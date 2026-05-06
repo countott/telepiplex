@@ -148,23 +148,6 @@ emby_server: http://your_emby_server:8096
 # Emby APIkey  Emby-->API秘钥-->新建
 api_key: your_api_key
 
-#############################################电影订阅####################################
-# 如果留空则无法通过“sm”命令订阅电影
-# 自动订阅https://nullbr.online/上的资源，有满足要求的自动离线到115
-# 自动订阅需要申请app_id，参考申请方法
-# https://nullbr.online/api?title=00.%F0%9F%93%A3api%E5%BC%80%E6%94%BE%E8%AE%A1%E5%88%92
-x_app_id: your_app_id
-x_api_key: your_api_key
-# 订阅条件，全部满足才订阅
-sub_condition:
-  # 包含中字
-  zh_cn: true
-  # Dolby Vision
-  dolby_vision: false
-  # 分辨率优先级
-  resolution_priority:
-    - 2160
-    - 1080
 ##########################################Aria2#######################################
 # 设置Aria2可选择将离线的影片推送到Aria2
 # 默认关闭

@@ -26,7 +26,7 @@ from app.handlers.rss_handler import register_rss_handlers
 
 
 def get_version(md_format=False):
-    version = "v3.4.1"
+    version = "v3.4.2"
     if md_format:
         return escape_markdown(version, version=2)
     return version
@@ -44,7 +44,6 @@ def get_help_info():
 <code>/csh</code> - <i>手动爬取涩花数据</i>\n
 <code>/cjav</code> - <i>手动爬取javbee数据</i>\n
 <code>/rss</code> - <i>rss订阅</i>\n
-<code>/sm</code> - 订阅电影\n
 <code>/sync</code> - 同步目录并创建软链\n
 <code>/q</code> - 取消当前会话\n\n
 <b>✨ 功能说明</b>\n
@@ -71,9 +70,6 @@ def get_help_info():
 • 输入 <code>"/rss"</code>
 • 将rsshub地址配置到config.yaml中
 • 选择RSS类别并订阅\n
-<u>电影订阅：</u>
-• 输入 <code>"/sm 电影名称"</code>
-• 自动监控资源更新, 发现更新后自动下载\n
 <u>目录同步：</u>
 • 输入 <code>"/sync"</code>
 • 选择目录后会在对应的目录创建strm软链\n
@@ -152,7 +148,6 @@ def get_bot_menu():
         BotCommand("csh", "手动爬取涩花数据"),
         BotCommand("cjav", "手动爬取javbee数据"),
         BotCommand("rss", "RSS订阅"),
-        BotCommand("sm", "订阅电影"),
         BotCommand("sync", "同步指定目录，并创建软链"),
         BotCommand("q", "退出当前会话")]
     
@@ -222,7 +217,7 @@ if __name__ == '__main__':
     # 注册下载
     register_download_handlers(application)
     # 注册电影订阅 
-    register_subscribe_movie_handlers(application)
+    # register_subscribe_movie_handlers(application)
     # 注册AV下载
     register_av_download_handlers(application)
     # 注册离线任务

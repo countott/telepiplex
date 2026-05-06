@@ -622,6 +622,10 @@ class OpenAPI_115:
         data = {
             "file_ids": file_ids
         }
+        
+        # 增加随机延时，减少频繁操作风控
+        time.sleep(random.uniform(0.5, 1.5))
+        
         response = self._make_api_request('POST', url, data=data, headers=self._get_headers())
         if response['state'] == True:
             init.logger.info(f"文件或目录删除成功: {file_ids}")
@@ -630,10 +634,10 @@ class OpenAPI_115:
             init.logger.warn(f"文件或目录删除失败: {response}")
             if response['code'] == 40140125:
                 return response
-            return None
+            return False
     
     def _batch_delete_files(self, fid_list, batch_size=100):
-        """分批删除文件，避免单次请求过长
+        """分批删除文件，避免单次请求过长，支持失败重试和降级处理
         
         Args:
             fid_list: 文件ID列表
@@ -642,6 +646,8 @@ class OpenAPI_115:
         if not fid_list:
             return
             
+        # 去重
+        fid_list = list(set(fid_list))
         total_files = len(fid_list)
         init.logger.info(f"准备分批删除 {total_files} 个文件，每批 {batch_size} 个")
         
@@ -654,16 +660,26 @@ class OpenAPI_115:
             init.logger.info(f"正在执行第 {batch_num}/{total_batches} 批删除操作，共 {len(batch)} 个文件")
             
             file_ids = ",".join(batch)
-            result = self.delet_file(file_ids)
             
-            if result is True:
-                init.logger.info(f"第 {batch_num} 批删除成功")
-            else:
-                init.logger.warn(f"第 {batch_num} 批删除失败: {result}")
+            # 尝试删除，最多重试 5 次
+            max_retries = 5
+            for attempt in range(max_retries):
+                result = self.delet_file(file_ids)
+                
+                if result is True:
+                    init.logger.info(f"第 {batch_num} 批删除成功")
+                    break
+                else:
+                    if attempt < max_retries - 1:
+                        sleep_time = (attempt + 1) * 3  # 递增等待时间：3s, 6s, 9s, 12s
+                        init.logger.warn(f"第 {batch_num} 批删除失败，{sleep_time}秒后进行第 {attempt + 2} 次重试...")
+                        time.sleep(sleep_time)
+                    else:
+                        init.logger.error(f"第 {batch_num} 批删除在 {max_retries} 次尝试后最终失败: {result}")
             
             # 批次间添加短暂延迟，避免请求过快
             if i + batch_size < total_files:
-                time.sleep(1)
+                time.sleep(2)
         # 等待服务器处理删除请求
         time.sleep(10)
         

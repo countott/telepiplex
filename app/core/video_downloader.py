@@ -16,7 +16,7 @@ class VideoDownloadManager:
         # 正在进行的任务 {task_id: task_info}
         self.active_tasks = {}
         # 最大并发数
-        self.max_concurrent_tasks = 3
+        self.max_concurrent_tasks = 5
         # 当前并发数
         self.current_tasks = 0
         # 任务锁
@@ -26,6 +26,15 @@ class VideoDownloadManager:
         """添加下载任务"""
         await self.queue.put(task_info)
         init.logger.info(f"任务已添加到队列: {task_info['file_name']}")
+        # 若并发已满，立即更新消息为"排队中"，避免消息停在目录选择界面
+        async with self.lock:
+            if self.current_tasks >= self.max_concurrent_tasks:
+                queue_pos = self.queue.qsize()
+                await self._update_status(
+                    task_info['context'], task_info['chat_id'], task_info['message_id'],
+                    f"⏳ 排队中: {task_info['file_name']}\n📋 队列位置: 第 {queue_pos} 位",
+                    task_info['task_id'], show_cancel=False
+                )
         # 尝试启动任务处理循环（如果尚未启动）
         asyncio.create_task(self._process_queue())
 
@@ -42,17 +51,14 @@ class VideoDownloadManager:
     async def _process_queue(self):
         """处理队列中的任务"""
         while True:
+            # 先在锁外检查是否已满，避免持锁时 sleep
             async with self.lock:
                 if self.current_tasks >= self.max_concurrent_tasks:
-                    # 达到最大并发数，等待
-                    await asyncio.sleep(1)
-                    continue
+                    break  # 达到最大并发数，退出；任务完成后会重新触发
                 
                 if self.queue.empty():
-                    # 队列为空，退出循环
                     break
                 
-                # 获取下一个任务
                 task_info = await self.queue.get()
                 self.current_tasks += 1
                 self.active_tasks[task_info['task_id']] = task_info
@@ -71,7 +77,11 @@ class VideoDownloadManager:
         chat_id = task_info['chat_id']
         message_id = task_info['message_id']
         
-        temp_file_path = f"{init.TEMP}/{file_name}"
+        # 用 task_id 确保临时路径唯一，避免同名视频并发下载时互相覆盖
+        _, file_ext = os.path.splitext(file_name)
+        if not file_ext:
+            file_ext = ".mp4"
+        temp_file_path = f"{init.TEMP}/{task_id}{file_ext}"
         cancel_event = asyncio.Event()
         task_info['cancel_event'] = cancel_event
         
@@ -125,8 +135,11 @@ class VideoDownloadManager:
             if cancel_event.is_set():
                 raise asyncio.CancelledError("用户取消下载")
 
-            await self._update_status(context, chat_id, message_id, f"☁️ 正在上传到115: {Path(final_path).name}", task_id)
-            await self._upload_to_115(final_path, save_path, context, chat_id, message_id, task_id)
+            # 上传文件名使用原始文件名（带检测后的扩展名），与临时路径解耦
+            final_ext = os.path.splitext(final_path)[1]
+            upload_name = os.path.splitext(file_name)[0] + final_ext
+            await self._update_status(context, chat_id, message_id, f"☁️ 正在上传到115: {upload_name}", task_id)
+            await self._upload_to_115(final_path, save_path, context, chat_id, message_id, task_id, upload_name)
 
         except asyncio.CancelledError:
             init.logger.info(f"任务 {task_id} 已取消")
@@ -144,11 +157,11 @@ class VideoDownloadManager:
             # 继续处理队列
             asyncio.create_task(self._process_queue())
 
-    async def _upload_to_115(self, file_path, save_dir, context, chat_id, message_id, task_id):
+    async def _upload_to_115(self, file_path, save_dir, context, chat_id, message_id, task_id, upload_name=None):
         """上传文件到115"""
         try:
             file_size = os.path.getsize(file_path)
-            file_name = Path(file_path).name
+            file_name = upload_name if upload_name else Path(file_path).name
             sha1 = self._calculate_sha1(file_path)
             
             # 确保目录存在

@@ -37,7 +37,8 @@ def download_by_url(download_url, save_path=""):
         return None
     try:
         options = {
-                "User-Agent": init.USER_AGENT
+                "user-agent": init.USER_AGENT,
+                "referer": "https://115.com/"
             }
         if save_path:
             options['dir'] = save_path

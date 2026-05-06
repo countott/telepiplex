@@ -99,7 +99,9 @@ def check_download_complete(download_url, user_id, device_name, check_interval=1
             message = f"❌ [{download_status['name']}] 没有找到下载链接！"
             break
         elif download_status['status'] == "error":
-            message = f"❌ [{download_status['name']}] 下载失败！"
+            error_msg = download_status.get('error', '未知错误')
+            init.logger.error(f"下载任务[{download_status['name']}]失败: {error_msg}")
+            message = f"❌ [{download_status['name']}] 下载失败！原因: {error_msg}"
             break
         elif download_status['status'] == "complete":
             message = f"✅ [{download_status['name']}] 已下载到{device_name}！"

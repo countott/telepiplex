@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MessageOriginChannel
 from telegram.ext import ContextTypes, CommandHandler, ConversationHandler, \
     MessageHandler, filters, CallbackQueryHandler
 import init
@@ -53,14 +53,59 @@ async def save_video2115(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 生成唯一任务ID
         task_id = str(uuid.uuid4())[:8]
-        
+
+        # 立即预获取 Telethon 消息对象
+        tg_message = None
+        fetch_error = None
+        try:
+            forward_origin = getattr(update.message, 'forward_origin', None)
+            if isinstance(forward_origin, MessageOriginChannel):
+                # 从频道转发：直接去原始频道按原始消息 ID 取，避免 bot 会话中找不到
+                entity = forward_origin.chat.id
+                lookup_msg_id = forward_origin.message_id
+                init.logger.info(f"频道转发消息，entity={entity}, message_id={lookup_msg_id}")
+            else:
+                # 直接发送或非频道转发：在当前会话中按消息 ID 查找
+                if update.effective_chat.id == update.effective_user.id:
+                    # 私聊：在用户与 Bot 的对话中查找
+                    bot_info = await context.bot.get_me()
+                    entity = f"@{bot_info.username}" if bot_info.username else bot_info.id
+                else:
+                    # 群组：在群组中查找
+                    entity = update.effective_chat.id
+                lookup_msg_id = update.message.message_id
+                init.logger.info(f"预获取消息 entity={entity}, message_id={lookup_msg_id}")
+
+            tg_message = await init.tg_user_client.get_messages(entity, ids=lookup_msg_id)
+            if tg_message:
+                init.logger.info(f"找到视频消息 (ID: {tg_message.id})")
+            else:
+                fetch_error = f"未找到消息 ID={lookup_msg_id}，实体={entity}"
+                init.logger.error(fetch_error)
+        except Exception as e:
+            fetch_error = str(e)
+            init.logger.error(f"预获取 Telethon 消息异常: {e}")
+
+        # 预获取失败则直接报错，不继续
+        if fetch_error and not tg_message:
+            await update.message.reply_text(
+                f"❌ 无法通过 Telethon 用户客户端获取视频消息\n\n"
+                f"原因: {fetch_error}\n\n"
+                f"请确认：\n"
+                f"1. Telethon session 账号与发送视频的 Telegram 账号一致\n"
+                f"2. 若在群组中使用，该账号已加入群组\n"
+                f"3. 尝试重新发送 /start 后再试"
+            )
+            return
+
         # 暂存视频信息到 context.user_data，使用 task_id 作为 key
         context.user_data[f"video_{task_id}"] = {
             "file_name": file_name,
             "file_ext": file_ext,
             "file_size": video.file_size,
             "message_id": update.message.message_id,
-            "chat_id": update.effective_chat.id
+            "chat_id": update.effective_chat.id,
+            "tg_message": tg_message
         }
 
         # 询问是否重命名
@@ -211,63 +256,58 @@ async def handle_category_selection(update: Update, context: ContextTypes.DEFAUL
 
         # 获取原始消息对象
         try:
-            # 确定 entity
-            entity = None
-            # 如果是私聊（chat_id == user_id），User Client 需要去获取和 Bot 的聊天记录
-            if video_info['chat_id'] == update.effective_user.id:
-                # 动态获取 Bot 用户名，无需依赖配置文件
-                try:
-                    bot_info = await context.bot.get_me()
-                    entity = f"@{bot_info.username}"
-                except Exception as e:
-                    init.logger.error(f"获取Bot信息失败: {e}")
-                    # 回退到配置文件
-                    entity = init.bot_config.get('bot_name')
+            # 优先使用收到视频时预获取的消息对象
+            target_msg = video_info.get('tg_message')
+
+            if target_msg:
+                init.logger.info(f"使用预获取消息 (ID: {target_msg.id})")
             else:
-                # 群组情况，直接用 chat_id
-                entity = video_info['chat_id']
+                # 预获取失败，实时重新查找
+                init.logger.info(f"预获取消息不可用，重新查找 (msg_id={video_info['message_id']})")
+                entity = None
+                if video_info['chat_id'] == update.effective_user.id:
+                    try:
+                        bot_info = await context.bot.get_me()
+                        entity = f"@{bot_info.username}" if bot_info.username else bot_info.id
+                    except Exception as e:
+                        init.logger.error(f"获取Bot信息失败: {e}")
+                        entity = init.bot_config.get('bot_name')
+                else:
+                    entity = video_info['chat_id']
 
-            if not entity:
-                await query.edit_message_text("❌ 无法确定消息来源 (Entity unknown)")
-                return
+                if not entity:
+                    await query.edit_message_text("❌ 无法确定消息来源 (Entity unknown)")
+                    return
 
-            # 尝试获取消息
-            target_msg = None
-            
-            # 方法1: 精确 ID 获取 (Telethon get_messages with ids)
-            try:
-                msg = await init.tg_user_client.get_messages(entity, ids=video_info['message_id'])
-                if msg and msg.media:
-                    target_msg = msg
-            except Exception as e:
-                init.logger.warning(f"精确获取消息失败: {e}")
-
-            # 方法2: 遍历最近消息 (Fallback，兼容旧逻辑)
-            if not target_msg:
-                init.logger.info(f"精确获取失败，尝试遍历最近消息 (ID: {video_info['message_id']})")
+                # 方法1: 精确 ID 获取
                 try:
-                    # 获取最近 20 条消息
-                    recent_msgs = await init.tg_user_client.get_messages(entity, limit=20)
-                    
-                    # 2.1 优先寻找 ID 匹配的消息
-                    for msg in recent_msgs:
-                        if msg.id == video_info['message_id'] and msg.media:
-                            target_msg = msg
-                            break
-                    
-                    # 2.2 如果没找到 ID，寻找最近的一条带视频的消息 (用户提到的"原来的写法")
-                    if not target_msg:
-                        for msg in recent_msgs:
-                            if msg.media:
-                                # 简单的校验：如果是视频/文件
-                                target_msg = msg
-                                init.logger.info(f"使用最近的媒体消息作为目标 (ID: {msg.id})")
-                                break
+                    msg = await init.tg_user_client.get_messages(entity, ids=video_info['message_id'])
+                    if msg:
+                        target_msg = msg
+                        init.logger.info(f"精确获取消息成功 (ID: {msg.id})")
                 except Exception as e:
-                    init.logger.error(f"遍历消息失败: {e}")
+                    init.logger.warning(f"精确获取消息失败: {e}")
+
+                # 方法2: 遍历最近消息
+                if not target_msg:
+                    try:
+                        recent_msgs = await init.tg_user_client.get_messages(entity, limit=100)
+                        for msg in recent_msgs:
+                            if msg.id == video_info['message_id']:
+                                target_msg = msg
+                                init.logger.info(f"遍历找到消息 (ID: {msg.id})")
+                                break
+                        if not target_msg:
+                            init.logger.warning(f"遍历 100 条消息仍未找到 ID={video_info['message_id']}，实体={entity}")
+                    except Exception as e:
+                        init.logger.error(f"遍历消息失败: {e}")
 
             if not target_msg:
-                await query.edit_message_text(f"❌ 无法获取原始视频消息 (Entity: {entity}, ID: {video_info['message_id']})")
+                await query.edit_message_text(
+                    f"❌ 无法获取原始视频消息\n"
+                    f"消息 ID: {video_info['message_id']}\n"
+                    f"请检查 Telethon 用户客户端是否与发送视频的账号一致"
+                )
                 return
                 
             # 提交任务到管理器
