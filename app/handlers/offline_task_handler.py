@@ -9,6 +9,7 @@ import time
 from warnings import filterwarnings
 from telegram.warnings import PTBUserWarning
 from telegram.error import TelegramError
+from app.core.open_115 import RenameFailedError
 from app.utils.cover_capture import get_movie_cover
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
@@ -85,7 +86,12 @@ def try_to_offline2115_again():
                         old_name = f"{save_path}/temp"
                     
                     # 执行重命名
-                    init.openapi_115.rename(old_name, title)
+                    try:
+                        init.openapi_115.rename(old_name, title)
+                    except RenameFailedError as e:
+                        init.openapi_115.delete_single_file(old_name)
+                        init.logger.error(f"重命名失败: {e}")
+                        continue
                     new_final_path = f"{save_path}/{title}"
                     file_list = init.openapi_115.get_files_from_dir(new_final_path)
                     # 创建软链

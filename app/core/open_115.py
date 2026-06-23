@@ -23,6 +23,11 @@ from telegram.helpers import escape_markdown
 
 RISK_THRESHOLD = 0.95
 
+
+class RenameFailedError(Exception):
+    """Raised when 115 OpenAPI rename operation fails."""
+
+
 def handle_token_expiry(func):
     """装饰器：统一处理API调用中的token过期情况"""
     @wraps(func)
@@ -530,7 +535,7 @@ class OpenAPI_115:
             init.logger.warn(f"文件重命名失败: {response['message']}")
             if response['code'] == 40140125:
                 return response
-            return None
+            raise RenameFailedError(f"文件重命名失败: {response['message']}")
         
     @handle_token_expiry
     def rename_by_id(self, file_id, old_name, new_name):

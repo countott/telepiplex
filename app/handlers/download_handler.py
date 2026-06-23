@@ -18,6 +18,7 @@ from warnings import filterwarnings
 from telegram.warnings import PTBUserWarning
 from app.utils.sqlitelib import *
 from concurrent.futures import ThreadPoolExecutor
+from app.core.open_115 import RenameFailedError
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
@@ -472,14 +473,16 @@ async def handle_manual_rename(update: Update, context: ContextTypes.DEFAULT_TYP
     if not rename_data:
         return
     
+    # 获取重命名所需的数据
+    old_resource_name = rename_data["resource_name"]
+    selected_path = rename_data["selected_path"]
+    download_url = rename_data["link"]
+    add2retry = rename_data["add2retry"]
+    final_path = rename_data["final_path"]
+    
+    new_resource_name = ""
     try:
         new_resource_name = update.message.text.strip()
-        
-        # 获取重命名所需的数据
-        old_resource_name = rename_data["resource_name"]
-        selected_path = rename_data["selected_path"]
-        download_url = rename_data["link"]
-        add2retry = rename_data["add2retry"]
         
         # 添加到重试列表
         if add2retry:
@@ -492,7 +495,7 @@ async def handle_manual_rename(update: Update, context: ContextTypes.DEFAULT_TYP
             context.user_data.pop("rename_data", None)
             return
 
-        final_path = rename_data["final_path"]
+        
         # 执行重命名
         init.openapi_115.rename(final_path, new_resource_name)
         
@@ -559,6 +562,17 @@ async def handle_manual_rename(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.pop("rename_data", None)
         init.logger.info(f"重命名操作完成：{old_resource_name} -> {new_resource_name}")
         
+    except RenameFailedError as e:
+        init.logger.warn(f"捕获到重命名失败异常: {e}")
+        resource_hint = new_resource_name or old_resource_name
+        message = f"⚠️ 资源已存在或已入库。\n\n请直接在EMBY中搜索：{resource_hint}"
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=message
+        )
+        # 重命名失败时清理当前下载目录，避免留下重复资源。
+        init.openapi_115.delete_single_file(final_path)
+        context.user_data.pop("rename_data", None)
     except Exception as e:
         init.logger.error(f"重命名处理失败: {e}")
         await context.bot.send_message(
