@@ -14,6 +14,7 @@ import init
 from app.utils.message_queue import add_task_to_queue, queue_worker
 from app.handlers.auth_handler import register_auth_handlers
 from app.handlers.download_handler import register_download_handlers
+from app.handlers.search_handler import register_search_handlers
 from app.handlers.sync_handler import register_sync_handlers
 from app.handlers.video_handler import register_video_handlers
 from app.core.scheduler import start_scheduler_in_thread
@@ -39,6 +40,7 @@ def get_help_info():
 <code>/start</code> - 显示帮助信息\n
 <code>/auth</code> - <i>115扫码授权 (解除授权后使用)</i>\n
 <code>/reload</code> - <i>重载配置</i>\n
+<code>/s</code> - 搜索片源\n
 <code>/rl</code> - 查看重试列表\n
 <code>/av</code> - <i>下载番号资源 (自动匹配磁力)</i>\n
 <code>/csh</code> - <i>手动爬取涩花数据</i>\n
@@ -49,6 +51,7 @@ def get_help_info():
 <b>✨ 功能说明</b>\n
 <u>电影下载：</u>
 • 直接输入下载链接，支持磁力/ed2k/迅雷
+• 输入 <code>"/s 片名"</code> 通过Prowlarr搜索片源
 • 离线超时可选择添加到重试列表
 • 根据配置自动生成 <code>.strm</code> 软链文件\n
 <u>重试列表：</u>
@@ -143,6 +146,7 @@ def get_bot_menu():
         BotCommand("start", "获取帮助信息"),
         BotCommand("auth", "115扫码授权"),
         BotCommand("reload", "重载配置"),
+        BotCommand("s", "搜索片源"),
         BotCommand("rl", "查看重试列表"),
         BotCommand("av", "指定番号下载"),
         BotCommand("csh", "手动爬取涩花数据"),
@@ -216,6 +220,8 @@ if __name__ == '__main__':
     register_auth_handlers(application)
     # 注册下载
     register_download_handlers(application)
+    # 注册搜索
+    register_search_handlers(application)
     # 注册电影订阅 
     # register_subscribe_movie_handlers(application)
     # 注册AV下载

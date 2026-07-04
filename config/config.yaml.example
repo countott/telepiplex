@@ -71,6 +71,48 @@ category_folder:
       - name: 祼の真
         path: /AV/无码
 
+#############################################搜索设置#######################################
+# 通过Prowlarr搜索片源，选择候选后复用上面的分类目录投递到115离线下载
+search:
+  enable: false
+  prowlarr:
+    base_url: "http://192.168.7.7:9696"
+    api_key: ""
+    timeout: 20
+    indexer_ids: "-2"
+    categories:
+      movie: 2000
+      tv: 5000
+    result_limit: 8
+  scoring:
+    prefer_resolution:
+      - "2160p"
+      - "1080p"
+    prefer_source:
+      - "WEB-DL"
+      - "BluRay"
+      - "Remux"
+    prefer_codec:
+      - "HEVC"
+      - "H.265"
+      - "x265"
+      - "H.264"
+      - "x264"
+    prefer_audio:
+      - "Atmos"
+      - "TrueHD"
+      - "DTS-HD"
+      - "EAC3"
+    reject_keywords:
+      - "CAM"
+      - "TS"
+      - "TC"
+      - "枪版"
+      - "抢先"
+      - "HC"
+      - "HDTC"
+      - "HDCAM"
+
 #############################################AV日更#######################################
 # 自动同步最新AV
 av_daily_update:
