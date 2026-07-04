@@ -93,6 +93,14 @@ class OpenAPI_115:
         self.file_info_cache = {}
         self.cache_hit = 0
         self.get_token()  # 初始化时获取token
+
+    @staticmethod
+    def is_valid_user_info(user_info):
+        """判断115用户信息是否是可用于启动欢迎语的成功响应。"""
+        return (
+            isinstance(user_info, dict)
+            and isinstance(user_info.get("rt_space_info"), dict)
+        )
         
     def get_token(self):
         if not self.refresh_token or not self.access_token:
@@ -982,25 +990,30 @@ class OpenAPI_115:
     def welcome_message(self):
         """欢迎消息"""
         user_info = self.get_user_info()
+        if not self.is_valid_user_info(user_info):
+            init.logger.warn(f"无法生成欢迎消息，用户信息无效: {user_info}")
+            return "", "", "", ""
+
         quota_info = self.get_quota_info()
-        if user_info:
-            user_name = user_info.get('user_name')
-            total_space= user_info['rt_space_info']['all_total']['size_format']
-            used_space = user_info['rt_space_info']['all_use']['size_format']
-            remaining_space = user_info['rt_space_info']['all_remain']['size_format']
-            vip_info = user_info.get('vip_info', {})
-            # 判断永V
-            if "长期" in vip_info.get('level_name', ''):
-                self.lifetime_vip = True
-            expire_date = datetime.fromtimestamp(vip_info.get('expire', 0), tz=timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-            line1 = escape_markdown(f"👋 [{user_name}]您好， 欢迎使用Telegram-115Bot！", version=2)
-            line2 = escape_markdown(f"会员等级：{vip_info.get('level_name', '')} \n到期时间：{expire_date}", version=2)
-            line3 = escape_markdown(f"总空间：{total_space} \n已用：{used_space} \n剩余：{remaining_space}", version=2)
-            line4 = escape_markdown(f"离线配额：{quota_info['used']}/{quota_info['count']}", version=2)   
-            return line1, line2, line3, line4
+        user_name = user_info.get('user_name')
+        space_info = user_info.get('rt_space_info', {})
+        total_space = space_info.get('all_total', {}).get('size_format', '未知')
+        used_space = space_info.get('all_use', {}).get('size_format', '未知')
+        remaining_space = space_info.get('all_remain', {}).get('size_format', '未知')
+        vip_info = user_info.get('vip_info', {})
+        # 判断永V
+        if "长期" in vip_info.get('level_name', ''):
+            self.lifetime_vip = True
+        expire_date = datetime.fromtimestamp(vip_info.get('expire', 0), tz=timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+        line1 = escape_markdown(f"👋 [{user_name}]您好， 欢迎使用Telegram-115Bot！", version=2)
+        line2 = escape_markdown(f"会员等级：{vip_info.get('level_name', '')} \n到期时间：{expire_date}", version=2)
+        line3 = escape_markdown(f"总空间：{total_space} \n已用：{used_space} \n剩余：{remaining_space}", version=2)
+        if isinstance(quota_info, dict) and 'used' in quota_info and 'count' in quota_info:
+            line4 = escape_markdown(f"离线配额：{quota_info['used']}/{quota_info['count']}", version=2)
         else:
-            line1 = escape_markdown(f"👋 [{user_name}]您好， 欢迎使用Telegram-115Bot！", version=2)
-            return line1, "", "", ""
+            init.logger.warn(f"欢迎消息缺少配额信息: {quota_info}")
+            line4 = escape_markdown("离线配额：未知", version=2)
+        return line1, line2, line3, line4
 
 
     def check_offline_download_success(self, url, offline_timeout=300):
@@ -1643,4 +1656,3 @@ if __name__ == "__main__":
     # welcome_text = app.welcome_message()
     # init.logger.info(welcome_text)
     # app.clear_cloud_task()  # 清理云端任务
-
