@@ -104,21 +104,30 @@ class OpenAPI_115:
         
     def get_token(self):
         if not self.refresh_token or not self.access_token:
+            app_id = init.bot_config.get('115_app_id')
+            config_access_token = init.bot_config.get('access_token', '')
+            config_refresh_token = init.bot_config.get('refresh_token', '')
+            has_config_tokens = (
+                config_access_token
+                and config_refresh_token
+                and config_access_token.lower() != "your_access_token"
+                and config_refresh_token.lower() != "your_refresh_token"
+            )
+            use_direct_config_tokens = not (
+                app_id and str(app_id).lower() != "your_115_app_id"
+            )
+
+            if use_direct_config_tokens and has_config_tokens:
+                self.access_token = config_access_token
+                self.refresh_token = config_refresh_token
+                init.logger.info("使用配置文件中的access_token和refresh_token")
+                self.save_token_to_file(self.access_token, self.refresh_token, init.TOKEN_FILE)
+                return
+
             if not os.path.exists(init.TOKEN_FILE):
-                app_id = init.bot_config.get('115_app_id')
                 if app_id and str(app_id).lower() != "your_115_app_id":
                     init.logger.info("正在进入PKCE授权流程，获取refresh_token...")
                     self.auth_pkce(init.bot_config['allowed_user'], app_id)
-                else:
-                    _access_token = init.bot_config.get('access_token', '')
-                    _refresh_token = init.bot_config.get('refresh_token', '')
-                    if _access_token and _refresh_token and \
-                       _access_token.lower() != "your_access_token" and \
-                       _refresh_token.lower() != "your_refresh_token":
-                        self.access_token = _access_token
-                        self.refresh_token = _refresh_token
-                        init.logger.info("使用配置文件中的access_token和refresh_token")
-                        self.save_token_to_file(self.access_token, self.refresh_token, init.TOKEN_FILE)
             with open(init.TOKEN_FILE, 'r', encoding='utf-8') as f:
                 tokens = json.load(f)
                 # 从文件中读取access_token和refresh_token

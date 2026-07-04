@@ -1,4 +1,6 @@
 import sys
+import json
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -61,6 +63,9 @@ TOKEN_ERROR_RESPONSE = {
 
 
 class Open115StartupTest(unittest.TestCase):
+    def setUp(self):
+        init.logger = Mock()
+
     def test_welcome_message_skips_invalid_user_info_without_crashing(self):
         api = object.__new__(OpenAPI_115)
         api.get_user_info = Mock(return_value=TOKEN_ERROR_RESPONSE)
@@ -69,8 +74,6 @@ class Open115StartupTest(unittest.TestCase):
         self.assertEqual(api.welcome_message(), ("", "", "", ""))
 
     def test_initialize_115open_rejects_api_error_response(self):
-        init.logger = Mock()
-
         def set_expired_tokens(api):
             api.access_token = "expired-access-token"
             api.refresh_token = "expired-refresh-token"
@@ -83,6 +86,38 @@ class Open115StartupTest(unittest.TestCase):
             self.assertFalse(init.initialize_115open())
 
         init.logger.error.assert_called_with("115 OpenAPI客户端初始化失败: OpenAPI测试失败！")
+
+    def test_get_token_prefers_config_tokens_over_stale_token_file_in_direct_token_mode(self):
+        init.bot_config = {
+            "115_app_id": None,
+            "access_token": "config-access-token",
+            "refresh_token": "config-refresh-token",
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            token_file = Path(tmpdir) / "115_tokens.json"
+            token_file.write_text(
+                json.dumps(
+                    {
+                        "access_token": "stale-access-token",
+                        "refresh_token": "stale-refresh-token",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            init.TOKEN_FILE = str(token_file)
+
+            api = OpenAPI_115()
+
+            self.assertEqual(api.access_token, "config-access-token")
+            self.assertEqual(api.refresh_token, "config-refresh-token")
+            self.assertEqual(
+                json.loads(token_file.read_text(encoding="utf-8")),
+                {
+                    "access_token": "config-access-token",
+                    "refresh_token": "config-refresh-token",
+                },
+            )
 
 
 if __name__ == "__main__":
