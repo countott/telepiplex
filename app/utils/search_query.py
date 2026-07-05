@@ -2,6 +2,7 @@
 
 import html
 import re
+import unicodedata
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
@@ -83,7 +84,38 @@ def _title_with_year(title: str, year: str) -> str:
 
 
 def _contains_latin(text: str) -> bool:
-    return bool(re.search(r"[A-Za-z]", str(text or "")))
+    return any(_is_latin_letter(char) for char in str(text or ""))
+
+
+def _is_latin_letter(char: str) -> bool:
+    return char.isalpha() and "LATIN" in unicodedata.name(char, "")
+
+
+def _is_latin_title_separator(char: str) -> bool:
+    return char.isdigit() or char.isspace() or char in "'’`.,:;!?&+-()[]"
+
+
+def _latin_title_runs(title: str) -> list[str]:
+    runs = []
+    current = []
+    has_latin = False
+
+    for char in title:
+        if _is_latin_letter(char):
+            current.append(char)
+            has_latin = True
+        elif current and _is_latin_title_separator(char):
+            current.append(char)
+        else:
+            if has_latin:
+                runs.append("".join(current))
+            current = []
+            has_latin = False
+
+    if has_latin:
+        runs.append("".join(current))
+
+    return [_clean_media_title(run) for run in runs if _clean_media_title(run)]
 
 
 def _latin_title_from_mixed(title: str) -> str:
@@ -98,11 +130,11 @@ def _latin_title_from_mixed(title: str) -> str:
     if year_match:
         year = year_match.group(1)
 
-    latin_match = re.search(r"[A-Za-z][A-Za-z0-9\s'’`.,:;!?&+\-()]+", title)
-    if not latin_match:
+    latin_runs = _latin_title_runs(title)
+    if not latin_runs:
         return title
 
-    latin_title = _clean_media_title(latin_match.group(0))
+    latin_title = max(latin_runs, key=len)
     latin_title = re.sub(r"\b(19\d{2}|20\d{2})\b.*$", r"\1", latin_title).strip()
     return _title_with_year(latin_title, year)
 

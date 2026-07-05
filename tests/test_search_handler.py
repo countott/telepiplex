@@ -80,6 +80,8 @@ class SearchHandlerHelpersTest(unittest.TestCase):
 
     def test_metadata_url_pattern_matches_supported_sites_only(self):
         self.assertRegex("https://movie.douban.com/subject/1234567/", METADATA_URL_PATTERN)
+        self.assertRegex("https://movie.douban.com:443/subject/1234567/?dt_dapp=1", METADATA_URL_PATTERN)
+        self.assertRegex("http://movie.douban.com:80/subject/1234567/?from=share", METADATA_URL_PATTERN)
         self.assertRegex("https://www.imdb.com/title/tt2278388/", METADATA_URL_PATTERN)
         self.assertRegex("https://thetvdb.com/series/breaking-bad", METADATA_URL_PATTERN)
         self.assertNotRegex("https://example.com/movie.mkv", METADATA_URL_PATTERN)

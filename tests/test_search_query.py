@@ -59,6 +59,16 @@ class SearchQueryHelpersTest(unittest.TestCase):
 
         self.assertEqual(parse_douban_subject_abstract_title(payload), "Shadow 2018")
 
+    def test_parse_douban_subject_abstract_title_preserves_accented_latin_title(self):
+        payload = {"subject": {"title": "这个杀手不太冷", "original_title": "Léon", "release_year": "1994"}}
+
+        self.assertEqual(parse_douban_subject_abstract_title(payload), "Léon 1994")
+
+    def test_parse_douban_subject_abstract_title_extracts_accented_latin_from_mixed_title(self):
+        payload = {"subject": {"title": "这个杀手不太冷 Léon", "release_year": "1994"}}
+
+        self.assertEqual(parse_douban_subject_abstract_title(payload), "Léon 1994")
+
     def test_parse_douban_mobile_title_prefers_original_name_and_rejects_generic_douban_title(self):
         self.assertEqual(parse_douban_mobile_title("<html><head><title>豆瓣</title></head></html>"), "")
         self.assertEqual(

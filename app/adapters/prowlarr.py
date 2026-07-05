@@ -267,6 +267,21 @@ def _fetch_magnet_from_info_page(item: dict, timeout) -> str:
     return _extract_magnet_from_text(_response_text(response))
 
 
+def _fetch_magnet_from_torrent_download(link: str, item: dict, timeout) -> str:
+    response = requests.get(link, timeout=timeout, allow_redirects=False)
+    try:
+        status_code = int(getattr(response, "status_code", 200) or 200)
+    except (TypeError, ValueError):
+        status_code = 200
+
+    location = (getattr(response, "headers", {}) or {}).get("Location", "")
+    if 300 <= status_code < 400 and _is_magnet_url(location):
+        return location
+
+    response.raise_for_status()
+    return magnet_from_torrent_bytes(response.content, item.get("title") or "")
+
+
 def resolve_prowlarr_download_url(item: dict, timeout=None) -> str:
     magnet_url = _magnet_from_item_fields(item)
     if magnet_url:
@@ -286,16 +301,20 @@ def resolve_prowlarr_download_url(item: dict, timeout=None) -> str:
     if timeout is None:
         timeout = ((init.bot_config.get("search") or {}).get("prowlarr") or {}).get("timeout", 20)
 
+    torrent_error = None
+    try:
+        return _fetch_magnet_from_torrent_download(link, item, timeout)
+    except Exception as e:
+        torrent_error = e
+        _warn(f"Prowlarr torrent 转磁力失败，将尝试详情页磁力兜底: {e}")
+
     try:
         magnet_url = _fetch_magnet_from_info_page(item, timeout)
         if magnet_url:
             return magnet_url
     except Exception as e:
-        _warn(f"Prowlarr 详情页磁力提取失败，将尝试 torrent 兜底: {e}")
+        raise ProwlarrRequestError(
+            f"Prowlarr torrent 转磁力失败，详情页磁力提取也失败: torrent={torrent_error}; info_page={e}"
+        ) from e
 
-    try:
-        response = requests.get(link, timeout=timeout)
-        response.raise_for_status()
-        return magnet_from_torrent_bytes(response.content, item.get("title") or "")
-    except Exception as e:
-        raise ProwlarrRequestError(f"Prowlarr torrent 转磁力失败: {e}") from e
+    raise ProwlarrRequestError(f"Prowlarr torrent 转磁力失败: {torrent_error}")

@@ -121,17 +121,60 @@ class ProwlarrAdapterTest(unittest.TestCase):
         )
 
         self.assertEqual(link, f"magnet:?xt=urn:btih:{expected_hash}&dn=movie.mkv")
-        get_mock.assert_called_once_with("https://prowlarr.example/download?id=1", timeout=20)
+        get_mock.assert_called_once_with("https://prowlarr.example/download?id=1", timeout=20, allow_redirects=False)
 
     @patch("app.adapters.prowlarr.requests.get")
-    def test_resolve_prowlarr_download_url_prefers_info_page_magnet_before_torrent_download(self, get_mock):
+    def test_resolve_prowlarr_download_url_returns_magnet_redirect_from_prowlarr_download(self, get_mock):
+        magnet = "magnet:?xt=urn:btih:8DF2ECE4F1739AB307C52E3FC9971E87E24B0A41&dn=movie.mkv"
+        response = Mock()
+        response.status_code = 302
+        response.headers = {"Location": magnet}
+        get_mock.return_value = response
+
+        link = resolve_prowlarr_download_url(
+            {
+                "title": "Redirect Title",
+                "download_url": "https://prowlarr.example/download?id=1",
+                "protocol": "torrent",
+            }
+        )
+
+        self.assertEqual(link, magnet)
+        get_mock.assert_called_once_with("https://prowlarr.example/download?id=1", timeout=20, allow_redirects=False)
+
+    @patch("app.adapters.prowlarr.requests.get")
+    def test_resolve_prowlarr_download_url_prefers_prowlarr_download_before_indexer_info_page(self, get_mock):
+        info = b"d6:lengthi123e4:name9:movie.mkve"
+        torrent = b"d8:announce14:http://tracker4:info" + info + b"e"
+        expected_hash = hashlib.sha1(info).hexdigest().upper()
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.content = torrent
+        get_mock.return_value = response
+
+        link = resolve_prowlarr_download_url(
+            {
+                "title": "Fallback Title",
+                "download_url": "https://prowlarr.example/download?id=1",
+                "info_url": "https://indexer.example/details/1",
+                "protocol": "torrent",
+            }
+        )
+
+        self.assertEqual(link, f"magnet:?xt=urn:btih:{expected_hash}&dn=movie.mkv")
+        get_mock.assert_called_once_with("https://prowlarr.example/download?id=1", timeout=20, allow_redirects=False)
+
+    @patch("app.adapters.prowlarr.requests.get")
+    def test_resolve_prowlarr_download_url_falls_back_to_info_page_magnet_when_torrent_download_fails(self, get_mock):
+        torrent_response = Mock()
+        torrent_response.raise_for_status.side_effect = Exception("prowlarr download failed")
         info_page_response = Mock()
         info_page_response.raise_for_status.return_value = None
         info_page_response.text = (
             '<a href="magnet:?xt=urn:btih:8DF2ECE4F1739AB307C52E3FC9971E87E24B0A41'
             '&amp;dn=Vivre+sa+Vie">magnet</a>'
         )
-        get_mock.return_value = info_page_response
+        get_mock.side_effect = [torrent_response, info_page_response]
 
         link = resolve_prowlarr_download_url(
             {
@@ -146,7 +189,9 @@ class ProwlarrAdapterTest(unittest.TestCase):
             link,
             "magnet:?xt=urn:btih:8DF2ECE4F1739AB307C52E3FC9971E87E24B0A41&dn=Vivre+sa+Vie",
         )
-        get_mock.assert_called_once_with("https://indexer.example/details/1", timeout=20)
+        self.assertEqual(get_mock.call_count, 2)
+        self.assertEqual(get_mock.call_args_list[0].args[0], "https://prowlarr.example/download?id=1")
+        self.assertEqual(get_mock.call_args_list[1].args[0], "https://indexer.example/details/1")
 
 
 if __name__ == "__main__":
