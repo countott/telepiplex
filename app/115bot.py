@@ -26,6 +26,8 @@ from app.handlers.offline_task_handler import register_offline_task_handlers
 from app.handlers.aria2_handler import register_aria2_handlers
 from app.handlers.rss_handler import register_rss_handlers
 
+TELEGRAM_API_TIMEOUT = 30
+
 
 def get_version(md_format=False):
     version = "v3.4.3"
@@ -75,15 +77,43 @@ def get_help_info():
 """
     return help_info
 
+async def send_bot_message_safely(bot, *, chat_id, text, **kwargs):
+    timeout_kwargs = {
+        "connect_timeout": TELEGRAM_API_TIMEOUT,
+        "read_timeout": TELEGRAM_API_TIMEOUT,
+        "write_timeout": TELEGRAM_API_TIMEOUT,
+        "pool_timeout": TELEGRAM_API_TIMEOUT,
+    }
+    timeout_kwargs.update(kwargs)
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, **timeout_kwargs)
+        return True
+    except NetworkError as e:
+        if init.logger:
+            init.logger.warn(f"Telegram 消息发送超时/网络异常，消息可能已成功送达: {e}")
+        return False
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_info = get_help_info()
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=help_info, parse_mode="html", disable_web_page_preview=True)
-    
+    await send_bot_message_safely(
+        context.bot,
+        chat_id=update.effective_chat.id,
+        text=help_info,
+        parse_mode="html",
+        disable_web_page_preview=True,
+    )
+
 async def reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     init.load_yaml_config()
     init.logger.info("配置已重新加载:")
     init.logger.info(json.dumps(init.bot_config))
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ 配置已重新加载。", parse_mode="html")
+    await send_bot_message_safely(
+        context.bot,
+        chat_id=update.effective_chat.id,
+        text="✅ 配置已重新加载。",
+        parse_mode="html",
+    )
 
 def start_async_loop():
     """启动异步事件循环的线程"""
@@ -158,6 +188,19 @@ async def set_bot_menu(application):
 async def post_init(application):
     """应用初始化后的回调"""
     await set_bot_menu(application)
+
+
+def build_application(token):
+    return (
+        Application.builder()
+        .token(token)
+        .post_init(post_init)
+        .connect_timeout(TELEGRAM_API_TIMEOUT)
+        .read_timeout(TELEGRAM_API_TIMEOUT)
+        .write_timeout(TELEGRAM_API_TIMEOUT)
+        .pool_timeout(TELEGRAM_API_TIMEOUT)
+        .build()
+    )
 
 
 async def initialize_application_with_retry(application, max_retries=5, retry_delay=5):
@@ -240,7 +283,7 @@ if __name__ == '__main__':
     # 调整telegram日志级别
     update_logger_level()
     token = init.bot_config['bot_token']
-    application = Application.builder().token(token).post_init(post_init).build()    
+    application = build_application(token)
 
     # 启动帮助
     start_handler = CommandHandler('start', start)

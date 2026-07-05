@@ -19,6 +19,64 @@ def load_bot_module():
 
 
 class BotRuntimeStartupTest(unittest.TestCase):
+    def test_start_treats_telegram_timeout_as_possible_delivery(self):
+        bot_module = load_bot_module()
+
+        update = Mock()
+        update.effective_chat.id = 472943219
+        context = Mock()
+        context.bot.send_message = AsyncMock(side_effect=bot_module.TimedOut("Timed out"))
+
+        asyncio.run(bot_module.start(update, context))
+
+        context.bot.send_message.assert_awaited_once()
+
+    def test_build_application_uses_longer_telegram_timeouts(self):
+        bot_module = load_bot_module()
+        calls = []
+
+        class FakeBuilder:
+            def token(self, token):
+                calls.append(("token", token))
+                return self
+
+            def post_init(self, callback):
+                calls.append(("post_init", callback))
+                return self
+
+            def connect_timeout(self, value):
+                calls.append(("connect_timeout", value))
+                return self
+
+            def read_timeout(self, value):
+                calls.append(("read_timeout", value))
+                return self
+
+            def write_timeout(self, value):
+                calls.append(("write_timeout", value))
+                return self
+
+            def pool_timeout(self, value):
+                calls.append(("pool_timeout", value))
+                return self
+
+            def build(self):
+                calls.append(("build", None))
+                return "application"
+
+        original_builder = bot_module.Application.builder
+        bot_module.Application.builder = Mock(return_value=FakeBuilder())
+        try:
+            application = bot_module.build_application("token")
+        finally:
+            bot_module.Application.builder = original_builder
+
+        self.assertEqual(application, "application")
+        self.assertIn(("connect_timeout", 30), calls)
+        self.assertIn(("read_timeout", 30), calls)
+        self.assertIn(("write_timeout", 30), calls)
+        self.assertIn(("pool_timeout", 30), calls)
+
     def test_run_application_polling_starts_application_before_updater_polling(self):
         bot_module = load_bot_module()
         calls = []
