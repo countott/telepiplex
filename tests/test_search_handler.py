@@ -14,6 +14,7 @@ from app.handlers.search_handler import (
     METADATA_URL_PATTERN,
     SEARCH_TASK_TTL_SECONDS,
     _fetch_media_page_title,
+    _metadata_matches_plain_query,
     _plex_metadata_for_selected_release,
     _resolve_search_request,
     build_results_text,
@@ -200,6 +201,17 @@ class SearchHandlerHelpersTest(unittest.TestCase):
                 "chinese_title": "英雄",
             },
         )
+
+    def test_plain_query_metadata_match_ignores_case_punctuation_and_year(self):
+        metadata = {
+            "source": "douban",
+            "chinese_title": "随心所欲",
+            "english_title": "Vivre sa vie: Film en douze tableaux",
+            "year": "1962",
+        }
+
+        self.assertTrue(_metadata_matches_plain_query(metadata, "Vivre sa vie Film en douze tableaux"))
+        self.assertTrue(_metadata_matches_plain_query(metadata, "vivre-sa-vie film en douze tableaux 1962"))
 
     def test_plain_search_metadata_for_selected_release_uses_candidate_title(self):
         task = {

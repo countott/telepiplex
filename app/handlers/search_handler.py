@@ -131,8 +131,8 @@ def _query_from_plex_metadata(metadata: dict) -> str:
 
 
 def _metadata_matches_plain_query(metadata: dict, query: str) -> bool:
-    query = _collapse_title_spaces(query).casefold()
-    if not query:
+    normalized_query = _normalize_match_title(query)
+    if not normalized_query:
         return False
 
     candidates = [
@@ -140,7 +140,14 @@ def _metadata_matches_plain_query(metadata: dict, query: str) -> bool:
         metadata.get("english_title"),
         _query_from_plex_metadata(metadata),
     ]
-    return any(_collapse_title_spaces(candidate).casefold() == query for candidate in candidates)
+    return any(_normalize_match_title(candidate) == normalized_query for candidate in candidates)
+
+
+def _normalize_match_title(title: str) -> str:
+    title = _collapse_title_spaces(title).casefold()
+    title = re.sub(r"\b(?:19\d{2}|20\d{2})\b", " ", title)
+    title = re.sub(r"[^\w\u4e00-\u9fff]+", " ", title)
+    return _collapse_title_spaces(title)
 
 
 def _fetch_douban_json_metadata(endpoint: str, referer: str) -> dict | None:
@@ -186,6 +193,7 @@ def _fetch_douban_metadata_for_plain_query(query: str) -> dict | None:
             _log_info(f"普通片名命中豆瓣元数据 query={query} url={subject_url} metadata={metadata}")
             return metadata
 
+    _log_info(f"普通片名豆瓣反查未命中 query={query}")
     return None
 
 

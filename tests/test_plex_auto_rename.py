@@ -91,6 +91,14 @@ class PlexAutoRenameTest(unittest.TestCase):
             "The Grand Budapest Hotel",
         )
 
+    def test_infer_english_title_drops_year_parenthesis_cleanly(self):
+        self.assertEqual(
+            infer_english_title_from_release(
+                "Vivre sa Vie.Film en Douze Tableaux (1962).BDRip.1080p.10bit.HEVC.PlamenNik"
+            ),
+            "Vivre sa Vie Film en Douze Tableaux",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

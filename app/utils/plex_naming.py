@@ -53,6 +53,7 @@ def infer_english_title_from_release(release_title: str) -> str:
         title = title[:quality_match.start()]
 
     title = re.sub(r"[._]+", " ", title)
+    title = re.sub(r"[\s([{<]+$", "", title)
     return sanitize_path_name(title)
 
 
