@@ -1,8 +1,9 @@
 import sys
 import time
+import asyncio
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -18,6 +19,7 @@ from app.handlers.search_handler import (
     get_pending_search_task,
     parse_douban_title,
     pending_search_tasks,
+    _search_prowlarr_with_progress,
 )
 
 
@@ -117,6 +119,32 @@ class SearchHandlerHelpersTest(unittest.TestCase):
 
         self.assertIsNone(get_pending_search_task("expired"))
         self.assertNotIn("expired", pending_search_tasks)
+
+    @patch("app.handlers.search_handler.search_prowlarr")
+    def test_search_prowlarr_progress_notifies_during_slow_queries(self, search_mock):
+        def slow_search(query, media_type):
+            time.sleep(0.05)
+            return []
+
+        search_mock.side_effect = slow_search
+        update = Mock()
+        update.effective_chat.id = 472943219
+        context = Mock()
+        context.bot.send_message = AsyncMock()
+
+        items = asyncio.run(
+            _search_prowlarr_with_progress(
+                update,
+                context,
+                "Transformers: Dark of the Moon 2011",
+                progress_interval=0.01,
+            )
+        )
+
+        self.assertEqual(items, [])
+        self.assertGreaterEqual(context.bot.send_message.await_count, 1)
+        first_message = context.bot.send_message.await_args_list[0].kwargs["text"]
+        self.assertIn("Prowlarr 仍在搜索", first_message)
 
 
 if __name__ == "__main__":

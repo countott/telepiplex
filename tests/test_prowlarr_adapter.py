@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import requests
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
@@ -36,6 +38,7 @@ class ProwlarrAdapterTest(unittest.TestCase):
 
     @patch("app.adapters.prowlarr.requests.get")
     def test_search_prowlarr_calls_api_and_normalizes_results(self, get_mock):
+        init.bot_config["search"]["prowlarr"]["timeout"] = 240
         response = Mock()
         response.raise_for_status.return_value = None
         response.json.return_value = [
@@ -64,7 +67,7 @@ class ProwlarrAdapterTest(unittest.TestCase):
                 "categories": 2000,
                 "type": "search",
             },
-            timeout=20,
+            timeout=240,
         )
         self.assertEqual(
             results,
@@ -93,6 +96,26 @@ class ProwlarrAdapterTest(unittest.TestCase):
         init.bot_config["search"]["prowlarr"]["api_key"] = ""
 
         with self.assertRaisesRegex(ProwlarrConfigError, "search.prowlarr.base_url 或 api_key 未配置"):
+            search_prowlarr("movie")
+
+    @patch("app.adapters.prowlarr.requests.get")
+    def test_search_prowlarr_uses_minimum_timeout_for_slow_indexers(self, get_mock):
+        init.bot_config["search"]["prowlarr"]["timeout"] = 80
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = []
+        get_mock.return_value = response
+
+        search_prowlarr("Transformers: Dark of the Moon 2011")
+
+        self.assertEqual(get_mock.call_args.kwargs["timeout"], 180)
+
+    @patch("app.adapters.prowlarr.requests.get")
+    def test_search_prowlarr_reports_timeout_with_wait_budget(self, get_mock):
+        init.bot_config["search"]["prowlarr"]["timeout"] = 80
+        get_mock.side_effect = requests.exceptions.Timeout("read timed out")
+
+        with self.assertRaisesRegex(ProwlarrRequestError, "Prowlarr 查询超时.*180"):
             search_prowlarr("movie")
 
     @patch("app.adapters.prowlarr.requests.get")

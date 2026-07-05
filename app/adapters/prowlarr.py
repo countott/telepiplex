@@ -10,6 +10,9 @@ import requests
 import init
 
 
+MIN_PROWLARR_SEARCH_TIMEOUT = 180
+
+
 class ProwlarrConfigError(Exception):
     """Raised when search or Prowlarr config is missing."""
 
@@ -37,6 +40,14 @@ def _get_prowlarr_config():
         raise ProwlarrConfigError("search.prowlarr.base_url 或 api_key 未配置")
 
     return prowlarr_config, base_url.rstrip("/"), api_key
+
+
+def _search_timeout(prowlarr_config: dict):
+    try:
+        timeout = float(prowlarr_config.get("timeout", MIN_PROWLARR_SEARCH_TIMEOUT))
+    except (TypeError, ValueError):
+        timeout = MIN_PROWLARR_SEARCH_TIMEOUT
+    return max(timeout, MIN_PROWLARR_SEARCH_TIMEOUT)
 
 
 def _warn(message: str):
@@ -103,12 +114,17 @@ def search_prowlarr(query: str, media_type: str = "movie") -> list[dict]:
     }
     url = f"{base_url}/api/v1/search"
     headers = {"X-Api-Key": api_key}
-    timeout = prowlarr_config.get("timeout", 20)
+    timeout = _search_timeout(prowlarr_config)
 
     try:
         response = requests.get(url, headers=headers, params=params, timeout=timeout)
         response.raise_for_status()
         data = response.json()
+    except requests.exceptions.Timeout as e:
+        raise ProwlarrRequestError(
+            f"Prowlarr 查询超时（已等待 {int(timeout)} 秒）。"
+            "部分索引器需要 Cloudflare 解析，建议稍后重试或减少启用的慢索引器。"
+        ) from e
     except Exception as e:
         raise ProwlarrRequestError(f"Prowlarr 请求失败: {e}") from e
 

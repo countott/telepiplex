@@ -8,6 +8,7 @@ from warnings import filterwarnings
 
 import requests
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import NetworkError
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 from telegram.warnings import PTBUserWarning
 
@@ -34,6 +35,8 @@ filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBU
 
 SEARCH_SELECT_RESULT, SEARCH_SELECT_MAIN_CATEGORY, SEARCH_SELECT_SUB_CATEGORY = range(30, 33)
 SEARCH_TASK_TTL_SECONDS = 30 * 60
+SEARCH_PROGRESS_INTERVAL_SECONDS = 30
+TELEGRAM_SEND_TIMEOUT_SECONDS = 30
 METADATA_URL_PATTERN = r"(?i)^https?://(?:[^/\s]+\.)*(?:douban\.com|imdb\.com|thetvdb\.com|tvdb\.com)(?::\d+)?/\S+$"
 
 pending_search_tasks = {}
@@ -309,11 +312,62 @@ def _owner_matches(task: dict, user_id: int) -> bool:
 
 
 async def _reply_or_send(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, **kwargs):
-    if update.callback_query:
-        return await update.callback_query.edit_message_text(text=text, **kwargs)
-    if update.message:
-        return await update.message.reply_text(text, **kwargs)
-    return await context.bot.send_message(chat_id=update.effective_chat.id, text=text, **kwargs)
+    timeout_kwargs = {
+        "connect_timeout": TELEGRAM_SEND_TIMEOUT_SECONDS,
+        "read_timeout": TELEGRAM_SEND_TIMEOUT_SECONDS,
+        "write_timeout": TELEGRAM_SEND_TIMEOUT_SECONDS,
+        "pool_timeout": TELEGRAM_SEND_TIMEOUT_SECONDS,
+    }
+    timeout_kwargs.update(kwargs)
+    try:
+        if update.callback_query:
+            return await update.callback_query.edit_message_text(text=text, **timeout_kwargs)
+        if update.message:
+            return await update.message.reply_text(text, **timeout_kwargs)
+        return await context.bot.send_message(chat_id=update.effective_chat.id, text=text, **timeout_kwargs)
+    except NetworkError as e:
+        _log_warn(f"Telegram 搜索消息发送超时/网络异常，继续执行搜索流程: {e}")
+        return None
+
+
+async def _send_search_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, **kwargs):
+    timeout_kwargs = {
+        "connect_timeout": TELEGRAM_SEND_TIMEOUT_SECONDS,
+        "read_timeout": TELEGRAM_SEND_TIMEOUT_SECONDS,
+        "write_timeout": TELEGRAM_SEND_TIMEOUT_SECONDS,
+        "pool_timeout": TELEGRAM_SEND_TIMEOUT_SECONDS,
+    }
+    timeout_kwargs.update(kwargs)
+    try:
+        return await context.bot.send_message(chat_id=chat_id, text=text, **timeout_kwargs)
+    except NetworkError as e:
+        _log_warn(f"Telegram 搜索消息发送超时/网络异常，继续执行搜索流程: {e}")
+        return None
+
+
+async def _search_prowlarr_with_progress(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    query: str,
+    progress_interval: float = SEARCH_PROGRESS_INTERVAL_SECONDS,
+):
+    search_task = asyncio.create_task(asyncio.to_thread(search_prowlarr, query, "movie"))
+    elapsed = 0.0
+    while True:
+        done, _ = await asyncio.wait({search_task}, timeout=progress_interval)
+        if done:
+            return search_task.result()
+
+        elapsed += progress_interval
+        await _send_search_message(
+            context,
+            update.effective_chat.id,
+            (
+                f"⏳ Prowlarr 仍在搜索：{query}\n"
+                f"已等待约 {int(elapsed)} 秒。部分索引器需要 Cloudflare 解析，请继续等待。"
+            ),
+            disable_web_page_preview=True,
+        )
 
 
 async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
@@ -321,22 +375,22 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
     _log_info(f"搜索片源开始 query={query}")
 
     try:
-        items = await asyncio.to_thread(search_prowlarr, query, "movie")
+        items = await _search_prowlarr_with_progress(update, context, query)
         results = rank_releases(items, _get_result_limit())
     except ProwlarrConfigError as e:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⚠️ {e}")
+        await _send_search_message(context, update.effective_chat.id, f"⚠️ {e}")
         return ConversationHandler.END
     except ProwlarrRequestError as e:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ {e}")
+        await _send_search_message(context, update.effective_chat.id, f"❌ {e}")
         return ConversationHandler.END
     except Exception as e:
         _log_error(f"搜索处理失败: {e}")
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ 搜索失败：{e}")
+        await _send_search_message(context, update.effective_chat.id, f"❌ 搜索失败：{e}")
         return ConversationHandler.END
 
     if not results:
         _log_info(f"搜索片源无结果 query={query}")
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ 未找到可用片源，请调整关键词后重试。")
+        await _send_search_message(context, update.effective_chat.id, "⚠️ 未找到可用片源，请调整关键词后重试。")
         return ConversationHandler.END
 
     _log_info(f"搜索片源完成 query={query} results={len(results)}")
@@ -348,9 +402,10 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
         "user_id": update.effective_user.id,
     }
 
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=build_results_text(query, results),
+    await _send_search_message(
+        context,
+        update.effective_chat.id,
+        build_results_text(query, results),
         reply_markup=_build_results_keyboard(task_id, results),
         disable_web_page_preview=True,
     )
