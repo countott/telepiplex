@@ -15,14 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # 核心运行库 (防止 Chrome 启动静默挂起)
     libasound2 \
     libgbm1 \
-    libgomp1 \
     libnss3 \
     # 字体支持
     fonts-liberation \
     fonts-noto-cjk \
-    tesseract-ocr \
-    tesseract-ocr-eng \
-    tesseract-ocr-chi-sim \
     && \
     # 针对 amd64 安装 Chrome
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \

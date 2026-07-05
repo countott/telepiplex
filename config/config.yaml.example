@@ -75,13 +75,10 @@ category_folder:
 # 通过Prowlarr搜索片源，选择候选后复用上面的分类目录投递到115离线下载
 search:
   enable: false
-  ocr:
-    # 截图识别引擎。paddleocr 使用 PP-OCRv6 medium 默认模型，质量优先；tesseract 仅作为轻量备用。
-    engine: paddleocr
-    fallback_engine: tesseract
-    device: cpu
-    preprocess: true
-    scale: 2
+  # 可选：自建豆瓣 API 服务。配置后，豆瓣详情页链接会优先调用 /movie/detail?url= 解析片名。
+  douban_api:
+    enable: false
+    base_url: ""
   prowlarr:
     base_url: "http://192.168.7.7:9696"
     api_key: ""

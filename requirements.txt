@@ -11,6 +11,3 @@ urllib3==2.5.0
 Pillow==11.2.1
 aria2p==0.12.1
 PySocks==1.7.1
---extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cpu/
-paddlepaddle==3.3.0
-paddleocr==3.7.0

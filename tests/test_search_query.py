@@ -7,8 +7,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
 from app.utils.search_query import (
-    extract_search_query_from_ocr_text,
     is_supported_metadata_url,
+    parse_douban_api_title,
     parse_media_page_title,
 )
 
@@ -35,27 +35,10 @@ class SearchQueryHelpersTest(unittest.TestCase):
         self.assertTrue(is_supported_metadata_url("https://thetvdb.com/series/breaking-bad"))
         self.assertFalse(is_supported_metadata_url("https://example.com/title/tt2278388/"))
 
-    def test_extract_search_query_from_ocr_text_prefers_title_and_nearby_year(self):
-        text = """
-        IMDb
-        The Grand Budapest Hotel
-        2014
-        1h 39m
-        User reviews
-        """
+    def test_parse_douban_api_title_extracts_title_and_year(self):
+        payload = {"status": True, "data": {"title": "影(2018)", "又名": "Shadow"}}
 
-        self.assertEqual(extract_search_query_from_ocr_text(text), "The Grand Budapest Hotel 2014")
-
-    def test_extract_search_query_from_douban_screenshot_text(self):
-        text = """
-        豆瓣电影
-        布达佩斯大饭店 The Grand Budapest Hotel
-        2014 / 美国 德国 / 剧情 喜剧
-        8.9
-        想看 看过
-        """
-
-        self.assertEqual(extract_search_query_from_ocr_text(text), "布达佩斯大饭店 The Grand Budapest Hotel 2014")
+        self.assertEqual(parse_douban_api_title(payload), "影 2018")
 
 
 if __name__ == "__main__":

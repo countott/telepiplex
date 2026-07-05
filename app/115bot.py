@@ -46,8 +46,7 @@ def get_help_info():
 <b>✨ 功能说明</b>\n
 <u>电影下载：</u>
 • 直接发送磁力、ed2k、迅雷或 HTTP 下载链接
-• 输入 <code>"/s 片名"</code> 或 <code>"/s 豆瓣/IMDb/TVDB链接"</code> 搜索片源
-• 发送影视页面截图，可用高质量本地 OCR 识别片名后确认搜索
+• 输入 <code>"/s 片名"</code>，或直接发送豆瓣/IMDb/TVDB 链接搜索片源
 • 离线超时后可选择写入重试列表
 • 根据配置自动生成 <code>.strm</code> 软链文件\n
 <u>重试列表：</u>
@@ -203,10 +202,10 @@ if __name__ == '__main__':
 
     # 注册Auth
     register_auth_handlers(application)
-    # 注册下载
-    register_download_handlers(application)
     # 注册搜索
     register_search_handlers(application)
+    # 注册下载
+    register_download_handlers(application)
     # 注册电影订阅
     # register_subscribe_movie_handlers(application)
     # 注册离线任务

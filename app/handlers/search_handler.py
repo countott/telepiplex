@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
-import os
-import tempfile
 import time
 import uuid
 from warnings import filterwarnings
@@ -20,19 +18,18 @@ from app.adapters.prowlarr import (
     search_prowlarr,
 )
 from app.handlers.download_handler import download_executor, download_task
-from app.utils.local_ocr import LocalOCRError, extract_text_from_image
 from app.utils.release_score import rank_releases
 from app.utils.search_query import (
-    extract_search_query_from_ocr_text,
     is_supported_metadata_url,
+    parse_douban_api_title,
     parse_media_page_title,
 )
-from app.utils.telegram_safe import safe_reply_text
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
-SEARCH_WAIT_SCREENSHOT, SEARCH_CONFIRM_OCR_QUERY, SEARCH_SELECT_RESULT, SEARCH_SELECT_MAIN_CATEGORY, SEARCH_SELECT_SUB_CATEGORY = range(30, 35)
+SEARCH_SELECT_RESULT, SEARCH_SELECT_MAIN_CATEGORY, SEARCH_SELECT_SUB_CATEGORY = range(30, 33)
 SEARCH_TASK_TTL_SECONDS = 30 * 60
+METADATA_URL_PATTERN = r"(?i)^https?://(?:[^/\s]+\.)*(?:douban\.com|imdb\.com|thetvdb\.com|tvdb\.com)/\S+$"
 
 pending_search_tasks = {}
 
@@ -168,7 +165,42 @@ def _extract_command_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     return text.split(maxsplit=1)[1].strip() if " " in text else ""
 
 
+def _is_douban_url(raw_query: str) -> bool:
+    return "douban.com/subject/" in str(raw_query or "")
+
+
+def _get_douban_api_base_url() -> str:
+    search_config = init.bot_config.get("search") or {}
+    douban_api_config = search_config.get("douban_api") or {}
+    if douban_api_config.get("enable") is False:
+        return ""
+    return str(douban_api_config.get("base_url") or "").strip().rstrip("/")
+
+
+def _fetch_douban_api_title(url: str) -> str:
+    base_url = _get_douban_api_base_url()
+    if not base_url:
+        return ""
+
+    response = requests.get(
+        f"{base_url}/movie/detail",
+        params={"url": url},
+        headers={"User-Agent": init.USER_AGENT},
+        timeout=20,
+    )
+    response.raise_for_status()
+    return parse_douban_api_title(response.json())
+
+
 def _fetch_media_page_title(url: str) -> str:
+    if _is_douban_url(url):
+        try:
+            douban_api_title = _fetch_douban_api_title(url)
+            if douban_api_title:
+                return douban_api_title
+        except Exception as e:
+            init.logger.warn(f"豆瓣API标题解析失败，回退到页面标题解析: {e}")
+
     response = requests.get(url, headers={"User-Agent": init.USER_AGENT}, timeout=10)
     response.raise_for_status()
     return parse_media_page_title(response.text)
@@ -235,70 +267,6 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
     return SEARCH_SELECT_RESULT
 
 
-async def _download_photo_to_temp(update: Update) -> str:
-    photo = update.message.photo[-1]
-    telegram_file = await photo.get_file()
-    with tempfile.NamedTemporaryFile(prefix="search_ocr_", suffix=".jpg", delete=False) as tmp_file:
-        image_path = tmp_file.name
-    await telegram_file.download_to_drive(image_path)
-    return image_path
-
-
-async def search_screenshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not init.check_user(user_id):
-        await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
-        return ConversationHandler.END
-
-    await safe_reply_text(update.message, "🔍 正在识别截图内容，请稍候。", logger=init.logger)
-    image_path = ""
-    try:
-        image_path = await _download_photo_to_temp(update)
-        ocr_text = await asyncio.to_thread(extract_text_from_image, image_path)
-    except LocalOCRError as e:
-        await update.message.reply_text(f"❌ {e}")
-        return ConversationHandler.END
-    except Exception as e:
-        init.logger.error(f"截图处理失败: {e}")
-        await update.message.reply_text(f"❌ 截图处理失败：{e}")
-        return ConversationHandler.END
-    finally:
-        if image_path and os.path.exists(image_path):
-            os.remove(image_path)
-
-    query = extract_search_query_from_ocr_text(ocr_text)
-    if not query:
-        await update.message.reply_text("⚠️ 未能从截图中识别到片名。请裁剪标题区域后重试，或使用 /s 片名。")
-        return ConversationHandler.END
-
-    context.user_data["search_ocr_query"] = query
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton(f"搜索：{query}", callback_data="search_ocr:confirm")],
-            [InlineKeyboardButton("取消", callback_data="search_ocr:cancel")],
-        ]
-    )
-    await update.message.reply_text("已识别到候选搜索词，请确认是否搜索：", reply_markup=keyboard)
-    return SEARCH_CONFIRM_OCR_QUERY
-
-
-async def confirm_ocr_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "search_ocr:cancel":
-        context.user_data.pop("search_ocr_query", None)
-        await query.edit_message_text("已取消本次搜索。")
-        return ConversationHandler.END
-
-    search_query = context.user_data.pop("search_ocr_query", "")
-    if not search_query:
-        await query.edit_message_text("⚠️ 截图识别结果已失效，请重新发送截图。")
-        return ConversationHandler.END
-
-    return await _send_search_results(update, context, search_query)
-
-
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if not init.check_user(user_id):
@@ -307,9 +275,24 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     raw_query = _extract_command_query(update, context)
     if not raw_query:
-        await update.message.reply_text("请输入搜索内容：/s 片名，或 /s 豆瓣/IMDb/TVDB 链接；也可以直接发送影视页面截图。")
-        return SEARCH_WAIT_SCREENSHOT
+        await update.message.reply_text("请输入搜索内容：/s 片名，或 /s 豆瓣/IMDb/TVDB 链接。")
+        return ConversationHandler.END
 
+    query = await _resolve_query(raw_query)
+    if not query:
+        await update.message.reply_text("⚠️ 页面链接解析失败，请改用片名搜索。")
+        return ConversationHandler.END
+
+    return await _send_search_results(update, context, query)
+
+
+async def search_metadata_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not init.check_user(user_id):
+        await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
+        return ConversationHandler.END
+
+    raw_query = (update.message.text or "").strip()
     query = await _resolve_query(raw_query)
     if not query:
         await update.message.reply_text("⚠️ 页面链接解析失败，请改用片名搜索。")
@@ -452,10 +435,11 @@ async def quit_search_conversation(update: Update, context: ContextTypes.DEFAULT
 
 def register_search_handlers(application):
     search_handler = ConversationHandler(
-        entry_points=[CommandHandler("s", search_command), MessageHandler(filters.PHOTO, search_screenshot_command)],
+        entry_points=[
+            CommandHandler("s", search_command),
+            MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(METADATA_URL_PATTERN), search_metadata_link_command),
+        ],
         states={
-            SEARCH_WAIT_SCREENSHOT: [MessageHandler(filters.PHOTO, search_screenshot_command)],
-            SEARCH_CONFIRM_OCR_QUERY: [CallbackQueryHandler(confirm_ocr_query, pattern=r"^search_ocr:(confirm|cancel)$")],
             SEARCH_SELECT_RESULT: [CallbackQueryHandler(select_search_result, pattern=r"^search_(pick|cancel):")],
             SEARCH_SELECT_MAIN_CATEGORY: [
                 CallbackQueryHandler(select_search_main_category, pattern=r"^search_(main|last|cancel):")

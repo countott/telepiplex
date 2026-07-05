@@ -2,13 +2,17 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
+import init
 from app.handlers.search_handler import (
+    METADATA_URL_PATTERN,
     SEARCH_TASK_TTL_SECONDS,
+    _fetch_media_page_title,
     build_results_text,
     format_size,
     get_pending_search_task,
@@ -30,6 +34,30 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         html = "<html><head><title>布达佩斯大饭店 The Grand Budapest Hotel (豆瓣)</title></head></html>"
 
         self.assertEqual(parse_douban_title(html), "布达佩斯大饭店 The Grand Budapest Hotel")
+
+    @patch("app.handlers.search_handler.requests.get")
+    def test_douban_url_uses_configured_douban_api_title(self, mock_get):
+        old_bot_config = init.bot_config
+        init.bot_config = {"search": {"douban_api": {"enable": True, "base_url": "http://douban-api"}}}
+        self.addCleanup(setattr, init, "bot_config", old_bot_config)
+        mock_response = Mock()
+        mock_response.json.return_value = {"status": True, "data": {"title": "影(2018)"}}
+        mock_get.return_value = mock_response
+
+        title = _fetch_media_page_title("https://movie.douban.com/subject/1234567/")
+
+        self.assertEqual(title, "影 2018")
+        mock_get.assert_called_once()
+        self.assertEqual(mock_get.call_args.args[0], "http://douban-api/movie/detail")
+        self.assertEqual(mock_get.call_args.kwargs["params"], {"url": "https://movie.douban.com/subject/1234567/"})
+        self.assertEqual(mock_get.call_args.kwargs["timeout"], 20)
+
+    def test_metadata_url_pattern_matches_supported_sites_only(self):
+        self.assertRegex("https://movie.douban.com/subject/1234567/", METADATA_URL_PATTERN)
+        self.assertRegex("https://www.imdb.com/title/tt2278388/", METADATA_URL_PATTERN)
+        self.assertRegex("https://thetvdb.com/series/breaking-bad", METADATA_URL_PATTERN)
+        self.assertNotRegex("https://example.com/movie.mkv", METADATA_URL_PATTERN)
+        self.assertNotRegex("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567", METADATA_URL_PATTERN)
 
     def test_build_results_text_contains_rank_score_size_seeders_indexer_and_features(self):
         text = build_results_text(

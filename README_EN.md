@@ -223,6 +223,8 @@ Please refer to the comments in `config/config.yaml.example` for configuration d
 - `/sm`      - Subscribe to movies
 - `/q`       - Cancel current session
 
+Use `/s movie name` to search releases, or send a Douban, IMDb, or TVDB link directly.
+
 ### 115 Open Platform Application
 
 **Strongly recommend applying for 115 Open Platform for better user experience**

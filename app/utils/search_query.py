@@ -6,35 +6,11 @@ from html.parser import HTMLParser
 from urllib.parse import urlparse
 
 
-YEAR_PATTERN = re.compile(r"\b(19\d{2}|20\d{2})\b")
 SITE_SUFFIX_PATTERNS = [
     re.compile(r"\s*[\-|]\s*IMDb\s*$", re.IGNORECASE),
     re.compile(r"\s*[\-|]\s*TheTVDB(?:\.com)?\s*$", re.IGNORECASE),
     re.compile(r"\s*[\-|]\s*TVDB(?:\.com)?\s*$", re.IGNORECASE),
     re.compile(r"\s*\(豆瓣\)\s*$", re.IGNORECASE),
-]
-NOISE_LINE_PATTERNS = [
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in [
-        r"^imdb$",
-        r"^imdbpro$",
-        r"^豆瓣$",
-        r"^豆瓣电影$",
-        r"^thetvdb(?:\.com)?$",
-        r"^tvdb(?:\.com)?$",
-        r"^open in app$",
-        r"^user reviews?$",
-        r"^all topics$",
-        r"^photos?$",
-        r"^cast$",
-        r"^episodes?$",
-        r"^where to watch$",
-        r"^想看\s*看过$",
-        r"^看过$",
-        r"^想看$",
-        r"^\d+(?:\.\d+)?$",
-        r"^\d+h\s*\d+m$",
-    ]
 ]
 
 
@@ -95,6 +71,18 @@ def parse_media_page_title(html_text: str) -> str:
     return _clean_media_title(parser.og_title or parser.title)
 
 
+def parse_douban_api_title(payload: dict) -> str:
+    if not isinstance(payload, dict):
+        return ""
+
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    title = _clean_media_title(data.get("title") or "")
+    if not title:
+        return ""
+
+    return title
+
+
 def is_supported_metadata_url(raw_url: str) -> bool:
     host = urlparse(str(raw_url or "").strip()).netloc.lower()
     return any(
@@ -106,38 +94,3 @@ def is_supported_metadata_url(raw_url: str) -> bool:
             "tvdb.com",
         ]
     )
-
-
-def _is_noise_line(line: str) -> bool:
-    return any(pattern.search(line) for pattern in NOISE_LINE_PATTERNS)
-
-
-def _looks_like_title(line: str) -> bool:
-    if not line or _is_noise_line(line):
-        return False
-    if len(line) > 100:
-        return False
-    return bool(re.search(r"[A-Za-z\u4e00-\u9fff]", line))
-
-
-def extract_search_query_from_ocr_text(text: str) -> str:
-    lines = [_collapse_spaces(line) for line in str(text or "").splitlines()]
-    lines = [line for line in lines if line]
-
-    for index, line in enumerate(lines):
-        title = _clean_media_title(line)
-        if not _looks_like_title(title):
-            continue
-
-        year = ""
-        for nearby_line in lines[index:index + 3]:
-            year_match = YEAR_PATTERN.search(nearby_line)
-            if year_match:
-                year = year_match.group(1)
-                break
-
-        if year and year not in title:
-            title = f"{title} {year}"
-        return title
-
-    return ""
