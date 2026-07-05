@@ -14,6 +14,8 @@ from app.handlers.search_handler import (
     METADATA_URL_PATTERN,
     SEARCH_TASK_TTL_SECONDS,
     _fetch_media_page_title,
+    _plex_metadata_for_selected_release,
+    _resolve_search_request,
     build_results_text,
     format_size,
     get_pending_search_task,
@@ -79,6 +81,77 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertEqual(mock_get.call_args_list[1].args[0], "https://m.douban.com/rexxar/api/v2/movie/4864908")
         self.assertEqual(mock_get.call_args_list[2].args[0], "https://m.douban.com/movie/subject/4864908/")
         self.assertEqual(mock_get.call_args_list[3].args[0], "https://movie.douban.com/subject/4864908/")
+
+    @patch("app.handlers.search_handler.requests.get")
+    def test_resolve_search_request_keeps_douban_metadata_for_plex_rename(self, mock_get):
+        old_bot_config = init.bot_config
+        init.bot_config = {"search": {}}
+        self.addCleanup(setattr, init, "bot_config", old_bot_config)
+        subject_response = Mock()
+        subject_response.json.return_value = {
+            "subject": {
+                "title": "布达佩斯大饭店",
+                "original_title": "The Grand Budapest Hotel",
+                "release_year": "2014",
+            }
+        }
+        mock_get.return_value = subject_response
+
+        request = asyncio.run(_resolve_search_request("https://movie.douban.com/subject/11525673/"))
+
+        self.assertEqual(request["query"], "The Grand Budapest Hotel 2014")
+        self.assertEqual(
+            request["plex_metadata"],
+            {
+                "source": "douban",
+                "chinese_title": "布达佩斯大饭店",
+                "english_title": "The Grand Budapest Hotel",
+                "year": "2014",
+            },
+        )
+
+    def test_plex_metadata_for_selected_release_adds_release_title_without_mutating_task(self):
+        task_metadata = {
+            "source": "douban",
+            "chinese_title": "绝命毒师",
+            "english_title": "Breaking Bad",
+            "year": "2008",
+        }
+        task = {"plex_metadata": task_metadata}
+        selected_item = {"title": "Breaking.Bad.1x02.1080p.WEB-DL"}
+
+        metadata = _plex_metadata_for_selected_release(task, selected_item)
+
+        self.assertEqual(metadata["release_title"], "Breaking.Bad.1x02.1080p.WEB-DL")
+        self.assertNotIn("release_title", task_metadata)
+
+    def test_resolve_plain_search_request_keeps_query_as_chinese_folder_hint(self):
+        request = asyncio.run(_resolve_search_request("布达佩斯大饭店"))
+
+        self.assertEqual(request["query"], "布达佩斯大饭店")
+        self.assertEqual(
+            request["plex_metadata"],
+            {
+                "source": "search_query",
+                "chinese_title": "布达佩斯大饭店",
+            },
+        )
+
+    def test_plain_search_metadata_for_selected_release_uses_candidate_title(self):
+        task = {
+            "query": "布达佩斯大饭店",
+            "plex_metadata": {
+                "source": "search_query",
+                "chinese_title": "布达佩斯大饭店",
+            },
+        }
+        selected_item = {"title": "The.Grand.Budapest.Hotel.2014.1080p.BluRay.x265-GROUP"}
+
+        metadata = _plex_metadata_for_selected_release(task, selected_item)
+
+        self.assertEqual(metadata["source"], "search_query")
+        self.assertEqual(metadata["chinese_title"], "布达佩斯大饭店")
+        self.assertEqual(metadata["release_title"], "The.Grand.Budapest.Hotel.2014.1080p.BluRay.x265-GROUP")
 
     def test_metadata_url_pattern_matches_supported_sites_only(self):
         self.assertRegex("https://movie.douban.com/subject/1234567/", METADATA_URL_PATTERN)

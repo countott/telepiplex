@@ -19,6 +19,7 @@ from telegram.warnings import PTBUserWarning
 from app.utils.sqlitelib import *
 from concurrent.futures import ThreadPoolExecutor
 from app.core.open_115 import RenameFailedError
+from app.utils.plex_naming import build_plex_naming_plan
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
@@ -305,9 +306,41 @@ def save_failed_download_to_db(title, magnet, save_path):
         raise str(e)
     
     
-def download_task(link, selected_path, user_id):
+def _attempt_plex_auto_rename(final_path, selected_path, resource_name, plex_metadata):
+    if not plex_metadata:
+        return None
+
+    file_list = init.openapi_115.get_files_from_dir(final_path)
+    if not file_list:
+        init.logger.warn(f"自动整理跳过：目录中未找到视频文件 {final_path}")
+        return None
+
+    original_file_name = file_list[0]
+    release_title = plex_metadata.get("release_title") or resource_name
+    plan = build_plex_naming_plan(plex_metadata, release_title, original_file_name)
+    if not plan:
+        init.logger.warn(f"自动整理跳过：豆瓣元数据不足 {plex_metadata}")
+        return None
+
+    target_path = f"{selected_path}/{plan.chinese_folder}/{plan.english_folder}"
+    init.openapi_115.create_dir_recursive(target_path)
+
+    original_file_path = f"{final_path}/{original_file_name}"
+    renamed_file_path = f"{final_path}/{plan.file_name}"
+    if original_file_name != plan.file_name:
+        init.openapi_115.rename(original_file_path, plan.file_name)
+
+    init.openapi_115.move_file(renamed_file_path, target_path)
+    if final_path != target_path:
+        init.openapi_115.delete_single_file(final_path)
+
+    create_strm_file(target_path, [plan.file_name])
+    notice_emby_scan_library(target_path)
+    return target_path, plan
+
+
+def download_task(link, selected_path, user_id, plex_metadata=None):
     """异步下载任务"""
-    from app.utils.message_queue import add_task_to_queue
     info_hash = ""
     if init.openapi_115 is None:
         add_task_to_queue(
@@ -343,6 +376,16 @@ def download_task(link, selected_path, user_id):
                 init.openapi_115.move_file(final_path, f"{selected_path}/{temp_folder}")
                 final_path = f"{selected_path}/{temp_folder}"
                 resource_name = temp_folder
+
+            try:
+                auto_result = _attempt_plex_auto_rename(final_path, selected_path, resource_name, plex_metadata)
+                if auto_result:
+                    target_path, plan = auto_result
+                    message = f"✅ 自动整理完成：`{plan.file_name}`\n\n保存目录：`{target_path}`"
+                    add_task_to_queue(user_id, None, message=message)
+                    return
+            except Exception as e:
+                init.logger.warn(f"自动整理失败，回退到手动重命名: {e}")
             
             # 为避免callback_data长度限制，使用时间戳作为唯一标识符
             task_id = str(int(time.time() * 1000))  # 毫秒时间戳作为唯一ID

@@ -64,6 +64,85 @@ def _title_contains_latin(title: str) -> bool:
     return bool(re.search(r"[A-Za-z]", str(title or "")))
 
 
+def _collapse_title_spaces(title: str) -> str:
+    return " ".join(str(title or "").replace("\xa0", " ").split())
+
+
+def _as_title_candidates(value) -> list[str]:
+    if isinstance(value, list):
+        values = value
+    elif isinstance(value, str):
+        values = re.split(r"\s*/\s*|\s*[、,]\s*", value)
+    else:
+        values = []
+    return [_collapse_title_spaces(item) for item in values if _collapse_title_spaces(item)]
+
+
+def _extract_douban_metadata(payload: dict) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+
+    data = payload.get("subject") if isinstance(payload.get("subject"), dict) else payload
+    if not isinstance(data, dict):
+        return None
+
+    chinese_title = _collapse_title_spaces(data.get("title") or data.get("name"))
+    year = _collapse_title_spaces(data.get("release_year") or data.get("year"))
+    english_candidates = [
+        data.get("original_title"),
+        data.get("originalTitle"),
+        data.get("original_name"),
+        data.get("originalName"),
+        data.get("foreign_title"),
+        data.get("foreignTitle"),
+    ]
+    english_candidates.extend(_as_title_candidates(data.get("aka")))
+    english_candidates.extend(_as_title_candidates(data.get("aka_titles")))
+    english_candidates.extend(_as_title_candidates(data.get("aliases")))
+    english_candidates.extend(_as_title_candidates(data.get("alias")))
+
+    english_title = ""
+    for candidate in english_candidates:
+        candidate = _collapse_title_spaces(candidate)
+        if candidate and _title_contains_latin(candidate):
+            english_title = candidate
+            break
+
+    if not english_title and chinese_title and _title_contains_latin(chinese_title):
+        english_title = chinese_title
+
+    if not chinese_title or not english_title:
+        return None
+
+    return {
+        "source": "douban",
+        "chinese_title": chinese_title,
+        "english_title": english_title,
+        "year": year,
+    }
+
+
+def _query_from_plex_metadata(metadata: dict) -> str:
+    query = metadata.get("english_title") or metadata.get("chinese_title") or ""
+    year = metadata.get("year") or ""
+    if query and year and year not in query:
+        query = f"{query} {year}"
+    return _collapse_title_spaces(query)
+
+
+def _fetch_douban_json_metadata(endpoint: str, referer: str) -> dict | None:
+    response = requests.get(
+        endpoint,
+        headers={
+            **_douban_request_headers(referer),
+            "Accept": "application/json, text/plain, */*",
+        },
+        timeout=10,
+    )
+    response.raise_for_status()
+    return _extract_douban_metadata(response.json())
+
+
 def format_size(size) -> str:
     try:
         size = int(size or 0)
@@ -223,6 +302,39 @@ def _fetch_douban_json_title(endpoint: str, parser, referer: str) -> str:
 
 
 def _fetch_builtin_douban_title(url: str) -> str:
+    return _fetch_builtin_douban_title_fallback(url)
+
+
+def _fetch_builtin_douban_metadata(url: str) -> dict | None:
+    subject_id = extract_douban_subject_id(url)
+    if not subject_id:
+        return None
+
+    attempts = [
+        (
+            "subject_abstract",
+            f"https://movie.douban.com/j/subject_abstract?subject_id={subject_id}",
+            f"https://movie.douban.com/subject/{subject_id}/",
+        ),
+        (
+            "rexxar",
+            f"https://m.douban.com/rexxar/api/v2/movie/{subject_id}",
+            f"https://m.douban.com/movie/subject/{subject_id}/",
+        ),
+    ]
+    for source, endpoint, referer in attempts:
+        try:
+            metadata = _fetch_douban_json_metadata(endpoint, referer)
+            if metadata:
+                _log_info(f"豆瓣链接解析元数据 source={source} subject={subject_id} metadata={metadata}")
+                return metadata
+        except Exception as e:
+            _log_warn(f"豆瓣内建JSON元数据解析失败 source={source} subject={subject_id}: {e}")
+
+    return None
+
+
+def _fetch_builtin_douban_title_fallback(url: str) -> str:
     subject_id = extract_douban_subject_id(url)
     if not subject_id:
         return ""
@@ -295,16 +407,45 @@ def _fetch_media_page_title(url: str) -> str:
 
 
 async def _resolve_query(raw_query: str) -> str | None:
+    request = await _resolve_search_request(raw_query)
+    return request.get("query") if request else None
+
+
+async def _resolve_search_request(raw_query: str) -> dict | None:
     if not is_supported_metadata_url(raw_query):
-        return raw_query
+        query = _collapse_title_spaces(raw_query)
+        return {
+            "query": query,
+            "plex_metadata": {
+                "source": "search_query",
+                "chinese_title": query,
+            } if query else None,
+        }
 
     try:
+        if _is_douban_url(raw_query):
+            metadata = await asyncio.to_thread(_fetch_builtin_douban_metadata, raw_query)
+            if metadata:
+                query = _query_from_plex_metadata(metadata)
+                _log_info(f"豆瓣链接解析为搜索词 raw={raw_query} query={query} metadata={metadata}")
+                return {"query": query, "plex_metadata": metadata}
+
         query = await asyncio.to_thread(_fetch_media_page_title, raw_query)
         _log_info(f"媒体链接解析为搜索词 raw={raw_query} query={query}")
-        return query
+        return {"query": query, "plex_metadata": None}
     except Exception as e:
         _log_warn(f"媒体页面标题解析失败: {e}")
         return None
+
+
+def _plex_metadata_for_selected_release(task: dict, selected_item: dict):
+    metadata = task.get("plex_metadata")
+    if not metadata:
+        return None
+
+    result = metadata.copy()
+    result["release_title"] = selected_item.get("title") or task.get("query") or ""
+    return result
 
 
 def _owner_matches(task: dict, user_id: int) -> bool:
@@ -370,7 +511,7 @@ async def _search_prowlarr_with_progress(
         )
 
 
-async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
+async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, plex_metadata=None):
     await _reply_or_send(update, context, f"🔍 正在搜索片源：{query}")
     _log_info(f"搜索片源开始 query={query}")
 
@@ -400,6 +541,7 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
         "query": query,
         "results": results,
         "user_id": update.effective_user.id,
+        "plex_metadata": plex_metadata,
     }
 
     await _send_search_message(
@@ -423,12 +565,17 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("请输入搜索内容：/s 片名，或 /s 豆瓣/IMDb/TVDB 链接。")
         return ConversationHandler.END
 
-    query = await _resolve_query(raw_query)
-    if not query:
+    request = await _resolve_search_request(raw_query)
+    if not request or not request.get("query"):
         await update.message.reply_text("⚠️ 页面链接解析失败，请改用片名搜索。")
         return ConversationHandler.END
 
-    return await _send_search_results(update, context, query)
+    return await _send_search_results(
+        update,
+        context,
+        request["query"],
+        plex_metadata=request.get("plex_metadata"),
+    )
 
 
 async def search_metadata_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -438,12 +585,17 @@ async def search_metadata_link_command(update: Update, context: ContextTypes.DEF
         return ConversationHandler.END
 
     raw_query = (update.message.text or "").strip()
-    query = await _resolve_query(raw_query)
-    if not query:
+    request = await _resolve_search_request(raw_query)
+    if not request or not request.get("query"):
         await update.message.reply_text("⚠️ 页面链接解析失败，请改用片名搜索。")
         return ConversationHandler.END
 
-    return await _send_search_results(update, context, query)
+    return await _send_search_results(
+        update,
+        context,
+        request["query"],
+        plex_metadata=request.get("plex_metadata"),
+    )
 
 
 async def select_search_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -506,8 +658,10 @@ async def select_search_main_category(update: Update, context: ContextTypes.DEFA
             await query.edit_message_text(f"❌ {e}")
             return ConversationHandler.END
 
+        selected_item = context.user_data.get("search_selected_item") or {}
+        plex_metadata = _plex_metadata_for_selected_release(task, selected_item)
         await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到 115 离线下载，请稍后查看结果。")
-        download_executor.submit(download_task, link, selected_path, update.effective_user.id)
+        download_executor.submit(download_task, link, selected_path, update.effective_user.id, plex_metadata=plex_metadata)
         pending_search_tasks.pop(task_id, None)
         return ConversationHandler.END
 
@@ -564,8 +718,10 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
         await query.edit_message_text(f"❌ {e}")
         return ConversationHandler.END
 
+    selected_item = context.user_data.get("search_selected_item") or {}
+    plex_metadata = _plex_metadata_for_selected_release(task, selected_item)
     await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到 115 离线下载，请稍后查看结果。")
-    download_executor.submit(download_task, link, selected_path, update.effective_user.id)
+    download_executor.submit(download_task, link, selected_path, update.effective_user.id, plex_metadata=plex_metadata)
     pending_search_tasks.pop(task_id, None)
     return ConversationHandler.END
 
