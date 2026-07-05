@@ -1,3 +1,4 @@
+import hashlib
 import unittest
 import sys
 from pathlib import Path
@@ -9,7 +10,12 @@ sys.path.insert(0, str(ROOT / "app"))
 
 import init
 
-from app.adapters.prowlarr import ProwlarrConfigError, ProwlarrRequestError, search_prowlarr
+from app.adapters.prowlarr import (
+    ProwlarrConfigError,
+    ProwlarrRequestError,
+    resolve_prowlarr_download_url,
+    search_prowlarr,
+)
 
 
 class ProwlarrAdapterTest(unittest.TestCase):
@@ -35,7 +41,7 @@ class ProwlarrAdapterTest(unittest.TestCase):
         response.json.return_value = [
             {
                 "title": "The Grand Budapest Hotel 2014 1080p WEB-DL",
-                "magnetUrl": "magnet:?xt=urn:btih:ABC",
+                "magnetUrl": "magnet:?xt=urn:btih:8DF2ECE4F1739AB307C52E3FC9971E87E24B0A41",
                 "downloadUrl": "https://example/download",
                 "size": 8589934592,
                 "seeders": 32,
@@ -65,8 +71,8 @@ class ProwlarrAdapterTest(unittest.TestCase):
             [
                 {
                     "title": "The Grand Budapest Hotel 2014 1080p WEB-DL",
-                    "download_url": "magnet:?xt=urn:btih:ABC",
-                    "magnet_url": "magnet:?xt=urn:btih:ABC",
+                    "download_url": "magnet:?xt=urn:btih:8DF2ECE4F1739AB307C52E3FC9971E87E24B0A41",
+                    "magnet_url": "magnet:?xt=urn:btih:8DF2ECE4F1739AB307C52E3FC9971E87E24B0A41",
                     "size": 8589934592,
                     "seeders": 32,
                     "indexer": "Indexer A",
@@ -95,6 +101,52 @@ class ProwlarrAdapterTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ProwlarrRequestError, "Prowlarr 请求失败"):
             search_prowlarr("movie")
+
+    @patch("app.adapters.prowlarr.requests.get")
+    def test_resolve_prowlarr_download_url_converts_torrent_file_to_magnet(self, get_mock):
+        info = b"d6:lengthi123e4:name9:movie.mkve"
+        torrent = b"d8:announce14:http://tracker4:info" + info + b"e"
+        expected_hash = hashlib.sha1(info).hexdigest().upper()
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.content = torrent
+        get_mock.return_value = response
+
+        link = resolve_prowlarr_download_url(
+            {
+                "title": "Fallback Title",
+                "download_url": "https://prowlarr.example/download?id=1",
+                "protocol": "torrent",
+            }
+        )
+
+        self.assertEqual(link, f"magnet:?xt=urn:btih:{expected_hash}&dn=movie.mkv")
+        get_mock.assert_called_once_with("https://prowlarr.example/download?id=1", timeout=20)
+
+    @patch("app.adapters.prowlarr.requests.get")
+    def test_resolve_prowlarr_download_url_prefers_info_page_magnet_before_torrent_download(self, get_mock):
+        info_page_response = Mock()
+        info_page_response.raise_for_status.return_value = None
+        info_page_response.text = (
+            '<a href="magnet:?xt=urn:btih:8DF2ECE4F1739AB307C52E3FC9971E87E24B0A41'
+            '&amp;dn=Vivre+sa+Vie">magnet</a>'
+        )
+        get_mock.return_value = info_page_response
+
+        link = resolve_prowlarr_download_url(
+            {
+                "title": "Vivre sa Vie",
+                "download_url": "https://prowlarr.example/download?id=1",
+                "info_url": "https://indexer.example/details/1",
+                "protocol": "torrent",
+            }
+        )
+
+        self.assertEqual(
+            link,
+            "magnet:?xt=urn:btih:8DF2ECE4F1739AB307C52E3FC9971E87E24B0A41&dn=Vivre+sa+Vie",
+        )
+        get_mock.assert_called_once_with("https://indexer.example/details/1", timeout=20)
 
 
 if __name__ == "__main__":

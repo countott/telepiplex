@@ -12,7 +12,12 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Con
 from telegram.warnings import PTBUserWarning
 
 import init
-from app.adapters.prowlarr import ProwlarrConfigError, ProwlarrRequestError, search_prowlarr
+from app.adapters.prowlarr import (
+    ProwlarrConfigError,
+    ProwlarrRequestError,
+    resolve_prowlarr_download_url,
+    search_prowlarr,
+)
 from app.handlers.download_handler import download_executor, download_task
 from app.utils.release_score import rank_releases
 
@@ -137,6 +142,11 @@ def _build_sub_category_keyboard(task_id: str, category_name: str) -> InlineKeyb
 def _get_selected_link(context: ContextTypes.DEFAULT_TYPE):
     item = context.user_data.get("search_selected_item") or {}
     return item.get("magnet_url") or item.get("download_url")
+
+
+async def _resolve_selected_link(context: ContextTypes.DEFAULT_TYPE):
+    item = context.user_data.get("search_selected_item") or {}
+    return await asyncio.to_thread(resolve_prowlarr_download_url, item)
 
 
 def _get_result_limit() -> int:
@@ -278,9 +288,14 @@ async def select_search_main_category(update: Update, context: ContextTypes.DEFA
             return ConversationHandler.END
 
         selected_path = init.bot_session.get("movie_last_save") if hasattr(init, "bot_session") else None
-        link = _get_selected_link(context)
-        if not selected_path or not link:
+        if not selected_path or not _get_selected_link(context):
             await query.edit_message_text("❌ 未找到最后一次保存路径或候选链接，请重新选择。")
+            return ConversationHandler.END
+
+        try:
+            link = await _resolve_selected_link(context)
+        except ProwlarrRequestError as e:
+            await query.edit_message_text(f"❌ {e}")
             return ConversationHandler.END
 
         await query.edit_message_text("✅ 已为您添加到下载队列！\n请稍后~")
@@ -331,9 +346,14 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
         init.bot_session = {}
     init.bot_session["movie_last_save"] = selected_path
 
-    link = _get_selected_link(context)
-    if not link:
+    if not _get_selected_link(context):
         await query.edit_message_text("❌ 候选链接已失效，请重新搜索。")
+        return ConversationHandler.END
+
+    try:
+        link = await _resolve_selected_link(context)
+    except ProwlarrRequestError as e:
+        await query.edit_message_text(f"❌ {e}")
         return ConversationHandler.END
 
     await query.edit_message_text("✅ 已为您添加到下载队列！\n请稍后~")
