@@ -7,6 +7,7 @@ import asyncio
 import threading
 import signal
 from telegram import Update, BotCommand
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import ContextTypes, CommandHandler, Application
 from telegram.helpers import escape_markdown
 
@@ -159,7 +160,23 @@ async def post_init(application):
     await set_bot_menu(application)
 
 
-async def run_application_polling(application, after_start=None, stop_event=None):
+async def initialize_application_with_retry(application, max_retries=5, retry_delay=5):
+    for attempt in range(max_retries + 1):
+        try:
+            await application.initialize()
+            return
+        except NetworkError as e:
+            if attempt >= max_retries:
+                raise
+            if init.logger:
+                init.logger.warn(
+                    f"Telegram Bot 初始化超时/网络异常，{retry_delay} 秒后重试 "
+                    f"({attempt + 1}/{max_retries}): {e}"
+                )
+            await asyncio.sleep(retry_delay)
+
+
+async def run_application_polling(application, after_start=None, stop_event=None, initialize_retry_delay=5):
     """Run PTB with an explicit lifecycle to avoid half-initialized polling startup."""
     if stop_event is None:
         stop_event = asyncio.Event()
@@ -171,7 +188,7 @@ async def run_application_polling(application, after_start=None, stop_event=None
                 break
 
     try:
-        await application.initialize()
+        await initialize_application_with_retry(application, retry_delay=initialize_retry_delay)
         if application.post_init:
             await application.post_init(application)
         await application.start()
