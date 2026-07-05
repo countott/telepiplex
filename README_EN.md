@@ -225,8 +225,6 @@ Please refer to the comments in `config/config.yaml.example` for configuration d
 
 Use `/s movie name` to search releases, or send a Douban, IMDb, or TVDB link directly.
 
-For more stable Douban link parsing, deploy the bundled Unraid helper in [deploy/douban-api/README.md](deploy/douban-api/README.md), then set `search.douban_api.base_url` in the runtime `/config/config.yaml`.
-
 ### 115 Open Platform Application
 
 **Strongly recommend applying for 115 Open Platform for better user experience**

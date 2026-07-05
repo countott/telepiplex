@@ -20,8 +20,11 @@ from app.adapters.prowlarr import (
 from app.handlers.download_handler import download_executor, download_task
 from app.utils.release_score import rank_releases
 from app.utils.search_query import (
+    extract_douban_subject_id,
     is_supported_metadata_url,
-    parse_douban_api_title,
+    parse_douban_mobile_title,
+    parse_douban_rexxar_title,
+    parse_douban_subject_abstract_title,
     parse_media_page_title,
 )
 
@@ -169,37 +172,78 @@ def _is_douban_url(raw_query: str) -> bool:
     return "douban.com/subject/" in str(raw_query or "")
 
 
-def _get_douban_api_base_url() -> str:
-    search_config = init.bot_config.get("search") or {}
-    douban_api_config = search_config.get("douban_api") or {}
-    if douban_api_config.get("enable") is False:
-        return ""
-    return str(douban_api_config.get("base_url") or "").strip().rstrip("/")
+def _douban_request_headers(referer: str = "") -> dict:
+    headers = {
+        "User-Agent": init.USER_AGENT,
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    }
+    if referer:
+        headers["Referer"] = referer
+    return headers
 
 
-def _fetch_douban_api_title(url: str) -> str:
-    base_url = _get_douban_api_base_url()
-    if not base_url:
-        return ""
-
+def _fetch_douban_json_title(endpoint: str, parser, referer: str) -> str:
     response = requests.get(
-        f"{base_url}/movie/detail",
-        params={"url": url},
-        headers={"User-Agent": init.USER_AGENT},
-        timeout=20,
+        endpoint,
+        headers={
+            **_douban_request_headers(referer),
+            "Accept": "application/json, text/plain, */*",
+        },
+        timeout=10,
     )
     response.raise_for_status()
-    return parse_douban_api_title(response.json())
+    return parser(response.json())
+
+
+def _fetch_builtin_douban_title(url: str) -> str:
+    subject_id = extract_douban_subject_id(url)
+    if not subject_id:
+        return ""
+
+    attempts = [
+        (
+            f"https://movie.douban.com/j/subject_abstract?subject_id={subject_id}",
+            parse_douban_subject_abstract_title,
+            f"https://movie.douban.com/subject/{subject_id}/",
+        ),
+        (
+            f"https://m.douban.com/rexxar/api/v2/movie/{subject_id}",
+            parse_douban_rexxar_title,
+            f"https://m.douban.com/movie/subject/{subject_id}/",
+        ),
+    ]
+    for endpoint, parser, referer in attempts:
+        try:
+            title = _fetch_douban_json_title(endpoint, parser, referer)
+            if title:
+                return title
+        except Exception as e:
+            init.logger.warn(f"豆瓣内建JSON标题解析失败: {e}")
+
+    try:
+        response = requests.get(
+            f"https://m.douban.com/movie/subject/{subject_id}/",
+            headers=_douban_request_headers("https://m.douban.com/movie/"),
+            timeout=10,
+        )
+        response.raise_for_status()
+        title = parse_douban_mobile_title(response.text)
+        if title:
+            return title
+    except Exception as e:
+        init.logger.warn(f"豆瓣移动页标题解析失败: {e}")
+
+    return ""
 
 
 def _fetch_media_page_title(url: str) -> str:
     if _is_douban_url(url):
         try:
-            douban_api_title = _fetch_douban_api_title(url)
-            if douban_api_title:
-                return douban_api_title
+            douban_title = _fetch_builtin_douban_title(url)
+            if douban_title:
+                return douban_title
         except Exception as e:
-            init.logger.warn(f"豆瓣API标题解析失败，回退到页面标题解析: {e}")
+            init.logger.warn(f"豆瓣内建标题解析失败，回退到页面标题解析: {e}")
 
     response = requests.get(url, headers={"User-Agent": init.USER_AGENT}, timeout=10)
     response.raise_for_status()

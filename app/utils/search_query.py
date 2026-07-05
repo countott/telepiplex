@@ -10,6 +10,7 @@ SITE_SUFFIX_PATTERNS = [
     re.compile(r"\s*[\-|]\s*IMDb\s*$", re.IGNORECASE),
     re.compile(r"\s*[\-|]\s*TheTVDB(?:\.com)?\s*$", re.IGNORECASE),
     re.compile(r"\s*[\-|]\s*TVDB(?:\.com)?\s*$", re.IGNORECASE),
+    re.compile(r"\s*[\-|]\s*豆瓣(?:电影)?\s*$", re.IGNORECASE),
     re.compile(r"\s*\(豆瓣\)\s*$", re.IGNORECASE),
 ]
 
@@ -71,16 +72,49 @@ def parse_media_page_title(html_text: str) -> str:
     return _clean_media_title(parser.og_title or parser.title)
 
 
-def parse_douban_api_title(payload: dict) -> str:
+def _title_with_year(title: str, year: str) -> str:
+    title = _clean_media_title(title)
+    year = _collapse_spaces(year)
+    if not title:
+        return ""
+    if year and year not in title:
+        title = f"{title}({year})"
+    return _clean_media_title(title)
+
+
+def _useful_douban_title(title: str) -> str:
+    title = _clean_media_title(title)
+    if title in {"豆瓣", "豆瓣电影"}:
+        return ""
+    return title
+
+
+def extract_douban_subject_id(raw_url: str) -> str:
+    parsed = urlparse(str(raw_url or "").strip())
+    if "douban.com" not in parsed.netloc.lower():
+        return ""
+
+    match = re.search(r"/subject/(\d+)/?", parsed.path)
+    return match.group(1) if match else ""
+
+
+def parse_douban_subject_abstract_title(payload: dict) -> str:
     if not isinstance(payload, dict):
         return ""
 
-    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-    title = _clean_media_title(data.get("title") or "")
-    if not title:
+    data = payload.get("subject") if isinstance(payload.get("subject"), dict) else payload
+    return _title_with_year(data.get("title") or data.get("name") or "", data.get("release_year") or data.get("year") or "")
+
+
+def parse_douban_rexxar_title(payload: dict) -> str:
+    if not isinstance(payload, dict):
         return ""
 
-    return title
+    return _title_with_year(payload.get("title") or payload.get("name") or "", payload.get("year") or payload.get("release_year") or "")
+
+
+def parse_douban_mobile_title(html_text: str) -> str:
+    return _useful_douban_title(parse_media_page_title(html_text))
 
 
 def is_supported_metadata_url(raw_url: str) -> bool:

@@ -58,6 +58,17 @@ class BotSurfaceCleanupTest(unittest.TestCase):
 
         self.assertLess(bot_source.index("register_search_handlers(application)"), bot_source.index("register_download_handlers(application)"))
 
+    def test_external_douban_api_deployment_is_removed(self):
+        self.assertFalse((ROOT / "deploy" / "douban-api").exists())
+
+        config_source = (ROOT / "config" / "config.yaml.example").read_text(encoding="utf-8")
+        app_config_source = (ROOT / "app" / "config.yaml.example").read_text(encoding="utf-8")
+        readme_source = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertNotIn("douban_api:", config_source)
+        self.assertNotIn("douban_api:", app_config_source)
+        self.assertNotIn("deploy/douban-api", readme_source)
+
 
 if __name__ == "__main__":
     unittest.main()

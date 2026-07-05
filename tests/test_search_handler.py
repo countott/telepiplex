@@ -36,39 +36,44 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertEqual(parse_douban_title(html), "布达佩斯大饭店 The Grand Budapest Hotel")
 
     @patch("app.handlers.search_handler.requests.get")
-    def test_douban_url_uses_configured_douban_api_title(self, mock_get):
+    def test_douban_url_uses_builtin_subject_abstract_title(self, mock_get):
         old_bot_config = init.bot_config
-        init.bot_config = {"search": {"douban_api": {"enable": True, "base_url": "http://douban-api"}}}
+        init.bot_config = {"search": {}}
         self.addCleanup(setattr, init, "bot_config", old_bot_config)
         mock_response = Mock()
-        mock_response.json.return_value = {"status": True, "data": {"title": "影(2018)"}}
+        mock_response.json.return_value = {"subject": {"title": "影", "release_year": "2018"}}
         mock_get.return_value = mock_response
 
-        title = _fetch_media_page_title("https://movie.douban.com/subject/1234567/")
+        title = _fetch_media_page_title("https://movie.douban.com/subject/4864908/")
 
         self.assertEqual(title, "影 2018")
         mock_get.assert_called_once()
-        self.assertEqual(mock_get.call_args.args[0], "http://douban-api/movie/detail")
-        self.assertEqual(mock_get.call_args.kwargs["params"], {"url": "https://movie.douban.com/subject/1234567/"})
-        self.assertEqual(mock_get.call_args.kwargs["timeout"], 20)
+        self.assertEqual(mock_get.call_args.args[0], "https://movie.douban.com/j/subject_abstract?subject_id=4864908")
+        self.assertEqual(mock_get.call_args.kwargs["timeout"], 10)
 
     @patch("app.handlers.search_handler.requests.get")
-    def test_douban_api_empty_title_falls_back_to_page_title(self, mock_get):
+    def test_douban_builtin_empty_title_falls_back_to_page_title(self, mock_get):
         old_bot_config = init.bot_config
-        init.bot_config = {"search": {"douban_api": {"enable": True, "base_url": "http://douban-api"}}}
+        init.bot_config = {"search": {}}
         self.addCleanup(setattr, init, "bot_config", old_bot_config)
-        api_response = Mock()
-        api_response.json.return_value = {"status": True, "data": {"title": ""}}
+        subject_response = Mock()
+        subject_response.json.return_value = {"subject": {"title": ""}}
+        rexxar_response = Mock()
+        rexxar_response.json.return_value = {"title": ""}
+        mobile_response = Mock()
+        mobile_response.text = "<html><head><title>豆瓣</title></head></html>"
         page_response = Mock()
         page_response.text = "<html><head><title>影 Shadow (2018) (豆瓣)</title></head></html>"
-        mock_get.side_effect = [api_response, page_response]
+        mock_get.side_effect = [subject_response, rexxar_response, mobile_response, page_response]
 
         title = _fetch_media_page_title("https://movie.douban.com/subject/4864908/")
 
         self.assertEqual(title, "影 Shadow 2018")
-        self.assertEqual(mock_get.call_count, 2)
-        self.assertEqual(mock_get.call_args_list[0].args[0], "http://douban-api/movie/detail")
-        self.assertEqual(mock_get.call_args_list[1].args[0], "https://movie.douban.com/subject/4864908/")
+        self.assertEqual(mock_get.call_count, 4)
+        self.assertEqual(mock_get.call_args_list[0].args[0], "https://movie.douban.com/j/subject_abstract?subject_id=4864908")
+        self.assertEqual(mock_get.call_args_list[1].args[0], "https://m.douban.com/rexxar/api/v2/movie/4864908")
+        self.assertEqual(mock_get.call_args_list[2].args[0], "https://m.douban.com/movie/subject/4864908/")
+        self.assertEqual(mock_get.call_args_list[3].args[0], "https://movie.douban.com/subject/4864908/")
 
     def test_metadata_url_pattern_matches_supported_sites_only(self):
         self.assertRegex("https://movie.douban.com/subject/1234567/", METADATA_URL_PATTERN)
