@@ -24,6 +24,7 @@ from app.utils.search_query import (
     extract_douban_subject_id,
     is_supported_metadata_url,
     parse_douban_mobile_title,
+    parse_douban_page_title,
     parse_douban_rexxar_title,
     parse_douban_subject_abstract_title,
     parse_media_page_title,
@@ -174,7 +175,7 @@ def _extract_command_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 def _is_douban_url(raw_query: str) -> bool:
-    return "douban.com/subject/" in str(raw_query or "")
+    return bool(extract_douban_subject_id(raw_query))
 
 
 def _douban_request_headers(referer: str = "") -> dict:
@@ -265,7 +266,7 @@ def _fetch_media_page_title(url: str) -> str:
 
     response = requests.get(url, headers={"User-Agent": init.USER_AGENT}, timeout=10)
     response.raise_for_status()
-    title = parse_media_page_title(response.text)
+    title = parse_douban_page_title(response.text) if _is_douban_url(url) else parse_media_page_title(response.text)
     init.logger.info(f"媒体页面标题解析完成 url={url} title={title}")
     return title
 

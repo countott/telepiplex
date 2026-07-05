@@ -36,7 +36,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertEqual(parse_douban_title(html), "布达佩斯大饭店 The Grand Budapest Hotel")
 
     @patch("app.handlers.search_handler.requests.get")
-    def test_douban_url_uses_builtin_subject_abstract_title(self, mock_get):
+    def test_mobile_douban_url_uses_builtin_subject_abstract_title(self, mock_get):
         old_bot_config = init.bot_config
         init.bot_config = {"search": {}}
         self.addCleanup(setattr, init, "bot_config", old_bot_config)
@@ -46,7 +46,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         rexxar_response.json.return_value = {"title": "影", "original_title": "Shadow", "year": "2018"}
         mock_get.side_effect = [subject_response, rexxar_response]
 
-        title = _fetch_media_page_title("https://movie.douban.com/subject/4864908/")
+        title = _fetch_media_page_title("https://m.douban.com/movie/subject/4864908/")
 
         self.assertEqual(title, "Shadow 2018")
         self.assertEqual(mock_get.call_count, 2)

@@ -10,6 +10,7 @@ from app.utils.search_query import (
     extract_douban_subject_id,
     is_supported_metadata_url,
     parse_douban_mobile_title,
+    parse_douban_page_title,
     parse_douban_rexxar_title,
     parse_douban_subject_abstract_title,
     parse_media_page_title,
@@ -62,6 +63,13 @@ class SearchQueryHelpersTest(unittest.TestCase):
         self.assertEqual(parse_douban_mobile_title("<html><head><title>豆瓣</title></head></html>"), "")
         self.assertEqual(
             parse_douban_mobile_title("<html><head><title>影 Shadow (2018) - 豆瓣</title></head></html>"),
+            "Shadow 2018",
+        )
+
+    def test_parse_douban_page_title_rejects_generic_site_title(self):
+        self.assertEqual(parse_douban_page_title("<html><head><title>豆瓣</title></head></html>"), "")
+        self.assertEqual(
+            parse_douban_page_title("<html><head><title>影 Shadow (2018) (豆瓣)</title></head></html>"),
             "Shadow 2018",
         )
         html = """

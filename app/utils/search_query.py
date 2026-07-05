@@ -206,6 +206,10 @@ def parse_douban_mobile_title(html_text: str) -> str:
     return _useful_douban_title(parse_media_page_title(html_text))
 
 
+def parse_douban_page_title(html_text: str) -> str:
+    return _useful_douban_title(parse_media_page_title(html_text))
+
+
 def is_supported_metadata_url(raw_url: str) -> bool:
     host = urlparse(str(raw_url or "").strip()).netloc.lower()
     return any(
