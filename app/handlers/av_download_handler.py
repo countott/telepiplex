@@ -295,9 +295,12 @@ def download_task(av_result, av_number, save_path, user_id):
         add_task_to_queue(user_id, None, f"❌ [{av_number}] 所有磁力链接都下载失败，请稍后重试！")
         
     except Exception as e:
-        init.logger.warn(f"💀下载遇到错误: {str(e)}")
-        add_task_to_queue(init.bot_config['allowed_user'], f"{init.IMAGE_PATH}/male023.png",
-                            message=f"❌ 下载任务执行出错: {escape_markdown(str(e), version=2)}")
+        init.logger.warn(f"下载任务执行失败: {str(e)}")
+        add_task_to_queue(
+            init.bot_config['allowed_user'],
+            None,
+            message=f"❌ 下载任务执行失败：{escape_markdown(str(e), version=2)}",
+        )
     finally:
         # 清空离线任务
         init.openapi_115.del_offline_task(info_hash, del_source_file=0)
@@ -337,7 +340,7 @@ def batch_download_task(magnet_links, save_path, user_id):
             valid_links.append(link.strip())
     if not valid_links:
         init.logger.warn("❌ 没有发现有效链接，请检查链接格式！")
-        add_task_to_queue(user_id, f"{init.IMAGE_PATH}/male023.png", "❌ 没有发现有效链接，请检查链接格式！")
+        add_task_to_queue(user_id, None, "❌ 没有发现有效链接，请检查链接格式。")
         return
     
     init.logger.info(f"发现 {len(valid_links)} 个有效链接，准备添加离线任务...")
@@ -347,7 +350,7 @@ def batch_download_task(magnet_links, save_path, user_id):
     # # 离线配额不足
     # if left_offline_quota < len(valid_links):
     #     init.logger.warn("❌ 离线配额不足，无法添加离线任务！")
-    #     add_task_to_queue(user_id, f"{init.IMAGE_PATH}/male023.png", "❌ 离线配额不足，无法添加离线任务！")
+    #     add_task_to_queue(user_id, None, "❌ 离线配额不足，无法添加离线任务。")
     #     return
     
     # 分割磁力，避免数量太多超过接口限制
@@ -382,7 +385,7 @@ def batch_download_task(magnet_links, save_path, user_id):
                 break
     message = f"✅ 批量离线任务完成！\n离线成功: {success_count}/{len(valid_links)}\n保存目录: {save_path}"
     
-    add_task_to_queue(user_id, f"{init.IMAGE_PATH}/male022.png", message)
+    add_task_to_queue(user_id, None, message)
     
     # 删除垃圾文件
     init.openapi_115.auto_clean_all(save_path)
@@ -439,5 +442,3 @@ def register_av_download_handlers(application):
     )
     application.add_handler(download_handler)
     init.logger.info("✅ AV Downloader处理器已注册")
-    
-    

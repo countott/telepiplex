@@ -19,7 +19,7 @@ v3.2.1
 
 v3.2.0
 - Added SeHua spider, crawl sehua data you specify and offline download them to 115 every midnight.
-- Updated interaction experience. Command "/dl", "/av" update to async model, offline download to 115 will not block. Both of the max download queue is 5.
+- Updated interaction experience. Download commands use an async model, so offline download tasks do not block the bot. The max download queue is 5.
 - Updated interaction flow. If you want to add a record to retry list, you must to specify the TMDB name. Once the retry succeeds, the bot will never ask for it again.
 - Added “/reload” command to reload configuration
 - Added a log file. By default, it will be saved in "/config/115bot.log" and overwritten when the container restarts.
@@ -217,8 +217,8 @@ Please refer to the comments in `config/config.yaml.example` for configuration d
 - `/start`   - Show help information
 - `/auth`    - 115 authorization setup
 - `/reload`  - reload the configuration
+- `/s`       - Search releases
 - `/rl`      - Retry list
-- `/av`      - AV number download
 - `/sync`    - Sync directory and create symlinks
 - `/sm`      - Subscribe to movies
 - `/q`       - Cancel current session

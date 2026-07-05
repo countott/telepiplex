@@ -18,13 +18,13 @@ async def auth_pkce_115(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(init.TOKEN_FILE)
             init.openapi_115.auth_pkce(usr_id, init.bot_config['115_app_id'])
             if init.openapi_115.access_token and init.openapi_115.refresh_token:
-                await update.message.reply_text("✅ 授权成功！")
+                await update.message.reply_text("✅ 115 授权成功。")
             else:
-                await update.message.reply_text("⚠️ 授权失败，请检查配置文件中的app_id是否正确！")
+                await update.message.reply_text("⚠️ 授权未完成，请检查配置文件中的 115_app_id。")
         else:
-            await update.message.reply_text("⚠️ 115开放平台APPID未配置！")
+            await update.message.reply_text("⚠️ 未配置 115_app_id，无法发起扫码授权。")
     else:
-        await update.message.reply_text(f"⚠️ 对不起，您无权使用115机器人！")
+        await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
     # 结束对话
     return ConversationHandler.END
 
@@ -32,7 +32,7 @@ async def auth_pkce_115(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def check_115_app_id():
     api_key = str(init.bot_config.get('115_app_id'))
     if api_key is None or api_key.strip() == "" or api_key.strip().lower() == "your_115_app_id":
-        init.logger.error("115 Open APPID未配置!")
+        init.logger.error("115_app_id 未配置，无法发起扫码授权")
         return False
     return True
 
@@ -40,9 +40,9 @@ def check_115_app_id():
 async def quit_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 检查是否是回调查询
     if update.callback_query:
-        await update.callback_query.edit_message_text(text="🚪用户退出本次会话")
+        await update.callback_query.edit_message_text(text="已取消本次授权。")
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="🚪用户退出本次会话")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="已取消本次授权。")
     return ConversationHandler.END
 
 

@@ -61,6 +61,13 @@ TOKEN_ERROR_RESPONSE = {
     "data": [],
 }
 
+TOKEN_VALIDATION_ERROR_RESPONSE = {
+    "state": False,
+    "message": "access_token 校验失败",
+    "code": 40140126,
+    "data": [],
+}
+
 
 class Open115StartupTest(unittest.TestCase):
     def setUp(self):
@@ -86,6 +93,20 @@ class Open115StartupTest(unittest.TestCase):
             self.assertFalse(init.initialize_115open())
 
         init.logger.error.assert_called_with("115 OpenAPI客户端初始化失败: OpenAPI测试失败！")
+
+    def test_get_user_info_refreshes_on_access_token_validation_failure(self):
+        api = object.__new__(OpenAPI_115)
+        api.base_url = "https://proapi.115.com"
+        api.refresh_access_token = Mock()
+        api._make_api_request = Mock(
+            side_effect=[
+                TOKEN_VALIDATION_ERROR_RESPONSE,
+                {"code": 0, "data": {"rt_space_info": {}}},
+            ]
+        )
+
+        self.assertEqual(api.get_user_info(), {"rt_space_info": {}})
+        api.refresh_access_token.assert_called_once()
 
     def test_get_token_prefers_config_tokens_over_stale_token_file_in_direct_token_mode(self):
         init.bot_config = {

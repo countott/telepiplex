@@ -19,10 +19,8 @@ from app.handlers.sync_handler import register_sync_handlers
 from app.handlers.video_handler import register_video_handlers
 from app.core.scheduler import start_scheduler_in_thread
 from app.handlers.subscribe_movie_handler import register_subscribe_movie_handlers
-from app.handlers.av_download_handler import register_av_download_handlers
 from app.handlers.offline_task_handler import register_offline_task_handlers
 from app.handlers.aria2_handler import register_aria2_handlers
-from app.handlers.crawl_handler import register_crawl_handlers
 from app.handlers.rss_handler import register_rss_handlers
 
 
@@ -42,33 +40,19 @@ def get_help_info():
 <code>/reload</code> - <i>重载配置</i>\n
 <code>/s</code> - 搜索片源\n
 <code>/rl</code> - 查看重试列表\n
-<code>/av</code> - <i>下载番号资源 (自动匹配磁力)</i>\n
-<code>/csh</code> - <i>手动爬取涩花数据</i>\n
-<code>/cjav</code> - <i>手动爬取javbee数据</i>\n
 <code>/rss</code> - <i>rss订阅</i>\n
 <code>/sync</code> - 同步目录并创建软链\n
 <code>/q</code> - 取消当前会话\n\n
 <b>✨ 功能说明</b>\n
 <u>电影下载：</u>
-• 直接输入下载链接，支持磁力/ed2k/迅雷
-• 输入 <code>"/s 片名"</code> 通过Prowlarr搜索片源
-• 离线超时可选择添加到重试列表
+• 直接发送磁力、ed2k、迅雷或 HTTP 下载链接
+• 输入 <code>"/s 片名"</code> 或 <code>"/s 豆瓣/IMDb/TVDB链接"</code> 搜索片源
+• 发送影视页面截图，可先识别片名，再确认搜索
+• 离线超时后可选择写入重试列表
 • 根据配置自动生成 <code>.strm</code> 软链文件\n
 <u>重试列表：</u>
 • 输入 <code>"/rl"</code>
 • 查看当前重试列表，可根据需要选择是否清空\n
-<u>AV下载：</u>
-• 输入 <code>"/av 番号"</code>
-• 支持批量下载，一行一个链接
-• 支持接收txt文件下载，文件内容每行一个链接
-• 自动检索磁力并离线,默认不生成软链（建议使用削刮工具生成软链）\n
-<u>手动爬取涩花：</u>
-• 输入 <code>"/csh"</code>
-• 基于版块配置，爬取涩花昨日数据！\n
-<u>手动爬取javbee：</u>
-• 输入 <code>"/cjav yyyymmdd"</code>
-• 日期格式为 <code>yyyymmdd</code>，例如：20250808
-• 留空则默认爬取昨日数据\n
 <u>RSS订阅：</u>
 • 输入 <code>"/rss"</code>
 • 将rsshub地址配置到config.yaml中
@@ -87,9 +71,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
 async def reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     init.load_yaml_config()
-    init.logger.info("Reload configuration success:")
+    init.logger.info("配置已重新加载:")
     init.logger.info(json.dumps(init.bot_config))
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="🔁重载配置完成！", parse_mode="html")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ 配置已重新加载。", parse_mode="html")
 
 def start_async_loop():
     """启动异步事件循环的线程"""
@@ -114,7 +98,7 @@ def send_start_message():
     line1, line2, line3, line4 = init.openapi_115.welcome_message()
     if not line1:
         return
-    line5 = escape_markdown(f"Telegram-115Bot {version} 启动成功！", version=2)
+    line5 = escape_markdown(f"✅ Telegram-115Bot {version} 已启动", version=2)
     if line1 and line2 and line3 and line4:
         formatted_message = f"""
 {line1}
@@ -125,10 +109,10 @@ def send_start_message():
 {line5}
 
 发送 `/start` 查看操作说明"""
-        
+
         add_task_to_queue(
-            init.bot_config['allowed_user'], 
-            f"{init.IMAGE_PATH}/neuter010.png", 
+            init.bot_config['allowed_user'],
+            None,
             message=formatted_message
         )
 
@@ -148,9 +132,6 @@ def get_bot_menu():
         BotCommand("reload", "重载配置"),
         BotCommand("s", "搜索片源"),
         BotCommand("rl", "查看重试列表"),
-        BotCommand("av", "指定番号下载"),
-        BotCommand("csh", "手动爬取涩花数据"),
-        BotCommand("cjav", "手动爬取javbee数据"),
         BotCommand("rss", "RSS订阅"),
         BotCommand("sync", "同步指定目录，并创建软链"),
         BotCommand("q", "退出当前会话")]
@@ -205,9 +186,13 @@ if __name__ == '__main__':
     if not init.initialize_115open():
         init.logger.error("115 OpenAPI客户端初始化失败，程序无法继续运行！")
         add_task_to_queue(
-            init.bot_config['allowed_user'], 
-            f"{init.IMAGE_PATH}/male023.png", 
-            message="❌ 115 OpenAPI客户端初始化失败，程序无法继续运行！\n请检查Token或115 AppID设置是否正确！"
+            init.bot_config['allowed_user'],
+            None,
+            message=(
+                "❌ 115 OpenAPI 初始化失败，程序已停止。\n"
+                "请检查 `/config/config.yaml` 中的 `115_app_id` 或 `access_token`/`refresh_token`。\n"
+                "直连 Token 模式下，`115_app_id` 可以留空，但两个 Token 必须有效。"
+            )
         )
         # 等待消息队列处理完毕再退出
         while not message_queue.message_queue.empty():
@@ -222,16 +207,12 @@ if __name__ == '__main__':
     register_download_handlers(application)
     # 注册搜索
     register_search_handlers(application)
-    # 注册电影订阅 
+    # 注册电影订阅
     # register_subscribe_movie_handlers(application)
-    # 注册AV下载
-    register_av_download_handlers(application)
     # 注册离线任务
     register_offline_task_handlers(application)
     # 注册Aria2
     register_aria2_handlers(application)
-    # 手动爬虫
-    register_crawl_handlers(application)
     # 注册RSS订阅
     register_rss_handlers(application)
     # 注册同步

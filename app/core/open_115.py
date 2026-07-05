@@ -40,30 +40,30 @@ def handle_token_expiry(func):
                 
                 # 检查响应是否是字典且包含错误码
                 if isinstance(response, dict) and 'code' in response:
-                    if response['code'] == 40140125:
+                    if response['code'] in [40140125, 40140126]:
                         # token需要刷新
                         if attempt < max_retries - 1:  # 还有重试机会
-                            init.logger.info("Token需要刷新，正在重试...")
+                            init.logger.info("Access token 已失效，正在刷新后重试")
                             self.refresh_access_token()
                             continue
                         else:
-                            init.logger.warn("Token刷新后仍然失败")
+                            init.logger.warn("Access token 刷新后请求仍失败")
                             return response
                     elif response['code'] in [40140116, 40140119]:
                         # token已过期，需要重新授权
-                        init.logger.warn("Access token 已过期，请重新授权！")
+                        init.logger.warn("Access token 已过期，请重新授权")
                         return response
                     elif response['code'] == 40140118:
-                        init.logger.warn("开发者认证已过期，请到115开放平台重新授权！")
+                        init.logger.warn("开发者认证已过期，请到 115 开放平台重新授权")
                         return response
                     elif response['code'] == 40140110:
-                        init.logger.warn("应用已过期，请到115开放平台重新授权！")
+                        init.logger.warn("应用已过期，请到 115 开放平台重新授权")
                         return response
                     elif response['code'] == 40140109:
-                        init.logger.warn("应用被停用，请到115开放平台查询详细信息！")
+                        init.logger.warn("应用已被停用，请到 115 开放平台查询详细信息")
                         return response
                     elif response['code'] == 40140108:
-                        init.logger.warn("应用审核未通过，请稍后再试！")
+                        init.logger.warn("应用审核未通过，请稍后再试")
                         return response
                 
                 # 成功或其他情况，直接返回
@@ -241,7 +241,11 @@ class OpenAPI_115:
             # 如果内存无token，且文件也无token（或文件不存在）
             if not file_refresh_token:
                 init.logger.warn("请先进行授权，获取refresh_token！")
-                add_task_to_queue(init.bot_config['allowed_user'], "/app/images/male023.png", "请先进行授权，获取refresh_token！")
+                add_task_to_queue(
+                    init.bot_config['allowed_user'],
+                    None,
+                    "⚠️ 未找到可用的 `refresh_token`。\n请使用 `/auth` 完成 115 授权，或在 `/config/config.yaml` 中填写有效 Token。",
+                )
                 return
             # 如果内存无token但文件有
             self.access_token = file_access_token
@@ -858,7 +862,7 @@ class OpenAPI_115:
             return response['data']
         else:
             init.logger.warn(f"获取用户信息失败: {response}")
-            if response['code'] == 40140125:
+            if response['code'] in [40140125, 40140126]:
                 return response
             return None
         
@@ -1004,7 +1008,7 @@ class OpenAPI_115:
             return "", "", "", ""
 
         quota_info = self.get_quota_info()
-        user_name = user_info.get('user_name')
+        user_name = user_info.get('user_name') or '未知用户'
         space_info = user_info.get('rt_space_info', {})
         total_space = space_info.get('all_total', {}).get('size_format', '未知')
         used_space = space_info.get('all_use', {}).get('size_format', '未知')
@@ -1014,9 +1018,9 @@ class OpenAPI_115:
         if "长期" in vip_info.get('level_name', ''):
             self.lifetime_vip = True
         expire_date = datetime.fromtimestamp(vip_info.get('expire', 0), tz=timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-        line1 = escape_markdown(f"👋 [{user_name}]您好， 欢迎使用Telegram-115Bot！", version=2)
-        line2 = escape_markdown(f"会员等级：{vip_info.get('level_name', '')} \n到期时间：{expire_date}", version=2)
-        line3 = escape_markdown(f"总空间：{total_space} \n已用：{used_space} \n剩余：{remaining_space}", version=2)
+        line1 = escape_markdown(f"👋 115 账号：{user_name}", version=2)
+        line2 = escape_markdown(f"会员等级：{vip_info.get('level_name', '未知')}\n到期时间：{expire_date}", version=2)
+        line3 = escape_markdown(f"空间总量：{total_space}\n已用空间：{used_space}\n剩余空间：{remaining_space}", version=2)
         if isinstance(quota_info, dict) and 'used' in quota_info and 'count' in quota_info:
             line4 = escape_markdown(f"离线配额：{quota_info['used']}/{quota_info['count']}", version=2)
         else:

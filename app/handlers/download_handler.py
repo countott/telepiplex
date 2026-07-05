@@ -41,7 +41,7 @@ class DownloadUrlType(Enum):
 async def start_d_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     usr_id = update.message.from_user.id
     if not init.check_user(usr_id):
-        await update.message.reply_text("⚠️ 对不起，您无权使用115机器人！")
+        await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
         return ConversationHandler.END
     magnet_link = update.message.text.strip()
     context.user_data["link"] = magnet_link  # 将用户参数存储起来
@@ -49,7 +49,7 @@ async def start_d_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dl_url_type = is_valid_link(magnet_link)
     # 检查链接格式是否正确
     if dl_url_type == DownloadUrlType.UNKNOWN:
-        await update.message.reply_text("⚠️ 下载链接格式错误，请修改后重试！")
+        await update.message.reply_text("⚠️ 下载链接格式不受支持，请检查后重试。")
         return ConversationHandler.END
     # 保存下载类型到context.user_data
     context.user_data["dl_url_type"] = dl_url_type
@@ -64,7 +64,7 @@ async def start_d_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton(f"📁 上次保存: {last_save_path}", callback_data="last_save_path")])
     keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="❓请选择要保存到哪个分类：",
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="📁 请选择保存分类：",
                                    reply_markup=reply_markup)
     return SELECT_MAIN_CATEGORY
 
@@ -82,13 +82,13 @@ async def select_main_category(update: Update, context: ContextTypes.DEFAULT_TYP
             link = context.user_data["link"]
             user_id = update.effective_user.id
             
-            await query.edit_message_text("✅ 已为您添加到下载队列！\n请稍后~")
+            await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到 115 离线下载，请稍后查看结果。")
             
             # 使用全局线程池异步执行下载任务
             download_executor.submit(download_task, link, last_save_path, user_id)
             return ConversationHandler.END
         else:
-            await query.edit_message_text("❌ 未找到最后一次保存路径，请重新选择分类")
+            await query.edit_message_text("⚠️ 未找到上次保存路径，请重新选择分类。")
             return ConversationHandler.END
     else:
         context.user_data["selected_main_category"] = query_data
@@ -103,7 +103,7 @@ async def select_main_category(update: Update, context: ContextTypes.DEFAULT_TYP
         keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.edit_message_text("❓请选择分类保存目录：", reply_markup=reply_markup)
+        await query.edit_message_text("📁 请选择保存目录：", reply_markup=reply_markup)
 
         return SELECT_SUB_CATEGORY
 
@@ -125,7 +125,7 @@ async def select_sub_category(update: Update, context: ContextTypes.DEFAULT_TYPE
     selected_main_category = context.user_data["selected_main_category"]
     user_id = update.effective_user.id
     
-    await query.edit_message_text("✅ 已为您添加到下载队列！\n请稍后~")
+    await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到 115 离线下载，请稍后查看结果。")
     
     # 使用全局线程池异步执行下载任务
     download_executor.submit(download_task, link, selected_path, user_id)
@@ -152,16 +152,16 @@ async def handle_retry_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 task_data["selected_path"]
             )
             
-            await query.edit_message_text("✅ 已将失败任务添加到重试列表，系统将自动重试！")
+            await query.edit_message_text("✅ 已加入重试列表，系统会按计划自动重试。")
             
             # 清理已使用的任务数据
             del init.pending_tasks[task_id]
         else:
-            await query.edit_message_text("❌ 任务数据已过期")
+            await query.edit_message_text("⚠️ 任务数据已过期，请重新发起下载。")
         
     except Exception as e:
         init.logger.error(f"处理重试回调失败: {e}")
-        await query.edit_message_text("❌ 添加到重试列表失败，请稍后再试")
+        await query.edit_message_text("❌ 添加到重试列表失败，请稍后再试。")
 
 
 async def handle_download_failure(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -173,15 +173,15 @@ async def handle_download_failure(update: Update, context: ContextTypes.DEFAULT_
     
     if choice == "cancel_download":
         # 取消下载
-        await query.edit_message_text("✅ 已取消，可尝试更换磁力重试！")
+        await query.edit_message_text("已取消本次下载，可更换资源后重试。")
 
 
 async def quit_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 检查是否是回调查询
     if update.callback_query:
-        await update.callback_query.edit_message_text(text="🚪用户退出本次会话")
+        await update.callback_query.edit_message_text(text="已取消本次操作。")
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="🚪用户退出本次会话")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="已取消本次操作。")
     return ConversationHandler.END
 
 
@@ -312,7 +312,7 @@ def download_task(link, selected_path, user_id):
     try:
         offline_success = init.openapi_115.offline_download_specify_path(link, selected_path)
         if not offline_success:
-            add_task_to_queue(user_id, f"{init.IMAGE_PATH}/male023.png", message=f"❌ 离线遇到错误！")
+            add_task_to_queue(user_id, None, message="❌ 115 离线任务创建失败，请检查链接或稍后重试。")
             return
             
         # 检查下载状态
@@ -361,9 +361,9 @@ def download_task(link, selected_path, user_id):
             reply_markup = InlineKeyboardMarkup(keyboard)
             movie_name = get_movie_tmdb_name_with_ai(resource_name)  # 预调用AI接口，提前准备
             if movie_name:
-                message = f"✅ \\[`{resource_name}`\\]离线下载完成\\!\n\n根据AI识别，推荐的TMDB名称是：`{movie_name}`\n\n请确认！"
+                message = f"✅ \\[`{resource_name}`\\] 离线下载完成\\!\n\nAI 推荐的 TMDB 名称：`{movie_name}`\n\n请确认是否使用该名称。"
             else:
-                message = f"✅ \\[`{resource_name}`\\]离线下载完成\\!\n\n如需削刮，请为资源指定TMDB的标准名称！"
+                message = f"✅ \\[`{resource_name}`\\] 离线下载完成\\!\n\n如需入库识别，请指定 TMDB 标准名称。"
             
             add_task_to_queue(user_id, None, message=message, keyboard=reply_markup)
             
@@ -394,14 +394,17 @@ def download_task(link, selected_path, user_id):
                 [InlineKeyboardButton("取消", callback_data="cancel_download")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            message = f"`{link}`\n\n😭 离线下载超时，请选择后续操作："
+            message = f"`{link}`\n\n⚠️ 115 离线下载超时，请选择后续操作。"
             
             add_task_to_queue(user_id, None, message=message, keyboard=reply_markup)
             
     except Exception as e:
-        init.logger.error(f"💀下载遇到错误: {str(e)}")
-        add_task_to_queue(user_id, f"{init.IMAGE_PATH}/male023.png",
-                            message=f"❌ 下载任务执行出错: {escape_markdown(str(e), version=2)}")
+        init.logger.error(f"下载任务执行失败: {str(e)}")
+        add_task_to_queue(
+            user_id,
+            None,
+            message=f"❌ 下载任务执行失败：{escape_markdown(str(e), version=2)}",
+        )
     finally:
         # 清除云端任务，避免重复下载
         init.openapi_115.del_offline_task(info_hash, del_source_file=0)
@@ -423,16 +426,16 @@ async def handle_manual_rename_callback(update: Update, context: ContextTypes.DE
             # 将数据保存到用户上下文中（用于后续的重命名操作）
             context.user_data["rename_data"] = task_data
 
-            await query.edit_message_text(f"`{task_data['resource_name']}`\n\n📝 请直接回复TMDB标准名称进行重命名：\n\\(点击资源名称自动复制\\)", parse_mode='MarkdownV2')
+            await query.edit_message_text(f"`{task_data['resource_name']}`\n\n📝 请直接回复 TMDB 标准名称。\n\\(点击资源名称可复制\\)", parse_mode='MarkdownV2')
 
             # 清理已使用的任务数据
             del init.pending_tasks[task_id]
         else:
-            await query.edit_message_text("❌ 任务数据已过期，请重新下载")
+            await query.edit_message_text("⚠️ 任务数据已过期，请重新下载。")
         
     except Exception as e:
         init.logger.error(f"处理手动重命名回调失败: {e}")
-        await query.edit_message_text("❌ 处理失败，请稍后再试")
+        await query.edit_message_text("❌ 处理失败，请稍后再试。")
         
         
 async def handle_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -456,14 +459,14 @@ async def handle_cancel_callback(update: Update, context: ContextTypes.DEFAULT_T
             if "rename_data" in context.user_data:
                 del context.user_data["rename_data"]
             
-            await query.edit_message_text(f"✅ 已取消对资源 `{resource_name}` 的重命名操作！", parse_mode='MarkdownV2')
+            await query.edit_message_text(f"已取消资源 `{resource_name}` 的重命名操作。", parse_mode='MarkdownV2')
             init.logger.info(f"用户取消了对资源 {resource_name} 的重命名操作")
         else:
-            await query.edit_message_text("✅ 重命名操作已取消！")
+            await query.edit_message_text("已取消重命名操作。")
             
     except Exception as e:
         init.logger.error(f"处理取消重命名操作时出错: {str(e)}")
-        await query.edit_message_text("✅ 重命名操作已取消！")
+        await query.edit_message_text("已取消重命名操作。")
 
 
 async def handle_manual_rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -491,7 +494,7 @@ async def handle_manual_rename(update: Update, context: ContextTypes.DEFAULT_TYP
                 download_url, 
                 selected_path
             )
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ 已将失败任务添加到重试列表，系统将自动重试！")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ 已加入重试列表，系统会按计划自动重试。")
             context.user_data.pop("rename_data", None)
             return
 
@@ -519,16 +522,16 @@ async def handle_manual_rename(update: Update, context: ContextTypes.DEFAULT_TYP
             update_subscribe(new_resource_name, cover_url, download_url)
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text=f"💡订阅影片`{new_resource_name}`已手动下载成功\\！",
+                text=f"✅ 订阅影片 `{new_resource_name}` 已下载完成。",
                 parse_mode='MarkdownV2'
             )
         
         # 通知Emby扫库
         is_noticed = notice_emby_scan_library(new_final_path)
         if is_noticed:
-            message = f"✅ 重命名成功：`{new_resource_name}`\n\n**👻 已通知Emby扫库，请稍后确认！**"
+            message = f"✅ 重命名成功：`{new_resource_name}`\n\n**已通知 Emby 扫库，请稍后确认。**"
         else:
-            message = f"✅ 重命名成功：`{new_resource_name}`\n\n**⚠️ 未能通知Emby，请先配置'EMBY API KEY'！**"
+            message = f"✅ 重命名成功：`{new_resource_name}`\n\n**⚠️ 未能通知 Emby，请检查 EMBY API KEY 配置。**"
         if cover_url:
             try:
                 init.logger.info(f"cover_url: {cover_url}")
@@ -565,7 +568,7 @@ async def handle_manual_rename(update: Update, context: ContextTypes.DEFAULT_TYP
     except RenameFailedError as e:
         init.logger.warn(f"捕获到重命名失败异常: {e}")
         resource_hint = new_resource_name or old_resource_name
-        message = f"⚠️ 资源已存在或已入库。\n\n请直接在EMBY中搜索：{resource_hint}"
+        message = f"⚠️ 资源已存在或已入库。\n\n请直接在 Emby 中搜索：{resource_hint}"
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=message
@@ -577,7 +580,7 @@ async def handle_manual_rename(update: Update, context: ContextTypes.DEFAULT_TYP
         init.logger.error(f"重命名处理失败: {e}")
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=f"❌ 重命名失败: {str(e)}"
+            text=f"❌ 重命名失败：{str(e)}"
         )
         # 出错时也清除数据，结束当前操作
         context.user_data.pop("rename_data", None)

@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
+import os
+import tempfile
 import time
 import uuid
 from warnings import filterwarnings
 
 import requests
-from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, ConversationHandler
+from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 from telegram.warnings import PTBUserWarning
 
 import init
@@ -19,11 +20,17 @@ from app.adapters.prowlarr import (
     search_prowlarr,
 )
 from app.handlers.download_handler import download_executor, download_task
+from app.utils.local_ocr import LocalOCRError, extract_text_from_image
 from app.utils.release_score import rank_releases
+from app.utils.search_query import (
+    extract_search_query_from_ocr_text,
+    is_supported_metadata_url,
+    parse_media_page_title,
+)
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
-SEARCH_SELECT_RESULT, SEARCH_SELECT_MAIN_CATEGORY, SEARCH_SELECT_SUB_CATEGORY = range(30, 33)
+SEARCH_WAIT_SCREENSHOT, SEARCH_CONFIRM_OCR_QUERY, SEARCH_SELECT_RESULT, SEARCH_SELECT_MAIN_CATEGORY, SEARCH_SELECT_SUB_CATEGORY = range(30, 35)
 SEARCH_TASK_TTL_SECONDS = 30 * 60
 
 pending_search_tasks = {}
@@ -51,12 +58,7 @@ def format_size(size) -> str:
 
 
 def parse_douban_title(html: str) -> str:
-    soup = BeautifulSoup(html or "", "html.parser")
-    title = soup.title.string if soup.title and soup.title.string else ""
-    title = " ".join(title.split())
-    if title.endswith("(豆瓣)"):
-        title = title[:-4].strip()
-    return title
+    return parse_media_page_title(html)
 
 
 def get_pending_search_task(task_id: str):
@@ -165,20 +167,20 @@ def _extract_command_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     return text.split(maxsplit=1)[1].strip() if " " in text else ""
 
 
-def _fetch_douban_title(url: str) -> str:
+def _fetch_media_page_title(url: str) -> str:
     response = requests.get(url, headers={"User-Agent": init.USER_AGENT}, timeout=10)
     response.raise_for_status()
-    return parse_douban_title(response.text)
+    return parse_media_page_title(response.text)
 
 
 async def _resolve_query(raw_query: str) -> str | None:
-    if "douban.com/subject/" not in raw_query:
+    if not is_supported_metadata_url(raw_query):
         return raw_query
 
     try:
-        return await asyncio.to_thread(_fetch_douban_title, raw_query)
+        return await asyncio.to_thread(_fetch_media_page_title, raw_query)
     except Exception as e:
-        init.logger.warn(f"豆瓣标题解析失败: {e}")
+        init.logger.warn(f"媒体页面标题解析失败: {e}")
         return None
 
 
@@ -186,40 +188,33 @@ def _owner_matches(task: dict, user_id: int) -> bool:
     return task.get("user_id") == user_id
 
 
-async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if not init.check_user(user_id):
-        await update.message.reply_text("⚠️ 对不起，您无权使用115机器人！")
-        return ConversationHandler.END
+async def _reply_or_send(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, **kwargs):
+    if update.callback_query:
+        return await update.callback_query.edit_message_text(text=text, **kwargs)
+    if update.message:
+        return await update.message.reply_text(text, **kwargs)
+    return await context.bot.send_message(chat_id=update.effective_chat.id, text=text, **kwargs)
 
-    raw_query = _extract_command_query(update, context)
-    if not raw_query:
-        await update.message.reply_text("请使用 /s 片名，例如：/s The Grand Budapest Hotel 2014")
-        return ConversationHandler.END
 
-    query = await _resolve_query(raw_query)
-    if not query:
-        await update.message.reply_text("豆瓣链接解析失败，请手动输入片名搜索。")
-        return ConversationHandler.END
-
-    await update.message.reply_text(f"🔍 正在搜索：{query}")
+async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
+    await _reply_or_send(update, context, f"🔍 正在搜索片源：{query}")
 
     try:
         items = await asyncio.to_thread(search_prowlarr, query, "movie")
         results = rank_releases(items, _get_result_limit())
     except ProwlarrConfigError as e:
-        await update.message.reply_text(f"⚠️ {e}")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⚠️ {e}")
         return ConversationHandler.END
     except ProwlarrRequestError as e:
-        await update.message.reply_text(f"❌ {e}")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ {e}")
         return ConversationHandler.END
     except Exception as e:
         init.logger.error(f"搜索处理失败: {e}")
-        await update.message.reply_text(f"❌ 搜索处理失败: {e}")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ 搜索失败：{e}")
         return ConversationHandler.END
 
     if not results:
-        await update.message.reply_text("没有找到可用结果。")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ 未找到可用片源，请调整关键词后重试。")
         return ConversationHandler.END
 
     task_id = uuid.uuid4().hex[:10]
@@ -227,15 +222,99 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "created_at": time.time(),
         "query": query,
         "results": results,
-        "user_id": user_id,
+        "user_id": update.effective_user.id,
     }
 
-    await update.message.reply_text(
-        build_results_text(query, results),
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=build_results_text(query, results),
         reply_markup=_build_results_keyboard(task_id, results),
         disable_web_page_preview=True,
     )
     return SEARCH_SELECT_RESULT
+
+
+async def _download_photo_to_temp(update: Update) -> str:
+    photo = update.message.photo[-1]
+    telegram_file = await photo.get_file()
+    with tempfile.NamedTemporaryFile(prefix="search_ocr_", suffix=".jpg", delete=False) as tmp_file:
+        image_path = tmp_file.name
+    await telegram_file.download_to_drive(image_path)
+    return image_path
+
+
+async def search_screenshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not init.check_user(user_id):
+        await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
+        return ConversationHandler.END
+
+    await update.message.reply_text("🔍 正在识别截图内容，请稍候。")
+    image_path = ""
+    try:
+        image_path = await _download_photo_to_temp(update)
+        ocr_text = await asyncio.to_thread(extract_text_from_image, image_path)
+    except LocalOCRError as e:
+        await update.message.reply_text(f"❌ {e}")
+        return ConversationHandler.END
+    except Exception as e:
+        init.logger.error(f"截图处理失败: {e}")
+        await update.message.reply_text(f"❌ 截图处理失败：{e}")
+        return ConversationHandler.END
+    finally:
+        if image_path and os.path.exists(image_path):
+            os.remove(image_path)
+
+    query = extract_search_query_from_ocr_text(ocr_text)
+    if not query:
+        await update.message.reply_text("⚠️ 未能从截图中识别到片名。请裁剪标题区域后重试，或使用 /s 片名。")
+        return ConversationHandler.END
+
+    context.user_data["search_ocr_query"] = query
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(f"搜索：{query}", callback_data="search_ocr:confirm")],
+            [InlineKeyboardButton("取消", callback_data="search_ocr:cancel")],
+        ]
+    )
+    await update.message.reply_text("已识别到候选搜索词，请确认是否搜索：", reply_markup=keyboard)
+    return SEARCH_CONFIRM_OCR_QUERY
+
+
+async def confirm_ocr_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "search_ocr:cancel":
+        context.user_data.pop("search_ocr_query", None)
+        await query.edit_message_text("已取消本次搜索。")
+        return ConversationHandler.END
+
+    search_query = context.user_data.pop("search_ocr_query", "")
+    if not search_query:
+        await query.edit_message_text("⚠️ 截图识别结果已失效，请重新发送截图。")
+        return ConversationHandler.END
+
+    return await _send_search_results(update, context, search_query)
+
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not init.check_user(user_id):
+        await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
+        return ConversationHandler.END
+
+    raw_query = _extract_command_query(update, context)
+    if not raw_query:
+        await update.message.reply_text("请输入搜索内容：/s 片名，或 /s 豆瓣/IMDb/TVDB 链接；也可以直接发送影视页面截图。")
+        return SEARCH_WAIT_SCREENSHOT
+
+    query = await _resolve_query(raw_query)
+    if not query:
+        await update.message.reply_text("⚠️ 页面链接解析失败，请改用片名搜索。")
+        return ConversationHandler.END
+
+    return await _send_search_results(update, context, query)
 
 
 async def select_search_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -244,30 +323,30 @@ async def select_search_result(update: Update, context: ContextTypes.DEFAULT_TYP
 
     data = query.data
     if data.startswith("search_cancel:"):
-        await query.edit_message_text("🚪用户退出本次会话")
+        await query.edit_message_text("已取消本次搜索。")
         return ConversationHandler.END
 
     _, task_id, index_text = data.split(":", 2)
     task = get_pending_search_task(task_id)
     if not task or not _owner_matches(task, update.effective_user.id):
-        await query.edit_message_text("❌ 搜索任务已过期，请重新搜索。")
+        await query.edit_message_text("⚠️ 搜索任务已过期，请重新发起搜索。")
         return ConversationHandler.END
 
     try:
         selected_item = task["results"][int(index_text)]
     except (IndexError, ValueError):
-        await query.edit_message_text("❌ 候选资源不可用，请重新搜索。")
+        await query.edit_message_text("⚠️ 候选资源不可用，请重新搜索。")
         return ConversationHandler.END
 
     link = selected_item.get("magnet_url") or selected_item.get("download_url")
     if not link:
-        await query.edit_message_text("❌ 该候选没有可用 magnet/downloadUrl，请选择其他结果。")
+        await query.edit_message_text("⚠️ 该候选缺少可用下载链接，请选择其他结果。")
         return ConversationHandler.END
 
     context.user_data["search_task_id"] = task_id
     context.user_data["search_selected_item"] = selected_item
 
-    await query.edit_message_text("❓请选择要保存到哪个分类：", reply_markup=_build_main_category_keyboard(task_id))
+    await query.edit_message_text("📁 请选择保存分类：", reply_markup=_build_main_category_keyboard(task_id))
     return SEARCH_SELECT_MAIN_CATEGORY
 
 
@@ -277,19 +356,19 @@ async def select_search_main_category(update: Update, context: ContextTypes.DEFA
     data = query.data
 
     if data.startswith("search_cancel:"):
-        await query.edit_message_text("🚪用户退出本次会话")
+        await query.edit_message_text("已取消本次搜索。")
         return ConversationHandler.END
 
     if data.startswith("search_last:"):
         task_id = data.split(":", 1)[1]
         task = get_pending_search_task(task_id)
         if not task or not _owner_matches(task, update.effective_user.id):
-            await query.edit_message_text("❌ 搜索任务已过期，请重新搜索。")
+            await query.edit_message_text("⚠️ 搜索任务已过期，请重新发起搜索。")
             return ConversationHandler.END
 
         selected_path = init.bot_session.get("movie_last_save") if hasattr(init, "bot_session") else None
         if not selected_path or not _get_selected_link(context):
-            await query.edit_message_text("❌ 未找到最后一次保存路径或候选链接，请重新选择。")
+            await query.edit_message_text("⚠️ 未找到上次保存路径或候选链接，请重新选择。")
             return ConversationHandler.END
 
         try:
@@ -298,7 +377,7 @@ async def select_search_main_category(update: Update, context: ContextTypes.DEFA
             await query.edit_message_text(f"❌ {e}")
             return ConversationHandler.END
 
-        await query.edit_message_text("✅ 已为您添加到下载队列！\n请稍后~")
+        await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到 115 离线下载，请稍后查看结果。")
         download_executor.submit(download_task, link, selected_path, update.effective_user.id)
         pending_search_tasks.pop(task_id, None)
         return ConversationHandler.END
@@ -306,11 +385,11 @@ async def select_search_main_category(update: Update, context: ContextTypes.DEFA
     _, task_id, category_name = data.split(":", 2)
     task = get_pending_search_task(task_id)
     if not task or not _owner_matches(task, update.effective_user.id):
-        await query.edit_message_text("❌ 搜索任务已过期，请重新搜索。")
+        await query.edit_message_text("⚠️ 搜索任务已过期，请重新发起搜索。")
         return ConversationHandler.END
 
     context.user_data["search_selected_main_category"] = category_name
-    await query.edit_message_text("❓请选择分类保存目录：", reply_markup=_build_sub_category_keyboard(task_id, category_name))
+    await query.edit_message_text("📁 请选择保存目录：", reply_markup=_build_sub_category_keyboard(task_id, category_name))
     return SEARCH_SELECT_SUB_CATEGORY
 
 
@@ -320,13 +399,13 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
     data = query.data
 
     if data.startswith("search_cancel:"):
-        await query.edit_message_text("🚪用户退出本次会话")
+        await query.edit_message_text("已取消本次搜索。")
         return ConversationHandler.END
 
     _, task_id, index_text = data.split(":", 2)
     task = get_pending_search_task(task_id)
     if not task or not _owner_matches(task, update.effective_user.id):
-        await query.edit_message_text("❌ 搜索任务已过期，请重新搜索。")
+        await query.edit_message_text("⚠️ 搜索任务已过期，请重新发起搜索。")
         return ConversationHandler.END
 
     category_name = context.user_data.get("search_selected_main_category")
@@ -339,7 +418,7 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
     try:
         selected_path = sub_categories[int(index_text)]["path"]
     except (IndexError, KeyError, TypeError, ValueError):
-        await query.edit_message_text("❌ 保存目录不可用，请重新搜索。")
+        await query.edit_message_text("⚠️ 保存目录不可用，请重新搜索。")
         return ConversationHandler.END
 
     if not hasattr(init, "bot_session"):
@@ -347,7 +426,7 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
     init.bot_session["movie_last_save"] = selected_path
 
     if not _get_selected_link(context):
-        await query.edit_message_text("❌ 候选链接已失效，请重新搜索。")
+        await query.edit_message_text("⚠️ 候选链接已失效，请重新搜索。")
         return ConversationHandler.END
 
     try:
@@ -356,7 +435,7 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
         await query.edit_message_text(f"❌ {e}")
         return ConversationHandler.END
 
-    await query.edit_message_text("✅ 已为您添加到下载队列！\n请稍后~")
+    await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到 115 离线下载，请稍后查看结果。")
     download_executor.submit(download_task, link, selected_path, update.effective_user.id)
     pending_search_tasks.pop(task_id, None)
     return ConversationHandler.END
@@ -364,16 +443,18 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
 
 async def quit_search_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
-        await update.callback_query.edit_message_text(text="🚪用户退出本次会话")
+        await update.callback_query.edit_message_text(text="已取消本次搜索。")
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="🚪用户退出本次会话")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="已取消本次搜索。")
     return ConversationHandler.END
 
 
 def register_search_handlers(application):
     search_handler = ConversationHandler(
-        entry_points=[CommandHandler("s", search_command)],
+        entry_points=[CommandHandler("s", search_command), MessageHandler(filters.PHOTO, search_screenshot_command)],
         states={
+            SEARCH_WAIT_SCREENSHOT: [MessageHandler(filters.PHOTO, search_screenshot_command)],
+            SEARCH_CONFIRM_OCR_QUERY: [CallbackQueryHandler(confirm_ocr_query, pattern=r"^search_ocr:(confirm|cancel)$")],
             SEARCH_SELECT_RESULT: [CallbackQueryHandler(select_search_result, pattern=r"^search_(pick|cancel):")],
             SEARCH_SELECT_MAIN_CATEGORY: [
                 CallbackQueryHandler(select_search_main_category, pattern=r"^search_(main|last|cancel):")

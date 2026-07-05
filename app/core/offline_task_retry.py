@@ -95,7 +95,7 @@ def sehua_offline():
                         offline2115(batch_tasks, task_count, save_path)
             else:
                 init.logger.warn("涩花离线任务未执行，可能是115离线配额不足，请检查115账号状态！")
-                add_task_to_queue(init.bot_config['allowed_user'], f"{init.IMAGE_PATH}/male023.png", "涩花离线任务未执行，可能是115离线配额不足，请检查115账号状态！")
+                add_task_to_queue(init.bot_config['allowed_user'], None, "涩花离线任务未执行，可能是 115 离线配额不足，请检查账号状态。")
                 return
 
     # 等待离线完成
@@ -177,10 +177,8 @@ def sehua_offline():
     # 只有当有任务时才发送消息
     if messages: 
         final_message = "**涩花离线任务完成情况:**\n" + "\n".join(messages)
-        if domestic_original_success + asia_censored_success + asia_uncensored_success + hd_subtitle_success > 0:
-            add_task_to_queue(init.bot_config['allowed_user'], f"{init.IMAGE_PATH}/sehua_daily_update.png", final_message)
-        else:
-            add_task_to_queue(init.bot_config['allowed_user'], f"{init.IMAGE_PATH}/teacher_pto.jpg", final_message)
+        add_task_to_queue(init.bot_config['allowed_user'], None, final_message)
+        if domestic_original_success + asia_censored_success + asia_uncensored_success + hd_subtitle_success <= 0:
             return
     
     # 删除垃圾文件 创建strm文件
@@ -313,7 +311,7 @@ def av_daily_offline():
             offline2115(offline_tasks, len(update_list), save_path)
     else:
         init.logger.warn("AV日更离线任务未执行，可能是115离线配额不足，请检查115账号状态！")
-        add_task_to_queue(init.bot_config['allowed_user'], f"{init.IMAGE_PATH}/male023.png", "AV日更离线任务未执行，可能是115离线配额不足，请检查115账号状态！")
+        add_task_to_queue(init.bot_config['allowed_user'], None, "AV 日更离线任务未执行，可能是 115 离线配额不足，请检查账号状态。")
         return
     
     # 等待离线完成
@@ -348,7 +346,7 @@ def av_daily_offline():
         init.logger.info("失败的任务会在下次自动重试，请检查日志。")
         message += "\n失败的任务会在下次自动重试，请留意日志或通知！"
 
-    add_task_to_queue(init.bot_config['allowed_user'], f"{init.IMAGE_PATH}/av_daily_update.png", message)
+    add_task_to_queue(init.bot_config['allowed_user'], None, message)
     
     # 删除垃圾文件 创建strm文件
     init.openapi_115.auto_clean_all(save_path)
@@ -527,7 +525,7 @@ def t66y_offline():
                     offline2115(batch_tasks, task_count, save_path)
         else:
             init.logger.warn("t66y离线任务未执行，可能是115离线配额不足，请检查115账号状态！")
-            add_task_to_queue(init.bot_config['allowed_user'], f"{init.IMAGE_PATH}/male023.png", "t66y离线任务未执行，可能是115离线配额不足，请检查115账号状态！")
+            add_task_to_queue(init.bot_config['allowed_user'], None, "t66y 离线任务未执行，可能是 115 离线配额不足，请检查账号状态。")
             return
 
     # 等待离线完成
@@ -579,10 +577,7 @@ def t66y_offline():
             
     if messages:
         final_message = "**t66y离线任务完成情况:**\n" + "\n".join(messages)
-        if total_success > 0:
-            add_task_to_queue(init.bot_config['allowed_user'], f"{init.IMAGE_PATH}/rss_1024.jpg", final_message)
-        else:
-            add_task_to_queue(init.bot_config['allowed_user'], f"{init.IMAGE_PATH}/teacher_pto.jpg", final_message)
+        add_task_to_queue(init.bot_config['allowed_user'], None, final_message)
             
     # 删除垃圾文件
     for path in save_path_list:
@@ -665,7 +660,7 @@ def javbus_offline():
                     offline2115(batch_tasks, task_count, save_path)
         else:
             init.logger.warn("JavBus离线任务未执行，可能是115离线配额不足，请检查115账号状态！")
-            add_task_to_queue(init.bot_config['allowed_user'], f"{init.IMAGE_PATH}/male023.png", "JavBus离线任务未执行，可能是115离线配额不足，请检查115账号状态！")
+            add_task_to_queue(init.bot_config['allowed_user'], None, "JavBus 离线任务未执行，可能是 115 离线配额不足，请检查账号状态。")
             return
 
     # 等待离线完成
@@ -700,10 +695,7 @@ def javbus_offline():
     
     # 生成汇总消息
     message = escape_markdown(f"JavBus订阅任务完成情况: {total_success}/{total_offline}", version=2) 
-    if total_success > 0:
-        add_task_to_queue(init.bot_config['allowed_user'], f"{init.IMAGE_PATH}/rss_javbus.jpg", message)
-    else:
-        add_task_to_queue(init.bot_config['allowed_user'], f"{init.IMAGE_PATH}/teacher_pto.jpg", message)
+    add_task_to_queue(init.bot_config['allowed_user'], None, message)
             
     # 删除垃圾文件
     for path in save_path_list:

@@ -4,6 +4,13 @@ LABEL authors="qiqiandfei"
 # 设置工作目录
 WORKDIR /app
 
+# 安装本地截图OCR依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-chi-sim \
+    && rm -rf /var/lib/apt/lists/*
+
 # 复制app下所有文件到/app
 ADD ./app .
 
