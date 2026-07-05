@@ -12,7 +12,10 @@ sys.path.insert(0, str(ROOT / "app"))
 import init
 from app.handlers.search_handler import (
     METADATA_URL_PATTERN,
+    SEARCH_RESOLVE_METADATA,
+    SEARCH_SELECT_RESULT,
     SEARCH_TASK_TTL_SECONDS,
+    _clean_prowlarr_query,
     _fetch_media_page_title,
     _metadata_matches_plain_query,
     _plex_metadata_for_selected_release,
@@ -22,6 +25,8 @@ from app.handlers.search_handler import (
     get_pending_search_task,
     parse_douban_title,
     pending_search_tasks,
+    resolve_plain_search_metadata,
+    search_command,
     _search_prowlarr_with_progress,
 )
 
@@ -126,17 +131,20 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertEqual(metadata["release_title"], "Breaking.Bad.1x02.1080p.WEB-DL")
         self.assertNotIn("release_title", task_metadata)
 
-    def test_resolve_plain_search_request_keeps_query_as_chinese_folder_hint(self):
+    @patch("app.handlers.search_handler.requests.get")
+    def test_resolve_plain_search_request_requires_metadata_when_douban_misses(self, mock_get):
+        old_bot_config = init.bot_config
+        init.bot_config = {"search": {}}
+        self.addCleanup(setattr, init, "bot_config", old_bot_config)
+        search_response = Mock()
+        search_response.text = "<html></html>"
+        mock_get.return_value = search_response
+
         request = asyncio.run(_resolve_search_request("布达佩斯大饭店"))
 
         self.assertEqual(request["query"], "布达佩斯大饭店")
-        self.assertEqual(
-            request["plex_metadata"],
-            {
-                "source": "search_query",
-                "chinese_title": "布达佩斯大饭店",
-            },
-        )
+        self.assertIsNone(request["plex_metadata"])
+        self.assertTrue(request["needs_metadata"])
 
     @patch("app.handlers.search_handler.requests.get")
     def test_resolve_plain_search_request_uses_douban_exact_match_metadata(self, mock_get):
@@ -175,7 +183,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertEqual(mock_get.call_args_list[0].kwargs["params"], {"cat": "1002", "q": "布达佩斯大饭店"})
 
     @patch("app.handlers.search_handler.requests.get")
-    def test_resolve_plain_search_request_falls_back_when_douban_match_is_not_exact(self, mock_get):
+    def test_resolve_plain_search_request_requires_metadata_when_douban_match_is_not_exact(self, mock_get):
         old_bot_config = init.bot_config
         init.bot_config = {"search": {}}
         self.addCleanup(setattr, init, "bot_config", old_bot_config)
@@ -194,12 +202,94 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         request = asyncio.run(_resolve_search_request("英雄"))
 
         self.assertEqual(request["query"], "英雄")
+        self.assertIsNone(request["plex_metadata"])
+        self.assertTrue(request["needs_metadata"])
+
+    def test_clean_prowlarr_query_removes_colons_and_dashes(self):
         self.assertEqual(
-            request["plex_metadata"],
-            {
+            _clean_prowlarr_query("Vivre sa vie：Film en douze tableaux"),
+            "Vivre sa vie Film en douze tableaux",
+        )
+        self.assertEqual(
+            _clean_prowlarr_query("Transformers: Dark-of-the-Moon — 2011"),
+            "Transformers Dark of the Moon 2011",
+        )
+
+    @patch("app.handlers.search_handler._resolve_search_request", new_callable=AsyncMock)
+    def test_search_command_prompts_for_metadata_when_plain_reverse_lookup_misses(self, resolve_mock):
+        init.check_user = Mock(return_value=True)
+        resolve_mock.return_value = {
+            "query": "Vivre sa vie Film en douze tableaux",
+            "plex_metadata": None,
+            "needs_metadata": True,
+        }
+        update = Mock()
+        update.message.from_user.id = 472943219
+        update.message.reply_text = AsyncMock()
+        context = Mock()
+        context.args = ["Vivre", "sa", "vie:", "Film", "en", "douze", "tableaux"]
+        context.user_data = {}
+
+        state = asyncio.run(search_command(update, context))
+
+        self.assertEqual(state, SEARCH_RESOLVE_METADATA)
+        self.assertEqual(context.user_data["pending_plain_search_query"], "Vivre sa vie Film en douze tableaux")
+        self.assertIn("豆瓣链接", update.message.reply_text.await_args.args[0])
+
+    @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
+    def test_plain_metadata_reply_uses_chinese_name_and_original_query(self, send_results_mock):
+        init.check_user = Mock(return_value=True)
+        send_results_mock.return_value = SEARCH_SELECT_RESULT
+        update = Mock()
+        update.message.from_user.id = 472943219
+        update.message.text = "随心所欲"
+        context = Mock()
+        context.user_data = {"pending_plain_search_query": "Vivre sa vie Film en douze tableaux"}
+
+        state = asyncio.run(resolve_plain_search_metadata(update, context))
+
+        self.assertEqual(state, SEARCH_SELECT_RESULT)
+        self.assertNotIn("pending_plain_search_query", context.user_data)
+        send_results_mock.assert_awaited_once_with(
+            update,
+            context,
+            "Vivre sa vie Film en douze tableaux",
+            plex_metadata={
                 "source": "search_query",
-                "chinese_title": "英雄",
+                "chinese_title": "随心所欲",
             },
+        )
+
+    @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
+    @patch("app.handlers.search_handler._resolve_search_request", new_callable=AsyncMock)
+    def test_plain_metadata_reply_accepts_douban_link(self, resolve_mock, send_results_mock):
+        init.check_user = Mock(return_value=True)
+        send_results_mock.return_value = SEARCH_SELECT_RESULT
+        metadata = {
+            "source": "douban",
+            "chinese_title": "随心所欲",
+            "english_title": "Vivre sa vie",
+            "year": "1962",
+        }
+        resolve_mock.return_value = {
+            "query": "Vivre sa vie 1962",
+            "plex_metadata": metadata,
+        }
+        update = Mock()
+        update.message.from_user.id = 472943219
+        update.message.text = "https://movie.douban.com/subject/1293374/"
+        context = Mock()
+        context.user_data = {"pending_plain_search_query": "Vivre sa vie Film en douze tableaux"}
+
+        state = asyncio.run(resolve_plain_search_metadata(update, context))
+
+        self.assertEqual(state, SEARCH_SELECT_RESULT)
+        self.assertNotIn("pending_plain_search_query", context.user_data)
+        send_results_mock.assert_awaited_once_with(
+            update,
+            context,
+            "Vivre sa vie 1962",
+            plex_metadata=metadata,
         )
 
     def test_plain_query_metadata_match_ignores_case_punctuation_and_year(self):

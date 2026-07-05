@@ -33,7 +33,7 @@ from app.utils.search_query import (
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
-SEARCH_SELECT_RESULT, SEARCH_SELECT_MAIN_CATEGORY, SEARCH_SELECT_SUB_CATEGORY = range(30, 33)
+SEARCH_SELECT_RESULT, SEARCH_SELECT_MAIN_CATEGORY, SEARCH_SELECT_SUB_CATEGORY, SEARCH_RESOLVE_METADATA = range(30, 34)
 SEARCH_TASK_TTL_SECONDS = 30 * 60
 SEARCH_PROGRESS_INTERVAL_SECONDS = 30
 TELEGRAM_SEND_TIMEOUT_SECONDS = 30
@@ -66,6 +66,11 @@ def _title_contains_latin(title: str) -> bool:
 
 def _collapse_title_spaces(title: str) -> str:
     return " ".join(str(title or "").replace("\xa0", " ").split())
+
+
+def _clean_prowlarr_query(query: str) -> str:
+    query = re.sub(r"[:：\u2010-\u2015-]+", " ", str(query or ""))
+    return _collapse_title_spaces(query)
 
 
 def _as_title_candidates(value) -> list[str]:
@@ -467,34 +472,35 @@ async def _resolve_query(raw_query: str) -> str | None:
 
 async def _resolve_search_request(raw_query: str) -> dict | None:
     if not is_supported_metadata_url(raw_query):
-        query = _collapse_title_spaces(raw_query)
+        query = _clean_prowlarr_query(raw_query)
+        if not query:
+            return {"query": "", "plex_metadata": None}
+
         try:
             metadata = await asyncio.to_thread(_fetch_douban_metadata_for_plain_query, query)
             if metadata:
                 return {
-                    "query": _query_from_plex_metadata(metadata),
+                    "query": _clean_prowlarr_query(_query_from_plex_metadata(metadata)),
                     "plex_metadata": metadata,
                 }
         except Exception as e:
-            _log_warn(f"普通片名豆瓣反查失败，回退到原始搜索词: {e}")
+            _log_warn(f"普通片名豆瓣反查失败，等待用户补充元数据: {e}")
 
         return {
             "query": query,
-            "plex_metadata": {
-                "source": "search_query",
-                "chinese_title": query,
-            } if query else None,
+            "plex_metadata": None,
+            "needs_metadata": True,
         }
 
     try:
         if _is_douban_url(raw_query):
             metadata = await asyncio.to_thread(_fetch_builtin_douban_metadata, raw_query)
             if metadata:
-                query = _query_from_plex_metadata(metadata)
+                query = _clean_prowlarr_query(_query_from_plex_metadata(metadata))
                 _log_info(f"豆瓣链接解析为搜索词 raw={raw_query} query={query} metadata={metadata}")
                 return {"query": query, "plex_metadata": metadata}
 
-        query = await asyncio.to_thread(_fetch_media_page_title, raw_query)
+        query = _clean_prowlarr_query(await asyncio.to_thread(_fetch_media_page_title, raw_query))
         _log_info(f"媒体链接解析为搜索词 raw={raw_query} query={query}")
         return {"query": query, "plex_metadata": None}
     except Exception as e:
@@ -634,6 +640,15 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ 页面链接解析失败，请改用片名搜索。")
         return ConversationHandler.END
 
+    if request.get("needs_metadata"):
+        context.user_data["pending_plain_search_query"] = request["query"]
+        await update.message.reply_text(
+            "⚠️ 未从豆瓣匹配到准确信息。\n"
+            "请直接回复豆瓣链接，或回复中文片名作为保存文件夹名称。\n"
+            "发送 /q 取消。"
+        )
+        return SEARCH_RESOLVE_METADATA
+
     return await _send_search_results(
         update,
         context,
@@ -659,6 +674,58 @@ async def search_metadata_link_command(update: Update, context: ContextTypes.DEF
         context,
         request["query"],
         plex_metadata=request.get("plex_metadata"),
+    )
+
+
+async def resolve_plain_search_metadata(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not init.check_user(user_id):
+        await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
+        return ConversationHandler.END
+
+    pending_query = context.user_data.get("pending_plain_search_query")
+    if not pending_query:
+        await update.message.reply_text("⚠️ 未找到待补充的搜索任务，请重新发送 /s。")
+        return ConversationHandler.END
+
+    text = (update.message.text or "").strip()
+    if not text:
+        await update.message.reply_text("请回复豆瓣链接，或直接回复中文片名。")
+        return SEARCH_RESOLVE_METADATA
+
+    if is_supported_metadata_url(text):
+        request = await _resolve_search_request(text)
+        metadata = request.get("plex_metadata") if request else None
+        if not metadata:
+            await update.message.reply_text("⚠️ 无法从该链接取得豆瓣元数据，请发送豆瓣链接或直接回复中文片名。")
+            return SEARCH_RESOLVE_METADATA
+
+        context.user_data.pop("pending_plain_search_query", None)
+        return await _send_search_results(
+            update,
+            context,
+            request["query"],
+            plex_metadata=metadata,
+        )
+
+    if re.match(r"(?i)^https?://", text):
+        await update.message.reply_text("⚠️ 该链接暂不支持，请发送豆瓣链接或直接回复中文片名。")
+        return SEARCH_RESOLVE_METADATA
+
+    chinese_title = _collapse_title_spaces(text)
+    if not chinese_title:
+        await update.message.reply_text("请回复豆瓣链接，或直接回复中文片名。")
+        return SEARCH_RESOLVE_METADATA
+
+    context.user_data.pop("pending_plain_search_query", None)
+    return await _send_search_results(
+        update,
+        context,
+        pending_query,
+        plex_metadata={
+            "source": "search_query",
+            "chinese_title": chinese_title,
+        },
     )
 
 
@@ -805,6 +872,9 @@ def register_search_handlers(application):
             MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(METADATA_URL_PATTERN), search_metadata_link_command),
         ],
         states={
+            SEARCH_RESOLVE_METADATA: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, resolve_plain_search_metadata)
+            ],
             SEARCH_SELECT_RESULT: [CallbackQueryHandler(select_search_result, pattern=r"^search_(pick|cancel):")],
             SEARCH_SELECT_MAIN_CATEGORY: [
                 CallbackQueryHandler(select_search_main_category, pattern=r"^search_(main|last|cancel):")
