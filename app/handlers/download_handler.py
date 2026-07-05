@@ -309,6 +309,14 @@ def download_task(link, selected_path, user_id):
     """异步下载任务"""
     from app.utils.message_queue import add_task_to_queue
     info_hash = ""
+    if init.openapi_115 is None:
+        add_task_to_queue(
+            user_id,
+            None,
+            message="❌ 115 OpenAPI 尚未初始化，暂时无法投递离线任务。请检查 Token 或使用 `/auth` 重新授权。",
+        )
+        return
+
     try:
         offline_success = init.openapi_115.offline_download_specify_path(link, selected_path)
         if not offline_success:
@@ -407,7 +415,8 @@ def download_task(link, selected_path, user_id):
         )
     finally:
         # 清除云端任务，避免重复下载
-        init.openapi_115.del_offline_task(info_hash, del_source_file=0)
+        if init.openapi_115 is not None and info_hash:
+            init.openapi_115.del_offline_task(info_hash, del_source_file=0)
 
 
 async def handle_manual_rename_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):

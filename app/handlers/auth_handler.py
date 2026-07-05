@@ -4,10 +4,26 @@ from telegram import Update
 from telegram.ext import CommandHandler, ConversationHandler, ContextTypes
 import init
 import os
+import threading
+from app.core.open_115 import OpenAPI_115
 
 
 # 定义对话的步骤
 # ASK_COOKIE, RECEIVE_COOKIE = range(0, 2)
+
+
+def create_115_client_for_auth_only():
+    api = object.__new__(OpenAPI_115)
+    api.access_token = ""
+    api.refresh_token = ""
+    api.base_url = "https://proapi.115.com"
+    api.lifetime_vip = False
+    api.request_count = 0
+    api.lock = threading.Lock()
+    api.last_req_time = 0
+    api.file_info_cache = {}
+    api.cache_hit = 0
+    return api
 
 
 async def auth_pkce_115(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -16,6 +32,8 @@ async def auth_pkce_115(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if check_115_app_id():
             if os.path.exists(init.TOKEN_FILE):
                 os.remove(init.TOKEN_FILE)
+            if init.openapi_115 is None:
+                init.openapi_115 = create_115_client_for_auth_only()
             init.openapi_115.auth_pkce(usr_id, init.bot_config['115_app_id'])
             if init.openapi_115.access_token and init.openapi_115.refresh_token:
                 await update.message.reply_text("✅ 115 授权成功。")

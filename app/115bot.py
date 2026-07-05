@@ -5,6 +5,7 @@ import os
 import time
 import asyncio
 import threading
+import signal
 from telegram import Update, BotCommand
 from telegram.ext import ContextTypes, CommandHandler, Application
 from telegram.helpers import escape_markdown
@@ -158,6 +159,46 @@ async def post_init(application):
     await set_bot_menu(application)
 
 
+async def run_application_polling(application, after_start=None, stop_event=None):
+    """Run PTB with an explicit lifecycle to avoid half-initialized polling startup."""
+    if stop_event is None:
+        stop_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGABRT):
+            try:
+                loop.add_signal_handler(sig, stop_event.set)
+            except NotImplementedError:
+                break
+
+    try:
+        await application.initialize()
+        if application.post_init:
+            await application.post_init(application)
+        await application.start()
+        if application.updater:
+            await application.updater.start_polling(bootstrap_retries=5)
+        if after_start:
+            after_start()
+        await stop_event.wait()
+    finally:
+        if application.updater and getattr(application.updater, "running", False):
+            await application.updater.stop()
+        if getattr(application, "running", False):
+            await application.stop()
+        await application.shutdown()
+
+
+def start_runtime_services(openapi_ready: bool):
+    if not openapi_ready:
+        init.logger.warn("115 OpenAPI 未初始化，跳过定时任务和启动账号信息；Bot 将以受限模式继续运行。")
+        return
+
+    start_scheduler_in_thread()
+    init.logger.info("订阅线程启动成功！")
+    time.sleep(3)  # 等待订阅线程启动
+    send_start_message()
+
+
 if __name__ == '__main__':
     init.init()
     # 启动消息队列
@@ -192,22 +233,20 @@ if __name__ == '__main__':
     application.add_handler(reload_handler)
     
     # 初始化115open对象
-    if not init.initialize_115open():
-        init.logger.error("115 OpenAPI客户端初始化失败，程序无法继续运行！")
+    openapi_ready = init.initialize_115open()
+    if not openapi_ready:
+        init.logger.error("115 OpenAPI客户端初始化失败，离线投递功能暂不可用。")
         add_task_to_queue(
             init.bot_config['allowed_user'],
             None,
             message=(
-                "❌ 115 OpenAPI 初始化失败，程序已停止。\n"
+                "❌ 115 OpenAPI 初始化失败，Bot 已进入受限模式。\n"
                 "请检查 `/config/config.yaml` 中的 `115_app_id` 或 `access_token`/`refresh_token`。\n"
-                "直连 Token 模式下，`115_app_id` 可以留空，但两个 Token 必须有效。"
+                "直连 Token 模式下，`115_app_id` 可以留空，但两个 Token 必须有效。\n"
+                "搜索和 `/auth`/`/reload` 仍可使用，离线投递会暂时拒绝。"
             )
         )
-        # 等待消息队列处理完毕再退出
-        while not message_queue.message_queue.empty():
-            time.sleep(5)
-        time.sleep(30)
-        exit(1)
+        init.logger.warn("115 OpenAPI 初始化失败，Bot 将继续启动以便使用 `/auth`、`/reload` 和搜索功能，避免容器重启反复刷新 Token。")
 
 
     # 注册Auth
@@ -233,12 +272,7 @@ if __name__ == '__main__':
 
     # 启动机器人轮询
     try:
-        # 启动订阅线程
-        start_scheduler_in_thread()
-        init.logger.info("订阅线程启动成功！")
-        time.sleep(3)  # 等待订阅线程启动
-        send_start_message()
-        application.run_polling()  # 阻塞运行
+        asyncio.run(run_application_polling(application, after_start=lambda: start_runtime_services(openapi_ready)))
     except KeyboardInterrupt:
         init.logger.info("程序已被用户终止（Ctrl+C）。")
     except SystemExit:
