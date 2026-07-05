@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # 核心运行库 (防止 Chrome 启动静默挂起)
     libasound2 \
     libgbm1 \
+    libgomp1 \
     libnss3 \
     # 字体支持
     fonts-liberation \

@@ -6,6 +6,7 @@ WORKDIR /app
 
 # 安装本地截图OCR依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
     tesseract-ocr \
     tesseract-ocr-eng \
     tesseract-ocr-chi-sim \
