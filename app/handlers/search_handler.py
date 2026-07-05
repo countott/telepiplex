@@ -27,6 +27,7 @@ from app.utils.search_query import (
     is_supported_metadata_url,
     parse_media_page_title,
 )
+from app.utils.telegram_safe import safe_reply_text
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
@@ -249,7 +250,7 @@ async def search_screenshot_command(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
         return ConversationHandler.END
 
-    await update.message.reply_text("🔍 正在识别截图内容，请稍候。")
+    await safe_reply_text(update.message, "🔍 正在识别截图内容，请稍候。", logger=init.logger)
     image_path = ""
     try:
         image_path = await _download_photo_to_temp(update)
