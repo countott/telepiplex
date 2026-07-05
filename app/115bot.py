@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import json
+import os
 import time
 import asyncio
 import threading
@@ -29,6 +30,14 @@ def get_version(md_format=False):
     if md_format:
         return escape_markdown(version, version=2)
     return version
+
+
+def log_runtime_features():
+    revision = os.getenv("TELEPIPLEX_COMMIT") or os.getenv("GIT_COMMIT") or "unknown"
+    init.logger.info(
+        "Telepiplex runtime features: direct_metadata_link_search=enabled, "
+        "builtin_douban_title_priority=latin_or_original_first, revision=%s" % revision
+    )
 
 def get_help_info():
     version = get_version()
@@ -169,6 +178,7 @@ if __name__ == '__main__':
             exit(1)
     init.logger.info("Starting bot with configuration:")
     init.logger.info(json.dumps(init.bot_config))
+    log_runtime_features()
     # 调整telegram日志级别
     update_logger_level()
     token = init.bot_config['bot_token']

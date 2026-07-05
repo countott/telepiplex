@@ -40,16 +40,19 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         old_bot_config = init.bot_config
         init.bot_config = {"search": {}}
         self.addCleanup(setattr, init, "bot_config", old_bot_config)
-        mock_response = Mock()
-        mock_response.json.return_value = {"subject": {"title": "影", "release_year": "2018"}}
-        mock_get.return_value = mock_response
+        subject_response = Mock()
+        subject_response.json.return_value = {"subject": {"title": "影", "release_year": "2018"}}
+        rexxar_response = Mock()
+        rexxar_response.json.return_value = {"title": "影", "original_title": "Shadow", "year": "2018"}
+        mock_get.side_effect = [subject_response, rexxar_response]
 
         title = _fetch_media_page_title("https://movie.douban.com/subject/4864908/")
 
-        self.assertEqual(title, "影 2018")
-        mock_get.assert_called_once()
-        self.assertEqual(mock_get.call_args.args[0], "https://movie.douban.com/j/subject_abstract?subject_id=4864908")
-        self.assertEqual(mock_get.call_args.kwargs["timeout"], 10)
+        self.assertEqual(title, "Shadow 2018")
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertEqual(mock_get.call_args_list[0].args[0], "https://movie.douban.com/j/subject_abstract?subject_id=4864908")
+        self.assertEqual(mock_get.call_args_list[1].args[0], "https://m.douban.com/rexxar/api/v2/movie/4864908")
+        self.assertEqual(mock_get.call_args_list[1].kwargs["timeout"], 10)
 
     @patch("app.handlers.search_handler.requests.get")
     def test_douban_builtin_empty_title_falls_back_to_page_title(self, mock_get):

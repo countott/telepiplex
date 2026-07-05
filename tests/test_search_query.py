@@ -44,20 +44,35 @@ class SearchQueryHelpersTest(unittest.TestCase):
         self.assertEqual(extract_douban_subject_id("https://example.com/subject/4864908/"), "")
 
     def test_parse_douban_subject_abstract_title_extracts_title_and_year(self):
-        payload = {"subject": {"title": "影", "release_year": "2018"}}
+        payload = {"subject": {"title": "影", "original_title": "Shadow", "release_year": "2018"}}
 
-        self.assertEqual(parse_douban_subject_abstract_title(payload), "影 2018")
+        self.assertEqual(parse_douban_subject_abstract_title(payload), "Shadow 2018")
 
     def test_parse_douban_rexxar_title_extracts_title_and_year(self):
-        payload = {"title": "影", "year": "2018"}
+        payload = {"title": "影", "original_title": "Shadow", "year": "2018"}
 
-        self.assertEqual(parse_douban_rexxar_title(payload), "影 2018")
+        self.assertEqual(parse_douban_rexxar_title(payload), "Shadow 2018")
 
-    def test_parse_douban_mobile_title_rejects_generic_douban_title(self):
+    def test_parse_douban_subject_abstract_title_prefers_latin_alias(self):
+        payload = {"subject": {"title": "影", "release_year": "2018", "aka": ["三国·荆州", "Shadow"]}}
+
+        self.assertEqual(parse_douban_subject_abstract_title(payload), "Shadow 2018")
+
+    def test_parse_douban_mobile_title_prefers_original_name_and_rejects_generic_douban_title(self):
         self.assertEqual(parse_douban_mobile_title("<html><head><title>豆瓣</title></head></html>"), "")
         self.assertEqual(
             parse_douban_mobile_title("<html><head><title>影 Shadow (2018) - 豆瓣</title></head></html>"),
-            "影 Shadow 2018",
+            "Shadow 2018",
+        )
+        html = """
+        <html>
+          <head><title>影 Shadow (2018) - 豆瓣</title></head>
+          <body><span>原名:</span> Shadow<br><span>年份:</span> 2018</body>
+        </html>
+        """
+        self.assertEqual(
+            parse_douban_mobile_title(html),
+            "Shadow 2018",
         )
 
 

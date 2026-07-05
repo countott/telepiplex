@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
+import re
 import time
 import uuid
 from warnings import filterwarnings
@@ -35,6 +36,10 @@ SEARCH_TASK_TTL_SECONDS = 30 * 60
 METADATA_URL_PATTERN = r"(?i)^https?://(?:[^/\s]+\.)*(?:douban\.com|imdb\.com|thetvdb\.com|tvdb\.com)/\S+$"
 
 pending_search_tasks = {}
+
+
+def _title_contains_latin(title: str) -> bool:
+    return bool(re.search(r"[A-Za-z]", str(title or "")))
 
 
 def format_size(size) -> str:
@@ -200,25 +205,32 @@ def _fetch_builtin_douban_title(url: str) -> str:
     if not subject_id:
         return ""
 
+    fallback_title = ""
     attempts = [
         (
+            "subject_abstract",
             f"https://movie.douban.com/j/subject_abstract?subject_id={subject_id}",
             parse_douban_subject_abstract_title,
             f"https://movie.douban.com/subject/{subject_id}/",
         ),
         (
+            "rexxar",
             f"https://m.douban.com/rexxar/api/v2/movie/{subject_id}",
             parse_douban_rexxar_title,
             f"https://m.douban.com/movie/subject/{subject_id}/",
         ),
     ]
-    for endpoint, parser, referer in attempts:
+    for source, endpoint, parser, referer in attempts:
         try:
             title = _fetch_douban_json_title(endpoint, parser, referer)
             if title:
-                return title
+                init.logger.info(f"豆瓣链接解析候选 source={source} subject={subject_id} title={title}")
+                if _title_contains_latin(title):
+                    init.logger.info(f"豆瓣链接解析命中英文/原标题 source={source} subject={subject_id} title={title}")
+                    return title
+                fallback_title = fallback_title or title
         except Exception as e:
-            init.logger.warn(f"豆瓣内建JSON标题解析失败: {e}")
+            init.logger.warn(f"豆瓣内建JSON标题解析失败 source={source} subject={subject_id}: {e}")
 
     try:
         response = requests.get(
@@ -229,11 +241,17 @@ def _fetch_builtin_douban_title(url: str) -> str:
         response.raise_for_status()
         title = parse_douban_mobile_title(response.text)
         if title:
-            return title
+            init.logger.info(f"豆瓣链接解析候选 source=mobile_html subject={subject_id} title={title}")
+            if _title_contains_latin(title):
+                init.logger.info(f"豆瓣链接解析命中英文/原标题 source=mobile_html subject={subject_id} title={title}")
+                return title
+            fallback_title = fallback_title or title
     except Exception as e:
-        init.logger.warn(f"豆瓣移动页标题解析失败: {e}")
+        init.logger.warn(f"豆瓣移动页标题解析失败 subject={subject_id}: {e}")
 
-    return ""
+    if fallback_title:
+        init.logger.info(f"豆瓣链接解析使用中文兜底 subject={subject_id} title={fallback_title}")
+    return fallback_title
 
 
 def _fetch_media_page_title(url: str) -> str:
@@ -247,7 +265,9 @@ def _fetch_media_page_title(url: str) -> str:
 
     response = requests.get(url, headers={"User-Agent": init.USER_AGENT}, timeout=10)
     response.raise_for_status()
-    return parse_media_page_title(response.text)
+    title = parse_media_page_title(response.text)
+    init.logger.info(f"媒体页面标题解析完成 url={url} title={title}")
+    return title
 
 
 async def _resolve_query(raw_query: str) -> str | None:
@@ -255,7 +275,9 @@ async def _resolve_query(raw_query: str) -> str | None:
         return raw_query
 
     try:
-        return await asyncio.to_thread(_fetch_media_page_title, raw_query)
+        query = await asyncio.to_thread(_fetch_media_page_title, raw_query)
+        init.logger.info(f"媒体链接解析为搜索词 raw={raw_query} query={query}")
+        return query
     except Exception as e:
         init.logger.warn(f"媒体页面标题解析失败: {e}")
         return None
@@ -275,6 +297,7 @@ async def _reply_or_send(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
 
 async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
     await _reply_or_send(update, context, f"🔍 正在搜索片源：{query}")
+    init.logger.info(f"搜索片源开始 query={query}")
 
     try:
         items = await asyncio.to_thread(search_prowlarr, query, "movie")
@@ -291,9 +314,11 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     if not results:
+        init.logger.info(f"搜索片源无结果 query={query}")
         await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ 未找到可用片源，请调整关键词后重试。")
         return ConversationHandler.END
 
+    init.logger.info(f"搜索片源完成 query={query} results={len(results)}")
     task_id = uuid.uuid4().hex[:10]
     pending_search_tasks[task_id] = {
         "created_at": time.time(),
@@ -495,4 +520,4 @@ def register_search_handlers(application):
         fallbacks=[CommandHandler("q", quit_search_conversation)],
     )
     application.add_handler(search_handler)
-    init.logger.info("✅ Search处理器已注册")
+    init.logger.info("✅ Search处理器已注册，支持直接发送豆瓣/IMDb/TVDB链接；豆瓣解析使用内建英文/原标题优先策略")

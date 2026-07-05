@@ -69,6 +69,12 @@ class BotSurfaceCleanupTest(unittest.TestCase):
         self.assertNotIn("douban_api:", app_config_source)
         self.assertNotIn("deploy/douban-api", readme_source)
 
+    def test_startup_logs_current_search_runtime_features(self):
+        bot_source = (ROOT / "app" / "115bot.py").read_text(encoding="utf-8")
+
+        self.assertIn("direct_metadata_link_search=enabled", bot_source)
+        self.assertIn("builtin_douban_title_priority=latin_or_original_first", bot_source)
+
 
 if __name__ == "__main__":
     unittest.main()
