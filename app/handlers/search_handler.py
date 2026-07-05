@@ -130,6 +130,19 @@ def _query_from_plex_metadata(metadata: dict) -> str:
     return _collapse_title_spaces(query)
 
 
+def _metadata_matches_plain_query(metadata: dict, query: str) -> bool:
+    query = _collapse_title_spaces(query).casefold()
+    if not query:
+        return False
+
+    candidates = [
+        metadata.get("chinese_title"),
+        metadata.get("english_title"),
+        _query_from_plex_metadata(metadata),
+    ]
+    return any(_collapse_title_spaces(candidate).casefold() == query for candidate in candidates)
+
+
 def _fetch_douban_json_metadata(endpoint: str, referer: str) -> dict | None:
     response = requests.get(
         endpoint,
@@ -141,6 +154,39 @@ def _fetch_douban_json_metadata(endpoint: str, referer: str) -> dict | None:
     )
     response.raise_for_status()
     return _extract_douban_metadata(response.json())
+
+
+def _extract_douban_subject_urls(html_text: str) -> list[str]:
+    urls = []
+    seen = set()
+    for subject_id in re.findall(r"https?://movie\.douban\.com/subject/(\d+)/?", str(html_text or "")):
+        if subject_id in seen:
+            continue
+        seen.add(subject_id)
+        urls.append(f"https://movie.douban.com/subject/{subject_id}/")
+    return urls
+
+
+def _fetch_douban_metadata_for_plain_query(query: str) -> dict | None:
+    query = _collapse_title_spaces(query)
+    if not query:
+        return None
+
+    response = requests.get(
+        "https://www.douban.com/search",
+        params={"cat": "1002", "q": query},
+        headers=_douban_request_headers("https://www.douban.com/"),
+        timeout=10,
+    )
+    response.raise_for_status()
+
+    for subject_url in _extract_douban_subject_urls(response.text):
+        metadata = _fetch_builtin_douban_metadata(subject_url)
+        if metadata and _metadata_matches_plain_query(metadata, query):
+            _log_info(f"普通片名命中豆瓣元数据 query={query} url={subject_url} metadata={metadata}")
+            return metadata
+
+    return None
 
 
 def format_size(size) -> str:
@@ -414,6 +460,16 @@ async def _resolve_query(raw_query: str) -> str | None:
 async def _resolve_search_request(raw_query: str) -> dict | None:
     if not is_supported_metadata_url(raw_query):
         query = _collapse_title_spaces(raw_query)
+        try:
+            metadata = await asyncio.to_thread(_fetch_douban_metadata_for_plain_query, query)
+            if metadata:
+                return {
+                    "query": _query_from_plex_metadata(metadata),
+                    "plex_metadata": metadata,
+                }
+        except Exception as e:
+            _log_warn(f"普通片名豆瓣反查失败，回退到原始搜索词: {e}")
+
         return {
             "query": query,
             "plex_metadata": {

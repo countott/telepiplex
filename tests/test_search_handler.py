@@ -137,6 +137,70 @@ class SearchHandlerHelpersTest(unittest.TestCase):
             },
         )
 
+    @patch("app.handlers.search_handler.requests.get")
+    def test_resolve_plain_search_request_uses_douban_exact_match_metadata(self, mock_get):
+        old_bot_config = init.bot_config
+        init.bot_config = {"search": {}}
+        self.addCleanup(setattr, init, "bot_config", old_bot_config)
+        search_response = Mock()
+        search_response.text = """
+        <html>
+          <a href="https://movie.douban.com/subject/11525673/">布达佩斯大饭店</a>
+        </html>
+        """
+        subject_response = Mock()
+        subject_response.json.return_value = {
+            "subject": {
+                "title": "布达佩斯大饭店",
+                "original_title": "The Grand Budapest Hotel",
+                "release_year": "2014",
+            }
+        }
+        mock_get.side_effect = [search_response, subject_response]
+
+        request = asyncio.run(_resolve_search_request("布达佩斯大饭店"))
+
+        self.assertEqual(request["query"], "The Grand Budapest Hotel 2014")
+        self.assertEqual(
+            request["plex_metadata"],
+            {
+                "source": "douban",
+                "chinese_title": "布达佩斯大饭店",
+                "english_title": "The Grand Budapest Hotel",
+                "year": "2014",
+            },
+        )
+        self.assertEqual(mock_get.call_args_list[0].args[0], "https://www.douban.com/search")
+        self.assertEqual(mock_get.call_args_list[0].kwargs["params"], {"cat": "1002", "q": "布达佩斯大饭店"})
+
+    @patch("app.handlers.search_handler.requests.get")
+    def test_resolve_plain_search_request_falls_back_when_douban_match_is_not_exact(self, mock_get):
+        old_bot_config = init.bot_config
+        init.bot_config = {"search": {}}
+        self.addCleanup(setattr, init, "bot_config", old_bot_config)
+        search_response = Mock()
+        search_response.text = '<a href="https://movie.douban.com/subject/1291546/">霸王别姬</a>'
+        subject_response = Mock()
+        subject_response.json.return_value = {
+            "subject": {
+                "title": "霸王别姬",
+                "original_title": "Farewell My Concubine",
+                "release_year": "1993",
+            }
+        }
+        mock_get.side_effect = [search_response, subject_response]
+
+        request = asyncio.run(_resolve_search_request("英雄"))
+
+        self.assertEqual(request["query"], "英雄")
+        self.assertEqual(
+            request["plex_metadata"],
+            {
+                "source": "search_query",
+                "chinese_title": "英雄",
+            },
+        )
+
     def test_plain_search_metadata_for_selected_release_uses_candidate_title(self):
         task = {
             "query": "布达佩斯大饭店",

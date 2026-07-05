@@ -4,7 +4,7 @@
 
 **Goal:** Automatically organize 115 offline results from Douban-backed and plain-title `/s` searches into Plex-friendly Chinese-title and English-title folders.
 
-**Architecture:** Add a small pure helper module for metadata and naming decisions. Thread Douban metadata or plain search-query metadata through `search_handler` into `download_task`, then let `download_handler` attempt auto-rename before falling back to the current manual TMDB flow.
+**Architecture:** Add a small pure helper module for metadata and naming decisions. Thread Douban metadata, exact-match Douban reverse-lookup metadata, or plain search-query metadata through `search_handler` into `download_task`, then let `download_handler` attempt auto-rename before falling back to the current manual TMDB flow.
 
 **Tech Stack:** Python 3, `unittest`, existing Telegram handler code, existing OpenAPI 115 wrapper.
 
@@ -27,7 +27,7 @@
 - Modify: `app/handlers/search_handler.py`
 - Test: `tests/test_search_handler.py`
 
-- [ ] Write failing tests that `_resolve_search_request` returns Douban Chinese and English title metadata, and plain `/s title` metadata.
+- [ ] Write failing tests that `_resolve_search_request` returns Douban Chinese and English title metadata, exact-match Douban reverse-lookup metadata for plain `/s title`, and plain `/s title` fallback metadata.
 - [ ] Run `python3 -m unittest tests.test_search_handler` and confirm the new assertions fail.
 - [ ] Replace the title-only resolver with a search request object while preserving existing query behavior.
 - [ ] Pass metadata and selected release title into `download_task`.

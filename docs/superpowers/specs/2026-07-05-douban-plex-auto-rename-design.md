@@ -10,7 +10,7 @@ This implementation changes the `/s Douban URL -> Prowlarr candidate -> 115 offl
 
 ## Naming Contract
 
-Douban metadata supplies the Chinese title and English/original title when the search starts from a Douban URL. For plain `/s title`, the user query becomes the Chinese folder hint and the selected Prowlarr release title is cleaned to infer the English folder name. Prowlarr remains the release search and download source.
+Douban metadata supplies the Chinese title and English/original title when the search starts from a Douban URL. For plain `/s title`, the system first searches Douban and uses Douban metadata when the returned subject exactly matches the query. If Douban lookup fails or the result is not an exact metadata match, the user query becomes the Chinese folder hint and the selected Prowlarr release title is cleaned to infer the English folder name. Prowlarr remains the release search and download source.
 
 Movies are organized as:
 
@@ -28,13 +28,13 @@ Season and episode numbers are parsed from the selected Prowlarr release title. 
 
 ## Flow
 
-1. Parse Douban subject metadata into Chinese title, English title, year, and search query, or keep a plain search query as the Chinese folder hint.
+1. Parse Douban subject metadata into Chinese title, English title, year, and search query; for plain search text, first try an exact Douban metadata match, otherwise keep the query as the Chinese folder hint.
 2. Store this metadata with the pending search task.
 3. When the user chooses a candidate and save path, pass the metadata and selected release title into `download_task`.
 4. After 115 reports the offline result as complete, normalize the result into a single working directory as today.
 5. Create `/保存文件夹/中文名/英文名` if needed, rename the main video file to the Plex filename, and move it there.
 6. Generate STRM files and notify Emby for the final English-title folder.
-7. If metadata is missing, the English title cannot be inferred, or any 115 operation fails, fall back to the existing manual rename prompt.
+7. If Douban lookup fails, metadata is missing, the English title cannot be inferred, or any 115 operation fails, fall back to the existing manual rename prompt or the plain-query metadata flow.
 
 ## Testing
 
