@@ -587,31 +587,22 @@ async def handle_manual_rename(update: Update, context: ContextTypes.DEFAULT_TYP
         if cover_url:
             try:
                 init.logger.info(f"cover_url: {cover_url}")
-                
-                if not init.aria2_client:
-                    await context.bot.send_photo(
-                        chat_id=update.effective_chat.id, 
-                        photo=cover_url, 
-                        caption=message,
-                        parse_mode='MarkdownV2'
-                    )
-                else:
-                    # 推送到aria2
-                    push2aria2(new_final_path, cover_url, message, update.effective_chat.id)
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=cover_url,
+                    caption=message,
+                    parse_mode='MarkdownV2'
+                )
             except TelegramError as e:
                 init.logger.warn(f"Telegram API error: {e}")
             except Exception as e:
                 init.logger.warn(f"Unexpected error: {e}")
         else:
-            if not init.aria2_client:
-                await context.bot.send_message(
-                                                chat_id=update.effective_chat.id,
-                                                text=message,
-                                                parse_mode='MarkdownV2'
-                )
-            else:
-                # 推送到aria2
-                push2aria2(new_final_path, cover_url, message, update.effective_chat.id)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=message,
+                parse_mode='MarkdownV2'
+            )
         
         # 清除重命名数据，结束当前操作
         context.user_data.pop("rename_data", None)
@@ -637,34 +628,6 @@ async def handle_manual_rename(update: Update, context: ContextTypes.DEFAULT_TYP
         # 出错时也清除数据，结束当前操作
         context.user_data.pop("rename_data", None)
         
-        
-def push2aria2(new_final_path, cover_url, message, user_id):
-    
-    # 为Aria2推送创建任务ID系统
-    import uuid
-    push_task_id = str(uuid.uuid4())[:8]
-    
-    # 初始化pending_push_tasks（如果不存在）
-    if not hasattr(init, 'pending_push_tasks'):
-        init.pending_push_tasks = {}
-    
-    # 存储推送任务数据
-    init.pending_push_tasks[push_task_id] = {
-        'path': new_final_path
-    }
-    
-    device_name = init.bot_config.get('aria2', {}).get('device_name', 'Aria2') or 'Aria2'
-    
-    keyboard = [
-        [InlineKeyboardButton(f"推送到{device_name}", callback_data=f"push2aria2_{push_task_id}")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    if cover_url:
-        add_task_to_queue(user_id, cover_url, message=message, keyboard=reply_markup)
-    else:
-        add_task_to_queue(user_id, None, message=message, keyboard=reply_markup)
-
-
 def register_download_handlers(application):
     # 命令形式的下载交互
     download_command_handler = ConversationHandler(

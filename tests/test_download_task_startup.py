@@ -1,14 +1,14 @@
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
 import init
-from app.handlers.download_handler import download_task
+from app.handlers.download_handler import download_task, handle_manual_rename
 
 
 class DownloadTaskStartupTest(unittest.TestCase):
@@ -126,6 +126,56 @@ class DownloadTaskStartupTest(unittest.TestCase):
             "/影视/剧集/欧美剧/绝命毒师/Breaking Bad"
         )
         self.assertIn("Breaking Bad S02E03.mp4", add_task_mock.call_args.kwargs["message"])
+
+    @patch("app.core.subscribe_movie.is_subscribe", return_value=False)
+    @patch("app.handlers.download_handler.get_movie_cover", return_value="")
+    @patch("app.handlers.download_handler.notice_emby_scan_library", return_value=True)
+    @patch("app.handlers.download_handler.create_strm_file")
+    def test_manual_rename_stops_after_rename_without_aria_push(
+        self,
+        create_strm_mock,
+        notice_mock,
+        cover_mock,
+        subscribe_mock,
+    ):
+        api = Mock()
+        api.rename.return_value = True
+        api.get_files_from_dir.return_value = ["movie.mkv"]
+        init.openapi_115 = api
+        init.aria2_client = Mock()
+        if hasattr(init, "pending_push_tasks"):
+            delattr(init, "pending_push_tasks")
+
+        update = Mock()
+        update.message.text = "The Grand Budapest Hotel"
+        update.effective_chat.id = 123
+        context = Mock()
+        context.user_data = {
+            "rename_data": {
+                "resource_name": "old-name",
+                "selected_path": "/影视/电影/外语电影",
+                "link": "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
+                "add2retry": False,
+                "final_path": "/影视/电影/外语电影/old-name",
+            }
+        }
+        context.bot.send_message = AsyncMock()
+
+        import asyncio
+        asyncio.run(handle_manual_rename(update, context))
+
+        api.rename.assert_called_once_with(
+            "/影视/电影/外语电影/old-name",
+            "The Grand Budapest Hotel",
+        )
+        create_strm_mock.assert_called_once_with(
+            "/影视/电影/外语电影/The Grand Budapest Hotel",
+            ["movie.mkv"],
+        )
+        notice_mock.assert_called_once_with("/影视/电影/外语电影/The Grand Budapest Hotel")
+        context.bot.send_message.assert_called()
+        self.assertIn("重命名成功", context.bot.send_message.await_args.kwargs["text"])
+        self.assertFalse(hasattr(init, "pending_push_tasks"))
 
 
 if __name__ == "__main__":
