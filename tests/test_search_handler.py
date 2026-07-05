@@ -52,6 +52,24 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertEqual(mock_get.call_args.kwargs["params"], {"url": "https://movie.douban.com/subject/1234567/"})
         self.assertEqual(mock_get.call_args.kwargs["timeout"], 20)
 
+    @patch("app.handlers.search_handler.requests.get")
+    def test_douban_api_empty_title_falls_back_to_page_title(self, mock_get):
+        old_bot_config = init.bot_config
+        init.bot_config = {"search": {"douban_api": {"enable": True, "base_url": "http://douban-api"}}}
+        self.addCleanup(setattr, init, "bot_config", old_bot_config)
+        api_response = Mock()
+        api_response.json.return_value = {"status": True, "data": {"title": ""}}
+        page_response = Mock()
+        page_response.text = "<html><head><title>影 Shadow (2018) (豆瓣)</title></head></html>"
+        mock_get.side_effect = [api_response, page_response]
+
+        title = _fetch_media_page_title("https://movie.douban.com/subject/4864908/")
+
+        self.assertEqual(title, "影 Shadow 2018")
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertEqual(mock_get.call_args_list[0].args[0], "http://douban-api/movie/detail")
+        self.assertEqual(mock_get.call_args_list[1].args[0], "https://movie.douban.com/subject/4864908/")
+
     def test_metadata_url_pattern_matches_supported_sites_only(self):
         self.assertRegex("https://movie.douban.com/subject/1234567/", METADATA_URL_PATTERN)
         self.assertRegex("https://www.imdb.com/title/tt2278388/", METADATA_URL_PATTERN)

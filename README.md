@@ -56,6 +56,8 @@
 
 搜索片源可使用 `/s 片名`，也可以直接发送豆瓣、IMDb 或 TVDB 链接。
 
+如需提高豆瓣链接解析稳定性，可在 Unraid 上部署自建豆瓣 API，见 [deploy/douban-api/README.md](deploy/douban-api/README.md)，并在运行时 `/config/config.yaml` 配置 `search.douban_api.base_url`。
+
 ### 115 开放平台申请
 
 **强烈建议申请 115 开放平台以获得更好的使用体验！**
