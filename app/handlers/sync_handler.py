@@ -158,7 +158,7 @@ def create_movie_directory(sync_path, movie_path):
 def register_sync_handlers(application):
     # 同步strm软链
     sync_handler = ConversationHandler(
-        entry_points=[CommandHandler("sync", sync_strm_files)],
+        entry_points=[CommandHandler("strm", sync_strm_files)],
         states={
             SELECT_MAIN_CATEGORY_SYNC: [CallbackQueryHandler(select_main_category_sync)],
             SELECT_SUB_CATEGORY_SYNC: [CallbackQueryHandler(select_sub_category_sync)],

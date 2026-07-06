@@ -7,8 +7,8 @@ Telepiplex 是基于 Telegram-115Bot 的个人媒体自动化 fork，用 Telegra
 - 通过 Prowlarr 搜索片源，并按清晰度、来源、编码、音轨和屏蔽词排序候选。
 - 选择候选后复用原有 115 离线下载流程，按配置的分类目录保存。
 - 支持直接发送豆瓣、IMDb、TVDB、TMDB 等元数据链接，自动解析片名和年份后搜索。
-- 普通片名搜索会尽量通过豆瓣反查元数据；无法确认时会要求补充豆瓣链接或中文片名。
-- 下载完成后可按元数据自动整理为 Plex/Emby 友好的目录和文件名。
+- 普通片名搜索不会阻塞等待元数据；下载完成后优先根据实际文件名推断整理。
+- 搜索链路中的豆瓣/IMDb/TVDB/TMDB 元数据会作为下载后整理的辅助信息。
 - 115 OpenAPI 初始化失败时，Bot 会尽量继续启动，保留 `/auth`、`/reload` 和搜索能力，避免容器反复重启。
 
 > 本项目仅供个人学习和自用研究。请遵守当地法律法规和站点规则，自行承担使用风险。
@@ -22,20 +22,22 @@ Telepiplex 是基于 Telegram-115Bot 的个人媒体自动化 fork，用 Telegra
 | `/start` | 显示帮助信息 |
 | `/auth` | 115 扫码授权 |
 | `/reload` | 重新加载配置 |
-| `/find 片名` | 搜索片源，选择候选后加入 115 离线 |
-| `/s 片名` | 豆瓣关键词搜索入口，当前仍为预留入口 |
-| `/rl` | 查看离线失败后的重试列表 |
-| `/sync` | 同步目录并创建 STRM 软链 |
+| `/search 片名` | 搜索片源，选择候选后加入 115 离线 |
+| `/magnet 磁力链接` | 跳过片名搜索，直接投递已有磁力链接 |
+| `/m 磁力链接` | `/magnet` 的短命令 |
+| `/retry` | 查看离线失败后的重试列表 |
+| `/r` | `/retry` 的短命令 |
+| `/strm` | 同步目录并创建 STRM 文件 |
 | `/q` | 取消当前会话 |
 
 ### 推荐使用方式
 
-- 发送 `/find 布达佩斯大饭店` 搜索片源。
+- 发送 `/search 布达佩斯大饭店` 搜索片源。
 - 直接发送豆瓣、IMDb、TVDB 或 TMDB 页面链接，Bot 会解析标题和年份后搜索。
-- 直接发送 magnet、ed2k 或 thunder 链接，走普通 115 离线下载流程。
+- 已有磁力链接时，发送 `/magnet magnet:?xt=urn:btih:...` 或 `/m magnet:?xt=urn:btih:...`，跳过片名搜索并直接投递 115 离线。
 - 搜索结果出现后，选择候选资源，再选择 115 保存分类和目录。
 
-不支持的普通 HTTP/HTTPS 网页会被拒绝。当前直接下载链接只接受 magnet、ed2k 和 thunder。
+不支持的普通 HTTP/HTTPS 网页会被拒绝。已有磁力链接请使用 `/magnet` 或 `/m`。
 
 ## 快速部署
 
@@ -166,8 +168,8 @@ media:
 
 ## 搜索流程
 
-1. 用户发送 `/find 片名`，或直接发送支持的元数据链接。
-2. Bot 解析搜索词和元数据。豆瓣链接优先使用内建解析；IMDb、TVDB、TMDB 会先提取英文标题和年份，再尝试豆瓣反查。
+1. 用户发送 `/search 片名`，或直接发送支持的元数据链接。
+2. Bot 解析搜索词。豆瓣链接优先使用内建解析；IMDb、TVDB、TMDB 会先提取英文标题和年份，再尝试豆瓣反查，所得元数据只作为下载后整理辅助。
 3. Bot 调用 Prowlarr 搜索候选，并展示索引器、大小、做种数、发布时间和评分信息。
 4. 用户选择候选资源。
 5. 用户选择 115 保存目录，或使用上次保存目录。
@@ -187,7 +189,7 @@ docker logs -f telepiplex
 应能看到类似运行特性标记：
 
 ```text
-Telepiplex runtime features: direct_metadata_link_search=enabled, builtin_douban_title_priority=latin_or_original_first, external_metadata_douban_reverse_lookup=enabled
+Telepiplex runtime features: direct_metadata_link_search=enabled, builtin_douban_title_priority=latin_or_original_first, external_metadata_douban_reverse_lookup=enabled, search_command=enabled, magnet_command=enabled, find_command_removed=enabled, legacy_s_command_removed=enabled, retry_command=enabled, strm_command=enabled
 Search处理器已注册
 ```
 
@@ -204,7 +206,7 @@ git -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol diff
 
 ## 重要风险
 
-- `/sync` 会删除目标目录下的所有文件后重新生成 STRM，包括元数据文件。大目录慎用。
+- `/strm` 会删除目标目录下的所有文件后重新生成 STRM，包括元数据文件。大目录慎用。
 - 115 离线下载、重命名和移动都依赖 115 接口状态，接口限流或 Token 失效会导致任务失败。
 - Prowlarr 结果质量取决于索引器配置。建议先在 Prowlarr 中确认索引器可用，再排查 Bot。
 - 本仓库仍保留部分上游历史模块，用户可见命令以 `app/115bot.py` 注册内容和 README 为准。

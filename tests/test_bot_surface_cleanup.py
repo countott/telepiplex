@@ -11,16 +11,47 @@ class BotSurfaceCleanupTest(unittest.TestCase):
         readme_source = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_en_source = (ROOT / "README_EN.md").read_text(encoding="utf-8")
 
-        for command in ("av", "csh", "cjav", "rss"):
+        for command in ("av", "csh", "cjav", "rss", "find"):
             self.assertNotIn(f"<code>/{command}</code>", bot_source)
             self.assertNotIn(f'BotCommand("{command}"', bot_source)
             self.assertNotIn(f"CommandHandler('{command}'", bot_source)
+            self.assertNotIn(f'CommandHandler("{command}"', bot_source)
             self.assertNotIn(f"`/{command}`", readme_source)
             self.assertNotIn(f"`/{command}`", readme_en_source)
 
         self.assertNotIn("register_av_download_handlers", bot_source)
         self.assertNotIn("register_crawl_handlers", bot_source)
         self.assertNotIn("register_rss_handlers", bot_source)
+
+    def test_search_magnet_and_retry_are_the_public_commands(self):
+        bot_source = (ROOT / "app" / "115bot.py").read_text(encoding="utf-8")
+        search_source = (ROOT / "app" / "handlers" / "search_handler.py").read_text(encoding="utf-8")
+        download_source = (ROOT / "app" / "handlers" / "download_handler.py").read_text(encoding="utf-8")
+        offline_source = (ROOT / "app" / "handlers" / "offline_task_handler.py").read_text(encoding="utf-8")
+
+        self.assertIn('BotCommand("search"', bot_source)
+        self.assertIn('BotCommand("magnet"', bot_source)
+        self.assertIn('BotCommand("m"', bot_source)
+        self.assertIn('BotCommand("retry"', bot_source)
+        self.assertIn('BotCommand("r"', bot_source)
+        self.assertIn('BotCommand("strm"', bot_source)
+        self.assertIn('CommandHandler("search"', search_source)
+        self.assertIn('CommandHandler("magnet"', download_source)
+        self.assertIn('CommandHandler("m"', download_source)
+        self.assertIn('CommandHandler("retry"', offline_source)
+        self.assertIn('CommandHandler("r"', offline_source)
+        self.assertIn('CommandHandler("strm"', bot_source + (ROOT / "app" / "handlers" / "sync_handler.py").read_text(encoding="utf-8"))
+        self.assertNotRegex(bot_source, r'BotCommand\("s"\s*,')
+        self.assertNotRegex(bot_source, r'BotCommand\("mag"\s*,')
+        self.assertNotRegex(bot_source, r'BotCommand\("rl"\s*,')
+        self.assertNotRegex(bot_source, r'BotCommand\("sync"\s*,')
+        self.assertNotRegex(search_source, r'CommandHandler\("s"\s*,')
+        self.assertNotRegex(download_source, r'CommandHandler\("mag"\s*,')
+        self.assertNotRegex(offline_source, r'CommandHandler\("rl"\s*,')
+        self.assertNotIn("`/sync`", (ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertNotIn("`/sync`", (ROOT / "README_EN.md").read_text(encoding="utf-8"))
+        self.assertNotIn('CommandHandler("find"', search_source)
+        self.assertNotIn("find_command", search_source)
 
     def test_adult_rss_and_tmdb_subscription_code_is_removed_but_aria_helpers_remain(self):
         removed_paths = [
@@ -98,6 +129,12 @@ class BotSurfaceCleanupTest(unittest.TestCase):
         self.assertIn("external_metadata_douban_reverse_lookup=enabled", bot_source)
         self.assertIn("prowlarr_indexer_summary=enabled", bot_source)
         self.assertIn("metadata_object=enabled", bot_source)
+        self.assertIn("search_command=enabled", bot_source)
+        self.assertIn("magnet_command=enabled", bot_source)
+        self.assertIn("find_command_removed=enabled", bot_source)
+        self.assertIn("legacy_s_command_removed=enabled", bot_source)
+        self.assertIn("retry_command=enabled", bot_source)
+        self.assertIn("strm_command=enabled", bot_source)
         self.assertIn("tvdb_adapter=enabled", bot_source)
         self.assertIn("ai_tvdb_inference=enabled", bot_source)
         self.assertIn("tvdb_ai_115_tree_rename=enabled", bot_source)

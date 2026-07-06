@@ -1,4 +1,5 @@
 import sys
+import asyncio
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -8,7 +9,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
 import init
-from app.handlers.download_handler import download_task
+from app.handlers.download_handler import SELECT_MAIN_CATEGORY, download_task, magnet_command
 from app.utils.ai import get_movie_tmdb_name_with_ai
 from app.utils.cover_capture import get_movie_cover
 
@@ -158,30 +159,65 @@ class DownloadTaskStartupTest(unittest.TestCase):
         )
         media_update_mock.assert_called_once_with(target_path)
 
+    def test_magnet_command_accepts_magnet_argument_and_starts_directory_selection(self):
+        init.check_user = Mock(return_value=True)
+        init.bot_config = {
+            "category_folder": [
+                {"name": "movie", "display_name": "电影", "path_map": []},
+                {"name": "series", "display_name": "剧集", "path_map": []},
+            ]
+        }
+        update = Mock()
+        update.message.from_user.id = 123
+        update.message.reply_text = AsyncMock()
+        update.effective_chat.id = 123
+        context = Mock()
+        context.args = ["magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567"]
+        context.user_data = {}
+        context.bot.send_message = AsyncMock()
+
+        state = asyncio.run(magnet_command(update, context))
+
+        self.assertEqual(state, SELECT_MAIN_CATEGORY)
+        self.assertEqual(context.user_data["link"], "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567")
+        context.bot.send_message.assert_awaited_once()
+        self.assertIn("请选择保存分类", context.bot.send_message.await_args.kwargs["text"])
+
+    @patch("app.handlers.download_handler.handle_media_library_update", return_value=None)
     @patch("app.handlers.download_handler.add_task_to_queue")
-    def test_download_task_moves_success_without_metadata_to_unorganized(self, add_task_mock):
+    def test_download_task_infers_name_from_completed_filename_without_metadata(self, add_task_mock, media_update_mock):
         api = Mock()
         api.offline_download_specify_path.return_value = True
-        api.check_offline_download_success.return_value = (True, "Unknown.Release.2026", "HASH")
+        api.check_offline_download_success.return_value = (True, "Breaking.Bad.S02E03.1080p.WEB-DL", "HASH")
         api.is_directory.return_value = True
+        api.get_files_from_dir.return_value = ["episode.mp4"]
         api.create_dir_recursive.return_value = {"file_id": "unorganized"}
         api.move_file.return_value = True
+        api.rename.return_value = True
         api.del_offline_task.return_value = True
         init.openapi_115 = api
 
         download_task(
             "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-            "/影视/电影/外语电影",
+            "/影视/剧集/欧美剧",
             123,
         )
 
-        api.create_dir_recursive.assert_called_once_with("/未整理")
-        api.move_file.assert_called_once_with(
-            "/影视/电影/外语电影/Unknown.Release.2026",
-            "/未整理",
+        api.create_dir_recursive.assert_called_once_with(
+            "/影视/剧集/欧美剧/Breaking Bad/Breaking Bad Season 02"
         )
-        self.assertIn("/未整理/Unknown.Release.2026", add_task_mock.call_args.kwargs["message"])
-        self.assertNotIn("TMDB", add_task_mock.call_args.kwargs["message"])
+        api.rename.assert_called_once_with(
+            "/影视/剧集/欧美剧/Breaking.Bad.S02E03.1080p.WEB-DL/episode.mp4",
+            "Breaking Bad S02E03.mp4",
+        )
+        api.move_file.assert_called_once_with(
+            "/影视/剧集/欧美剧/Breaking.Bad.S02E03.1080p.WEB-DL/Breaking Bad S02E03.mp4",
+            "/影视/剧集/欧美剧/Breaking Bad/Breaking Bad Season 02",
+        )
+        media_update_mock.assert_called_once_with(
+            "/影视/剧集/欧美剧/Breaking Bad/Breaking Bad Season 02"
+        )
+        self.assertIn("Breaking Bad S02E03.mp4", add_task_mock.call_args.kwargs["message"])
 
     @patch("app.handlers.download_handler.add_task_to_queue")
     def test_download_task_moves_auto_rename_failure_to_unorganized(self, add_task_mock):

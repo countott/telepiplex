@@ -40,7 +40,8 @@ def log_runtime_features():
         "Telepiplex runtime features: direct_metadata_link_search=enabled, "
         "builtin_douban_title_priority=latin_or_original_first, "
         "external_metadata_douban_reverse_lookup=enabled, prowlarr_indexer_summary=enabled, "
-        "metadata_object=enabled, tvdb_adapter=enabled, ai_tvdb_inference=enabled, "
+        "metadata_object=enabled, search_command=enabled, magnet_command=enabled, find_command_removed=enabled, "
+        "legacy_s_command_removed=enabled, retry_command=enabled, strm_command=enabled, tvdb_adapter=enabled, ai_tvdb_inference=enabled, "
         "tvdb_ai_115_tree_rename=enabled, "
         "revision=%s" % revision
     )
@@ -53,24 +54,26 @@ def get_help_info():
 <code>/start</code> - 显示帮助信息\n
 <code>/auth</code> - <i>115扫码授权 (解除授权后使用)</i>\n
 <code>/reload</code> - <i>重载配置</i>\n
-<code>/find</code> - 搜索片源并加入 115 离线\n
-<code>/s</code> - 豆瓣关键词搜索入口\n
-<code>/rl</code> - 查看重试列表\n
-<code>/sync</code> - 同步目录并创建软链\n
+<code>/search</code> - 搜索片源并加入 115 离线\n
+<code>/magnet</code> - 直接投递已有磁力链接\n
+<code>/m</code> - 直接投递磁力链接的短命令\n
+<code>/retry</code> - 查看重试列表\n
+<code>/r</code> - 查看重试列表的短命令\n
+<code>/strm</code> - 同步目录并创建 STRM 文件\n
 <code>/q</code> - 取消当前会话\n\n
 <b>✨ 功能说明</b>\n
 <u>电影下载：</u>
-• 直接发送磁力、ed2k 或迅雷链接
-• 输入 <code>"/find 片名"</code>，或直接发送豆瓣/IMDb/TVDB/TMDB 链接搜索片源
-• 输入 <code>"/s 片名"</code> 使用豆瓣搜索入口（功能预留）
+• 输入 <code>"/search 片名"</code>，或直接发送豆瓣/IMDb/TVDB/TMDB 链接搜索片源
+• 输入 <code>"/magnet 磁力链接"</code> 或 <code>"/m 磁力链接"</code> 跳过片名搜索，直接选择目录并投递 115 离线
+• 下载完成后优先根据实际文件名自动整理；搜索链路中的元数据只作为辅助
 • 离线超时后可选择写入重试列表
 • 根据媒体服务配置自动整理并通知媒体库\n
 <u>重试列表：</u>
-• 输入 <code>"/rl"</code>
+• 输入 <code>"/retry"</code> 或 <code>"/r"</code>
 • 查看当前重试列表，可根据需要选择是否清空\n
 <u>目录同步：</u>
-• 输入 <code>"/sync"</code>
-• 选择目录后会在对应的目录创建strm软链\n
+• 输入 <code>"/strm"</code>
+• 选择目录后会在对应的目录创建 STRM 文件\n
 <u>视频下载：</u>
 • 直接转发视频给机器人，选择保存目录即可保存到115
 """
@@ -169,10 +172,12 @@ def get_bot_menu():
         BotCommand("start", "获取帮助信息"),
         BotCommand("auth", "115扫码授权"),
         BotCommand("reload", "重载配置"),
-        BotCommand("find", "搜索片源并加入 115 离线"),
-        BotCommand("s", "豆瓣关键词搜索入口"),
-        BotCommand("rl", "查看重试列表"),
-        BotCommand("sync", "同步指定目录，并创建软链"),
+        BotCommand("search", "搜索片源并加入 115 离线"),
+        BotCommand("magnet", "直接投递磁力链接"),
+        BotCommand("m", "直接投递磁力链接"),
+        BotCommand("retry", "查看重试列表"),
+        BotCommand("r", "查看重试列表"),
+        BotCommand("strm", "同步指定目录，并创建 STRM 文件"),
         BotCommand("q", "退出当前会话")]
     
 

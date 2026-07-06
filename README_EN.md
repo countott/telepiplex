@@ -12,9 +12,9 @@ Usage Issues & Bug Reports
 [Join](https://t.me/+FTPNla_7SCc3ZWVl)
 
 ## Update Log
-- Added `/find` for release search, metadata link parsing, 115 offline download, and automatic Plex naming.
-- Reserved `/s` as the Douban keyword search entry point.
-- Unsupported HTTP/HTTPS web pages are rejected; direct downloads currently accept magnet, ed2k, and thunder links.
+- Added `/search` for release search, metadata link parsing, 115 offline download, and automatic Plex naming.
+- Added `/magnet` and `/m` for direct magnet submission.
+- Unsupported HTTP/HTTPS web pages are rejected; existing magnet links should be submitted with `/magnet` or `/m`.
 - Removed obsolete command surfaces and manual naming flows.
 - Added media configuration for unorganized files and Plex/Emby library update extension points.
 
@@ -158,13 +158,15 @@ Please refer to the comments in `config/config.yaml.example` for configuration d
 - `/start`   - Show help information
 - `/auth`    - 115 authorization setup
 - `/reload`  - reload the configuration
-- `/find`    - Search releases and add them to 115 offline download
-- `/s`       - Reserved Douban keyword search entry
-- `/rl`      - Retry list
-- `/sync`    - Sync directory and create symlinks
+- `/search`  - Search releases and add them to 115 offline download
+- `/magnet`  - Submit an existing magnet link directly
+- `/m`       - Short magnet command
+- `/retry`   - Retry list
+- `/r`       - Short retry list command
+- `/strm`    - Sync directory and create STRM files
 - `/q`       - Cancel current session
 
-Use `/find movie name` to search releases, or send a Douban, IMDb, TVDB, or TMDB link directly. `/s` is reserved for Douban keyword search and currently tells users to use `/find`.
+Use `/search movie name` to search releases, or send a Douban, IMDb, TVDB, or TMDB link directly. Use `/magnet magnet:?xt=urn:btih:...` or `/m magnet:?xt=urn:btih:...` when you already have a magnet link.
 
 ### 115 Open Platform Application
 
@@ -197,7 +199,7 @@ tg_api_hash: 1yh3j4k9dsk0fj3jdufnwrhf62j1k33f
 
 ### Important Warning
 
-⚠️ **Synchronization Function Warning**: The `/sync` command will **delete all files in the target directory**, including metadata. Large-scale synchronization operations may trigger 115 Network Disk's risk control mechanism, please use with caution!
+⚠️ **STRM Sync Function Warning**: The `/strm` command will **delete all files in the target directory**, including metadata. Large-scale synchronization operations may trigger 115 Network Disk's risk control mechanism, please use with caution!
 
 ### License
 ```

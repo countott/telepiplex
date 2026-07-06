@@ -25,13 +25,12 @@ from app.handlers.search_handler import (
     _plex_metadata_for_selected_release,
     _resolve_search_request,
     build_results_text,
-    douban_search_command,
     format_size,
-    find_command,
     get_pending_search_task,
     parse_douban_title,
     pending_search_tasks,
     resolve_plain_search_metadata,
+    search_command,
     _search_prowlarr_with_progress,
     select_search_sub_category,
 )
@@ -341,7 +340,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertEqual(submit_mock.call_args.kwargs["metadata"]["external_ids"], {"imdb": "tt0773262"})
 
     @patch("app.handlers.search_handler.requests.get")
-    def test_resolve_plain_search_request_requires_metadata_when_douban_misses(self, mock_get):
+    def test_resolve_plain_search_request_uses_plain_query_when_douban_misses(self, mock_get):
         old_bot_config = init.bot_config
         init.bot_config = {"search": {}}
         self.addCleanup(setattr, init, "bot_config", old_bot_config)
@@ -353,7 +352,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
 
         self.assertEqual(request["query"], "布达佩斯大饭店")
         self.assertIsNone(request["plex_metadata"])
-        self.assertTrue(request["needs_metadata"])
+        self.assertNotIn("needs_metadata", request)
 
     @patch("app.handlers.search_handler.requests.get")
     def test_resolve_plain_search_request_uses_douban_exact_match_metadata(self, mock_get):
@@ -392,7 +391,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertEqual(mock_get.call_args_list[0].kwargs["params"], {"cat": "1002", "q": "布达佩斯大饭店"})
 
     @patch("app.handlers.search_handler.requests.get")
-    def test_resolve_plain_search_request_requires_metadata_when_douban_match_is_not_exact(self, mock_get):
+    def test_resolve_plain_search_request_uses_plain_query_when_douban_match_is_not_exact(self, mock_get):
         old_bot_config = init.bot_config
         init.bot_config = {"search": {}}
         self.addCleanup(setattr, init, "bot_config", old_bot_config)
@@ -412,7 +411,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
 
         self.assertEqual(request["query"], "英雄")
         self.assertIsNone(request["plex_metadata"])
-        self.assertTrue(request["needs_metadata"])
+        self.assertNotIn("needs_metadata", request)
 
     def test_clean_prowlarr_query_removes_colons_and_dashes(self):
         self.assertEqual(
@@ -424,14 +423,15 @@ class SearchHandlerHelpersTest(unittest.TestCase):
             "Transformers Dark of the Moon 2011",
         )
 
+    @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
     @patch("app.handlers.search_handler._resolve_search_request", new_callable=AsyncMock)
-    def test_find_command_prompts_for_metadata_when_plain_reverse_lookup_misses(self, resolve_mock):
+    def test_search_command_runs_plain_query_without_requiring_metadata(self, resolve_mock, send_results_mock):
         init.check_user = Mock(return_value=True)
         resolve_mock.return_value = {
             "query": "Vivre sa vie Film en douze tableaux",
             "plex_metadata": None,
-            "needs_metadata": True,
         }
+        send_results_mock.return_value = SEARCH_SELECT_RESULT
         update = Mock()
         update.message.from_user.id = 472943219
         update.message.reply_text = AsyncMock()
@@ -439,15 +439,20 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         context.args = ["Vivre", "sa", "vie:", "Film", "en", "douze", "tableaux"]
         context.user_data = {}
 
-        state = asyncio.run(find_command(update, context))
+        state = asyncio.run(search_command(update, context))
 
-        self.assertEqual(state, SEARCH_RESOLVE_METADATA)
-        self.assertEqual(context.user_data["pending_plain_search_query"], "Vivre sa vie Film en douze tableaux")
-        self.assertIn("豆瓣链接", update.message.reply_text.await_args.args[0])
+        self.assertEqual(state, SEARCH_SELECT_RESULT)
+        self.assertNotIn("pending_plain_search_query", context.user_data)
+        send_results_mock.assert_awaited_once_with(
+            update,
+            context,
+            "Vivre sa vie Film en douze tableaux",
+            plex_metadata=None,
+        )
 
     @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
     @patch("app.handlers.search_handler._resolve_search_request", new_callable=AsyncMock)
-    def test_find_command_runs_prowlarr_flow(self, resolve_mock, send_results_mock):
+    def test_search_command_runs_prowlarr_flow(self, resolve_mock, send_results_mock):
         init.check_user = Mock(return_value=True)
         resolve_mock.return_value = {
             "query": "The Grand Budapest Hotel 2014",
@@ -461,7 +466,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         context.args = ["布达佩斯大饭店"]
         context.user_data = {}
 
-        state = asyncio.run(find_command(update, context))
+        state = asyncio.run(search_command(update, context))
 
         self.assertEqual(state, SEARCH_SELECT_RESULT)
         send_results_mock.assert_awaited_once_with(
@@ -470,21 +475,6 @@ class SearchHandlerHelpersTest(unittest.TestCase):
             "The Grand Budapest Hotel 2014",
             plex_metadata={"source": "douban", "chinese_title": "布达佩斯大饭店"},
         )
-
-    @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
-    def test_s_command_is_douban_placeholder_and_does_not_run_prowlarr(self, send_results_mock):
-        init.check_user = Mock(return_value=True)
-        update = Mock()
-        update.message.from_user.id = 472943219
-        update.message.reply_text = AsyncMock()
-        context = Mock()
-        context.args = ["布达佩斯大饭店"]
-
-        state = asyncio.run(douban_search_command(update, context))
-
-        self.assertIsNone(state)
-        send_results_mock.assert_not_awaited()
-        self.assertIn("豆瓣搜索入口已预留", update.message.reply_text.await_args.args[0])
 
     @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
     def test_plain_metadata_reply_uses_chinese_name_and_original_query(self, send_results_mock):
@@ -649,6 +639,43 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertGreaterEqual(context.bot.send_message.await_count, 1)
         first_message = context.bot.send_message.await_args_list[0].kwargs["text"]
         self.assertIn("Prowlarr 仍在搜索", first_message)
+
+    @patch("app.handlers.search_handler.search_prowlarr")
+    def test_search_prowlarr_with_progress_merges_movie_and_tv_categories(self, search_mock):
+        def category_search(query, media_type):
+            if media_type == "movie":
+                return [
+                    {
+                        "title": "Dexter.Original.Sin.S01E01.1080p.WEB-DL",
+                        "magnet_url": "magnet:?xt=urn:btih:111",
+                    }
+                ]
+            if media_type == "tv":
+                return [
+                    {
+                        "title": "Dexter.Original.Sin.S01E01.1080p.WEB-DL",
+                        "magnet_url": "magnet:?xt=urn:btih:111",
+                    },
+                    {
+                        "title": "Dexter.Original.Sin.S01E02.1080p.WEB-DL",
+                        "magnet_url": "magnet:?xt=urn:btih:222",
+                    },
+                ]
+            return []
+
+        search_mock.side_effect = category_search
+        update = Mock()
+        update.effective_chat.id = 472943219
+        context = Mock()
+        context.bot.send_message = AsyncMock()
+
+        items = asyncio.run(_search_prowlarr_with_progress(update, context, "Dexter Original Sin 2024"))
+
+        self.assertEqual([item["magnet_url"] for item in items], ["magnet:?xt=urn:btih:111", "magnet:?xt=urn:btih:222"])
+        self.assertEqual(
+            [call.args for call in search_mock.call_args_list],
+            [("Dexter Original Sin 2024", "movie"), ("Dexter Original Sin 2024", "tv")],
+        )
 
 
 if __name__ == "__main__":

@@ -91,6 +91,8 @@ class AiInferenceTest(unittest.TestCase):
         self.assertIn("episode_map", prompt)
         self.assertIn("target_relative_path", prompt)
         self.assertIn("Series Name Season 01/Series Name S01E01.ext", prompt)
+        self.assertIn("单个视频文件也可能是剧集单集", prompt)
+        self.assertIn("不要仅因为 file_tree 只有一个视频文件就判定为电影", prompt)
         self.assertEqual(plan["tvdb_series_id"], "79349")
         self.assertEqual(plan["episode_map"][0]["target_name"], "Dexter S01E01.mkv")
 

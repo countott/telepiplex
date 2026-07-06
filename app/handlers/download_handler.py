@@ -17,7 +17,7 @@ from app.utils.sqlitelib import *
 from concurrent.futures import ThreadPoolExecutor
 from app.adapters.tvdb import TvdbConfigError, TvdbRequestError, get_tvdb_series_episodes, search_tvdb_series
 from app.utils.ai import infer_tvdb_episode_plan_with_ai
-from app.utils.plex_naming import build_plex_naming_plan
+from app.utils.plex_naming import build_plex_naming_plan, infer_english_title_from_release
 from app.utils.tvdb_rename import VIDEO_EXTENSIONS, build_tvdb_rename_plan
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
@@ -37,17 +37,17 @@ class DownloadUrlType(Enum):
         return self.value
 
 
-async def start_d_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _start_download_link(update: Update, context: ContextTypes.DEFAULT_TYPE, link: str, allowed_types=None):
     usr_id = update.message.from_user.id
     if not init.check_user(usr_id):
         await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
         return ConversationHandler.END
-    magnet_link = update.message.text.strip()
-    context.user_data["link"] = magnet_link  # 将用户参数存储起来
-    init.logger.info(f"download link: {magnet_link}")
-    dl_url_type = is_valid_link(magnet_link)
+    link = str(link or "").strip()
+    context.user_data["link"] = link
+    init.logger.info(f"download link: {link}")
+    dl_url_type = is_valid_link(link)
     # 检查链接格式是否正确
-    if dl_url_type == DownloadUrlType.UNKNOWN:
+    if dl_url_type == DownloadUrlType.UNKNOWN or (allowed_types and dl_url_type not in allowed_types):
         await update.message.reply_text("⚠️ 下载链接格式不受支持，请检查后重试。")
         return ConversationHandler.END
     # 保存下载类型到context.user_data
@@ -66,6 +66,18 @@ async def start_d_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id, text="📁 请选择保存分类：",
                                    reply_markup=reply_markup)
     return SELECT_MAIN_CATEGORY
+
+
+async def start_d_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _start_download_link(update, context, update.message.text.strip())
+
+
+async def magnet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    link = " ".join(context.args or []).strip()
+    if not link:
+        await update.message.reply_text("请输入磁力链接：/magnet magnet:?xt=urn:btih:...")
+        return ConversationHandler.END
+    return await _start_download_link(update, context, link, allowed_types={DownloadUrlType.MAGNET})
 
 
 async def select_main_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -599,6 +611,19 @@ def _attempt_plex_auto_rename(final_path, selected_path, resource_name, plex_met
     return target_path, plan
 
 
+def _filename_metadata_from_resource(resource_name):
+    inferred_title = infer_english_title_from_release(resource_name)
+    if not inferred_title:
+        return None
+    return {
+        "source": "filename",
+        "chinese_title": inferred_title,
+        "english_title": inferred_title,
+        "query": inferred_title,
+        "release_title": resource_name,
+    }
+
+
 def _resource_leaf(resource_name: str) -> str:
     return str(resource_name or "").strip("/").split("/")[-1] or "unknown"
 
@@ -683,11 +708,14 @@ def download_task(link, selected_path, user_id, plex_metadata=None, metadata=Non
                 resource_name = temp_folder
 
             try:
+                filename_metadata = _filename_metadata_from_resource(resource_name)
+                tvdb_metadata = metadata or plex_metadata or filename_metadata
+                plex_auto_metadata = plex_metadata or (filename_metadata if not metadata and not plex_metadata else None)
                 tvdb_result = _attempt_tvdb_ai_episode_rename(
                     final_path,
                     selected_path,
                     resource_name,
-                    metadata or plex_metadata,
+                    tvdb_metadata,
                 )
                 if tvdb_result:
                     message = (
@@ -702,7 +730,7 @@ def download_task(link, selected_path, user_id, plex_metadata=None, metadata=Non
                     add_task_to_queue(user_id, None, message=message)
                     return
 
-                auto_result = _attempt_plex_auto_rename(final_path, selected_path, resource_name, plex_metadata)
+                auto_result = _attempt_plex_auto_rename(final_path, selected_path, resource_name, plex_auto_metadata)
                 if auto_result:
                     target_path, plan = auto_result
                     message = f"✅ 自动整理完成：`{plan.file_name}`\n\n保存目录：`{target_path}`"
@@ -742,10 +770,8 @@ def register_download_handlers(application):
     # 命令形式的下载交互
     download_command_handler = ConversationHandler(
          entry_points=[
-            MessageHandler(
-                filters.TEXT & filters.Regex(r'^(magnet:|ed2k://|ED2K://|thunder://)(?!.*\n).+$'),
-                start_d_command
-            )
+            CommandHandler("magnet", magnet_command),
+            CommandHandler("m", magnet_command),
         ],
         states={
             SELECT_MAIN_CATEGORY: [CallbackQueryHandler(select_main_category)],

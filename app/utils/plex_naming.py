@@ -97,13 +97,15 @@ def infer_english_title_from_release(release_title: str) -> str:
 
 def build_plex_naming_plan(metadata: dict | None, release_title: str, original_file_name: str):
     metadata = metadata or {}
-    if metadata.get("source") not in {"douban", "search_query"}:
+    if metadata.get("source") not in {"douban", "search_query", "filename"}:
         return None
 
     chinese_folder = sanitize_path_name(metadata.get("chinese_title"))
     english_folder = sanitize_path_name(metadata.get("english_title"))
-    if not english_folder and metadata.get("source") == "search_query":
+    if not english_folder and metadata.get("source") in {"search_query", "filename"}:
         english_folder = infer_english_title_from_release(release_title)
+    if not chinese_folder and metadata.get("source") == "filename":
+        chinese_folder = english_folder
     if not chinese_folder or not english_folder:
         return None
 

@@ -151,7 +151,8 @@ async def handle_clear_retry_list(update: Update, context: ContextTypes.DEFAULT_
 def register_offline_task_handlers(application):
     """注册离线任务处理器"""
     # 添加独立的命令处理器用于查看重试列表
-    application.add_handler(CommandHandler("rl", view_retry_list))
+    application.add_handler(CommandHandler("retry", view_retry_list))
+    application.add_handler(CommandHandler("r", view_retry_list))
     
     # 添加独立的清空重试列表处理器
     application.add_handler(CallbackQueryHandler(handle_clear_retry_list, pattern="^(clear_all|return)$"))

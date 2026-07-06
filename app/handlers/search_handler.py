@@ -757,7 +757,6 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
         return {
             "query": query,
             "plex_metadata": None,
-            "needs_metadata": True,
         }
 
     try:
@@ -888,7 +887,7 @@ async def _search_prowlarr_with_progress(
     query: str,
     progress_interval: float = SEARCH_PROGRESS_INTERVAL_SECONDS,
 ):
-    search_task = asyncio.create_task(asyncio.to_thread(search_prowlarr, query, "movie"))
+    search_task = asyncio.create_task(asyncio.to_thread(_search_prowlarr_release_categories, query))
     elapsed = 0.0
     while True:
         done, _ = await asyncio.wait({search_task}, timeout=progress_interval)
@@ -905,6 +904,25 @@ async def _search_prowlarr_with_progress(
             ),
             disable_web_page_preview=True,
         )
+
+
+def _search_prowlarr_release_categories(query: str) -> list[dict]:
+    results = []
+    seen = set()
+    for media_type in ("movie", "tv"):
+        for item in search_prowlarr(query, media_type):
+            key = (
+                item.get("magnet_url")
+                or item.get("download_url")
+                or item.get("title")
+                or ""
+            )
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            results.append(item)
+    return results
 
 
 async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, plex_metadata=None, metadata=None):
@@ -959,7 +977,7 @@ async def _send_resolved_search_results(update: Update, context: ContextTypes.DE
     return await _send_search_results(update, context, request["query"], **kwargs)
 
 
-async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if not init.check_user(user_id):
         await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
@@ -967,7 +985,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     raw_query = _extract_command_query(update, context)
     if not raw_query:
-        await update.message.reply_text("请输入搜索内容：/s 片名，或 /s 豆瓣/IMDb/TVDB 链接。")
+        await update.message.reply_text("请输入搜索内容：/search 片名，或 /search 豆瓣/IMDb/TVDB 链接。")
         return ConversationHandler.END
 
     request = await _resolve_search_request(raw_query)
@@ -975,31 +993,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ 页面链接解析失败，请改用片名搜索。")
         return ConversationHandler.END
 
-    if request.get("needs_metadata"):
-        context.user_data["pending_plain_search_query"] = request["query"]
-        await update.message.reply_text(
-            "⚠️ 未从豆瓣匹配到准确信息。\n"
-            "请直接回复豆瓣链接，或回复中文片名作为保存文件夹名称。\n"
-            "发送 /q 取消。"
-        )
-        return SEARCH_RESOLVE_METADATA
-
     return await _send_resolved_search_results(update, context, request)
-
-
-async def douban_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if not init.check_user(user_id):
-        await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
-        return ConversationHandler.END
-
-    raw_query = _extract_command_query(update, context)
-    if not raw_query:
-        await update.message.reply_text("请输入搜索内容：/s 片名。")
-        return ConversationHandler.END
-
-    await update.message.reply_text("豆瓣搜索入口已预留，暂请使用 /find 搜索片源。")
-    return None
 
 
 async def search_metadata_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1023,7 +1017,7 @@ async def unsupported_http_link_command(update: Update, context: ContextTypes.DE
         await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
         return ConversationHandler.END
 
-    await update.message.reply_text("⚠️ 不支持该网页链接，请发送 magnet/ed2k/thunder，或使用 /find 搜索片源。")
+    await update.message.reply_text("⚠️ 不支持该网页链接，请发送 /magnet 磁力链接，或使用 /search 搜索片源。")
     return ConversationHandler.END
 
 
@@ -1035,7 +1029,7 @@ async def resolve_plain_search_metadata(update: Update, context: ContextTypes.DE
 
     pending_query = context.user_data.get("pending_plain_search_query")
     if not pending_query:
-        await update.message.reply_text("⚠️ 未找到待补充的搜索任务，请重新发送 /s。")
+        await update.message.reply_text("⚠️ 未找到待补充的搜索任务，请重新发送 /search。")
         return ConversationHandler.END
 
     text = (update.message.text or "").strip()
@@ -1229,7 +1223,7 @@ async def quit_search_conversation(update: Update, context: ContextTypes.DEFAULT
 def register_search_handlers(application):
     search_handler = ConversationHandler(
         entry_points=[
-            CommandHandler("find", find_command),
+            CommandHandler("search", search_command),
             MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(METADATA_URL_PATTERN), search_metadata_link_command),
             MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(HTTP_URL_PATTERN), unsupported_http_link_command),
         ],
@@ -1248,5 +1242,4 @@ def register_search_handlers(application):
         fallbacks=[CommandHandler("q", quit_search_conversation)],
     )
     application.add_handler(search_handler)
-    application.add_handler(CommandHandler("s", douban_search_command))
-    _log_info("✅ Search处理器已注册，支持直接发送豆瓣/IMDb/TVDB链接；豆瓣解析使用内建英文/原标题优先策略")
+    _log_info("✅ Search处理器已注册，支持 /search 搜索和直接发送豆瓣/IMDb/TVDB链接；豆瓣解析使用内建英文/原标题优先策略")
