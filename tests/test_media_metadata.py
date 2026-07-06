@@ -54,6 +54,18 @@ class MediaMetadataTest(unittest.TestCase):
         self.assertEqual(metadata["external_ids"], {"imdb": "tt0773262"})
         self.assertEqual(metadata["evidence"][0]["source"], "imdb")
 
+    def test_build_search_metadata_keeps_collection_titles_when_present(self):
+        metadata = build_search_metadata(
+            source="douban",
+            chinese_title="碟中谍7：致命清算（上）",
+            english_title="Mission Impossible Dead Reckoning Part One",
+            collection_chinese_title="碟中谍系列",
+            collection_english_title="Mission Impossible Collection",
+        )
+
+        self.assertEqual(metadata["collection_chinese_title"], "碟中谍系列")
+        self.assertEqual(metadata["collection_english_title"], "Mission Impossible Collection")
+
 
 if __name__ == "__main__":
     unittest.main()

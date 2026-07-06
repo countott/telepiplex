@@ -18,13 +18,51 @@ QUALITY_START_PATTERN = re.compile(
 class PlexNamingPlan:
     chinese_folder: str
     english_folder: str
+    target_relative_dir: str
     file_name: str
     is_episode: bool
 
 
 def sanitize_path_name(name: str) -> str:
-    name = INVALID_NAME_CHARS.sub(" ", str(name or ""))
+    name = INVALID_NAME_CHARS.sub("", str(name or ""))
     return " ".join(name.split()).strip().strip(".")
+
+
+def _strip_collection_suffix(name: str, suffix: str) -> str:
+    name = sanitize_path_name(name)
+    if name.lower().endswith(suffix.lower()):
+        name = name[: -len(suffix)].strip()
+    return sanitize_path_name(name)
+
+
+def _display_folder(chinese_title: str, english_title: str) -> str:
+    chinese_title = sanitize_path_name(chinese_title)
+    english_title = sanitize_path_name(english_title)
+    if chinese_title and english_title and chinese_title != english_title:
+        return f"{chinese_title} ({english_title})"
+    return chinese_title or english_title
+
+
+def _collection_titles(metadata: dict) -> tuple[str, str]:
+    chinese_title = (
+        metadata.get("collection_chinese_title")
+        or metadata.get("chinese_collection_title")
+        or metadata.get("collection_chinese")
+        or ""
+    )
+    english_title = (
+        metadata.get("collection_english_title")
+        or metadata.get("english_collection_title")
+        or metadata.get("collection_english")
+        or metadata.get("collection_title")
+        or ""
+    )
+    return _strip_collection_suffix(chinese_title, "系列"), _strip_collection_suffix(english_title, "Collection")
+
+
+def _episode_marker_text(season: int, episode: int) -> str:
+    episode_width = 3 if episode >= 100 else 2
+    return f"S{season:02d}E{episode:0{episode_width}d}"
 
 
 def parse_episode_marker(release_title: str):
@@ -73,15 +111,22 @@ def build_plex_naming_plan(metadata: dict | None, release_title: str, original_f
     episode_marker = parse_episode_marker(release_title)
     if episode_marker:
         season, episode = episode_marker
-        file_stem = f"{english_folder} S{season:02d}E{episode:02d}"
+        marker = _episode_marker_text(season, episode)
+        target_relative_dir = f"{_display_folder(chinese_folder, english_folder)}/{english_folder} Season {season:02d}"
+        file_stem = f"{english_folder} {marker}"
         is_episode = True
     else:
+        movie_folder = _display_folder(chinese_folder, english_folder)
+        collection_chinese, collection_english = _collection_titles(metadata)
+        collection_folder = _display_folder(collection_chinese, collection_english)
+        target_relative_dir = f"{collection_folder}/{movie_folder}" if collection_folder else movie_folder
         file_stem = english_folder
         is_episode = False
 
     return PlexNamingPlan(
         chinese_folder=chinese_folder,
         english_folder=english_folder,
+        target_relative_dir=target_relative_dir,
         file_name=f"{file_stem}{suffix}",
         is_episode=is_episode,
     )

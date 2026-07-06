@@ -197,6 +197,12 @@ def _metadata_from_plex_metadata(plex_metadata: dict, query: str = "", original_
         year=plex_metadata.get("year") or "",
         query=query or _query_from_plex_metadata(plex_metadata),
         original_url=original_url,
+        collection_chinese_title=plex_metadata.get("collection_chinese_title")
+        or plex_metadata.get("chinese_collection_title")
+        or "",
+        collection_english_title=plex_metadata.get("collection_english_title")
+        or plex_metadata.get("english_collection_title")
+        or "",
         external_ids=external_ids,
         evidence=[
             {

@@ -90,6 +90,7 @@ class AiInferenceTest(unittest.TestCase):
         self.assertIn("只返回JSON", prompt)
         self.assertIn("episode_map", prompt)
         self.assertIn("target_relative_path", prompt)
+        self.assertIn("Series Name Season 01/Series Name S01E01.ext", prompt)
         self.assertEqual(plan["tvdb_series_id"], "79349")
         self.assertEqual(plan["episode_map"][0]["target_name"], "Dexter S01E01.mkv")
 

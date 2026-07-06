@@ -33,6 +33,8 @@ def build_search_metadata(
     year: str = "",
     query: str = "",
     original_url: str = "",
+    collection_chinese_title: str = "",
+    collection_english_title: str = "",
     external_ids: dict | None = None,
     evidence: list[dict] | None = None,
 ) -> dict:
@@ -47,6 +49,12 @@ def build_search_metadata(
         "external_ids": _clean_mapping(external_ids),
         "evidence": _clean_evidence(evidence),
     }
+    collection_chinese_title = _clean_text(collection_chinese_title)
+    collection_english_title = _clean_text(collection_english_title)
+    if collection_chinese_title:
+        metadata["collection_chinese_title"] = collection_chinese_title
+    if collection_english_title:
+        metadata["collection_english_title"] = collection_english_title
     return metadata
 
 

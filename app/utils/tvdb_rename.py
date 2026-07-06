@@ -86,12 +86,35 @@ def _episode_ids(tvdb_episodes: list[dict]) -> set[str]:
     }
 
 
-def _safe_positive_int(value) -> int | None:
+def _safe_int(value) -> int | None:
     try:
         parsed = int(value or 0)
     except (TypeError, ValueError):
         return None
-    return parsed if parsed > 0 else None
+    return parsed
+
+
+def _safe_season_int(value) -> int | None:
+    parsed = _safe_int(value)
+    return parsed if parsed is not None and parsed >= 0 else None
+
+
+def _safe_episode_int(value) -> int | None:
+    parsed = _safe_int(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _episode_marker_text(season: int, episode: int) -> str:
+    episode_width = 3 if episode >= 100 else 2
+    return f"S{season:02d}E{episode:0{episode_width}d}"
+
+
+def _display_folder(chinese_title: str, english_title: str) -> str:
+    chinese_title = sanitize_path_name(chinese_title)
+    english_title = sanitize_path_name(english_title)
+    if chinese_title and english_title and chinese_title != english_title:
+        return f"{chinese_title} ({english_title})"
+    return chinese_title or english_title
 
 
 def _target_root(selected_path: str, metadata: dict, ai_plan: dict) -> str:
@@ -99,31 +122,19 @@ def _target_root(selected_path: str, metadata: dict, ai_plan: dict) -> str:
     chinese_title = sanitize_path_name(metadata.get("chinese_title"))
     if not series_name:
         return ""
-    if chinese_title and chinese_title != series_name:
-        return _join_path(selected_path, chinese_title, series_name)
-    return _join_path(selected_path, series_name)
+    return _join_path(selected_path, _display_folder(chinese_title, series_name))
 
 
-def _target_relative_path(item: dict, source_relative_path: str) -> str:
-    target_path = _clean_path(item.get("target_relative_path") or "")
-    if target_path:
-        return target_path
-
-    target_name = sanitize_path_name(item.get("target_name") or "")
-    if not target_name:
-        source_suffix = PurePosixPath(source_relative_path).suffix
-        season = _safe_positive_int(item.get("season_number"))
-        episode = _safe_positive_int(item.get("episode_number"))
-        target_name = f"S{season:02d}E{episode:02d}{source_suffix}" if season and episode else ""
-    if not target_name:
+def _target_relative_path(item: dict, source_relative_path: str, series_name: str) -> str:
+    series_name = sanitize_path_name(series_name)
+    season = _safe_season_int(item.get("season_number"))
+    episode = _safe_episode_int(item.get("episode_number"))
+    if not series_name or season is None or episode is None:
         return ""
 
-    season = _safe_positive_int(item.get("season_number"))
-    if item.get("season_number") and not season:
-        return ""
-    if season:
-        return _join_path(f"Season {season:02d}", target_name)
-    return target_name
+    suffix = PurePosixPath(source_relative_path).suffix
+    marker = _episode_marker_text(season, episode)
+    return _join_path(f"{series_name} Season {season:02d}", f"{series_name} {marker}{suffix}")
 
 
 def build_tvdb_rename_plan(
@@ -149,6 +160,7 @@ def build_tvdb_rename_plan(
     target_root = _target_root(selected_path, metadata, ai_plan)
     if not target_root:
         return None
+    series_name = sanitize_path_name(ai_plan.get("series_name") or metadata.get("english_title") or metadata.get("query"))
 
     operations = []
     seen_targets = set()
@@ -165,7 +177,7 @@ def build_tvdb_rename_plan(
         if tvdb_episode_id and known_episode_ids and tvdb_episode_id not in known_episode_ids:
             return None
 
-        target_relative_path = _target_relative_path(item, source_node["relative_path"])
+        target_relative_path = _target_relative_path(item, source_node["relative_path"], series_name)
         if not target_relative_path:
             return None
         if target_relative_path in seen_targets:

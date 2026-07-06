@@ -531,8 +531,8 @@ def _attempt_tvdb_ai_episode_rename(final_path, selected_path, resource_name, me
         "tvdb_candidates": tvdb_candidates,
         "tvdb_episodes": tvdb_episodes,
         "naming_rules": {
-            "target_root": "selected_path / chinese_title(if present) / tvdb series_name",
-            "target_relative_path": "Season XX / Series Name - SXXEXX - Episode Title.ext",
+            "target_root": "selected_path / chinese_title (tvdb series_name)",
+            "target_relative_path": "Series Name Season XX / Series Name SXXEXX.ext",
             "source_file": "must exactly match one file_tree relative_path or a unique file name",
         },
     }
@@ -583,7 +583,7 @@ def _attempt_plex_auto_rename(final_path, selected_path, resource_name, plex_met
         init.logger.warn(f"自动整理跳过：豆瓣元数据不足 {plex_metadata}")
         return None
 
-    target_path = f"{selected_path}/{plan.chinese_folder}/{plan.english_folder}"
+    target_path = f"{selected_path}/{plan.target_relative_dir}"
     init.openapi_115.create_dir_recursive(target_path)
 
     original_file_path = f"{final_path}/{original_file_name}"
