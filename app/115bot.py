@@ -21,10 +21,8 @@ from app.handlers.search_handler import register_search_handlers
 from app.handlers.sync_handler import register_sync_handlers
 from app.handlers.video_handler import register_video_handlers
 from app.core.scheduler import start_scheduler_in_thread
-from app.handlers.subscribe_movie_handler import register_subscribe_movie_handlers
 from app.handlers.offline_task_handler import register_offline_task_handlers
 from app.handlers.aria2_handler import register_aria2_handlers
-from app.handlers.rss_handler import register_rss_handlers
 
 TELEGRAM_API_TIMEOUT = 30
 
@@ -51,24 +49,21 @@ def get_help_info():
 <code>/start</code> - 显示帮助信息\n
 <code>/auth</code> - <i>115扫码授权 (解除授权后使用)</i>\n
 <code>/reload</code> - <i>重载配置</i>\n
-<code>/s</code> - 搜索片源\n
+<code>/find</code> - 搜索片源并加入 115 离线\n
+<code>/s</code> - 豆瓣关键词搜索入口\n
 <code>/rl</code> - 查看重试列表\n
-<code>/rss</code> - <i>rss订阅</i>\n
 <code>/sync</code> - 同步目录并创建软链\n
 <code>/q</code> - 取消当前会话\n\n
 <b>✨ 功能说明</b>\n
 <u>电影下载：</u>
-• 直接发送磁力、ed2k、迅雷或 HTTP 下载链接
-• 输入 <code>"/s 片名"</code>，或直接发送豆瓣/IMDb/TVDB 链接搜索片源
+• 直接发送磁力、ed2k 或迅雷链接
+• 输入 <code>"/find 片名"</code>，或直接发送豆瓣/IMDb/TVDB/TMDB 链接搜索片源
+• 输入 <code>"/s 片名"</code> 使用豆瓣搜索入口（功能预留）
 • 离线超时后可选择写入重试列表
-• 根据配置自动生成 <code>.strm</code> 软链文件\n
+• 根据媒体服务配置自动整理并通知媒体库\n
 <u>重试列表：</u>
 • 输入 <code>"/rl"</code>
 • 查看当前重试列表，可根据需要选择是否清空\n
-<u>RSS订阅：</u>
-• 输入 <code>"/rss"</code>
-• 将rsshub地址配置到config.yaml中
-• 选择RSS类别并订阅\n
 <u>目录同步：</u>
 • 输入 <code>"/sync"</code>
 • 选择目录后会在对应的目录创建strm软链\n
@@ -170,9 +165,9 @@ def get_bot_menu():
         BotCommand("start", "获取帮助信息"),
         BotCommand("auth", "115扫码授权"),
         BotCommand("reload", "重载配置"),
-        BotCommand("s", "搜索片源"),
+        BotCommand("find", "搜索片源并加入 115 离线"),
+        BotCommand("s", "豆瓣关键词搜索入口"),
         BotCommand("rl", "查看重试列表"),
-        BotCommand("rss", "RSS订阅"),
         BotCommand("sync", "同步指定目录，并创建软链"),
         BotCommand("q", "退出当前会话")]
     
@@ -315,14 +310,10 @@ if __name__ == '__main__':
     register_search_handlers(application)
     # 注册下载
     register_download_handlers(application)
-    # 注册电影订阅
-    # register_subscribe_movie_handlers(application)
     # 注册离线任务
     register_offline_task_handlers(application)
     # 注册Aria2
     register_aria2_handlers(application)
-    # 注册RSS订阅
-    register_rss_handlers(application)
     # 注册同步
     register_sync_handlers(application)
     # 注册视频

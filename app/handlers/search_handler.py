@@ -37,7 +37,8 @@ SEARCH_SELECT_RESULT, SEARCH_SELECT_MAIN_CATEGORY, SEARCH_SELECT_SUB_CATEGORY, S
 SEARCH_TASK_TTL_SECONDS = 30 * 60
 SEARCH_PROGRESS_INTERVAL_SECONDS = 30
 TELEGRAM_SEND_TIMEOUT_SECONDS = 30
-METADATA_URL_PATTERN = r"(?i)^https?://(?:[^/\s]+\.)*(?:douban\.com|imdb\.com|thetvdb\.com|tvdb\.com)(?::\d+)?/\S+$"
+METADATA_URL_PATTERN = r"(?i)^https?://(?:[^/\s]+\.)*(?:douban\.com|imdb\.com|thetvdb\.com|tvdb\.com|themoviedb\.org|tmdb\.org)(?::\d+)?/\S+$"
+HTTP_URL_PATTERN = r"(?i)^https?://[^\s]+$"
 
 pending_search_tasks = {}
 
@@ -337,6 +338,10 @@ def _is_douban_url(raw_query: str) -> bool:
     return bool(extract_douban_subject_id(raw_query))
 
 
+def _is_supported_http_download(raw_query: str) -> bool:
+    return is_supported_metadata_url(raw_query)
+
+
 def _douban_request_headers(referer: str = "") -> dict:
     headers = {
         "User-Agent": init.USER_AGENT,
@@ -624,7 +629,7 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
     return SEARCH_SELECT_RESULT
 
 
-async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if not init.check_user(user_id):
         await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
@@ -657,6 +662,21 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def douban_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not init.check_user(user_id):
+        await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
+        return ConversationHandler.END
+
+    raw_query = _extract_command_query(update, context)
+    if not raw_query:
+        await update.message.reply_text("请输入搜索内容：/s 片名。")
+        return ConversationHandler.END
+
+    await update.message.reply_text("豆瓣搜索入口已预留，暂请使用 /find 搜索片源。")
+    return None
+
+
 async def search_metadata_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if not init.check_user(user_id):
@@ -675,6 +695,16 @@ async def search_metadata_link_command(update: Update, context: ContextTypes.DEF
         request["query"],
         plex_metadata=request.get("plex_metadata"),
     )
+
+
+async def unsupported_http_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not init.check_user(user_id):
+        await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
+        return ConversationHandler.END
+
+    await update.message.reply_text("⚠️ 不支持该网页链接，请发送 magnet/ed2k/thunder，或使用 /find 搜索片源。")
+    return ConversationHandler.END
 
 
 async def resolve_plain_search_metadata(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -868,8 +898,9 @@ async def quit_search_conversation(update: Update, context: ContextTypes.DEFAULT
 def register_search_handlers(application):
     search_handler = ConversationHandler(
         entry_points=[
-            CommandHandler("s", search_command),
+            CommandHandler("find", find_command),
             MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(METADATA_URL_PATTERN), search_metadata_link_command),
+            MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(HTTP_URL_PATTERN), unsupported_http_link_command),
         ],
         states={
             SEARCH_RESOLVE_METADATA: [
@@ -886,4 +917,5 @@ def register_search_handlers(application):
         fallbacks=[CommandHandler("q", quit_search_conversation)],
     )
     application.add_handler(search_handler)
+    application.add_handler(CommandHandler("s", douban_search_command))
     _log_info("✅ Search处理器已注册，支持直接发送豆瓣/IMDb/TVDB链接；豆瓣解析使用内建英文/原标题优先策略")

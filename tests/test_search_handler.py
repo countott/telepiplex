@@ -17,16 +17,18 @@ from app.handlers.search_handler import (
     SEARCH_TASK_TTL_SECONDS,
     _clean_prowlarr_query,
     _fetch_media_page_title,
+    _is_supported_http_download,
     _metadata_matches_plain_query,
     _plex_metadata_for_selected_release,
     _resolve_search_request,
     build_results_text,
+    douban_search_command,
     format_size,
+    find_command,
     get_pending_search_task,
     parse_douban_title,
     pending_search_tasks,
     resolve_plain_search_metadata,
-    search_command,
     _search_prowlarr_with_progress,
 )
 
@@ -216,7 +218,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         )
 
     @patch("app.handlers.search_handler._resolve_search_request", new_callable=AsyncMock)
-    def test_search_command_prompts_for_metadata_when_plain_reverse_lookup_misses(self, resolve_mock):
+    def test_find_command_prompts_for_metadata_when_plain_reverse_lookup_misses(self, resolve_mock):
         init.check_user = Mock(return_value=True)
         resolve_mock.return_value = {
             "query": "Vivre sa vie Film en douze tableaux",
@@ -230,11 +232,52 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         context.args = ["Vivre", "sa", "vie:", "Film", "en", "douze", "tableaux"]
         context.user_data = {}
 
-        state = asyncio.run(search_command(update, context))
+        state = asyncio.run(find_command(update, context))
 
         self.assertEqual(state, SEARCH_RESOLVE_METADATA)
         self.assertEqual(context.user_data["pending_plain_search_query"], "Vivre sa vie Film en douze tableaux")
         self.assertIn("豆瓣链接", update.message.reply_text.await_args.args[0])
+
+    @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
+    @patch("app.handlers.search_handler._resolve_search_request", new_callable=AsyncMock)
+    def test_find_command_runs_prowlarr_flow(self, resolve_mock, send_results_mock):
+        init.check_user = Mock(return_value=True)
+        resolve_mock.return_value = {
+            "query": "The Grand Budapest Hotel 2014",
+            "plex_metadata": {"source": "douban", "chinese_title": "布达佩斯大饭店"},
+        }
+        send_results_mock.return_value = SEARCH_SELECT_RESULT
+        update = Mock()
+        update.message.from_user.id = 472943219
+        update.message.reply_text = AsyncMock()
+        context = Mock()
+        context.args = ["布达佩斯大饭店"]
+        context.user_data = {}
+
+        state = asyncio.run(find_command(update, context))
+
+        self.assertEqual(state, SEARCH_SELECT_RESULT)
+        send_results_mock.assert_awaited_once_with(
+            update,
+            context,
+            "The Grand Budapest Hotel 2014",
+            plex_metadata={"source": "douban", "chinese_title": "布达佩斯大饭店"},
+        )
+
+    @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
+    def test_s_command_is_douban_placeholder_and_does_not_run_prowlarr(self, send_results_mock):
+        init.check_user = Mock(return_value=True)
+        update = Mock()
+        update.message.from_user.id = 472943219
+        update.message.reply_text = AsyncMock()
+        context = Mock()
+        context.args = ["布达佩斯大饭店"]
+
+        state = asyncio.run(douban_search_command(update, context))
+
+        self.assertIsNone(state)
+        send_results_mock.assert_not_awaited()
+        self.assertIn("豆瓣搜索入口已预留", update.message.reply_text.await_args.args[0])
 
     @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
     def test_plain_metadata_reply_uses_chinese_name_and_original_query(self, send_results_mock):
@@ -325,8 +368,14 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertRegex("http://movie.douban.com:80/subject/1234567/?from=share", METADATA_URL_PATTERN)
         self.assertRegex("https://www.imdb.com/title/tt2278388/", METADATA_URL_PATTERN)
         self.assertRegex("https://thetvdb.com/series/breaking-bad", METADATA_URL_PATTERN)
+        self.assertRegex("https://www.themoviedb.org/movie/120-the-lord-of-the-rings", METADATA_URL_PATTERN)
         self.assertNotRegex("https://example.com/movie.mkv", METADATA_URL_PATTERN)
         self.assertNotRegex("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567", METADATA_URL_PATTERN)
+
+    def test_http_download_messages_only_allow_supported_metadata_sites(self):
+        self.assertTrue(_is_supported_http_download("https://movie.douban.com/subject/1234567/"))
+        self.assertTrue(_is_supported_http_download("https://www.imdb.com/title/tt2278388/"))
+        self.assertFalse(_is_supported_http_download("https://example.com/movie.mkv"))
 
     def test_build_results_text_contains_rank_score_size_seeders_indexer_and_features(self):
         text = build_results_text(

@@ -1431,7 +1431,7 @@ class OpenAPI_115:
             return res
         
         path_list = get_parent_paths(path) 
-        # get_parent_paths 返回如 ['/AV', '/AV/涩花', '/AV/涩花/亚洲无码原创', ...]
+        # get_parent_paths 返回如 ['/影视', '/影视/电影', '/影视/电影/示例目录', ...]
         
         last_path = ""
         final_info = None
@@ -1589,8 +1589,8 @@ def file_sha1_by_range(file_path, start, end):
 def get_parent_paths(path):
     """
     获取路径的所有父级路径列表
-    :param path: 输入路径，如 "/AV/rigeng/111/222"
-    :return: 父级路径列表，如 ["/AV", "/AV/rigeng", "/AV/rigeng/111"]
+    :param path: 输入路径，如 "/影视/电影/示例/子目录"
+    :return: 父级路径列表，如 ["/影视", "/影视/电影", "/影视/电影/示例"]
     """
     # 规范化路径（处理多余的斜杠等问题）
     normalized_path = os.path.normpath(path)
@@ -1616,7 +1616,7 @@ if __name__ == "__main__":
     init.init_log()
     init.load_yaml_config()
     app = OpenAPI_115()
-    # empty_dir_list = app.auto_clean_all("/AV/1024/亚洲无码原创", clean_empty_dir=True)
+    # empty_dir_list = app.auto_clean_all("/影视/电影/示例目录", clean_empty_dir=True)
     # if not empty_dir_list:
     #     init.logger.info("没有找到空目录")
     # else:
@@ -1636,8 +1636,8 @@ if __name__ == "__main__":
     #     init.logger.info("这是一个目录")
     # else:
     #     init.logger.info("这不是一个目录")
-    # app.create_dir_for_video_file(f"{init.bot_config['offline_path']}/gc2048.com-agnes-sss.mp4")
-    # file_list = app.get_files_from_dir(f"{init.bot_config['offline_path']}/极品眼镜妹~【agnes-sss】清纯外表~长腿黑丝~白领装~全裸跳蛋")
+    # app.create_dir_for_video_file(f"{init.bot_config['offline_path']}/example.mp4")
+    # file_list = app.get_files_from_dir(f"{init.bot_config['offline_path']}/示例目录")
     # for file in file_list:
     #     init.logger.info(f"找到视频文件: {file}")
     # app.rename(f"{init.bot_config['offline_path']}/temp", "1111")
@@ -1653,7 +1653,7 @@ if __name__ == "__main__":
     # file_name = os.path.basename(file_path)
     # sha1_value = file_sha1(file_path)
     # up_flg, bingo = app.upload_file(
-    #     target="/AV/国产直播精选",
+    #     target="/影视/电影/示例目录",
     #     file_name=file_name,
     #     file_size=file_size,
     #     fileid=sha1_value,

@@ -8,9 +8,6 @@ from app.utils.message_queue import add_task_to_queue
 import time
 from warnings import filterwarnings
 from telegram.warnings import PTBUserWarning
-from telegram.error import TelegramError
-from app.core.open_115 import RenameFailedError
-from app.utils.cover_capture import get_movie_cover
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
@@ -74,45 +71,17 @@ def try_to_offline2115_again():
                 if task['status'] == 2 and task['percentDone'] == 100:
                     resource_name = task['name']
                     init.logger.info(f"重试任务 {title} 下载完成！")
-                    # 处理下载成功后的清理和重命名准备
+                    # 处理下载成功后的清理和媒体库通知
                     if init.openapi_115.is_directory(f"{save_path}/{resource_name}"):
                         # 清除垃圾文件
                         init.openapi_115.auto_clean_all(f"{save_path}/{resource_name}")
-                        old_name = f"{save_path}/{resource_name}"
+                        final_path = f"{save_path}/{resource_name}"
                     else:
-                        init.openapi_115.create_dir_for_file(f"{save_path}", "temp")
-                        # 移动文件到临时目录
-                        init.openapi_115.move_file(f"{save_path}", f"{save_path}/temp")
-                        old_name = f"{save_path}/temp"
-                    
-                    # 执行重命名
-                    try:
-                        init.openapi_115.rename(old_name, title)
-                    except RenameFailedError as e:
-                        init.openapi_115.delete_single_file(old_name)
-                        init.logger.error(f"重命名失败: {e}")
-                        continue
-                    new_final_path = f"{save_path}/{title}"
-                    file_list = init.openapi_115.get_files_from_dir(new_final_path)
-                    # 创建软链
-                    from app.handlers.download_handler import create_strm_file, notice_emby_scan_library
-                    create_strm_file(new_final_path, file_list)
-                    
-                    # 发送封面图片（如果有的话）
-                    cover_url = ""
-                    
-                    # 根据分类获取封面
-                    cover_url = get_movie_cover(title)
-                    
-                    # 检查是否为订阅内容
-                    from app.core.subscribe_movie import is_subscribe, update_subscribe
-                    if is_subscribe(title):
-                        # 更新订阅信息
-                        update_subscribe(title, cover_url, link)
-                        init.logger.info(f"订阅影片[{title}]已手动下载成功！")
-                    
-                    # 通知Emby扫库
-                    notice_emby_scan_library(new_final_path)
+                        final_path = save_path
+
+                    from app.handlers.download_handler import handle_media_library_update
+                    handle_media_library_update(final_path)
+
                     # 避免link过长
                     if len(link) > 600:
                         link = link[:600] + "..."
@@ -123,21 +92,7 @@ def try_to_offline2115_again():
 **磁力链接:** `{link}`
 **保存路径:** `{save_path}`
         """
-                    if cover_url:
-                        try:
-                            init.logger.info(f"cover_url: {cover_url}")
-                            # 发送通知给授权用户
-                            add_task_to_queue(
-                                init.bot_config['allowed_user'], 
-                                cover_url, 
-                                message=message
-                            )
-                        except TelegramError as e:
-                            init.logger.warn(f"Telegram API error: {e}")
-                        except Exception as e:
-                            init.logger.warn(f"Unexpected error: {e}")
-                    else:
-                        add_task_to_queue(init.bot_config['allowed_user'], None, message=message)
+                    add_task_to_queue(init.bot_config['allowed_user'], None, message=message)
                     
                     # 标记任务为完成
                     mark_task_as_completed(task_id)

@@ -8,7 +8,9 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
 import init
-from app.handlers.download_handler import download_task, handle_manual_rename
+from app.handlers.download_handler import download_task
+from app.utils.ai import get_movie_tmdb_name_with_ai
+from app.utils.cover_capture import get_movie_cover
 
 
 class DownloadTaskStartupTest(unittest.TestCase):
@@ -16,9 +18,9 @@ class DownloadTaskStartupTest(unittest.TestCase):
         init.logger = Mock()
         init.openapi_115 = None
         init.bot_config = {
-            "strm_mode": "disable",
-            "emby_server": "http://emby.example",
-            "api_key": "",
+            "media": {
+                "unorganized_path": "/未整理",
+            },
             "aria2": {"enable": False},
         }
 
@@ -30,10 +32,9 @@ class DownloadTaskStartupTest(unittest.TestCase):
         self.assertEqual(add_task_mock.call_args.args[:2], (123, None))
         self.assertIn("115 OpenAPI 尚未初始化", add_task_mock.call_args.kwargs["message"])
 
-    @patch("app.handlers.download_handler.notice_emby_scan_library", return_value=True)
-    @patch("app.handlers.download_handler.create_strm_file")
+    @patch("app.handlers.download_handler.handle_media_library_update", return_value=None)
     @patch("app.handlers.download_handler.add_task_to_queue")
-    def test_download_task_auto_renames_douban_result_for_plex(self, add_task_mock, create_strm_mock, notice_mock):
+    def test_download_task_auto_renames_douban_result_for_plex(self, add_task_mock, media_update_mock):
         api = Mock()
         api.offline_download_specify_path.return_value = True
         api.check_offline_download_success.return_value = (True, "The.Grand.Budapest.Hotel.2014.1080p", "HASH")
@@ -72,19 +73,14 @@ class DownloadTaskStartupTest(unittest.TestCase):
         api.delete_single_file.assert_called_once_with(
             "/影视/电影/外语电影/The.Grand.Budapest.Hotel.2014.1080p"
         )
-        create_strm_mock.assert_called_once_with(
-            "/影视/电影/外语电影/布达佩斯大饭店/The Grand Budapest Hotel",
-            ["The Grand Budapest Hotel.mkv"],
-        )
-        notice_mock.assert_called_once_with(
+        media_update_mock.assert_called_once_with(
             "/影视/电影/外语电影/布达佩斯大饭店/The Grand Budapest Hotel"
         )
         self.assertIn("自动整理完成", add_task_mock.call_args.kwargs["message"])
 
-    @patch("app.handlers.download_handler.notice_emby_scan_library", return_value=True)
-    @patch("app.handlers.download_handler.create_strm_file")
+    @patch("app.handlers.download_handler.handle_media_library_update", return_value=None)
     @patch("app.handlers.download_handler.add_task_to_queue")
-    def test_download_task_auto_renames_plain_search_result_for_plex(self, add_task_mock, create_strm_mock, notice_mock):
+    def test_download_task_auto_renames_plain_search_result_for_plex(self, add_task_mock, media_update_mock):
         api = Mock()
         api.offline_download_specify_path.return_value = True
         api.check_offline_download_success.return_value = (True, "Breaking.Bad.S02E03.1080p", "HASH")
@@ -118,64 +114,113 @@ class DownloadTaskStartupTest(unittest.TestCase):
             "/影视/剧集/欧美剧/Breaking.Bad.S02E03.1080p/Breaking Bad S02E03.mp4",
             "/影视/剧集/欧美剧/绝命毒师/Breaking Bad",
         )
-        create_strm_mock.assert_called_once_with(
-            "/影视/剧集/欧美剧/绝命毒师/Breaking Bad",
-            ["Breaking Bad S02E03.mp4"],
-        )
-        notice_mock.assert_called_once_with(
+        media_update_mock.assert_called_once_with(
             "/影视/剧集/欧美剧/绝命毒师/Breaking Bad"
         )
         self.assertIn("Breaking Bad S02E03.mp4", add_task_mock.call_args.kwargs["message"])
 
-    @patch("app.core.subscribe_movie.is_subscribe", return_value=False)
-    @patch("app.handlers.download_handler.get_movie_cover", return_value="")
-    @patch("app.handlers.download_handler.notice_emby_scan_library", return_value=True)
-    @patch("app.handlers.download_handler.create_strm_file")
-    def test_manual_rename_stops_after_rename_without_aria_push(
-        self,
-        create_strm_mock,
-        notice_mock,
-        cover_mock,
-        subscribe_mock,
-    ):
+    @patch("app.handlers.download_handler.add_task_to_queue")
+    def test_download_task_moves_success_without_metadata_to_unorganized(self, add_task_mock):
         api = Mock()
-        api.rename.return_value = True
-        api.get_files_from_dir.return_value = ["movie.mkv"]
+        api.offline_download_specify_path.return_value = True
+        api.check_offline_download_success.return_value = (True, "Unknown.Release.2026", "HASH")
+        api.is_directory.return_value = True
+        api.create_dir_recursive.return_value = {"file_id": "unorganized"}
+        api.move_file.return_value = True
+        api.del_offline_task.return_value = True
         init.openapi_115 = api
-        init.aria2_client = Mock()
-        if hasattr(init, "pending_push_tasks"):
-            delattr(init, "pending_push_tasks")
 
-        update = Mock()
-        update.message.text = "The Grand Budapest Hotel"
-        update.effective_chat.id = 123
-        context = Mock()
-        context.user_data = {
-            "rename_data": {
-                "resource_name": "old-name",
-                "selected_path": "/影视/电影/外语电影",
-                "link": "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-                "add2retry": False,
-                "final_path": "/影视/电影/外语电影/old-name",
+        download_task(
+            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
+            "/影视/电影/外语电影",
+            123,
+        )
+
+        api.create_dir_recursive.assert_called_once_with("/未整理")
+        api.move_file.assert_called_once_with(
+            "/影视/电影/外语电影/Unknown.Release.2026",
+            "/未整理",
+        )
+        self.assertIn("/未整理/Unknown.Release.2026", add_task_mock.call_args.kwargs["message"])
+        self.assertNotIn("TMDB", add_task_mock.call_args.kwargs["message"])
+
+    @patch("app.handlers.download_handler.add_task_to_queue")
+    def test_download_task_moves_auto_rename_failure_to_unorganized(self, add_task_mock):
+        api = Mock()
+        api.offline_download_specify_path.return_value = True
+        api.check_offline_download_success.return_value = (True, "Bad.Release", "HASH")
+        api.is_directory.return_value = True
+        api.get_files_from_dir.return_value = []
+        api.create_dir_recursive.return_value = {"file_id": "unorganized"}
+        api.move_file.return_value = True
+        api.del_offline_task.return_value = True
+        init.openapi_115 = api
+
+        download_task(
+            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
+            "/影视/电影/外语电影",
+            123,
+            plex_metadata={
+                "source": "douban",
+                "chinese_title": "未知",
+                "english_title": "Unknown",
+                "year": "2026",
+            },
+        )
+
+        api.move_file.assert_called_once_with("/影视/电影/外语电影/Bad.Release", "/未整理")
+        self.assertIn("未自动整理", add_task_mock.call_args.kwargs["message"])
+        self.assertNotIn("TMDB", add_task_mock.call_args.kwargs["message"])
+
+    @patch("app.handlers.download_handler.add_task_to_queue")
+    def test_download_timeout_offers_retry_without_tmdb_rename(self, add_task_mock):
+        api = Mock()
+        api.offline_download_specify_path.return_value = True
+        api.check_offline_download_success.return_value = (False, "Unknown.Release.2026", "HASH")
+        api.del_offline_task.return_value = True
+        init.openapi_115 = api
+        init.pending_tasks = {}
+
+        download_task(
+            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
+            "/影视/电影/外语电影",
+            123,
+        )
+
+        keyboard = add_task_mock.call_args.kwargs["keyboard"]
+        callback_data = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+        self.assertTrue(any(item.startswith("retry_") for item in callback_data))
+        self.assertIn("cancel_download", callback_data)
+        self.assertFalse(any(item.startswith("rename_") for item in callback_data))
+        self.assertNotIn("TMDB", add_task_mock.call_args.kwargs["message"])
+
+    @patch("app.handlers.download_handler.notice_plex_scan_library", return_value="queued")
+    @patch("app.handlers.download_handler.create_strm_file")
+    def test_plex_media_config_takes_precedence_over_emby_strm(self, create_strm_mock, plex_scan_mock):
+        from app.handlers.download_handler import handle_media_library_update
+
+        init.bot_config = {
+            "media": {
+                "plex": {
+                    "base_url": "http://plex.example:32400",
+                    "token": "plex-token",
+                    "library_id": "1",
+                },
+                "emby": {
+                    "base_url": "http://emby.example:8096",
+                    "api_key": "emby-token",
+                    "strm_mode": "strm_302",
+                },
             }
         }
-        context.bot.send_message = AsyncMock()
 
-        import asyncio
-        asyncio.run(handle_manual_rename(update, context))
+        self.assertEqual(handle_media_library_update("/影视/电影/片名", ["movie.mkv"]), "plex")
+        plex_scan_mock.assert_called_once_with("/影视/电影/片名")
+        create_strm_mock.assert_not_called()
 
-        api.rename.assert_called_once_with(
-            "/影视/电影/外语电影/old-name",
-            "The Grand Budapest Hotel",
-        )
-        create_strm_mock.assert_called_once_with(
-            "/影视/电影/外语电影/The Grand Budapest Hotel",
-            ["movie.mkv"],
-        )
-        notice_mock.assert_called_once_with("/影视/电影/外语电影/The Grand Budapest Hotel")
-        context.bot.send_message.assert_called()
-        self.assertIn("重命名成功", context.bot.send_message.await_args.kwargs["text"])
-        self.assertFalse(hasattr(init, "pending_push_tasks"))
+    def test_ai_and_cover_helpers_remain_available_for_future_naming_pipeline(self):
+        self.assertTrue(callable(get_movie_tmdb_name_with_ai))
+        self.assertTrue(callable(get_movie_cover))
 
 
 if __name__ == "__main__":

@@ -251,5 +251,7 @@ def is_supported_metadata_url(raw_url: str) -> bool:
             "imdb.com",
             "thetvdb.com",
             "tvdb.com",
+            "themoviedb.org",
+            "tmdb.org",
         ]
     )

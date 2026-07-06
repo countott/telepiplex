@@ -49,11 +49,6 @@ tg_user_client: Optional[TelegramClient] = None
 # aria2 客户端
 aria2_client = None
 
-# 爬取状态
-CRAWL_SEHUA_STATUS = 0  # 涩花爬取状态
-CRAWL_JAV_STATUS = 0    # javbee爬取状态
-
-
 # yaml配置文件
 CONFIG_FILE = "/config/config.yaml"
 # yaml配置文件示例
@@ -395,93 +390,6 @@ def init_db():
         '''
         sqlite.execute_sql(create_table_query)
         
-        create_table_query = """
-        CREATE TABLE IF NOT EXISTS av_daily_update (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            av_number TEXT, -- 番号
-            publish_date DATETIME, -- 发布时间
-            title TEXT, -- 标题
-            post_url TEXT, -- 封面URL
-            pub_url TEXT, -- 发布链接
-            magnet TEXT, -- 磁力链接
-            is_download TINYINT DEFAULT 0, -- 是否下载, 0或1, 默认0
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP -- 创建时间，默认当前时间
-        );
-        """
-        sqlite.execute_sql(create_table_query)
-        
-        create_table_query = '''
-        CREATE TABLE IF NOT EXISTS sub_movie (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            movie_name TEXT, -- 电影名称
-            tmdb_id INTEGER, -- TMDB ID
-            size TEXT, -- 文件大小
-            category_folder TEXT, -- 分类文件夹
-            is_download TINYINT DEFAULT 0, -- 是否下载, 0或1, 默认0
-            download_url TEXT,  -- 下载链接, magnet, ed2k, 115share
-            sub_user INTEGER,
-            post_url TEXT, -- 封面URL
-            is_delete TINYINT DEFAULT 0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP -- 创建时间，默认当前时间
-        );
-        '''
-        sqlite.execute_sql(create_table_query)
-        
-        create_table_query = '''
-        CREATE TABLE IF NOT EXISTS sehua_data (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            section_name TEXT, -- 版块名称
-            av_number TEXT, -- 番号
-            title TEXT, -- 标题
-            movie_type TEXT, -- 有码|无码
-            size TEXT, -- 文件大小
-            magnet TEXT, -- 磁力链接
-            post_url TEXT, -- 封面url
-            publish_date DATETIME, -- 发布时间
-            pub_url TEXT, -- 资源链接
-            image_path TEXT, -- 图片本地路径 
-            save_path TEXT, -- 保存路径
-            is_download TINYINT DEFAULT 0, -- 是否下载, 0或1, 默认0
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP -- 创建时间，默认当前时间
-        );
-        '''
-        sqlite.execute_sql(create_table_query)
-        
-        create_table_query = '''
-        CREATE TABLE IF NOT EXISTS t66y (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            section_name TEXT, -- 版块名称
-            movie_info TEXT, -- 影片信息
-            title TEXT, -- 标题
-            magnet TEXT, -- 磁力链接
-            poster_url TEXT, -- 封面url
-            publish_date DATE, -- 发布日期
-            pub_url TEXT, -- 资源链接
-            save_path TEXT, -- 保存路径
-            is_download TINYINT DEFAULT 0, -- 是否下载, 0或1, 默认0
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP -- 创建时间，默认当前时间
-        );
-        '''
-        sqlite.execute_sql(create_table_query)
-        
-        create_table_query = '''
-        CREATE TABLE IF NOT EXISTS javbus (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            av_number TEXT, -- 番号
-            actress TEXT, -- 演员，多个演员逗号分隔
-            sub_category TEXT, -- 订阅类别
-            movie_info TEXT, -- 影片信息
-            title TEXT, -- 标题
-            magnet TEXT, -- 磁力链接
-            poster_url TEXT, -- 封面url
-            publish_date DATE, -- 发布日期
-            pub_url TEXT, -- 资源链接
-            save_path TEXT, -- 保存路径
-            is_download TINYINT DEFAULT 0, -- 是否下载, 0或1, 默认0
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP -- 创建时间，默认当前时间
-        );
-        '''
-        sqlite.execute_sql(create_table_query)
         logger.info("init DataBase success.")
         
 

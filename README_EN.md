@@ -12,60 +12,11 @@ Usage Issues & Bug Reports
 [Join](https://t.me/+FTPNla_7SCc3ZWVl)
 
 ## Update Log
-v3.2.1
-- Added crawling filter rule configuration, allowing precise scraping through title keyword regex. Matched resources can also be assigned to specific save directories for easy categorization. For rule configuration details, please refer to the instructions in "/config/crawling_strategy.yaml".
-- Optimized request strategies, significantly reducing API request frequency.
-- Code improvements and bug fixes.
-
-v3.2.0
-- Added SeHua spider, crawl sehua data you specify and offline download them to 115 every midnight.
-- Updated interaction experience. Download commands use an async model, so offline download tasks do not block the bot. The max download queue is 5.
-- Updated interaction flow. If you want to add a record to retry list, you must to specify the TMDB name. Once the retry succeeds, the bot will never ask for it again.
-- Added “/reload” command to reload configuration
-- Added a log file. By default, it will be saved in "/config/115bot.log" and overwritten when the container restarts.
-- Code optimization and bug fixes
-
-v3.1.0
-- Removed AV subscription feature, added AV daily update functionality that automatically updates and downloads the latest resources to 115 daily, can be enabled or disabled in the configuration file. If the offline download fails, the bot will retry every 6 hours until successful.
-- Added direct AV number offline download feature, input 'av ipz-266' to automatically download to 115, eliminating the need to search for magnet links
-- A new “Retry List” feature has been added. When offline access fails, you can add it to the retry list, and the robot will attempt offline access again after a fixed interval. When you no longer need it, you can clear this list at any time.
-- Added bot menu
-- Code optimization and bug fixes
-
-v3.0.0
-- Refactored underlying interface, all 115 requests now use the open platform API for faster and more stable performance!
-- Optimized video file upload, supporting large video uploads
-- Temporarily disabled AV subscription feature, will update when a stable and reliable interface is found
-
-v2.3.7
-- Fixed the bug where subscription wasn't automatically cancelled after manually downloading subscribed movies
-
-v2.3.6
-- Fixed error with subscribe movie download
-- Due to the triggering of JAVDB's anti-crawling mechanism, the crawling failed and the AV subscription function was temporarily closed. A stable solution will be updated later.
-
-v2.3.5
-- Fixed escaping errors in MarkdownV2 formatting for offline download timeout alert messages  
-- Optimized movie subscription download logic  
-
-v2.3.4
-- bug fix
-
-v2.3.3
-- bug fix
-
-v2.3.2
-- bug fix
-
-v2.3.1
-- When the actress subscription offline download failed, bot will try to change the magnet link
-
-v2.3.0
-- Added movie subscription feature
-- Fixed various bugs
-
-v2.2.0
-- Fixed various bugs
+- Added `/find` for release search, metadata link parsing, 115 offline download, and automatic Plex naming.
+- Reserved `/s` as the Douban keyword search entry point.
+- Unsupported HTTP/HTTPS web pages are rejected; direct downloads currently accept magnet, ed2k, and thunder links.
+- Removed obsolete command surfaces and manual naming flows.
+- Added media configuration for unorganized files and Plex/Emby library update extension points.
 
 ## Background
 This project originated from the need to optimize personal daily viewing experience. As a movie enthusiast, I use the combination of 115 Network Disk + CloudDrive2 + Emby to manage and watch media content.
@@ -92,20 +43,10 @@ If you'd like to help improve this project, welcome to [join](https://t.me/qiqia
   - Uses official API for stable and reliable service
 
 - ⬇️ **Offline Download**
-  - Support multiple download protocols: Magnet links, Thunder, ed2k, FTP, HTTPS
+  - Support multiple download protocols: Magnet links, Thunder, ed2k
   - Intelligent automatic category storage
   - Advertisement file cleanup
-  - Automatic STRM file creation
-
-- 🎬 **AV Number Download**
-  - Input AV number to automatically download offline
-  - Intelligent advertisement file cleanup
-
-- 🎭 **Movie Subscription**
-  - Support automatic movie resource subscription
-  - Automatic offline download when new resources are available
-  - Intelligent advertisement file cleanup
-  - Automatic STRM file creation
+  - Automatic organization for media-library naming
 
 - 🔄 **Directory Synchronization**
   - Automatic local symlink creation
@@ -217,13 +158,13 @@ Please refer to the comments in `config/config.yaml.example` for configuration d
 - `/start`   - Show help information
 - `/auth`    - 115 authorization setup
 - `/reload`  - reload the configuration
-- `/s`       - Search releases
+- `/find`    - Search releases and add them to 115 offline download
+- `/s`       - Reserved Douban keyword search entry
 - `/rl`      - Retry list
 - `/sync`    - Sync directory and create symlinks
-- `/sm`      - Subscribe to movies
 - `/q`       - Cancel current session
 
-Use `/s movie name` to search releases, or send a Douban, IMDb, or TVDB link directly.
+Use `/find movie name` to search releases, or send a Douban, IMDb, TVDB, or TMDB link directly. `/s` is reserved for Douban keyword search and currently tells users to use `/find`.
 
 ### 115 Open Platform Application
 

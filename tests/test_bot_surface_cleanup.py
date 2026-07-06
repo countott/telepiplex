@@ -11,7 +11,7 @@ class BotSurfaceCleanupTest(unittest.TestCase):
         readme_source = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_en_source = (ROOT / "README_EN.md").read_text(encoding="utf-8")
 
-        for command in ("av", "csh", "cjav"):
+        for command in ("av", "csh", "cjav", "rss"):
             self.assertNotIn(f"<code>/{command}</code>", bot_source)
             self.assertNotIn(f'BotCommand("{command}"', bot_source)
             self.assertNotIn(f"CommandHandler('{command}'", bot_source)
@@ -20,6 +20,27 @@ class BotSurfaceCleanupTest(unittest.TestCase):
 
         self.assertNotIn("register_av_download_handlers", bot_source)
         self.assertNotIn("register_crawl_handlers", bot_source)
+        self.assertNotIn("register_rss_handlers", bot_source)
+
+    def test_adult_rss_and_tmdb_subscription_code_is_removed_but_aria_helpers_remain(self):
+        removed_paths = [
+            ROOT / "app" / "handlers" / "av_download_handler.py",
+            ROOT / "app" / "handlers" / "crawl_handler.py",
+            ROOT / "app" / "handlers" / "rss_handler.py",
+            ROOT / "app" / "handlers" / "subscribe_movie_handler.py",
+            ROOT / "app" / "core" / "av_daily_update.py",
+            ROOT / "app" / "core" / "sehua_spider.py",
+            ROOT / "app" / "core" / "javbus.py",
+            ROOT / "app" / "core" / "t66y.py",
+            ROOT / "app" / "core" / "subscribe_movie.py",
+        ]
+        for path in removed_paths:
+            self.assertFalse(path.exists(), str(path))
+
+        self.assertTrue((ROOT / "app" / "handlers" / "aria2_handler.py").exists())
+        self.assertTrue((ROOT / "app" / "utils" / "aria2.py").exists())
+        self.assertTrue((ROOT / "app" / "utils" / "ai.py").exists())
+        self.assertTrue((ROOT / "app" / "utils" / "cover_capture.py").exists())
 
     def test_system_notifications_do_not_attach_decorative_images(self):
         bot_source = (ROOT / "app" / "115bot.py").read_text(encoding="utf-8")
@@ -74,6 +95,30 @@ class BotSurfaceCleanupTest(unittest.TestCase):
 
         self.assertIn("direct_metadata_link_search=enabled", bot_source)
         self.assertIn("builtin_douban_title_priority=latin_or_original_first", bot_source)
+
+    def test_scheduler_and_config_do_not_expose_removed_adult_or_tmdb_pipelines(self):
+        scheduler_source = (ROOT / "app" / "core" / "scheduler.py").read_text(encoding="utf-8")
+        init_source = (ROOT / "app" / "init.py").read_text(encoding="utf-8")
+        app_config_source = (ROOT / "app" / "config.yaml.example").read_text(encoding="utf-8")
+        readme_source = (ROOT / "README.md").read_text(encoding="utf-8")
+        readme_en_source = (ROOT / "README_EN.md").read_text(encoding="utf-8")
+        app_source = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "app").rglob("*.py"))
+
+        removed_terms = [
+            "av_daily_update",
+            "sehua_spider",
+            "rsshub",
+            "register_rss_handlers",
+            "register_subscribe_movie_handlers",
+            "指定标准的TMDB名称",
+            "指定TMDB名称并添加到重试列表",
+        ]
+        for source in (scheduler_source, init_source, app_config_source, readme_source, readme_en_source, app_source):
+            for term in removed_terms:
+                self.assertNotIn(term, source)
+
+        self.assertIn("aria2:", app_config_source)
+        self.assertIn("register_aria2_handlers", (ROOT / "app" / "115bot.py").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -33,10 +33,12 @@ class SearchQueryHelpersTest(unittest.TestCase):
 
         self.assertEqual(parse_media_page_title(html), "Breaking Bad")
 
-    def test_supported_metadata_urls_include_douban_imdb_and_tvdb(self):
+    def test_supported_metadata_urls_include_douban_imdb_tvdb_and_tmdb(self):
         self.assertTrue(is_supported_metadata_url("https://movie.douban.com/subject/11525673/"))
         self.assertTrue(is_supported_metadata_url("https://www.imdb.com/title/tt2278388/"))
         self.assertTrue(is_supported_metadata_url("https://thetvdb.com/series/breaking-bad"))
+        self.assertTrue(is_supported_metadata_url("https://www.themoviedb.org/movie/120-the-lord-of-the-rings"))
+        self.assertTrue(is_supported_metadata_url("https://www.tmdb.org/movie/120-the-lord-of-the-rings"))
         self.assertFalse(is_supported_metadata_url("https://example.com/title/tt2278388/"))
 
     def test_extract_douban_subject_id_from_movie_url(self):
