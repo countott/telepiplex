@@ -121,6 +121,16 @@ media:
     openlist_root: /115
     mount_root: /CloudNAS/115
 
+#############################################元数据设置####################################
+metadata:
+  tvdb:
+    enable: false
+    base_url: "https://api4.thetvdb.com/v4"
+    api_key: ""
+    # user-supported TVDB key 可填写 subscriber pin；licensed key 留空
+    subscriber_pin: ""
+    timeout: 15
+
 ##########################################Aria2#######################################
 # 设置Aria2可选择将离线的影片推送到Aria2
 # 默认关闭

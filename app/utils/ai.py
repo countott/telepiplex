@@ -9,6 +9,42 @@ sys.path.append(parent_dir)
 sys.path.append(current_dir)
 import init
 
+
+TVDB_EPISODE_PLAN_PROMPT = """你是媒体库剧集整理助手。根据输入的多源事实，推断 TVDB 剧集和文件重命名映射。
+
+要求：
+1. 只返回JSON，不要返回Markdown、解释或额外文字。
+2. 不要编造输入中不存在的文件名。
+3. 如果无法可靠匹配，返回空的 episode_map，并在 warnings 中说明原因。
+4. evidence 必须来自输入事实，用于后续代码交叉校验，不要输出自评置信分。
+
+JSON结构：
+{
+  "tvdb_series_id": "string",
+  "series_name": "string",
+  "season_type": "official|default|dvd|absolute|alternate|regional",
+  "evidence": {
+    "title_match": true,
+    "year_match": true,
+    "episode_count_match": true,
+    "notes": ["string"]
+  },
+  "episode_map": [
+    {
+      "source_file": "string",
+      "target_relative_path": "Season 01/Series Name - S01E01 - Episode Title.ext",
+      "target_name": "string",
+      "tvdb_episode_id": 0,
+      "season_number": 1,
+      "episode_number": 1
+    }
+  ],
+  "warnings": ["string"]
+}
+
+输入事实如下：
+"""
+
 def check_ai_api_available():
     url = init.bot_config.get("ai", {}).get("api_url", "")
     if not url:
@@ -57,6 +93,61 @@ def chat_completion(tip_words, max_tokens=8192):
     except Exception as e:
         init.logger.error(f"调用AI接口出错: {e}")
         return None
+
+
+def _strip_json_markdown(text: str) -> str:
+    text = str(text or "").strip()
+    if text.startswith("```"):
+        text = text.replace("```json", "", 1).replace("```", "").strip()
+    return text
+
+
+def parse_ai_json_response(result):
+    if not isinstance(result, dict):
+        return None
+
+    text_content = ""
+    if isinstance(result.get("content"), list) and result["content"]:
+        text_content = result["content"][0].get("text", "")
+    elif isinstance(result.get("choices"), list) and result["choices"]:
+        message = result["choices"][0].get("message") or {}
+        text_content = message.get("content", "")
+
+    text_content = _strip_json_markdown(text_content)
+    if not text_content:
+        return None
+
+    try:
+        return json.loads(text_content)
+    except json.JSONDecodeError:
+        logger = getattr(init, "logger", None)
+        if logger:
+            logger.warn(f"AI返回的不是有效的JSON格式: {text_content}")
+        return None
+
+
+def infer_tvdb_episode_plan_with_ai(context: dict):
+    if not check_ai_api_available():
+        return None
+
+    prompt = TVDB_EPISODE_PLAN_PROMPT + json.dumps(context or {}, ensure_ascii=False, indent=2)
+    result = chat_completion(prompt, max_tokens=4096)
+    if getattr(init, "logger", None):
+        init.logger.info(f"AI TVDB映射原始响应: {result}")
+    plan = parse_ai_json_response(result)
+    if not isinstance(plan, dict):
+        return None
+
+    episode_map = plan.get("episode_map")
+    if not isinstance(episode_map, list):
+        plan["episode_map"] = []
+    warnings = plan.get("warnings")
+    if not isinstance(warnings, list):
+        plan["warnings"] = []
+    evidence = plan.get("evidence")
+    if not isinstance(evidence, dict):
+        plan["evidence"] = {}
+    return plan
 
 def get_movie_tmdb_name_with_ai(movie_desc):
     

@@ -15,7 +15,10 @@ from warnings import filterwarnings
 from telegram.warnings import PTBUserWarning
 from app.utils.sqlitelib import *
 from concurrent.futures import ThreadPoolExecutor
+from app.adapters.tvdb import TvdbConfigError, TvdbRequestError, get_tvdb_series_episodes, search_tvdb_series
+from app.utils.ai import infer_tvdb_episode_plan_with_ai
 from app.utils.plex_naming import build_plex_naming_plan
+from app.utils.tvdb_rename import VIDEO_EXTENSIONS, build_tvdb_rename_plan
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
@@ -375,6 +378,194 @@ def save_failed_download_to_db(title, magnet, save_path):
     except Exception as e:
         raise str(e)
     
+
+def _list_response_items(response):
+    if isinstance(response, list):
+        return response
+    if isinstance(response, dict):
+        data = response.get("data")
+        if isinstance(data, dict) and isinstance(data.get("list"), list):
+            return data["list"]
+        if isinstance(data, list):
+            return data
+        if isinstance(response.get("list"), list):
+            return response["list"]
+    return []
+
+
+def _file_name_from_115_item(item):
+    return str(item.get("fn") or item.get("n") or item.get("file_name") or item.get("name") or "").strip()
+
+
+def _file_id_from_115_item(item):
+    return str(item.get("fid") or item.get("cid") or item.get("file_id") or item.get("id") or "").strip()
+
+
+def _is_dir_115_item(item):
+    if "is_dir" in item:
+        return bool(item.get("is_dir"))
+    if "file_category" in item:
+        return str(item.get("file_category")) == "0"
+    if "fc" in item:
+        return str(item.get("fc")) != "1"
+    return False
+
+
+def collect_115_file_tree(openapi, root_path, max_depth=4, limit=1000):
+    root_info = openapi.get_file_info(root_path)
+    if not root_info:
+        init.logger.warn(f"TVDB整理跳过：无法读取115目录 {root_path}")
+        return []
+
+    root_id = str(root_info.get("file_id") or root_info.get("cid") or root_info.get("fid") or "").strip()
+    if not root_id:
+        init.logger.warn(f"TVDB整理跳过：115目录缺少ID {root_path}")
+        return []
+
+    tree = []
+
+    def walk(parent_id, prefix="", depth=0):
+        if depth > max_depth:
+            return
+        items = _list_response_items(openapi.get_file_list({"cid": parent_id, "limit": limit, "show_dir": 1}))
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = _file_name_from_115_item(item)
+            if not name:
+                continue
+            relative_path = f"{prefix}/{name}".strip("/")
+            is_dir = _is_dir_115_item(item)
+            node = {
+                "name": name,
+                "relative_path": relative_path,
+                "is_dir": is_dir,
+                "file_id": _file_id_from_115_item(item),
+                "size": item.get("fs") or item.get("size") or item.get("size_byte") or 0,
+            }
+            if is_dir:
+                tree.append(node)
+                child_id = node["file_id"]
+                if child_id:
+                    walk(child_id, relative_path, depth + 1)
+            elif Path(name).suffix.lower() in VIDEO_EXTENSIONS:
+                tree.append(node)
+
+    walk(root_id)
+    return tree
+
+
+def _tvdb_title_from_metadata(metadata):
+    metadata = metadata or {}
+    title = metadata.get("english_title") or metadata.get("query") or ""
+    year = str(metadata.get("year") or "").strip()
+    if title and year and title.endswith(f" {year}"):
+        title = title[: -len(year)].strip()
+    return " ".join(str(title or "").split())
+
+
+def _get_tvdb_candidates_and_episodes(metadata):
+    title = _tvdb_title_from_metadata(metadata)
+    if not title:
+        init.logger.warn(f"TVDB整理跳过：元数据缺少英文标题 {metadata}")
+        return [], []
+
+    try:
+        candidates = search_tvdb_series(title, year=str((metadata or {}).get("year") or "").strip())[:3]
+    except TvdbConfigError as e:
+        init.logger.info(f"TVDB整理跳过：{e}")
+        return [], []
+    except TvdbRequestError as e:
+        init.logger.warn(f"TVDB搜索失败，跳过TVDB整理: {e}")
+        return [], []
+
+    episodes = []
+    for candidate in candidates:
+        series_id = str(candidate.get("tvdb_series_id") or "").strip()
+        if not series_id:
+            continue
+        try:
+            series_episodes = get_tvdb_series_episodes(series_id, season_type="default")
+        except TvdbRequestError as e:
+            init.logger.warn(f"TVDB剧集列表获取失败 series_id={series_id}: {e}")
+            continue
+        for episode in series_episodes:
+            item = dict(episode)
+            item["tvdb_series_id"] = series_id
+            episodes.append(item)
+    return candidates, episodes
+
+
+def _has_ai_episode_inference_config():
+    ai_config = init.bot_config.get("ai") or {}
+    return bool(
+        str(ai_config.get("api_url") or "").strip()
+        and str(ai_config.get("api_key") or "").strip()
+        and str(ai_config.get("model") or "").strip()
+    )
+
+
+def _attempt_tvdb_ai_episode_rename(final_path, selected_path, resource_name, metadata):
+    if not metadata:
+        return None
+
+    if not _has_ai_episode_inference_config():
+        return None
+
+    tvdb_candidates, tvdb_episodes = _get_tvdb_candidates_and_episodes(metadata)
+    if not tvdb_candidates or not tvdb_episodes:
+        return None
+
+    file_tree = collect_115_file_tree(init.openapi_115, final_path)
+    video_count = len([item for item in file_tree if not item.get("is_dir")])
+    if not video_count:
+        init.logger.warn(f"TVDB整理跳过：目录中未找到视频文件 {final_path}")
+        return None
+
+    context = {
+        "metadata": metadata,
+        "release_title": metadata.get("release_title") or resource_name,
+        "resource_name": resource_name,
+        "download_path": final_path,
+        "file_tree": file_tree,
+        "tvdb_candidates": tvdb_candidates,
+        "tvdb_episodes": tvdb_episodes,
+        "naming_rules": {
+            "target_root": "selected_path / chinese_title(if present) / tvdb series_name",
+            "target_relative_path": "Season XX / Series Name - SXXEXX - Episode Title.ext",
+            "source_file": "must exactly match one file_tree relative_path or a unique file name",
+        },
+    }
+    ai_plan = infer_tvdb_episode_plan_with_ai(context)
+    rename_plan = build_tvdb_rename_plan(
+        final_path=final_path,
+        selected_path=selected_path,
+        metadata=metadata,
+        ai_plan=ai_plan,
+        file_tree=file_tree,
+        tvdb_candidates=tvdb_candidates,
+        tvdb_episodes=tvdb_episodes,
+    )
+    if not rename_plan:
+        init.logger.warn(f"TVDB整理跳过：AI映射未通过交叉校验 path={final_path}")
+        return None
+
+    for operation in rename_plan["operations"]:
+        init.openapi_115.create_dir_recursive(operation["target_dir"])
+        current_source_path = operation["source_path"]
+        if Path(operation["source_path"]).name != operation["rename_to"]:
+            if not init.openapi_115.rename(operation["source_path"], operation["rename_to"]):
+                raise RuntimeError(f"TVDB整理失败：重命名失败 {operation['source_path']}")
+            current_source_path = operation["renamed_source_path"]
+        if not init.openapi_115.move_file(current_source_path, operation["target_dir"]):
+            raise RuntimeError(f"TVDB整理失败：移动失败 {current_source_path}")
+
+    if final_path != rename_plan["target_root"]:
+        init.openapi_115.delete_single_file(final_path)
+
+    handle_media_library_update(rename_plan["target_root"])
+    return rename_plan
+
     
 def _attempt_plex_auto_rename(final_path, selected_path, resource_name, plex_metadata):
     if not plex_metadata:
@@ -453,7 +644,7 @@ def _queue_retry_choice(user_id, link, selected_path, resource_name, reason):
     )
 
 
-def download_task(link, selected_path, user_id, plex_metadata=None):
+def download_task(link, selected_path, user_id, plex_metadata=None, metadata=None):
     """异步下载任务"""
     info_hash = ""
     if init.openapi_115 is None:
@@ -492,6 +683,25 @@ def download_task(link, selected_path, user_id, plex_metadata=None):
                 resource_name = temp_folder
 
             try:
+                tvdb_result = _attempt_tvdb_ai_episode_rename(
+                    final_path,
+                    selected_path,
+                    resource_name,
+                    metadata or plex_metadata,
+                )
+                if tvdb_result:
+                    message = (
+                        f"✅ TVDB 自动整理完成：`{tvdb_result['series_name'] or tvdb_result['target_root'].split('/')[-1]}`\n"
+                        f"文件数：{len(tvdb_result['operations'])} 个文件\n\n"
+                        f"保存目录：`{tvdb_result['target_root']}`"
+                    )
+                    if tvdb_result.get("tvdb_series_id"):
+                        message += f"\nTVDB：`{tvdb_result['tvdb_series_id']}`"
+                    if tvdb_result.get("warnings"):
+                        message += f"\n提示：{'; '.join(tvdb_result['warnings'][:2])}"
+                    add_task_to_queue(user_id, None, message=message)
+                    return
+
                 auto_result = _attempt_plex_auto_rename(final_path, selected_path, resource_name, plex_metadata)
                 if auto_result:
                     target_path, plan = auto_result

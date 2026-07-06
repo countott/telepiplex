@@ -17,8 +17,10 @@ from app.handlers.search_handler import (
     SEARCH_TASK_TTL_SECONDS,
     _clean_prowlarr_query,
     _extract_douban_metadata,
+    _extract_douban_subject_urls,
     _fetch_media_page_title,
     _is_supported_http_download,
+    _metadata_for_selected_release,
     _metadata_matches_plain_query,
     _plex_metadata_for_selected_release,
     _resolve_search_request,
@@ -31,6 +33,7 @@ from app.handlers.search_handler import (
     pending_search_tasks,
     resolve_plain_search_metadata,
     _search_prowlarr_with_progress,
+    select_search_sub_category,
 )
 
 
@@ -137,6 +140,23 @@ class SearchHandlerHelpersTest(unittest.TestCase):
                 "english_title": "Dexter Original Sin",
                 "year": "2024",
             },
+        )
+
+    def test_extract_douban_subject_urls_supports_redirect_relative_and_escaped_links(self):
+        html = """
+        <a href="/subject/1111111/">relative</a>
+        <a href="https://www.douban.com/link2/?url=https%3A%2F%2Fmovie.douban.com%2Fsubject%2F2222222%2F">redirect</a>
+        <a href="https:\\/\\/movie.douban.com\\/subject\\/3333333\\/">escaped</a>
+        <a href="https://movie.douban.com/subject/2222222/">duplicate</a>
+        """
+
+        self.assertEqual(
+            _extract_douban_subject_urls(html),
+            [
+                "https://movie.douban.com/subject/1111111/",
+                "https://movie.douban.com/subject/2222222/",
+                "https://movie.douban.com/subject/3333333/",
+            ],
         )
 
     @patch("app.handlers.search_handler.requests.get")
@@ -251,6 +271,74 @@ class SearchHandlerHelpersTest(unittest.TestCase):
 
         self.assertEqual(metadata["release_title"], "Breaking.Bad.1x02.1080p.WEB-DL")
         self.assertNotIn("release_title", task_metadata)
+
+    def test_metadata_for_selected_release_adds_release_title_without_mutating_task(self):
+        task_metadata = {
+            "source": "imdb",
+            "english_title": "Dexter",
+            "year": "2006",
+            "external_ids": {"imdb": "tt0773262"},
+            "evidence": [{"source": "imdb", "field": "title_year"}],
+        }
+        task = {"metadata": task_metadata}
+        selected_item = {"title": "Dexter.S01.1080p.BluRay-GROUP"}
+
+        metadata = _metadata_for_selected_release(task, selected_item)
+
+        self.assertEqual(metadata["release_title"], "Dexter.S01.1080p.BluRay-GROUP")
+        self.assertEqual(metadata["external_ids"], {"imdb": "tt0773262"})
+        self.assertNotIn("release_title", task_metadata)
+
+    @patch("app.handlers.search_handler.download_executor.submit")
+    @patch("app.handlers.search_handler._resolve_selected_link", new_callable=AsyncMock)
+    def test_search_sub_category_passes_metadata_to_download_task(self, resolve_link_mock, submit_mock):
+        resolve_link_mock.return_value = "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567"
+        init.bot_config = {
+            "category_folder": [
+                {
+                    "name": "series",
+                    "path_map": [{"name": "真人剧集", "path": "/真人剧集"}],
+                }
+            ]
+        }
+        pending_search_tasks["task-1"] = {
+            "created_at": time.time(),
+            "user_id": 472943219,
+            "query": "Dexter 2006",
+            "results": [],
+            "plex_metadata": {
+                "source": "douban",
+                "chinese_title": "嗜血法医",
+                "english_title": "Dexter",
+                "year": "2006",
+            },
+            "metadata": {
+                "source": "imdb",
+                "english_title": "Dexter",
+                "year": "2006",
+                "external_ids": {"imdb": "tt0773262"},
+            },
+        }
+        update = Mock()
+        update.effective_user.id = 472943219
+        update.callback_query.data = "search_path:task-1:0"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        context = Mock()
+        context.user_data = {
+            "search_selected_main_category": "series",
+            "search_selected_item": {
+                "title": "Dexter.S01.1080p.BluRay-GROUP",
+                "magnet_url": "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
+            },
+        }
+
+        asyncio.run(select_search_sub_category(update, context))
+
+        submit_mock.assert_called_once()
+        self.assertEqual(submit_mock.call_args.args[2], "/真人剧集")
+        self.assertEqual(submit_mock.call_args.kwargs["metadata"]["release_title"], "Dexter.S01.1080p.BluRay-GROUP")
+        self.assertEqual(submit_mock.call_args.kwargs["metadata"]["external_ids"], {"imdb": "tt0773262"})
 
     @patch("app.handlers.search_handler.requests.get")
     def test_resolve_plain_search_request_requires_metadata_when_douban_misses(self, mock_get):

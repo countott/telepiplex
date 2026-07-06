@@ -172,6 +172,134 @@ class DownloadTaskStartupTest(unittest.TestCase):
         self.assertIn("未自动整理", add_task_mock.call_args.kwargs["message"])
         self.assertNotIn("TMDB", add_task_mock.call_args.kwargs["message"])
 
+    @patch("app.handlers.download_handler.time.sleep", return_value=None)
+    @patch("app.handlers.download_handler.handle_media_library_update", return_value=None)
+    @patch("app.handlers.download_handler.infer_tvdb_episode_plan_with_ai")
+    @patch("app.handlers.download_handler.get_tvdb_series_episodes")
+    @patch("app.handlers.download_handler.search_tvdb_series")
+    @patch("app.handlers.download_handler.add_task_to_queue")
+    def test_download_task_uses_115_tree_and_tvdb_ai_plan_before_legacy_rename(
+        self,
+        add_task_mock,
+        search_tvdb_mock,
+        episodes_mock,
+        ai_plan_mock,
+        media_update_mock,
+        sleep_mock,
+    ):
+        api = Mock()
+        api.offline_download_specify_path.return_value = True
+        api.check_offline_download_success.return_value = (True, "Dexter.Release", "HASH")
+        api.is_directory.return_value = True
+        api.get_file_info.return_value = {"file_id": "root", "file_category": "0"}
+        api.get_file_list.return_value = [
+            {"fn": "Dexter.S01E01.mkv", "fid": "file-1", "fc": "1", "fs": 1024}
+        ]
+        api.create_dir_recursive.return_value = {"file_id": "season"}
+        api.rename.return_value = True
+        api.move_file.return_value = True
+        api.delete_single_file.return_value = True
+        api.del_offline_task.return_value = True
+        init.openapi_115 = api
+        init.bot_config["ai"] = {
+            "api_url": "https://api.example/v1",
+            "api_key": "key",
+            "model": "model",
+        }
+
+        search_tvdb_mock.return_value = [{"tvdb_series_id": "79349", "name": "Dexter", "year": "2006"}]
+        episodes_mock.return_value = [
+            {"tvdb_episode_id": 349232, "season_number": 1, "episode_number": 1, "name": "Dexter"}
+        ]
+        ai_plan_mock.return_value = {
+            "tvdb_series_id": "79349",
+            "series_name": "Dexter",
+            "episode_map": [
+                {
+                    "source_file": "Dexter.S01E01.mkv",
+                    "target_relative_path": "Season 01/Dexter - S01E01 - Dexter.mkv",
+                    "tvdb_episode_id": 349232,
+                    "season_number": 1,
+                    "episode_number": 1,
+                }
+            ],
+            "warnings": [],
+        }
+
+        download_task(
+            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
+            "/真人剧集",
+            123,
+            plex_metadata={
+                "source": "douban",
+                "chinese_title": "嗜血法医",
+                "english_title": "Dexter",
+                "year": "2006",
+            },
+            metadata={
+                "source": "douban",
+                "chinese_title": "嗜血法医",
+                "english_title": "Dexter",
+                "year": "2006",
+                "query": "Dexter 2006",
+                "release_title": "Dexter.S01.1080p",
+            },
+        )
+
+        api.get_file_info.assert_any_call("/真人剧集/Dexter.Release")
+        api.get_file_list.assert_any_call({"cid": "root", "limit": 1000, "show_dir": 1})
+        search_tvdb_mock.assert_called_once_with("Dexter", year="2006")
+        episodes_mock.assert_called_once_with("79349", season_type="default")
+        self.assertEqual(ai_plan_mock.call_args.args[0]["file_tree"][0]["relative_path"], "Dexter.S01E01.mkv")
+        api.create_dir_recursive.assert_called_once_with("/真人剧集/嗜血法医/Dexter/Season 01")
+        api.rename.assert_called_once_with(
+            "/真人剧集/Dexter.Release/Dexter.S01E01.mkv",
+            "Dexter - S01E01 - Dexter.mkv",
+        )
+        api.move_file.assert_called_once_with(
+            "/真人剧集/Dexter.Release/Dexter - S01E01 - Dexter.mkv",
+            "/真人剧集/嗜血法医/Dexter/Season 01",
+        )
+        api.delete_single_file.assert_any_call("/真人剧集/Dexter.Release")
+        api.get_files_from_dir.assert_not_called()
+        media_update_mock.assert_called_once_with("/真人剧集/嗜血法医/Dexter")
+        self.assertIn("TVDB 自动整理完成", add_task_mock.call_args.kwargs["message"])
+        self.assertIn("1 个文件", add_task_mock.call_args.kwargs["message"])
+
+    @patch("app.handlers.download_handler.time.sleep", return_value=None)
+    @patch("app.handlers.download_handler.search_tvdb_series")
+    @patch("app.handlers.download_handler.add_task_to_queue")
+    def test_download_task_skips_tvdb_lookup_when_ai_config_missing(
+        self,
+        add_task_mock,
+        search_tvdb_mock,
+        sleep_mock,
+    ):
+        init.bot_config = {
+            "media": {"unorganized_path": "/未整理"},
+            "metadata": {"tvdb": {"enable": True, "api_key": "tvdb-key"}},
+        }
+        api = Mock()
+        api.offline_download_specify_path.return_value = True
+        api.check_offline_download_success.return_value = (True, "Dexter.Release", "HASH")
+        api.is_directory.return_value = True
+        api.create_dir_recursive.return_value = {"file_id": "unorganized"}
+        api.move_file.return_value = True
+        api.del_offline_task.return_value = True
+        init.openapi_115 = api
+
+        download_task(
+            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
+            "/真人剧集",
+            123,
+            metadata={"source": "imdb", "english_title": "Dexter", "year": "2006"},
+        )
+
+        search_tvdb_mock.assert_not_called()
+        api.get_file_info.assert_not_called()
+        init.logger.warn.assert_not_called()
+        self.assertIn("/未整理/Dexter.Release", add_task_mock.call_args.kwargs["message"])
+
     @patch("app.handlers.download_handler.add_task_to_queue")
     def test_download_timeout_offers_retry_without_tmdb_rename(self, add_task_mock):
         api = Mock()

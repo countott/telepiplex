@@ -40,6 +40,8 @@ def log_runtime_features():
         "Telepiplex runtime features: direct_metadata_link_search=enabled, "
         "builtin_douban_title_priority=latin_or_original_first, "
         "external_metadata_douban_reverse_lookup=enabled, prowlarr_indexer_summary=enabled, "
+        "metadata_object=enabled, tvdb_adapter=enabled, ai_tvdb_inference=enabled, "
+        "tvdb_ai_115_tree_rename=enabled, "
         "revision=%s" % revision
     )
 

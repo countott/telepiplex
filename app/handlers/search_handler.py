@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
+import html
 import re
 import time
 import uuid
 from warnings import filterwarnings
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, unquote_plus, urlparse
 
 import requests
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -22,6 +23,7 @@ from app.adapters.prowlarr import (
     search_prowlarr,
 )
 from app.handlers.download_handler import download_executor, download_task
+from app.utils.media_metadata import build_external_metadata, build_search_metadata
 from app.utils.release_score import rank_releases
 from app.utils.search_query import (
     extract_douban_subject_id,
@@ -181,6 +183,30 @@ def _query_from_plex_metadata(metadata: dict) -> str:
     return _collapse_title_spaces(query)
 
 
+def _metadata_from_plex_metadata(plex_metadata: dict, query: str = "", original_url: str = "") -> dict:
+    external_ids = {}
+    source = plex_metadata.get("source") or ""
+    if source == "douban" and plex_metadata.get("subject_id"):
+        external_ids["douban_subject"] = plex_metadata["subject_id"]
+
+    return build_search_metadata(
+        source=source,
+        media_type=plex_metadata.get("media_type") or "",
+        chinese_title=plex_metadata.get("chinese_title") or "",
+        english_title=plex_metadata.get("english_title") or "",
+        year=plex_metadata.get("year") or "",
+        query=query or _query_from_plex_metadata(plex_metadata),
+        original_url=original_url,
+        external_ids=external_ids,
+        evidence=[
+            {
+                "source": source,
+                "field": "plex_metadata",
+            }
+        ],
+    )
+
+
 def _metadata_matches_plain_query(metadata: dict, query: str) -> bool:
     normalized_query = _normalize_match_title(query)
     if not normalized_query:
@@ -217,7 +243,12 @@ def _fetch_douban_json_metadata(endpoint: str, referer: str) -> dict | None:
 def _extract_douban_subject_urls(html_text: str) -> list[str]:
     urls = []
     seen = set()
-    for subject_id in re.findall(r"https?://movie\.douban\.com/subject/(\d+)/?", str(html_text or "")):
+    text = html.unescape(str(html_text or ""))
+    text = unquote_plus(unquote(text.replace("\\/", "/")))
+
+    pattern = re.compile(r"(?:https?:)?//movie\.douban\.com/subject/(\d+)/?|(?<![\w/])/subject/(\d+)/?")
+    for match in pattern.finditer(text):
+        subject_id = match.group(1) or match.group(2)
         if subject_id in seen:
             continue
         seen.add(subject_id)
@@ -458,6 +489,19 @@ def _is_imdb_url(raw_query: str) -> bool:
     return bool(_extract_imdb_title_id(raw_query))
 
 
+def _metadata_source_from_url(raw_url: str) -> str:
+    host = urlparse(str(raw_url or "").strip()).netloc.lower()
+    if "imdb.com" in host:
+        return "imdb"
+    if "thetvdb.com" in host or "tvdb.com" in host:
+        return "tvdb"
+    if "themoviedb.org" in host or "tmdb.org" in host:
+        return "tmdb"
+    if "douban.com" in host:
+        return "douban"
+    return "metadata_url"
+
+
 def _is_supported_http_download(raw_query: str) -> bool:
     return is_supported_metadata_url(raw_query)
 
@@ -654,7 +698,12 @@ def _title_from_metadata_url_slug(raw_url: str) -> str:
 
 def _fetch_external_title_metadata(raw_url: str) -> dict | None:
     if _is_imdb_url(raw_url):
-        return _fetch_imdb_suggestion_metadata(_extract_imdb_title_id(raw_url))
+        metadata = _fetch_imdb_suggestion_metadata(_extract_imdb_title_id(raw_url))
+        if metadata:
+            metadata["source"] = "imdb"
+            metadata["external_id"] = _extract_imdb_title_id(raw_url)
+            metadata["original_url"] = raw_url
+        return metadata
 
     title = ""
     try:
@@ -664,10 +713,16 @@ def _fetch_external_title_metadata(raw_url: str) -> dict | None:
 
     metadata = _split_external_title_year(title)
     if metadata:
+        metadata["source"] = _metadata_source_from_url(raw_url)
+        metadata["original_url"] = raw_url
         return metadata
 
     slug_title = _title_from_metadata_url_slug(raw_url)
-    return _split_external_title_year(slug_title)
+    metadata = _split_external_title_year(slug_title)
+    if metadata:
+        metadata["source"] = _metadata_source_from_url(raw_url)
+        metadata["original_url"] = raw_url
+    return metadata
 
 
 async def _resolve_query(raw_query: str) -> str | None:
@@ -684,9 +739,11 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
         try:
             metadata = await asyncio.to_thread(_fetch_douban_metadata_for_plain_query, query)
             if metadata:
+                resolved_query = _clean_prowlarr_query(_query_from_plex_metadata(metadata))
                 return {
-                    "query": _clean_prowlarr_query(_query_from_plex_metadata(metadata)),
+                    "query": resolved_query,
                     "plex_metadata": metadata,
+                    "metadata": _metadata_from_plex_metadata(metadata, query=resolved_query),
                 }
         except Exception as e:
             _log_warn(f"普通片名豆瓣反查失败，等待用户补充元数据: {e}")
@@ -703,7 +760,11 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
             if metadata:
                 query = _clean_prowlarr_query(_query_from_plex_metadata(metadata))
                 _log_info(f"豆瓣链接解析为搜索词 raw={raw_query} query={query} metadata={metadata}")
-                return {"query": query, "plex_metadata": metadata}
+                return {
+                    "query": query,
+                    "plex_metadata": metadata,
+                    "metadata": _metadata_from_plex_metadata(metadata, query=query, original_url=raw_query),
+                }
 
         external_metadata = await asyncio.to_thread(_fetch_external_title_metadata, raw_query)
         if external_metadata:
@@ -719,14 +780,31 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
                     f"title={external_metadata.get('title')} year={external_metadata.get('year')} "
                     f"query={query} metadata={metadata}"
                 )
-                return {"query": query, "plex_metadata": metadata}
+                search_metadata = _metadata_from_plex_metadata(metadata, query=query, original_url=raw_query)
+                search_metadata["evidence"].append(
+                    {
+                        "source": external_metadata.get("source") or _metadata_source_from_url(raw_query),
+                        "field": "external_title_year",
+                        "title": external_metadata.get("title"),
+                        "year": external_metadata.get("year"),
+                    }
+                )
+                return {"query": query, "plex_metadata": metadata, "metadata": search_metadata}
 
             if query:
+                source = external_metadata.get("source") or _metadata_source_from_url(raw_query)
+                search_metadata = build_external_metadata(
+                    source=source,
+                    title=external_metadata.get("title"),
+                    year=external_metadata.get("year"),
+                    external_id=external_metadata.get("external_id") or "",
+                    original_url=raw_query,
+                )
                 _log_info(
                     f"外站链接解析为英文搜索词 raw={raw_query} "
                     f"title={external_metadata.get('title')} year={external_metadata.get('year')} query={query}"
                 )
-                return {"query": query, "plex_metadata": None}
+                return {"query": query, "plex_metadata": None, "metadata": search_metadata}
 
         query = _clean_prowlarr_query(await asyncio.to_thread(_fetch_media_page_title, raw_query))
         _log_info(f"媒体链接解析为搜索词 raw={raw_query} query={query}")
@@ -743,6 +821,20 @@ def _plex_metadata_for_selected_release(task: dict, selected_item: dict):
 
     result = metadata.copy()
     result["release_title"] = selected_item.get("title") or task.get("query") or ""
+    return result
+
+
+def _metadata_for_selected_release(task: dict, selected_item: dict):
+    metadata = task.get("metadata")
+    if not metadata:
+        return None
+
+    result = metadata.copy()
+    if isinstance(metadata.get("external_ids"), dict):
+        result["external_ids"] = metadata["external_ids"].copy()
+    if isinstance(metadata.get("evidence"), list):
+        result["evidence"] = [item.copy() if isinstance(item, dict) else item for item in metadata["evidence"]]
+    result["release_title"] = selected_item.get("title") or task.get("query") or metadata.get("query") or ""
     return result
 
 
@@ -809,7 +901,7 @@ async def _search_prowlarr_with_progress(
         )
 
 
-async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, plex_metadata=None):
+async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, plex_metadata=None, metadata=None):
     await _reply_or_send(update, context, f"🔍 正在搜索片源：{query}")
     _log_info(f"搜索片源开始 query={query}")
 
@@ -841,6 +933,7 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
         "results": results,
         "user_id": update.effective_user.id,
         "plex_metadata": plex_metadata,
+        "metadata": metadata or (_metadata_from_plex_metadata(plex_metadata, query=query) if plex_metadata else None),
     }
 
     await _send_search_message(
@@ -851,6 +944,13 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
         disable_web_page_preview=True,
     )
     return SEARCH_SELECT_RESULT
+
+
+async def _send_resolved_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, request: dict):
+    kwargs = {"plex_metadata": request.get("plex_metadata")}
+    if request.get("metadata") is not None:
+        kwargs["metadata"] = request.get("metadata")
+    return await _send_search_results(update, context, request["query"], **kwargs)
 
 
 async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -878,12 +978,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return SEARCH_RESOLVE_METADATA
 
-    return await _send_search_results(
-        update,
-        context,
-        request["query"],
-        plex_metadata=request.get("plex_metadata"),
-    )
+    return await _send_resolved_search_results(update, context, request)
 
 
 async def douban_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -913,12 +1008,7 @@ async def search_metadata_link_command(update: Update, context: ContextTypes.DEF
         await update.message.reply_text("⚠️ 页面链接解析失败，请改用片名搜索。")
         return ConversationHandler.END
 
-    return await _send_search_results(
-        update,
-        context,
-        request["query"],
-        plex_metadata=request.get("plex_metadata"),
-    )
+    return await _send_resolved_search_results(update, context, request)
 
 
 async def unsupported_http_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -955,12 +1045,7 @@ async def resolve_plain_search_metadata(update: Update, context: ContextTypes.DE
             return SEARCH_RESOLVE_METADATA
 
         context.user_data.pop("pending_plain_search_query", None)
-        return await _send_search_results(
-            update,
-            context,
-            request["query"],
-            plex_metadata=metadata,
-        )
+        return await _send_resolved_search_results(update, context, request)
 
     if re.match(r"(?i)^https?://", text):
         await update.message.reply_text("⚠️ 该链接暂不支持，请发送豆瓣链接或直接回复中文片名。")
@@ -1045,8 +1130,16 @@ async def select_search_main_category(update: Update, context: ContextTypes.DEFA
 
         selected_item = context.user_data.get("search_selected_item") or {}
         plex_metadata = _plex_metadata_for_selected_release(task, selected_item)
+        metadata = _metadata_for_selected_release(task, selected_item)
         await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到 115 离线下载，请稍后查看结果。")
-        download_executor.submit(download_task, link, selected_path, update.effective_user.id, plex_metadata=plex_metadata)
+        download_executor.submit(
+            download_task,
+            link,
+            selected_path,
+            update.effective_user.id,
+            plex_metadata=plex_metadata,
+            metadata=metadata,
+        )
         pending_search_tasks.pop(task_id, None)
         return ConversationHandler.END
 
@@ -1105,8 +1198,16 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
 
     selected_item = context.user_data.get("search_selected_item") or {}
     plex_metadata = _plex_metadata_for_selected_release(task, selected_item)
+    metadata = _metadata_for_selected_release(task, selected_item)
     await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到 115 离线下载，请稍后查看结果。")
-    download_executor.submit(download_task, link, selected_path, update.effective_user.id, plex_metadata=plex_metadata)
+    download_executor.submit(
+        download_task,
+        link,
+        selected_path,
+        update.effective_user.id,
+        plex_metadata=plex_metadata,
+        metadata=metadata,
+    )
     pending_search_tasks.pop(task_id, None)
     return ConversationHandler.END
 

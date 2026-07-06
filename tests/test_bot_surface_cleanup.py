@@ -97,6 +97,10 @@ class BotSurfaceCleanupTest(unittest.TestCase):
         self.assertIn("builtin_douban_title_priority=latin_or_original_first", bot_source)
         self.assertIn("external_metadata_douban_reverse_lookup=enabled", bot_source)
         self.assertIn("prowlarr_indexer_summary=enabled", bot_source)
+        self.assertIn("metadata_object=enabled", bot_source)
+        self.assertIn("tvdb_adapter=enabled", bot_source)
+        self.assertIn("ai_tvdb_inference=enabled", bot_source)
+        self.assertIn("tvdb_ai_115_tree_rename=enabled", bot_source)
 
     def test_scheduler_and_config_do_not_expose_removed_adult_or_tmdb_pipelines(self):
         scheduler_source = (ROOT / "app" / "core" / "scheduler.py").read_text(encoding="utf-8")
