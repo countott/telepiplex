@@ -1,127 +1,234 @@
-<div align="center">
-    <h1>115Bot - Telegram 机器人</h1>
-    <p>简体中文 | <a href="./README_EN.md">[English]</a> </p>
-</div>
+# Telepiplex
 
-一个基于 Python 的 Telegram 机器人，用于管理和控制 115 网盘，支持离线下载、视频上传、目录同步等功能。
+Telepiplex 是基于 Telegram-115Bot 的个人媒体自动化 fork，用 Telegram 控制 115 网盘离线下载，并把“找片源、选候选、投递 115、整理媒体库”放到同一条流程里。
 
-## Tg讨论群
+当前重点是电影片源搜索和 115 离线投递：
 
-使用问题 & Bug反馈
+- 通过 Prowlarr 搜索片源，并按清晰度、来源、编码、音轨和屏蔽词排序候选。
+- 选择候选后复用原有 115 离线下载流程，按配置的分类目录保存。
+- 支持直接发送豆瓣、IMDb、TVDB、TMDB 等元数据链接，自动解析片名和年份后搜索。
+- 普通片名搜索会尽量通过豆瓣反查元数据；无法确认时会要求补充豆瓣链接或中文片名。
+- 下载完成后可按元数据自动整理为 Plex/Emby 友好的目录和文件名。
+- 115 OpenAPI 初始化失败时，Bot 会尽量继续启动，保留 `/auth`、`/reload` 和搜索能力，避免容器反复重启。
 
-[加入](https://t.me/+FTPNla_7SCc3ZWVl)
+> 本项目仅供个人学习和自用研究。请遵守当地法律法规和站点规则，自行承担使用风险。
 
-## 部署&使用
+## 当前入口
 
-📖[部署&使用](https://github.com/qiqiandfei/Telegram-115bot/wiki)
+### Telegram 命令
 
+| 命令 | 用途 |
+| --- | --- |
+| `/start` | 显示帮助信息 |
+| `/auth` | 115 扫码授权 |
+| `/reload` | 重新加载配置 |
+| `/find 片名` | 搜索片源，选择候选后加入 115 离线 |
+| `/s 片名` | 豆瓣关键词搜索入口，当前仍为预留入口 |
+| `/rl` | 查看离线失败后的重试列表 |
+| `/sync` | 同步目录并创建 STRM 软链 |
+| `/q` | 取消当前会话 |
 
-### 目录结构
+### 推荐使用方式
+
+- 发送 `/find 布达佩斯大饭店` 搜索片源。
+- 直接发送豆瓣、IMDb、TVDB 或 TMDB 页面链接，Bot 会解析标题和年份后搜索。
+- 直接发送 magnet、ed2k 或 thunder 链接，走普通 115 离线下载流程。
+- 搜索结果出现后，选择候选资源，再选择 115 保存分类和目录。
+
+不支持的普通 HTTP/HTTPS 网页会被拒绝。当前直接下载链接只接受 magnet、ed2k 和 thunder。
+
+## 快速部署
+
+### 运行要求
+
+- Docker 或 Docker Compose
+- Telegram Bot Token
+- 可访问 Telegram 的网络环境
+- 115 OpenAPI 凭据，或可用的 `access_token` / `refresh_token`
+- Prowlarr 服务和 API Key，若要使用搜索片源能力
+
+如需使用本 fork 的搜索和整理能力，请从本仓库构建镜像，或使用你自己基于本仓库发布的镜像。上游 `qiqiandfei/115-bot:latest` 不一定包含 Telepiplex 的新增能力。
+
+```bash
+git clone https://github.com/countott/telepiplex.git
+cd telepiplex
+cp config/config.yaml.example config/config.yaml
+docker build -t telepiplex:latest .
 ```
+
+最小 Docker 运行示例：
+
+```bash
+docker run -d \
+  --name telepiplex \
+  --restart unless-stopped \
+  -e TZ=Asia/Shanghai \
+  -v /path/to/config:/config \
+  -v /path/to/tmp:/tmp \
+  -v /path/to/media:/media \
+  -v /path/to/CloudNAS:/CloudNAS:rslave \
+  telepiplex:latest
+```
+
+Docker Compose 可参考仓库内的 `docker-compose.yaml`。如果部署在 Unraid，真实运行配置通常是容器内的 `/config/config.yaml`，也就是你挂载到 `/config` 的宿主机目录中的 `config.yaml`。
+
+## 关键配置
+
+先复制模板：
+
+```bash
+cp config/config.yaml.example config/config.yaml
+```
+
+### Telegram
+
+```yaml
+bot_token: your_bot_token
+allowed_user: your_user_id
+bot_name: "@your_bot_name"
+```
+
+`allowed_user` 填 Telegram 用户 ID，建议通过 `@getidsbot` 获取。`bot_name`、`tg_api_id`、`tg_api_hash` 主要用于处理超过 Bot API 限制的大视频转存。
+
+### 115 授权
+
+推荐使用 115 开放平台：
+
+```yaml
+115_app_id: your_115_app_id
+access_token: ""
+refresh_token: ""
+```
+
+不使用开放平台时，使用直接 Token 模式：
+
+```yaml
+115_app_id: null
+access_token: your_access_token
+refresh_token: your_refresh_token
+```
+
+在直接 Token 模式下，`config.yaml` 中的 Token 是优先来源，并会同步到 `/config/115_tokens.json`。如果你在 Unraid 中更新 Token，请确认改的是容器实际挂载的 `/config/config.yaml`，不是仓库里的示例文件。
+
+### Prowlarr 搜索
+
+搜索片源需要启用 `search` 并填写 Prowlarr API Key：
+
+```yaml
+search:
+  enable: true
+  prowlarr:
+    base_url: "http://your-prowlarr:9696"
+    api_key: "your_prowlarr_api_key"
+    timeout: 20
+    indexer_ids: "-2"
+    result_limit: 8
+```
+
+`search.prowlarr.api_key` 是运行时必须填写的位置。Unraid 部署时同样应写入 `/config/config.yaml`。
+
+### 115 分类目录
+
+搜索候选被选中后，会复用普通离线下载流程，并要求选择分类目录：
+
+```yaml
+category_folder:
+  - name: movies
+    display_name: 电影
+    path_map:
+      - name: 外语电影
+        path: /影视/电影/外语电影
+      - name: 华语电影
+        path: /影视/电影/华语电影
+```
+
+`path` 是 115 网盘内的保存目录。目录命名会影响后续媒体库整理，建议保持稳定。
+
+### 媒体库整理
+
+```yaml
+media:
+  unorganized_path: /未整理
+  plex:
+    base_url: ""
+    token: ""
+    library_id: ""
+  emby:
+    base_url: ""
+    api_key: ""
+    strm_mode: disable
+    strm_root: /media/115
+    openlist_root: /115
+    mount_root: /CloudNAS/115
+```
+
+有可靠元数据时，下载流程会尝试按媒体库友好的名称整理。缺少元数据或整理失败时，会移动到 `media.unorganized_path`，避免混入已整理目录。
+
+## 搜索流程
+
+1. 用户发送 `/find 片名`，或直接发送支持的元数据链接。
+2. Bot 解析搜索词和元数据。豆瓣链接优先使用内建解析；IMDb、TVDB、TMDB 会先提取英文标题和年份，再尝试豆瓣反查。
+3. Bot 调用 Prowlarr 搜索候选，并展示索引器、大小、做种数、发布时间和评分信息。
+4. 用户选择候选资源。
+5. 用户选择 115 保存目录，或使用上次保存目录。
+6. Bot 将下载链接投递到 115 离线下载队列。
+7. 下载完成后按配置清理广告文件，并尝试整理到媒体库命名结构。
+
+普通片名无法可靠匹配豆瓣元数据时，Bot 会要求你回复豆瓣链接或中文片名，避免把错误标题写进媒体库目录。
+
+## 运行验证
+
+容器启动后可以看日志确认当前功能是否生效：
+
+```bash
+docker logs -f telepiplex
+```
+
+应能看到类似运行特性标记：
+
+```text
+Telepiplex runtime features: direct_metadata_link_search=enabled, builtin_douban_title_priority=latin_or_original_first, external_metadata_douban_reverse_lookup=enabled
+Search处理器已注册
+```
+
+如果日志里没有这些标记，通常说明容器没有运行到包含 Telepiplex 改动的镜像或分支。
+
+本地开发常用检查：
+
+```bash
+python3 -m unittest tests/test_search_handler.py
+python3 -m unittest tests/test_bot_surface_cleanup.py
+python3 -m py_compile app/115bot.py app/handlers/search_handler.py app/handlers/download_handler.py
+git -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol diff --check
+```
+
+## 重要风险
+
+- `/sync` 会删除目标目录下的所有文件后重新生成 STRM，包括元数据文件。大目录慎用。
+- 115 离线下载、重命名和移动都依赖 115 接口状态，接口限流或 Token 失效会导致任务失败。
+- Prowlarr 结果质量取决于索引器配置。建议先在 Prowlarr 中确认索引器可用，再排查 Bot。
+- 本仓库仍保留部分上游历史模块，用户可见命令以 `app/115bot.py` 注册内容和 README 为准。
+
+## 项目结构
+
+```text
 .
 ├── app
-│   ├── 115bot.py                 # 程序入口脚本
-│   ├── config.yaml.example       # 配置文件模板
-│   ├── core                      # 核心功能
-│   ├── handlers                  # Telegram handlers
-│   ├── images                    # 图片
-│   ├── init.py                   # 初始化脚本
-│   └── utils                     # 有用的工具
-├── build.sh                      # 本地构建脚本
-├── config                        # 配置目录
-├── create_tg_session_file.py     # 创建tg_session脚本
-├── docker-compose.yaml           # docker-compose
-├── Dockerfile                    
-├── Dockerfile.base
-├── legacy                        # 历史遗留
-├── LICENSE
-├── README_EN.md
-├── README.md
-├── requirements.txt              # 项目依赖
+│   ├── 115bot.py                 # Telegram Bot 入口
+│   ├── adapters                  # 外部服务适配器
+│   ├── core                      # 115、调度和核心流程
+│   ├── handlers                  # Telegram handlers
+│   ├── utils                     # 搜索、元数据、媒体整理等工具
+│   └── config.yaml.example       # 应用配置模板
+├── config
+│   └── config.yaml.example       # 容器运行配置模板
+├── tests                         # 单元测试和回归检查
+├── docker-compose.yaml
+├── Dockerfile
+├── requirements.txt
+└── README.md
 ```
 
-## 使用指南
+## 上游与许可
 
-### 基本命令
-
-- `/start`   - 显示帮助信息
-- `/auth`    - 115 授权设置
-- `/reload`  - 重载配置
-- `/find`    - 搜索片源并加入 115 离线
-- `/s`       - 豆瓣关键词搜索入口（预留）
-- `/rl`      - 重试列表
-- `/sync`    - 同步目录并创建软链
-- `/q`       - 取消当前会话
-
-搜索片源可使用 `/find 片名`，也可以直接发送豆瓣、IMDb、TVDB 或 TMDB 链接。`/s` 已预留为豆瓣关键词搜索入口，当前会提示使用 `/find`。
-
-### 115 开放平台申请
-
-**强烈建议申请 115 开放平台以获得更好的使用体验！**
-- 申请地址：[115开放平台](https://open.115.com/)
-- 审核通过后将 `115_app_id` 填入配置文件中
-
-如不想使用 115 开放平台，请使用之前的镜像版本 `qiqiandfei/115-bot:v2.3.7`
-
-### 视频下载配置
-
-由于 Telegram Bot API 限制，无法下载超过 20MB 的视频文件。如需下载大视频，请配置 Telegram 客户端：
-
-#### 配置方法
-Telegram API申请地址：[Telegram Development Platform](https://my.telegram.org/auth)
-
-申请成功后可以获取到tg_api_id和tg_api_hash
-
-确保配置文件中以下三个参数配置正确：
-```
-# bot_name
-bot_name: "@yourbotname"
-
-# telegram 的api信息
-tg_api_id: 1122334
-tg_api_hash: 1yh3j4k9dsk0fj3jdufnwrhf62j1k33f
-```
-**生成 user_session的方法**
-1. 修改create_tg_session_file.py中的 API_ID 和 API_HASH
-2. 运行脚本：python create_tg_session_file.py
-3. 按照提示输入手机号和验证码
-4. 将生成的 user_session.session 文件放到 config 目录
-
-> **注意**：如果不配置此步骤，机器人仍可正常运行，只是无法处理超过 20MB 的视频文件。
-
-### 重要提醒
-
-⚠️ **同步功能警告**：`/sync` 命令会**删除目标目录下的所有文件**，包括元数据。大规模同步操作可能触发 115 网盘风控机制，请谨慎使用！
-
-## 许可证
-```
-MIT License
-
-Copyright (c) 2025 qiqiandfei
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
-## 免责声明
-本项目仅供学习和研究使用，请遵守相关法律法规，不得用于商业用途。使用者需自行承担使用风险！
-
-如果这个项目对您有帮助，请献上一个⭐！
-
-## Buy me a coffee~
-![请我喝咖啡](https://alist.qiqiandfei.fun:8843/d/Syncthing/yufei/%E4%B8%AA%E4%BA%BA/%E8%B5%9E%E8%B5%8F.png)
+本项目基于 `qiqiandfei/Telegram-115bot` 演进，遵循原项目 MIT License。原始许可证文本见 `LICENSE`。
