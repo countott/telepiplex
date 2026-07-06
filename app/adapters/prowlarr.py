@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+from collections import Counter
 import hashlib
 from html import unescape
 import re
@@ -11,6 +12,7 @@ import init
 
 
 MIN_PROWLARR_SEARCH_TIMEOUT = 180
+PROWLARR_STATUS_TIMEOUT = 15
 
 
 class ProwlarrConfigError(Exception):
@@ -48,6 +50,14 @@ def _search_timeout(prowlarr_config: dict):
     except (TypeError, ValueError):
         timeout = MIN_PROWLARR_SEARCH_TIMEOUT
     return max(timeout, MIN_PROWLARR_SEARCH_TIMEOUT)
+
+
+def _status_timeout(prowlarr_config: dict):
+    try:
+        timeout = float(prowlarr_config.get("status_timeout", PROWLARR_STATUS_TIMEOUT))
+    except (TypeError, ValueError):
+        timeout = PROWLARR_STATUS_TIMEOUT
+    return max(5, min(timeout, 30))
 
 
 def _warn(message: str):
@@ -132,6 +142,71 @@ def search_prowlarr(query: str, media_type: str = "movie") -> list[dict]:
         raise ProwlarrRequestError("Prowlarr 返回数据格式异常")
 
     return [_normalize_result(item) for item in data if isinstance(item, dict)]
+
+
+def _prowlarr_get_json(path: str, timeout: float | None = None):
+    prowlarr_config, base_url, api_key = _get_prowlarr_config()
+    response = requests.get(
+        f"{base_url}{path}",
+        headers={"X-Api-Key": api_key},
+        timeout=timeout if timeout is not None else _status_timeout(prowlarr_config),
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _normalize_health_entry(item: dict) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+
+    source = str(item.get("source") or item.get("name") or "").strip()
+    message = str(item.get("message") or item.get("type") or "").strip()
+    if not source and not message:
+        return None
+
+    return {
+        "source": source or "Prowlarr",
+        "message": message,
+    }
+
+
+def get_prowlarr_indexer_summary(results: list[dict] | None = None) -> dict:
+    result_sources = Counter()
+    for item in results or []:
+        indexer = str((item or {}).get("indexer") or "未知").strip() or "未知"
+        result_sources[indexer] += 1
+
+    summary = {
+        "enabled_indexers": [],
+        "result_sources": dict(result_sources),
+        "down_indexers": [],
+        "error": "",
+    }
+
+    try:
+        prowlarr_config, _, _ = _get_prowlarr_config()
+        timeout = _status_timeout(prowlarr_config)
+        indexers = _prowlarr_get_json("/api/v1/indexer", timeout=timeout)
+        if isinstance(indexers, list):
+            summary["enabled_indexers"] = [
+                str(item.get("name") or "").strip()
+                for item in indexers
+                if isinstance(item, dict)
+                and item.get("enable", True)
+                and str(item.get("name") or "").strip()
+            ]
+
+        health = _prowlarr_get_json("/api/v1/health", timeout=timeout)
+        if isinstance(health, list):
+            summary["down_indexers"] = [
+                entry
+                for entry in (_normalize_health_entry(item) for item in health)
+                if entry
+            ]
+    except Exception as e:
+        summary["error"] = str(e)
+
+    return summary
 
 
 def _read_bencoded_bytes(data: bytes, pos: int) -> tuple[bytes, int]:

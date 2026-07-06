@@ -5,6 +5,7 @@ import re
 import time
 import uuid
 from warnings import filterwarnings
+from urllib.parse import unquote, urlparse
 
 import requests
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -16,6 +17,7 @@ import init
 from app.adapters.prowlarr import (
     ProwlarrConfigError,
     ProwlarrRequestError,
+    get_prowlarr_indexer_summary,
     resolve_prowlarr_download_url,
     search_prowlarr,
 )
@@ -39,6 +41,7 @@ SEARCH_PROGRESS_INTERVAL_SECONDS = 30
 TELEGRAM_SEND_TIMEOUT_SECONDS = 30
 METADATA_URL_PATTERN = r"(?i)^https?://(?:[^/\s]+\.)*(?:douban\.com|imdb\.com|thetvdb\.com|tvdb\.com|themoviedb\.org|tmdb\.org)(?::\d+)?/\S+$"
 HTTP_URL_PATTERN = r"(?i)^https?://[^\s]+$"
+UNICODE_FORMAT_CODEPOINTS = {0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E}
 
 pending_search_tasks = {}
 
@@ -66,7 +69,8 @@ def _title_contains_latin(title: str) -> bool:
 
 
 def _collapse_title_spaces(title: str) -> str:
-    return " ".join(str(title or "").replace("\xa0", " ").split())
+    title = "".join(char for char in str(title or "") if ord(char) not in UNICODE_FORMAT_CODEPOINTS)
+    return " ".join(title.replace("\xa0", " ").split())
 
 
 def _clean_prowlarr_query(query: str) -> str:
@@ -84,6 +88,41 @@ def _as_title_candidates(value) -> list[str]:
     return [_collapse_title_spaces(item) for item in values if _collapse_title_spaces(item)]
 
 
+def _strip_year_suffix(title: str) -> str:
+    title = _collapse_title_spaces(title)
+    title = re.sub(r"\([^)]*\b(?:19\d{2}|20\d{2})(?:[–-]\d{0,4})?[^)]*\)", "", title).strip()
+    title = re.sub(r"\b(?:19\d{2}|20\d{2})\b", "", title).strip()
+    return _collapse_title_spaces(title)
+
+
+def _split_mixed_douban_title(title: str) -> tuple[str, str]:
+    title = _strip_year_suffix(title)
+    if not title:
+        return "", ""
+
+    has_chinese = bool(re.search(r"[\u4e00-\u9fff]", title))
+    has_latin = _title_contains_latin(title)
+    if not has_chinese:
+        return "", re.sub(r"[:：]+", " ", title).strip() if has_latin else ""
+    if not has_latin:
+        return title, ""
+
+    first_latin = re.search(r"[A-Za-z]", title)
+    if not first_latin:
+        return title, ""
+
+    chinese_title = title[: first_latin.start()].strip(" \t\r\n-—|/")
+    english_title = title[first_latin.start() :].strip(" \t\r\n-—|/")
+    english_title = re.sub(r"[:：]+", " ", english_title).strip()
+    return _collapse_title_spaces(chinese_title), _collapse_title_spaces(english_title)
+
+
+def _clean_english_title(title: str) -> str:
+    title = _strip_year_suffix(title)
+    title = re.sub(r"[:：]+", " ", title).strip()
+    return _collapse_title_spaces(title)
+
+
 def _extract_douban_metadata(payload: dict) -> dict | None:
     if not isinstance(payload, dict):
         return None
@@ -92,8 +131,10 @@ def _extract_douban_metadata(payload: dict) -> dict | None:
     if not isinstance(data, dict):
         return None
 
-    chinese_title = _collapse_title_spaces(data.get("title") or data.get("name"))
+    raw_title = _collapse_title_spaces(data.get("title") or data.get("name"))
     year = _collapse_title_spaces(data.get("release_year") or data.get("year"))
+    chinese_title, mixed_english_title = _split_mixed_douban_title(raw_title)
+    chinese_title = chinese_title or raw_title
     english_candidates = [
         data.get("original_title"),
         data.get("originalTitle"),
@@ -109,13 +150,17 @@ def _extract_douban_metadata(payload: dict) -> dict | None:
 
     english_title = ""
     for candidate in english_candidates:
-        candidate = _collapse_title_spaces(candidate)
+        candidate = _clean_english_title(candidate)
         if candidate and _title_contains_latin(candidate):
             english_title = candidate
             break
 
+    if not english_title:
+        english_title = mixed_english_title
+    if not english_title and raw_title and _title_contains_latin(raw_title):
+        _, english_title = _split_mixed_douban_title(raw_title)
     if not english_title and chinese_title and _title_contains_latin(chinese_title):
-        english_title = chinese_title
+        english_title = _clean_english_title(chinese_title)
 
     if not chinese_title or not english_title:
         return None
@@ -180,11 +225,7 @@ def _extract_douban_subject_urls(html_text: str) -> list[str]:
     return urls
 
 
-def _fetch_douban_metadata_for_plain_query(query: str) -> dict | None:
-    query = _collapse_title_spaces(query)
-    if not query:
-        return None
-
+def _fetch_douban_metadata_from_search(query: str, require_exact_match: bool) -> dict | None:
     response = requests.get(
         "https://www.douban.com/search",
         params={"cat": "1002", "q": query},
@@ -195,12 +236,45 @@ def _fetch_douban_metadata_for_plain_query(query: str) -> dict | None:
 
     for subject_url in _extract_douban_subject_urls(response.text):
         metadata = _fetch_builtin_douban_metadata(subject_url)
-        if metadata and _metadata_matches_plain_query(metadata, query):
-            _log_info(f"普通片名命中豆瓣元数据 query={query} url={subject_url} metadata={metadata}")
+        if metadata and (not require_exact_match or _metadata_matches_plain_query(metadata, query)):
+            _log_info(f"豆瓣反查命中元数据 query={query} url={subject_url} metadata={metadata}")
             return metadata
+
+    return None
+
+
+def _fetch_douban_metadata_for_plain_query(query: str) -> dict | None:
+    query = _collapse_title_spaces(query)
+    if not query:
+        return None
+
+    metadata = _fetch_douban_metadata_from_search(query, require_exact_match=True)
+    if metadata:
+        return metadata
 
     _log_info(f"普通片名豆瓣反查未命中 query={query}")
     return None
+
+
+def _fetch_douban_metadata_for_external_title(title: str, year: str = "") -> tuple[dict | None, str]:
+    query = _clean_prowlarr_query(
+        _query_from_plex_metadata(
+            {
+                "english_title": title,
+                "year": year,
+            }
+        )
+    )
+    if not query:
+        return None, ""
+
+    metadata = _fetch_douban_metadata_from_search(query, require_exact_match=True)
+    if metadata:
+        _log_info(f"外站标题豆瓣反查命中 query={query} metadata={metadata}")
+        return metadata, query
+
+    _log_info(f"外站标题豆瓣反查未命中 query={query}")
+    return None, query
 
 
 def format_size(size) -> str:
@@ -240,7 +314,43 @@ def get_pending_search_task(task_id: str):
     return task
 
 
-def build_results_text(query: str, results: list[dict]) -> str:
+def _format_indexer_summary(indexer_summary: dict | None) -> list[str]:
+    if not indexer_summary:
+        return []
+
+    lines = ["", "📡 搜刮器总结"]
+    result_sources = indexer_summary.get("result_sources") or {}
+    if result_sources:
+        source_text = "、".join(
+            f"{name} x{count}"
+            for name, count in sorted(result_sources.items(), key=lambda item: (-item[1], item[0]))
+        )
+    else:
+        source_text = "无"
+    lines.append(f"结果来源: {source_text}")
+
+    enabled_indexers = indexer_summary.get("enabled_indexers") or []
+    if enabled_indexers:
+        lines.append(f"启用搜刮器: {len(enabled_indexers)} 个")
+
+    down_indexers = indexer_summary.get("down_indexers") or []
+    if down_indexers:
+        down_lines = []
+        for item in down_indexers[:5]:
+            source = item.get("source") or "Prowlarr"
+            message = item.get("message") or "健康检查异常"
+            down_lines.append(f"{source} - {message}")
+        lines.append(f"疑似 Down: {'; '.join(down_lines)}")
+    elif not indexer_summary.get("error"):
+        lines.append("疑似 Down: Prowlarr 健康检查未报告异常")
+
+    if indexer_summary.get("error"):
+        lines.append(f"健康检查读取失败: {indexer_summary['error']}")
+
+    return lines
+
+
+def build_results_text(query: str, results: list[dict], indexer_summary: dict | None = None) -> str:
     lines = [f"🔍 搜索结果: {query}", ""]
     for index, item in enumerate(results, start=1):
         title = item.get("title") or "未命名资源"
@@ -262,6 +372,7 @@ def build_results_text(query: str, results: list[dict]) -> str:
             ]
         )
 
+    lines.extend(_format_indexer_summary(indexer_summary))
     return "\n".join(lines).strip()
 
 
@@ -336,6 +447,15 @@ def _extract_command_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 def _is_douban_url(raw_query: str) -> bool:
     return bool(extract_douban_subject_id(raw_query))
+
+
+def _extract_imdb_title_id(raw_query: str) -> str:
+    match = re.search(r"(?i)/title/(tt\d+)/?", str(raw_query or ""))
+    return match.group(1).lower() if match else ""
+
+
+def _is_imdb_url(raw_query: str) -> bool:
+    return bool(_extract_imdb_title_id(raw_query))
 
 
 def _is_supported_http_download(raw_query: str) -> bool:
@@ -470,6 +590,86 @@ def _fetch_media_page_title(url: str) -> str:
     return title
 
 
+def _fetch_imdb_suggestion_metadata(imdb_id: str) -> dict | None:
+    imdb_id = _collapse_title_spaces(imdb_id).lower()
+    if not re.fullmatch(r"tt\d+", imdb_id or ""):
+        return None
+
+    response = requests.get(
+        f"https://v3.sg.media-imdb.com/suggestion/t/{imdb_id}.json",
+        headers={"User-Agent": init.USER_AGENT, "Accept": "application/json, text/plain, */*"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    data = response.json()
+    candidates = data.get("d") if isinstance(data, dict) else []
+    if not isinstance(candidates, list):
+        return None
+
+    for item in candidates:
+        if not isinstance(item, dict) or str(item.get("id") or "").lower() != imdb_id:
+            continue
+        title = _clean_english_title(item.get("l") or "")
+        year = _collapse_title_spaces(item.get("y") or item.get("yr") or "")
+        if title:
+            return {"title": title, "year": year}
+
+    return None
+
+
+def _split_external_title_year(title: str) -> dict | None:
+    title = _collapse_title_spaces(title)
+    if not title:
+        return None
+
+    year = ""
+    year_match = re.search(r"\b(19\d{2}|20\d{2})\b", title)
+    if year_match:
+        year = year_match.group(1)
+
+    english_title = _clean_english_title(title)
+    if not english_title:
+        return None
+
+    return {
+        "title": english_title,
+        "year": year,
+    }
+
+
+def _title_from_metadata_url_slug(raw_url: str) -> str:
+    parsed = urlparse(str(raw_url or "").strip())
+    parts = [unquote(part) for part in parsed.path.split("/") if part]
+    if not parts:
+        return ""
+
+    slug = parts[-1]
+    if re.fullmatch(r"tt\d+", slug, re.IGNORECASE):
+        return ""
+    slug = re.sub(r"^\d+[-_]+", "", slug)
+    slug = re.sub(r"[-_]+", " ", slug)
+    slug = re.sub(r"\b(19\d{2}|20\d{2})\b.*$", r"\1", slug)
+    return _collapse_title_spaces(slug).title()
+
+
+def _fetch_external_title_metadata(raw_url: str) -> dict | None:
+    if _is_imdb_url(raw_url):
+        return _fetch_imdb_suggestion_metadata(_extract_imdb_title_id(raw_url))
+
+    title = ""
+    try:
+        title = _fetch_media_page_title(raw_url)
+    except Exception as e:
+        _log_warn(f"外站页面标题解析失败，尝试从URL slug兜底: {e}")
+
+    metadata = _split_external_title_year(title)
+    if metadata:
+        return metadata
+
+    slug_title = _title_from_metadata_url_slug(raw_url)
+    return _split_external_title_year(slug_title)
+
+
 async def _resolve_query(raw_query: str) -> str | None:
     request = await _resolve_search_request(raw_query)
     return request.get("query") if request else None
@@ -504,6 +704,29 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
                 query = _clean_prowlarr_query(_query_from_plex_metadata(metadata))
                 _log_info(f"豆瓣链接解析为搜索词 raw={raw_query} query={query} metadata={metadata}")
                 return {"query": query, "plex_metadata": metadata}
+
+        external_metadata = await asyncio.to_thread(_fetch_external_title_metadata, raw_query)
+        if external_metadata:
+            metadata, query = await asyncio.to_thread(
+                _fetch_douban_metadata_for_external_title,
+                external_metadata.get("title"),
+                external_metadata.get("year"),
+            )
+            if metadata:
+                query = _clean_prowlarr_query(_query_from_plex_metadata(metadata))
+                _log_info(
+                    f"外站链接经豆瓣反查解析为搜索词 raw={raw_query} "
+                    f"title={external_metadata.get('title')} year={external_metadata.get('year')} "
+                    f"query={query} metadata={metadata}"
+                )
+                return {"query": query, "plex_metadata": metadata}
+
+            if query:
+                _log_info(
+                    f"外站链接解析为英文搜索词 raw={raw_query} "
+                    f"title={external_metadata.get('title')} year={external_metadata.get('year')} query={query}"
+                )
+                return {"query": query, "plex_metadata": None}
 
         query = _clean_prowlarr_query(await asyncio.to_thread(_fetch_media_page_title, raw_query))
         _log_info(f"媒体链接解析为搜索词 raw={raw_query} query={query}")
@@ -593,6 +816,7 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         items = await _search_prowlarr_with_progress(update, context, query)
         results = rank_releases(items, _get_result_limit())
+        indexer_summary = await asyncio.to_thread(get_prowlarr_indexer_summary, results)
     except ProwlarrConfigError as e:
         await _send_search_message(context, update.effective_chat.id, f"⚠️ {e}")
         return ConversationHandler.END
@@ -622,7 +846,7 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
     await _send_search_message(
         context,
         update.effective_chat.id,
-        build_results_text(query, results),
+        build_results_text(query, results, indexer_summary=indexer_summary),
         reply_markup=_build_results_keyboard(task_id, results),
         disable_web_page_preview=True,
     )

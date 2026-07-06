@@ -11,8 +11,13 @@ SITE_SUFFIX_PATTERNS = [
     re.compile(r"\s*[\-|]\s*IMDb\s*$", re.IGNORECASE),
     re.compile(r"\s*[\-|]\s*TheTVDB(?:\.com)?\s*$", re.IGNORECASE),
     re.compile(r"\s*[\-|]\s*TVDB(?:\.com)?\s*$", re.IGNORECASE),
+    re.compile(r"\s*[\-|]\s*The Movie Database\s*(?:\(TMDB\))?\s*$", re.IGNORECASE),
+    re.compile(r"\s*[\-|]\s*TMDB\s*$", re.IGNORECASE),
     re.compile(r"\s*[\-|]\s*豆瓣(?:电影)?\s*$", re.IGNORECASE),
     re.compile(r"\s*\(豆瓣\)\s*$", re.IGNORECASE),
+    re.compile(r"\s*\|\s*TheTVDB(?:\.com)?\s*$", re.IGNORECASE),
+    re.compile(r"\s*\|\s*The Movie Database\s*(?:\(TMDB\))?\s*$", re.IGNORECASE),
+    re.compile(r"\s*\|\s*TMDB\s*$", re.IGNORECASE),
 ]
 
 
@@ -50,7 +55,8 @@ class _MetadataTitleParser(HTMLParser):
 
 
 def _collapse_spaces(text: str) -> str:
-    return " ".join(str(text or "").replace("\xa0", " ").split())
+    text = "".join(char for char in str(text or "") if unicodedata.category(char) != "Cf")
+    return " ".join(text.replace("\xa0", " ").split())
 
 
 def _clean_media_title(title: str) -> str:
@@ -58,7 +64,7 @@ def _clean_media_title(title: str) -> str:
     for pattern in SITE_SUFFIX_PATTERNS:
         title = pattern.sub("", title).strip()
 
-    year_match = re.search(r"\((19\d{2}|20\d{2})(?:[–-]\d{0,4})?\)", title)
+    year_match = re.search(r"\([^)]*\b(19\d{2}|20\d{2})(?:[–-]\d{0,4})?[^)]*\)", title)
     if year_match:
         title = f"{title[:year_match.start()].strip()} {year_match.group(1)}{title[year_match.end():]}".strip()
 
@@ -136,6 +142,7 @@ def _latin_title_from_mixed(title: str) -> str:
 
     latin_title = max(latin_runs, key=len)
     latin_title = re.sub(r"\b(19\d{2}|20\d{2})\b.*$", r"\1", latin_title).strip()
+    latin_title = re.sub(r"[:：]+", " ", latin_title).strip()
     return _title_with_year(latin_title, year)
 
 

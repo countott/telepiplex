@@ -38,7 +38,9 @@ def log_runtime_features():
     revision = os.getenv("TELEPIPLEX_COMMIT") or os.getenv("GIT_COMMIT") or "unknown"
     init.logger.info(
         "Telepiplex runtime features: direct_metadata_link_search=enabled, "
-        "builtin_douban_title_priority=latin_or_original_first, revision=%s" % revision
+        "builtin_douban_title_priority=latin_or_original_first, "
+        "external_metadata_douban_reverse_lookup=enabled, prowlarr_indexer_summary=enabled, "
+        "revision=%s" % revision
     )
 
 def get_help_info():

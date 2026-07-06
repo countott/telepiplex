@@ -15,6 +15,7 @@ import init
 from app.adapters.prowlarr import (
     ProwlarrConfigError,
     ProwlarrRequestError,
+    get_prowlarr_indexer_summary,
     resolve_prowlarr_download_url,
     search_prowlarr,
 )
@@ -124,6 +125,42 @@ class ProwlarrAdapterTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ProwlarrRequestError, "Prowlarr 请求失败"):
             search_prowlarr("movie")
+
+    @patch("app.adapters.prowlarr.requests.get")
+    def test_get_prowlarr_indexer_summary_reports_sources_and_down_health(self, get_mock):
+        indexers_response = Mock()
+        indexers_response.raise_for_status.return_value = None
+        indexers_response.json.return_value = [
+            {"id": 1, "name": "UIndex", "enable": True},
+            {"id": 2, "name": "TorrentLeech", "enable": True},
+            {"id": 3, "name": "DisabledIndexer", "enable": False},
+        ]
+        health_response = Mock()
+        health_response.raise_for_status.return_value = None
+        health_response.json.return_value = [
+            {"source": "TorrentLeech", "type": "error", "message": "Indexer unavailable"}
+        ]
+        get_mock.side_effect = [indexers_response, health_response]
+
+        summary = get_prowlarr_indexer_summary(
+            [
+                {"indexer": "UIndex"},
+                {"indexer": "UIndex"},
+                {"indexer": "OtherIndexer"},
+            ]
+        )
+
+        self.assertEqual(
+            summary,
+            {
+                "enabled_indexers": ["UIndex", "TorrentLeech"],
+                "result_sources": {"UIndex": 2, "OtherIndexer": 1},
+                "down_indexers": [{"source": "TorrentLeech", "message": "Indexer unavailable"}],
+                "error": "",
+            },
+        )
+        self.assertEqual(get_mock.call_args_list[0].args[0], "http://192.168.7.7:9696/api/v1/indexer")
+        self.assertEqual(get_mock.call_args_list[1].args[0], "http://192.168.7.7:9696/api/v1/health")
 
     @patch("app.adapters.prowlarr.requests.get")
     def test_resolve_prowlarr_download_url_converts_torrent_file_to_magnet(self, get_mock):

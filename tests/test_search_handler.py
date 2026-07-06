@@ -16,6 +16,7 @@ from app.handlers.search_handler import (
     SEARCH_SELECT_RESULT,
     SEARCH_TASK_TTL_SECONDS,
     _clean_prowlarr_query,
+    _extract_douban_metadata,
     _fetch_media_page_title,
     _is_supported_http_download,
     _metadata_matches_plain_query,
@@ -117,6 +118,124 @@ class SearchHandlerHelpersTest(unittest.TestCase):
                 "year": "2014",
             },
         )
+
+    def test_extract_douban_metadata_splits_chinese_title_from_mixed_title(self):
+        metadata = _extract_douban_metadata(
+            {
+                "subject": {
+                    "title": "嗜血法医：源罪 Dexter: Original Sin‎ (2024)",
+                    "release_year": "2024",
+                }
+            }
+        )
+
+        self.assertEqual(
+            metadata,
+            {
+                "source": "douban",
+                "chinese_title": "嗜血法医：源罪",
+                "english_title": "Dexter Original Sin",
+                "year": "2024",
+            },
+        )
+
+    @patch("app.handlers.search_handler.requests.get")
+    def test_resolve_imdb_link_uses_english_title_year_for_douban_reverse_lookup(self, mock_get):
+        old_bot_config = init.bot_config
+        init.bot_config = {"search": {}}
+        self.addCleanup(setattr, init, "bot_config", old_bot_config)
+        suggestion_response = Mock()
+        suggestion_response.json.return_value = {
+            "d": [{"id": "tt32252772", "l": "Dexter: Original Sin", "y": 2024}]
+        }
+        search_response = Mock()
+        search_response.text = '<a href="https://movie.douban.com/subject/36235376/">Dexter Original Sin</a>'
+        subject_response = Mock()
+        subject_response.json.return_value = {
+            "subject": {
+                "title": "嗜血法医：源罪 Dexter: Original Sin‎ (2024)",
+                "release_year": "2024",
+            }
+        }
+        mock_get.side_effect = [suggestion_response, search_response, subject_response]
+
+        request = asyncio.run(_resolve_search_request("https://www.imdb.com/title/tt32252772/?ref_=cht_all_t_20"))
+
+        self.assertEqual(request["query"], "Dexter Original Sin 2024")
+        self.assertEqual(request["plex_metadata"]["chinese_title"], "嗜血法医：源罪")
+        self.assertEqual(mock_get.call_args_list[0].args[0], "https://v3.sg.media-imdb.com/suggestion/t/tt32252772.json")
+        self.assertEqual(mock_get.call_args_list[1].args[0], "https://www.douban.com/search")
+        self.assertEqual(mock_get.call_args_list[1].kwargs["params"], {"cat": "1002", "q": "Dexter Original Sin 2024"})
+
+    @patch("app.handlers.search_handler.requests.get")
+    def test_resolve_imdb_link_falls_back_to_imdb_suggestion_when_page_title_is_empty(self, mock_get):
+        old_bot_config = init.bot_config
+        init.bot_config = {"search": {}}
+        self.addCleanup(setattr, init, "bot_config", old_bot_config)
+        suggestion_response = Mock()
+        suggestion_response.json.return_value = {
+            "d": [{"id": "tt0773262", "l": "Dexter", "y": 2006}]
+        }
+        douban_response = Mock()
+        douban_response.text = "<html></html>"
+        mock_get.side_effect = [suggestion_response, douban_response]
+
+        request = asyncio.run(_resolve_search_request("https://www.imdb.com/title/tt0773262/?ref_=cht_all_int_t_20"))
+
+        self.assertEqual(request["query"], "Dexter 2006")
+        self.assertIsNone(request["plex_metadata"])
+        self.assertEqual(mock_get.call_args_list[0].args[0], "https://v3.sg.media-imdb.com/suggestion/t/tt0773262.json")
+        self.assertEqual(mock_get.call_args_list[1].args[0], "https://www.douban.com/search")
+
+    @patch("app.handlers.search_handler.requests.get")
+    def test_resolve_tvdb_link_uses_external_title_year_for_douban_reverse_lookup(self, mock_get):
+        old_bot_config = init.bot_config
+        init.bot_config = {"search": {}}
+        self.addCleanup(setattr, init, "bot_config", old_bot_config)
+        tvdb_response = Mock()
+        tvdb_response.text = '<html><head><title>Breaking Bad (2008) - TheTVDB.com</title></head></html>'
+        search_response = Mock()
+        search_response.text = '<a href="https://movie.douban.com/subject/23761370/">Breaking Bad</a>'
+        subject_response = Mock()
+        subject_response.json.return_value = {
+            "subject": {"title": "绝命毒师 Breaking Bad (2008)", "release_year": "2008"}
+        }
+        mock_get.side_effect = [tvdb_response, search_response, subject_response]
+
+        request = asyncio.run(_resolve_search_request("https://thetvdb.com/series/breaking-bad"))
+
+        self.assertEqual(request["query"], "Breaking Bad 2008")
+        self.assertEqual(request["plex_metadata"]["chinese_title"], "绝命毒师")
+        self.assertEqual(mock_get.call_args_list[1].kwargs["params"], {"cat": "1002", "q": "Breaking Bad 2008"})
+
+    @patch("app.handlers.search_handler.requests.get")
+    def test_resolve_tmdb_link_uses_external_title_year_for_douban_reverse_lookup(self, mock_get):
+        old_bot_config = init.bot_config
+        init.bot_config = {"search": {}}
+        self.addCleanup(setattr, init, "bot_config", old_bot_config)
+        tmdb_response = Mock()
+        tmdb_response.text = """
+        <html><head>
+          <meta property="og:title" content="The Grand Budapest Hotel (2014) | The Movie Database (TMDB)" />
+        </head></html>
+        """
+        search_response = Mock()
+        search_response.text = '<a href="https://movie.douban.com/subject/11525673/">The Grand Budapest Hotel</a>'
+        subject_response = Mock()
+        subject_response.json.return_value = {
+            "subject": {
+                "title": "布达佩斯大饭店",
+                "original_title": "The Grand Budapest Hotel",
+                "release_year": "2014",
+            }
+        }
+        mock_get.side_effect = [tmdb_response, search_response, subject_response]
+
+        request = asyncio.run(_resolve_search_request("https://www.themoviedb.org/movie/120-the-grand-budapest-hotel"))
+
+        self.assertEqual(request["query"], "The Grand Budapest Hotel 2014")
+        self.assertEqual(request["plex_metadata"]["chinese_title"], "布达佩斯大饭店")
+        self.assertEqual(mock_get.call_args_list[1].kwargs["params"], {"cat": "1002", "q": "The Grand Budapest Hotel 2014"})
 
     def test_plex_metadata_for_selected_release_adds_release_title_without_mutating_task(self):
         task_metadata = {
@@ -377,7 +496,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertTrue(_is_supported_http_download("https://www.imdb.com/title/tt2278388/"))
         self.assertFalse(_is_supported_http_download("https://example.com/movie.mkv"))
 
-    def test_build_results_text_contains_rank_score_size_seeders_indexer_and_features(self):
+    def test_build_results_text_contains_rank_score_size_seeders_indexer_features_and_summary(self):
         text = build_results_text(
             "The Grand Budapest Hotel 2014",
             [
@@ -390,6 +509,12 @@ class SearchHandlerHelpersTest(unittest.TestCase):
                     "features": ["1080p", "WEB-DL", "HEVC"],
                 }
             ],
+            indexer_summary={
+                "enabled_indexers": ["Indexer A", "Indexer B"],
+                "result_sources": {"Indexer A": 1},
+                "down_indexers": [{"source": "Indexer B", "message": "Query failed"}],
+                "error": "",
+            },
         )
 
         self.assertIn("The Grand Budapest Hotel 2014", text)
@@ -398,6 +523,9 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertIn("seeders: 32", text)
         self.assertIn("indexer: Indexer A", text)
         self.assertIn("特征: 1080p / WEB-DL / HEVC", text)
+        self.assertIn("搜刮器总结", text)
+        self.assertIn("结果来源: Indexer A x1", text)
+        self.assertIn("疑似 Down: Indexer B - Query failed", text)
 
     def test_get_pending_search_task_rejects_expired_tasks(self):
         pending_search_tasks["expired"] = {
