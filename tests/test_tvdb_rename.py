@@ -50,7 +50,7 @@ class TvdbRenamePlanTest(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(plan["target_root"], "/真人剧集/嗜血法医 (Dexter)")
+        self.assertEqual(plan["target_root"], "/真人剧集/嗜血法医 ◈ Dexter")
         self.assertEqual(
             plan["operations"],
             [
@@ -59,7 +59,7 @@ class TvdbRenamePlanTest(unittest.TestCase):
                     "source_path": "/真人剧集/Release.Name/Season 1/Dexter.S01E01.mkv",
                     "rename_to": "Dexter S01E01.mkv",
                     "renamed_source_path": "/真人剧集/Release.Name/Season 1/Dexter S01E01.mkv",
-                    "target_dir": "/真人剧集/嗜血法医 (Dexter)/Dexter Season 01",
+                    "target_dir": "/真人剧集/嗜血法医 ◈ Dexter/Dexter Season 01",
                     "target_relative_path": "Dexter Season 01/Dexter S01E01.mkv",
                 }
             ],

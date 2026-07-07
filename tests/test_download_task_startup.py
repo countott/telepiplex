@@ -62,7 +62,7 @@ class DownloadTaskStartupTest(unittest.TestCase):
         )
 
         api.create_dir_recursive.assert_called_once_with(
-            "/影视/电影/外语电影/布达佩斯大饭店 (The Grand Budapest Hotel)"
+            "/影视/电影/外语电影/布达佩斯大饭店 ◈ The Grand Budapest Hotel"
         )
         api.rename.assert_called_once_with(
             "/影视/电影/外语电影/The.Grand.Budapest.Hotel.2014.1080p/movie.mkv",
@@ -70,13 +70,13 @@ class DownloadTaskStartupTest(unittest.TestCase):
         )
         api.move_file.assert_called_once_with(
             "/影视/电影/外语电影/The.Grand.Budapest.Hotel.2014.1080p/The Grand Budapest Hotel.mkv",
-            "/影视/电影/外语电影/布达佩斯大饭店 (The Grand Budapest Hotel)",
+            "/影视/电影/外语电影/布达佩斯大饭店 ◈ The Grand Budapest Hotel",
         )
         api.delete_single_file.assert_called_once_with(
             "/影视/电影/外语电影/The.Grand.Budapest.Hotel.2014.1080p"
         )
         media_update_mock.assert_called_once_with(
-            "/影视/电影/外语电影/布达佩斯大饭店 (The Grand Budapest Hotel)"
+            "/影视/电影/外语电影/布达佩斯大饭店 ◈ The Grand Budapest Hotel"
         )
         self.assertIn("自动整理完成", add_task_mock.call_args.kwargs["message"])
 
@@ -106,7 +106,7 @@ class DownloadTaskStartupTest(unittest.TestCase):
         )
 
         api.create_dir_recursive.assert_called_once_with(
-            "/影视/剧集/欧美剧/绝命毒师 (Breaking Bad)/Breaking Bad Season 02"
+            "/影视/剧集/欧美剧/绝命毒师 ◈ Breaking Bad/Breaking Bad Season 02"
         )
         api.rename.assert_called_once_with(
             "/影视/剧集/欧美剧/Breaking.Bad.S02E03.1080p/episode.mp4",
@@ -114,10 +114,10 @@ class DownloadTaskStartupTest(unittest.TestCase):
         )
         api.move_file.assert_called_once_with(
             "/影视/剧集/欧美剧/Breaking.Bad.S02E03.1080p/Breaking Bad S02E03.mp4",
-            "/影视/剧集/欧美剧/绝命毒师 (Breaking Bad)/Breaking Bad Season 02",
+            "/影视/剧集/欧美剧/绝命毒师 ◈ Breaking Bad/Breaking Bad Season 02",
         )
         media_update_mock.assert_called_once_with(
-            "/影视/剧集/欧美剧/绝命毒师 (Breaking Bad)/Breaking Bad Season 02"
+            "/影视/剧集/欧美剧/绝命毒师 ◈ Breaking Bad/Breaking Bad Season 02"
         )
         self.assertIn("Breaking Bad S02E03.mp4", add_task_mock.call_args.kwargs["message"])
 
@@ -150,8 +150,8 @@ class DownloadTaskStartupTest(unittest.TestCase):
         )
 
         target_path = (
-            "/影视/电影/外语电影/碟中谍 (Mission Impossible)/"
-            "碟中谍7：致命清算（上） (Mission Impossible Dead Reckoning Part One)"
+            "/影视/电影/外语电影/碟中谍 ◈ Mission Impossible/"
+            "碟中谍7：致命清算（上） ◈ Mission Impossible Dead Reckoning Part One"
         )
         api.create_dir_recursive.assert_called_once_with(target_path)
         api.move_file.assert_called_once_with(
@@ -334,18 +334,18 @@ class DownloadTaskStartupTest(unittest.TestCase):
         search_tvdb_mock.assert_called_once_with("Dexter", year="2006")
         episodes_mock.assert_called_once_with("79349", season_type="default")
         self.assertEqual(ai_plan_mock.call_args.args[0]["file_tree"][0]["relative_path"], "Dexter.S01E01.mkv")
-        api.create_dir_recursive.assert_called_once_with("/真人剧集/嗜血法医 (Dexter)/Dexter Season 01")
+        api.create_dir_recursive.assert_called_once_with("/真人剧集/嗜血法医 ◈ Dexter/Dexter Season 01")
         api.rename.assert_called_once_with(
             "/真人剧集/Dexter.Release/Dexter.S01E01.mkv",
             "Dexter S01E01.mkv",
         )
         api.move_file.assert_called_once_with(
             "/真人剧集/Dexter.Release/Dexter S01E01.mkv",
-            "/真人剧集/嗜血法医 (Dexter)/Dexter Season 01",
+            "/真人剧集/嗜血法医 ◈ Dexter/Dexter Season 01",
         )
         api.delete_single_file.assert_any_call("/真人剧集/Dexter.Release")
         api.get_files_from_dir.assert_not_called()
-        media_update_mock.assert_called_once_with("/真人剧集/嗜血法医 (Dexter)")
+        media_update_mock.assert_called_once_with("/真人剧集/嗜血法医 ◈ Dexter")
         self.assertIn("TVDB 自动整理完成", add_task_mock.call_args.kwargs["message"])
         self.assertIn("1 个文件", add_task_mock.call_args.kwargs["message"])
 
