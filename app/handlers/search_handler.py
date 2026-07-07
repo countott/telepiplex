@@ -867,7 +867,12 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
         except Exception as e:
             _log_warn(f"普通片名豆瓣反查失败: {e}")
 
+        _log_info(f"AI搜索清洗开始 raw={raw_query}")
         normalized = await asyncio.to_thread(normalize_search_query_with_ai, raw_query)
+        if normalized:
+            _log_info(f"AI搜索清洗完成 raw={raw_query} status={normalized.get('status')} candidates={len(normalized.get('lookup_candidates') or [])}")
+        else:
+            _log_info(f"AI搜索清洗无结果 raw={raw_query}")
         for item in (normalized or {}).get("lookup_candidates") or []:
             candidate_query = _clean_prowlarr_query(item.get("query") or item.get("title") or "")
             if not candidate_query:
@@ -877,9 +882,13 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
                 if metadata:
                     resolved_query = _clean_prowlarr_query(_query_from_plex_metadata(metadata))
                     search_metadata = _metadata_from_plex_metadata(metadata, query=resolved_query)
+                    if item.get("title"):
+                        search_metadata["normalized_title"] = _collapse_title_spaces(item.get("title"))
                     scope = item.get("scope")
                     if scope:
                         search_metadata["selected_scope"] = scope
+                        if scope in {"whole_series", "season", "episode"}:
+                            search_metadata["media_type"] = "series"
                     if item.get("season_number") is not None:
                         search_metadata["season_number"] = item.get("season_number")
                     if item.get("episode_number") is not None:
@@ -888,7 +897,12 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
             except Exception as e:
                 _log_warn(f"AI清洗候选豆瓣反查失败 query={candidate_query}: {e}")
 
+        _log_info(f"AI验证兜底开始 raw={raw_query}")
         verified = await asyncio.to_thread(infer_verified_search_match_with_ai, raw_query)
+        if verified:
+            _log_info(f"AI验证兜底完成 raw={raw_query} status={verified.get('status')} candidates={len(verified.get('candidates') or [])}")
+        else:
+            _log_info(f"AI验证兜底无结果 raw={raw_query}")
         if verified and verified.get("status") == "ok" and verified.get("candidates"):
             first = verified["candidates"][0]
             title = first.get("title") or ""
@@ -904,6 +918,11 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
                     media_type=first.get("media_type") or "",
                 )
                 metadata["external_ids"] = (first.get("external_ids") or {}).copy()
+                metadata["selected_scope"] = first.get("scope") or ""
+                if first.get("season_number") is not None:
+                    metadata["season_number"] = first.get("season_number")
+                if first.get("episode_number") is not None:
+                    metadata["episode_number"] = first.get("episode_number")
                 return {"query": query, "plex_metadata": None, "metadata": metadata}
 
         return None
@@ -1141,10 +1160,20 @@ def _entry_from_request(request: dict) -> dict | None:
     )
     if not title:
         return None
-    media_type = metadata.get("media_type") or plex_metadata.get("media_type") or "movie"
+    selected_scope = metadata.get("selected_scope") or metadata.get("scope") or ""
+    media_type = metadata.get("media_type") or plex_metadata.get("media_type") or ""
+    if selected_scope in {"whole_series", "season", "episode"}:
+        media_type = "series"
+        if metadata.get("normalized_title"):
+            title = metadata.get("normalized_title")
+    media_type = media_type or "movie"
+    scope = selected_scope if selected_scope in {"movie", "whole_series", "season", "episode"} else ""
+    if not scope:
+        scope = "movie" if media_type != "series" else "whole_series"
+
     return {
         "media_type": media_type if media_type in {"movie", "series"} else "movie",
-        "scope": "movie" if media_type != "series" else "whole_series",
+        "scope": scope,
         "title": title,
         "chinese_title": plex_metadata.get("chinese_title") or metadata.get("chinese_title") or "",
         "year": plex_metadata.get("year") or metadata.get("year") or "",
@@ -1152,7 +1181,35 @@ def _entry_from_request(request: dict) -> dict | None:
         "source": plex_metadata.get("source") or metadata.get("source") or "metadata",
         "plex_metadata": request.get("plex_metadata"),
         "metadata": request.get("metadata"),
+        "season_number": metadata.get("season_number"),
+        "episode_number": metadata.get("episode_number"),
     }
+
+
+def _intent_override_from_request(request: dict) -> dict:
+    metadata = request.get("metadata") if isinstance(request, dict) else {}
+    if not isinstance(metadata, dict):
+        return {}
+
+    scope = metadata.get("selected_scope") or metadata.get("scope")
+    if scope not in {"whole_series", "season", "episode"}:
+        return {}
+
+    override = {"scope": scope}
+    if metadata.get("normalized_title") or metadata.get("english_title") or metadata.get("chinese_title"):
+        override["title"] = metadata.get("normalized_title") or metadata.get("english_title") or metadata.get("chinese_title")
+    if metadata.get("year"):
+        override["year"] = metadata.get("year")
+    if metadata.get("season_number") is not None:
+        override["season_number"] = metadata.get("season_number")
+    if metadata.get("episode_number") is not None:
+        override["episode_number"] = metadata.get("episode_number")
+    return override
+
+
+def _entry_external_id(entry: dict, key: str) -> str:
+    external_ids = entry.get("external_ids") if isinstance(entry.get("external_ids"), dict) else {}
+    return str(external_ids.get(key) or entry.get(f"{key}_id") or entry.get(f"{key}_series_id") or "").strip()
 
 
 def _entry_from_tvdb_series(item: dict) -> dict | None:
@@ -1211,10 +1268,21 @@ async def _resolve_entry_candidates(raw_query: str) -> dict:
     entry = _entry_from_request(request) if request else None
     if entry:
         entries.append(entry)
+        intent.update(_intent_override_from_request(request))
 
     tvdb_entries, tvdb_episodes = await asyncio.to_thread(_lookup_tvdb_entries, intent)
     entries.extend(tvdb_entries)
     episodes_by_series.update(tvdb_episodes)
+
+    for item in entries:
+        series_id = _entry_external_id(item, "tvdb")
+        if not series_id or series_id in episodes_by_series:
+            continue
+        try:
+            episodes_by_series[series_id] = await asyncio.to_thread(get_tvdb_series_episodes, series_id)
+        except (TvdbConfigError, TvdbRequestError) as e:
+            _log_warn(f"AI/外部ID TVDB 剧集列表读取失败 series_id={series_id}: {e}")
+            episodes_by_series[series_id] = []
 
     seen = set()
     unique_entries = []
@@ -1289,7 +1357,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     raw_query = _extract_command_query(update, context)
     if not raw_query:
-        await update.message.reply_text("请输入搜索内容：/search 片名，或 /search 豆瓣/IMDb/TVDB 链接。")
+        await update.message.reply_text("请输入搜索内容：/search 片名 或 /s 片名，也可以发送豆瓣/IMDb/TVDB 链接。")
         return ConversationHandler.END
 
     return await _start_entry_resolution(update, context, raw_query)
@@ -1342,7 +1410,7 @@ async def unsupported_http_link_command(update: Update, context: ContextTypes.DE
         await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
         return ConversationHandler.END
 
-    await update.message.reply_text("⚠️ 不支持该网页链接，请发送 /magnet 磁力链接，或使用 /search 搜索片源。")
+    await update.message.reply_text("⚠️ 不支持该网页链接，请发送 /magnet 磁力链接，或使用 /search /s 搜索片源。")
     return ConversationHandler.END
 
 
@@ -1354,7 +1422,7 @@ async def resolve_plain_search_metadata(update: Update, context: ContextTypes.DE
 
     pending_query = context.user_data.get("pending_plain_search_query")
     if not pending_query:
-        await update.message.reply_text("⚠️ 未找到待补充的搜索任务，请重新发送 /search。")
+        await update.message.reply_text("⚠️ 未找到待补充的搜索任务，请重新发送 /search 或 /s。")
         return ConversationHandler.END
 
     text = (update.message.text or "").strip()
@@ -1524,6 +1592,7 @@ def register_search_handlers(application):
     search_handler = ConversationHandler(
         entry_points=[
             CommandHandler("search", search_command),
+            CommandHandler("s", search_command),
             MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(METADATA_URL_PATTERN), search_metadata_link_command),
             MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(HTTP_URL_PATTERN), unsupported_http_link_command),
         ],
@@ -1542,4 +1611,4 @@ def register_search_handlers(application):
         fallbacks=[CommandHandler("q", quit_search_conversation)],
     )
     application.add_handler(search_handler)
-    _log_info("✅ Search处理器已注册，支持 /search 搜索和直接发送豆瓣/IMDb/TVDB链接；豆瓣解析使用内建英文/原标题优先策略")
+    _log_info("✅ Search处理器已注册，支持 /search /s 搜索和直接发送豆瓣/IMDb/TVDB链接；豆瓣解析使用内建英文/原标题优先策略")

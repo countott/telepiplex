@@ -40,8 +40,8 @@ def log_runtime_features():
         "Telepiplex runtime features: direct_metadata_link_search=enabled, "
         "builtin_douban_title_priority=latin_or_original_first, "
         "external_metadata_douban_reverse_lookup=enabled, prowlarr_indexer_summary=enabled, "
-        "metadata_object=enabled, search_command=enabled, magnet_command=enabled, find_command_removed=enabled, "
-        "legacy_s_command_removed=enabled, retry_command=enabled, strm_command=enabled, tvdb_adapter=enabled, ai_tvdb_inference=enabled, "
+        "metadata_object=enabled, search_command=enabled, search_short_command=enabled, magnet_command=enabled, find_command_removed=enabled, "
+        "retry_command=enabled, strm_command=enabled, tvdb_adapter=enabled, ai_tvdb_inference=enabled, "
         "tvdb_ai_115_tree_rename=enabled, "
         "revision=%s" % revision
     )
@@ -55,6 +55,7 @@ def get_help_info():
 <code>/auth</code> - <i>115扫码授权 (解除授权后使用)</i>\n
 <code>/reload</code> - <i>重载配置</i>\n
 <code>/search</code> - 搜索片源并加入 115 离线\n
+<code>/s</code> - 搜索片源的短命令\n
 <code>/magnet</code> - 直接投递已有磁力链接\n
 <code>/m</code> - 直接投递磁力链接的短命令\n
 <code>/retry</code> - 查看重试列表\n
@@ -63,7 +64,7 @@ def get_help_info():
 <code>/q</code> - 取消当前会话\n\n
 <b>✨ 功能说明</b>\n
 <u>电影下载：</u>
-• 输入 <code>"/search 片名"</code>，或直接发送豆瓣/IMDb/TVDB/TMDB 链接搜索片源
+• 输入 <code>"/search 片名"</code> 或 <code>"/s 片名"</code>，或直接发送豆瓣/IMDb/TVDB/TMDB 链接搜索片源
 • 输入 <code>"/magnet 磁力链接"</code> 或 <code>"/m 磁力链接"</code> 跳过片名搜索，直接选择目录并投递 115 离线
 • 下载完成后优先根据实际文件名自动整理；搜索链路中的元数据只作为辅助
 • 离线超时后可选择写入重试列表
@@ -173,6 +174,7 @@ def get_bot_menu():
         BotCommand("auth", "115扫码授权"),
         BotCommand("reload", "重载配置"),
         BotCommand("search", "搜索片源并加入 115 离线"),
+        BotCommand("s", "搜索片源"),
         BotCommand("magnet", "直接投递磁力链接"),
         BotCommand("m", "直接投递磁力链接"),
         BotCommand("retry", "查看重试列表"),

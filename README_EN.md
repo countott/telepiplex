@@ -159,6 +159,7 @@ Please refer to the comments in `config/config.yaml.example` for configuration d
 - `/auth`    - 115 authorization setup
 - `/reload`  - reload the configuration
 - `/search`  - Search releases and add them to 115 offline download
+- `/s`       - Short search command
 - `/magnet`  - Submit an existing magnet link directly
 - `/m`       - Short magnet command
 - `/retry`   - Retry list
@@ -166,9 +167,9 @@ Please refer to the comments in `config/config.yaml.example` for configuration d
 - `/strm`    - Sync directory and create STRM files
 - `/q`       - Cancel current session
 
-Use `/search movie name` to resolve and confirm a media entry before searching releases, or send a Douban, IMDb, TVDB, or TMDB link directly. Series requests can include scope such as `S02E05`; unreleased episodes are blocked before Prowlarr is queried. Use `/magnet magnet:?xt=urn:btih:...` or `/m magnet:?xt=urn:btih:...` when you already have a magnet link.
+Use `/search movie name` or `/s movie name` to resolve and confirm a media entry before searching releases, or send a Douban, IMDb, TVDB, or TMDB link directly. Series requests can include scope such as `S02E05`; unreleased episodes are blocked before Prowlarr is queried. Use `/magnet magnet:?xt=urn:btih:...` or `/m magnet:?xt=urn:btih:...` when you already have a magnet link.
 
-`/search` does not send raw text, cleaned page titles, or unverified AI guesses directly to Prowlarr. It first resolves a verified movie or series entry, asks for confirmation when needed, and then generates the Prowlarr query from the confirmed title, year, season, or episode scope.
+`/search` and `/s` do not send raw text, cleaned page titles, or unverified AI guesses directly to Prowlarr. They first resolve a verified movie or series entry, ask for confirmation when needed, and then generate the Prowlarr query from the confirmed title, year, season, or episode scope.
 
 Configure `category_folder` as a flat list of 115 save paths. The bot shows these paths directly, without an extra category step:
 

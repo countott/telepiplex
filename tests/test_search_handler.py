@@ -24,6 +24,7 @@ from app.handlers.search_handler import (
     _is_supported_http_download,
     _metadata_for_selected_release,
     _metadata_matches_plain_query,
+    _resolve_entry_candidates,
     _plex_metadata_for_selected_release,
     _resolve_search_request,
     build_results_text,
@@ -565,6 +566,45 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         button_text = update.message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard[0][0].text
         self.assertIn("推荐", button_text)
         self.assertIn("S02E05", button_text)
+
+    @patch("app.handlers.search_handler._lookup_tvdb_entries")
+    @patch("app.handlers.search_handler._resolve_search_request", new_callable=AsyncMock)
+    def test_entry_resolution_uses_ai_normalized_episode_scope(self, resolve_mock, tvdb_mock):
+        resolve_mock.return_value = {
+            "query": "Rick and Morty S09E07",
+            "plex_metadata": None,
+            "metadata": {
+                "source": "ai_verified",
+                "media_type": "series",
+                "english_title": "Rick and Morty",
+                "query": "Rick and Morty S09E07",
+                "selected_scope": "episode",
+                "season_number": 9,
+                "episode_number": 7,
+                "external_ids": {"tvdb": "275274"},
+            },
+        }
+        tvdb_mock.return_value = (
+            [],
+            {
+                "275274": [
+                    {
+                        "season_number": 9,
+                        "episode_number": 7,
+                        "aired": "2026-06-30",
+                    }
+                ]
+            },
+        )
+
+        resolution = asyncio.run(_resolve_entry_candidates("瑞克和莫迪第九季第七集"))
+
+        self.assertEqual(resolution["status"], "needs_confirmation")
+        candidate = resolution["candidates"][0]
+        self.assertEqual(candidate["media_type"], "series")
+        self.assertEqual(candidate["scope"], "episode")
+        self.assertEqual(candidate["season_number"], 9)
+        self.assertEqual(candidate["episode_number"], 7)
 
     @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
     def test_confirm_entry_scope_generates_episode_query(self, send_results_mock):
