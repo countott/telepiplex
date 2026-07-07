@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "app"))
 import init
 from app.handlers.search_handler import (
     METADATA_URL_PATTERN,
+    SEARCH_CONFIRM_ENTRY_SCOPE,
     SEARCH_RESOLVE_METADATA,
     SEARCH_SELECT_RESULT,
     SEARCH_SELECT_SUB_CATEGORY,
@@ -26,9 +27,11 @@ from app.handlers.search_handler import (
     _plex_metadata_for_selected_release,
     _resolve_search_request,
     build_results_text,
+    confirm_entry_scope,
     format_size,
     get_pending_search_task,
     parse_douban_title,
+    pending_entry_confirmations,
     pending_search_tasks,
     resolve_plain_search_metadata,
     search_command,
@@ -41,6 +44,7 @@ from app.handlers.search_handler import (
 class SearchHandlerHelpersTest(unittest.TestCase):
     def tearDown(self):
         pending_search_tasks.clear()
+        pending_entry_confirmations.clear()
 
     def test_format_size_uses_readable_units(self):
         self.assertEqual(format_size(0), "未知")
@@ -377,7 +381,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertNotIn("📁 媒体", button_texts)
 
     @patch("app.handlers.search_handler.requests.get")
-    def test_resolve_plain_search_request_uses_plain_query_when_douban_misses(self, mock_get):
+    def test_resolve_plain_search_request_blocks_when_douban_misses(self, mock_get):
         old_bot_config = init.bot_config
         init.bot_config = {"search": {}}
         self.addCleanup(setattr, init, "bot_config", old_bot_config)
@@ -387,9 +391,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
 
         request = asyncio.run(_resolve_search_request("布达佩斯大饭店"))
 
-        self.assertEqual(request["query"], "布达佩斯大饭店")
-        self.assertIsNone(request["plex_metadata"])
-        self.assertNotIn("needs_metadata", request)
+        self.assertIsNone(request)
 
     @patch("app.handlers.search_handler.requests.get")
     def test_resolve_plain_search_request_uses_douban_exact_match_metadata(self, mock_get):
@@ -428,7 +430,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertEqual(mock_get.call_args_list[0].kwargs["params"], {"cat": "1002", "q": "布达佩斯大饭店"})
 
     @patch("app.handlers.search_handler.requests.get")
-    def test_resolve_plain_search_request_uses_plain_query_when_douban_match_is_not_exact(self, mock_get):
+    def test_resolve_plain_search_request_blocks_when_douban_match_is_not_exact(self, mock_get):
         old_bot_config = init.bot_config
         init.bot_config = {"search": {}}
         self.addCleanup(setattr, init, "bot_config", old_bot_config)
@@ -446,9 +448,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
 
         request = asyncio.run(_resolve_search_request("英雄"))
 
-        self.assertEqual(request["query"], "英雄")
-        self.assertIsNone(request["plex_metadata"])
-        self.assertNotIn("needs_metadata", request)
+        self.assertIsNone(request)
 
     def test_clean_prowlarr_query_removes_colons_and_dashes(self):
         self.assertEqual(
@@ -461,14 +461,13 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         )
 
     @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
-    @patch("app.handlers.search_handler._resolve_search_request", new_callable=AsyncMock)
-    def test_search_command_runs_plain_query_without_requiring_metadata(self, resolve_mock, send_results_mock):
+    @patch("app.handlers.search_handler._resolve_entry_candidates", new_callable=AsyncMock)
+    def test_search_command_blocks_plain_query_without_verified_entry(self, resolve_mock, send_results_mock):
         init.check_user = Mock(return_value=True)
         resolve_mock.return_value = {
-            "query": "Vivre sa vie Film en douze tableaux",
-            "plex_metadata": None,
+            "status": "blocked_no_verified_match",
+            "message": "未匹配到明确的影视条目，请提供豆瓣/TVDB/IMDb/TMDB 链接或更明确的关键词。",
         }
-        send_results_mock.return_value = SEARCH_SELECT_RESULT
         update = Mock()
         update.message.from_user.id = 472943219
         update.message.reply_text = AsyncMock()
@@ -478,22 +477,26 @@ class SearchHandlerHelpersTest(unittest.TestCase):
 
         state = asyncio.run(search_command(update, context))
 
-        self.assertEqual(state, SEARCH_SELECT_RESULT)
-        self.assertNotIn("pending_plain_search_query", context.user_data)
-        send_results_mock.assert_awaited_once_with(
-            update,
-            context,
-            "Vivre sa vie Film en douze tableaux",
-            plex_metadata=None,
-        )
+        self.assertEqual(state, -1)
+        update.message.reply_text.assert_awaited_once()
+        self.assertIn("未匹配", update.message.reply_text.await_args.args[0])
+        send_results_mock.assert_not_awaited()
 
     @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
-    @patch("app.handlers.search_handler._resolve_search_request", new_callable=AsyncMock)
+    @patch("app.handlers.search_handler._resolve_entry_candidates", new_callable=AsyncMock)
     def test_search_command_runs_prowlarr_flow(self, resolve_mock, send_results_mock):
         init.check_user = Mock(return_value=True)
         resolve_mock.return_value = {
-            "query": "The Grand Budapest Hotel 2014",
-            "plex_metadata": {"source": "douban", "chinese_title": "布达佩斯大饭店"},
+            "status": "auto_confirm",
+            "message": "已识别电影：布达佩斯大饭店 The Grand Budapest Hotel (2014)",
+            "candidate": {
+                "media_type": "movie",
+                "scope": "movie",
+                "title": "The Grand Budapest Hotel",
+                "chinese_title": "布达佩斯大饭店",
+                "year": "2014",
+                "plex_metadata": {"source": "douban", "chinese_title": "布达佩斯大饭店"},
+            },
         }
         send_results_mock.return_value = SEARCH_SELECT_RESULT
         update = Mock()
@@ -506,11 +509,97 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         state = asyncio.run(search_command(update, context))
 
         self.assertEqual(state, SEARCH_SELECT_RESULT)
+        update.message.reply_text.assert_awaited_once()
+        self.assertIn("已识别电影", update.message.reply_text.await_args.args[0])
         send_results_mock.assert_awaited_once_with(
             update,
             context,
             "The Grand Budapest Hotel 2014",
             plex_metadata={"source": "douban", "chinese_title": "布达佩斯大饭店"},
+            metadata={
+                "source": "confirmed",
+                "media_type": "movie",
+                "english_title": "The Grand Budapest Hotel",
+                "chinese_title": "布达佩斯大饭店",
+                "year": "2014",
+                "query": "The Grand Budapest Hotel 2014",
+                "external_ids": {},
+                "selected_scope": "movie",
+                "season_number": None,
+                "episode_number": None,
+                "cover_url": "",
+            },
+        )
+
+    @patch("app.handlers.search_handler._resolve_entry_candidates", new_callable=AsyncMock)
+    def test_search_command_shows_entry_scope_confirmation(self, resolve_mock):
+        init.check_user = Mock(return_value=True)
+        resolve_mock.return_value = {
+            "status": "needs_confirmation",
+            "candidates": [
+                {
+                    "media_type": "series",
+                    "scope": "episode",
+                    "title": "Breaking Bad",
+                    "chinese_title": "绝命毒师",
+                    "year": "2008",
+                    "season_number": 2,
+                    "episode_number": 5,
+                    "recommended": True,
+                    "metadata": {"media_type": "series", "season_number": 2, "episode_number": 5},
+                }
+            ],
+        }
+        update = Mock()
+        update.message.from_user.id = 472943219
+        update.message.reply_text = AsyncMock()
+        context = Mock()
+        context.args = ["绝命毒师", "S02E05"]
+        context.user_data = {}
+
+        state = asyncio.run(search_command(update, context))
+
+        self.assertEqual(state, SEARCH_CONFIRM_ENTRY_SCOPE)
+        update.message.reply_text.assert_awaited_once()
+        self.assertIn("请确认", update.message.reply_text.await_args.args[0])
+        button_text = update.message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard[0][0].text
+        self.assertIn("推荐", button_text)
+        self.assertIn("S02E05", button_text)
+
+    @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
+    def test_confirm_entry_scope_generates_episode_query(self, send_results_mock):
+        send_results_mock.return_value = SEARCH_SELECT_RESULT
+        pending_entry_confirmations["confirm-1"] = {
+            "created_at": time.time(),
+            "user_id": 472943219,
+            "candidates": [
+                {
+                    "media_type": "series",
+                    "scope": "episode",
+                    "title": "Breaking Bad",
+                    "season_number": 2,
+                    "episode_number": 5,
+                    "metadata": {"media_type": "series", "season_number": 2, "episode_number": 5},
+                }
+            ],
+        }
+        update = Mock()
+        update.effective_user.id = 472943219
+        update.callback_query.data = "entry_confirm:confirm-1:0"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        context = Mock()
+        context.user_data = {}
+
+        state = asyncio.run(confirm_entry_scope(update, context))
+
+        self.assertEqual(state, SEARCH_SELECT_RESULT)
+        send_results_mock.assert_awaited_once_with(
+            update,
+            context,
+            "Breaking Bad S02E05",
+            plex_metadata=None,
+            metadata={"media_type": "series", "season_number": 2, "episode_number": 5},
         )
 
     @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)

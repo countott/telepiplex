@@ -12,7 +12,7 @@ Usage Issues & Bug Reports
 [Join](https://t.me/+FTPNla_7SCc3ZWVl)
 
 ## Update Log
-- Added `/search` for release search, metadata link parsing, 115 offline download, and automatic Plex naming.
+- Added `/search` for verified media-entry confirmation, release search, metadata link parsing, 115 offline download, and automatic Plex naming.
 - Added `/magnet` and `/m` for direct magnet submission.
 - Unsupported HTTP/HTTPS web pages are rejected; existing magnet links should be submitted with `/magnet` or `/m`.
 - Removed obsolete command surfaces and manual naming flows.
@@ -166,7 +166,9 @@ Please refer to the comments in `config/config.yaml.example` for configuration d
 - `/strm`    - Sync directory and create STRM files
 - `/q`       - Cancel current session
 
-Use `/search movie name` to search releases, or send a Douban, IMDb, TVDB, or TMDB link directly. Use `/magnet magnet:?xt=urn:btih:...` or `/m magnet:?xt=urn:btih:...` when you already have a magnet link.
+Use `/search movie name` to resolve and confirm a media entry before searching releases, or send a Douban, IMDb, TVDB, or TMDB link directly. Series requests can include scope such as `S02E05`; unreleased episodes are blocked before Prowlarr is queried. Use `/magnet magnet:?xt=urn:btih:...` or `/m magnet:?xt=urn:btih:...` when you already have a magnet link.
+
+`/search` does not send raw text, cleaned page titles, or unverified AI guesses directly to Prowlarr. It first resolves a verified movie or series entry, asks for confirmation when needed, and then generates the Prowlarr query from the confirmed title, year, season, or episode scope.
 
 Configure `category_folder` as a flat list of 115 save paths. The bot shows these paths directly, without an extra category step:
 

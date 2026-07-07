@@ -24,8 +24,15 @@ from app.adapters.prowlarr import (
     search_prowlarr,
 )
 from app.handlers.download_handler import download_executor, download_task
+from app.adapters.tvdb import TvdbConfigError, TvdbRequestError, get_tvdb_series_episodes, search_tvdb_series
+from app.utils.ai import infer_verified_search_match_with_ai, normalize_search_query_with_ai
 from app.utils.media_metadata import build_external_metadata, build_search_metadata
 from app.utils.release_score import rank_releases
+from app.utils.search_resolution import (
+    build_confirmation_candidates,
+    candidate_to_prowlarr_query,
+    parse_search_intent,
+)
 from app.utils.search_query import (
     extract_douban_subject_id,
     is_supported_metadata_url,
@@ -38,7 +45,7 @@ from app.utils.search_query import (
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
-SEARCH_SELECT_RESULT, SEARCH_SELECT_SUB_CATEGORY, SEARCH_RESOLVE_METADATA = range(30, 33)
+SEARCH_SELECT_RESULT, SEARCH_SELECT_SUB_CATEGORY, SEARCH_RESOLVE_METADATA, SEARCH_CONFIRM_ENTRY_SCOPE = range(30, 34)
 SEARCH_TASK_TTL_SECONDS = 30 * 60
 SEARCH_PROGRESS_INTERVAL_SECONDS = 30
 TELEGRAM_SEND_TIMEOUT_SECONDS = 30
@@ -47,6 +54,7 @@ HTTP_URL_PATTERN = r"(?i)^https?://[^\s]+$"
 UNICODE_FORMAT_CODEPOINTS = {0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E}
 
 pending_search_tasks = {}
+pending_entry_confirmations = {}
 
 
 def _log_info(message: str):
@@ -352,6 +360,114 @@ def get_pending_search_task(task_id: str):
     return task
 
 
+def get_pending_entry_confirmation(task_id: str):
+    task = pending_entry_confirmations.get(task_id)
+    if not task:
+        return None
+    if time.time() - task.get("created_at", 0) > SEARCH_TASK_TTL_SECONDS:
+        pending_entry_confirmations.pop(task_id, None)
+        return None
+    return task
+
+
+def _candidate_display_scope(candidate: dict) -> str:
+    scope = candidate.get("scope")
+    if scope == "episode":
+        return f"S{int(candidate.get('season_number')):02d}E{int(candidate.get('episode_number')):02d}"
+    if scope == "season":
+        return f"S{int(candidate.get('season_number')):02d} 整季"
+    if scope == "whole_series":
+        return "全集"
+    return "电影"
+
+
+def _candidate_display_title(candidate: dict) -> str:
+    title = candidate.get("title") or candidate.get("english_title") or ""
+    chinese_title = candidate.get("chinese_title") or ""
+    year = candidate.get("year") or ""
+    parts = []
+    if chinese_title and chinese_title != title:
+        parts.append(chinese_title)
+    if title:
+        parts.append(title)
+    display = " ".join(parts) or "未知条目"
+    if year and year not in display:
+        display = f"{display} ({year})"
+    return display
+
+
+def _candidate_button_text(candidate: dict) -> str:
+    prefix = "✅ 推荐 " if candidate.get("recommended") else ""
+    text = f"{prefix}{_candidate_display_title(candidate)} · {_candidate_display_scope(candidate)}"
+    return text[:60]
+
+
+def _build_entry_confirmation_keyboard(task_id: str, candidates: list[dict]) -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton(_candidate_button_text(candidate), callback_data=f"entry_confirm:{task_id}:{index}")]
+        for index, candidate in enumerate(candidates)
+    ]
+    keyboard.append([InlineKeyboardButton("取消", callback_data=f"entry_cancel:{task_id}")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def _build_entry_confirmation_text(candidates: list[dict]) -> str:
+    lines = ["请确认要搜索的影视条目和范围：", ""]
+    for index, candidate in enumerate(candidates, start=1):
+        marker = "（推荐）" if candidate.get("recommended") else ""
+        lines.append(f"{index}. {_candidate_display_title(candidate)} · {_candidate_display_scope(candidate)}{marker}")
+        external_ids = candidate.get("external_ids") if isinstance(candidate.get("external_ids"), dict) else {}
+        source = " / ".join(f"{key}:{value}" for key, value in external_ids.items() if value)
+        if source:
+            lines.append(f"   来源: {source}")
+    return "\n".join(lines).strip()
+
+
+def _candidate_plex_metadata(candidate: dict):
+    if candidate.get("plex_metadata") is not None:
+        return candidate.get("plex_metadata")
+    if candidate.get("media_type") == "series":
+        return None
+    return {
+        "source": candidate.get("source") or "confirmed",
+        "media_type": candidate.get("media_type") or "",
+        "chinese_title": candidate.get("chinese_title") or "",
+        "english_title": candidate.get("title") or candidate.get("english_title") or "",
+        "year": candidate.get("year") or "",
+    }
+
+
+def _candidate_search_metadata(candidate: dict):
+    metadata = candidate.get("metadata")
+    if isinstance(metadata, dict):
+        return metadata
+    external_ids = candidate.get("external_ids") if isinstance(candidate.get("external_ids"), dict) else {}
+    return {
+        "source": candidate.get("source") or "confirmed",
+        "media_type": candidate.get("media_type") or "",
+        "english_title": candidate.get("title") or candidate.get("english_title") or "",
+        "chinese_title": candidate.get("chinese_title") or "",
+        "year": candidate.get("year") or "",
+        "query": candidate_to_prowlarr_query(candidate),
+        "external_ids": external_ids.copy(),
+        "selected_scope": candidate.get("scope") or "",
+        "season_number": candidate.get("season_number"),
+        "episode_number": candidate.get("episode_number"),
+        "cover_url": candidate.get("cover_url") or "",
+    }
+
+
+async def _send_confirmed_candidate_search(update: Update, context: ContextTypes.DEFAULT_TYPE, candidate: dict):
+    query = candidate_to_prowlarr_query(candidate)
+    return await _send_search_results(
+        update,
+        context,
+        query,
+        plex_metadata=_candidate_plex_metadata(candidate),
+        metadata=_candidate_search_metadata(candidate),
+    )
+
+
 def _format_indexer_summary(indexer_summary: dict | None) -> list[str]:
     if not indexer_summary:
         return []
@@ -492,6 +608,17 @@ def _metadata_source_from_url(raw_url: str) -> str:
     if "douban.com" in host:
         return "douban"
     return "metadata_url"
+
+
+def _media_type_from_metadata_url(raw_url: str) -> str:
+    parsed = urlparse(str(raw_url or "").strip())
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    if "thetvdb.com" in host or "tvdb.com" in host or "/tv/" in path:
+        return "series"
+    if "/movie/" in path:
+        return "movie"
+    return "movie"
 
 
 def _is_supported_http_download(raw_query: str) -> bool:
@@ -726,7 +853,7 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
     if not is_supported_metadata_url(raw_query):
         query = _clean_prowlarr_query(raw_query)
         if not query:
-            return {"query": "", "plex_metadata": None}
+            return None
 
         try:
             metadata = await asyncio.to_thread(_fetch_douban_metadata_for_plain_query, query)
@@ -738,12 +865,48 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
                     "metadata": _metadata_from_plex_metadata(metadata, query=resolved_query),
                 }
         except Exception as e:
-            _log_warn(f"普通片名豆瓣反查失败，等待用户补充元数据: {e}")
+            _log_warn(f"普通片名豆瓣反查失败: {e}")
 
-        return {
-            "query": query,
-            "plex_metadata": None,
-        }
+        normalized = await asyncio.to_thread(normalize_search_query_with_ai, raw_query)
+        for item in (normalized or {}).get("lookup_candidates") or []:
+            candidate_query = _clean_prowlarr_query(item.get("query") or item.get("title") or "")
+            if not candidate_query:
+                continue
+            try:
+                metadata = await asyncio.to_thread(_fetch_douban_metadata_for_plain_query, candidate_query)
+                if metadata:
+                    resolved_query = _clean_prowlarr_query(_query_from_plex_metadata(metadata))
+                    search_metadata = _metadata_from_plex_metadata(metadata, query=resolved_query)
+                    scope = item.get("scope")
+                    if scope:
+                        search_metadata["selected_scope"] = scope
+                    if item.get("season_number") is not None:
+                        search_metadata["season_number"] = item.get("season_number")
+                    if item.get("episode_number") is not None:
+                        search_metadata["episode_number"] = item.get("episode_number")
+                    return {"query": resolved_query, "plex_metadata": metadata, "metadata": search_metadata}
+            except Exception as e:
+                _log_warn(f"AI清洗候选豆瓣反查失败 query={candidate_query}: {e}")
+
+        verified = await asyncio.to_thread(infer_verified_search_match_with_ai, raw_query)
+        if verified and verified.get("status") == "ok" and verified.get("candidates"):
+            first = verified["candidates"][0]
+            title = first.get("title") or ""
+            year = first.get("year") or ""
+            query = _clean_prowlarr_query(f"{title} {year}".strip())
+            if query:
+                metadata = build_external_metadata(
+                    source="ai_verified",
+                    title=title,
+                    year=year,
+                    external_id="",
+                    original_url="",
+                    media_type=first.get("media_type") or "",
+                )
+                metadata["external_ids"] = (first.get("external_ids") or {}).copy()
+                return {"query": query, "plex_metadata": None, "metadata": metadata}
+
+        return None
 
     try:
         if _is_douban_url(raw_query):
@@ -790,6 +953,7 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
                     year=external_metadata.get("year"),
                     external_id=external_metadata.get("external_id") or "",
                     original_url=raw_query,
+                    media_type=_media_type_from_metadata_url(raw_query),
                 )
                 _log_info(
                     f"外站链接解析为英文搜索词 raw={raw_query} "
@@ -797,9 +961,7 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
                 )
                 return {"query": query, "plex_metadata": None, "metadata": search_metadata}
 
-        query = _clean_prowlarr_query(await asyncio.to_thread(_fetch_media_page_title, raw_query))
-        _log_info(f"媒体链接解析为搜索词 raw={raw_query} query={query}")
-        return {"query": query, "plex_metadata": None}
+        return None
     except Exception as e:
         _log_warn(f"媒体页面标题解析失败: {e}")
         return None
@@ -963,6 +1125,162 @@ async def _send_resolved_search_results(update: Update, context: ContextTypes.DE
     return await _send_search_results(update, context, request["query"], **kwargs)
 
 
+def _entry_from_request(request: dict) -> dict | None:
+    if not request:
+        return None
+    plex_metadata = request.get("plex_metadata") or {}
+    metadata = request.get("metadata") or {}
+    external_ids = metadata.get("external_ids") if isinstance(metadata.get("external_ids"), dict) else {}
+    title = (
+        plex_metadata.get("english_title")
+        or metadata.get("english_title")
+        or request.get("query")
+        or plex_metadata.get("chinese_title")
+        or metadata.get("chinese_title")
+        or ""
+    )
+    if not title:
+        return None
+    media_type = metadata.get("media_type") or plex_metadata.get("media_type") or "movie"
+    return {
+        "media_type": media_type if media_type in {"movie", "series"} else "movie",
+        "scope": "movie" if media_type != "series" else "whole_series",
+        "title": title,
+        "chinese_title": plex_metadata.get("chinese_title") or metadata.get("chinese_title") or "",
+        "year": plex_metadata.get("year") or metadata.get("year") or "",
+        "external_ids": external_ids.copy(),
+        "source": plex_metadata.get("source") or metadata.get("source") or "metadata",
+        "plex_metadata": request.get("plex_metadata"),
+        "metadata": request.get("metadata"),
+    }
+
+
+def _entry_from_tvdb_series(item: dict) -> dict | None:
+    if not item or not item.get("tvdb_series_id"):
+        return None
+    return {
+        "media_type": "series",
+        "scope": "whole_series",
+        "title": item.get("name") or "",
+        "chinese_title": "",
+        "year": item.get("year") or "",
+        "external_ids": {"tvdb": str(item.get("tvdb_series_id"))},
+        "source": "tvdb",
+        "metadata": build_external_metadata(
+            source="tvdb",
+            title=item.get("name") or "",
+            year=item.get("year") or "",
+            external_id=str(item.get("tvdb_series_id")),
+            media_type="series",
+        ),
+    }
+
+
+def _lookup_tvdb_entries(intent: dict) -> tuple[list[dict], dict]:
+    title = intent.get("title") or intent.get("raw_query") or ""
+    if not title:
+        return [], {}
+    try:
+        series_items = search_tvdb_series(title, year=intent.get("year") or "")
+    except (TvdbConfigError, TvdbRequestError) as e:
+        _log_warn(f"TVDB 搜索跳过 query={title}: {e}")
+        return [], {}
+
+    entries = []
+    episodes_by_series = {}
+    for item in series_items[:5]:
+        entry = _entry_from_tvdb_series(item)
+        if not entry:
+            continue
+        entries.append(entry)
+        series_id = entry["external_ids"]["tvdb"]
+        try:
+            episodes_by_series[series_id] = get_tvdb_series_episodes(series_id)
+        except (TvdbConfigError, TvdbRequestError) as e:
+            _log_warn(f"TVDB 剧集列表读取失败 series_id={series_id}: {e}")
+            episodes_by_series[series_id] = []
+    return entries, episodes_by_series
+
+
+async def _resolve_entry_candidates(raw_query: str) -> dict:
+    intent = parse_search_intent(raw_query)
+    entries = []
+    episodes_by_series = {}
+
+    request = await _resolve_search_request(raw_query)
+    entry = _entry_from_request(request) if request else None
+    if entry:
+        entries.append(entry)
+
+    tvdb_entries, tvdb_episodes = await asyncio.to_thread(_lookup_tvdb_entries, intent)
+    entries.extend(tvdb_entries)
+    episodes_by_series.update(tvdb_episodes)
+
+    seen = set()
+    unique_entries = []
+    for item in entries:
+        external_ids = item.get("external_ids") if isinstance(item.get("external_ids"), dict) else {}
+        key = tuple(sorted(external_ids.items())) or (item.get("media_type"), item.get("title"), item.get("year"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_entries.append(item)
+
+    if not unique_entries:
+        return {
+            "status": "blocked_no_verified_match",
+            "message": "未匹配到明确的影视条目，请提供豆瓣/TVDB/IMDb/TMDB 链接或更明确的关键词。",
+        }
+
+    candidates = build_confirmation_candidates(unique_entries, intent, episodes_by_series)
+    if not candidates:
+        return {
+            "status": "blocked_unreleased",
+            "message": "该剧集范围尚未播出或不存在，已停止搜索。",
+        }
+
+    is_link = is_supported_metadata_url(raw_query)
+    if is_link and len(candidates) == 1 and candidates[0].get("media_type") == "movie":
+        return {
+            "status": "auto_confirm",
+            "message": f"已识别电影：{_candidate_display_title(candidates[0])}",
+            "candidate": candidates[0],
+        }
+
+    return {"status": "needs_confirmation", "candidates": candidates}
+
+
+async def _start_entry_resolution(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_query: str):
+    resolution = await _resolve_entry_candidates(raw_query)
+    status = resolution.get("status")
+    if status in {"blocked_no_verified_match", "blocked_unreleased"}:
+        await update.message.reply_text(resolution.get("message") or "未匹配到明确的影视条目。")
+        return ConversationHandler.END
+
+    if status == "auto_confirm":
+        await update.message.reply_text(resolution.get("message") or "已识别电影。")
+        if is_supported_metadata_url(raw_query):
+            await asyncio.sleep(1)
+        return await _send_confirmed_candidate_search(update, context, resolution["candidate"])
+
+    if status == "needs_confirmation":
+        task_id = uuid.uuid4().hex[:10]
+        pending_entry_confirmations[task_id] = {
+            "created_at": time.time(),
+            "user_id": update.effective_user.id,
+            "candidates": resolution.get("candidates") or [],
+        }
+        await update.message.reply_text(
+            _build_entry_confirmation_text(resolution.get("candidates") or []),
+            reply_markup=_build_entry_confirmation_keyboard(task_id, resolution.get("candidates") or []),
+            disable_web_page_preview=True,
+        )
+        return SEARCH_CONFIRM_ENTRY_SCOPE
+
+    await update.message.reply_text("未匹配到明确的影视条目，请提供更明确的关键词或元数据链接。")
+    return ConversationHandler.END
+
+
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if not init.check_user(user_id):
@@ -974,12 +1292,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("请输入搜索内容：/search 片名，或 /search 豆瓣/IMDb/TVDB 链接。")
         return ConversationHandler.END
 
-    request = await _resolve_search_request(raw_query)
-    if not request or not request.get("query"):
-        await update.message.reply_text("⚠️ 页面链接解析失败，请改用片名搜索。")
-        return ConversationHandler.END
-
-    return await _send_resolved_search_results(update, context, request)
+    return await _start_entry_resolution(update, context, raw_query)
 
 
 async def search_metadata_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -989,12 +1302,38 @@ async def search_metadata_link_command(update: Update, context: ContextTypes.DEF
         return ConversationHandler.END
 
     raw_query = (update.message.text or "").strip()
-    request = await _resolve_search_request(raw_query)
-    if not request or not request.get("query"):
-        await update.message.reply_text("⚠️ 页面链接解析失败，请改用片名搜索。")
+    return await _start_entry_resolution(update, context, raw_query)
+
+
+async def confirm_entry_scope(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+
+    if data.startswith("entry_cancel:"):
+        await query.edit_message_text("已取消本次搜索。")
         return ConversationHandler.END
 
-    return await _send_resolved_search_results(update, context, request)
+    try:
+        _, task_id, index_text = data.split(":", 2)
+    except ValueError:
+        await query.edit_message_text("⚠️ 确认请求无效，请重新搜索。")
+        return ConversationHandler.END
+
+    task = get_pending_entry_confirmation(task_id)
+    if not task or not _owner_matches(task, update.effective_user.id):
+        await query.edit_message_text("⚠️ 确认请求已过期，请重新搜索。")
+        return ConversationHandler.END
+
+    try:
+        candidate = task["candidates"][int(index_text)]
+    except (IndexError, ValueError):
+        await query.edit_message_text("⚠️ 候选条目不可用，请重新搜索。")
+        return ConversationHandler.END
+
+    pending_entry_confirmations.pop(task_id, None)
+    await query.edit_message_text(f"✅ 已确认：{_candidate_display_title(candidate)} · {_candidate_display_scope(candidate)}")
+    return await _send_confirmed_candidate_search(update, context, candidate)
 
 
 async def unsupported_http_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1191,6 +1530,9 @@ def register_search_handlers(application):
         states={
             SEARCH_RESOLVE_METADATA: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, resolve_plain_search_metadata)
+            ],
+            SEARCH_CONFIRM_ENTRY_SCOPE: [
+                CallbackQueryHandler(confirm_entry_scope, pattern=r"^entry_(confirm|cancel):")
             ],
             SEARCH_SELECT_RESULT: [CallbackQueryHandler(select_search_result, pattern=r"^search_(pick|cancel):")],
             SEARCH_SELECT_SUB_CATEGORY: [

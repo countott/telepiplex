@@ -48,19 +48,91 @@ JSON结构：
 输入事实如下：
 """
 
+SEARCH_QUERY_NORMALIZATION_PROMPT = """你是影视搜索请求清洗器。只返回JSON，不要返回Markdown、解释或额外文字。
+
+任务：把用户输入拆解成可用于豆瓣/TVDB回查的候选查询。
+
+硬性规则：
+1. 这一步不验证影视条目。
+2. 不要编造豆瓣、TVDB、IMDb、TMDB或MovieDB ID。
+3. 不要编造季数、集数、播出日期或播出状态。
+4. 不要输出Prowlarr query。
+5. 只保留用户明确表达的季/集/全集/整季意图。
+6. 可以修正常见错别字、去掉清晰度/字幕组/平台/资源格式等噪声。
+
+JSON结构：
+{
+  "status": "ok|blocked",
+  "lookup_candidates": [
+    {
+      "query": "string",
+      "title": "string",
+      "year": "string",
+      "scope": "movie_or_series|whole_series|season|episode",
+      "season_number": 1,
+      "episode_number": 1
+    }
+  ],
+  "warnings": ["string"]
+}
+
+用户输入：
+"""
+
+SEARCH_VERIFIED_MATCH_PROMPT = """你是影视条目验证助手。只返回JSON，不要返回Markdown、解释或额外文字。
+
+任务：当豆瓣/TVDB API两轮回查都失败时，尝试给出可验证的外部ID。
+
+硬性规则：
+1. 没有可验证外部ID的结果不可接受。
+2. 不要编造ID。
+3. 不要编造播出状态、季数、集数或播出日期。
+4. 不要输出Prowlarr query。
+5. 如果没有可验证匹配，返回 blocked_no_verified_match。
+6. 如果明确知道请求集数尚未播出，返回 blocked_unreleased。
+
+JSON结构：
+{
+  "status": "ok|blocked_no_verified_match|blocked_unreleased",
+  "candidates": [
+    {
+      "media_type": "movie|series",
+      "title": "string",
+      "year": "string",
+      "external_ids": {
+        "douban_subject": "string",
+        "tvdb": "string",
+        "imdb": "string",
+        "tmdb": "string",
+        "moviedb": "string"
+      },
+      "scope": "movie|whole_series|season|episode",
+      "season_number": 1,
+      "episode_number": 1
+    }
+  ],
+  "reason": "string"
+}
+
+用户输入：
+"""
+
 def check_ai_api_available():
     url = init.bot_config.get("ai", {}).get("api_url", "")
     if not url:
-        init.logger.warn("AI API URL 未定义.")
+        if getattr(init, "logger", None):
+            init.logger.warn("AI API URL 未定义.")
         return False
     model = init.bot_config.get("ai", {}).get("model", "")
     if not model:
-        init.logger.warn("AI 模型未定义.")
+        if getattr(init, "logger", None):
+            init.logger.warn("AI 模型未定义.")
         return False
     
     api_key = init.bot_config.get("ai", {}).get("api_key", "")
     if not api_key:
-        init.logger.warn("AI API Key 未定义.")
+        if getattr(init, "logger", None):
+            init.logger.warn("AI API Key 未定义.")
         return False
     return True
 
@@ -151,6 +223,63 @@ def infer_tvdb_episode_plan_with_ai(context: dict):
     if not isinstance(evidence, dict):
         plan["evidence"] = {}
     return plan
+
+
+def _without_prowlarr_query(value):
+    if isinstance(value, dict):
+        value.pop("prowlarr_query", None)
+        for nested in value.values():
+            _without_prowlarr_query(nested)
+    elif isinstance(value, list):
+        for item in value:
+            _without_prowlarr_query(item)
+    return value
+
+
+def normalize_search_query_with_ai(raw_query: str):
+    if not check_ai_api_available():
+        return None
+
+    result = chat_completion(SEARCH_QUERY_NORMALIZATION_PROMPT + str(raw_query or ""), max_tokens=2048)
+    plan = parse_ai_json_response(result)
+    if not isinstance(plan, dict):
+        return None
+
+    candidates = plan.get("lookup_candidates")
+    if not isinstance(candidates, list):
+        plan["lookup_candidates"] = []
+    warnings = plan.get("warnings")
+    if not isinstance(warnings, list):
+        plan["warnings"] = []
+    plan["status"] = plan.get("status") or "ok"
+    return _without_prowlarr_query(plan)
+
+
+def infer_verified_search_match_with_ai(raw_query: str):
+    if not check_ai_api_available():
+        return None
+
+    result = chat_completion(SEARCH_VERIFIED_MATCH_PROMPT + str(raw_query or ""), max_tokens=2048)
+    plan = parse_ai_json_response(result)
+    if not isinstance(plan, dict):
+        return None
+
+    candidates = plan.get("candidates")
+    if not isinstance(candidates, list):
+        plan["candidates"] = []
+
+    verified_candidates = []
+    for candidate in plan["candidates"]:
+        if not isinstance(candidate, dict):
+            continue
+        external_ids = candidate.get("external_ids") if isinstance(candidate.get("external_ids"), dict) else {}
+        if any(str(value or "").strip() for value in external_ids.values()):
+            verified_candidates.append(_without_prowlarr_query(candidate))
+    plan["candidates"] = verified_candidates
+    if not verified_candidates and plan.get("status") == "ok":
+        plan["status"] = "blocked_no_verified_match"
+    plan["status"] = plan.get("status") or "blocked_no_verified_match"
+    return _without_prowlarr_query(plan)
 
 def get_movie_tmdb_name_with_ai(movie_desc):
     
