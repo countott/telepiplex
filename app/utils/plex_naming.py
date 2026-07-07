@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-INVALID_NAME_CHARS = re.compile(r'[\\/:*?"<>|]+')
+INVALID_NAME_CHARS = re.compile(r'[\\/*?"<>|]+')
+CHINESE_DASH_PATTERN = re.compile(r"\s*(?:——|—|–|－)\s*")
 RELEASE_GROUP_PATTERN = re.compile(r"-[A-Za-z0-9]+$")
 QUALITY_START_PATTERN = re.compile(
     r"(?i)\b(?:19\d{2}|20\d{2}|S\d{1,2}E\d{1,3}|\d{1,2}x\d{1,3}|"
@@ -24,7 +25,13 @@ class PlexNamingPlan:
 
 
 def sanitize_path_name(name: str) -> str:
-    name = INVALID_NAME_CHARS.sub("", str(name or ""))
+    name = str(name or "")
+    name = name.replace("：", ": ")
+    name = name.replace("（", "(").replace("）", ")")
+    name = CHINESE_DASH_PATTERN.sub(" - ", name)
+    name = re.sub(r"\s+:", ":", name)
+    name = re.sub(r"(?<!\d):\s*", ": ", name)
+    name = INVALID_NAME_CHARS.sub("", name)
     return " ".join(name.split()).strip().strip(".")
 
 

@@ -105,6 +105,41 @@ class TvdbRenamePlanTest(unittest.TestCase):
         self.assertEqual(plan["operations"][0]["target_relative_path"], "One Piece Season 00/One Piece S00E07.mkv")
         self.assertEqual(plan["operations"][1]["target_relative_path"], "One Piece Season 01/One Piece S01E100.mkv")
 
+    def test_build_plan_normalizes_chinese_punctuation_in_final_target_root(self):
+        plan = build_tvdb_rename_plan(
+            final_path="/真人剧集/Release.Name",
+            selected_path="/真人剧集",
+            metadata={
+                "chinese_title": "嗜血法医：源罪（前传）——第一季",
+                "english_title": "Dexter Original Sin",
+            },
+            ai_plan={
+                "tvdb_series_id": "454",
+                "series_name": "Dexter Original Sin",
+                "episode_map": [
+                    {
+                        "source_file": "Dexter.Original.Sin.S01E01.mkv",
+                        "season_number": 1,
+                        "episode_number": 1,
+                    }
+                ],
+            },
+            file_tree=[
+                {
+                    "name": "Dexter.Original.Sin.S01E01.mkv",
+                    "relative_path": "Dexter.Original.Sin.S01E01.mkv",
+                    "is_dir": False,
+                }
+            ],
+            tvdb_candidates=[{"tvdb_series_id": "454", "name": "Dexter Original Sin"}],
+            tvdb_episodes=[],
+        )
+
+        self.assertEqual(
+            plan["target_root"],
+            "/真人剧集/嗜血法医: 源罪(前传) - 第一季 ◈ Dexter Original Sin",
+        )
+
     def test_build_plan_rejects_invented_source_file(self):
         plan = build_tvdb_rename_plan(
             final_path="/真人剧集/Release.Name",

@@ -151,7 +151,7 @@ class DownloadTaskStartupTest(unittest.TestCase):
 
         target_path = (
             "/影视/电影/外语电影/碟中谍 ◈ Mission Impossible/"
-            "碟中谍7：致命清算（上） ◈ Mission Impossible Dead Reckoning Part One"
+            "碟中谍7: 致命清算(上) ◈ Mission Impossible Dead Reckoning Part One"
         )
         api.create_dir_recursive.assert_called_once_with(target_path)
         api.move_file.assert_called_once_with(
