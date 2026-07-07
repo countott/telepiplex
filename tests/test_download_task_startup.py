@@ -9,7 +9,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
 import init
-from app.handlers.download_handler import SELECT_MAIN_CATEGORY, download_task, magnet_command
+from app.handlers.download_handler import SELECT_SUB_CATEGORY, download_task, magnet_command
 from app.utils.ai import get_movie_tmdb_name_with_ai
 from app.utils.cover_capture import get_movie_cover
 
@@ -18,6 +18,7 @@ class DownloadTaskStartupTest(unittest.TestCase):
     def setUp(self):
         init.logger = Mock()
         init.openapi_115 = None
+        init.pending_plex_scans = {}
         init.bot_config = {
             "media": {
                 "unorganized_path": "/未整理",
@@ -163,8 +164,8 @@ class DownloadTaskStartupTest(unittest.TestCase):
         init.check_user = Mock(return_value=True)
         init.bot_config = {
             "category_folder": [
-                {"name": "movie", "display_name": "电影", "path_map": []},
-                {"name": "series", "display_name": "剧集", "path_map": []},
+                {"name": "真人电影", "path": "/真人电影"},
+                {"name": "动画剧集", "path": "/动画剧集"},
             ]
         }
         update = Mock()
@@ -178,10 +179,17 @@ class DownloadTaskStartupTest(unittest.TestCase):
 
         state = asyncio.run(magnet_command(update, context))
 
-        self.assertEqual(state, SELECT_MAIN_CATEGORY)
+        self.assertEqual(state, SELECT_SUB_CATEGORY)
         self.assertEqual(context.user_data["link"], "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567")
         context.bot.send_message.assert_awaited_once()
-        self.assertIn("请选择保存分类", context.bot.send_message.await_args.kwargs["text"])
+        self.assertIn("请选择保存目录", context.bot.send_message.await_args.kwargs["text"])
+        button_texts = [
+            button.text
+            for row in context.bot.send_message.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("📁 真人电影", button_texts)
+        self.assertNotIn("📁 媒体", button_texts)
 
     @patch("app.handlers.download_handler.handle_media_library_update", return_value=None)
     @patch("app.handlers.download_handler.add_task_to_queue")
@@ -397,12 +405,13 @@ class DownloadTaskStartupTest(unittest.TestCase):
         self.assertFalse(any(item.startswith("rename_") for item in callback_data))
         self.assertNotIn("TMDB", add_task_mock.call_args.kwargs["message"])
 
-    @patch("app.handlers.download_handler.notice_plex_scan_library", return_value="queued")
+    @patch("app.handlers.download_handler.add_task_to_queue", return_value=True)
     @patch("app.handlers.download_handler.create_strm_file")
-    def test_plex_media_config_takes_precedence_over_emby_strm(self, create_strm_mock, plex_scan_mock):
+    def test_plex_media_config_queues_scan_confirmation_before_emby_strm(self, create_strm_mock, add_task_mock):
         from app.handlers.download_handler import handle_media_library_update
 
         init.bot_config = {
+            "allowed_user": 123,
             "media": {
                 "plex": {
                     "base_url": "http://plex.example:32400",
@@ -417,9 +426,80 @@ class DownloadTaskStartupTest(unittest.TestCase):
             }
         }
 
-        self.assertEqual(handle_media_library_update("/影视/电影/片名", ["movie.mkv"]), "plex")
-        plex_scan_mock.assert_called_once_with("/影视/电影/片名")
+        self.assertEqual(handle_media_library_update("/影视/电影/片名", ["movie.mkv"]), "plex_pending")
+        add_task_mock.assert_called_once()
+        self.assertEqual(add_task_mock.call_args.args[:2], (123, None))
+        self.assertIn("确认刷新 Plex", add_task_mock.call_args.kwargs["message"])
+        callback_data = [
+            button.callback_data
+            for row in add_task_mock.call_args.kwargs["keyboard"].inline_keyboard
+            for button in row
+        ]
+        self.assertTrue(any(item.startswith("plex_scan_confirm:") for item in callback_data))
+        self.assertTrue(any(item.startswith("plex_scan_skip:") for item in callback_data))
         create_strm_mock.assert_not_called()
+
+    @patch("app.handlers.download_handler.add_task_to_queue", return_value=True)
+    def test_plex_scan_confirmation_uses_library_id_from_selected_115_folder(self, add_task_mock):
+        from app.handlers.download_handler import handle_media_library_update
+
+        init.bot_config = {
+            "allowed_user": 123,
+            "category_folder": [
+                {"name": "真人电影", "path": "/真人电影", "plex_library_id": "1"},
+                {"name": "动画电影", "path": "/动画电影", "plex_library_id": "12"},
+                {"name": "真人剧集", "path": "/真人剧集", "plex_library_id": "2"},
+                {"name": "动画剧集", "path": "/动画剧集", "plex_library_id": "11"},
+            ],
+            "media": {
+                "plex": {
+                    "base_url": "http://plex.example:32400",
+                    "token": "plex-token",
+                }
+            },
+        }
+
+        self.assertEqual(handle_media_library_update("/真人剧集/Dexter/Dexter Season 01"), "plex_pending")
+
+        scan_id, scan = next(iter(init.pending_plex_scans.items()))
+        self.assertEqual(scan["library_id"], "2")
+        self.assertIn("Library ID", add_task_mock.call_args.kwargs["message"])
+        self.assertTrue(scan_id)
+
+    @patch("app.handlers.download_handler.requests.get")
+    def test_plex_scan_confirmation_calls_plex_refresh_api(self, get_mock):
+        from app.handlers.download_handler import handle_plex_scan_callback
+
+        init.check_user = Mock(return_value=True)
+        init.bot_config = {
+            "media": {
+                "plex": {
+                    "base_url": "http://plex.example:32400/",
+                    "token": "plex-token",
+                    "library_id": "1",
+                }
+            }
+        }
+        init.pending_plex_scans = {"scan-1": {"path": "/影视/电影/片名", "library_id": "2"}}
+        response = Mock()
+        response.raise_for_status.return_value = None
+        get_mock.return_value = response
+        update = Mock()
+        update.effective_user.id = 123
+        update.callback_query.data = "plex_scan_confirm:scan-1"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        context = Mock()
+
+        asyncio.run(handle_plex_scan_callback(update, context))
+
+        get_mock.assert_called_once_with(
+            "http://plex.example:32400/library/sections/2/refresh",
+            params={"X-Plex-Token": "plex-token"},
+            timeout=15,
+        )
+        update.callback_query.edit_message_text.assert_awaited_once()
+        self.assertNotIn("scan-1", init.pending_plex_scans)
 
     def test_ai_and_cover_helpers_remain_available_for_future_naming_pipeline(self):
         self.assertTrue(callable(get_movie_tmdb_name_with_ai))

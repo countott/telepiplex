@@ -24,7 +24,7 @@ This project originated from the need to optimize personal daily viewing experie
 Imagine this scenario:
 
 While commuting, you come across an interesting movie. Simply send the magnet link to the TG bot, and it will:
-- Automatically download the movie to the specified category directory in 115 Network Disk
+- Automatically download the movie to the specified 115 save directory
 - Intelligently clean up advertisement files
 - Automatically create STRM files and notify Emby for media library scanning
 
@@ -44,7 +44,7 @@ If you'd like to help improve this project, welcome to [join](https://t.me/qiqia
 
 - ⬇️ **Offline Download**
   - Support multiple download protocols: Magnet links, Thunder, ed2k
-  - Intelligent automatic category storage
+  - Intelligent automatic save-path selection
   - Advertisement file cleanup
   - Automatic organization for media-library naming
 
@@ -167,6 +167,26 @@ Please refer to the comments in `config/config.yaml.example` for configuration d
 - `/q`       - Cancel current session
 
 Use `/search movie name` to search releases, or send a Douban, IMDb, TVDB, or TMDB link directly. Use `/magnet magnet:?xt=urn:btih:...` or `/m magnet:?xt=urn:btih:...` when you already have a magnet link.
+
+Configure `category_folder` as a flat list of 115 save paths. The bot shows these paths directly, without an extra category step:
+
+```yaml
+category_folder:
+  - name: 真人电影
+    path: /真人电影
+    plex_library_id: "1"
+  - name: 动画电影
+    path: /动画电影
+    plex_library_id: "12"
+  - name: 真人剧集
+    path: /真人剧集
+    plex_library_id: "2"
+  - name: 动画剧集
+    path: /动画剧集
+    plex_library_id: "11"
+```
+
+When Plex is configured, `plex_library_id` maps each 115 save path to the corresponding Plex library. The bot sends a confirmation button after media organization, and Plex refresh is triggered only after the user confirms.
 
 ### 115 Open Platform Application
 

@@ -10,6 +10,7 @@ from datetime import datetime
 from warnings import filterwarnings
 from telegram.warnings import PTBUserWarning
 from app.core.video_downloader import video_manager
+from app.utils.directory_config import get_save_directories
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 # 过滤 Telethon 的异步会话实验性功能警告
@@ -143,12 +144,12 @@ async def show_directory_selection(update: Update, context: ContextTypes.DEFAULT
         keyboard.append([InlineKeyboardButton(f"🚀 上次保存: {last_path}", callback_data=f"quick_last_{task_id}")])
         
     keyboard.extend([
-        [InlineKeyboardButton(f"📁 {category['display_name']}", callback_data=f"main_{category['name']}_{task_id}")] 
-        for category in init.bot_config['category_folder']
+        [InlineKeyboardButton(f"📁 {category['name']}", callback_data=f"subidx_{index}_{task_id}")]
+        for index, category in enumerate(get_save_directories())
     ])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    text = f"📹 视频文件: {file_name}\n❓请选择要保存到哪个分类："
+    text = f"📹 视频文件: {file_name}\n❓请选择保存目录："
     
     if edit_message and update.callback_query:
         await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup)
@@ -215,25 +216,19 @@ async def handle_category_selection(update: Update, context: ContextTypes.DEFAUL
             await query.edit_message_text("⌨️ 请输入新的文件名（无需后缀）：")
 
     elif action == "main":
-        # 选择主分类: main_categoryName_taskId
-        category_name = parts[1]
-        task_id = parts[2]
-        
-        sub_categories = [
-            item['path_map'] for item in init.bot_config["category_folder"] if item['name'] == category_name
-        ][0]
-
+        # 兼容旧按钮：直接回到保存目录列表
+        task_id = parts[-1]
         keyboard = [
-            [InlineKeyboardButton(f"📁 {category['name']}", callback_data=f"sub_{category['path']}_{task_id}")] 
-            for category in sub_categories
+            [InlineKeyboardButton(f"📁 {category['name']}", callback_data=f"subidx_{index}_{task_id}")]
+            for index, category in enumerate(get_save_directories())
         ]
         keyboard.append([InlineKeyboardButton("返回", callback_data=f"back_{task_id}")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("❓请选择子分类：", reply_markup=reply_markup)
+        await query.edit_message_text("❓请选择保存目录：", reply_markup=reply_markup)
         
-    elif action == "sub" or action == "quick":
-        # 选择子分类: sub_path_taskId 或 quick_last_taskId
+    elif action in {"sub", "subidx", "quick"}:
+        # 选择目录: sub_path_taskId、subidx_index_taskId 或 quick_last_taskId
         save_path = None
         task_id = None
         
@@ -241,6 +236,14 @@ async def handle_category_selection(update: Update, context: ContextTypes.DEFAUL
             task_id = parts[-1]
             save_path = "_".join(parts[1:-1])
             # 记录本次保存路径
+            context.user_data['last_video_save_path'] = save_path
+        elif action == "subidx":
+            task_id = parts[2]
+            try:
+                save_path = get_save_directories()[int(parts[1])]["path"]
+            except (IndexError, KeyError, TypeError, ValueError):
+                await query.answer("保存目录不可用，请重新选择", show_alert=True)
+                return
             context.user_data['last_video_save_path'] = save_path
         elif action == "quick":
             task_id = parts[2]
@@ -341,11 +344,11 @@ async def handle_category_selection(update: Update, context: ContextTypes.DEFAUL
             keyboard.append([InlineKeyboardButton(f"🚀 上次保存: {last_path}", callback_data=f"quick_last_{task_id}")])
             
         keyboard.extend([
-            [InlineKeyboardButton(f"📁 {category['display_name']}", callback_data=f"main_{category['name']}_{task_id}")] 
-            for category in init.bot_config['category_folder']
+            [InlineKeyboardButton(f"📁 {category['name']}", callback_data=f"subidx_{index}_{task_id}")]
+            for index, category in enumerate(get_save_directories())
         ])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("❓请选择要保存到哪个分类：", reply_markup=reply_markup)
+        await query.edit_message_text("❓请选择保存目录：", reply_markup=reply_markup)
 
     elif action == "v" and parts[1] == "cancel":
         # 取消下载: v_cancel_taskId
@@ -374,9 +377,7 @@ def register_video_handlers(application):
     
     # 注册回调处理器
     # 添加 v_ 前缀支持，添加 rename 前缀支持
-    application.add_handler(CallbackQueryHandler(handle_category_selection, pattern="^(main|sub|back|cancel|quick|v|video_rename)_"))
+    application.add_handler(CallbackQueryHandler(handle_category_selection, pattern="^(main|sub|subidx|back|cancel|quick|v|video_rename)_"))
     
     init.logger.info("✅ Video处理器已注册")
     
-
-

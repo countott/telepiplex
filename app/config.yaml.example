@@ -44,25 +44,23 @@ clean_policy:
   # 文件小于设置值则自动删除单位K,M,G
   less_than: 400M
 
-# 设置分类文件夹
-# 分类文件夹设置只针对离线任务，离线下载完成后，会弹出需要移动到的分类文件夹，可以设置多个
+# 设置保存目录
+# category_folder 会直接展示为保存目录按钮。path 是 115 网盘内的完整路径。
 category_folder:
-  # 电影下的分类目录，不能修改
-  - name: movies
-    # 选择保存目录的第一级分类目录，不建议修改
-    display_name: 电影
-    # 一级分类目录(电影)下的二级分类，可按需修改或添加
-    path_map:
-        # 显示名称，可按需修改
-      - name: 外语电影
-        # 对应115上的完整路径，可以按需修改
-        path: /影视/电影/外语电影
-      - name: 华语电影
-        path: /影视/电影/华语电影
-      - name: 动画电影
-        path: /影视/电影/动画电影
+  - name: 真人电影
+    path: /真人电影
+    plex_library_id: "1"
+  - name: 动画电影
+    path: /动画电影
+    plex_library_id: "12"
+  - name: 真人剧集
+    path: /真人剧集
+    plex_library_id: "2"
+  - name: 动画剧集
+    path: /动画剧集
+    plex_library_id: "11"
 #############################################搜索设置#######################################
-# 通过Prowlarr搜索片源，选择候选后复用上面的分类目录投递到115离线下载
+# 通过Prowlarr搜索片源，选择候选后复用上面的保存目录投递到115离线下载
 search:
   enable: false
   prowlarr:
@@ -107,10 +105,11 @@ search:
 media:
   # 自动整理失败或缺少元数据时移入的115目录
   unorganized_path: /未整理
-  # Plex配置预留。配置完整时优先走Plex链路；当前仅保留扫库入口，不触发实际接口。
+  # Plex配置。配置完整时，整理完成后会发送确认按钮；用户确认后触发Plex扫库。
   plex:
     base_url: ""
     token: ""
+    # 可作为兜底库ID；推荐优先在 category_folder 每个目录上配置 plex_library_id。
     library_id: ""
   # Emby配置。仅在未配置Plex且Emby配置完整时创建STRM并通知扫库。
   emby:

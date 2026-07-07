@@ -14,6 +14,7 @@ from app.handlers.search_handler import (
     METADATA_URL_PATTERN,
     SEARCH_RESOLVE_METADATA,
     SEARCH_SELECT_RESULT,
+    SEARCH_SELECT_SUB_CATEGORY,
     SEARCH_TASK_TTL_SECONDS,
     _clean_prowlarr_query,
     _extract_douban_metadata,
@@ -32,6 +33,7 @@ from app.handlers.search_handler import (
     resolve_plain_search_metadata,
     search_command,
     _search_prowlarr_with_progress,
+    select_search_result,
     select_search_sub_category,
 )
 
@@ -294,10 +296,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         resolve_link_mock.return_value = "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567"
         init.bot_config = {
             "category_folder": [
-                {
-                    "name": "series",
-                    "path_map": [{"name": "真人剧集", "path": "/真人剧集"}],
-                }
+                {"name": "真人剧集", "path": "/真人剧集"},
             ]
         }
         pending_search_tasks["task-1"] = {
@@ -325,7 +324,6 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         update.callback_query.edit_message_text = AsyncMock()
         context = Mock()
         context.user_data = {
-            "search_selected_main_category": "series",
             "search_selected_item": {
                 "title": "Dexter.S01.1080p.BluRay-GROUP",
                 "magnet_url": "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
@@ -338,6 +336,45 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertEqual(submit_mock.call_args.args[2], "/真人剧集")
         self.assertEqual(submit_mock.call_args.kwargs["metadata"]["release_title"], "Dexter.S01.1080p.BluRay-GROUP")
         self.assertEqual(submit_mock.call_args.kwargs["metadata"]["external_ids"], {"imdb": "tt0773262"})
+
+    def test_search_result_selection_shows_save_directories_without_category_step(self):
+        init.bot_config = {
+            "category_folder": [
+                {"name": "真人电影", "path": "/真人电影"},
+                {"name": "动画剧集", "path": "/动画剧集"},
+            ]
+        }
+        pending_search_tasks["task-2"] = {
+            "created_at": time.time(),
+            "user_id": 472943219,
+            "query": "Dexter",
+            "results": [
+                {
+                    "title": "Dexter.S01E01.1080p",
+                    "magnet_url": "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
+                }
+            ],
+        }
+        update = Mock()
+        update.effective_user.id = 472943219
+        update.callback_query.data = "search_pick:task-2:0"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        context = Mock()
+        context.user_data = {}
+
+        state = asyncio.run(select_search_result(update, context))
+
+        self.assertEqual(state, SEARCH_SELECT_SUB_CATEGORY)
+        update.callback_query.edit_message_text.assert_awaited_once()
+        self.assertIn("请选择保存目录", update.callback_query.edit_message_text.await_args.args[0])
+        button_texts = [
+            button.text
+            for row in update.callback_query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("📁 真人电影", button_texts)
+        self.assertNotIn("📁 媒体", button_texts)
 
     @patch("app.handlers.search_handler.requests.get")
     def test_resolve_plain_search_request_uses_plain_query_when_douban_misses(self, mock_get):

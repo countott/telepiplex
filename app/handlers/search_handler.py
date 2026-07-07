@@ -15,6 +15,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Con
 from telegram.warnings import PTBUserWarning
 
 import init
+from app.utils.directory_config import get_save_directories
 from app.adapters.prowlarr import (
     ProwlarrConfigError,
     ProwlarrRequestError,
@@ -37,7 +38,7 @@ from app.utils.search_query import (
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
-SEARCH_SELECT_RESULT, SEARCH_SELECT_MAIN_CATEGORY, SEARCH_SELECT_SUB_CATEGORY, SEARCH_RESOLVE_METADATA = range(30, 34)
+SEARCH_SELECT_RESULT, SEARCH_SELECT_SUB_CATEGORY, SEARCH_RESOLVE_METADATA = range(30, 33)
 SEARCH_TASK_TTL_SECONDS = 30 * 60
 SEARCH_PROGRESS_INTERVAL_SECONDS = 30
 TELEGRAM_SEND_TIMEOUT_SECONDS = 30
@@ -425,8 +426,8 @@ def _build_results_keyboard(task_id: str, results: list[dict]) -> InlineKeyboard
 
 def _build_main_category_keyboard(task_id: str) -> InlineKeyboardMarkup:
     keyboard = [
-        [InlineKeyboardButton(f"📁 {category['display_name']}", callback_data=f"search_main:{task_id}:{category['name']}")]
-        for category in init.bot_config.get("category_folder", [])
+        [InlineKeyboardButton(f"📁 {category['name']}", callback_data=f"search_path:{task_id}:{index}")]
+        for index, category in enumerate(get_save_directories())
     ]
     if hasattr(init, "bot_session") and "movie_last_save" in init.bot_session:
         keyboard.append(
@@ -437,21 +438,6 @@ def _build_main_category_keyboard(task_id: str) -> InlineKeyboardMarkup:
                 )
             ]
         )
-    keyboard.append([InlineKeyboardButton("取消", callback_data=f"search_cancel:{task_id}")])
-    return InlineKeyboardMarkup(keyboard)
-
-
-def _build_sub_category_keyboard(task_id: str, category_name: str) -> InlineKeyboardMarkup:
-    sub_categories = []
-    for category in init.bot_config.get("category_folder", []):
-        if category.get("name") == category_name:
-            sub_categories = category.get("path_map") or []
-            break
-
-    keyboard = [
-        [InlineKeyboardButton(f"📁 {category['name']}", callback_data=f"search_path:{task_id}:{index}")]
-        for index, category in enumerate(sub_categories)
-    ]
     keyboard.append([InlineKeyboardButton("取消", callback_data=f"search_cancel:{task_id}")])
     return InlineKeyboardMarkup(keyboard)
 
@@ -1097,11 +1083,11 @@ async def select_search_result(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["search_task_id"] = task_id
     context.user_data["search_selected_item"] = selected_item
 
-    await query.edit_message_text("📁 请选择保存分类：", reply_markup=_build_main_category_keyboard(task_id))
-    return SEARCH_SELECT_MAIN_CATEGORY
+    await query.edit_message_text("📁 请选择保存目录：", reply_markup=_build_main_category_keyboard(task_id))
+    return SEARCH_SELECT_SUB_CATEGORY
 
 
-async def select_search_main_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def select_search_sub_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1143,38 +1129,13 @@ async def select_search_main_category(update: Update, context: ContextTypes.DEFA
         pending_search_tasks.pop(task_id, None)
         return ConversationHandler.END
 
-    _, task_id, category_name = data.split(":", 2)
-    task = get_pending_search_task(task_id)
-    if not task or not _owner_matches(task, update.effective_user.id):
-        await query.edit_message_text("⚠️ 搜索任务已过期，请重新发起搜索。")
-        return ConversationHandler.END
-
-    context.user_data["search_selected_main_category"] = category_name
-    await query.edit_message_text("📁 请选择保存目录：", reply_markup=_build_sub_category_keyboard(task_id, category_name))
-    return SEARCH_SELECT_SUB_CATEGORY
-
-
-async def select_search_sub_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if data.startswith("search_cancel:"):
-        await query.edit_message_text("已取消本次搜索。")
-        return ConversationHandler.END
-
     _, task_id, index_text = data.split(":", 2)
     task = get_pending_search_task(task_id)
     if not task or not _owner_matches(task, update.effective_user.id):
         await query.edit_message_text("⚠️ 搜索任务已过期，请重新发起搜索。")
         return ConversationHandler.END
 
-    category_name = context.user_data.get("search_selected_main_category")
-    sub_categories = []
-    for category in init.bot_config.get("category_folder", []):
-        if category.get("name") == category_name:
-            sub_categories = category.get("path_map") or []
-            break
+    sub_categories = get_save_directories()
 
     try:
         selected_path = sub_categories[int(index_text)]["path"]
@@ -1232,11 +1193,8 @@ def register_search_handlers(application):
                 MessageHandler(filters.TEXT & ~filters.COMMAND, resolve_plain_search_metadata)
             ],
             SEARCH_SELECT_RESULT: [CallbackQueryHandler(select_search_result, pattern=r"^search_(pick|cancel):")],
-            SEARCH_SELECT_MAIN_CATEGORY: [
-                CallbackQueryHandler(select_search_main_category, pattern=r"^search_(main|last|cancel):")
-            ],
             SEARCH_SELECT_SUB_CATEGORY: [
-                CallbackQueryHandler(select_search_sub_category, pattern=r"^search_(path|cancel):")
+                CallbackQueryHandler(select_search_sub_category, pattern=r"^search_(path|last|cancel):")
             ],
         },
         fallbacks=[CommandHandler("q", quit_search_conversation)],

@@ -7,6 +7,7 @@ from telegram.helpers import escape_markdown
 import init
 import re
 import time
+import uuid
 from pathlib import Path
 from app.utils.message_queue import add_task_to_queue
 import requests
@@ -17,12 +18,13 @@ from app.utils.sqlitelib import *
 from concurrent.futures import ThreadPoolExecutor
 from app.adapters.tvdb import TvdbConfigError, TvdbRequestError, get_tvdb_series_episodes, search_tvdb_series
 from app.utils.ai import infer_tvdb_episode_plan_with_ai
+from app.utils.directory_config import get_plex_library_id_for_path, get_save_directories
 from app.utils.plex_naming import build_plex_naming_plan, infer_english_title_from_release
 from app.utils.tvdb_rename import VIDEO_EXTENSIONS, build_tvdb_rename_plan
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
-SELECT_MAIN_CATEGORY, SELECT_SUB_CATEGORY = range(10, 12)
+SELECT_SUB_CATEGORY = 10
 
 # 全局线程池，用于处理下载任务
 download_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="Movie_Download")
@@ -52,10 +54,10 @@ async def _start_download_link(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
     # 保存下载类型到context.user_data
     context.user_data["dl_url_type"] = dl_url_type
-    # 显示主分类（电影/剧集）
+    # 显示保存目录
     keyboard = [
-        [InlineKeyboardButton(f"📁 {category['display_name']}", callback_data=category['name'])] for category in
-        init.bot_config['category_folder']
+        [InlineKeyboardButton(f"📁 {category['name']}", callback_data=f"save_path:{index}")]
+        for index, category in enumerate(get_save_directories())
     ]
     # 只在有最后保存路径时才显示该选项
     if hasattr(init, 'bot_session') and "movie_last_save" in init.bot_session:
@@ -63,9 +65,9 @@ async def _start_download_link(update: Update, context: ContextTypes.DEFAULT_TYP
         keyboard.append([InlineKeyboardButton(f"📁 上次保存: {last_save_path}", callback_data="last_save_path")])
     keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="📁 请选择保存分类：",
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="📁 请选择保存目录：",
                                    reply_markup=reply_markup)
-    return SELECT_MAIN_CATEGORY
+    return SELECT_SUB_CATEGORY
 
 
 async def start_d_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -80,60 +82,34 @@ async def magnet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await _start_download_link(update, context, link, allowed_types={DownloadUrlType.MAGNET})
 
 
-async def select_main_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def select_sub_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     query_data = query.data
     if query_data == "cancel":
         return await quit_conversation(update, context)
-    elif query_data == "last_save_path":
-        if hasattr(init, 'bot_session') and "movie_last_save" in init.bot_session:
-            last_save_path = init.bot_session["movie_last_save"]
-            link = context.user_data["link"]
-            user_id = update.effective_user.id
-            
-            await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到 115 离线下载，请稍后查看结果。")
-            
-            # 使用全局线程池异步执行下载任务
-            download_executor.submit(download_task, link, last_save_path, user_id)
+    if query_data == "last_save_path":
+        selected_path = init.bot_session.get("movie_last_save") if hasattr(init, "bot_session") else ""
+        if not selected_path:
+            await query.edit_message_text("⚠️ 未找到上次保存路径，请重新选择。")
             return ConversationHandler.END
-        else:
-            await query.edit_message_text("⚠️ 未找到上次保存路径，请重新选择分类。")
+    elif str(query_data).startswith("save_path:"):
+        directories = get_save_directories()
+        try:
+            selected_path = directories[int(str(query_data).split(":", 1)[1])]["path"]
+        except (IndexError, KeyError, TypeError, ValueError):
+            await query.edit_message_text("⚠️ 保存目录不可用，请重新选择。")
             return ConversationHandler.END
     else:
-        context.user_data["selected_main_category"] = query_data
-        sub_categories = [
-            item['path_map'] for item in init.bot_config["category_folder"] if item['name'] == query_data
-        ][0]
+        selected_path = query_data
 
-        # 创建子分类按钮
-        keyboard = [
-            [InlineKeyboardButton(f"📁 {category['name']}", callback_data=category['path'])] for category in sub_categories
-        ]
-        keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await query.edit_message_text("📁 请选择保存目录：", reply_markup=reply_markup)
-
-        return SELECT_SUB_CATEGORY
-
-
-async def select_sub_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    # 获取用户选择的路径
-    selected_path = query.data
     # 保存最后一次选择路径
     if not hasattr(init, 'bot_session'):
         init.bot_session = {}
     init.bot_session['movie_last_save'] = selected_path
-    
-    if selected_path == "cancel":
-        return await quit_conversation(update, context)
+
     link = context.user_data["link"]
-    selected_main_category = context.user_data["selected_main_category"]
     user_id = update.effective_user.id
     
     await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到 115 离线下载，请稍后查看结果。")
@@ -336,12 +312,11 @@ def notice_emby_scan_library(path):
         return False
 
 
-def _has_plex_scan_config():
+def _has_plex_credentials():
     plex_config = _plex_config()
     return (
         _configured(plex_config.get("base_url"))
         and _configured(plex_config.get("token"))
-        and _configured(plex_config.get("library_id"))
     )
 
 
@@ -352,17 +327,111 @@ def _has_emby_config():
     )
 
 
-def notice_plex_scan_library(path):
-    if not _has_plex_scan_config():
+def notice_plex_scan_library(path, library_id=None):
+    if not _has_plex_credentials():
         return None
-    init.logger.info(f"Plex 扫库入口已预留，当前暂未触发实际接口 path={path}")
-    return None
+    plex_config = _plex_config()
+    base_url = str(plex_config.get("base_url") or "").rstrip("/")
+    library_id = str(library_id or get_plex_library_id_for_path(path) or "").strip()
+    if not library_id:
+        init.logger.warn(f"Plex library_id 未匹配，跳过扫库 path={path}")
+        return None
+    token = str(plex_config.get("token") or "").strip()
+    url = f"{base_url}/library/sections/{library_id}/refresh"
+    response = requests.get(url, params={"X-Plex-Token": token}, timeout=15)
+    response.raise_for_status()
+    init.logger.info(f"通知 Plex 扫库成功 library_id={library_id} path={path}")
+    return True
+
+
+def _pending_plex_scans():
+    if not hasattr(init, "pending_plex_scans"):
+        init.pending_plex_scans = {}
+    return init.pending_plex_scans
+
+
+def _build_plex_scan_keyboard(scan_id):
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("确认刷新 Plex", callback_data=f"plex_scan_confirm:{scan_id}")],
+            [InlineKeyboardButton("跳过", callback_data=f"plex_scan_skip:{scan_id}")],
+        ]
+    )
+
+
+def queue_plex_scan_confirmation(path):
+    if not _has_plex_credentials():
+        return None
+    library_id = get_plex_library_id_for_path(path)
+    if not _configured(library_id):
+        init.logger.warn(f"Plex library_id 未匹配，跳过确认消息 path={path}")
+        return None
+
+    scan_id = uuid.uuid4().hex[:10]
+    _pending_plex_scans()[scan_id] = {
+        "path": path,
+        "library_id": str(library_id),
+        "created_at": time.time(),
+    }
+    user_id = init.bot_config.get("allowed_user")
+    if not user_id:
+        init.logger.warn("Plex 扫库待确认，但 allowed_user 未配置，无法发送确认消息")
+        return None
+
+    escaped_path = escape_markdown(str(path), version=2)
+    add_task_to_queue(
+        user_id,
+        None,
+        message=(
+            "📚 Plex 扫库待确认\n\n"
+            f"整理目录：`{escaped_path}`\n\n"
+            f"Library ID：`{escape_markdown(str(library_id), version=2)}`\n\n"
+            "点击“确认刷新 Plex”后会刷新 Plex 媒体库。"
+        ),
+        keyboard=_build_plex_scan_keyboard(scan_id),
+    )
+    return scan_id
+
+
+async def handle_plex_scan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if not init.check_user(update.effective_user.id):
+        await query.edit_message_text("⚠️ 当前账号无权使用此机器人。")
+        return
+
+    try:
+        action, scan_id = query.data.split(":", 1)
+    except (AttributeError, ValueError):
+        await query.edit_message_text("⚠️ Plex 扫库请求无效。")
+        return
+
+    pending_scans = _pending_plex_scans()
+    scan = pending_scans.get(scan_id)
+    if not scan:
+        await query.edit_message_text("⚠️ Plex 扫库请求已过期。")
+        return
+
+    if action == "plex_scan_skip":
+        pending_scans.pop(scan_id, None)
+        await query.edit_message_text("已跳过 Plex 扫库。")
+        return
+
+    try:
+        notice_plex_scan_library(scan["path"], library_id=scan.get("library_id"))
+    except Exception as e:
+        init.logger.error(f"Plex 扫库触发失败: {e}")
+        await query.edit_message_text(f"❌ Plex 扫库触发失败：{e}")
+        return
+
+    pending_scans.pop(scan_id, None)
+    await query.edit_message_text("✅ 已触发 Plex 媒体库刷新。")
 
 
 def handle_media_library_update(path, file_list=None):
-    if _has_plex_scan_config():
-        notice_plex_scan_library(path)
-        return "plex"
+    if _has_plex_credentials() and queue_plex_scan_confirmation(path):
+        return "plex_pending"
 
     if _has_emby_config():
         if file_list is None:
@@ -774,7 +843,6 @@ def register_download_handlers(application):
             CommandHandler("m", magnet_command),
         ],
         states={
-            SELECT_MAIN_CATEGORY: [CallbackQueryHandler(select_main_category)],
             SELECT_SUB_CATEGORY: [CallbackQueryHandler(select_sub_category)]
         },
         fallbacks=[CommandHandler("q", quit_conversation)],
@@ -783,5 +851,6 @@ def register_download_handlers(application):
     
     # 添加独立的回调处理器处理异步任务的后续操作
     application.add_handler(CallbackQueryHandler(handle_retry_callback, pattern=r"^retry_"))
+    application.add_handler(CallbackQueryHandler(handle_plex_scan_callback, pattern=r"^plex_scan_(confirm|skip):"))
     application.add_handler(CallbackQueryHandler(handle_download_failure, pattern=r"^cancel_download$"))
     init.logger.info("✅ Downloader处理器已注册")

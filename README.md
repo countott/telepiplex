@@ -5,7 +5,7 @@ Telepiplex 是基于 Telegram-115Bot 的个人媒体自动化 fork，用 Telegra
 当前重点是电影片源搜索和 115 离线投递：
 
 - 通过 Prowlarr 搜索片源，并按清晰度、来源、编码、音轨和屏蔽词排序候选。
-- 选择候选后复用原有 115 离线下载流程，按配置的分类目录保存。
+- 选择候选后复用原有 115 离线下载流程，按配置的保存目录保存。
 - 支持直接发送豆瓣、IMDb、TVDB、TMDB 等元数据链接，自动解析片名和年份后搜索。
 - 普通片名搜索不会阻塞等待元数据；下载完成后优先根据实际文件名推断整理。
 - 搜索链路中的豆瓣/IMDb/TVDB/TMDB 元数据会作为下载后整理的辅助信息。
@@ -35,7 +35,7 @@ Telepiplex 是基于 Telegram-115Bot 的个人媒体自动化 fork，用 Telegra
 - 发送 `/search 布达佩斯大饭店` 搜索片源。
 - 直接发送豆瓣、IMDb、TVDB 或 TMDB 页面链接，Bot 会解析标题和年份后搜索。
 - 已有磁力链接时，发送 `/magnet magnet:?xt=urn:btih:...` 或 `/m magnet:?xt=urn:btih:...`，跳过片名搜索并直接投递 115 离线。
-- 搜索结果出现后，选择候选资源，再选择 115 保存分类和目录。
+- 搜索结果出现后，选择候选资源，再选择 115 保存目录。
 
 不支持的普通 HTTP/HTTPS 网页会被拒绝。已有磁力链接请使用 `/magnet` 或 `/m`。
 
@@ -129,22 +129,27 @@ search:
 
 `search.prowlarr.api_key` 是运行时必须填写的位置。Unraid 部署时同样应写入 `/config/config.yaml`。
 
-### 115 分类目录
+### 115 保存目录
 
-搜索候选被选中后，会复用普通离线下载流程，并要求选择分类目录：
+搜索候选被选中后，会复用普通离线下载流程，并直接选择保存目录：
 
 ```yaml
 category_folder:
-  - name: movies
-    display_name: 电影
-    path_map:
-      - name: 外语电影
-        path: /影视/电影/外语电影
-      - name: 华语电影
-        path: /影视/电影/华语电影
+  - name: 真人电影
+    path: /真人电影
+    plex_library_id: "1"
+  - name: 动画电影
+    path: /动画电影
+    plex_library_id: "12"
+  - name: 真人剧集
+    path: /真人剧集
+    plex_library_id: "2"
+  - name: 动画剧集
+    path: /动画剧集
+    plex_library_id: "11"
 ```
 
-`path` 是 115 网盘内的保存目录。目录命名会影响后续媒体库整理，建议保持稳定。
+`path` 是 115 网盘内的保存目录。Bot 会直接展示这些目录按钮，不再要求先选择一级分类。`plex_library_id` 用于把该 115 目录映射到对应 Plex 库；整理后的路径会按最长目录前缀匹配库 ID。
 
 ### 媒体库整理
 
@@ -165,6 +170,8 @@ media:
 ```
 
 有可靠元数据时，下载流程会尝试按媒体库友好的名称整理。缺少元数据或整理失败时，会移动到 `media.unorganized_path`，避免混入已整理目录。
+
+Plex 配置完整时，整理完成后会先发送“确认刷新 Plex”按钮；只有用户确认后才会触发 Plex 媒体库刷新。
 
 ## 搜索流程
 

@@ -7,11 +7,12 @@ import shutil
 from pathlib import Path
 from warnings import filterwarnings
 from telegram.warnings import PTBUserWarning
+from app.utils.directory_config import get_save_directories
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
 
-SELECT_MAIN_CATEGORY_SYNC, SELECT_SUB_CATEGORY_SYNC = range(30, 32)
+SELECT_SUB_CATEGORY_SYNC = 30
 
 
 async def sync_strm_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -20,54 +21,18 @@ async def sync_strm_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ 对不起，您无权使用115机器人！")
         return ConversationHandler.END
 
-    # 显示主分类（电影/剧集）
+    # 显示可同步目录
     keyboard = [
-        [InlineKeyboardButton(f"📁 {category['display_name']}", callback_data=category['name'])] for category in
-        init.bot_config['category_folder']
+        [InlineKeyboardButton(f"📁 {category['name']}", callback_data=f"sync_path:{index}")]
+        for index, category in enumerate(get_save_directories())
     ]
     # 添加退出按钮
     keyboard.append([InlineKeyboardButton("退出", callback_data="quit")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="❓请选择要同步的分类：",
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="❓请选择要同步的目录：",
                                    reply_markup=reply_markup)
-    return SELECT_MAIN_CATEGORY_SYNC
+    return SELECT_SUB_CATEGORY_SYNC
 
-
-async def select_main_category_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    selected_main_category = query.data
-    if selected_main_category == "return":
-        # 显示主分类
-        keyboard = [
-            [InlineKeyboardButton(f"📁 {category['display_name']}", callback_data=category['name'])]
-            for category in init.bot_config['category_folder']
-        ]
-        keyboard.append([InlineKeyboardButton("退出", callback_data="quit")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_message(chat_id=update.effective_chat.id,
-                                       text="❓请选择要同步的分类：",
-                                       reply_markup=reply_markup)
-        return SELECT_MAIN_CATEGORY_SYNC
-    elif selected_main_category == "quit":
-        # 直接退出会话
-        return await quit_conversation(update, context)
-    else:
-        context.user_data["selected_main_category"] = selected_main_category
-        sub_categories = [
-            item['path_map'] for item in init.bot_config["category_folder"] if item['name'] == selected_main_category
-        ][0]
-
-        # 创建子分类按钮
-        keyboard = [
-            [InlineKeyboardButton(f"📁 {category['name']}", callback_data=category['path'])] for category in sub_categories
-        ]
-        keyboard.append([InlineKeyboardButton("退出", callback_data="quit")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("❓请选择要同步的目录：", reply_markup=reply_markup)
-        return SELECT_SUB_CATEGORY_SYNC
-    
 
 async def select_sub_category_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -76,6 +41,13 @@ async def select_sub_category_sync(update: Update, context: ContextTypes.DEFAULT
     selected_path = query.data
     if selected_path == "quit":
         return await quit_conversation(update, context)
+    if str(selected_path).startswith("sync_path:"):
+        directories = get_save_directories()
+        try:
+            selected_path = directories[int(str(selected_path).split(":", 1)[1])]["path"]
+        except (IndexError, KeyError, TypeError, ValueError):
+            await query.edit_message_text(text="⚠️ 同步目录不可用，请重新选择。")
+            return ConversationHandler.END
     mount_root = Path(init.bot_config['mount_root'], "/CloudNAS/115")
     strm_root = Path(init.bot_config['strm_root'], "/media/115")
     openlist_root = Path(init.bot_config['openlist_root'], "/115")
@@ -160,7 +132,6 @@ def register_sync_handlers(application):
     sync_handler = ConversationHandler(
         entry_points=[CommandHandler("strm", sync_strm_files)],
         states={
-            SELECT_MAIN_CATEGORY_SYNC: [CallbackQueryHandler(select_main_category_sync)],
             SELECT_SUB_CATEGORY_SYNC: [CallbackQueryHandler(select_sub_category_sync)],
         },
         fallbacks=[CommandHandler("q", quit_conversation)],
