@@ -404,6 +404,10 @@ class OpenAPI_115:
                     if file_info:
                         break
                     time.sleep(2)
+
+        if not isinstance(file_info, dict) or not file_info.get("file_id"):
+            init.logger.warn(f"离线下载目录不可用，无法创建任务: {save_path}")
+            return False
         
         data = {
             "urls": download_url,

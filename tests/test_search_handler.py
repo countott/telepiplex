@@ -430,6 +430,51 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertEqual(mock_get.call_args_list[0].args[0], "https://www.douban.com/search")
         self.assertEqual(mock_get.call_args_list[0].kwargs["params"], {"cat": "1002", "q": "布达佩斯大饭店"})
 
+    @patch("app.handlers.search_handler.normalize_search_query_with_ai")
+    @patch("app.handlers.search_handler.requests.get")
+    def test_resolve_plain_search_request_strips_ai_episode_scope_before_douban_lookup(
+        self,
+        mock_get,
+        normalize_mock,
+    ):
+        old_bot_config = init.bot_config
+        init.bot_config = {"search": {}}
+        self.addCleanup(setattr, init, "bot_config", old_bot_config)
+        normalize_mock.return_value = {
+            "status": "ok",
+            "lookup_candidates": [
+                {
+                    "query": "瑞克和莫蒂 第九季 第七集",
+                    "title": "瑞克和莫蒂",
+                    "scope": "episode",
+                    "season_number": 9,
+                    "episode_number": 7,
+                }
+            ],
+            "warnings": [],
+        }
+        raw_search_response = Mock()
+        raw_search_response.text = "<html></html>"
+        stripped_search_response = Mock()
+        stripped_search_response.text = '<a href="https://movie.douban.com/subject/36508123/">瑞克和莫蒂 第九季</a>'
+        subject_response = Mock()
+        subject_response.json.return_value = {
+            "subject": {
+                "title": "瑞克和莫蒂 第九季",
+                "original_title": "Rick and Morty Season 9",
+                "release_year": "2026",
+            }
+        }
+        mock_get.side_effect = [raw_search_response, stripped_search_response, subject_response]
+
+        request = asyncio.run(_resolve_search_request("瑞克和莫迪第九季第七集"))
+
+        self.assertEqual(request["query"], "Rick and Morty Season 9 2026")
+        self.assertEqual(request["metadata"]["selected_scope"], "episode")
+        self.assertEqual(request["metadata"]["season_number"], 9)
+        self.assertEqual(request["metadata"]["episode_number"], 7)
+        self.assertEqual(mock_get.call_args_list[1].kwargs["params"], {"cat": "1002", "q": "瑞克和莫蒂 第九季"})
+
     @patch("app.handlers.search_handler.requests.get")
     def test_resolve_plain_search_request_blocks_when_douban_match_is_not_exact(self, mock_get):
         old_bot_config = init.bot_config
@@ -640,6 +685,49 @@ class SearchHandlerHelpersTest(unittest.TestCase):
             "Breaking Bad S02E05",
             plex_metadata=None,
             metadata={"media_type": "series", "season_number": 2, "episode_number": 5},
+        )
+
+    @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
+    def test_confirm_entry_scope_uses_english_original_title_for_movie_query(self, send_results_mock):
+        send_results_mock.return_value = SEARCH_SELECT_RESULT
+        pending_entry_confirmations["confirm-2"] = {
+            "created_at": time.time(),
+            "user_id": 472943219,
+            "candidates": [
+                {
+                    "media_type": "movie",
+                    "scope": "movie",
+                    "title": "变形金刚4：绝迹重生",
+                    "chinese_title": "变形金刚4：绝迹重生",
+                    "english_title": "Transformers: Age-of-Extinction",
+                    "year": "2014",
+                    "metadata": {"media_type": "movie", "year": "2014"},
+                }
+            ],
+        }
+        update = Mock()
+        update.effective_user.id = 472943219
+        update.callback_query.data = "entry_confirm:confirm-2:0"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        context = Mock()
+        context.user_data = {}
+
+        state = asyncio.run(confirm_entry_scope(update, context))
+
+        self.assertEqual(state, SEARCH_SELECT_RESULT)
+        send_results_mock.assert_awaited_once_with(
+            update,
+            context,
+            "Transformers Age of Extinction 2014",
+            plex_metadata={
+                "source": "confirmed",
+                "media_type": "movie",
+                "chinese_title": "变形金刚4：绝迹重生",
+                "english_title": "Transformers: Age-of-Extinction",
+                "year": "2014",
+            },
+            metadata={"media_type": "movie", "year": "2014"},
         )
 
     @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)

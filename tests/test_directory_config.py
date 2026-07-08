@@ -27,7 +27,7 @@ class DirectoryConfigTest(unittest.TestCase):
             ],
         )
 
-    def test_legacy_nested_category_folder_is_flattened_for_compatibility(self):
+    def test_legacy_nested_category_folder_is_ignored_after_flat_directory_migration(self):
         config = {
             "category_folder": [
                 {
@@ -41,13 +41,7 @@ class DirectoryConfigTest(unittest.TestCase):
             ]
         }
 
-        self.assertEqual(
-            get_save_directories(config),
-            [
-                {"name": "真人电影", "path": "/真人电影"},
-                {"name": "动画剧集", "path": "/动画剧集"},
-            ],
-        )
+        self.assertEqual(get_save_directories(config), [])
 
     def test_plex_library_id_maps_by_selected_115_path_prefix(self):
         config = {

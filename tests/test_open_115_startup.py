@@ -140,6 +140,24 @@ class Open115StartupTest(unittest.TestCase):
                 },
             )
 
+    def test_offline_download_specify_path_returns_false_when_save_path_info_unavailable(self):
+        api = object.__new__(OpenAPI_115)
+        api.base_url = "https://proapi.115.com"
+        api.get_file_info = Mock(return_value=None)
+        api.create_dir_recursive = Mock(return_value=None)
+        api._make_api_request = Mock()
+        api._get_headers = Mock(return_value={})
+        api.refresh_access_token = Mock()
+
+        result = api.offline_download_specify_path(
+            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
+            "/动画剧集",
+        )
+
+        self.assertFalse(result)
+        api._make_api_request.assert_not_called()
+        init.logger.warn.assert_any_call("离线下载目录不可用，无法创建任务: /动画剧集")
+
 
 if __name__ == "__main__":
     unittest.main()

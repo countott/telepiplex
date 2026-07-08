@@ -34,6 +34,28 @@ class DownloadTaskStartupTest(unittest.TestCase):
         self.assertEqual(add_task_mock.call_args.args[:2], (123, None))
         self.assertIn("115 OpenAPI 尚未初始化", add_task_mock.call_args.kwargs["message"])
 
+    def test_unorganized_path_uses_configured_path_without_media_root_prefix(self):
+        from app.handlers.download_handler import _get_unorganized_path
+
+        init.bot_config = {
+            "media": {
+                "unorganized_path": "/未整理",
+            }
+        }
+
+        self.assertEqual(_get_unorganized_path(), "/未整理")
+
+    def test_unorganized_path_keeps_full_configured_path(self):
+        from app.handlers.download_handler import _get_unorganized_path
+
+        init.bot_config = {
+            "media": {
+                "unorganized_path": "/媒体/未整理",
+            }
+        }
+
+        self.assertEqual(_get_unorganized_path(), "/媒体/未整理")
+
     @patch("app.handlers.download_handler.handle_media_library_update", return_value=None)
     @patch("app.handlers.download_handler.add_task_to_queue")
     def test_download_task_auto_renames_douban_result_for_plex(self, add_task_mock, media_update_mock):

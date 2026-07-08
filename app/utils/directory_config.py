@@ -14,19 +14,9 @@ def get_save_directories(config=None):
 
         if item.get("path"):
             name = item.get("name") or item.get("display_name") or item.get("path")
-            directory = {"name": str(name), "path": str(item["path"])}
+            directory = {"name": str(name), "path": _normalize_path(item["path"])}
             if item.get("plex_library_id") is not None:
                 directory["plex_library_id"] = str(item["plex_library_id"])
-            directories.append(directory)
-            continue
-
-        for nested in item.get("path_map") or []:
-            if not isinstance(nested, dict) or not nested.get("path"):
-                continue
-            name = nested.get("name") or nested.get("display_name") or nested.get("path")
-            directory = {"name": str(name), "path": str(nested["path"])}
-            if nested.get("plex_library_id") is not None:
-                directory["plex_library_id"] = str(nested["plex_library_id"])
             directories.append(directory)
 
     return directories

@@ -45,7 +45,7 @@ clean_policy:
   less_than: 400M
 
 # 设置保存目录
-# category_folder 会直接展示为保存目录按钮。path 是 115 网盘内的完整路径。
+# category_folder 会直接展示为保存目录按钮。path 是 115 网盘内的最终保存目录。
 category_folder:
   - name: 真人电影
     path: /真人电影

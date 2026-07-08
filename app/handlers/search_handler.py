@@ -302,6 +302,19 @@ def _fetch_douban_metadata_for_plain_query(query: str) -> dict | None:
     return None
 
 
+def _metadata_lookup_query_from_ai_candidate(item: dict) -> str:
+    query = _clean_prowlarr_query(item.get("query") or item.get("title") or "")
+    if not query:
+        return ""
+
+    if item.get("scope") == "episode":
+        query = re.sub(r"(?i)\b(S\d{1,2})\s*E\d{1,3}\b", r"\1", query)
+        query = re.sub(r"(?i)\bepisode\s*\d{1,3}\b", " ", query)
+        query = re.sub(r"\s*第\s*(?:\d+|[零〇一二两三四五六七八九十]+)\s*[集话話]\s*", " ", query)
+
+    return _clean_prowlarr_query(query)
+
+
 def _fetch_douban_metadata_for_external_title(title: str, year: str = "") -> tuple[dict | None, str]:
     query = _clean_prowlarr_query(
         _query_from_plex_metadata(
@@ -428,11 +441,12 @@ def _candidate_plex_metadata(candidate: dict):
         return candidate.get("plex_metadata")
     if candidate.get("media_type") == "series":
         return None
+    english_title = candidate.get("english_title") or candidate.get("title") or ""
     return {
         "source": candidate.get("source") or "confirmed",
         "media_type": candidate.get("media_type") or "",
         "chinese_title": candidate.get("chinese_title") or "",
-        "english_title": candidate.get("title") or candidate.get("english_title") or "",
+        "english_title": english_title,
         "year": candidate.get("year") or "",
     }
 
@@ -445,7 +459,7 @@ def _candidate_search_metadata(candidate: dict):
     return {
         "source": candidate.get("source") or "confirmed",
         "media_type": candidate.get("media_type") or "",
-        "english_title": candidate.get("title") or candidate.get("english_title") or "",
+        "english_title": candidate.get("english_title") or candidate.get("title") or "",
         "chinese_title": candidate.get("chinese_title") or "",
         "year": candidate.get("year") or "",
         "query": candidate_to_prowlarr_query(candidate),
@@ -874,7 +888,7 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
         else:
             _log_info(f"AI搜索清洗无结果 raw={raw_query}")
         for item in (normalized or {}).get("lookup_candidates") or []:
-            candidate_query = _clean_prowlarr_query(item.get("query") or item.get("title") or "")
+            candidate_query = _metadata_lookup_query_from_ai_candidate(item)
             if not candidate_query:
                 continue
             try:
@@ -1175,6 +1189,7 @@ def _entry_from_request(request: dict) -> dict | None:
         "media_type": media_type if media_type in {"movie", "series"} else "movie",
         "scope": scope,
         "title": title,
+        "english_title": plex_metadata.get("english_title") or metadata.get("english_title") or title,
         "chinese_title": plex_metadata.get("chinese_title") or metadata.get("chinese_title") or "",
         "year": plex_metadata.get("year") or metadata.get("year") or "",
         "external_ids": external_ids.copy(),
@@ -1219,6 +1234,7 @@ def _entry_from_tvdb_series(item: dict) -> dict | None:
         "media_type": "series",
         "scope": "whole_series",
         "title": item.get("name") or "",
+        "english_title": item.get("name") or "",
         "chinese_title": "",
         "year": item.get("year") or "",
         "external_ids": {"tvdb": str(item.get("tvdb_series_id"))},

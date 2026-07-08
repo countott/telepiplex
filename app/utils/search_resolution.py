@@ -8,14 +8,85 @@ def _collapse_spaces(value: str) -> str:
     return " ".join(str(value or "").replace("\xa0", " ").split())
 
 
+CHINESE_NUMERAL_DIGITS = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+
+
+ENGLISH_NUMBER_WORDS = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+}
+
+
+def _parse_number_token(value: str) -> int:
+    value = _collapse_spaces(value).lower().replace("-", " ")
+    if not value:
+        return 0
+    if value.isdigit():
+        return int(value)
+    if value in ENGLISH_NUMBER_WORDS:
+        return ENGLISH_NUMBER_WORDS[value]
+    if value == "十":
+        return 10
+    if "十" in value:
+        left, _, right = value.partition("十")
+        tens = CHINESE_NUMERAL_DIGITS.get(left, 1 if left == "" else 0)
+        ones = CHINESE_NUMERAL_DIGITS.get(right, 0) if right else 0
+        return tens * 10 + ones
+    total = 0
+    for char in value:
+        if char not in CHINESE_NUMERAL_DIGITS:
+            return 0
+        total = total * 10 + CHINESE_NUMERAL_DIGITS[char]
+    return total
+
+
+CHINESE_NUMBER_PATTERN = r"\d+|[零〇一二两三四五六七八九十]+"
+ENGLISH_NUMBER_PATTERN = r"\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty"
+SEASON_EPISODE_WORD_PATTERN = rf"(?:{ENGLISH_NUMBER_PATTERN})"
+
+
 def _strip_scope_text(text: str) -> str:
     patterns = [
         r"(?i)\bS\d{1,2}\s*E\d{1,3}\b",
+        r"(?i)\b\d{1,2}\s*x\s*\d{1,3}\b",
+        rf"(?i)\bseason\s*(?:{SEASON_EPISODE_WORD_PATTERN})\s*(?:episode|ep)\s*(?:{SEASON_EPISODE_WORD_PATTERN})\b",
         r"(?i)\bS\d{1,2}\b",
-        r"第\s*\d+\s*季\s*第\s*\d+\s*[集话話]",
-        r"第\s*\d+\s*季",
-        r"第\s*\d+\s*[集话話]",
-        r"(?i)\bseason\s*\d+\b",
+        rf"第?\s*(?:{CHINESE_NUMBER_PATTERN})\s*季\s*第?\s*(?:{CHINESE_NUMBER_PATTERN})\s*[集话話]",
+        rf"第?\s*(?:{CHINESE_NUMBER_PATTERN})\s*季",
+        rf"第\s*(?:{CHINESE_NUMBER_PATTERN})\s*[集话話]",
+        rf"(?i)\bseason\s*(?:{SEASON_EPISODE_WORD_PATTERN})\b",
     ]
     for pattern in patterns:
         text = re.sub(pattern, " ", text)
@@ -39,13 +110,26 @@ def parse_search_intent(raw_query: str) -> dict:
 
     episode_match = re.search(r"(?i)\bS(\d{1,2})\s*E(\d{1,3})\b", query)
     if not episode_match:
-        episode_match = re.search(r"第\s*(\d+)\s*季\s*第\s*(\d+)\s*[集话話]", query)
+        episode_match = re.search(
+            r"(?i)\b(\d{1,2})\s*x\s*(\d{1,3})\b",
+            query,
+        )
+    if not episode_match:
+        episode_match = re.search(
+            rf"(?i)\bseason\s*({SEASON_EPISODE_WORD_PATTERN})\s*(?:episode|ep)\s*({SEASON_EPISODE_WORD_PATTERN})\b",
+            query,
+        )
+    if not episode_match:
+        episode_match = re.search(
+            rf"第?\s*({CHINESE_NUMBER_PATTERN})\s*季\s*第?\s*({CHINESE_NUMBER_PATTERN})\s*[集话話]",
+            query,
+        )
     if episode_match:
         intent.update(
             {
                 "scope": "episode",
-                "season_number": int(episode_match.group(1)),
-                "episode_number": int(episode_match.group(2)),
+                "season_number": _parse_number_token(episode_match.group(1)),
+                "episode_number": _parse_number_token(episode_match.group(2)),
                 "title": _strip_scope_text(query),
             }
         )
@@ -53,14 +137,14 @@ def parse_search_intent(raw_query: str) -> dict:
 
     season_match = re.search(r"(?i)\bS(\d{1,2})\b", query)
     if not season_match:
-        season_match = re.search(r"第\s*(\d+)\s*季", query)
+        season_match = re.search(rf"第?\s*({CHINESE_NUMBER_PATTERN})\s*季", query)
     if not season_match:
-        season_match = re.search(r"(?i)\bseason\s*(\d+)\b", query)
+        season_match = re.search(rf"(?i)\bseason\s*({SEASON_EPISODE_WORD_PATTERN})\b", query)
     if season_match:
         intent.update(
             {
                 "scope": "season",
-                "season_number": int(season_match.group(1)),
+                "season_number": _parse_number_token(season_match.group(1)),
                 "title": _strip_scope_text(query),
             }
         )
@@ -74,6 +158,29 @@ def parse_search_intent(raw_query: str) -> dict:
 
 def _candidate_title(entry: dict) -> str:
     return _collapse_spaces(entry.get("title") or entry.get("english_title") or entry.get("name") or entry.get("chinese_title"))
+
+
+def _candidate_query_title(entry: dict) -> str:
+    english_title = _collapse_spaces(entry.get("english_title") or "")
+    if english_title and re.search(r"[A-Za-z]", english_title):
+        return english_title
+    title = _candidate_title(entry)
+    if title and re.search(r"[A-Za-z]", title):
+        return title
+    return title
+
+
+def _clean_prowlarr_query_text(value: str) -> str:
+    value = re.sub(r"[^\w\u4e00-\u9fff]+", " ", str(value or ""), flags=re.UNICODE)
+    return _collapse_spaces(value)
+
+
+def _strip_trailing_season_suffix(value: str) -> str:
+    value = _collapse_spaces(value)
+    value = re.sub(rf"(?i)\bseason\s*(?:{SEASON_EPISODE_WORD_PATTERN})\s*$", " ", value)
+    value = re.sub(r"(?i)\bS\d{1,2}\s*$", " ", value)
+    value = re.sub(rf"第\s*(?:{CHINESE_NUMBER_PATTERN})\s*季\s*$", " ", value)
+    return _collapse_spaces(value)
 
 
 def _external_id(entry: dict, key: str = "tvdb") -> str:
@@ -113,6 +220,7 @@ def _base_candidate(entry: dict, scope: str) -> dict:
         "media_type": entry.get("media_type") or ("series" if _external_id(entry, "tvdb") else "movie"),
         "scope": scope,
         "title": _candidate_title(entry),
+        "english_title": entry.get("english_title") or "",
         "chinese_title": entry.get("chinese_title") or "",
         "year": str(entry.get("year") or ""),
         "external_ids": external_ids.copy(),
@@ -153,13 +261,19 @@ def build_confirmation_candidates(
 
         if intent_scope == "season":
             requested_season = int(intent.get("season_number") or 0)
-            aired_season = any(
-                _episode_key(item)
-                and _episode_key(item)[0] == requested_season
-                and not is_unreleased_episode(item, today=today)
-                for item in episodes
-            )
-            if aired_season:
+            season_episodes = [
+                item for item in episodes if _episode_key(item) and _episode_key(item)[0] == requested_season
+            ]
+            aired_episodes = [
+                item for item in season_episodes if not is_unreleased_episode(item, today=today)
+            ]
+            has_unreleased_episodes = any(is_unreleased_episode(item, today=today) for item in season_episodes)
+            if aired_episodes and has_unreleased_episodes:
+                for episode in sorted(aired_episodes, key=lambda item: _episode_key(item)[1], reverse=True):
+                    candidate = _base_candidate(entry, "episode")
+                    candidate["season_number"], candidate["episode_number"] = _episode_key(episode)
+                    candidates.append(candidate)
+            elif aired_episodes:
                 candidate = _base_candidate(entry, "season")
                 candidate["season_number"] = requested_season
                 candidates.append(candidate)
@@ -174,12 +288,13 @@ def build_confirmation_candidates(
 
 
 def candidate_to_prowlarr_query(candidate: dict) -> str:
-    title = _candidate_title(candidate)
+    title = _clean_prowlarr_query_text(_candidate_query_title(candidate))
     scope = candidate.get("scope")
     if candidate.get("media_type") == "movie" or scope == "movie":
         year = str(candidate.get("year") or "").strip()
         return _collapse_spaces(f"{title} {year}" if year and year not in title else title)
 
+    title = _clean_prowlarr_query_text(_strip_trailing_season_suffix(title))
     if scope == "episode":
         return _collapse_spaces(f"{title} S{int(candidate.get('season_number')):02d}E{int(candidate.get('episode_number')):02d}")
     if scope == "season":
