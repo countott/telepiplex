@@ -18,7 +18,6 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from functools import wraps
 from app.utils.message_queue import add_task_to_queue
-from app.utils.alioss import upload_file_to_oss
 from app.utils.log_sanitizer import sanitize_log_value
 from telegram.helpers import escape_markdown
 
@@ -837,6 +836,11 @@ class OpenAPI_115:
                     
                     # 上传文件到阿里云OSS
                     try:
+                        try:
+                            from app.utils.alioss import upload_file_to_oss
+                        except ImportError:
+                            init.logger.warn("文件上传到OSS的辅助模块未包含在 feature/115 分支中")
+                            return False, False
                         init.logger.info(f"开始上传文件: {kwargs.get('file_name', '')}")
                         upload_result = upload_file_to_oss(
                             access_key_id=access_key_id,
