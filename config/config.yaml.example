@@ -1,67 +1,30 @@
-# Telepiplex 配置模板
-# 运行时配置文件路径：/config/config.yaml
-# 本文件会在容器启动时同步到 /config/config.yaml.example。
+# Telepiplex 配置模板；运行时配置路径为 /config/config.yaml。
 
-############################################
-# 基础日志
-############################################
-
-# 可选：debug / info / warning / error / critical
+# 基础日志：可选 debug / info / warning / error / critical。
 log_level: info
 
-############################################
-# Telegram Bot
-############################################
-
-# 必填：BotFather 创建的 bot token。
+# Telegram Bot：bot_token 和 allowed_user 必填，用户客户端字段可留空。
 bot_token: "your_bot_token"
-
-# 必填：允许使用机器人的 Telegram user_id。
-# 建议填写数字，不要加引号；也兼容字符串。
 allowed_user: 123456789
-
-# 可选：Telegram 用户客户端配置，仅用于大视频转存等上游视频能力。
-# 不使用视频转存时可以留空。
 bot_name: ""
 tg_api_id: ""
 tg_api_hash: ""
 
-############################################
-# 115 授权
-############################################
-
-# 二选一：
-# 1. OpenAPI /auth 扫码授权：填写 115_app_id，access_token / refresh_token 留空。
-# 2. Access/Refresh Token 直连：115_app_id 填 null，填写 access_token / refresh_token。
-#
-# Telegram 可视化配置：
-# - /config -> 配置 115 -> 115 OpenAPI 扫码授权：写入 115_app_id 后继续 /auth
-# - /config -> 配置 115 -> Access / Refresh Token：第一条发 access token，第二条发 refresh token
+# 115 授权：OpenAPI 填 115_app_id，直连 Token 填 access_token / refresh_token。
 115_app_id: null
 access_token: ""
 refresh_token: ""
 
-# 115 OpenAPI 请求超时，单位秒。
+# 115 OpenAPI：请求超时秒数。
 open115:
   timeout: 30
 
-############################################
-# 115 离线下载清理
-############################################
-
+# 清理策略：下载完成后按体积清理广告小文件。
 clean_policy:
-  # on：下载完成后按规则清理广告小文件；off：关闭自动清理。
   switch: "on"
-  # 小于该体积的文件会被清理，支持 K / M / G。
   less_than: 400M
 
-############################################
-# 115 保存目录
-############################################
-
-# Bot 会把 category_folder 直接展示成保存目录按钮。
-# path 是 115 网盘内最终保存目录，不再自动追加旧版顶层目录。
-# plex_library_id 是可选高级项：配置后 Plex 扫库确认会刷新对应库；不配置则默认刷新 Plex 全部资料库。
+# 保存目录：path 是 115 保存目录，plex_library_id 可匹配 Plex 库。
 category_folder:
   - name: 真人电影
     path: /真人电影
@@ -76,28 +39,22 @@ category_folder:
     path: /动画剧集
     plex_library_id: "11"
 
-############################################
-# 搜索 / Prowlarr
-############################################
-
+# 搜索与 Prowlarr：启用后使用 /search 和 /s 找片源。
 search:
-  # true 后启用 /search 和 /s 的 Prowlarr 搜索。
   enable: false
 
+  # Prowlarr 连接：/config 可写入 base_url / api_key 并启用搜索。
   prowlarr:
     base_url: "http://your-prowlarr:9696"
     api_key: ""
-    # 搜索解析默认 150 秒，适配慢索引器和 torrent -> magnet 解析。
     timeout: 150
-    # Prowlarr indexerIds；-2 表示所有启用索引器。
     indexer_ids: "-2"
-    # Prowlarr 分类。默认电影 2000，剧集 5000。
     categories:
       movie: 2000
       tv: 5000
-    # Telegram 候选展示数量。
     result_limit: 8
 
+  # 评分规则：keyword_scores / indexer_scores 可自定义正负分。
   scoring:
     prefer_resolution:
       - "2160p"
@@ -126,41 +83,39 @@ search:
       - "HC"
       - "HDTC"
       - "HDCAM"
+    keyword_scores:
+      "2160p": 35
+      "1080p": 25
+      "WEB-DL": 25
+      "BluRay": 22
+      "Remux": 24
+      "国配": 10
+      "中字": 8
+      "CAM": -90
+      "枪版": -90
+    indexer_scores:
+      "M-Team": 30
+      "TorrentLeech": 10
 
-############################################
-# 媒体库整理 / Plex
-############################################
-
+# 媒体库整理：unorganized_path 接收缺少元数据或整理失败的文件。
 media:
-  # 自动整理失败或缺少重命名元数据时，文件会移动到该 115 目录。
   unorganized_path: /未整理
 
-  # 可选：配置完整后，整理完成会发送 Plex 扫库确认按钮。
-  # /config -> 配置 Plex 为两步输入：Plex 地址 -> Plex Token。
-  # 不需要配置 library_id；未匹配 category_folder.plex_library_id 时默认刷新全部资料库。
+  # Plex：/config 可写入 base_url / token，plex_library_id 在保存目录中匹配。
   plex:
     base_url: ""
     token: ""
 
-############################################
-# 元数据 / TVDB
-############################################
-
+# 元数据：TVDB 用于剧集确认、播出校验、封面反馈和剧集重命名。
 metadata:
   tvdb:
-    # 可选：启用后用于剧集 ID 确认、剧集播出校验、封面反馈和剧集重命名。
     enable: false
     base_url: "https://api4.thetvdb.com/v4"
     api_key: ""
-    # 有 subscriber pin 时填写；没有则留空。
     subscriber_pin: ""
-    # TVDB 请求超时，范围会被代码限制在 5-60 秒。
     timeout: 15
 
-############################################
-# Aria2
-############################################
-
+# Aria2：可选离线下载后端。
 aria2:
   enable: false
   device_name: "Aria2"
@@ -169,21 +124,12 @@ aria2:
   rpc_secret: ""
   download_path: "/Downloads"
 
-############################################
-# AI 兜底
-############################################
-
+# AI 兜底：用于搜索推断、口误修正和少量元数据补全。
 ai:
-  # 用于搜索兜底推断、错别字/口误修正、极少数元数据补全。
-  # 不配置时，主链路仍会优先使用豆瓣 / TVDB / Prowlarr。
   api_url: ""
   api_key: ""
   model: ""
   timeout: 60
 
-############################################
-# 浏览器辅助
-############################################
-
-# 可选：网页元数据抓取时的浏览器加载超时，单位秒。
+# 浏览器辅助：网页元数据抓取时的加载超时秒数。
 selenium_timeout: 60

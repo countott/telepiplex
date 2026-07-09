@@ -4,7 +4,7 @@ Telepiplex 是基于 Telegram-115Bot 的个人媒体自动化 fork，用 Telegra
 
 当前重点是电影片源搜索和 115 离线投递：
 
-- 先确认影视条目和剧集范围，再通过 Prowlarr 搜索片源，并按清晰度、来源、编码、音轨和屏蔽词排序候选。
+- 先确认影视条目和剧集范围，再通过 Prowlarr 搜索片源，并按清晰度、来源、编码、音轨、屏蔽词和自定义分数排序候选。
 - 选择候选后复用原有 115 离线下载流程，按配置的保存目录保存。
 - 支持直接发送豆瓣、IMDb、TVDB、TMDB 等元数据链接，自动解析片名和年份后搜索。
 - 普通片名搜索不会阻塞等待元数据；下载完成后优先根据实际文件名推断整理。
@@ -21,6 +21,7 @@ Telepiplex 是基于 Telegram-115Bot 的个人媒体自动化 fork，用 Telegra
 | --- | --- |
 | `/start` | 显示帮助信息 |
 | `/auth` | 115 扫码授权 |
+| `/config` | 配置 115，并在下一层补充 Prowlarr / Plex / TVDB |
 | `/reload` | 重新加载配置 |
 | `/search 片名` | 搜索片源，选择候选后加入 115 离线 |
 | `/s 片名` | `/search` 的短命令 |
@@ -113,9 +114,11 @@ refresh_token: your_refresh_token
 
 在直接 Token 模式下，`config.yaml` 中的 Token 是优先来源，并会同步到 `/config/115_tokens.json`。如果你在 Unraid 中更新 Token，请确认改的是容器实际挂载的 `/config/config.yaml`，不是仓库里的示例文件。
 
+也可以通过 Telegram 发送 `/config` 写入配置。首屏会优先显示 115 配置入口；进入“可选服务配置”后，Prowlarr、Plex、TVDB 会作为平级项目出现。
+
 ### Prowlarr 搜索
 
-搜索片源需要启用 `search` 并填写 Prowlarr API Key：
+搜索片源需要启用 `search` 并填写 Prowlarr API Key；也可以通过 `/config -> 可选服务配置 -> 配置 Prowlarr` 写入：
 
 ```yaml
 search:
@@ -129,6 +132,29 @@ search:
 ```
 
 `search.prowlarr.api_key` 是运行时必须填写的位置。Unraid 部署时同样应写入 `/config/config.yaml`。`search.prowlarr.timeout` 会按配置值真实生效；默认推荐 150 秒以兼容较慢索引器，如需快速失败可以自行调小。
+
+### 搜索评分
+
+默认评分会识别清晰度、来源、编码、音轨、屏蔽词、做种数和大小。需要覆盖或追加分数时，可配置 `keyword_scores` 和 `indexer_scores`：
+
+```yaml
+search:
+  scoring:
+    keyword_scores:
+      "2160p": 35
+      "1080p": 25
+      "Remux": 24
+      "国配": 10
+      "中字": 8
+      "CAM": -90
+      "枪版": -90
+    indexer_scores:
+      "M-Team": 30
+      "TorrentLeech": 10
+      "低质量站点": -30
+```
+
+`keyword_scores` 按标题关键词加减分；`indexer_scores` 按 Prowlarr 返回的 indexer 名称加减分。同名关键词会覆盖默认权重，未配置的关键词和站点继续使用默认评分逻辑。
 
 ### 115 保存目录
 
@@ -172,7 +198,7 @@ Plex 配置完整时，整理完成后会先发送扫库确认按钮；匹配到
 2. Bot 先用豆瓣、TVDB 和必要时的 AI 清洗来确立影视条目；无法验证外部条目时会阻断，并要求提供更明确的 query 或元数据链接。
 3. Bot 展示“条目 + 范围”确认。剧集会确认全集、某季或某集；电影链接唯一明确时会短暂展示后自动继续。
 4. 确认后才生成 Prowlarr query。电影使用标题和年份，剧集季/集使用 `Sxx` 或 `SxxEyy`。
-5. Bot 调用 Prowlarr 搜索候选，并展示索引器、大小、做种数、发布时间和评分信息。
+5. Bot 调用 Prowlarr 搜索候选，并展示索引器、大小、做种数、发布时间、评分和命中特征。
 6. 用户选择候选资源。
 7. 用户选择 115 保存目录，或使用上次保存目录。
 8. Bot 将下载链接投递到 115 离线下载队列。

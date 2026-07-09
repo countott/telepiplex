@@ -64,6 +64,52 @@ class ReleaseScoreTest(unittest.TestCase):
         self.assertGreater(ranked[0]["score"], ranked[1]["score"])
         self.assertEqual(ranked[0]["features"], ["1080p", "BluRay", "x264", "DTS-HD"])
 
+    def test_score_release_uses_configured_keyword_scores(self):
+        init.bot_config["search"]["scoring"]["keyword_scores"] = {
+            "2160p": 50,
+            "国配": 12,
+            "CAM": -90,
+        }
+
+        score, features = score_release(
+            {
+                "title": "Movie 2160p 国配 CAM",
+                "seeders": 0,
+                "size": 0,
+            }
+        )
+
+        self.assertEqual(score, -56)
+        self.assertEqual(features, ["2160p", "CAM", "国配"])
+
+    def test_rank_releases_applies_configured_indexer_scores(self):
+        init.bot_config["search"]["scoring"]["indexer_scores"] = {
+            "M-Team": 35,
+            "LowQuality": -30,
+        }
+        items = [
+            {
+                "title": "Movie 1080p WEB-DL",
+                "seeders": 10,
+                "size": 6 * 1024**3,
+                "indexer": "LowQuality",
+                "download_url": "https://example/low",
+            },
+            {
+                "title": "Movie 1080p WEB-DL",
+                "seeders": 10,
+                "size": 6 * 1024**3,
+                "indexer": "M-Team",
+                "download_url": "https://example/high",
+            },
+        ]
+
+        ranked = rank_releases(items, limit=8)
+
+        self.assertEqual(ranked[0]["indexer"], "M-Team")
+        self.assertIn("indexer:M-Team", ranked[0]["features"])
+        self.assertGreater(ranked[0]["score"], ranked[1]["score"])
+
 
 if __name__ == "__main__":
     unittest.main()

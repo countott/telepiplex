@@ -30,6 +30,69 @@ def _get_scoring_config():
     return merged
 
 
+def _score_value(value, default=None):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _configured_score_map(scoring: dict, key: str) -> dict:
+    values = scoring.get(key) or {}
+    if not isinstance(values, dict):
+        return {}
+
+    scores = {}
+    for raw_key, raw_value in values.items():
+        name = str(raw_key or "").strip()
+        score = _score_value(raw_value)
+        if name and score is not None:
+            scores[name] = score
+    return scores
+
+
+def _keyword_score_entries(scoring: dict) -> list[tuple[str, int]]:
+    configured_scores = _configured_score_map(scoring, "keyword_scores")
+    emitted = set()
+    entries = []
+
+    for group in ("prefer_resolution", "prefer_source", "prefer_codec", "prefer_audio"):
+        weights = WEIGHTS.get(group, {})
+        for keyword in scoring.get(group, []):
+            keyword = str(keyword or "").strip()
+            if not keyword:
+                continue
+            score = configured_scores.get(keyword, weights.get(keyword, 8))
+            entries.append((keyword, score))
+            emitted.add(keyword.lower())
+
+    for keyword in scoring.get("reject_keywords", []):
+        keyword = str(keyword or "").strip()
+        if not keyword:
+            continue
+        score = configured_scores.get(keyword, -60)
+        entries.append((keyword, score))
+        emitted.add(keyword.lower())
+
+    for keyword, score in configured_scores.items():
+        if keyword.lower() not in emitted:
+            entries.append((keyword, score))
+
+    return entries
+
+
+def _indexer_score(indexer: str, scoring: dict) -> tuple[int, str]:
+    indexer = str(indexer or "").strip()
+    if not indexer:
+        return 0, ""
+
+    for configured_name, score in _configured_score_map(scoring, "indexer_scores").items():
+        if configured_name.lower() == indexer.lower():
+            return score, configured_name
+
+    return 0, ""
+
+
 def _contains_keyword(title: str, keyword: str) -> bool:
     if not keyword:
         return False
@@ -75,17 +138,15 @@ def score_release(item: dict) -> tuple[int, list[str]]:
     score = 0
     features = []
 
-    for group in ("prefer_resolution", "prefer_source", "prefer_codec", "prefer_audio"):
-        weights = WEIGHTS.get(group, {})
-        for keyword in scoring.get(group, []):
-            if _contains_keyword(title, keyword):
-                features.append(keyword)
-                score += weights.get(keyword, 8)
-
-    for keyword in scoring.get("reject_keywords", []):
+    for keyword, keyword_score in _keyword_score_entries(scoring):
         if _contains_keyword(title, keyword):
             features.append(keyword)
-            score -= 60
+            score += keyword_score
+
+    indexer_score, indexer_name = _indexer_score(item.get("indexer"), scoring)
+    if indexer_name:
+        features.append(f"indexer:{indexer_name}")
+        score += indexer_score
 
     score += _score_seeders(_safe_int(item.get("seeders")))
     score += _score_size(_safe_int(item.get("size")))

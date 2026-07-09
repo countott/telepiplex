@@ -23,6 +23,7 @@ from app.handlers.config_handler import (
     apply_115_token_payload,
     apply_115_openapi_payload,
     apply_optional_token_payload,
+    build_config_keyboard,
     receive_115_access_token,
     receive_115_refresh_token,
     receive_plex_base_url,
@@ -110,6 +111,50 @@ class ConfigHandlerTest(unittest.TestCase):
             self.assertEqual(
                 written["media"]["plex"],
                 {"base_url": "http://plex:32400", "token": "plex-token"},
+            )
+
+    def test_apply_optional_token_payload_writes_prowlarr_without_dropping_existing_categories(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "search": {
+                            "enable": False,
+                            "prowlarr": {
+                                "categories": {"movie": 2000, "tv": 5000},
+                                "status_timeout": 12,
+                            },
+                        }
+                    },
+                    allow_unicode=True,
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            old_config_file = init.CONFIG_FILE
+            init.CONFIG_FILE = str(config_path)
+            self.addCleanup(setattr, init, "CONFIG_FILE", old_config_file)
+            init.load_yaml_config = Mock()
+
+            apply_optional_token_payload(
+                "prowlarr",
+                "base_url=http://prowlarr:9696\napi_key=prowlarr-key\ntimeout=90\nindexer_ids=1,2\nresult_limit=12",
+            )
+
+            written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            self.assertTrue(written["search"]["enable"])
+            self.assertEqual(
+                written["search"]["prowlarr"],
+                {
+                    "categories": {"movie": 2000, "tv": 5000},
+                    "status_timeout": 12,
+                    "base_url": "http://prowlarr:9696",
+                    "api_key": "prowlarr-key",
+                    "timeout": 90,
+                    "indexer_ids": "1,2",
+                    "result_limit": 12,
+                },
             )
 
     @patch("app.handlers.config_handler.init.load_yaml_config")
@@ -264,10 +309,41 @@ class ConfigHandlerTest(unittest.TestCase):
             {
                 "metadata": {"tvdb": {"enable": False, "api_key": ""}},
                 "media": {"plex": {"base_url": "", "token": ""}},
+                "search": {"enable": False, "prowlarr": {"base_url": "", "api_key": ""}},
             }
         )
 
-        self.assertEqual(labels, ["TVDB", "Plex"])
+        self.assertEqual(labels, ["Prowlarr", "Plex", "TVDB"])
+
+    def test_config_main_menu_prioritizes_115_then_optional_services(self):
+        keyboard = build_config_keyboard()
+        callback_data = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+
+        self.assertEqual(callback_data[:2], ["config_select:115", "config_select:optional"])
+        self.assertNotIn("config_select:plex", callback_data)
+        self.assertNotIn("config_select:tvdb", callback_data)
+
+    def test_optional_config_menu_lists_prowlarr_plex_and_tvdb_as_peers(self):
+        update = Mock()
+        update.effective_user.id = 472943219
+        update.callback_query.data = "config_select:optional"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        context = Mock()
+        context.user_data = {}
+        init.check_user = Mock(return_value=True)
+
+        state = asyncio.run(select_config_item(update, context))
+
+        self.assertNotEqual(state, -1)
+        text = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("Prowlarr", text)
+        keyboard = update.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+        callback_data = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+        self.assertEqual(
+            callback_data[:3],
+            ["config_select:prowlarr", "config_select:plex", "config_select:tvdb"],
+        )
 
     def test_config_inline_select_buttons_are_conversation_entry_points(self):
         from telegram.ext import CallbackQueryHandler
@@ -276,16 +352,21 @@ class ConfigHandlerTest(unittest.TestCase):
         old_logger = init.logger
         init.logger = Mock()
         self.addCleanup(setattr, init, "logger", old_logger)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            register_config_handlers(app)
 
-        register_config_handlers(app)
-
-        handler = app.add_handler.call_args.args[0]
-        entry_callbacks = [
-            entry.callback
-            for entry in handler.entry_points
-            if isinstance(entry, CallbackQueryHandler)
-        ]
-        self.assertIn(select_config_item, entry_callbacks)
+            handler = app.add_handler.call_args.args[0]
+            entry_callbacks = [
+                entry.callback
+                for entry in handler.entry_points
+                if isinstance(entry, CallbackQueryHandler)
+            ]
+            self.assertIn(select_config_item, entry_callbacks)
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
 
 
 if __name__ == "__main__":

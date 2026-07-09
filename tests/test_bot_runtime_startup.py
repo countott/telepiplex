@@ -137,7 +137,7 @@ class BotRuntimeStartupTest(unittest.TestCase):
         message = bot_module.add_task_to_queue.call_args.kwargs["message"]
         self.assertIn(r"\`access\_token\`", message)
         self.assertIn(r"config\.yaml", message)
-        self.assertIn("可选配置未完成：TVDB、Plex", message)
+        self.assertIn("可选配置未完成：Prowlarr、Plex、TVDB", message)
         self.assertNotIn("config.yaml`", message)
 
     def test_optional_config_notice_is_skipped_when_115_init_failed(self):
