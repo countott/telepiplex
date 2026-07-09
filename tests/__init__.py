@@ -3,6 +3,7 @@
 import json
 import sys
 import types
+from unittest.mock import Mock
 
 
 try:
@@ -30,6 +31,40 @@ except ModuleNotFoundError:
 
 
 try:
+    import requests  # noqa: F401
+except ModuleNotFoundError:
+    requests_module = types.ModuleType("requests")
+    requests_module.get = Mock()
+    requests_module.post = Mock()
+    sys.modules["requests"] = requests_module
+
+
+try:
+    import qrcode  # noqa: F401
+except ModuleNotFoundError:
+    qrcode_module = types.ModuleType("qrcode")
+
+    class _QRCode:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add_data(self, *_args, **_kwargs):
+            pass
+
+        def make(self, *_args, **_kwargs):
+            pass
+
+        def make_image(self, *_args, **_kwargs):
+            image = Mock()
+            image.save = Mock()
+            return image
+
+    qrcode_module.QRCode = _QRCode
+    qrcode_module.constants = types.SimpleNamespace(ERROR_CORRECT_L=1)
+    sys.modules["qrcode"] = qrcode_module
+
+
+try:
     import telegram  # noqa: F401
 except ModuleNotFoundError:
     telegram_module = types.ModuleType("telegram")
@@ -42,6 +77,9 @@ except ModuleNotFoundError:
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
+
+    class Bot(_TelegramObject):
+        pass
 
     class BotCommand:
         def __init__(self, command, description):
@@ -125,6 +163,7 @@ except ModuleNotFoundError:
     def escape_markdown(text, version=1):
         return str(text)
 
+    telegram_module.Bot = Bot
     telegram_module.BotCommand = BotCommand
     telegram_module.InlineKeyboardButton = InlineKeyboardButton
     telegram_module.InlineKeyboardMarkup = InlineKeyboardMarkup

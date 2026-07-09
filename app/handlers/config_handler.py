@@ -18,7 +18,69 @@ import init
     CONFIG_INPUT_115_OPENAPI,
     CONFIG_INPUT_115_ACCESS,
     CONFIG_INPUT_115_REFRESH,
-) = range(60, 65)
+    CONFIG_SELECT_OPTIONAL_ITEM,
+    CONFIG_INPUT_OPTIONAL,
+) = range(60, 67)
+
+
+OPTIONAL_CONFIG_ITEMS = {
+    "prowlarr": {
+        "label": "Prowlarr",
+        "path": ("search", "prowlarr"),
+        "fields": ("base_url", "api_key"),
+        "required": ("base_url", "api_key"),
+        "enable_path": ("search", "enable"),
+        "prompt": (
+            "请发送 Prowlarr 配置。\n\n"
+            "示例：\n"
+            "base_url=http://192.168.1.2:9696\n"
+            "api_key=xxxx\n\n"
+            "发送 /q 可取消。"
+        ),
+    },
+    "plex": {
+        "label": "Plex",
+        "path": ("media", "plex"),
+        "fields": ("base_url", "token"),
+        "required": ("base_url", "token"),
+        "prompt": (
+            "请发送 Plex 配置。\n\n"
+            "示例：\n"
+            "base_url=http://192.168.1.2:32400\n"
+            "token=xxxx\n\n"
+            "发送 /q 可取消。"
+        ),
+    },
+    "tvdb": {
+        "label": "TVDB",
+        "path": ("metadata", "tvdb"),
+        "fields": ("api_key", "subscriber_pin"),
+        "required": ("api_key",),
+        "enable_path": ("metadata", "tvdb", "enable"),
+        "prompt": (
+            "请发送 TVDB 配置。\n\n"
+            "示例：\n"
+            "api_key=xxxx\n"
+            "subscriber_pin=\n\n"
+            "发送 /q 可取消。"
+        ),
+    },
+    "ai": {
+        "label": "AI",
+        "path": ("ai",),
+        "fields": ("api_url", "api_key", "model"),
+        "required": ("api_key",),
+        "enable_path": ("ai", "enable"),
+        "prompt": (
+            "请发送 AI 配置。\n\n"
+            "示例：\n"
+            "api_url=https://api.deepseek.com\n"
+            "api_key=xxxx\n"
+            "model=deepseek-chat\n\n"
+            "发送 /q 可取消。"
+        ),
+    },
+}
 
 
 def parse_key_value_lines(text: str) -> dict:
@@ -50,6 +112,24 @@ def _write_config_file(config: dict):
     os.makedirs(os.path.dirname(init.CONFIG_FILE) or ".", exist_ok=True)
     with open(init.CONFIG_FILE, "w", encoding="utf-8") as f:
         yaml.safe_dump(config or {}, f, allow_unicode=True, sort_keys=False)
+
+
+def _ensure_nested_mapping(config: dict, path: tuple[str, ...]) -> dict:
+    current = config
+    for key in path:
+        value = current.get(key)
+        if not isinstance(value, dict):
+            value = {}
+            current[key] = value
+        current = value
+    return current
+
+
+def _set_nested_value(config: dict, path: tuple[str, ...], value):
+    if not path:
+        return
+    parent = _ensure_nested_mapping(config, path[:-1])
+    parent[path[-1]] = value
 
 
 def _require_values(values: dict, required: tuple[str, ...]):
@@ -121,10 +201,45 @@ def apply_115_openapi_payload(app_id: str) -> dict:
     return {"ready": True, "config_file": init.CONFIG_FILE, "token_file": init.TOKEN_FILE}
 
 
+def apply_optional_config_payload(kind: str, text: str) -> dict:
+    item = OPTIONAL_CONFIG_ITEMS.get(kind)
+    if not item:
+        raise ValueError("未知配置项")
+
+    values = parse_key_value_lines(text)
+    _require_values(values, item["required"])
+
+    config = _load_config_file()
+    section = _ensure_nested_mapping(config, item["path"])
+    for field in item["fields"]:
+        if field in values:
+            section[field] = values[field]
+    if item.get("enable_path"):
+        _set_nested_value(config, item["enable_path"], True)
+
+    _write_config_file(config)
+    init.load_yaml_config()
+    return {"ready": True, "config_file": init.CONFIG_FILE}
+
+
 def build_config_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("配置 115", callback_data="config_select:115")],
+            [InlineKeyboardButton("可选服务配置", callback_data="config_select:optional")],
+            [InlineKeyboardButton("取消", callback_data="config_cancel")],
+        ]
+    )
+
+
+def build_optional_config_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Prowlarr", callback_data="config_optional:prowlarr")],
+            [InlineKeyboardButton("Plex", callback_data="config_optional:plex")],
+            [InlineKeyboardButton("TVDB", callback_data="config_optional:tvdb")],
+            [InlineKeyboardButton("AI", callback_data="config_optional:ai")],
+            [InlineKeyboardButton("返回", callback_data="config_back")],
             [InlineKeyboardButton("取消", callback_data="config_cancel")],
         ]
     )
@@ -141,7 +256,7 @@ def build_115_mode_keyboard() -> InlineKeyboardMarkup:
 
 
 async def _show_config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit=False):
-    text = "请选择要配置的项目。\n115 是唯一必需配置。"
+    text = "请选择要配置的项目。\n115 是唯一必需配置，可选服务按需填写。"
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=build_config_keyboard())
     else:
@@ -177,6 +292,8 @@ async def select_config_item(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if data == "config_cancel":
         await query.edit_message_text("已取消配置。")
         return ConversationHandler.END
+    if data == "config_back":
+        return await _show_config_menu(update, context, edit=True)
 
     kind = data.split(":", 1)[1]
     context.user_data["config_kind"] = kind
@@ -187,9 +304,40 @@ async def select_config_item(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=build_115_mode_keyboard(),
         )
         return CONFIG_SELECT_115_MODE
+    if kind == "optional":
+        await query.edit_message_text(
+            "请选择要配置的可选服务。",
+            reply_markup=build_optional_config_keyboard(),
+        )
+        return CONFIG_SELECT_OPTIONAL_ITEM
 
     await query.edit_message_text("⚠️ 未知配置项。")
     return ConversationHandler.END
+
+
+async def select_optional_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not init.check_user(update.effective_user.id):
+        await query.edit_message_text("⚠️ 当前账号无权使用此机器人。")
+        return ConversationHandler.END
+
+    data = query.data or ""
+    if data == "config_cancel":
+        await query.edit_message_text("已取消配置。")
+        return ConversationHandler.END
+    if data == "config_back":
+        return await _show_config_menu(update, context, edit=True)
+
+    kind = data.split(":", 1)[1] if ":" in data else ""
+    item = OPTIONAL_CONFIG_ITEMS.get(kind)
+    if not item:
+        await query.edit_message_text("⚠️ 未知可选配置项。")
+        return ConversationHandler.END
+
+    context.user_data["config_optional_item"] = kind
+    await query.edit_message_text(item["prompt"])
+    return CONFIG_INPUT_OPTIONAL
 
 
 async def select_115_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -220,6 +368,24 @@ async def select_115_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CONFIG_INPUT_115_ACCESS
 
     await query.edit_message_text("⚠️ 未知 115 授权方式。")
+    return ConversationHandler.END
+
+
+async def receive_optional_config_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kind = context.user_data.get("config_optional_item")
+    item = OPTIONAL_CONFIG_ITEMS.get(kind)
+    if not item:
+        await update.message.reply_text("❌ 未找到配置项，请重新使用 /config 开始配置。")
+        return ConversationHandler.END
+
+    try:
+        result = apply_optional_config_payload(kind, update.message.text or "")
+    except Exception as e:
+        await update.message.reply_text(f"❌ {item['label']} 配置写入失败：{e}")
+        return CONFIG_INPUT_OPTIONAL
+
+    context.user_data.pop("config_optional_item", None)
+    await update.message.reply_text(f"✅ {item['label']} 配置已写入并重新加载。")
     return ConversationHandler.END
 
 
@@ -279,7 +445,7 @@ async def quit_config_conversation(update: Update, context: ContextTypes.DEFAULT
 
 
 def register_config_handlers(application):
-    top_level_pattern = r"^config_(select:115|cancel)$"
+    top_level_pattern = r"^config_(select:(115|optional)|cancel|back)$"
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", PTBUserWarning)
         config_handler = ConversationHandler(
@@ -290,6 +456,10 @@ def register_config_handlers(application):
             ],
             states={
                 CONFIG_SELECT: [CallbackQueryHandler(select_config_item, pattern=top_level_pattern)],
+                CONFIG_SELECT_OPTIONAL_ITEM: [
+                    CallbackQueryHandler(select_optional_item, pattern=r"^config_optional:(prowlarr|plex|tvdb|ai)$"),
+                    CallbackQueryHandler(select_optional_item, pattern=r"^config_(back|cancel)$"),
+                ],
                 CONFIG_SELECT_115_MODE: [
                     CallbackQueryHandler(select_115_mode, pattern=r"^config_115_mode:(openapi|tokens)$"),
                     CallbackQueryHandler(select_config_item, pattern=r"^config_cancel$"),
@@ -297,6 +467,7 @@ def register_config_handlers(application):
                 CONFIG_INPUT_115_OPENAPI: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_115_openapi_id)],
                 CONFIG_INPUT_115_ACCESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_115_access_token)],
                 CONFIG_INPUT_115_REFRESH: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_115_refresh_token)],
+                CONFIG_INPUT_OPTIONAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_optional_config_input)],
             },
             fallbacks=[CommandHandler("q", quit_config_conversation)],
         )
