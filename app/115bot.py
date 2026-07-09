@@ -16,8 +16,11 @@ import init
 from app.core.module_loader import load_enabled_modules
 from app.core.module_registry import ModuleRegistry
 try:
-    from app.utils.message_queue import queue_worker
+    from app.utils.message_queue import add_task_to_queue, queue_worker
 except ImportError:
+    def add_task_to_queue(*_args, **_kwargs):
+        return False
+
     async def queue_worker(_loop, _token):
         return None
 
@@ -185,6 +188,45 @@ def build_modules_status_text(config=None, registry=None):
         ]
     )
     return "\n".join(lines)
+
+
+def build_core_startup_notice_text(config=None, registry=None):
+    if config is None:
+        config = init.bot_config
+    running_modules = getattr(registry, "loaded_module_names", None) if registry is not None else None
+    if running_modules is None:
+        running_modules = get_enabled_module_names(config)
+
+    lines = [
+        "✅ Telepiplex 启动完成",
+        "",
+        "已加载模块",
+    ]
+    for module_name in running_modules:
+        module_info = MODULE_CATALOG.get(module_name, {"label": module_name})
+        label = escape_markdown(str(module_info["label"]), version=2)
+        lines.append(f"✅ {label}")
+    lines.extend(["", "可使用 /modules 查看状态"])
+    return "\n".join(lines)
+
+
+def queue_core_startup_notice(registry=None):
+    allowed_user = (init.bot_config or {}).get("allowed_user")
+    if allowed_user is None or str(allowed_user).strip() == "":
+        if init.logger:
+            init.logger.warn("未配置 allowed_user，跳过启动完成通知。")
+        return False
+
+    return add_task_to_queue(
+        allowed_user,
+        None,
+        message=build_core_startup_notice_text(init.bot_config, registry),
+    )
+
+
+def run_core_startup_hooks(registry, application=None):
+    registry.run_startup_hooks(application)
+    queue_core_startup_notice(registry)
 
 
 def get_help_info():
@@ -389,7 +431,7 @@ if __name__ == "__main__":
     registry.register_handlers(application)
 
     try:
-        asyncio.run(run_application_polling(application, after_start=lambda: registry.run_startup_hooks(application)))
+        asyncio.run(run_application_polling(application, after_start=lambda: run_core_startup_hooks(registry, application)))
     except KeyboardInterrupt:
         init.logger.info("程序已被用户终止（Ctrl+C）。")
     except SystemExit:

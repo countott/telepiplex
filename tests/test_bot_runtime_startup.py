@@ -173,6 +173,37 @@ class BotRuntimeStartupTest(unittest.TestCase):
         self.assertIn("下载后重命名", text)
         self.assertIn("重启容器后生效", text)
 
+    def test_core_startup_notice_reports_loaded_modules(self):
+        bot_module = load_bot_module()
+        registry = Mock()
+        registry.loaded_module_names = [
+            "app.modules.open115",
+            "app.modules.media_search",
+        ]
+
+        text = bot_module.build_core_startup_notice_text({}, registry)
+
+        self.assertIn("Telepiplex 启动完成", text)
+        self.assertIn("115 下载", text)
+        self.assertIn("媒体搜索", text)
+        self.assertNotIn("下载后重命名", text)
+
+    def test_core_startup_notice_is_queued_for_allowed_user(self):
+        bot_module = load_bot_module()
+        registry = Mock()
+        registry.loaded_module_names = ["app.modules.open115"]
+        bot_module.init.bot_config = {"allowed_user": "472943219"}
+        bot_module.add_task_to_queue = Mock(return_value=True)
+
+        bot_module.queue_core_startup_notice(registry)
+
+        bot_module.add_task_to_queue.assert_called_once()
+        args, kwargs = bot_module.add_task_to_queue.call_args
+        self.assertEqual(args[0], "472943219")
+        self.assertIsNone(args[1])
+        self.assertIn("Telepiplex 启动完成", kwargs["message"])
+        self.assertIn("115 下载", kwargs["message"])
+
     def test_bot_menu_and_help_include_config_command(self):
         bot_module = load_bot_module()
         from app.core.module_registry import ModuleRegistry
