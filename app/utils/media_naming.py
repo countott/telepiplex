@@ -48,7 +48,7 @@ def _display_folder(chinese_title: str, english_title: str) -> str:
     chinese_title = sanitize_path_name(chinese_title)
     english_title = sanitize_path_name(english_title)
     if chinese_title and english_title and chinese_title != english_title:
-        return f"{chinese_title} ◈ {english_title}"
+        return f"{chinese_title} ({english_title})"
     return chinese_title or english_title
 
 

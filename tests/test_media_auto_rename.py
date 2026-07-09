@@ -22,7 +22,7 @@ class MediaAutoRenameTest(unittest.TestCase):
             "movie.mkv",
         )
 
-        self.assertEqual(plan.target_relative_dir, "布达佩斯大饭店 ◈ The Grand Budapest Hotel")
+        self.assertEqual(plan.target_relative_dir, "布达佩斯大饭店 (The Grand Budapest Hotel)")
         self.assertEqual(plan.file_name, "The Grand Budapest Hotel.mkv")
 
     def test_build_movie_plan_uses_collection_parent_without_suffixes(self):
@@ -40,7 +40,7 @@ class MediaAutoRenameTest(unittest.TestCase):
 
         self.assertEqual(
             plan.target_relative_dir,
-            "碟中谍 ◈ Mission Impossible/碟中谍7: 致命清算(上) ◈ Mission Impossible Dead Reckoning Part One",
+            "碟中谍 (Mission Impossible)/碟中谍7: 致命清算(上) (Mission Impossible Dead Reckoning Part One)",
         )
         self.assertEqual(plan.file_name, "Mission Impossible Dead Reckoning Part One.mkv")
 
@@ -57,7 +57,7 @@ class MediaAutoRenameTest(unittest.TestCase):
 
         self.assertEqual(
             plan.target_relative_dir,
-            "随心所欲(十二章) - 导演版 ◈ Vivre sa vie: Film en douze tableaux",
+            "随心所欲(十二章) - 导演版 (Vivre sa vie: Film en douze tableaux)",
         )
         self.assertEqual(plan.file_name, "Vivre sa vie: Film en douze tableaux.mkv")
 
@@ -73,7 +73,7 @@ class MediaAutoRenameTest(unittest.TestCase):
             "episode.mp4",
         )
 
-        self.assertEqual(plan.target_relative_dir, "绝命毒师 ◈ Breaking Bad/Breaking Bad Season 01")
+        self.assertEqual(plan.target_relative_dir, "绝命毒师 (Breaking Bad)/Breaking Bad Season 01")
         self.assertEqual(plan.file_name, "Breaking Bad S01E02.mp4")
 
     def test_build_episode_plan_uses_specials_and_three_digit_episode_width(self):
@@ -96,7 +96,7 @@ class MediaAutoRenameTest(unittest.TestCase):
             "episode.mkv",
         )
 
-        self.assertEqual(special.target_relative_dir, "神秘博士 ◈ Doctor Who/Doctor Who Season 00")
+        self.assertEqual(special.target_relative_dir, "神秘博士 (Doctor Who)/Doctor Who Season 00")
         self.assertEqual(special.file_name, "Doctor Who S00E07.mkv")
         self.assertEqual(long_season.file_name, "One Piece S01E100.mkv")
 
@@ -125,7 +125,7 @@ class MediaAutoRenameTest(unittest.TestCase):
             "movie.mkv",
         )
 
-        self.assertEqual(plan.target_relative_dir, "布达佩斯大饭店 ◈ The Grand Budapest Hotel")
+        self.assertEqual(plan.target_relative_dir, "布达佩斯大饭店 (The Grand Budapest Hotel)")
         self.assertEqual(plan.file_name, "The Grand Budapest Hotel.mkv")
 
     def test_build_episode_plan_infers_show_title_for_plain_search(self):
@@ -138,7 +138,7 @@ class MediaAutoRenameTest(unittest.TestCase):
             "episode.mp4",
         )
 
-        self.assertEqual(plan.target_relative_dir, "绝命毒师 ◈ Breaking Bad/Breaking Bad Season 02")
+        self.assertEqual(plan.target_relative_dir, "绝命毒师 (Breaking Bad)/Breaking Bad Season 02")
         self.assertEqual(plan.file_name, "Breaking Bad S02E03.mp4")
 
     def test_build_plan_removes_forbidden_path_symbols(self):
@@ -152,7 +152,7 @@ class MediaAutoRenameTest(unittest.TestCase):
             "movie.mkv",
         )
 
-        self.assertEqual(plan.target_relative_dir, "异形契约: 导演剪辑版 ◈ Alien: Covenant Director Cut")
+        self.assertEqual(plan.target_relative_dir, "异形契约: 导演剪辑版 (Alien: Covenant Director Cut)")
         self.assertEqual(plan.file_name, "Alien: Covenant Director Cut.mkv")
 
     def test_infer_english_title_keeps_clean_release_title_last_word(self):
