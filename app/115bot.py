@@ -8,14 +8,18 @@ import threading
 import time
 
 from telegram import BotCommand, Update
-from telegram.error import NetworkError
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.helpers import escape_markdown
 
 import init
 from app.core.module_loader import load_enabled_modules
 from app.core.module_registry import ModuleRegistry
-from app.utils.message_queue import queue_worker
+try:
+    from app.utils.message_queue import queue_worker
+except ImportError:
+    async def queue_worker(_loop, _token):
+        return None
 
 
 TELEGRAM_API_TIMEOUT = 30

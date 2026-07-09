@@ -1,7 +1,32 @@
 """Test helpers shared by Telepiplex feature branches."""
 
+import json
 import sys
 import types
+
+
+try:
+    import yaml  # noqa: F401
+except ModuleNotFoundError:
+    yaml_module = types.ModuleType("yaml")
+
+    def safe_dump(data, stream=None, *args, **kwargs):
+        text = json.dumps(data or {}, ensure_ascii=False)
+        if stream is not None:
+            stream.write(text)
+            return None
+        return text
+
+    def safe_load(data):
+        if hasattr(data, "read"):
+            data = data.read()
+        if not data:
+            return {}
+        return json.loads(data)
+
+    yaml_module.safe_dump = safe_dump
+    yaml_module.safe_load = safe_load
+    sys.modules["yaml"] = yaml_module
 
 
 try:
@@ -24,16 +49,48 @@ except ModuleNotFoundError:
             self.description = description
 
     class InlineKeyboardButton(_TelegramObject):
-        pass
+        def __init__(self, text, callback_data=None, **kwargs):
+            super().__init__(text, callback_data=callback_data, **kwargs)
+            self.text = text
+            self.callback_data = callback_data
 
     class InlineKeyboardMarkup(_TelegramObject):
-        pass
+        def __init__(self, inline_keyboard, **kwargs):
+            super().__init__(inline_keyboard, **kwargs)
+            self.inline_keyboard = inline_keyboard
 
     class Update(_TelegramObject):
         pass
 
     class _Handler(_TelegramObject):
         pass
+
+    class _ApplicationBuilder:
+        def token(self, _token):
+            return self
+
+        def post_init(self, _callback):
+            return self
+
+        def connect_timeout(self, _value):
+            return self
+
+        def read_timeout(self, _value):
+            return self
+
+        def write_timeout(self, _value):
+            return self
+
+        def pool_timeout(self, _value):
+            return self
+
+        def build(self):
+            return _TelegramObject()
+
+    class Application(_TelegramObject):
+        @staticmethod
+        def builder():
+            return _ApplicationBuilder()
 
     class ConversationHandler(_Handler):
         END = -1
@@ -77,7 +134,7 @@ except ModuleNotFoundError:
     telegram_ext_module.ContextTypes = ContextTypes
     telegram_ext_module.ConversationHandler = ConversationHandler
     telegram_ext_module.MessageHandler = _Handler
-    telegram_ext_module.Application = _TelegramObject
+    telegram_ext_module.Application = Application
     telegram_ext_module.filters = _Filters()
     telegram_helpers_module.escape_markdown = escape_markdown
     telegram_warnings_module.PTBUserWarning = PTBUserWarning
