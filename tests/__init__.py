@@ -52,6 +52,34 @@ except ModuleNotFoundError:
 
 
 try:
+    import qrcode  # noqa: F401
+except ModuleNotFoundError:
+    qrcode_module = types.ModuleType("qrcode")
+
+    class _QrImage:
+        def save(self, *_args, **_kwargs):
+            return None
+
+    class QRCode:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def add_data(self, *_args, **_kwargs):
+            return None
+
+        def make(self, *_args, **_kwargs):
+            return None
+
+        def make_image(self, *_args, **_kwargs):
+            return _QrImage()
+
+    qrcode_module.QRCode = QRCode
+    qrcode_module.constants = types.SimpleNamespace(ERROR_CORRECT_L=1)
+    sys.modules["qrcode"] = qrcode_module
+
+
+try:
     import telegram  # noqa: F401
 except ModuleNotFoundError:
     telegram_module = types.ModuleType("telegram")
@@ -69,6 +97,9 @@ except ModuleNotFoundError:
         def __init__(self, command, description):
             self.command = command
             self.description = description
+
+    class Bot(_TelegramObject):
+        pass
 
     class InlineKeyboardButton(_TelegramObject):
         def __init__(self, text, callback_data=None, **kwargs):
@@ -148,6 +179,7 @@ except ModuleNotFoundError:
         return str(text)
 
     telegram_module.BotCommand = BotCommand
+    telegram_module.Bot = Bot
     telegram_module.InlineKeyboardButton = InlineKeyboardButton
     telegram_module.InlineKeyboardMarkup = InlineKeyboardMarkup
     telegram_module.Update = Update

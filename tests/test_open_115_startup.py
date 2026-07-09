@@ -152,6 +152,23 @@ class Open115StartupTest(unittest.TestCase):
                 },
             )
 
+    def test_initialize_115open_without_direct_tokens_does_not_log_missing_token_file_path(self):
+        init.bot_config = {
+            "115_app_id": None,
+            "access_token": "",
+            "refresh_token": "",
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            init.TOKEN_FILE = str(Path(tmpdir) / "missing_115_tokens.json")
+
+            self.assertFalse(init.initialize_115open())
+
+        self.assertIsNone(init.openapi_115)
+        errors = [call.args[0] for call in init.logger.error.call_args_list]
+        self.assertIn("115 OpenAPI客户端初始化失败: 无法获取有效的token", errors)
+        self.assertFalse(any("No such file or directory" in message for message in errors))
+
     def test_offline_download_specify_path_returns_false_when_save_path_info_unavailable(self):
         api = object.__new__(OpenAPI_115)
         api.base_url = "https://proapi.115.com"

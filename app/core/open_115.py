@@ -139,6 +139,8 @@ class OpenAPI_115:
                 if app_id and str(app_id).lower() != "your_115_app_id":
                     init.logger.info("正在进入PKCE授权流程，获取refresh_token...")
                     self.auth_pkce(init.bot_config['allowed_user'], app_id)
+                else:
+                    return
             with open(init.TOKEN_FILE, 'r', encoding='utf-8') as f:
                 tokens = json.load(f)
                 # 从文件中读取access_token和refresh_token
