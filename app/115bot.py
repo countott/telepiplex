@@ -13,10 +13,16 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.helpers import escape_markdown
 
 import init
+from app.core.module_loader import load_enabled_modules
+from app.core.module_registry import ModuleRegistry
 from app.utils.message_queue import queue_worker
 
 
 TELEGRAM_API_TIMEOUT = 30
+CORE_BOT_COMMANDS = [
+    BotCommand("start", "获取核心状态"),
+    BotCommand("reload", "重载配置"),
+]
 SENSITIVE_CONFIG_KEYWORDS = (
     "token",
     "api_key",
@@ -38,10 +44,11 @@ def get_version(md_format=False):
 
 def log_runtime_features():
     revision = os.getenv("TELEPIPLEX_COMMIT") or os.getenv("GIT_COMMIT") or "unknown"
+    module_names = get_enabled_module_names()
     init.logger.info(
         "Telepiplex runtime features: telepiplex_core=enabled, "
         "basic_telegram_runtime=enabled, message_queue=enabled, "
-        "revision=%s" % revision
+        f"modules={module_names}, revision={revision}"
     )
 
 
@@ -66,6 +73,24 @@ def sanitize_config_for_log(value):
 def log_config_snapshot(prefix: str):
     init.logger.info(prefix)
     init.logger.info(json.dumps(sanitize_config_for_log(init.bot_config), ensure_ascii=False))
+
+
+def get_enabled_module_names(config=None):
+    config = config or init.bot_config
+    modules_config = (config or {}).get("modules") or {}
+    enabled = modules_config.get("enabled") or []
+    if isinstance(enabled, str):
+        enabled = [item.strip() for item in enabled.split(",")]
+    return [str(item).strip() for item in enabled if str(item).strip()]
+
+
+def build_module_registry():
+    registry = ModuleRegistry()
+    loaded = load_enabled_modules(registry, get_enabled_module_names())
+    init.module_registry = registry
+    if init.logger:
+        init.logger.info(f"已加载 Telepiplex 模块: {loaded}")
+    return registry
 
 
 def get_help_info():
@@ -142,16 +167,16 @@ def update_logger_level():
     logging.getLogger("telegram.Bot").setLevel(logging.WARNING)
 
 
-def get_bot_menu():
-    return [
-        BotCommand("start", "获取核心状态"),
-        BotCommand("reload", "重载配置"),
-    ]
+def get_bot_menu(registry=None):
+    commands = list(CORE_BOT_COMMANDS)
+    if registry is not None:
+        commands.extend(registry.bot_commands())
+    return commands
 
 
 async def set_bot_menu(application):
     try:
-        await application.bot.set_my_commands(get_bot_menu())
+        await application.bot.set_my_commands(get_bot_menu(application.bot_data.get("telepiplex_registry")))
         init.logger.info("Bot菜单命令已设置!")
     except Exception as e:
         init.logger.error(f"设置Bot菜单失败: {e}")
@@ -243,11 +268,14 @@ if __name__ == "__main__":
     update_logger_level()
 
     application = build_application(init.bot_config["bot_token"])
+    registry = build_module_registry()
+    application.bot_data["telepiplex_registry"] = registry
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reload", reload))
+    registry.register_handlers(application)
 
     try:
-        asyncio.run(run_application_polling(application))
+        asyncio.run(run_application_polling(application, after_start=lambda: registry.run_startup_hooks(application)))
     except KeyboardInterrupt:
         init.logger.info("程序已被用户终止（Ctrl+C）。")
     except SystemExit:
