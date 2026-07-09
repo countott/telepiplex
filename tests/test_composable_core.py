@@ -2,12 +2,21 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import importlib.util
 from pathlib import Path
+from unittest.mock import Mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
+
+
+def load_bot_module():
+    spec = importlib.util.spec_from_file_location("telepiplex_bot_entry", ROOT / "app" / "115bot.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class ComposableCoreTest(unittest.TestCase):
@@ -86,6 +95,36 @@ class ComposableCoreTest(unittest.TestCase):
 
         self.assertEqual(loaded, ["samplepkg.mod"])
         self.assertEqual(registry.config_sections, ["sample"])
+
+    def test_core_startup_notice_reports_loaded_modules(self):
+        bot_module = load_bot_module()
+        registry = Mock()
+        registry.loaded_module_names = [
+            "app.modules.open115",
+            "app.modules.media_search",
+        ]
+
+        text = bot_module.build_core_startup_notice_text({}, registry)
+
+        self.assertIn("Telepiplex 启动完成", text)
+        self.assertIn("115 下载", text)
+        self.assertIn("媒体搜索", text)
+
+    def test_core_startup_notice_is_queued_for_allowed_user(self):
+        bot_module = load_bot_module()
+        registry = Mock()
+        registry.loaded_module_names = ["app.modules.open115"]
+        bot_module.init.bot_config = {"allowed_user": "472943219"}
+        bot_module.add_task_to_queue = Mock(return_value=True)
+
+        bot_module.queue_core_startup_notice(registry)
+
+        bot_module.add_task_to_queue.assert_called_once()
+        args, kwargs = bot_module.add_task_to_queue.call_args
+        self.assertEqual(args[0], "472943219")
+        self.assertIsNone(args[1])
+        self.assertIn("Telepiplex 启动完成", kwargs["message"])
+        self.assertIn("115 下载", kwargs["message"])
 
 
 if __name__ == "__main__":

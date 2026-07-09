@@ -16,8 +16,11 @@ import init
 from app.core.module_loader import load_enabled_modules
 from app.core.module_registry import ModuleRegistry
 try:
-    from app.utils.message_queue import queue_worker
+    from app.utils.message_queue import add_task_to_queue, queue_worker
 except ImportError:
+    def add_task_to_queue(*_args, **_kwargs):
+        return False
+
     async def queue_worker(_loop, _token):
         return None
 
@@ -27,6 +30,11 @@ CORE_BOT_COMMANDS = [
     BotCommand("start", "获取核心状态"),
     BotCommand("reload", "重载配置"),
 ]
+MODULE_LABELS = {
+    "app.modules.open115": "115 下载",
+    "app.modules.media_search": "媒体搜索",
+    "app.modules.renaming": "下载后重命名",
+}
 SENSITIVE_CONFIG_KEYWORDS = (
     "token",
     "api_key",
@@ -91,10 +99,52 @@ def get_enabled_module_names(config=None):
 def build_module_registry():
     registry = ModuleRegistry()
     loaded = load_enabled_modules(registry, get_enabled_module_names())
+    registry.loaded_module_names = loaded
     init.module_registry = registry
     if init.logger:
         init.logger.info(f"已加载 Telepiplex 模块: {loaded}")
     return registry
+
+
+def build_core_startup_notice_text(config=None, registry=None):
+    if config is None:
+        config = init.bot_config
+    running_modules = getattr(registry, "loaded_module_names", None) if registry is not None else None
+    if running_modules is None:
+        running_modules = get_enabled_module_names(config)
+
+    lines = [
+        "✅ Telepiplex 启动完成",
+        "",
+        "已加载模块",
+    ]
+    if running_modules:
+        for module_name in running_modules:
+            label = escape_markdown(MODULE_LABELS.get(module_name, module_name), version=2)
+            lines.append(f"✅ {label}")
+    else:
+        lines.append("✅ Core")
+    lines.extend(["", "可使用 /start 查看核心状态"])
+    return "\n".join(lines)
+
+
+def queue_core_startup_notice(registry=None):
+    allowed_user = (init.bot_config or {}).get("allowed_user")
+    if allowed_user is None or str(allowed_user).strip() == "":
+        if init.logger:
+            init.logger.warn("未配置 allowed_user，跳过启动完成通知。")
+        return False
+
+    return add_task_to_queue(
+        allowed_user,
+        None,
+        message=build_core_startup_notice_text(init.bot_config, registry),
+    )
+
+
+def run_core_startup_hooks(registry, application=None):
+    registry.run_startup_hooks(application)
+    queue_core_startup_notice(registry)
 
 
 def get_help_info():
@@ -279,7 +329,7 @@ if __name__ == "__main__":
     registry.register_handlers(application)
 
     try:
-        asyncio.run(run_application_polling(application, after_start=lambda: registry.run_startup_hooks(application)))
+        asyncio.run(run_application_polling(application, after_start=lambda: run_core_startup_hooks(registry, application)))
     except KeyboardInterrupt:
         init.logger.info("程序已被用户终止（Ctrl+C）。")
     except SystemExit:
