@@ -52,20 +52,21 @@ class MediaSearchSurfaceTest(unittest.TestCase):
         self.assertIn("registry.dispatch_download", source)
         self.assertNotIn("app.handlers.download_handler", source)
 
-    def test_config_exposes_search_not_delivery_or_organization(self):
-        for config_path in (ROOT / "config" / "modules" / "media-search.yaml.example",):
+    def test_unified_config_template_exposes_search_contract(self):
+        for config_path in (ROOT / "config" / "config.yaml.example", ROOT / "app" / "config.yaml.example"):
             source = config_path.read_text(encoding="utf-8")
             self.assertIn("search:", source)
+            self.assertIn("enable: false", source)
             self.assertIn("prowlarr:", source)
+            self.assertIn("result_limit:", source)
+            self.assertIn("scoring:", source)
             self.assertIn("metadata:", source)
+            self.assertIn("tvdb:", source)
             self.assertIn("ai:", source)
+            self.assertIn("api_url:", source)
             for term in (
-                "115_app_id",
-                "access_token",
-                "refresh_token",
-                "media:",
-                "plex:",
                 "aria2:",
+                'ai:\n  enable: false\n  api_key: ""\n  base_url: ""',
             ):
                 self.assertNotIn(term, source)
 

@@ -54,25 +54,23 @@ class Feature115SurfaceTest(unittest.TestCase):
         ):
             self.assertNotIn(symbol, module_source)
 
-    def test_config_templates_only_expose_minimal_115_settings(self):
-        for config_path in (ROOT / "config" / "modules" / "115.yaml.example",):
+    def test_unified_config_template_exposes_115_settings_without_legacy_delivery_keys(self):
+        for config_path in (ROOT / "config" / "config.yaml.example", ROOT / "app" / "config.yaml.example"):
             source = config_path.read_text(encoding="utf-8")
             self.assertIn("115_app_id:", source)
             self.assertIn("access_token:", source)
             self.assertIn("refresh_token:", source)
+            self.assertIn("open115:", source)
+            self.assertIn("category_folder:", source)
 
             removed_terms = [
-                "search:",
-                "prowlarr",
-                "metadata:",
-                "tvdb",
-                "media:",
                 "aria2:",
                 "selenium",
                 "plex_library_id",
                 "tg_api_id",
                 "tg_api_hash",
                 "bot_name",
+                "offline_path:",
             ]
             for term in removed_terms:
                 self.assertNotIn(term, source)

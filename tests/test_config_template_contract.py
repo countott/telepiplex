@@ -1,0 +1,42 @@
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class ConfigTemplateContractTest(unittest.TestCase):
+    def test_runtime_config_examples_are_identical_full_templates(self):
+        root_template = (ROOT / "config" / "config.yaml.example").read_text(encoding="utf-8")
+        app_template = (ROOT / "app" / "config.yaml.example").read_text(encoding="utf-8")
+
+        self.assertEqual(root_template, app_template)
+        for required in (
+            "modules:",
+            "enabled: all",
+            "115_app_id:",
+            "access_token:",
+            "refresh_token:",
+            "open115:",
+            "search:",
+            "prowlarr:",
+            "metadata:",
+            "tvdb:",
+            "media:",
+            "unorganized_path:",
+            "plex:",
+            "ai:",
+            "api_url:",
+        ):
+            self.assertIn(required, root_template)
+        self.assertIn('api_url: ""', root_template)
+        self.assertNotIn('ai:\n  enable: false\n  api_key: ""\n  base_url: ""', root_template)
+
+    def test_feature_config_is_not_split_into_module_snippets(self):
+        module_snippets = sorted((ROOT / "config" / "modules").glob("*.yaml.example"))
+
+        self.assertEqual(module_snippets, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

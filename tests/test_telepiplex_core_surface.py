@@ -37,27 +37,33 @@ class TelepiplexCoreSurfaceTest(unittest.TestCase):
         for path in required_paths:
             self.assertTrue(path.exists(), str(path))
 
-    def test_deployable_config_keeps_business_settings_out_of_base_template(self):
+    def test_deployable_config_template_contains_full_runtime_contract(self):
         for config_path in (ROOT / "config" / "config.yaml.example", ROOT / "app" / "config.yaml.example"):
             source = config_path.read_text(encoding="utf-8")
-            self.assertIn("bot_token:", source)
-            self.assertIn("allowed_user:", source)
-            self.assertIn("modules:", source)
-            self.assertIn("enabled: all", source)
-            self.assertIn("category_folder:", source)
             for term in (
-                "115_app_id",
-                "access_token",
-                "refresh_token",
+                "bot_token:",
+                "allowed_user:",
+                "modules:",
+                "enabled: all",
+                "115_app_id:",
+                "access_token:",
+                "refresh_token:",
+                "open115:",
+                "clean_policy:",
+                "category_folder:",
                 "search:",
-                "prowlarr",
+                "prowlarr:",
+                "scoring:",
                 "media:",
                 "metadata:",
-                "tvdb",
-                "aria2:",
+                "tvdb:",
                 "ai:",
+                "api_url:",
             ):
-                self.assertNotIn(term, source)
+                self.assertIn(term, source)
+
+            for legacy_term in ("aria2:", "selenium_timeout", "offline_path:", "ai:\n  enable: false\n  api_key: \"\"\n  base_url: \"\""):
+                self.assertNotIn(legacy_term, source)
 
 
 if __name__ == "__main__":
