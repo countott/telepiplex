@@ -468,6 +468,97 @@ class DownloadTaskStartupTest(unittest.TestCase):
         media_update_mock.assert_called_once_with("/动画剧集/瑞克和莫蒂 第九季 ◈ Rick and Morty")
 
     @patch("app.handlers.download_handler.time.sleep", return_value=None)
+    @patch("app.handlers.download_handler.infer_tvdb_episode_plan_with_ai")
+    @patch("app.handlers.download_handler.get_tvdb_series_episodes")
+    @patch("app.handlers.download_handler.search_tvdb_series")
+    @patch("app.handlers.download_handler.add_task_to_queue", return_value=True)
+    def test_download_task_queues_plex_scan_after_tvdb_organization_notice(
+        self,
+        add_task_mock,
+        search_tvdb_mock,
+        episodes_mock,
+        ai_plan_mock,
+        sleep_mock,
+    ):
+        api = Mock()
+        api.offline_download_specify_path.return_value = True
+        api.check_offline_download_success.return_value = (True, "Rick.and.Morty.S09E07.1080p", "HASH")
+        api.is_directory.return_value = True
+        api.get_file_info.return_value = {"file_id": "root", "file_category": "0"}
+        api.get_file_list.return_value = [
+            {"fn": "Rick.and.Morty.S09E07.mkv", "fid": "file-1", "fc": "1", "fs": 1024}
+        ]
+        api.create_dir_recursive.return_value = {"file_id": "season"}
+        api.rename.return_value = True
+        api.move_file.return_value = True
+        api.delete_single_file.return_value = True
+        api.del_offline_task.return_value = True
+        init.openapi_115 = api
+        init.bot_config = {
+            "allowed_user": 123,
+            "category_folder": [
+                {"name": "动画剧集", "path": "/动画剧集", "plex_library_id": "11"},
+            ],
+            "media": {
+                "unorganized_path": "/未整理",
+                "plex": {
+                    "base_url": "http://plex.example:32400",
+                    "token": "plex-token",
+                },
+            },
+            "ai": {
+                "api_url": "https://api.example/v1",
+                "api_key": "key",
+                "model": "model",
+            },
+        }
+
+        search_tvdb_mock.return_value = [{"tvdb_series_id": "275274", "name": "Rick and Morty", "year": "2013"}]
+        episodes_mock.return_value = [
+            {"tvdb_episode_id": 11759797, "season_number": 9, "episode_number": 7, "name": "Mortgully"}
+        ]
+        ai_plan_mock.return_value = {
+            "tvdb_series_id": "275274",
+            "series_name": "Rick and Morty",
+            "episode_map": [
+                {
+                    "source_file": "Rick.and.Morty.S09E07.mkv",
+                    "target_relative_path": "Rick and Morty Season 09/Rick and Morty S09E07.mkv",
+                    "tvdb_episode_id": 11759797,
+                    "season_number": 9,
+                    "episode_number": 7,
+                }
+            ],
+            "warnings": [],
+        }
+
+        download_task(
+            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
+            "/动画剧集",
+            123,
+            metadata={
+                "source": "confirmed",
+                "media_type": "series",
+                "chinese_title": "瑞克和莫蒂",
+                "english_title": "Rick and Morty",
+                "year": "2013",
+                "external_ids": {"tvdb": "275274"},
+                "selected_scope": "episode",
+                "season_number": 9,
+                "episode_number": 7,
+                "release_title": "Rick.and.Morty.S09E07.1080p",
+            },
+        )
+
+        queued_messages = [call.kwargs["message"] for call in add_task_mock.call_args_list]
+        self.assertIn("TVDB 自动整理完成", queued_messages[0])
+        self.assertIn("扫描 Plex 瑞克和莫蒂 ◈ Rick and Morty 资料库", queued_messages[1])
+        scan_id, scan = next(iter(init.pending_plex_scans.items()))
+        self.assertTrue(scan_id)
+        self.assertEqual(scan["path"], "/动画剧集/瑞克和莫蒂 ◈ Rick and Morty")
+        self.assertEqual(scan["library_id"], "11")
+
+    @patch("app.handlers.download_handler.time.sleep", return_value=None)
     @patch("app.handlers.download_handler.search_tvdb_series")
     @patch("app.handlers.download_handler.add_task_to_queue")
     def test_download_task_skips_tvdb_lookup_when_ai_config_missing(

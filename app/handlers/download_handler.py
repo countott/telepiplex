@@ -519,7 +519,6 @@ def _attempt_tvdb_ai_episode_rename(final_path, selected_path, resource_name, me
     if final_path != rename_plan["target_root"]:
         init.openapi_115.delete_single_file(final_path)
 
-    handle_media_library_update(rename_plan["target_root"])
     return rename_plan
 
     
@@ -551,7 +550,6 @@ def _attempt_media_auto_rename(final_path, selected_path, resource_name, naming_
     if final_path != target_path:
         init.openapi_115.delete_single_file(final_path)
 
-    handle_media_library_update(target_path)
     return target_path, plan
 
 
@@ -731,6 +729,7 @@ def download_task(link, selected_path, user_id, naming_metadata=None, metadata=N
                     if tvdb_result.get("warnings"):
                         message += f"\n提示：{'; '.join(tvdb_result['warnings'][:2])}"
                     add_task_to_queue(user_id, None, message=message)
+                    handle_media_library_update(tvdb_result["target_root"])
                     return
 
                 auto_result = _attempt_media_auto_rename(final_path, selected_path, resource_name, naming_auto_metadata)
@@ -738,6 +737,7 @@ def download_task(link, selected_path, user_id, naming_metadata=None, metadata=N
                     target_path, plan = auto_result
                     message = f"✅ 自动整理完成：`{plan.file_name}`\n\n保存目录：`{target_path}`"
                     add_task_to_queue(user_id, None, message=message)
+                    handle_media_library_update(target_path)
                     return
             except Exception as e:
                 init.logger.warn(f"自动整理失败，移入未整理目录: {e}")
