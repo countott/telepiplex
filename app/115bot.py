@@ -1,35 +1,52 @@
 # -*- coding: utf-8 -*-
 
+import asyncio
 import json
 import os
-import time
-import asyncio
-import threading
 import signal
-from telegram import Update, BotCommand
+import threading
+import time
+
+from telegram import BotCommand, Update
 from telegram.error import NetworkError, TimedOut
-from telegram.ext import ContextTypes, CommandHandler, Application
+from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.helpers import escape_markdown
 
-# 导入init模块（此时__init__.py已经设置了模块路径）
 import init
+from app.core.module_loader import load_enabled_modules
+from app.core.module_registry import ModuleRegistry
+try:
+    from app.utils.message_queue import queue_worker
+except ImportError:
+    async def queue_worker(_loop, _token):
+        return None
 
-from app.utils.message_queue import add_task_to_queue, queue_worker
-from app.handlers.auth_handler import register_auth_handlers
-from app.handlers.config_handler import (
-    build_config_keyboard,
-    missing_optional_config_labels,
-    queue_optional_config_notice,
-    register_config_handlers,
-)
-from app.handlers.download_handler import register_download_handlers
-from app.handlers.search_handler import register_search_handlers
-from app.handlers.video_handler import register_video_handlers
-from app.core.scheduler import start_scheduler_in_thread
-from app.handlers.offline_task_handler import register_offline_task_handlers
-from app.handlers.aria2_handler import register_aria2_handlers
 
 TELEGRAM_API_TIMEOUT = 30
+DEFAULT_ENABLED_MODULES = (
+    "app.modules.open115",
+    "app.modules.media_search",
+    "app.modules.renaming",
+)
+MODULE_CATALOG = {
+    "app.modules.open115": {
+        "label": "115 下载",
+        "description": "授权、保存目录和离线投递",
+    },
+    "app.modules.media_search": {
+        "label": "媒体搜索",
+        "description": "Prowlarr 搜索和候选确认",
+    },
+    "app.modules.renaming": {
+        "label": "下载后重命名",
+        "description": "下载完成后的反查、整理和重命名",
+    },
+}
+CORE_BOT_COMMANDS = [
+    BotCommand("start", "获取核心状态"),
+    BotCommand("reload", "重载配置"),
+    BotCommand("modules", "查看模块状态"),
+]
 SENSITIVE_CONFIG_KEYWORDS = (
     "token",
     "api_key",
@@ -43,7 +60,7 @@ SENSITIVE_CONFIG_KEYWORDS = (
 
 
 def get_version(md_format=False):
-    version = "v3.4.3"
+    version = "v3.4.3-core"
     if md_format:
         return escape_markdown(version, version=2)
     return version
@@ -51,14 +68,11 @@ def get_version(md_format=False):
 
 def log_runtime_features():
     revision = os.getenv("TELEPIPLEX_COMMIT") or os.getenv("GIT_COMMIT") or "unknown"
+    module_names = get_enabled_module_names()
     init.logger.info(
-        "Telepiplex runtime features: direct_metadata_link_search=enabled, "
-        "builtin_douban_title_priority=latin_or_original_first, "
-        "external_metadata_douban_reverse_lookup=enabled, prowlarr_indexer_summary=enabled, "
-        "metadata_object=enabled, search_command=enabled, search_short_command=enabled, magnet_command=enabled, find_command_removed=enabled, "
-        "retry_command=enabled, tvdb_adapter=enabled, ai_tvdb_inference=enabled, "
-        "tvdb_ai_115_tree_rename=enabled, "
-        "revision=%s" % revision
+        "Telepiplex runtime features: telepiplex_core=enabled, "
+        "basic_telegram_runtime=enabled, message_queue=enabled, "
+        f"modules={module_names}, revision={revision}"
     )
 
 
@@ -84,36 +98,106 @@ def log_config_snapshot(prefix: str):
     init.logger.info(prefix)
     init.logger.info(json.dumps(sanitize_config_for_log(init.bot_config), ensure_ascii=False))
 
+
+def get_enabled_module_names(config=None):
+    if config is None:
+        config = init.bot_config
+    modules_config = (config or {}).get("modules") or {}
+    enabled = modules_config.get("enabled")
+    if enabled is None or enabled == []:
+        enabled = list(DEFAULT_ENABLED_MODULES)
+    if isinstance(enabled, str):
+        if enabled.strip().lower() == "all":
+            enabled = list(DEFAULT_ENABLED_MODULES)
+        else:
+            enabled = [item.strip() for item in enabled.split(",")]
+    if isinstance(enabled, tuple):
+        enabled = list(enabled)
+    if isinstance(enabled, list) and any(str(item).strip().lower() == "all" for item in enabled):
+        enabled = list(DEFAULT_ENABLED_MODULES)
+
+    disabled = modules_config.get("disabled") or []
+    if isinstance(disabled, str):
+        disabled = [item.strip() for item in disabled.split(",")]
+    disabled = {str(item).strip() for item in disabled if str(item).strip()}
+
+    module_names = []
+    for item in enabled or []:
+        module_name = str(item).strip()
+        if module_name and module_name not in disabled and module_name not in module_names:
+            module_names.append(module_name)
+    return module_names
+
+
+def build_module_registry():
+    registry = ModuleRegistry()
+    loaded = load_enabled_modules(registry, get_enabled_module_names())
+    registry.loaded_module_names = loaded
+    init.module_registry = registry
+    if init.logger:
+        init.logger.info(f"已加载 Telepiplex 模块: {loaded}")
+    return registry
+
+
+def build_modules_status_text(config=None, registry=None):
+    if config is None:
+        config = init.bot_config
+    next_modules = get_enabled_module_names(config)
+    running_modules = getattr(registry, "loaded_module_names", None) if registry is not None else None
+    if running_modules is None:
+        running_modules = next_modules
+
+    lines = [
+        "<b>Telepiplex 模块状态</b>",
+        "",
+        "<b>当前运行</b>",
+    ]
+    for module_name in running_modules:
+        module_info = MODULE_CATALOG.get(module_name, {"label": module_name, "description": ""})
+        description = module_info.get("description")
+        suffix = f" - {description}" if description else ""
+        lines.append(f"✅ {module_info['label']}{suffix}")
+
+    configured = set(next_modules)
+    running = set(running_modules)
+    if configured != running:
+        lines.extend(["", "<b>下次启动</b>"])
+        for module_name in next_modules:
+            module_info = MODULE_CATALOG.get(module_name, {"label": module_name, "description": ""})
+            marker = "✅" if module_name in running else "⬆️"
+            lines.append(f"{marker} {module_info['label']}")
+
+    disabled = ((config or {}).get("modules") or {}).get("disabled") or []
+    if isinstance(disabled, str):
+        disabled = [item.strip() for item in disabled.split(",")]
+    disabled = [str(item).strip() for item in disabled if str(item).strip()]
+    if disabled:
+        lines.extend(["", "<b>已禁用</b>"])
+        for module_name in disabled:
+            module_info = MODULE_CATALOG.get(module_name, {"label": module_name})
+            lines.append(f"⏸ {module_info['label']}")
+
+    lines.extend(
+        [
+            "",
+            "模块代码更新或模块配置变更后，重启容器后生效。",
+            "当前 `/reload` 只重读配置，不会热加载 Telegram handler。",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def get_help_info():
     version = get_version()
-    help_info = f"""
-<b>🍿 Telegram-115Bot {version} 使用手册</b>\n\n
-<b>🔧 命令列表</b>\n
-<code>/start</code> - 显示帮助信息\n
-<code>/auth</code> - <i>115扫码授权 (解除授权后使用)</i>\n
-<code>/config</code> - <i>可视化配置 115 Token / TVDB / Plex</i>\n
-<code>/reload</code> - <i>重载配置</i>\n
-<code>/search</code> - 搜索片源并加入 115 离线\n
-<code>/s</code> - 搜索片源的短命令\n
-<code>/magnet</code> - 直接投递已有磁力链接\n
-<code>/m</code> - 直接投递磁力链接的短命令\n
-<code>/retry</code> - 查看重试列表\n
-<code>/r</code> - 查看重试列表的短命令\n
-<code>/q</code> - 取消当前会话\n\n
-<b>✨ 功能说明</b>\n
-<u>电影下载：</u>
-• 输入 <code>"/search 片名"</code> 或 <code>"/s 片名"</code>，或直接发送豆瓣/IMDb/TVDB/TMDB 链接搜索片源
-• 输入 <code>"/magnet 磁力链接"</code> 或 <code>"/m 磁力链接"</code> 跳过片名搜索，直接选择目录并投递 115 离线
-• 下载完成后优先根据实际文件名自动整理；搜索链路中的元数据只作为辅助
-• 离线超时后可选择写入重试列表
-• 根据媒体服务配置自动整理并通知媒体库\n
-<u>重试列表：</u>
-• 输入 <code>"/retry"</code> 或 <code>"/r"</code>
-• 查看当前重试列表，可单条重试、单条丢弃或清空\n
-<u>视频下载：</u>
-• 直接转发视频给机器人，选择保存目录即可保存到115
+    return f"""
+<b>Telepiplex {version}</b>\n\n
+<b>命令列表</b>\n
+<code>/start</code> - 显示核心运行层状态\n
+<code>/reload</code> - 重载配置\n
+<code>/modules</code> - 查看模块状态\n\n
+此运行版默认加载稳定模块。模块代码更新或模块配置变更后，重启容器后生效。
 """
-    return help_info
+
 
 async def send_bot_message_safely(bot, *, chat_id, text, **kwargs):
     timeout_kwargs = {
@@ -133,14 +217,14 @@ async def send_bot_message_safely(bot, *, chat_id, text, **kwargs):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_info = get_help_info()
     await send_bot_message_safely(
         context.bot,
         chat_id=update.effective_chat.id,
-        text=help_info,
+        text=get_help_info(),
         parse_mode="html",
         disable_web_page_preview=True,
     )
+
 
 async def reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     init.load_yaml_config()
@@ -152,13 +236,31 @@ async def reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="html",
     )
 
+
+async def modules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not init.check_user(update.effective_user.id):
+        await send_bot_message_safely(
+            context.bot,
+            chat_id=update.effective_chat.id,
+            text="⚠️ 当前账号无权使用此机器人。",
+            parse_mode="html",
+        )
+        return
+    await send_bot_message_safely(
+        context.bot,
+        chat_id=update.effective_chat.id,
+        text=build_modules_status_text(init.bot_config, context.application.bot_data.get("telepiplex_registry")),
+        parse_mode="html",
+        disable_web_page_preview=True,
+    )
+
+
 def start_async_loop():
-    """启动异步事件循环的线程"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     init.logger.info("事件循环已启动")
     try:
-        token = init.bot_config['bot_token']
+        token = init.bot_config["bot_token"]
         loop.create_task(queue_worker(loop, token))
         loop.run_forever()
     except Exception as e:
@@ -167,66 +269,33 @@ def start_async_loop():
         loop.close()
         init.logger.info("事件循环已关闭")
 
-def send_start_message():
-    version = get_version()  
-    if init.openapi_115 is None:
-        return
-    
-    line1, line2, line3, line4 = init.openapi_115.welcome_message()
-    if not line1:
-        return
-    line5 = escape_markdown(f"✅ Telegram-115Bot {version} 已启动", version=2)
-    if line1 and line2 and line3 and line4:
-        formatted_message = f"""
-{line1}
-{line2}
-{line3}
-{line4}
-
-{line5}
-
-发送 `/start` 查看操作说明"""
-
-        add_task_to_queue(
-            init.bot_config['allowed_user'],
-            None,
-            message=formatted_message
-        )
-
 
 def update_logger_level():
     import logging
-    logging.getLogger('httpx').setLevel(logging.WARNING)
-    logging.getLogger('telegram').setLevel(logging.WARNING)
-    logging.getLogger('telegram.ext.Application').setLevel(logging.WARNING)
-    logging.getLogger('telegram.ext.Updater').setLevel(logging.WARNING)
-    logging.getLogger('telegram.Bot').setLevel(logging.WARNING)
-    
-def get_bot_menu():
-    return  [
-        BotCommand("start", "获取帮助信息"),
-        BotCommand("auth", "115扫码授权"),
-        BotCommand("config", "可视化配置Token"),
-        BotCommand("reload", "重载配置"),
-        BotCommand("search", "搜索片源并加入 115 离线"),
-        BotCommand("s", "搜索片源"),
-        BotCommand("magnet", "直接投递磁力链接"),
-        BotCommand("m", "直接投递磁力链接"),
-        BotCommand("retry", "查看重试列表"),
-        BotCommand("r", "查看重试列表"),
-        BotCommand("q", "退出当前会话")]
-    
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING)
+    logging.getLogger("telegram.ext.Application").setLevel(logging.WARNING)
+    logging.getLogger("telegram.ext.Updater").setLevel(logging.WARNING)
+    logging.getLogger("telegram.Bot").setLevel(logging.WARNING)
+
+
+def get_bot_menu(registry=None):
+    commands = list(CORE_BOT_COMMANDS)
+    if registry is not None:
+        commands.extend(registry.bot_commands())
+    return commands
+
 
 async def set_bot_menu(application):
-    """异步设置Bot菜单"""
     try:
-        await application.bot.set_my_commands(get_bot_menu())
+        await application.bot.set_my_commands(get_bot_menu(application.bot_data.get("telepiplex_registry")))
         init.logger.info("Bot菜单命令已设置!")
     except Exception as e:
         init.logger.error(f"设置Bot菜单失败: {e}")
 
+
 async def post_init(application):
-    """应用初始化后的回调"""
     await set_bot_menu(application)
 
 
@@ -260,7 +329,6 @@ async def initialize_application_with_retry(application, max_retries=5, retry_de
 
 
 async def run_application_polling(application, after_start=None, stop_event=None, initialize_retry_delay=5):
-    """Run PTB with an explicit lifecycle to avoid half-initialized polling startup."""
     if stop_event is None:
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -288,50 +356,15 @@ async def run_application_polling(application, after_start=None, stop_event=None
         await application.shutdown()
 
 
-def start_runtime_services(openapi_ready: bool):
-    if not openapi_ready:
-        init.logger.warn("115 OpenAPI 未初始化，跳过定时任务和启动账号信息；Bot 将以受限模式继续运行。")
-        return
-
-    start_scheduler_in_thread()
-    init.logger.info("订阅线程启动成功！")
-    time.sleep(3)  # 等待订阅线程启动
-    send_start_message()
-
-
-def queue_115_init_failure_notice():
-    optional_missing = missing_optional_config_labels()
-    raw_message = (
-        "❌ 115 OpenAPI 初始化失败，Bot 已进入受限模式。\n"
-        "请检查 `/config/config.yaml` 中的 `115_app_id` 或 `access_token`/`refresh_token`。\n"
-        "直连 Token 模式下，`115_app_id` 可以留空，但两个 Token 必须有效。\n"
-        "可使用 `/config` 在 Telegram 中写入直连 Token。\n"
-        "搜索和 `/auth`/`/reload` 仍可使用，离线投递会暂时拒绝。"
-    )
-    if optional_missing:
-        raw_message += f"\n\n可选配置未完成：{'、'.join(optional_missing)}，可在同一个 /config 菜单补充，也可以取消忽略。"
-    return add_task_to_queue(
-        init.bot_config['allowed_user'],
-        None,
-        message=escape_markdown(raw_message, version=2),
-        keyboard=build_config_keyboard(),
-    )
-
-
-def queue_startup_optional_config_notice(openapi_ready: bool):
-    if not openapi_ready:
-        return False
-    return queue_optional_config_notice()
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     init.init()
-    # 启动消息队列
+
     message_thread = threading.Thread(target=start_async_loop, daemon=True)
     message_thread.start()
-    # 等待消息队列准备就绪
+
     import app.utils.message_queue as message_queue
-    max_wait = 30  # 最多等待30秒
+
+    max_wait = 30
     wait_count = 0
     while True:
         if message_queue.global_loop is not None:
@@ -341,57 +374,30 @@ if __name__ == '__main__':
         wait_count += 1
         if wait_count >= max_wait:
             init.logger.error("消息队列线程未准备就绪，程序将退出。")
-            exit(1)
+            raise SystemExit(1)
+
     log_config_snapshot("Starting bot with configuration:")
     log_runtime_features()
-    # 调整telegram日志级别
     update_logger_level()
-    token = init.bot_config['bot_token']
-    application = build_application(token)
 
-    # 启动帮助
-    start_handler = CommandHandler('start', start)
-    application.add_handler(start_handler)
-    # 重载配置
-    reload_handler = CommandHandler('reload', reload)
-    application.add_handler(reload_handler)
-    
-    # 初始化115open对象
-    openapi_ready = init.initialize_115open()
-    if not openapi_ready:
-        init.logger.error("115 OpenAPI客户端初始化失败，离线投递功能暂不可用。")
-        queue_115_init_failure_notice()
-        init.logger.warn("115 OpenAPI 初始化失败，Bot 将继续启动以便使用 `/auth`、`/reload` 和搜索功能，避免容器重启反复刷新 Token。")
+    application = build_application(init.bot_config["bot_token"])
+    registry = build_module_registry()
+    application.bot_data["telepiplex_registry"] = registry
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("reload", reload))
+    application.add_handler(CommandHandler("modules", modules))
+    registry.register_handlers(application)
 
-    # 注册可视化配置
-    register_config_handlers(application)
-    queue_startup_optional_config_notice(openapi_ready)
-
-    # 注册Auth
-    register_auth_handlers(application)
-    # 注册搜索
-    register_search_handlers(application)
-    # 注册下载
-    register_download_handlers(application)
-    # 注册离线任务
-    register_offline_task_handlers(application)
-    # 注册Aria2
-    register_aria2_handlers(application)
-    # 注册视频
-    register_video_handlers(application)
-    
-    init.logger.info(f"USER_AGENT: {init.USER_AGENT}")
-
-    # 启动机器人轮询
     try:
-        asyncio.run(run_application_polling(application, after_start=lambda: start_runtime_services(openapi_ready)))
+        asyncio.run(run_application_polling(application, after_start=lambda: registry.run_startup_hooks(application)))
     except KeyboardInterrupt:
         init.logger.info("程序已被用户终止（Ctrl+C）。")
     except SystemExit:
         init.logger.info("程序正在退出。")
     except Exception as e:
         import traceback
-        error_details = traceback.format_exc()  # 获取完整的异常堆栈信息
+
+        error_details = traceback.format_exc()
         init.logger.error(f"程序遇到错误：{str(e)}\n{error_details}")
     finally:
         init.logger.info("机器人已停止运行。")

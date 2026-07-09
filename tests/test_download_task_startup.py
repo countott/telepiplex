@@ -1,29 +1,27 @@
-import sys
 import asyncio
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
 import init
-from app.handlers.download_handler import SELECT_SUB_CATEGORY, download_task, magnet_command, save_failed_download_to_db
-from app.utils.ai import get_movie_tmdb_name_with_ai
-from app.utils.cover_capture import get_movie_cover
+from app.handlers.download_handler import SELECT_SUB_CATEGORY, SELECT_TARGET_FOLDER, download_task, magnet_command
 
 
 class DownloadTaskStartupTest(unittest.TestCase):
     def setUp(self):
         init.logger = Mock()
         init.openapi_115 = None
-        init.pending_plex_scans = {}
         init.bot_config = {
-            "media": {
-                "unorganized_path": "/未整理",
-            },
-            "aria2": {"enable": False},
+            "category_folder": [
+                {"name": "电影", "path": "/电影"},
+                {"name": "剧集", "path": "/剧集"},
+            ]
         }
 
     @patch("app.handlers.download_handler.add_task_to_queue")
@@ -34,171 +32,8 @@ class DownloadTaskStartupTest(unittest.TestCase):
         self.assertEqual(add_task_mock.call_args.args[:2], (123, None))
         self.assertIn("115 OpenAPI 尚未初始化", add_task_mock.call_args.kwargs["message"])
 
-    @patch("app.handlers.download_handler.SqlLiteLib", side_effect=Exception("db broken"))
-    def test_save_failed_download_to_db_preserves_database_error_context(self, sqlite_mock):
-        with self.assertRaisesRegex(RuntimeError, "保存重试任务失败: db broken"):
-            save_failed_download_to_db(
-                "Broken.Release",
-                "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-                "/真人电影",
-            )
-
-    def test_unorganized_path_uses_configured_path_without_media_root_prefix(self):
-        from app.handlers.download_handler import _get_unorganized_path
-
-        init.bot_config = {
-            "media": {
-                "unorganized_path": "/未整理",
-            }
-        }
-
-        self.assertEqual(_get_unorganized_path(), "/未整理")
-
-    def test_unorganized_path_keeps_full_configured_path(self):
-        from app.handlers.download_handler import _get_unorganized_path
-
-        init.bot_config = {
-            "media": {
-                "unorganized_path": "/媒体/未整理",
-            }
-        }
-
-        self.assertEqual(_get_unorganized_path(), "/媒体/未整理")
-
-    @patch("app.handlers.download_handler.handle_media_library_update", return_value=None)
-    @patch("app.handlers.download_handler.add_task_to_queue")
-    def test_download_task_auto_renames_douban_result_for_plex(self, add_task_mock, media_update_mock):
-        api = Mock()
-        api.offline_download_specify_path.return_value = True
-        api.check_offline_download_success.return_value = (True, "The.Grand.Budapest.Hotel.2014.1080p", "HASH")
-        api.is_directory.return_value = True
-        api.get_files_from_dir.return_value = ["movie.mkv"]
-        api.create_dir_recursive.return_value = {"file_id": "target"}
-        api.rename.return_value = True
-        api.move_file.return_value = True
-        api.del_offline_task.return_value = True
-        init.openapi_115 = api
-
-        download_task(
-            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-            "/影视/电影/外语电影",
-            123,
-            naming_metadata={
-                "source": "douban",
-                "chinese_title": "布达佩斯大饭店",
-                "english_title": "The Grand Budapest Hotel",
-                "year": "2014",
-                "release_title": "The.Grand.Budapest.Hotel.2014.1080p.BluRay.x265-GROUP",
-            },
-        )
-
-        api.create_dir_recursive.assert_called_once_with(
-            "/影视/电影/外语电影/布达佩斯大饭店 ◈ The Grand Budapest Hotel"
-        )
-        api.rename.assert_called_once_with(
-            "/影视/电影/外语电影/The.Grand.Budapest.Hotel.2014.1080p/movie.mkv",
-            "The Grand Budapest Hotel.mkv",
-        )
-        api.move_file.assert_called_once_with(
-            "/影视/电影/外语电影/The.Grand.Budapest.Hotel.2014.1080p/The Grand Budapest Hotel.mkv",
-            "/影视/电影/外语电影/布达佩斯大饭店 ◈ The Grand Budapest Hotel",
-        )
-        api.delete_single_file.assert_called_once_with(
-            "/影视/电影/外语电影/The.Grand.Budapest.Hotel.2014.1080p"
-        )
-        media_update_mock.assert_called_once_with(
-            "/影视/电影/外语电影/布达佩斯大饭店 ◈ The Grand Budapest Hotel"
-        )
-        self.assertIn("自动整理完成", add_task_mock.call_args.kwargs["message"])
-
-    @patch("app.handlers.download_handler.handle_media_library_update", return_value=None)
-    @patch("app.handlers.download_handler.add_task_to_queue")
-    def test_download_task_auto_renames_plain_search_result_for_plex(self, add_task_mock, media_update_mock):
-        api = Mock()
-        api.offline_download_specify_path.return_value = True
-        api.check_offline_download_success.return_value = (True, "Breaking.Bad.S02E03.1080p", "HASH")
-        api.is_directory.return_value = True
-        api.get_files_from_dir.return_value = ["episode.mp4"]
-        api.create_dir_recursive.return_value = {"file_id": "target"}
-        api.rename.return_value = True
-        api.move_file.return_value = True
-        api.del_offline_task.return_value = True
-        init.openapi_115 = api
-
-        download_task(
-            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-            "/影视/剧集/欧美剧",
-            123,
-            naming_metadata={
-                "source": "search_query",
-                "chinese_title": "绝命毒师",
-                "release_title": "Breaking.Bad.S02E03.1080p.WEB-DL.H264-GROUP",
-            },
-        )
-
-        api.create_dir_recursive.assert_called_once_with(
-            "/影视/剧集/欧美剧/绝命毒师 ◈ Breaking Bad/Breaking Bad Season 02"
-        )
-        api.rename.assert_called_once_with(
-            "/影视/剧集/欧美剧/Breaking.Bad.S02E03.1080p/episode.mp4",
-            "Breaking Bad S02E03.mp4",
-        )
-        api.move_file.assert_called_once_with(
-            "/影视/剧集/欧美剧/Breaking.Bad.S02E03.1080p/Breaking Bad S02E03.mp4",
-            "/影视/剧集/欧美剧/绝命毒师 ◈ Breaking Bad/Breaking Bad Season 02",
-        )
-        media_update_mock.assert_called_once_with(
-            "/影视/剧集/欧美剧/绝命毒师 ◈ Breaking Bad/Breaking Bad Season 02"
-        )
-        self.assertIn("Breaking Bad S02E03.mp4", add_task_mock.call_args.kwargs["message"])
-
-    @patch("app.handlers.download_handler.handle_media_library_update", return_value=None)
-    @patch("app.handlers.download_handler.add_task_to_queue")
-    def test_download_task_merges_movie_into_collection_folder(self, add_task_mock, media_update_mock):
-        api = Mock()
-        api.offline_download_specify_path.return_value = True
-        api.check_offline_download_success.return_value = (True, "Mission.Impossible.2023.1080p", "HASH")
-        api.is_directory.return_value = True
-        api.get_files_from_dir.return_value = ["movie.mkv"]
-        api.create_dir_recursive.return_value = {"file_id": "target"}
-        api.rename.return_value = True
-        api.move_file.return_value = True
-        api.del_offline_task.return_value = True
-        init.openapi_115 = api
-
-        download_task(
-            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-            "/影视/电影/外语电影",
-            123,
-            naming_metadata={
-                "source": "douban",
-                "chinese_title": "碟中谍7：致命清算（上）",
-                "english_title": "Mission Impossible Dead Reckoning Part One",
-                "collection_chinese_title": "碟中谍系列",
-                "collection_english_title": "Mission Impossible Collection",
-                "release_title": "Mission.Impossible.Dead.Reckoning.Part.One.2023.1080p",
-            },
-        )
-
-        target_path = (
-            "/影视/电影/外语电影/碟中谍 ◈ Mission Impossible/"
-            "碟中谍7: 致命清算(上) ◈ Mission Impossible Dead Reckoning Part One"
-        )
-        api.create_dir_recursive.assert_called_once_with(target_path)
-        api.move_file.assert_called_once_with(
-            "/影视/电影/外语电影/Mission.Impossible.2023.1080p/Mission Impossible Dead Reckoning Part One.mkv",
-            target_path,
-        )
-        media_update_mock.assert_called_once_with(target_path)
-
     def test_magnet_command_accepts_magnet_argument_and_starts_directory_selection(self):
         init.check_user = Mock(return_value=True)
-        init.bot_config = {
-            "category_folder": [
-                {"name": "真人电影", "path": "/真人电影"},
-                {"name": "动画剧集", "path": "/动画剧集"},
-            ]
-        }
         update = Mock()
         update.message.from_user.id = 123
         update.message.reply_text = AsyncMock()
@@ -214,643 +49,195 @@ class DownloadTaskStartupTest(unittest.TestCase):
         self.assertEqual(context.user_data["link"], "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567")
         context.bot.send_message.assert_awaited_once()
         self.assertIn("请选择保存目录", context.bot.send_message.await_args.kwargs["text"])
-        button_texts = [
-            button.text
-            for row in context.bot.send_message.await_args.kwargs["reply_markup"].inline_keyboard
-            for button in row
-        ]
-        self.assertIn("📁 真人电影", button_texts)
-        self.assertNotIn("📁 媒体", button_texts)
 
-    @patch("app.handlers.download_handler.handle_media_library_update", return_value=None)
-    @patch("app.handlers.download_handler.add_task_to_queue")
-    def test_download_task_infers_name_from_completed_filename_without_metadata(self, add_task_mock, media_update_mock):
-        api = Mock()
-        api.offline_download_specify_path.return_value = True
-        api.check_offline_download_success.return_value = (True, "Breaking.Bad.S02E03.1080p.WEB-DL", "HASH")
-        api.is_directory.return_value = True
-        api.get_files_from_dir.return_value = ["episode.mp4"]
-        api.create_dir_recursive.return_value = {"file_id": "unorganized"}
-        api.move_file.return_value = True
-        api.rename.return_value = True
-        api.del_offline_task.return_value = True
-        init.openapi_115 = api
+    @patch("app.handlers.download_handler.download_executor.submit")
+    def test_directory_selection_prompts_for_target_folder_name_before_download(self, submit_mock):
+        from app.handlers.download_handler import select_sub_category
 
-        download_task(
-            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-            "/影视/剧集/欧美剧",
-            123,
-        )
+        update = Mock()
+        update.effective_user.id = 123
+        update.callback_query.data = "save_path:1"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        context = Mock()
+        context.user_data = {"link": "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567"}
 
-        api.create_dir_recursive.assert_called_once_with(
-            "/影视/剧集/欧美剧/Breaking Bad/Breaking Bad Season 02"
-        )
-        api.rename.assert_called_once_with(
-            "/影视/剧集/欧美剧/Breaking.Bad.S02E03.1080p.WEB-DL/episode.mp4",
-            "Breaking Bad S02E03.mp4",
-        )
-        api.move_file.assert_called_once_with(
-            "/影视/剧集/欧美剧/Breaking.Bad.S02E03.1080p.WEB-DL/Breaking Bad S02E03.mp4",
-            "/影视/剧集/欧美剧/Breaking Bad/Breaking Bad Season 02",
-        )
-        media_update_mock.assert_called_once_with(
-            "/影视/剧集/欧美剧/Breaking Bad/Breaking Bad Season 02"
-        )
-        self.assertIn("Breaking Bad S02E03.mp4", add_task_mock.call_args.kwargs["message"])
+        state = asyncio.run(select_sub_category(update, context))
 
-    @patch("app.handlers.download_handler.add_task_to_queue")
-    def test_download_task_moves_auto_rename_failure_to_unorganized(self, add_task_mock):
-        api = Mock()
-        api.offline_download_specify_path.return_value = True
-        api.check_offline_download_success.return_value = (True, "Bad.Release", "HASH")
-        api.is_directory.return_value = True
-        api.get_files_from_dir.return_value = []
-        api.create_dir_recursive.return_value = {"file_id": "unorganized"}
-        api.move_file.return_value = True
-        api.del_offline_task.return_value = True
-        init.openapi_115 = api
+        self.assertEqual(state, SELECT_TARGET_FOLDER)
+        self.assertEqual(context.user_data["selected_path"], "/剧集")
+        submit_mock.assert_not_called()
+        update.callback_query.edit_message_text.assert_awaited_once()
+        self.assertIn("请输入保存后的文件夹名", update.callback_query.edit_message_text.await_args.kwargs["text"])
 
-        download_task(
-            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-            "/影视/电影/外语电影",
-            123,
-            naming_metadata={
-                "source": "douban",
-                "chinese_title": "未知",
-                "english_title": "Unknown",
-                "year": "2026",
-            },
-        )
+    @patch("app.handlers.download_handler.download_executor.submit")
+    def test_target_folder_input_submits_download_with_custom_name(self, submit_mock):
+        from app.handlers.download_handler import receive_target_folder_name
 
-        api.move_file.assert_called_once_with("/影视/电影/外语电影/Bad.Release", "/未整理")
-        self.assertIn("未自动整理", add_task_mock.call_args.kwargs["message"])
-        self.assertNotIn("TMDB", add_task_mock.call_args.kwargs["message"])
-
-    @patch("app.handlers.download_handler.time.sleep", return_value=None)
-    @patch("app.handlers.download_handler.handle_media_library_update", return_value=None)
-    @patch("app.handlers.download_handler.infer_tvdb_episode_plan_with_ai")
-    @patch("app.handlers.download_handler.get_tvdb_series_episodes")
-    @patch("app.handlers.download_handler.search_tvdb_series")
-    @patch("app.handlers.download_handler.add_task_to_queue")
-    def test_download_task_uses_115_tree_and_tvdb_ai_plan_before_legacy_rename(
-        self,
-        add_task_mock,
-        search_tvdb_mock,
-        episodes_mock,
-        ai_plan_mock,
-        media_update_mock,
-        sleep_mock,
-    ):
-        api = Mock()
-        api.offline_download_specify_path.return_value = True
-        api.check_offline_download_success.return_value = (True, "Dexter.Release", "HASH")
-        api.is_directory.return_value = True
-        api.get_file_info.return_value = {"file_id": "root", "file_category": "0"}
-        api.get_file_list.return_value = [
-            {"fn": "Dexter.S01E01.mkv", "fid": "file-1", "fc": "1", "fs": 1024}
-        ]
-        api.create_dir_recursive.return_value = {"file_id": "season"}
-        api.rename.return_value = True
-        api.move_file.return_value = True
-        api.delete_single_file.return_value = True
-        api.del_offline_task.return_value = True
-        init.openapi_115 = api
-        init.bot_config["ai"] = {
-            "api_url": "https://api.example/v1",
-            "api_key": "key",
-            "model": "model",
+        update = Mock()
+        update.message.text = "我的电影"
+        update.message.reply_text = AsyncMock()
+        update.effective_user.id = 123
+        context = Mock()
+        context.user_data = {
+            "link": "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
+            "selected_path": "/电影",
         }
 
-        search_tvdb_mock.return_value = [{"tvdb_series_id": "79349", "name": "Dexter", "year": "2006"}]
-        episodes_mock.return_value = [
-            {"tvdb_episode_id": 349232, "season_number": 1, "episode_number": 1, "name": "Dexter"}
-        ]
-        ai_plan_mock.return_value = {
-            "tvdb_series_id": "79349",
-            "series_name": "Dexter",
-            "episode_map": [
-                {
-                    "source_file": "Dexter.S01E01.mkv",
-                    "target_relative_path": "Season 01/Dexter - S01E01 - Dexter.mkv",
-                    "tvdb_episode_id": 349232,
-                    "season_number": 1,
-                    "episode_number": 1,
-                }
-            ],
-            "warnings": [],
-        }
+        state = asyncio.run(receive_target_folder_name(update, context))
 
-        download_task(
-            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-            "/真人剧集",
-            123,
-            naming_metadata={
-                "source": "douban",
-                "chinese_title": "嗜血法医",
-                "english_title": "Dexter",
-                "year": "2006",
-            },
-            metadata={
-                "source": "douban",
-                "chinese_title": "嗜血法医",
-                "english_title": "Dexter",
-                "year": "2006",
-                "query": "Dexter 2006",
-                "release_title": "Dexter.S01.1080p",
-            },
-        )
-
-        api.get_file_info.assert_any_call("/真人剧集/Dexter.Release")
-        api.get_file_list.assert_any_call({"cid": "root", "limit": 1000, "show_dir": 1})
-        search_tvdb_mock.assert_called_once_with("Dexter", year="2006")
-        episodes_mock.assert_called_once_with("79349", season_type="default")
-        self.assertEqual(ai_plan_mock.call_args.args[0]["file_tree"][0]["relative_path"], "Dexter.S01E01.mkv")
-        api.create_dir_recursive.assert_called_once_with("/真人剧集/嗜血法医 ◈ Dexter/Dexter Season 01")
-        api.rename.assert_called_once_with(
-            "/真人剧集/Dexter.Release/Dexter.S01E01.mkv",
-            "Dexter S01E01.mkv",
-        )
-        api.move_file.assert_called_once_with(
-            "/真人剧集/Dexter.Release/Dexter S01E01.mkv",
-            "/真人剧集/嗜血法医 ◈ Dexter/Dexter Season 01",
-        )
-        api.delete_single_file.assert_any_call("/真人剧集/Dexter.Release")
-        api.get_files_from_dir.assert_not_called()
-        media_update_mock.assert_called_once_with("/真人剧集/嗜血法医 ◈ Dexter")
-        self.assertIn("TVDB 自动整理完成", add_task_mock.call_args.kwargs["message"])
-        self.assertIn("1 个文件", add_task_mock.call_args.kwargs["message"])
-
-    @patch("app.handlers.download_handler.time.sleep", return_value=None)
-    @patch("app.handlers.download_handler.handle_media_library_update", return_value=None)
-    @patch("app.handlers.download_handler.infer_tvdb_episode_plan_with_ai")
-    @patch("app.handlers.download_handler.get_tvdb_series_episodes")
-    @patch("app.handlers.download_handler.search_tvdb_series")
-    @patch("app.handlers.download_handler.add_task_to_queue")
-    def test_download_task_merges_confirmed_tvdb_metadata_with_naming_chinese_title(
-        self,
-        add_task_mock,
-        search_tvdb_mock,
-        episodes_mock,
-        ai_plan_mock,
-        media_update_mock,
-        sleep_mock,
-    ):
-        api = Mock()
-        api.offline_download_specify_path.return_value = True
-        api.check_offline_download_success.return_value = (True, "Rick.and.Morty.S09E07.1080p", "HASH")
-        api.is_directory.return_value = True
-        api.get_file_info.return_value = {"file_id": "root", "file_category": "0"}
-        api.get_file_list.return_value = [
-            {"fn": "Rick.and.Morty.S09E07.mkv", "fid": "file-1", "fc": "1", "fs": 1024}
-        ]
-        api.create_dir_recursive.return_value = {"file_id": "season"}
-        api.rename.return_value = True
-        api.move_file.return_value = True
-        api.delete_single_file.return_value = True
-        api.del_offline_task.return_value = True
-        init.openapi_115 = api
-        init.bot_config["ai"] = {
-            "api_url": "https://api.example/v1",
-            "api_key": "key",
-            "model": "model",
-        }
-
-        search_tvdb_mock.return_value = [{"tvdb_series_id": "275274", "name": "Rick and Morty", "year": "2013"}]
-        episodes_mock.return_value = [
-            {"tvdb_episode_id": 11759797, "season_number": 9, "episode_number": 7, "name": "Mortgully"}
-        ]
-        ai_plan_mock.return_value = {
-            "tvdb_series_id": "275274",
-            "series_name": "Rick and Morty",
-            "episode_map": [
-                {
-                    "source_file": "Rick.and.Morty.S09E07.mkv",
-                    "target_relative_path": "Rick and Morty Season 09/Rick and Morty S09E07.mkv",
-                    "tvdb_episode_id": 11759797,
-                    "season_number": 9,
-                    "episode_number": 7,
-                }
-            ],
-            "warnings": [],
-        }
-
-        download_task(
-            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-            "/动画剧集",
-            123,
-            naming_metadata={
-                "source": "douban",
-                "chinese_title": "瑞克和莫蒂 第九季",
-                "english_title": "Rick and Morty Season 9",
-                "year": "2026",
-            },
-            metadata={
-                "source": "confirmed",
-                "media_type": "series",
-                "english_title": "Rick and Morty",
-                "year": "2026",
-                "external_ids": {"tvdb": "275274"},
-                "selected_scope": "episode",
-                "season_number": 9,
-                "episode_number": 7,
-                "release_title": "Rick.and.Morty.S09E07.1080p",
-            },
-        )
-
-        search_tvdb_mock.assert_called_once_with("Rick and Morty", year="2026")
+        self.assertEqual(state, -1)
+        submit_mock.assert_called_once()
         self.assertEqual(
-            ai_plan_mock.call_args.args[0]["metadata"]["chinese_title"],
-            "瑞克和莫蒂 第九季",
+            submit_mock.call_args.args,
+            (
+                download_task,
+                "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
+                "/电影",
+                123,
+                "我的电影",
+            ),
         )
-        api.create_dir_recursive.assert_called_once_with(
-            "/动画剧集/瑞克和莫蒂 第九季 ◈ Rick and Morty/Rick and Morty Season 09"
-        )
-        media_update_mock.assert_called_once_with("/动画剧集/瑞克和莫蒂 第九季 ◈ Rick and Morty")
+        self.assertIn("已加入下载队列", update.message.reply_text.await_args.args[0])
 
     @patch("app.handlers.download_handler.time.sleep", return_value=None)
-    @patch("app.handlers.download_handler.infer_tvdb_episode_plan_with_ai")
-    @patch("app.handlers.download_handler.get_tvdb_series_episodes")
-    @patch("app.handlers.download_handler.search_tvdb_series")
-    @patch("app.handlers.download_handler.add_task_to_queue", return_value=True)
-    def test_download_task_queues_plex_scan_after_tvdb_organization_notice(
-        self,
-        add_task_mock,
-        search_tvdb_mock,
-        episodes_mock,
-        ai_plan_mock,
-        sleep_mock,
-    ):
+    @patch("app.handlers.download_handler.add_task_to_queue")
+    def test_download_task_renames_completed_directory_to_user_folder_name(self, add_task_mock, sleep_mock):
         api = Mock()
         api.offline_download_specify_path.return_value = True
-        api.check_offline_download_success.return_value = (True, "Rick.and.Morty.S09E07.1080p", "HASH")
+        api.check_offline_download_success.return_value = (True, "Original.Release.2026", "HASH")
         api.is_directory.return_value = True
-        api.get_file_info.return_value = {"file_id": "root", "file_category": "0"}
-        api.get_file_list.return_value = [
-            {"fn": "Rick.and.Morty.S09E07.mkv", "fid": "file-1", "fc": "1", "fs": 1024}
-        ]
-        api.create_dir_recursive.return_value = {"file_id": "season"}
+        api.auto_clean_all.return_value = None
+        api.get_file_info.return_value = None
         api.rename.return_value = True
-        api.move_file.return_value = True
-        api.delete_single_file.return_value = True
-        api.del_offline_task.return_value = True
-        init.openapi_115 = api
-        init.bot_config = {
-            "allowed_user": 123,
-            "category_folder": [
-                {"name": "动画剧集", "path": "/动画剧集", "plex_library_id": "11"},
-            ],
-            "media": {
-                "unorganized_path": "/未整理",
-                "plex": {
-                    "base_url": "http://plex.example:32400",
-                    "token": "plex-token",
-                },
-            },
-            "ai": {
-                "api_url": "https://api.example/v1",
-                "api_key": "key",
-                "model": "model",
-            },
-        }
-
-        search_tvdb_mock.return_value = [{"tvdb_series_id": "275274", "name": "Rick and Morty", "year": "2013"}]
-        episodes_mock.return_value = [
-            {"tvdb_episode_id": 11759797, "season_number": 9, "episode_number": 7, "name": "Mortgully"}
-        ]
-        ai_plan_mock.return_value = {
-            "tvdb_series_id": "275274",
-            "series_name": "Rick and Morty",
-            "episode_map": [
-                {
-                    "source_file": "Rick.and.Morty.S09E07.mkv",
-                    "target_relative_path": "Rick and Morty Season 09/Rick and Morty S09E07.mkv",
-                    "tvdb_episode_id": 11759797,
-                    "season_number": 9,
-                    "episode_number": 7,
-                }
-            ],
-            "warnings": [],
-        }
-
-        download_task(
-            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-            "/动画剧集",
-            123,
-            metadata={
-                "source": "confirmed",
-                "media_type": "series",
-                "chinese_title": "瑞克和莫蒂",
-                "english_title": "Rick and Morty",
-                "year": "2013",
-                "external_ids": {"tvdb": "275274"},
-                "selected_scope": "episode",
-                "season_number": 9,
-                "episode_number": 7,
-                "release_title": "Rick.and.Morty.S09E07.1080p",
-            },
-        )
-
-        queued_messages = [call.kwargs["message"] for call in add_task_mock.call_args_list]
-        self.assertIn("TVDB 自动整理完成", queued_messages[0])
-        self.assertIn("扫描 Plex 瑞克和莫蒂 ◈ Rick and Morty 资料库", queued_messages[1])
-        scan_id, scan = next(iter(init.pending_plex_scans.items()))
-        self.assertTrue(scan_id)
-        self.assertEqual(scan["path"], "/动画剧集/瑞克和莫蒂 ◈ Rick and Morty")
-        self.assertEqual(scan["library_id"], "11")
-
-    @patch("app.handlers.download_handler.time.sleep", return_value=None)
-    @patch("app.handlers.download_handler.search_tvdb_series")
-    @patch("app.handlers.download_handler.add_task_to_queue")
-    def test_download_task_skips_tvdb_lookup_when_ai_config_missing(
-        self,
-        add_task_mock,
-        search_tvdb_mock,
-        sleep_mock,
-    ):
-        init.bot_config = {
-            "media": {"unorganized_path": "/未整理"},
-            "metadata": {"tvdb": {"enable": True, "api_key": "tvdb-key"}},
-        }
-        api = Mock()
-        api.offline_download_specify_path.return_value = True
-        api.check_offline_download_success.return_value = (True, "Dexter.Release", "HASH")
-        api.is_directory.return_value = True
-        api.create_dir_recursive.return_value = {"file_id": "unorganized"}
-        api.move_file.return_value = True
         api.del_offline_task.return_value = True
         init.openapi_115 = api
 
         download_task(
             "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-            "/真人剧集",
+            "/电影",
             123,
-            metadata={"source": "imdb", "english_title": "Dexter", "year": "2006"},
+            target_folder_name="我的电影",
         )
 
-        search_tvdb_mock.assert_not_called()
-        api.get_file_info.assert_not_called()
-        init.logger.warn.assert_not_called()
-        self.assertIn("/未整理/Dexter.Release", add_task_mock.call_args.kwargs["message"])
-
-    @patch("app.handlers.download_handler.save_failed_download_to_db")
-    @patch("app.handlers.download_handler.add_task_to_queue")
-    def test_download_timeout_offers_retry_without_tmdb_rename(self, add_task_mock, save_retry_mock):
-        api = Mock()
-        api.offline_download_specify_path.return_value = True
-        api.check_offline_download_success.return_value = (False, "Unknown.Release.2026", "HASH", 35)
-        api.del_offline_task.return_value = True
-        init.openapi_115 = api
-
-        download_task(
-            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-            "/影视/电影/外语电影",
-            123,
-        )
-
-        save_retry_mock.assert_called_once_with(
-            "Unknown.Release.2026",
-            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-            "/影视/电影/外语电影",
-            progress_percent=35,
-            retry_category="partial",
-            last_error="115 离线下载超时",
-        )
-        self.assertIsNone(add_task_mock.call_args.kwargs.get("keyboard"))
-        self.assertIn("已保留到重试列表", add_task_mock.call_args.kwargs["message"])
-        self.assertNotIn("TMDB", add_task_mock.call_args.kwargs["message"])
+        api.rename.assert_called_once_with("/电影/Original.Release.2026", "我的电影")
+        add_task_mock.assert_called_once()
+        self.assertIn("/电影/我的电影", add_task_mock.call_args.kwargs["message"])
         api.del_offline_task.assert_called_once_with("HASH", del_source_file=0)
 
-    @patch("app.handlers.download_handler.save_failed_download_to_db")
+    @patch("app.handlers.download_handler.time.sleep", return_value=None)
     @patch("app.handlers.download_handler.add_task_to_queue")
-    def test_download_timeout_discards_zero_progress_dead_seed(self, add_task_mock, save_retry_mock):
+    def test_download_task_wraps_single_file_then_renames_top_folder_only(self, add_task_mock, sleep_mock):
         api = Mock()
         api.offline_download_specify_path.return_value = True
-        api.check_offline_download_success.return_value = (False, "Dead.Release", "HASH", 0)
+        api.check_offline_download_success.return_value = (True, "movie.mkv", "HASH")
+        api.is_directory.return_value = False
+        api.create_dir_for_file.return_value = True
+        api.move_file.return_value = True
+        api.get_file_info.return_value = None
+        api.rename.return_value = True
         api.del_offline_task.return_value = True
         init.openapi_115 = api
 
         download_task(
             "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-            "/影视/电影/外语电影",
+            "/电影",
             123,
+            target_folder_name="电影名",
         )
 
-        save_retry_mock.assert_not_called()
-        self.assertIn("0\\.0%", add_task_mock.call_args.kwargs["message"])
-        self.assertIn("已丢弃", add_task_mock.call_args.kwargs["message"])
-        self.assertIsNone(add_task_mock.call_args.kwargs.get("keyboard"))
+        api.create_dir_for_file.assert_called_once_with("/电影", "movie")
+        api.move_file.assert_called_once_with("/电影/movie.mkv", "/电影/movie")
+        api.rename.assert_called_once_with("/电影/movie", "电影名")
+        self.assertIn("/电影/电影名", add_task_mock.call_args.kwargs["message"])
 
-    @patch("app.handlers.download_handler.save_failed_download_to_db")
+    @patch("app.handlers.download_handler.time.sleep", return_value=None)
     @patch("app.handlers.download_handler.add_task_to_queue")
-    def test_download_timeout_saves_partial_progress_for_single_retry(self, add_task_mock, save_retry_mock):
+    def test_download_task_sanitizes_target_name_and_appends_suffix_on_conflict(self, add_task_mock, sleep_mock):
         api = Mock()
         api.offline_download_specify_path.return_value = True
-        api.check_offline_download_success.return_value = (False, "Partial.Release", "HASH", 42)
+        api.check_offline_download_success.return_value = (True, "Original.Release.2026", "HASH")
+        api.is_directory.return_value = True
+        api.auto_clean_all.return_value = None
+        api.get_file_info.side_effect = [{"file_id": "exists"}, None]
+        api.rename.return_value = True
         api.del_offline_task.return_value = True
         init.openapi_115 = api
 
         download_task(
             "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-            "/影视/电影/外语电影",
+            "/电影",
             123,
+            target_folder_name='坏/名字:"版"',
         )
 
-        save_retry_mock.assert_called_once_with(
-            "Partial.Release",
+        self.assertEqual(api.get_file_info.call_args_list[0].args[0], "/电影/坏名字:版")
+        self.assertEqual(api.get_file_info.call_args_list[1].args[0], "/电影/坏名字:版 (2)")
+        api.rename.assert_called_once_with("/电影/Original.Release.2026", "坏名字:版 (2)")
+
+    @patch("app.handlers.download_handler.time.sleep", return_value=None)
+    @patch("app.handlers.download_handler.add_task_to_queue")
+    def test_download_task_keeps_original_name_when_user_enters_dash(self, add_task_mock, sleep_mock):
+        api = Mock()
+        api.offline_download_specify_path.return_value = True
+        api.check_offline_download_success.return_value = (True, "Original.Release.2026", "HASH")
+        api.is_directory.return_value = True
+        api.auto_clean_all.return_value = None
+        api.del_offline_task.return_value = True
+        init.openapi_115 = api
+
+        download_task(
             "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
-            "/影视/电影/外语电影",
-            progress_percent=42,
-            retry_category="partial",
-            last_error="115 离线下载超时",
+            "/电影",
+            123,
+            target_folder_name="-",
         )
-        self.assertIn("42\\.0%", add_task_mock.call_args.kwargs["message"])
-        self.assertIn("Partial\\.Release", add_task_mock.call_args.kwargs["message"])
-        self.assertIn("已保留到重试列表", add_task_mock.call_args.kwargs["message"])
 
-    @patch("app.handlers.download_handler.add_task_to_queue", return_value=True)
-    def test_plex_media_config_queues_scan_confirmation(self, add_task_mock):
-        from app.handlers.download_handler import handle_media_library_update
+        api.rename.assert_not_called()
+        self.assertIn("/电影/Original.Release.2026", add_task_mock.call_args.kwargs["message"])
 
-        init.bot_config = {
-            "allowed_user": 123,
-            "media": {
-                "plex": {
-                    "base_url": "http://plex.example:32400",
-                    "token": "plex-token",
-                    "library_id": "1",
-                }
-            }
-        }
+    @patch("app.handlers.download_handler.time.sleep", return_value=None)
+    @patch("app.handlers.download_handler.add_task_to_queue")
+    def test_download_task_keeps_original_directory_when_rename_fails(self, add_task_mock, sleep_mock):
+        api = Mock()
+        api.offline_download_specify_path.return_value = True
+        api.check_offline_download_success.return_value = (True, "Original.Release.2026", "HASH")
+        api.is_directory.return_value = True
+        api.auto_clean_all.return_value = None
+        api.get_file_info.return_value = None
+        api.rename.return_value = False
+        api.del_offline_task.return_value = True
+        init.openapi_115 = api
 
-        self.assertEqual(handle_media_library_update("/影视/电影/片名", ["movie.mkv"]), "plex_pending")
-        add_task_mock.assert_called_once()
-        self.assertEqual(add_task_mock.call_args.args[:2], (123, None))
-        self.assertIn("扫描 Plex 片名 资料库", add_task_mock.call_args.kwargs["message"])
-        callback_data = [
-            button.callback_data
-            for row in add_task_mock.call_args.kwargs["keyboard"].inline_keyboard
-            for button in row
-        ]
-        button_text = [
-            button.text
-            for row in add_task_mock.call_args.kwargs["keyboard"].inline_keyboard
-            for button in row
-        ]
-        self.assertIn("扫描 Plex 片名 资料库", button_text)
-        self.assertTrue(any(item.startswith("plex_scan_confirm:") for item in callback_data))
-        self.assertTrue(any(item.startswith("plex_scan_skip:") for item in callback_data))
-
-    @patch("app.handlers.download_handler.add_task_to_queue", return_value=True)
-    def test_media_library_update_without_plex_config_has_no_side_effect(self, add_task_mock):
-        from app.handlers.download_handler import handle_media_library_update
-
-        init.bot_config = {
-            "allowed_user": 123,
-            "media": {},
-        }
-
-        self.assertIsNone(handle_media_library_update("/影视/电影/片名", ["movie.mkv"]))
-        add_task_mock.assert_not_called()
-
-    @patch("app.handlers.download_handler.add_task_to_queue", return_value=True)
-    def test_plex_scan_confirmation_without_allowed_user_does_not_leave_pending_scan(self, add_task_mock):
-        from app.handlers.download_handler import handle_media_library_update
-
-        init.bot_config = {
-            "media": {
-                "plex": {
-                    "base_url": "http://plex.example:32400",
-                    "token": "plex-token",
-                }
-            },
-        }
-
-        self.assertIsNone(handle_media_library_update("/影视/电影/片名", ["movie.mkv"]))
-        self.assertEqual(init.pending_plex_scans, {})
-        add_task_mock.assert_not_called()
-
-    @patch("app.handlers.download_handler.add_task_to_queue", return_value=True)
-    def test_plex_media_config_without_library_id_queues_full_scan_confirmation(self, add_task_mock):
-        from app.handlers.download_handler import handle_media_library_update
-
-        init.bot_config = {
-            "allowed_user": 123,
-            "media": {
-                "plex": {
-                    "base_url": "http://plex.example:32400",
-                    "token": "plex-token",
-                }
-            },
-        }
-
-        self.assertEqual(handle_media_library_update("/影视/电影/片名", ["movie.mkv"]), "plex_pending")
-
-        scan_id, scan = next(iter(init.pending_plex_scans.items()))
-        self.assertEqual(scan["library_id"], "all")
-        self.assertTrue(scan_id)
-        message = add_task_mock.call_args.kwargs["message"]
-        self.assertIn("扫描 Plex 全部资料库", message)
-        self.assertNotIn("Library ID", message)
-
-    @patch("app.handlers.download_handler.add_task_to_queue", return_value=True)
-    def test_plex_scan_confirmation_uses_library_id_from_selected_115_folder(self, add_task_mock):
-        from app.handlers.download_handler import handle_media_library_update
-
-        init.bot_config = {
-            "allowed_user": 123,
-            "category_folder": [
-                {"name": "真人电影", "path": "/真人电影", "plex_library_id": "1"},
-                {"name": "动画电影", "path": "/动画电影", "plex_library_id": "12"},
-                {"name": "真人剧集", "path": "/真人剧集", "plex_library_id": "2"},
-                {"name": "动画剧集", "path": "/动画剧集", "plex_library_id": "11"},
-            ],
-            "media": {
-                "plex": {
-                    "base_url": "http://plex.example:32400",
-                    "token": "plex-token",
-                }
-            },
-        }
-
-        self.assertEqual(handle_media_library_update("/真人剧集/Dexter/Dexter Season 01"), "plex_pending")
-
-        scan_id, scan = next(iter(init.pending_plex_scans.items()))
-        self.assertEqual(scan["library_id"], "2")
-        self.assertIn("Library ID", add_task_mock.call_args.kwargs["message"])
-        self.assertTrue(scan_id)
-
-    @patch("app.handlers.download_handler.requests.get")
-    def test_plex_scan_confirmation_calls_plex_refresh_api(self, get_mock):
-        from app.handlers.download_handler import handle_plex_scan_callback
-
-        init.check_user = Mock(return_value=True)
-        init.bot_config = {
-            "media": {
-                "plex": {
-                    "base_url": "http://plex.example:32400/",
-                    "token": "plex-token",
-                    "library_id": "1",
-                }
-            }
-        }
-        init.pending_plex_scans = {"scan-1": {"path": "/影视/电影/片名", "library_id": "2"}}
-        response = Mock()
-        response.raise_for_status.return_value = None
-        get_mock.return_value = response
-        update = Mock()
-        update.effective_user.id = 123
-        update.callback_query.data = "plex_scan_confirm:scan-1"
-        update.callback_query.answer = AsyncMock()
-        update.callback_query.edit_message_text = AsyncMock()
-        context = Mock()
-
-        asyncio.run(handle_plex_scan_callback(update, context))
-
-        get_mock.assert_called_once_with(
-            "http://plex.example:32400/library/sections/2/refresh",
-            params={"X-Plex-Token": "plex-token"},
-            timeout=15,
+        download_task(
+            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
+            "/电影",
+            123,
+            target_folder_name="新名字",
         )
-        update.callback_query.edit_message_text.assert_awaited_once()
-        self.assertNotIn("scan-1", init.pending_plex_scans)
 
-    @patch("app.handlers.download_handler.requests.get")
-    def test_plex_scan_confirmation_without_library_id_calls_full_refresh_api(self, get_mock):
-        from app.handlers.download_handler import handle_plex_scan_callback
+        self.assertIn("重命名失败", add_task_mock.call_args.kwargs["message"])
+        self.assertIn("/电影/Original.Release.2026", add_task_mock.call_args.kwargs["message"])
 
-        init.check_user = Mock(return_value=True)
-        init.bot_config = {
-            "media": {
-                "plex": {
-                    "base_url": "http://plex.example:32400/",
-                    "token": "plex-token",
-                }
-            }
-        }
-        init.pending_plex_scans = {"scan-1": {"path": "/影视/电影/片名", "library_id": "all"}}
-        response = Mock()
-        response.raise_for_status.return_value = None
-        get_mock.return_value = response
-        update = Mock()
-        update.effective_user.id = 123
-        update.callback_query.data = "plex_scan_confirm:scan-1"
-        update.callback_query.answer = AsyncMock()
-        update.callback_query.edit_message_text = AsyncMock()
-        context = Mock()
+    @patch("app.handlers.download_handler.add_task_to_queue")
+    def test_download_timeout_only_notifies_failure_without_retry_db(self, add_task_mock):
+        api = Mock()
+        api.offline_download_specify_path.return_value = True
+        api.check_offline_download_success.return_value = (False, "Timeout.Release", "HASH", 35)
+        api.del_offline_task.return_value = True
+        init.openapi_115 = api
 
-        asyncio.run(handle_plex_scan_callback(update, context))
-
-        get_mock.assert_called_once_with(
-            "http://plex.example:32400/library/sections/all/refresh",
-            params={"X-Plex-Token": "plex-token"},
-            timeout=15,
+        download_task(
+            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
+            "/电影",
+            123,
+            target_folder_name="目标",
         )
-        update.callback_query.edit_message_text.assert_awaited_once()
-        self.assertNotIn("scan-1", init.pending_plex_scans)
 
-    def test_ai_and_cover_helpers_remain_available_for_future_naming_pipeline(self):
-        self.assertTrue(callable(get_movie_tmdb_name_with_ai))
-        self.assertTrue(callable(get_movie_cover))
+        self.assertIn("离线下载未完成", add_task_mock.call_args.kwargs["message"])
+        self.assertIn("35.0%", add_task_mock.call_args.kwargs["message"])
+        source = (ROOT / "app" / "handlers" / "download_handler.py").read_text(encoding="utf-8")
+        self.assertNotIn("save_failed_download_to_db", source)
 
 
 if __name__ == "__main__":

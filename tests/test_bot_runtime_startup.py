@@ -20,6 +20,14 @@ def load_bot_module():
 
 
 class BotRuntimeStartupTest(unittest.TestCase):
+    def setUp(self):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+
+    def tearDown(self):
+        self.loop.close()
+        asyncio.set_event_loop(None)
+
     def test_config_log_snapshot_redacts_nested_secrets(self):
         bot_module = load_bot_module()
 
@@ -28,32 +36,28 @@ class BotRuntimeStartupTest(unittest.TestCase):
             "allowed_user": 472943219,
             "115_app_id": "app-id-secret",
             "access_token": "access-secret",
-            "search": {
-                "prowlarr": {
-                    "base_url": "http://prowlarr.example:9696",
-                    "api_key": "prowlarr-secret",
-                }
+            "open115": {
+                "base_url": "http://open115.example",
+                "api_key": "api-secret",
             },
-            "media": {"plex": {"token": "plex-secret"}},
             "nested": [{"refresh_token": "refresh-secret"}],
         }
 
         redacted = bot_module.sanitize_config_for_log(config)
         dumped = json.dumps(redacted, ensure_ascii=False)
 
-        self.assertIn("http://prowlarr.example:9696", dumped)
+        self.assertIn("http://open115.example", dumped)
         self.assertIn("472943219", dumped)
         for secret in (
             "telegram-secret",
             "app-id-secret",
             "access-secret",
-            "prowlarr-secret",
-            "plex-secret",
+            "api-secret",
             "refresh-secret",
         ):
             self.assertNotIn(secret, dumped)
         self.assertEqual(redacted["bot_token"], "***redacted***")
-        self.assertEqual(redacted["search"]["prowlarr"]["api_key"], "***redacted***")
+        self.assertEqual(redacted["open115"]["api_key"], "***redacted***")
 
     def test_start_treats_telegram_timeout_as_possible_delivery(self):
         bot_module = load_bot_module()
@@ -113,39 +117,81 @@ class BotRuntimeStartupTest(unittest.TestCase):
         self.assertIn(("write_timeout", 30), calls)
         self.assertIn(("pool_timeout", 30), calls)
 
-    def test_bot_menu_and_help_include_config_command(self):
+    def test_default_enabled_modules_load_all_stable_modules(self):
         bot_module = load_bot_module()
 
-        commands = [item.command for item in bot_module.get_bot_menu()]
+        self.assertEqual(
+            bot_module.get_enabled_module_names({}),
+            [
+                "app.modules.open115",
+                "app.modules.media_search",
+                "app.modules.renaming",
+            ],
+        )
 
-        self.assertIn("config", commands)
-        self.assertIn("/config", bot_module.get_help_info())
+    def test_disabled_modules_are_removed_from_default_stable_modules(self):
+        bot_module = load_bot_module()
 
-    def test_115_init_failure_notice_uses_markdownv2_escaped_message(self):
+        self.assertEqual(
+            bot_module.get_enabled_module_names(
+                {
+                    "modules": {
+                        "enabled": "all",
+                        "disabled": ["app.modules.renaming"],
+                    }
+                }
+            ),
+            [
+                "app.modules.open115",
+                "app.modules.media_search",
+            ],
+        )
+
+    def test_explicit_empty_config_uses_default_modules_not_global_config(self):
         bot_module = load_bot_module()
         original_config = bot_module.init.bot_config
-        bot_module.init.bot_config = {
-            "allowed_user": 472943219,
-            "metadata": {"tvdb": {"enable": False, "api_key": ""}},
-            "media": {"plex": {"base_url": "", "token": ""}},
-        }
-        self.addCleanup(setattr, bot_module.init, "bot_config", original_config)
-        bot_module.add_task_to_queue = Mock(return_value=True)
+        bot_module.init.bot_config = {"modules": {"disabled": ["app.modules.renaming"]}}
+        try:
+            self.assertEqual(
+                bot_module.get_enabled_module_names({}),
+                [
+                    "app.modules.open115",
+                    "app.modules.media_search",
+                    "app.modules.renaming",
+                ],
+            )
+        finally:
+            bot_module.init.bot_config = original_config
 
-        bot_module.queue_115_init_failure_notice()
-
-        message = bot_module.add_task_to_queue.call_args.kwargs["message"]
-        self.assertIn(r"\`access\_token\`", message)
-        self.assertIn(r"config\.yaml", message)
-        self.assertIn("可选配置未完成：Prowlarr、Plex、TVDB", message)
-        self.assertNotIn("config.yaml`", message)
-
-    def test_optional_config_notice_is_skipped_when_115_init_failed(self):
+    def test_modules_status_text_reports_default_modules_and_restart_boundary(self):
         bot_module = load_bot_module()
-        bot_module.queue_optional_config_notice = Mock(return_value=True)
 
-        self.assertFalse(bot_module.queue_startup_optional_config_notice(openapi_ready=False))
-        bot_module.queue_optional_config_notice.assert_not_called()
+        text = bot_module.build_modules_status_text({})
+
+        self.assertIn("115 下载", text)
+        self.assertIn("媒体搜索", text)
+        self.assertIn("下载后重命名", text)
+        self.assertIn("重启容器后生效", text)
+
+    def test_bot_menu_and_help_include_config_command(self):
+        bot_module = load_bot_module()
+        from app.core.module_registry import ModuleRegistry
+        from app.modules.open115 import register_module
+
+        registry = ModuleRegistry()
+        register_module(registry)
+        commands = [item.command for item in bot_module.get_bot_menu(registry)]
+
+        self.assertIn("config", commands)
+
+    def test_open115_module_registers_startup_hook(self):
+        from app.core.module_registry import ModuleRegistry
+        from app.modules.open115 import register_module
+
+        registry = ModuleRegistry()
+        register_module(registry)
+
+        self.assertEqual(len(registry.startup_hooks), 1)
 
     def test_run_application_polling_starts_application_before_updater_polling(self):
         bot_module = load_bot_module()

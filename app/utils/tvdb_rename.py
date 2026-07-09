@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+from __future__ import annotations
+
 from pathlib import PurePosixPath
 
 from app.utils.media_naming import sanitize_path_name

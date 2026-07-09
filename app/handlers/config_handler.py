@@ -7,11 +7,9 @@ import warnings
 import yaml
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ConversationHandler, ContextTypes, MessageHandler, filters
-from telegram.helpers import escape_markdown
 from telegram.warnings import PTBUserWarning
 
 import init
-from app.utils.message_queue import add_task_to_queue
 
 
 (
@@ -20,15 +18,7 @@ from app.utils.message_queue import add_task_to_queue
     CONFIG_INPUT_115_OPENAPI,
     CONFIG_INPUT_115_ACCESS,
     CONFIG_INPUT_115_REFRESH,
-    CONFIG_INPUT_TVDB_API,
-    CONFIG_SELECT_TVDB_PIN,
-    CONFIG_INPUT_TVDB_PIN,
-    CONFIG_INPUT_PLEX_BASE_URL,
-    CONFIG_INPUT_PLEX_TOKEN,
-    CONFIG_SELECT_OPTIONAL_SERVICE,
-    CONFIG_INPUT_PROWLARR_BASE_URL,
-    CONFIG_INPUT_PROWLARR_API_KEY,
-) = range(60, 73)
+) = range(60, 65)
 
 
 def parse_key_value_lines(text: str) -> dict:
@@ -87,16 +77,6 @@ def _require_single_value(text: str, label: str) -> str:
     return value
 
 
-def _int_value(values: dict, key: str, default: int, label: str, unit: str = "整数秒") -> int:
-    raw_value = values.get(key)
-    if raw_value in (None, ""):
-        return default
-    try:
-        return int(raw_value)
-    except (TypeError, ValueError) as e:
-        raise ValueError(f"{label} 必须是{unit}") from e
-
-
 def apply_115_token_payload(text: str) -> dict:
     values = parse_key_value_lines(text)
     _require_values(values, ("access_token", "refresh_token"))
@@ -141,128 +121,10 @@ def apply_115_openapi_payload(app_id: str) -> dict:
     return {"ready": True, "config_file": init.CONFIG_FILE, "token_file": init.TOKEN_FILE}
 
 
-def apply_tvdb_values(api_key: str, subscriber_pin: str = "", timeout: int = 15) -> dict:
-    api_key = _require_single_value(api_key, "TVDB API Key")
-    config = _load_config_file()
-    metadata = config.setdefault("metadata", {})
-    metadata["tvdb"] = {
-        "enable": True,
-        "base_url": "https://api4.thetvdb.com/v4",
-        "api_key": api_key,
-        "subscriber_pin": _single_line_value(subscriber_pin),
-        "timeout": int(timeout),
-    }
-    _write_config_file(config)
-    init.load_yaml_config()
-    return {"ready": True, "config_file": init.CONFIG_FILE}
-
-
-def apply_plex_values(base_url: str, token: str) -> dict:
-    base_url = _require_single_value(base_url, "Plex base_url").rstrip("/")
-    token = _require_single_value(token, "Plex token")
-    config = _load_config_file()
-    media = config.setdefault("media", {})
-    media["plex"] = {
-        "base_url": base_url,
-        "token": token,
-    }
-    _write_config_file(config)
-    init.load_yaml_config()
-    return {"ready": True, "config_file": init.CONFIG_FILE}
-
-
-def apply_prowlarr_values(
-    base_url: str,
-    api_key: str,
-    timeout: int = 150,
-    indexer_ids: str = "-2",
-    result_limit: int = 8,
-) -> dict:
-    base_url = _require_single_value(base_url, "Prowlarr 地址").rstrip("/")
-    api_key = _require_single_value(api_key, "Prowlarr API Key")
-    config = _load_config_file()
-    search = config.setdefault("search", {})
-    search["enable"] = True
-    prowlarr = search.setdefault("prowlarr", {})
-    prowlarr.update(
-        {
-            "base_url": base_url,
-            "api_key": api_key,
-            "timeout": int(timeout),
-            "indexer_ids": _single_line_value(indexer_ids) or "-2",
-            "result_limit": int(result_limit),
-        }
-    )
-    _write_config_file(config)
-    init.load_yaml_config()
-    return {"ready": True, "config_file": init.CONFIG_FILE}
-
-
-def apply_optional_token_payload(kind: str, text: str) -> dict:
-    values = parse_key_value_lines(text)
-
-    if kind == "tvdb":
-        _require_values(values, ("api_key",))
-        return apply_tvdb_values(
-            values["api_key"],
-            subscriber_pin=values.get("subscriber_pin", ""),
-            timeout=_int_value(values, "timeout", 15, "TVDB timeout"),
-        )
-    elif kind == "plex":
-        _require_values(values, ("base_url", "token"))
-        return apply_plex_values(values["base_url"], values["token"])
-    elif kind == "prowlarr":
-        _require_values(values, ("base_url", "api_key"))
-        return apply_prowlarr_values(
-            values["base_url"],
-            values["api_key"],
-            timeout=_int_value(values, "timeout", 150, "Prowlarr timeout"),
-            indexer_ids=values.get("indexer_ids", "-2"),
-            result_limit=_int_value(values, "result_limit", 8, "Prowlarr result_limit", unit="整数"),
-        )
-    else:
-        raise ValueError(f"未知配置类型: {kind}")
-
-
-def missing_optional_config_labels(config=None) -> list[str]:
-    config = config if isinstance(config, dict) else (init.bot_config or {})
-    labels = []
-    search = (config.get("search") or {})
-    prowlarr = (search.get("prowlarr") or {})
-    if (
-        not search.get("enable")
-        or not str(prowlarr.get("base_url") or "").strip()
-        or not str(prowlarr.get("api_key") or "").strip()
-    ):
-        labels.append("Prowlarr")
-
-    plex = ((config.get("media") or {}).get("plex") or {})
-    if not str(plex.get("base_url") or "").strip() or not str(plex.get("token") or "").strip():
-        labels.append("Plex")
-
-    tvdb = ((config.get("metadata") or {}).get("tvdb") or {})
-    if not tvdb.get("enable") or not str(tvdb.get("api_key") or "").strip():
-        labels.append("TVDB")
-    return labels
-
-
 def build_config_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("配置 115", callback_data="config_select:115")],
-            [InlineKeyboardButton("可选服务配置", callback_data="config_select:optional")],
-            [InlineKeyboardButton("取消", callback_data="config_cancel")],
-        ]
-    )
-
-
-def build_optional_config_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("配置 Prowlarr", callback_data="config_select:prowlarr")],
-            [InlineKeyboardButton("配置 Plex", callback_data="config_select:plex")],
-            [InlineKeyboardButton("配置 TVDB", callback_data="config_select:tvdb")],
-            [InlineKeyboardButton("返回上一级", callback_data="config_select:main")],
             [InlineKeyboardButton("取消", callback_data="config_cancel")],
         ]
     )
@@ -278,35 +140,8 @@ def build_115_mode_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def build_tvdb_pin_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("有 subscriber pin", callback_data="config_tvdb_pin:has")],
-            [InlineKeyboardButton("没有 subscriber pin", callback_data="config_tvdb_pin:none")],
-            [InlineKeyboardButton("取消", callback_data="config_cancel")],
-        ]
-    )
-
-
-def queue_optional_config_notice():
-    missing = missing_optional_config_labels()
-    if not missing:
-        return False
-    user_id = (init.bot_config or {}).get("allowed_user")
-    if not user_id:
-        return False
-    message = escape_markdown(
-        f"可选配置未完成：{'、'.join(missing)}。可使用 /config 配置，也可以取消忽略。",
-        version=2,
-    )
-    return add_task_to_queue(user_id, None, message=message, keyboard=build_config_keyboard())
-
-
 async def _show_config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit=False):
-    text = (
-        "请选择要配置的项目。\n"
-        "115 是启动必需配置；Prowlarr、Plex、TVDB 可在可选服务配置中补充。"
-    )
+    text = "请选择要配置的项目。\n115 是唯一必需配置。"
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=build_config_keyboard())
     else:
@@ -345,15 +180,6 @@ async def select_config_item(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     kind = data.split(":", 1)[1]
     context.user_data["config_kind"] = kind
-    if kind == "main":
-        return await _show_config_menu(update, context, edit=True)
-    if kind == "optional":
-        await query.edit_message_text(
-            "请选择可选服务配置项目。\n"
-            "Prowlarr、Plex、TVDB 可按需补充，发送 /q 可取消。",
-            reply_markup=build_optional_config_keyboard(),
-        )
-        return CONFIG_SELECT_OPTIONAL_SERVICE
     if kind == "115":
         await query.edit_message_text(
             "请选择 115 授权方式。\n\n"
@@ -361,26 +187,6 @@ async def select_config_item(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=build_115_mode_keyboard(),
         )
         return CONFIG_SELECT_115_MODE
-    if kind == "tvdb":
-        await query.edit_message_text(
-            "请发送 TVDB API Key。\n"
-            "发送 /q 可取消。"
-        )
-        return CONFIG_INPUT_TVDB_API
-    if kind == "plex":
-        await query.edit_message_text(
-            "请发送 Plex 地址，例如：\n"
-            "http://你的Plex地址:32400\n\n"
-            "发送 /q 可取消。"
-        )
-        return CONFIG_INPUT_PLEX_BASE_URL
-    if kind == "prowlarr":
-        await query.edit_message_text(
-            "请发送 Prowlarr 地址，例如：\n"
-            "http://你的Prowlarr地址:9696\n\n"
-            "发送 /q 可取消。"
-        )
-        return CONFIG_INPUT_PROWLARR_BASE_URL
 
     await query.edit_message_text("⚠️ 未知配置项。")
     return ConversationHandler.END
@@ -464,171 +270,6 @@ async def receive_115_refresh_token(update: Update, context: ContextTypes.DEFAUL
     return ConversationHandler.END
 
 
-async def receive_115_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        result = apply_115_token_payload(update.message.text or "")
-    except Exception as e:
-        await update.message.reply_text(f"❌ 115 Token 写入失败：{e}")
-        return CONFIG_INPUT_115_ACCESS
-
-    if result["ready"]:
-        await update.message.reply_text("✅ 115 Token 已写入并重新初始化完成。")
-    else:
-        await update.message.reply_text("⚠️ 115 Token 已写入，但 OpenAPI 初始化仍失败，请检查 Token 是否有效。")
-    return ConversationHandler.END
-
-
-async def receive_tvdb_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        api_key = _require_single_value(update.message.text or "", "TVDB API Key")
-    except Exception as e:
-        await update.message.reply_text(f"❌ TVDB API Key 无效：{e}")
-        return CONFIG_INPUT_TVDB_API
-
-    context.user_data["config_tvdb_api_key"] = api_key
-    await update.message.reply_text(
-        "已收到 TVDB API Key。\n\n"
-        "是否有 subscriber pin？",
-        reply_markup=build_tvdb_pin_keyboard(),
-    )
-    return CONFIG_SELECT_TVDB_PIN
-
-
-async def select_tvdb_pin_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if not init.check_user(update.effective_user.id):
-        await query.edit_message_text("⚠️ 当前账号无权使用此机器人。")
-        return ConversationHandler.END
-
-    api_key = context.user_data.get("config_tvdb_api_key")
-    if not api_key:
-        await query.edit_message_text("❌ 未找到上一步的 TVDB API Key，请重新使用 /config 开始配置。")
-        return ConversationHandler.END
-
-    data = query.data or ""
-    option = data.split(":", 1)[1] if ":" in data else ""
-    if option == "has":
-        await query.edit_message_text(
-            "请发送 TVDB subscriber pin。\n"
-            "发送 /q 可取消。"
-        )
-        return CONFIG_INPUT_TVDB_PIN
-
-    if option == "none":
-        try:
-            apply_tvdb_values(api_key, subscriber_pin="")
-        except Exception as e:
-            await query.edit_message_text(f"❌ TVDB 配置写入失败：{e}")
-            return CONFIG_SELECT_TVDB_PIN
-        context.user_data.pop("config_tvdb_api_key", None)
-        await query.edit_message_text("✅ TVDB 配置已写入。")
-        return ConversationHandler.END
-
-    await query.edit_message_text("⚠️ 未知 TVDB pin 选项。")
-    return ConversationHandler.END
-
-
-async def receive_tvdb_pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    api_key = context.user_data.get("config_tvdb_api_key")
-    if not api_key:
-        await update.message.reply_text("❌ 未找到上一步的 TVDB API Key，请重新使用 /config 开始配置。")
-        return ConversationHandler.END
-
-    try:
-        apply_tvdb_values(api_key, subscriber_pin=update.message.text or "")
-    except Exception as e:
-        await update.message.reply_text(f"❌ TVDB 配置写入失败：{e}")
-        return CONFIG_INPUT_TVDB_PIN
-
-    context.user_data.pop("config_tvdb_api_key", None)
-    await update.message.reply_text("✅ TVDB 配置已写入。")
-    return ConversationHandler.END
-
-
-async def receive_plex_base_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        base_url = _require_single_value(update.message.text or "", "Plex 地址").rstrip("/")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Plex 地址无效：{e}")
-        return CONFIG_INPUT_PLEX_BASE_URL
-
-    context.user_data["config_plex_base_url"] = base_url
-    await update.message.reply_text(
-        "已收到 Plex 地址。\n\n"
-        "第二步：请发送 Plex Token。\n"
-        "发送 /q 可取消。"
-    )
-    return CONFIG_INPUT_PLEX_TOKEN
-
-
-async def receive_plex_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    base_url = context.user_data.get("config_plex_base_url")
-    if not base_url:
-        await update.message.reply_text("❌ 未找到上一步的 Plex 地址，请重新使用 /config 开始配置。")
-        return ConversationHandler.END
-
-    try:
-        apply_plex_values(base_url, update.message.text or "")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Plex 配置写入失败：{e}")
-        return CONFIG_INPUT_PLEX_TOKEN
-
-    context.user_data.pop("config_plex_base_url", None)
-    await update.message.reply_text("✅ Plex 配置已写入。")
-    return ConversationHandler.END
-
-
-async def receive_prowlarr_base_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        base_url = _require_single_value(update.message.text or "", "Prowlarr 地址").rstrip("/")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Prowlarr 地址无效：{e}")
-        return CONFIG_INPUT_PROWLARR_BASE_URL
-
-    context.user_data["config_prowlarr_base_url"] = base_url
-    await update.message.reply_text(
-        "已收到 Prowlarr 地址。\n\n"
-        "第二步：请发送 Prowlarr API Key。\n"
-        "发送 /q 可取消。"
-    )
-    return CONFIG_INPUT_PROWLARR_API_KEY
-
-
-async def receive_prowlarr_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    base_url = context.user_data.get("config_prowlarr_base_url")
-    if not base_url:
-        await update.message.reply_text("❌ 未找到上一步的 Prowlarr 地址，请重新使用 /config 开始配置。")
-        return ConversationHandler.END
-
-    try:
-        apply_prowlarr_values(base_url, update.message.text or "")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Prowlarr 配置写入失败：{e}")
-        return CONFIG_INPUT_PROWLARR_API_KEY
-
-    context.user_data.pop("config_prowlarr_base_url", None)
-    await update.message.reply_text("✅ Prowlarr 配置已写入，搜索功能已启用。")
-    return ConversationHandler.END
-
-
-async def receive_optional_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kind = context.user_data.get("config_kind")
-    try:
-        apply_optional_token_payload(kind, update.message.text or "")
-    except Exception as e:
-        await update.message.reply_text(f"❌ 配置写入失败：{e}")
-        if kind == "tvdb":
-            return CONFIG_INPUT_TVDB_API
-        if kind == "prowlarr":
-            return CONFIG_INPUT_PROWLARR_BASE_URL
-        return CONFIG_INPUT_PLEX_BASE_URL
-
-    label = {"tvdb": "TVDB", "prowlarr": "Prowlarr"}.get(kind, "Plex")
-    await update.message.reply_text(f"✅ {label} 配置已写入。")
-    return ConversationHandler.END
-
-
 async def quit_config_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.edit_message_text("已取消配置。")
@@ -638,7 +279,7 @@ async def quit_config_conversation(update: Update, context: ContextTypes.DEFAULT
 
 
 def register_config_handlers(application):
-    top_level_pattern = r"^config_(select:(115|optional|prowlarr|plex|tvdb)|cancel)$"
+    top_level_pattern = r"^config_(select:115|cancel)$"
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", PTBUserWarning)
         config_handler = ConversationHandler(
@@ -648,12 +289,7 @@ def register_config_handlers(application):
                 CallbackQueryHandler(select_config_item, pattern=top_level_pattern),
             ],
             states={
-                CONFIG_SELECT: [
-                    CallbackQueryHandler(select_config_item, pattern=top_level_pattern)
-                ],
-                CONFIG_SELECT_OPTIONAL_SERVICE: [
-                    CallbackQueryHandler(select_config_item, pattern=r"^config_(select:(prowlarr|plex|tvdb|main)|cancel)$")
-                ],
+                CONFIG_SELECT: [CallbackQueryHandler(select_config_item, pattern=top_level_pattern)],
                 CONFIG_SELECT_115_MODE: [
                     CallbackQueryHandler(select_115_mode, pattern=r"^config_115_mode:(openapi|tokens)$"),
                     CallbackQueryHandler(select_config_item, pattern=r"^config_cancel$"),
@@ -661,16 +297,6 @@ def register_config_handlers(application):
                 CONFIG_INPUT_115_OPENAPI: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_115_openapi_id)],
                 CONFIG_INPUT_115_ACCESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_115_access_token)],
                 CONFIG_INPUT_115_REFRESH: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_115_refresh_token)],
-                CONFIG_INPUT_TVDB_API: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_tvdb_api_key)],
-                CONFIG_SELECT_TVDB_PIN: [
-                    CallbackQueryHandler(select_tvdb_pin_option, pattern=r"^config_tvdb_pin:(has|none)$"),
-                    CallbackQueryHandler(select_config_item, pattern=r"^config_cancel$"),
-                ],
-                CONFIG_INPUT_TVDB_PIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_tvdb_pin)],
-                CONFIG_INPUT_PROWLARR_BASE_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_prowlarr_base_url)],
-                CONFIG_INPUT_PROWLARR_API_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_prowlarr_api_key)],
-                CONFIG_INPUT_PLEX_BASE_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_plex_base_url)],
-                CONFIG_INPUT_PLEX_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_plex_token)],
             },
             fallbacks=[CommandHandler("q", quit_config_conversation)],
         )

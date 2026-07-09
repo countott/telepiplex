@@ -1,135 +1,21 @@
 # Telepiplex 配置模板；运行时配置路径为 /config/config.yaml。
 
-# 基础日志：可选 debug / info / warning / error / critical。
 log_level: info
 
-# Telegram Bot：bot_token 和 allowed_user 必填，用户客户端字段可留空。
 bot_token: "your_bot_token"
 allowed_user: 123456789
-bot_name: ""
-tg_api_id: ""
-tg_api_hash: ""
 
-# 115 授权：OpenAPI 填 115_app_id，直连 Token 填 access_token / refresh_token。
-115_app_id: null
-access_token: ""
-refresh_token: ""
+modules:
+  enabled: all
+  disabled: []
 
-# 115 OpenAPI：请求超时秒数。
-open115:
-  timeout: 30
-
-# 清理策略：下载完成后按体积清理广告小文件。
-clean_policy:
-  switch: "on"
-  less_than: 400M
-
-# 保存目录：path 是 115 保存目录，plex_library_id 可匹配 Plex 库。
+# 共享保存目录合同。115 和媒体搜索模块会复用该结构。
 category_folder:
   - name: 真人电影
     path: /真人电影
-    plex_library_id: "1"
   - name: 动画电影
     path: /动画电影
-    plex_library_id: "12"
   - name: 真人剧集
     path: /真人剧集
-    plex_library_id: "2"
   - name: 动画剧集
     path: /动画剧集
-    plex_library_id: "11"
-
-# 搜索与 Prowlarr：启用后使用 /search 和 /s 找片源。
-search:
-  enable: false
-
-  # Prowlarr 连接：/config 可写入 base_url / api_key 并启用搜索。
-  prowlarr:
-    base_url: "http://your-prowlarr:9696"
-    api_key: ""
-    timeout: 150
-    indexer_ids: "-2"
-    categories:
-      movie: 2000
-      tv: 5000
-    result_limit: 8
-
-  # 评分规则：keyword_scores / indexer_scores 可自定义正负分。
-  scoring:
-    prefer_resolution:
-      - "2160p"
-      - "1080p"
-    prefer_source:
-      - "WEB-DL"
-      - "BluRay"
-      - "Remux"
-    prefer_codec:
-      - "HEVC"
-      - "H.265"
-      - "x265"
-      - "H.264"
-      - "x264"
-    prefer_audio:
-      - "Atmos"
-      - "TrueHD"
-      - "DTS-HD"
-      - "EAC3"
-    reject_keywords:
-      - "CAM"
-      - "TS"
-      - "TC"
-      - "枪版"
-      - "抢先"
-      - "HC"
-      - "HDTC"
-      - "HDCAM"
-    keyword_scores:
-      "2160p": 35
-      "1080p": 25
-      "WEB-DL": 25
-      "BluRay": 22
-      "Remux": 24
-      "国配": 10
-      "中字": 8
-      "CAM": -90
-      "枪版": -90
-    indexer_scores:
-      "M-Team": 30
-      "TorrentLeech": 10
-
-# 媒体库整理：unorganized_path 接收缺少元数据或整理失败的文件。
-media:
-  unorganized_path: /未整理
-
-  # Plex：/config 可写入 base_url / token，plex_library_id 在保存目录中匹配。
-  plex:
-    base_url: ""
-    token: ""
-
-# 元数据：TVDB 用于剧集确认、播出校验、封面反馈和剧集重命名。
-metadata:
-  tvdb:
-    enable: false
-    base_url: "https://api4.thetvdb.com/v4"
-    api_key: ""
-    subscriber_pin: ""
-    timeout: 15
-
-# Aria2：可选离线下载后端。
-aria2:
-  enable: false
-  device_name: "Aria2"
-  host: "http://your-aria2-host"
-  port: 6800
-  rpc_secret: ""
-  download_path: "/Downloads"
-
-# AI 兜底：用于搜索推断、口误修正和少量元数据补全。
-ai:
-  api_url: ""
-  api_key: ""
-  model: ""
-  timeout: 60
-
-# 浏览器辅助：网页元数据抓取时的加载超时秒数。
-selenium_timeout: 60

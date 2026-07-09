@@ -1,0 +1,6 @@
+115_app_id: ""
+access_token: ""
+refresh_token: ""
+
+open115:
+  timeout: 30

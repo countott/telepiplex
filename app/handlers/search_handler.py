@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+from __future__ import annotations
+
 import asyncio
 import html
 import re
@@ -15,6 +17,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Con
 from telegram.warnings import PTBUserWarning
 
 import init
+from app.core.module_registry import DownloadProviderUnavailable, DownloadRequest
 from app.utils.directory_config import get_save_directories
 from app.adapters.prowlarr import (
     ProwlarrConfigError,
@@ -23,7 +26,6 @@ from app.adapters.prowlarr import (
     resolve_prowlarr_download_url,
     search_prowlarr,
 )
-from app.handlers.download_handler import download_executor, download_task
 from app.adapters.tvdb import (
     TvdbConfigError,
     TvdbRequestError,
@@ -1200,6 +1202,16 @@ def _owner_matches(task: dict, user_id: int) -> bool:
     return task.get("user_id") == user_id
 
 
+def _submit_download_request(context: ContextTypes.DEFAULT_TYPE, request: DownloadRequest):
+    application = getattr(context, "application", None)
+    registry = None
+    if application is not None:
+        registry = application.bot_data.get("telepiplex_registry")
+    if registry is None:
+        raise DownloadProviderUnavailable("未注册下载 provider，无法处理媒体搜索下载请求。")
+    return registry.dispatch_download(request)
+
+
 async def _reply_or_send(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, **kwargs):
     timeout_kwargs = {
         "connect_timeout": TELEGRAM_SEND_TIMEOUT_SECONDS,
@@ -1848,15 +1860,22 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
         selected_item = context.user_data.get("search_selected_item") or {}
         naming_metadata = _naming_metadata_for_selected_release(task, selected_item)
         metadata = _metadata_for_selected_release(task, selected_item)
-        await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到 115 离线下载，请稍后查看结果。")
-        download_executor.submit(
-            download_task,
-            link,
-            selected_path,
-            update.effective_user.id,
-            naming_metadata=naming_metadata,
-            metadata=metadata,
-        )
+        try:
+            _submit_download_request(
+                context,
+                DownloadRequest(
+                    link=link,
+                    selected_path=selected_path,
+                    user_id=update.effective_user.id,
+                    naming_metadata=naming_metadata,
+                    metadata=metadata,
+                    source="media-search",
+                ),
+            )
+        except DownloadProviderUnavailable as e:
+            await query.edit_message_text(f"❌ {e}")
+            return ConversationHandler.END
+        await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到已注册下载模块，请稍后查看结果。")
         pending_search_tasks.pop(task_id, None)
         return ConversationHandler.END
 
@@ -1892,15 +1911,22 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
     selected_item = context.user_data.get("search_selected_item") or {}
     naming_metadata = _naming_metadata_for_selected_release(task, selected_item)
     metadata = _metadata_for_selected_release(task, selected_item)
-    await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到 115 离线下载，请稍后查看结果。")
-    download_executor.submit(
-        download_task,
-        link,
-        selected_path,
-        update.effective_user.id,
-        naming_metadata=naming_metadata,
-        metadata=metadata,
-    )
+    try:
+        _submit_download_request(
+            context,
+            DownloadRequest(
+                link=link,
+                selected_path=selected_path,
+                user_id=update.effective_user.id,
+                naming_metadata=naming_metadata,
+                metadata=metadata,
+                source="media-search",
+            ),
+        )
+    except DownloadProviderUnavailable as e:
+        await query.edit_message_text(f"❌ {e}")
+        return ConversationHandler.END
+    await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到已注册下载模块，请稍后查看结果。")
     pending_search_tasks.pop(task_id, None)
     return ConversationHandler.END
 
