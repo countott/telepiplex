@@ -28,32 +28,28 @@ class BotRuntimeStartupTest(unittest.TestCase):
             "allowed_user": 472943219,
             "115_app_id": "app-id-secret",
             "access_token": "access-secret",
-            "search": {
-                "prowlarr": {
-                    "base_url": "http://prowlarr.example:9696",
-                    "api_key": "prowlarr-secret",
-                }
+            "open115": {
+                "base_url": "http://open115.example",
+                "api_key": "api-secret",
             },
-            "media": {"plex": {"token": "plex-secret"}},
             "nested": [{"refresh_token": "refresh-secret"}],
         }
 
         redacted = bot_module.sanitize_config_for_log(config)
         dumped = json.dumps(redacted, ensure_ascii=False)
 
-        self.assertIn("http://prowlarr.example:9696", dumped)
+        self.assertIn("http://open115.example", dumped)
         self.assertIn("472943219", dumped)
         for secret in (
             "telegram-secret",
             "app-id-secret",
             "access-secret",
-            "prowlarr-secret",
-            "plex-secret",
+            "api-secret",
             "refresh-secret",
         ):
             self.assertNotIn(secret, dumped)
         self.assertEqual(redacted["bot_token"], "***redacted***")
-        self.assertEqual(redacted["search"]["prowlarr"]["api_key"], "***redacted***")
+        self.assertEqual(redacted["open115"]["api_key"], "***redacted***")
 
     def test_start_treats_telegram_timeout_as_possible_delivery(self):
         bot_module = load_bot_module()
@@ -126,8 +122,6 @@ class BotRuntimeStartupTest(unittest.TestCase):
         original_config = bot_module.init.bot_config
         bot_module.init.bot_config = {
             "allowed_user": 472943219,
-            "metadata": {"tvdb": {"enable": False, "api_key": ""}},
-            "media": {"plex": {"base_url": "", "token": ""}},
         }
         self.addCleanup(setattr, bot_module.init, "bot_config", original_config)
         bot_module.add_task_to_queue = Mock(return_value=True)
@@ -137,15 +131,8 @@ class BotRuntimeStartupTest(unittest.TestCase):
         message = bot_module.add_task_to_queue.call_args.kwargs["message"]
         self.assertIn(r"\`access\_token\`", message)
         self.assertIn(r"config\.yaml", message)
-        self.assertIn("可选配置未完成：Prowlarr、Plex、TVDB", message)
+        self.assertIn("离线投递会暂时拒绝", message)
         self.assertNotIn("config.yaml`", message)
-
-    def test_optional_config_notice_is_skipped_when_115_init_failed(self):
-        bot_module = load_bot_module()
-        bot_module.queue_optional_config_notice = Mock(return_value=True)
-
-        self.assertFalse(bot_module.queue_startup_optional_config_notice(openapi_ready=False))
-        bot_module.queue_optional_config_notice.assert_not_called()
 
     def test_run_application_polling_starts_application_before_updater_polling(self):
         bot_module = load_bot_module()
