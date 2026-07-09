@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+from __future__ import annotations
+
 from collections import Counter
 import hashlib
 from html import unescape

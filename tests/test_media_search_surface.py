@@ -1,0 +1,74 @@
+import inspect
+import re
+import sys
+import types
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "app"))
+sys.modules.setdefault("yaml", types.SimpleNamespace(safe_load=lambda stream: {}))
+
+
+class MediaSearchSurfaceTest(unittest.TestCase):
+    def test_bot_exposes_media_search_commands_only(self):
+        source = (ROOT / "app" / "115bot.py").read_text(encoding="utf-8")
+        commands = re.findall(r'BotCommand\("([^"]+)"', source)
+        self.assertEqual(commands, ["start", "reload", "search", "s"])
+
+        for symbol in (
+            "register_auth_handlers",
+            "register_config_handlers",
+            "register_download_handlers",
+            "register_video_handlers",
+            "register_offline_task_handlers",
+            "register_aria2_handlers",
+            "initialize_115open",
+            "start_scheduler_in_thread",
+        ):
+            self.assertNotIn(symbol, source)
+
+    def test_business_modules_outside_media_search_are_absent(self):
+        for path in (
+            ROOT / "app" / "core" / "open_115.py",
+            ROOT / "app" / "handlers" / "auth_handler.py",
+            ROOT / "app" / "handlers" / "config_handler.py",
+            ROOT / "app" / "handlers" / "offline_task_handler.py",
+            ROOT / "app" / "handlers" / "video_handler.py",
+            ROOT / "app" / "utils" / "aria2.py",
+            ROOT / "app" / "utils" / "media_naming.py",
+            ROOT / "app" / "utils" / "tvdb_rename.py",
+        ):
+            self.assertFalse(path.exists(), str(path))
+
+    def test_download_task_contract_is_handoff_only(self):
+        from app.handlers.download_handler import download_task
+
+        signature = inspect.signature(download_task)
+        self.assertEqual(
+            list(signature.parameters),
+            ["link", "selected_path", "user_id", "naming_metadata", "metadata"],
+        )
+
+    def test_config_exposes_search_not_delivery_or_organization(self):
+        for config_path in (ROOT / "config" / "config.yaml.example", ROOT / "app" / "config.yaml.example"):
+            source = config_path.read_text(encoding="utf-8")
+            self.assertIn("search:", source)
+            self.assertIn("prowlarr:", source)
+            self.assertIn("metadata:", source)
+            self.assertIn("ai:", source)
+            for term in (
+                "115_app_id",
+                "access_token",
+                "refresh_token",
+                "media:",
+                "plex:",
+                "aria2:",
+            ):
+                self.assertNotIn(term, source)
+
+
+if __name__ == "__main__":
+    unittest.main()

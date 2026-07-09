@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+from __future__ import annotations
+
 
 def _clean_text(value) -> str:
     return " ".join(str(value or "").replace("\xa0", " ").split())
