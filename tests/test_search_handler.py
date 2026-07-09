@@ -13,10 +13,10 @@ import init
 from app.handlers.search_handler import (
     METADATA_URL_PATTERN,
     SEARCH_CONFIRM_ENTRY_SCOPE,
-    SEARCH_RESOLVE_METADATA,
     SEARCH_SELECT_RESULT,
     SEARCH_SELECT_SUB_CATEGORY,
     SEARCH_TASK_TTL_SECONDS,
+    _backfill_missing_chinese_title,
     _clean_prowlarr_query,
     _extract_douban_metadata,
     _extract_douban_subject_urls,
@@ -25,8 +25,11 @@ from app.handlers.search_handler import (
     _metadata_for_selected_release,
     _metadata_matches_plain_query,
     _resolve_entry_candidates,
-    _plex_metadata_for_selected_release,
+    _naming_metadata_for_selected_release,
     _resolve_search_request,
+    _send_confirmed_candidate_search,
+    _send_single_series_info_card,
+    _send_search_results,
     build_results_text,
     confirm_entry_scope,
     format_size,
@@ -34,7 +37,6 @@ from app.handlers.search_handler import (
     parse_douban_title,
     pending_entry_confirmations,
     pending_search_tasks,
-    resolve_plain_search_metadata,
     search_command,
     _search_prowlarr_with_progress,
     select_search_result,
@@ -119,7 +121,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
 
         self.assertEqual(request["query"], "The Grand Budapest Hotel 2014")
         self.assertEqual(
-            request["plex_metadata"],
+            request["naming_metadata"],
             {
                 "source": "douban",
                 "chinese_title": "布达佩斯大饭店",
@@ -188,7 +190,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         request = asyncio.run(_resolve_search_request("https://www.imdb.com/title/tt32252772/?ref_=cht_all_t_20"))
 
         self.assertEqual(request["query"], "Dexter Original Sin 2024")
-        self.assertEqual(request["plex_metadata"]["chinese_title"], "嗜血法医：源罪")
+        self.assertEqual(request["naming_metadata"]["chinese_title"], "嗜血法医：源罪")
         self.assertEqual(mock_get.call_args_list[0].args[0], "https://v3.sg.media-imdb.com/suggestion/t/tt32252772.json")
         self.assertEqual(mock_get.call_args_list[1].args[0], "https://www.douban.com/search")
         self.assertEqual(mock_get.call_args_list[1].kwargs["params"], {"cat": "1002", "q": "Dexter Original Sin 2024"})
@@ -209,7 +211,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         request = asyncio.run(_resolve_search_request("https://www.imdb.com/title/tt0773262/?ref_=cht_all_int_t_20"))
 
         self.assertEqual(request["query"], "Dexter 2006")
-        self.assertIsNone(request["plex_metadata"])
+        self.assertIsNone(request["naming_metadata"])
         self.assertEqual(mock_get.call_args_list[0].args[0], "https://v3.sg.media-imdb.com/suggestion/t/tt0773262.json")
         self.assertEqual(mock_get.call_args_list[1].args[0], "https://www.douban.com/search")
 
@@ -231,7 +233,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         request = asyncio.run(_resolve_search_request("https://thetvdb.com/series/breaking-bad"))
 
         self.assertEqual(request["query"], "Breaking Bad 2008")
-        self.assertEqual(request["plex_metadata"]["chinese_title"], "绝命毒师")
+        self.assertEqual(request["naming_metadata"]["chinese_title"], "绝命毒师")
         self.assertEqual(mock_get.call_args_list[1].kwargs["params"], {"cat": "1002", "q": "Breaking Bad 2008"})
 
     @patch("app.handlers.search_handler.requests.get")
@@ -260,20 +262,20 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         request = asyncio.run(_resolve_search_request("https://www.themoviedb.org/movie/120-the-grand-budapest-hotel"))
 
         self.assertEqual(request["query"], "The Grand Budapest Hotel 2014")
-        self.assertEqual(request["plex_metadata"]["chinese_title"], "布达佩斯大饭店")
+        self.assertEqual(request["naming_metadata"]["chinese_title"], "布达佩斯大饭店")
         self.assertEqual(mock_get.call_args_list[1].kwargs["params"], {"cat": "1002", "q": "The Grand Budapest Hotel 2014"})
 
-    def test_plex_metadata_for_selected_release_adds_release_title_without_mutating_task(self):
+    def test_naming_metadata_for_selected_release_adds_release_title_without_mutating_task(self):
         task_metadata = {
             "source": "douban",
             "chinese_title": "绝命毒师",
             "english_title": "Breaking Bad",
             "year": "2008",
         }
-        task = {"plex_metadata": task_metadata}
+        task = {"naming_metadata": task_metadata}
         selected_item = {"title": "Breaking.Bad.1x02.1080p.WEB-DL"}
 
-        metadata = _plex_metadata_for_selected_release(task, selected_item)
+        metadata = _naming_metadata_for_selected_release(task, selected_item)
 
         self.assertEqual(metadata["release_title"], "Breaking.Bad.1x02.1080p.WEB-DL")
         self.assertNotIn("release_title", task_metadata)
@@ -309,7 +311,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
             "user_id": 472943219,
             "query": "Dexter 2006",
             "results": [],
-            "plex_metadata": {
+            "naming_metadata": {
                 "source": "douban",
                 "chinese_title": "嗜血法医",
                 "english_title": "Dexter",
@@ -338,6 +340,13 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         asyncio.run(select_search_sub_category(update, context))
 
         submit_mock.assert_called_once()
+        edit_messages = [
+            call.args[0]
+            for call in update.callback_query.edit_message_text.await_args_list
+            if call.args
+        ]
+        self.assertIn("正在解析下载链接", edit_messages[0])
+        self.assertIn("已加入下载队列", edit_messages[-1])
         self.assertEqual(submit_mock.call_args.args[2], "/真人剧集")
         self.assertEqual(submit_mock.call_args.kwargs["metadata"]["release_title"], "Dexter.S01.1080p.BluRay-GROUP")
         self.assertEqual(submit_mock.call_args.kwargs["metadata"]["external_ids"], {"imdb": "tt0773262"})
@@ -419,7 +428,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
 
         self.assertEqual(request["query"], "The Grand Budapest Hotel 2014")
         self.assertEqual(
-            request["plex_metadata"],
+            request["naming_metadata"],
             {
                 "source": "douban",
                 "chinese_title": "布达佩斯大饭店",
@@ -541,7 +550,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
                 "title": "The Grand Budapest Hotel",
                 "chinese_title": "布达佩斯大饭店",
                 "year": "2014",
-                "plex_metadata": {"source": "douban", "chinese_title": "布达佩斯大饭店"},
+                "naming_metadata": {"source": "douban", "chinese_title": "布达佩斯大饭店"},
             },
         }
         send_results_mock.return_value = SEARCH_SELECT_RESULT
@@ -561,7 +570,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
             update,
             context,
             "The Grand Budapest Hotel 2014",
-            plex_metadata={"source": "douban", "chinese_title": "布达佩斯大饭店"},
+            naming_metadata={"source": "douban", "chinese_title": "布达佩斯大饭店"},
             metadata={
                 "source": "confirmed",
                 "media_type": "movie",
@@ -587,8 +596,10 @@ class SearchHandlerHelpersTest(unittest.TestCase):
                     "media_type": "series",
                     "scope": "episode",
                     "title": "Breaking Bad",
-                    "chinese_title": "绝命毒师",
                     "year": "2008",
+                    "external_ids": {"tvdb": "81189"},
+                    "cover_url": "https://artworks.thetvdb.com/banners/series/81189/posters/main.jpg",
+                    "chinese_title": "绝命毒师",
                     "season_number": 2,
                     "episode_number": 5,
                     "recommended": True,
@@ -599,6 +610,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         update = Mock()
         update.message.from_user.id = 472943219
         update.message.reply_text = AsyncMock()
+        update.message.reply_photo = AsyncMock()
         context = Mock()
         context.args = ["绝命毒师", "S02E05"]
         context.user_data = {}
@@ -606,18 +618,48 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         state = asyncio.run(search_command(update, context))
 
         self.assertEqual(state, SEARCH_CONFIRM_ENTRY_SCOPE)
+        update.message.reply_photo.assert_awaited_once()
+        self.assertEqual(
+            update.message.reply_photo.await_args.kwargs["photo"],
+            "https://artworks.thetvdb.com/banners/series/81189/posters/main.jpg",
+        )
+        self.assertIn("Breaking Bad", update.message.reply_photo.await_args.kwargs["caption"])
+        self.assertIn("TVDB：`81189`", update.message.reply_photo.await_args.kwargs["caption"])
         update.message.reply_text.assert_awaited_once()
         self.assertIn("请确认", update.message.reply_text.await_args.args[0])
         button_text = update.message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard[0][0].text
         self.assertIn("推荐", button_text)
         self.assertIn("S02E05", button_text)
 
+    def test_single_series_info_card_failure_does_not_block_confirmation_flow(self):
+        init.logger = Mock()
+        update = Mock()
+        update.message.reply_photo = AsyncMock(side_effect=RuntimeError("bad photo"))
+
+        asyncio.run(
+            _send_single_series_info_card(
+                update,
+                [
+                    {
+                        "media_type": "series",
+                        "title": "Breaking Bad",
+                        "year": "2008",
+                        "external_ids": {"tvdb": "81189"},
+                        "cover_url": "https://example.invalid/poster.jpg",
+                    }
+                ],
+            )
+        )
+
+        update.message.reply_photo.assert_awaited_once()
+        init.logger.warn.assert_called_once()
+
     @patch("app.handlers.search_handler._lookup_tvdb_entries")
     @patch("app.handlers.search_handler._resolve_search_request", new_callable=AsyncMock)
     def test_entry_resolution_uses_ai_normalized_episode_scope(self, resolve_mock, tvdb_mock):
         resolve_mock.return_value = {
             "query": "Rick and Morty S09E07",
-            "plex_metadata": None,
+            "naming_metadata": None,
             "metadata": {
                 "source": "ai_verified",
                 "media_type": "series",
@@ -651,6 +693,187 @@ class SearchHandlerHelpersTest(unittest.TestCase):
         self.assertEqual(candidate["season_number"], 9)
         self.assertEqual(candidate["episode_number"], 7)
 
+    @patch("app.handlers.search_handler._lookup_tvdb_entries")
+    @patch("app.handlers.search_handler._resolve_search_request", new_callable=AsyncMock)
+    def test_entry_resolution_reports_tvdb_episode_lookup_unavailable(self, resolve_mock, tvdb_mock):
+        resolve_mock.return_value = {
+            "query": "Rick and Morty S09E07",
+            "naming_metadata": None,
+            "metadata": {
+                "source": "confirmed",
+                "media_type": "series",
+                "english_title": "Rick and Morty",
+                "query": "Rick and Morty S09E07",
+                "selected_scope": "episode",
+                "season_number": 9,
+                "episode_number": 7,
+                "external_ids": {"tvdb": "275274"},
+            },
+        }
+        tvdb_mock.return_value = ([], {"275274": None})
+
+        resolution = asyncio.run(_resolve_entry_candidates("Rick and Morty S09E07"))
+
+        self.assertEqual(resolution["status"], "blocked_tvdb_unavailable")
+        self.assertIn("TVDB 剧集列表暂时不可用", resolution["message"])
+        self.assertNotIn("尚未播出或不存在", resolution["message"])
+
+    @patch("app.handlers.search_handler._lookup_tvdb_entries")
+    @patch("app.handlers.search_handler._resolve_search_request", new_callable=AsyncMock)
+    def test_entry_resolution_reports_unknown_air_date_separately(self, resolve_mock, tvdb_mock):
+        resolve_mock.return_value = {
+            "query": "Rick and Morty S09E07",
+            "naming_metadata": None,
+            "metadata": {
+                "source": "confirmed",
+                "media_type": "series",
+                "english_title": "Rick and Morty",
+                "query": "Rick and Morty S09E07",
+                "selected_scope": "episode",
+                "season_number": 9,
+                "episode_number": 7,
+                "external_ids": {"tvdb": "275274"},
+            },
+        }
+        tvdb_mock.return_value = (
+            [],
+            {
+                "275274": [
+                    {
+                        "season_number": 9,
+                        "episode_number": 7,
+                        "aired": "",
+                    }
+                ]
+            },
+        )
+
+        resolution = asyncio.run(_resolve_entry_candidates("Rick and Morty S09E07"))
+
+        self.assertEqual(resolution["status"], "blocked_air_date_unknown")
+        self.assertIn("缺少播出日期", resolution["message"])
+        self.assertNotIn("尚未播出或不存在", resolution["message"])
+
+    @patch("app.handlers.search_handler._lookup_tvdb_entries")
+    @patch("app.handlers.search_handler.normalize_search_query_with_ai")
+    @patch("app.handlers.search_handler._resolve_search_request", new_callable=AsyncMock)
+    def test_complex_episode_query_uses_tvdb_before_ai_fallback(
+        self,
+        resolve_mock,
+        normalize_mock,
+        tvdb_mock,
+    ):
+        resolve_mock.return_value = None
+        normalize_mock.return_value = {
+            "status": "ok",
+            "lookup_candidates": [
+                {
+                    "query": "Rick and Morty Season 9 Episode 7",
+                    "title": "Rick and Morty",
+                    "scope": "episode",
+                    "season_number": 9,
+                    "episode_number": 7,
+                }
+            ],
+            "warnings": [],
+        }
+        tvdb_mock.return_value = (
+            [
+                {
+                    "media_type": "series",
+                    "scope": "whole_series",
+                    "title": "Rick and Morty",
+                    "english_title": "Rick and Morty",
+                    "year": "2013",
+                    "external_ids": {"tvdb": "275274"},
+                    "source": "tvdb",
+                }
+            ],
+            {
+                "275274": [
+                    {
+                        "season_number": 9,
+                        "episode_number": 7,
+                        "aired": "2026-07-06",
+                    }
+                ]
+            },
+        )
+
+        resolution = asyncio.run(_resolve_entry_candidates("Rick and morty s09e07"))
+
+        self.assertEqual(resolution["status"], "needs_confirmation")
+        resolve_mock.assert_awaited_once_with("Rick and morty s09e07", allow_ai_fallback=False)
+        normalize_mock.assert_not_called()
+        tvdb_intent = tvdb_mock.call_args.args[0]
+        self.assertEqual(tvdb_intent["title"], "Rick and morty")
+        self.assertEqual(resolution["candidates"][0]["title"], "Rick and Morty")
+        self.assertEqual(resolution["candidates"][0]["season_number"], 9)
+        self.assertEqual(resolution["candidates"][0]["episode_number"], 7)
+
+    @patch("app.handlers.search_handler._lookup_tvdb_entries")
+    @patch("app.handlers.search_handler.normalize_search_query_with_ai")
+    @patch("app.handlers.search_handler._resolve_search_request", new_callable=AsyncMock)
+    def test_ai_fallback_candidate_reenters_douban_and_tvdb_lookup_chain(
+        self,
+        resolve_mock,
+        normalize_mock,
+        tvdb_mock,
+    ):
+        resolve_mock.side_effect = [None, None]
+        normalize_mock.return_value = {
+            "status": "ok",
+            "lookup_candidates": [
+                {
+                    "query": "Rick and Morty Season 8 Episode 3",
+                    "title": "Rick and Morty",
+                    "scope": "episode",
+                    "season_number": 8,
+                    "episode_number": 3,
+                }
+            ],
+            "warnings": [],
+        }
+        tvdb_mock.side_effect = [
+            ([], {}),
+            (
+                [
+                    {
+                        "media_type": "series",
+                        "scope": "whole_series",
+                        "title": "Rick and Morty",
+                        "english_title": "Rick and Morty",
+                        "year": "2013",
+                        "external_ids": {"tvdb": "275274"},
+                        "source": "tvdb",
+                    }
+                ],
+                {
+                    "275274": [
+                        {
+                            "season_number": 8,
+                            "episode_number": 3,
+                            "aired": "2025-06-08",
+                        }
+                    ]
+                },
+            ),
+        ]
+
+        resolution = asyncio.run(_resolve_entry_candidates("瑞克和莫迪season8e03"))
+
+        self.assertEqual(resolution["status"], "needs_confirmation")
+        self.assertEqual(resolve_mock.await_args_list[0].args[0], "瑞克和莫迪season8e03")
+        self.assertEqual(resolve_mock.await_args_list[0].kwargs, {"allow_ai_fallback": False})
+        self.assertEqual(resolve_mock.await_args_list[1].args[0], "Rick and Morty Season 8")
+        self.assertEqual(resolve_mock.await_args_list[1].kwargs, {"allow_ai_fallback": False})
+        normalize_mock.assert_called_once_with("瑞克和莫迪season8e03")
+        tvdb_intent = tvdb_mock.call_args_list[1].args[0]
+        self.assertEqual(tvdb_intent["title"], "Rick and Morty")
+        self.assertEqual(tvdb_intent["scope"], "episode")
+        self.assertEqual(resolution["candidates"][0]["season_number"], 8)
+        self.assertEqual(resolution["candidates"][0]["episode_number"], 3)
+
     @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
     def test_confirm_entry_scope_generates_episode_query(self, send_results_mock):
         send_results_mock.return_value = SEARCH_SELECT_RESULT
@@ -683,9 +906,131 @@ class SearchHandlerHelpersTest(unittest.TestCase):
             update,
             context,
             "Breaking Bad S02E05",
-            plex_metadata=None,
+            naming_metadata={
+                "source": "confirmed",
+                "media_type": "series",
+                "chinese_title": "",
+                "english_title": "Breaking Bad",
+                "year": "",
+            },
             metadata={"media_type": "series", "season_number": 2, "episode_number": 5},
         )
+
+    @patch("app.handlers.search_handler.get_prowlarr_indexer_summary", return_value={})
+    @patch("app.handlers.search_handler.rank_releases")
+    @patch("app.handlers.search_handler._search_prowlarr_with_progress", new_callable=AsyncMock)
+    @patch("app.handlers.search_handler._fetch_douban_metadata_for_external_title")
+    def test_search_results_backfill_missing_chinese_title_after_prowlarr_results(
+        self,
+        douban_lookup_mock,
+        prowlarr_mock,
+        rank_mock,
+        indexer_mock,
+    ):
+        douban_lookup_mock.return_value = (
+            {
+                "source": "douban",
+                "chinese_title": "瑞克和莫蒂 第九季",
+                "english_title": "Rick and Morty Season 9",
+                "year": "2026",
+            },
+            "Rick and Morty Season 9 2026",
+        )
+        prowlarr_mock.return_value = [{"title": "Rick.and.Morty.S09E07.1080p", "magnet_url": "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567"}]
+        rank_mock.return_value = prowlarr_mock.return_value
+        naming_metadata = {
+            "media_type": "series",
+            "source": "tvdb",
+            "english_title": "Rick and Morty",
+            "chinese_title": "",
+            "year": "2026",
+        }
+        metadata = {
+            "source": "confirmed",
+            "media_type": "series",
+            "english_title": "Rick and Morty",
+            "chinese_title": "",
+            "year": "2026",
+            "external_ids": {"tvdb": "275274"},
+            "selected_scope": "episode",
+            "season_number": 9,
+            "episode_number": 7,
+        }
+        update = Mock()
+        update.callback_query = None
+        update.message.reply_text = AsyncMock()
+        update.effective_user.id = 472943219
+        update.effective_chat.id = 472943219
+        context = Mock()
+        context.bot.send_message = AsyncMock()
+
+        state = asyncio.run(
+            _send_search_results(
+                update,
+                context,
+                "Rick and Morty S09E07",
+                naming_metadata=naming_metadata,
+                metadata=metadata,
+            )
+        )
+
+        self.assertEqual(state, SEARCH_SELECT_RESULT)
+        douban_lookup_mock.assert_called_once_with("Rick and Morty", "2026")
+        task = next(iter(pending_search_tasks.values()))
+        self.assertEqual(task["naming_metadata"]["chinese_title"], "瑞克和莫蒂 第九季")
+        self.assertEqual(task["naming_metadata"]["english_title"], "Rick and Morty")
+        self.assertEqual(task["metadata"]["external_ids"], {"tvdb": "275274"})
+        self.assertEqual(task["metadata"]["season_number"], 9)
+        self.assertEqual(task["metadata"]["chinese_title"], "瑞克和莫蒂 第九季")
+
+    @patch("app.handlers.search_handler.infer_metadata_backfill_with_ai", create=True)
+    @patch("app.handlers.search_handler._fetch_douban_metadata_for_external_title")
+    def test_missing_chinese_title_backfill_uses_ai_when_douban_misses(
+        self,
+        douban_lookup_mock,
+        ai_backfill_mock,
+    ):
+        douban_lookup_mock.return_value = (None, "Rick and Morty 2026")
+        ai_backfill_mock.return_value = {
+            "source": "ai_metadata_backfill",
+            "media_type": "series",
+            "chinese_title": "瑞克和莫蒂 第九季",
+            "english_title": "Rick and Morty",
+            "year": "2026",
+            "external_ids": {"tvdb": "275274"},
+        }
+        naming_metadata = {
+            "media_type": "series",
+            "source": "tvdb",
+            "english_title": "Rick and Morty",
+            "chinese_title": "",
+            "year": "2026",
+        }
+        metadata = {
+            "source": "confirmed",
+            "media_type": "series",
+            "english_title": "Rick and Morty",
+            "chinese_title": "",
+            "year": "2026",
+            "external_ids": {"tvdb": "275274"},
+            "selected_scope": "episode",
+            "season_number": 9,
+            "episode_number": 7,
+        }
+
+        backfilled_naming, backfilled_metadata = asyncio.run(
+            _backfill_missing_chinese_title(naming_metadata, metadata)
+        )
+
+        ai_context = ai_backfill_mock.call_args.args[0]
+        self.assertEqual(ai_context["english_title"], "Rick and Morty")
+        self.assertEqual(ai_context["year"], "2026")
+        self.assertEqual(ai_context["external_ids"], {"tvdb": "275274"})
+        self.assertEqual(backfilled_naming["chinese_title"], "瑞克和莫蒂 第九季")
+        self.assertEqual(backfilled_naming["english_title"], "Rick and Morty")
+        self.assertEqual(backfilled_metadata["chinese_title"], "瑞克和莫蒂 第九季")
+        self.assertEqual(backfilled_metadata["external_ids"], {"tvdb": "275274"})
+        self.assertEqual(backfilled_metadata["evidence"][-1]["source"], "ai_metadata_backfill")
 
     @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
     def test_confirm_entry_scope_uses_english_original_title_for_movie_query(self, send_results_mock):
@@ -720,7 +1065,7 @@ class SearchHandlerHelpersTest(unittest.TestCase):
             update,
             context,
             "Transformers Age of Extinction 2014",
-            plex_metadata={
+            naming_metadata={
                 "source": "confirmed",
                 "media_type": "movie",
                 "chinese_title": "变形金刚4：绝迹重生",
@@ -728,62 +1073,6 @@ class SearchHandlerHelpersTest(unittest.TestCase):
                 "year": "2014",
             },
             metadata={"media_type": "movie", "year": "2014"},
-        )
-
-    @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
-    def test_plain_metadata_reply_uses_chinese_name_and_original_query(self, send_results_mock):
-        init.check_user = Mock(return_value=True)
-        send_results_mock.return_value = SEARCH_SELECT_RESULT
-        update = Mock()
-        update.message.from_user.id = 472943219
-        update.message.text = "随心所欲"
-        context = Mock()
-        context.user_data = {"pending_plain_search_query": "Vivre sa vie Film en douze tableaux"}
-
-        state = asyncio.run(resolve_plain_search_metadata(update, context))
-
-        self.assertEqual(state, SEARCH_SELECT_RESULT)
-        self.assertNotIn("pending_plain_search_query", context.user_data)
-        send_results_mock.assert_awaited_once_with(
-            update,
-            context,
-            "Vivre sa vie Film en douze tableaux",
-            plex_metadata={
-                "source": "search_query",
-                "chinese_title": "随心所欲",
-            },
-        )
-
-    @patch("app.handlers.search_handler._send_search_results", new_callable=AsyncMock)
-    @patch("app.handlers.search_handler._resolve_search_request", new_callable=AsyncMock)
-    def test_plain_metadata_reply_accepts_douban_link(self, resolve_mock, send_results_mock):
-        init.check_user = Mock(return_value=True)
-        send_results_mock.return_value = SEARCH_SELECT_RESULT
-        metadata = {
-            "source": "douban",
-            "chinese_title": "随心所欲",
-            "english_title": "Vivre sa vie",
-            "year": "1962",
-        }
-        resolve_mock.return_value = {
-            "query": "Vivre sa vie 1962",
-            "plex_metadata": metadata,
-        }
-        update = Mock()
-        update.message.from_user.id = 472943219
-        update.message.text = "https://movie.douban.com/subject/1293374/"
-        context = Mock()
-        context.user_data = {"pending_plain_search_query": "Vivre sa vie Film en douze tableaux"}
-
-        state = asyncio.run(resolve_plain_search_metadata(update, context))
-
-        self.assertEqual(state, SEARCH_SELECT_RESULT)
-        self.assertNotIn("pending_plain_search_query", context.user_data)
-        send_results_mock.assert_awaited_once_with(
-            update,
-            context,
-            "Vivre sa vie 1962",
-            plex_metadata=metadata,
         )
 
     def test_plain_query_metadata_match_ignores_case_punctuation_and_year(self):
@@ -800,14 +1089,14 @@ class SearchHandlerHelpersTest(unittest.TestCase):
     def test_plain_search_metadata_for_selected_release_uses_candidate_title(self):
         task = {
             "query": "布达佩斯大饭店",
-            "plex_metadata": {
+            "naming_metadata": {
                 "source": "search_query",
                 "chinese_title": "布达佩斯大饭店",
             },
         }
         selected_item = {"title": "The.Grand.Budapest.Hotel.2014.1080p.BluRay.x265-GROUP"}
 
-        metadata = _plex_metadata_for_selected_release(task, selected_item)
+        metadata = _naming_metadata_for_selected_release(task, selected_item)
 
         self.assertEqual(metadata["source"], "search_query")
         self.assertEqual(metadata["chinese_title"], "布达佩斯大饭店")

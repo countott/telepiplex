@@ -100,7 +100,7 @@ class ProwlarrAdapterTest(unittest.TestCase):
             search_prowlarr("movie")
 
     @patch("app.adapters.prowlarr.requests.get")
-    def test_search_prowlarr_uses_minimum_timeout_for_slow_indexers(self, get_mock):
+    def test_search_prowlarr_uses_configured_timeout(self, get_mock):
         init.bot_config["search"]["prowlarr"]["timeout"] = 80
         response = Mock()
         response.raise_for_status.return_value = None
@@ -109,14 +109,26 @@ class ProwlarrAdapterTest(unittest.TestCase):
 
         search_prowlarr("Transformers: Dark of the Moon 2011")
 
-        self.assertEqual(get_mock.call_args.kwargs["timeout"], 180)
+        self.assertEqual(get_mock.call_args.kwargs["timeout"], 80)
+
+    @patch("app.adapters.prowlarr.requests.get")
+    def test_search_prowlarr_defaults_timeout_to_150_when_not_configured(self, get_mock):
+        init.bot_config["search"]["prowlarr"].pop("timeout")
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = []
+        get_mock.return_value = response
+
+        search_prowlarr("Transformers: Dark of the Moon 2011")
+
+        self.assertEqual(get_mock.call_args.kwargs["timeout"], 150)
 
     @patch("app.adapters.prowlarr.requests.get")
     def test_search_prowlarr_reports_timeout_with_wait_budget(self, get_mock):
         init.bot_config["search"]["prowlarr"]["timeout"] = 80
         get_mock.side_effect = requests.exceptions.Timeout("read timed out")
 
-        with self.assertRaisesRegex(ProwlarrRequestError, "Prowlarr 查询超时.*180"):
+        with self.assertRaisesRegex(ProwlarrRequestError, "Prowlarr 查询超时.*80"):
             search_prowlarr("movie")
 
     @patch("app.adapters.prowlarr.requests.get")
@@ -182,6 +194,26 @@ class ProwlarrAdapterTest(unittest.TestCase):
 
         self.assertEqual(link, f"magnet:?xt=urn:btih:{expected_hash}&dn=movie.mkv")
         get_mock.assert_called_once_with("https://prowlarr.example/download?id=1", timeout=20, allow_redirects=False)
+
+    @patch("app.adapters.prowlarr.requests.get")
+    def test_resolve_prowlarr_download_url_defaults_timeout_to_search_default(self, get_mock):
+        init.bot_config["search"]["prowlarr"].pop("timeout")
+        info = b"d6:lengthi123e4:name9:movie.mkve"
+        torrent = b"d8:announce14:http://tracker4:info" + info + b"e"
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.content = torrent
+        get_mock.return_value = response
+
+        resolve_prowlarr_download_url(
+            {
+                "title": "Fallback Title",
+                "download_url": "https://prowlarr.example/download?id=1",
+                "protocol": "torrent",
+            }
+        )
+
+        get_mock.assert_called_once_with("https://prowlarr.example/download?id=1", timeout=150, allow_redirects=False)
 
     @patch("app.adapters.prowlarr.requests.get")
     def test_resolve_prowlarr_download_url_returns_magnet_redirect_from_prowlarr_download(self, get_mock):

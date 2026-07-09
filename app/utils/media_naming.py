@@ -16,7 +16,7 @@ QUALITY_START_PATTERN = re.compile(
 
 
 @dataclass(frozen=True)
-class PlexNamingPlan:
+class MediaNamingPlan:
     chinese_folder: str
     english_folder: str
     target_relative_dir: str
@@ -102,7 +102,7 @@ def infer_english_title_from_release(release_title: str) -> str:
     return sanitize_path_name(title)
 
 
-def build_plex_naming_plan(metadata: dict | None, release_title: str, original_file_name: str):
+def build_media_naming_plan(metadata: dict | None, release_title: str, original_file_name: str):
     metadata = metadata or {}
     if metadata.get("source") not in {"douban", "search_query", "filename"}:
         return None
@@ -132,7 +132,7 @@ def build_plex_naming_plan(metadata: dict | None, release_title: str, original_f
         file_stem = english_folder
         is_episode = False
 
-    return PlexNamingPlan(
+    return MediaNamingPlan(
         chinese_folder=chinese_folder,
         english_folder=english_folder,
         target_relative_dir=target_relative_dir,

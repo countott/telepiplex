@@ -40,7 +40,11 @@ async def auth_pkce_115(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text("⚠️ 授权未完成，请检查配置文件中的 115_app_id。")
         else:
-            await update.message.reply_text("⚠️ 未配置 115_app_id，无法发起扫码授权。")
+            await update.message.reply_text(
+                "⚠️ 当前为直连 Token 模式，无法发起 115 扫码授权。\n"
+                "请在 `/config/config.yaml` 更新 `access_token` / `refresh_token`，"
+                "或配置有效的 `115_app_id` 后再使用 `/auth`。"
+            )
     else:
         await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
     # 结束对话
@@ -48,8 +52,9 @@ async def auth_pkce_115(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def check_115_app_id():
-    api_key = str(init.bot_config.get('115_app_id'))
-    if api_key is None or api_key.strip() == "" or api_key.strip().lower() == "your_115_app_id":
+    api_key = init.bot_config.get('115_app_id')
+    api_key_text = str(api_key or "").strip().lower()
+    if api_key_text in {"", "null", "none", "your_115_app_id"}:
         init.logger.error("115_app_id 未配置，无法发起扫码授权")
         return False
     return True

@@ -19,7 +19,8 @@ from concurrent.futures import ThreadPoolExecutor
 from app.adapters.tvdb import TvdbConfigError, TvdbRequestError, get_tvdb_series_episodes, search_tvdb_series
 from app.utils.ai import infer_tvdb_episode_plan_with_ai
 from app.utils.directory_config import get_plex_library_id_for_path, get_save_directories
-from app.utils.plex_naming import build_plex_naming_plan, infer_english_title_from_release
+from app.utils.log_sanitizer import sanitize_log_value
+from app.utils.media_naming import build_media_naming_plan, infer_english_title_from_release
 from app.utils.tvdb_rename import VIDEO_EXTENSIONS, build_tvdb_rename_plan
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
@@ -28,6 +29,7 @@ SELECT_SUB_CATEGORY = 10
 
 # 全局线程池，用于处理下载任务
 download_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="Movie_Download")
+PARTIAL_RETRY_PROGRESS_THRESHOLD = 20
 
 class DownloadUrlType(Enum):
     ED2K = "ED2K"
@@ -46,7 +48,7 @@ async def _start_download_link(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
     link = str(link or "").strip()
     context.user_data["link"] = link
-    init.logger.info(f"download link: {link}")
+    init.logger.info(f"download link: {sanitize_log_value({'link': link})}")
     dl_url_type = is_valid_link(link)
     # 检查链接格式是否正确
     if dl_url_type == DownloadUrlType.UNKNOWN or (allowed_types and dl_url_type not in allowed_types):
@@ -119,50 +121,6 @@ async def select_sub_category(update: Update, context: ContextTypes.DEFAULT_TYPE
     return ConversationHandler.END
 
 
-async def handle_retry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理重试任务的回调"""
-    query = update.callback_query
-    await query.answer()
-    
-    try:
-        # 从callback_data中提取task_id
-        task_id = query.data.replace("retry_", "")
-        
-        # 从全局存储中获取任务数据
-        if hasattr(init, 'pending_tasks') and task_id in init.pending_tasks:
-            task_data = init.pending_tasks[task_id]
-            
-            # 添加到重试列表
-            save_failed_download_to_db(
-                task_data["resource_name"], 
-                task_data["link"], 
-                task_data["selected_path"]
-            )
-            
-            await query.edit_message_text("✅ 已加入重试列表，系统会按计划自动重试。")
-            
-            # 清理已使用的任务数据
-            del init.pending_tasks[task_id]
-        else:
-            await query.edit_message_text("⚠️ 任务数据已过期，请重新发起下载。")
-        
-    except Exception as e:
-        init.logger.error(f"处理重试回调失败: {e}")
-        await query.edit_message_text("❌ 添加到重试列表失败，请稍后再试。")
-
-
-async def handle_download_failure(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理下载失败时的用户选择"""
-    query = update.callback_query
-    await query.answer()
-    
-    choice = query.data
-    
-    if choice == "cancel_download":
-        # 取消下载
-        await query.edit_message_text("已取消本次下载，可更换资源后重试。")
-
-
 async def quit_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 检查是否是回调查询
     if update.callback_query:
@@ -192,13 +150,6 @@ def _media_config():
     return init.bot_config.get("media") or {}
 
 
-def _media_value(config: dict, key: str, legacy_key: str = "", default=""):
-    value = config.get(key)
-    if value is None and legacy_key:
-        value = init.bot_config.get(legacy_key)
-    return default if value is None else value
-
-
 def _configured(value, placeholder=""):
     value = str(value or "").strip()
     if not value:
@@ -206,11 +157,6 @@ def _configured(value, placeholder=""):
     if placeholder and value.lower() == placeholder.lower():
         return False
     return not value.lower().startswith("your_")
-
-
-def _emby_config():
-    media = _media_config()
-    return media.get("emby") or {}
 
 
 def _plex_config():
@@ -223,95 +169,6 @@ def _get_unorganized_path():
     return str(media.get("unorganized_path") or "/未整理").rstrip("/") or "/未整理"
 
 
-def create_strm_file(new_name, file_list):
-    emby_config = _emby_config()
-    strm_mode = _media_value(emby_config, "strm_mode", "strm_mode", "disable")
-    # 检查是否需要创建软链
-    if strm_mode == "disable":
-        return
-    try:
-        init.logger.debug(f"Original new_name: {new_name}")
-
-        # 获取根目录
-        cd2_mount_root = Path(_media_value(emby_config, "mount_root", "mount_root", "/CloudNAS/115"))
-        strm_root = Path(_media_value(emby_config, "strm_root", "strm_root", "/media/115"))
-
-        # 构建目标路径和 .strm 文件的路径
-        relative_path = Path(new_name).relative_to(Path(new_name).anchor)
-        cd2_mount_path = cd2_mount_root.joinpath(relative_path)
-        strm_path = strm_root.joinpath(relative_path)
-
-        # 日志输出以验证路径
-        init.logger.debug(f"cd2_mount_root: {cd2_mount_root}")
-        init.logger.debug(f"strm_root: {strm_root}")
-        init.logger.debug(f"cd2_mount_path: {cd2_mount_path}")
-        init.logger.debug(f"strm_path: {strm_path}")
-
-        # 确保 strm_path 路径存在
-        if not strm_path.exists():
-            strm_path.mkdir(parents=True, exist_ok=True)
-
-        # 遍历文件列表，创建 .strm 文件
-        for file in file_list:
-            target_file = strm_path / (Path(file).stem + ".strm")
-            if strm_mode == "strm_local":
-                mkv_file = cd2_mount_path / file
-            else:
-                mkv_file = Path(_media_value(emby_config, "openlist_root", "openlist_root", "/115")) / relative_path / (Path(file))
-
-            # 日志输出以验证 .strm 文件和目标文件
-            init.logger.debug(f"target_file (.strm): {target_file}")
-            init.logger.debug(f"mkv_file (.mp4): {mkv_file}")
-
-            # 如果原始文件存在，写入 .strm 文件
-            # if mkv_file.exists():
-            with target_file.open('w', encoding='utf-8') as f:
-                f.write(str(mkv_file))
-                init.logger.info(f"strm文件创建成功，{target_file} -> {mkv_file}")
-            # else:
-            #     init.logger.info(f"原始视频文件[{mkv_file}]不存在！")
-    except Exception as e:
-        init.logger.info(f"Error creating .strm files: {e}")
-
-
-def notice_emby_scan_library(path):
-    emby_config = _emby_config()
-    strm_root = Path(_media_value(emby_config, "strm_root", "strm_root", ""))
-    if not strm_root:
-        init.logger.warn("未设置strm_root，无法扫库！")
-        return False
-    relative_path = Path(path).relative_to(Path(path).anchor)
-    movie_path_in_emby = strm_root / relative_path
-    emby_server = _media_value(emby_config, "base_url", "emby_server", "")
-    api_key = _media_value(emby_config, "api_key", "api_key", "")
-    if not _configured(api_key):
-        init.logger.warn("Emby API Key 未配置，跳过通知Emby扫库")
-        return False
-    if str(emby_server).endswith("/"):
-        emby_server = emby_server[:-1]
-    url = f"{emby_server}/Library/Media/Updated"
-    headers = {
-        "accept": "*/*",
-        "X-Emby-Token": api_key,
-        "Content-Type": "application/json"
-    }
-    data = {
-        "Updates": [
-            {
-                "Path": str(movie_path_in_emby),
-                "UpdateType": "Created"
-            }
-        ]
-    }
-    emby_response = requests.post(url, headers=headers, json=data)
-    if emby_response.text == "":
-        init.logger.info("通知Emby扫库成功！")
-        return True
-    else:
-        init.logger.error(f"通知Emby扫库失败：{emby_response}")
-        return False
-
-
 def _has_plex_credentials():
     plex_config = _plex_config()
     return (
@@ -320,22 +177,12 @@ def _has_plex_credentials():
     )
 
 
-def _has_emby_config():
-    emby_config = _emby_config()
-    return _configured(_media_value(emby_config, "base_url", "emby_server", "")) and _configured(
-        _media_value(emby_config, "api_key", "api_key", "")
-    )
-
-
 def notice_plex_scan_library(path, library_id=None):
     if not _has_plex_credentials():
         return None
     plex_config = _plex_config()
     base_url = str(plex_config.get("base_url") or "").rstrip("/")
-    library_id = str(library_id or get_plex_library_id_for_path(path) or "").strip()
-    if not library_id:
-        init.logger.warn(f"Plex library_id 未匹配，跳过扫库 path={path}")
-        return None
+    library_id = str(library_id or get_plex_library_id_for_path(path) or "all").strip()
     token = str(plex_config.get("token") or "").strip()
     url = f"{base_url}/library/sections/{library_id}/refresh"
     response = requests.get(url, params={"X-Plex-Token": token}, timeout=15)
@@ -350,10 +197,22 @@ def _pending_plex_scans():
     return init.pending_plex_scans
 
 
-def _build_plex_scan_keyboard(scan_id):
+def _folder_display_name(path):
+    return str(path or "").rstrip("/").split("/")[-1] or str(path or "").strip("/") or "媒体库"
+
+
+def _plex_scan_button_text(path, library_id):
+    if str(library_id or "").strip() == "all":
+        return "扫描 Plex 全部资料库"
+    folder_name = _folder_display_name(path)
+    return f"扫描 Plex {folder_name} 资料库"
+
+
+def _build_plex_scan_keyboard(scan_id, path, library_id):
+    button_text = _plex_scan_button_text(path, library_id)
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("确认刷新 Plex", callback_data=f"plex_scan_confirm:{scan_id}")],
+            [InlineKeyboardButton(button_text, callback_data=f"plex_scan_confirm:{scan_id}")],
             [InlineKeyboardButton("跳过", callback_data=f"plex_scan_skip:{scan_id}")],
         ]
     )
@@ -362,10 +221,14 @@ def _build_plex_scan_keyboard(scan_id):
 def queue_plex_scan_confirmation(path):
     if not _has_plex_credentials():
         return None
+    user_id = init.bot_config.get("allowed_user")
+    if not user_id:
+        init.logger.warn("Plex 扫库待确认，但 allowed_user 未配置，无法发送确认消息")
+        return None
+
     library_id = get_plex_library_id_for_path(path)
     if not _configured(library_id):
-        init.logger.warn(f"Plex library_id 未匹配，跳过确认消息 path={path}")
-        return None
+        library_id = "all"
 
     scan_id = uuid.uuid4().hex[:10]
     _pending_plex_scans()[scan_id] = {
@@ -373,23 +236,27 @@ def queue_plex_scan_confirmation(path):
         "library_id": str(library_id),
         "created_at": time.time(),
     }
-    user_id = init.bot_config.get("allowed_user")
-    if not user_id:
-        init.logger.warn("Plex 扫库待确认，但 allowed_user 未配置，无法发送确认消息")
-        return None
 
     escaped_path = escape_markdown(str(path), version=2)
-    add_task_to_queue(
+    button_text = _plex_scan_button_text(path, library_id)
+    library_line = ""
+    if str(library_id) != "all":
+        library_line = f"Library ID：`{escape_markdown(str(library_id), version=2)}`\n\n"
+    queued = add_task_to_queue(
         user_id,
         None,
         message=(
-            "📚 Plex 扫库待确认\n\n"
+            f"📚 {escape_markdown(button_text, version=2)}\n\n"
             f"整理目录：`{escaped_path}`\n\n"
-            f"Library ID：`{escape_markdown(str(library_id), version=2)}`\n\n"
-            "点击“确认刷新 Plex”后会刷新 Plex 媒体库。"
+            f"{library_line}"
+            f"点击“{escape_markdown(button_text, version=2)}”后会刷新 Plex 媒体库。"
         ),
-        keyboard=_build_plex_scan_keyboard(scan_id),
+        keyboard=_build_plex_scan_keyboard(scan_id, path, library_id),
     )
+    if not queued:
+        _pending_plex_scans().pop(scan_id, None)
+        init.logger.warn(f"Plex 扫库确认消息入队失败，已清理待确认任务 path={path}")
+        return None
     return scan_id
 
 
@@ -433,18 +300,19 @@ def handle_media_library_update(path, file_list=None):
     if _has_plex_credentials() and queue_plex_scan_confirmation(path):
         return "plex_pending"
 
-    if _has_emby_config():
-        if file_list is None:
-            file_list = init.openapi_115.get_files_from_dir(path) if init.openapi_115 else []
-        create_strm_file(path, file_list)
-        notice_emby_scan_library(path)
-        return "emby"
-
-    init.logger.info(f"未配置 Plex/Emby 扫库，跳过媒体库通知 path={path}")
+    init.logger.info(f"未配置 Plex 扫库，跳过媒体库通知 path={path}")
     return None
 
 
-def save_failed_download_to_db(title, magnet, save_path):
+def save_failed_download_to_db(
+    title,
+    magnet,
+    save_path,
+    *,
+    progress_percent=0,
+    retry_category="partial",
+    last_error="",
+):
     """保存失败的下载任务到数据库"""
     try:
         with SqlLiteLib() as sqlite:
@@ -453,11 +321,18 @@ def save_failed_download_to_db(title, magnet, save_path):
             existing = sqlite.query_one(check_sql, (magnet, save_path, title))
             
             if not existing:
-                sql = "INSERT INTO offline_task (title, magnet, save_path) VALUES (?, ?, ?)"
-                sqlite.execute_sql(sql, (title, magnet, save_path))
+                sql = (
+                    "INSERT INTO offline_task "
+                    "(title, magnet, save_path, progress_percent, retry_category, last_error) "
+                    "VALUES (?, ?, ?, ?, ?, ?)"
+                )
+                sqlite.execute_sql(
+                    sql,
+                    (title, magnet, save_path, float(progress_percent or 0), retry_category, last_error),
+                )
                 init.logger.info(f"[{title}]已添加到重试列表")
     except Exception as e:
-        raise str(e)
+        raise RuntimeError(f"保存重试任务失败: {e}") from e
     
 
 def _list_response_items(response):
@@ -648,8 +523,8 @@ def _attempt_tvdb_ai_episode_rename(final_path, selected_path, resource_name, me
     return rename_plan
 
     
-def _attempt_plex_auto_rename(final_path, selected_path, resource_name, plex_metadata):
-    if not plex_metadata:
+def _attempt_media_auto_rename(final_path, selected_path, resource_name, naming_metadata):
+    if not naming_metadata:
         return None
 
     file_list = init.openapi_115.get_files_from_dir(final_path)
@@ -658,10 +533,10 @@ def _attempt_plex_auto_rename(final_path, selected_path, resource_name, plex_met
         return None
 
     original_file_name = file_list[0]
-    release_title = plex_metadata.get("release_title") or resource_name
-    plan = build_plex_naming_plan(plex_metadata, release_title, original_file_name)
+    release_title = naming_metadata.get("release_title") or resource_name
+    plan = build_media_naming_plan(naming_metadata, release_title, original_file_name)
     if not plan:
-        init.logger.warn(f"自动整理跳过：豆瓣元数据不足 {plex_metadata}")
+        init.logger.warn(f"自动整理跳过：豆瓣元数据不足 {naming_metadata}")
         return None
 
     target_path = f"{selected_path}/{plan.target_relative_dir}"
@@ -693,6 +568,28 @@ def _filename_metadata_from_resource(resource_name):
     }
 
 
+def _has_metadata_value(value):
+    return value is not None and value != "" and value != [] and value != {}
+
+
+def _merge_tvdb_metadata(naming_metadata=None, metadata=None, filename_metadata=None):
+    merged = {}
+    for source in (naming_metadata, metadata):
+        if not source:
+            continue
+        for key, value in source.items():
+            if _has_metadata_value(value) or key not in merged:
+                if key in {"external_ids", "evidence"} and isinstance(value, (dict, list)):
+                    merged[key] = value.copy()
+                elif _has_metadata_value(value):
+                    merged[key] = value
+    if filename_metadata:
+        for key, value in filename_metadata.items():
+            if key not in merged and _has_metadata_value(value):
+                merged[key] = value
+    return merged or None
+
+
 def _resource_leaf(resource_name: str) -> str:
     return str(resource_name or "").strip("/").split("/")[-1] or "unknown"
 
@@ -704,41 +601,65 @@ def _move_to_unorganized(final_path, resource_name):
     return f"{unorganized_path}/{_resource_leaf(resource_name)}"
 
 
-def _ensure_pending_tasks():
-    if not hasattr(init, "pending_tasks"):
-        init.pending_tasks = {}
-    return init.pending_tasks
+def _progress_percent(value) -> float:
+    try:
+        percent = float(value)
+    except (TypeError, ValueError):
+        percent = 0.0
+    return max(0.0, min(percent, 100.0))
 
 
-def _build_retry_keyboard(task_id):
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("加入重试列表", callback_data=f"retry_{task_id}")],
-            [InlineKeyboardButton("取消", callback_data="cancel_download")],
-        ]
-    )
+def _progress_bar(percent: float) -> str:
+    filled = int(_progress_percent(percent) // 5)
+    return "█" * filled + "░" * (20 - filled) + f" {_progress_percent(percent):.1f}%"
 
 
-def _queue_retry_choice(user_id, link, selected_path, resource_name, reason):
-    retry_task_id = str(int(time.time() * 1000))
-    pending_tasks = _ensure_pending_tasks()
-    pending_tasks[retry_task_id] = {
-        "user_id": user_id,
-        "action": "retry_download",
-        "selected_path": selected_path,
-        "resource_name": resource_name or _resource_leaf(link),
-        "link": link,
-        "add2retry": True,
-    }
+def _queue_download_failure_notice(user_id, reason, resource_name, progress_text, detail):
     add_task_to_queue(
         user_id,
         None,
-        message=f"`{link}`\n\n⚠️ {reason}，可加入重试列表后由系统稍后重试。",
-        keyboard=_build_retry_keyboard(retry_task_id),
+        message=escape_markdown(
+            f"⚠️ {reason}：{resource_name}\n"
+            f"进度：{progress_text}\n\n"
+            f"{detail}",
+            version=2,
+        ),
     )
 
 
-def download_task(link, selected_path, user_id, plex_metadata=None, metadata=None):
+def _handle_failed_offline_download(user_id, link, selected_path, resource_name, reason, progress_percent):
+    percent = _progress_percent(progress_percent)
+    progress_text = _progress_bar(percent)
+    resource_name = resource_name or _resource_leaf(link)
+    if percent >= PARTIAL_RETRY_PROGRESS_THRESHOLD:
+        save_failed_download_to_db(
+            resource_name,
+            link,
+            selected_path,
+            progress_percent=percent,
+            retry_category="partial",
+            last_error=reason,
+        )
+        _queue_download_failure_notice(
+            user_id,
+            reason,
+            resource_name,
+            progress_text,
+            "已保留到重试列表，可使用 /retry 单独选择重试。",
+        )
+        return
+
+    discard_reason = "进度为 0%，判定为死种" if percent <= 0 else "进度过低，重试价值较低"
+    _queue_download_failure_notice(
+        user_id,
+        reason,
+        resource_name,
+        progress_text,
+        f"{discard_reason}，已丢弃。",
+    )
+
+
+def download_task(link, selected_path, user_id, naming_metadata=None, metadata=None):
     """异步下载任务"""
     info_hash = ""
     if init.openapi_115 is None:
@@ -752,11 +673,20 @@ def download_task(link, selected_path, user_id, plex_metadata=None, metadata=Non
     try:
         offline_success = init.openapi_115.offline_download_specify_path(link, selected_path)
         if not offline_success:
-            _queue_retry_choice(user_id, link, selected_path, _resource_leaf(link), "115 离线任务创建失败")
+            _handle_failed_offline_download(
+                user_id,
+                link,
+                selected_path,
+                _resource_leaf(link),
+                "115 离线任务创建失败",
+                0,
+            )
             return
             
         # 检查下载状态
-        download_success, resource_name, info_hash = init.openapi_115.check_offline_download_success(link)
+        check_result = init.openapi_115.check_offline_download_success(link)
+        download_success, resource_name, info_hash = check_result[:3]
+        progress_percent = check_result[3] if len(check_result) > 3 else 0
         
         if download_success:
             init.logger.info(f"✅ {resource_name} 离线下载成功！")
@@ -778,8 +708,12 @@ def download_task(link, selected_path, user_id, plex_metadata=None, metadata=Non
 
             try:
                 filename_metadata = _filename_metadata_from_resource(resource_name)
-                tvdb_metadata = metadata or plex_metadata or filename_metadata
-                plex_auto_metadata = plex_metadata or (filename_metadata if not metadata and not plex_metadata else None)
+                tvdb_metadata = _merge_tvdb_metadata(
+                    naming_metadata=naming_metadata,
+                    metadata=metadata,
+                    filename_metadata=filename_metadata,
+                )
+                naming_auto_metadata = naming_metadata or (filename_metadata if not metadata and not naming_metadata else None)
                 tvdb_result = _attempt_tvdb_ai_episode_rename(
                     final_path,
                     selected_path,
@@ -799,7 +733,7 @@ def download_task(link, selected_path, user_id, plex_metadata=None, metadata=Non
                     add_task_to_queue(user_id, None, message=message)
                     return
 
-                auto_result = _attempt_plex_auto_rename(final_path, selected_path, resource_name, plex_auto_metadata)
+                auto_result = _attempt_media_auto_rename(final_path, selected_path, resource_name, naming_auto_metadata)
                 if auto_result:
                     target_path, plan = auto_result
                     message = f"✅ 自动整理完成：`{plan.file_name}`\n\n保存目录：`{target_path}`"
@@ -809,18 +743,24 @@ def download_task(link, selected_path, user_id, plex_metadata=None, metadata=Non
                 init.logger.warn(f"自动整理失败，移入未整理目录: {e}")
 
             unorganized_target = _move_to_unorganized(final_path, resource_name)
-            if plex_metadata:
+            if naming_metadata:
                 message = f"⚠️ 未自动整理，已移入未整理目录。\n\n保存目录：`{unorganized_target}`"
             else:
                 message = f"✅ 离线下载完成，已移入未整理目录。\n\n保存目录：`{unorganized_target}`"
             add_task_to_queue(user_id, None, message=message)
             
         else:
-            # 下载超时，删除任务并提供选择
-            init.openapi_115.del_offline_task(info_hash)
+            # 下载超时，后续由 finally 统一清理云端任务。
             init.logger.warn(f"❌ {resource_name} 离线下载超时")
             
-            _queue_retry_choice(user_id, link, selected_path, resource_name, "115 离线下载超时")
+            _handle_failed_offline_download(
+                user_id,
+                link,
+                selected_path,
+                resource_name,
+                "115 离线下载超时",
+                progress_percent,
+            )
             
     except Exception as e:
         init.logger.error(f"下载任务执行失败: {str(e)}")
@@ -849,8 +789,5 @@ def register_download_handlers(application):
     )
     application.add_handler(download_command_handler)
     
-    # 添加独立的回调处理器处理异步任务的后续操作
-    application.add_handler(CallbackQueryHandler(handle_retry_callback, pattern=r"^retry_"))
     application.add_handler(CallbackQueryHandler(handle_plex_scan_callback, pattern=r"^plex_scan_(confirm|skip):"))
-    application.add_handler(CallbackQueryHandler(handle_download_failure, pattern=r"^cancel_download$"))
     init.logger.info("✅ Downloader处理器已注册")

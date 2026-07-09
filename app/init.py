@@ -275,11 +275,13 @@ def initialize_115open():
             user_info = openapi_115.get_user_info()
             if not OpenAPI_115.is_valid_user_info(user_info):
                 logger.error("115 OpenAPI客户端初始化失败: OpenAPI测试失败！")
+                openapi_115 = None
                 return False
             logger.info("115 OpenAPI客户端初始化成功")
             return True
         else:
             logger.error("115 OpenAPI客户端初始化失败: 无法获取有效的token")
+            openapi_115 = None
             return False
     except Exception as e:
         logger.error(f"115 OpenAPI客户端初始化失败: {e}")
@@ -384,11 +386,23 @@ def init_db():
             magnet TEXT, -- 磁力链接
             is_download TINYINT DEFAULT 0, -- 是否下载, 0或1, 默认0
             retry_count INTEGER DEFAULT 1, -- 重试次数
+            progress_percent REAL DEFAULT 0, -- 失败时离线进度
+            retry_category TEXT DEFAULT '', -- 重试分类
+            last_error TEXT DEFAULT '', -- 最近失败原因
             completed_at DATETIME, -- 完成时间
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP -- 创建时间，默认当前时间
         );
         '''
         sqlite.execute_sql(create_table_query)
+        existing_columns = {row[1] for row in sqlite.query("PRAGMA table_info(offline_task)")}
+        retry_columns = {
+            "progress_percent": "REAL DEFAULT 0",
+            "retry_category": "TEXT DEFAULT ''",
+            "last_error": "TEXT DEFAULT ''",
+        }
+        for column, definition in retry_columns.items():
+            if column not in existing_columns:
+                sqlite.execute_sql(f"ALTER TABLE offline_task ADD COLUMN {column} {definition}")
         
         logger.info("init DataBase success.")
         

@@ -6,6 +6,7 @@ import os
 import init
 from concurrent.futures import ThreadPoolExecutor
 from app.utils.aria2 import download_by_url, check_status_by_url
+from app.utils.log_sanitizer import sanitize_log_value
 from app.utils.message_queue import add_task_to_queue
 from telegram.helpers import escape_markdown
 
@@ -51,7 +52,7 @@ async def push2aria2(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 download = download_by_url(download_url, download_dir)
                 if not download:
                     all_pushed = False
-                    init.logger.error(f"推送到Aria2失败，下载链接: {download_url}")
+                    init.logger.error(f"推送到Aria2失败，下载链接: {sanitize_log_value({'download_url': download_url})}")
                 else:
                     # 添加到检查队列
                     aria2_download_check_executor.submit(check_download_complete, download_url, update.effective_chat.id, device_name)

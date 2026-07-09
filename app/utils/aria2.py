@@ -7,6 +7,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 sys.path.append(current_dir)
 import init
+from app.utils.log_sanitizer import sanitize_log_value
 
 
 aria2 = None
@@ -43,7 +44,7 @@ def download_by_url(download_url, save_path=""):
         if save_path:
             options['dir'] = save_path
         download = aria2.add(download_url, options=options)
-        init.logger.info(f"已添加下载任务: {download_url}")
+        init.logger.info(f"已添加下载任务: {sanitize_log_value({'download_url': download_url})}")
         return download
     except Exception as e:
         init.logger.error(f"添加下载任务失败: {e}")
@@ -63,7 +64,7 @@ def check_status_by_url(download_url):
         
         # 标准化输入URL用于比较
         target_url = download_url.strip()
-        init.logger.debug(f"查找目标URL: {target_url}")
+        init.logger.debug(f"查找目标URL: {sanitize_log_value({'target_url': target_url})}")
         
         # 遍历所有下载任务
         for i, download in enumerate(downloads):
@@ -71,7 +72,7 @@ def check_status_by_url(download_url):
             
             # 获取下载任务的URL列表
             task_urls = _extract_download_urls(download)
-            init.logger.debug(f"任务{download.gid}的URL列表: {task_urls}")
+            init.logger.debug(f"任务{download.gid}的URL列表: {sanitize_log_value({'urls': task_urls})}")
             
             # 检查URL是否匹配 - 使用多种匹配策略
             for task_url in task_urls:
@@ -96,10 +97,10 @@ def check_status_by_url(download_url):
         
         # 如果没有找到匹配的任务，输出调试信息
         init.logger.warn(f"未找到匹配的下载任务")
-        init.logger.warn(f"目标URL: {target_url}")
+        init.logger.warn(f"目标URL: {sanitize_log_value({'target_url': target_url})}")
         for download in downloads:
             urls = _extract_download_urls(download)
-            init.logger.warn(f"任务{download.gid}的URLs: {urls}")
+            init.logger.warn(f"任务{download.gid}的URLs: {sanitize_log_value({'urls': urls})}")
         
         return {"status": "not_found", "message": "未找到匹配的下载任务"}
         
@@ -223,11 +224,9 @@ if __name__ == "__main__":
     
     print("添加下载任务...")
     download_task = download_by_url(test_url)
-    
+
     # if download_task:
     #     init.logger.info("等待下载完成...")
     #     check_download_complete(test_url, check_interval=5)
     # else:
     #     init.logger.error("下载任务添加失败。")
-        
-        

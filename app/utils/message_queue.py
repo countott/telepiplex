@@ -3,7 +3,7 @@
 import asyncio
 import init
 from telegram import Bot
-from telegram.helpers import escape_markdown
+from app.utils.log_sanitizer import sanitize_log_value
 
 # 全局消息队列
 message_queue = asyncio.Queue()
@@ -24,10 +24,18 @@ def add_task_to_queue(sub_user, post_url, message, keyboard=None, retry_count=0)
             global_loop
         )
         future.result(timeout=30)  # 等待任务添加到队列，设置超时时间
-        init.logger.debug(f"任务已添加到队列: {sub_user}, {post_url}, {message}")
+        init.logger.debug(
+            f"任务已添加到队列: user={sub_user}, "
+            f"post_url={sanitize_log_value({'post_url': post_url})}, "
+            f"message={sanitize_log_value(message)}"
+        )
         return True
     except TimeoutError:
-        init.logger.error(f"添加任务到队列超时: {sub_user}, {post_url}, {message}")
+        init.logger.error(
+            f"添加任务到队列超时: user={sub_user}, "
+            f"post_url={sanitize_log_value({'post_url': post_url})}, "
+            f"message={sanitize_log_value(message)}"
+        )
         return False
     except Exception as e:
         init.logger.error(f"添加任务到队列失败: {e}")
@@ -61,7 +69,11 @@ async def queue_worker(loop, token):
                 sub_user, post_url, message, keyboard, retry_count = task_data
 
             retry_suffix = f" (重试 {retry_count}/3)" if retry_count > 0 else ""
-            init.logger.info(f"从消息队列中取出任务{retry_suffix}: 用户[{sub_user}], 链接[{post_url}], 消息[{message}]")
+            init.logger.info(
+                f"从消息队列中取出任务{retry_suffix}: 用户[{sub_user}], "
+                f"链接[{sanitize_log_value({'post_url': post_url})}], "
+                f"消息[{sanitize_log_value(message)}]"
+            )
 
             # 检查键盘数据
             if keyboard:
@@ -159,10 +171,10 @@ async def queue_worker(loop, token):
                     # 超过最大重试次数或遇到不可重试错误，记录最终失败
                     if should_retry:
                         init.logger.error(f"❌ 任务重试次数已达上限，放弃重试: 用户[{sub_user}], 错误: {error_msg}")
-                        init.logger.error(f"❌ 失败消息内容: {message}")
+                        init.logger.error(f"❌ 失败消息内容: {sanitize_log_value(message)}")
                     elif not is_timeout:
                         init.logger.error(f"❌ 任务因不可重试错误直接放弃: 用户[{sub_user}], 错误: {error_msg}")
-                        init.logger.error(f"❌ 失败消息内容: {message}")
+                        init.logger.error(f"❌ 失败消息内容: {sanitize_log_value(message)}")
                     # 超时错误不记录为失败（因为消息可能已经成功发送）
 
                     # 无论如何都要等待一下，避免连续错误
@@ -173,4 +185,3 @@ async def queue_worker(loop, token):
                 init.logger.error(f"重试处理失败: {retry_error}")
                 # 确保有等待时间
                 await asyncio.sleep(3)
-

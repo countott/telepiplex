@@ -7,8 +7,6 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.handlers.offline_task_handler import try_to_offline2115_again
-
 scheduler = BlockingScheduler()
 tasks = []
 
@@ -29,7 +27,6 @@ def clear_request_count():
 def init_tasks():
     global tasks
     tasks = [
-        {"id": "retry_failed_downloads", "func": try_to_offline2115_again, "interval": 12 * 60 * 60, "task_type": "interval"},
         {"id": "clear_request_count_task", "func": clear_request_count, "hour": 0, "minute": 0, "task_type": "time"},
     ]
 

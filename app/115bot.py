@@ -16,15 +16,30 @@ import init
 
 from app.utils.message_queue import add_task_to_queue, queue_worker
 from app.handlers.auth_handler import register_auth_handlers
+from app.handlers.config_handler import (
+    build_config_keyboard,
+    missing_optional_config_labels,
+    queue_optional_config_notice,
+    register_config_handlers,
+)
 from app.handlers.download_handler import register_download_handlers
 from app.handlers.search_handler import register_search_handlers
-from app.handlers.sync_handler import register_sync_handlers
 from app.handlers.video_handler import register_video_handlers
 from app.core.scheduler import start_scheduler_in_thread
 from app.handlers.offline_task_handler import register_offline_task_handlers
 from app.handlers.aria2_handler import register_aria2_handlers
 
 TELEGRAM_API_TIMEOUT = 30
+SENSITIVE_CONFIG_KEYWORDS = (
+    "token",
+    "api_key",
+    "secret",
+    "password",
+    "app_id",
+    "api_hash",
+    "cookie",
+    "authorization",
+)
 
 
 def get_version(md_format=False):
@@ -41,10 +56,33 @@ def log_runtime_features():
         "builtin_douban_title_priority=latin_or_original_first, "
         "external_metadata_douban_reverse_lookup=enabled, prowlarr_indexer_summary=enabled, "
         "metadata_object=enabled, search_command=enabled, search_short_command=enabled, magnet_command=enabled, find_command_removed=enabled, "
-        "retry_command=enabled, strm_command=enabled, tvdb_adapter=enabled, ai_tvdb_inference=enabled, "
+        "retry_command=enabled, tvdb_adapter=enabled, ai_tvdb_inference=enabled, "
         "tvdb_ai_115_tree_rename=enabled, "
         "revision=%s" % revision
     )
+
+
+def _is_sensitive_config_key(key: str) -> bool:
+    normalized = str(key or "").lower()
+    return any(keyword in normalized for keyword in SENSITIVE_CONFIG_KEYWORDS)
+
+
+def sanitize_config_for_log(value):
+    if isinstance(value, dict):
+        return {
+            key: "***redacted***" if _is_sensitive_config_key(key) else sanitize_config_for_log(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [sanitize_config_for_log(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(sanitize_config_for_log(item) for item in value)
+    return value
+
+
+def log_config_snapshot(prefix: str):
+    init.logger.info(prefix)
+    init.logger.info(json.dumps(sanitize_config_for_log(init.bot_config), ensure_ascii=False))
 
 def get_help_info():
     version = get_version()
@@ -53,6 +91,7 @@ def get_help_info():
 <b>🔧 命令列表</b>\n
 <code>/start</code> - 显示帮助信息\n
 <code>/auth</code> - <i>115扫码授权 (解除授权后使用)</i>\n
+<code>/config</code> - <i>可视化配置 115 Token / TVDB / Plex</i>\n
 <code>/reload</code> - <i>重载配置</i>\n
 <code>/search</code> - 搜索片源并加入 115 离线\n
 <code>/s</code> - 搜索片源的短命令\n
@@ -60,7 +99,6 @@ def get_help_info():
 <code>/m</code> - 直接投递磁力链接的短命令\n
 <code>/retry</code> - 查看重试列表\n
 <code>/r</code> - 查看重试列表的短命令\n
-<code>/strm</code> - 同步目录并创建 STRM 文件\n
 <code>/q</code> - 取消当前会话\n\n
 <b>✨ 功能说明</b>\n
 <u>电影下载：</u>
@@ -71,10 +109,7 @@ def get_help_info():
 • 根据媒体服务配置自动整理并通知媒体库\n
 <u>重试列表：</u>
 • 输入 <code>"/retry"</code> 或 <code>"/r"</code>
-• 查看当前重试列表，可根据需要选择是否清空\n
-<u>目录同步：</u>
-• 输入 <code>"/strm"</code>
-• 选择目录后会在对应的目录创建 STRM 文件\n
+• 查看当前重试列表，可单条重试、单条丢弃或清空\n
 <u>视频下载：</u>
 • 直接转发视频给机器人，选择保存目录即可保存到115
 """
@@ -109,8 +144,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     init.load_yaml_config()
-    init.logger.info("配置已重新加载:")
-    init.logger.info(json.dumps(init.bot_config))
+    log_config_snapshot("配置已重新加载:")
     await send_bot_message_safely(
         context.bot,
         chat_id=update.effective_chat.id,
@@ -172,6 +206,7 @@ def get_bot_menu():
     return  [
         BotCommand("start", "获取帮助信息"),
         BotCommand("auth", "115扫码授权"),
+        BotCommand("config", "可视化配置Token"),
         BotCommand("reload", "重载配置"),
         BotCommand("search", "搜索片源并加入 115 离线"),
         BotCommand("s", "搜索片源"),
@@ -179,7 +214,6 @@ def get_bot_menu():
         BotCommand("m", "直接投递磁力链接"),
         BotCommand("retry", "查看重试列表"),
         BotCommand("r", "查看重试列表"),
-        BotCommand("strm", "同步指定目录，并创建 STRM 文件"),
         BotCommand("q", "退出当前会话")]
     
 
@@ -265,6 +299,31 @@ def start_runtime_services(openapi_ready: bool):
     send_start_message()
 
 
+def queue_115_init_failure_notice():
+    optional_missing = missing_optional_config_labels()
+    raw_message = (
+        "❌ 115 OpenAPI 初始化失败，Bot 已进入受限模式。\n"
+        "请检查 `/config/config.yaml` 中的 `115_app_id` 或 `access_token`/`refresh_token`。\n"
+        "直连 Token 模式下，`115_app_id` 可以留空，但两个 Token 必须有效。\n"
+        "可使用 `/config` 在 Telegram 中写入直连 Token。\n"
+        "搜索和 `/auth`/`/reload` 仍可使用，离线投递会暂时拒绝。"
+    )
+    if optional_missing:
+        raw_message += f"\n\n可选配置未完成：{'、'.join(optional_missing)}，可在同一个 /config 菜单补充，也可以取消忽略。"
+    return add_task_to_queue(
+        init.bot_config['allowed_user'],
+        None,
+        message=escape_markdown(raw_message, version=2),
+        keyboard=build_config_keyboard(),
+    )
+
+
+def queue_startup_optional_config_notice(openapi_ready: bool):
+    if not openapi_ready:
+        return False
+    return queue_optional_config_notice()
+
+
 if __name__ == '__main__':
     init.init()
     # 启动消息队列
@@ -283,8 +342,7 @@ if __name__ == '__main__':
         if wait_count >= max_wait:
             init.logger.error("消息队列线程未准备就绪，程序将退出。")
             exit(1)
-    init.logger.info("Starting bot with configuration:")
-    init.logger.info(json.dumps(init.bot_config))
+    log_config_snapshot("Starting bot with configuration:")
     log_runtime_features()
     # 调整telegram日志级别
     update_logger_level()
@@ -302,18 +360,12 @@ if __name__ == '__main__':
     openapi_ready = init.initialize_115open()
     if not openapi_ready:
         init.logger.error("115 OpenAPI客户端初始化失败，离线投递功能暂不可用。")
-        add_task_to_queue(
-            init.bot_config['allowed_user'],
-            None,
-            message=(
-                "❌ 115 OpenAPI 初始化失败，Bot 已进入受限模式。\n"
-                "请检查 `/config/config.yaml` 中的 `115_app_id` 或 `access_token`/`refresh_token`。\n"
-                "直连 Token 模式下，`115_app_id` 可以留空，但两个 Token 必须有效。\n"
-                "搜索和 `/auth`/`/reload` 仍可使用，离线投递会暂时拒绝。"
-            )
-        )
+        queue_115_init_failure_notice()
         init.logger.warn("115 OpenAPI 初始化失败，Bot 将继续启动以便使用 `/auth`、`/reload` 和搜索功能，避免容器重启反复刷新 Token。")
 
+    # 注册可视化配置
+    register_config_handlers(application)
+    queue_startup_optional_config_notice(openapi_ready)
 
     # 注册Auth
     register_auth_handlers(application)
@@ -325,8 +377,6 @@ if __name__ == '__main__':
     register_offline_task_handlers(application)
     # 注册Aria2
     register_aria2_handlers(application)
-    # 注册同步
-    register_sync_handlers(application)
     # 注册视频
     register_video_handlers(application)
     

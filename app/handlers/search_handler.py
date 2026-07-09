@@ -24,13 +24,20 @@ from app.adapters.prowlarr import (
     search_prowlarr,
 )
 from app.handlers.download_handler import download_executor, download_task
-from app.adapters.tvdb import TvdbConfigError, TvdbRequestError, get_tvdb_series_episodes, search_tvdb_series
-from app.utils.ai import infer_verified_search_match_with_ai, normalize_search_query_with_ai
+from app.adapters.tvdb import (
+    TvdbConfigError,
+    TvdbRequestError,
+    get_tvdb_series_artwork_url,
+    get_tvdb_series_episodes,
+    search_tvdb_series,
+)
+from app.utils.ai import infer_metadata_backfill_with_ai, infer_verified_search_match_with_ai, normalize_search_query_with_ai
 from app.utils.media_metadata import build_external_metadata, build_search_metadata
 from app.utils.release_score import rank_releases
 from app.utils.search_resolution import (
     build_confirmation_candidates,
     candidate_to_prowlarr_query,
+    is_unreleased_episode,
     parse_search_intent,
 )
 from app.utils.search_query import (
@@ -45,7 +52,7 @@ from app.utils.search_query import (
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
-SEARCH_SELECT_RESULT, SEARCH_SELECT_SUB_CATEGORY, SEARCH_RESOLVE_METADATA, SEARCH_CONFIRM_ENTRY_SCOPE = range(30, 34)
+SEARCH_SELECT_RESULT, SEARCH_SELECT_SUB_CATEGORY, SEARCH_CONFIRM_ENTRY_SCOPE = range(30, 33)
 SEARCH_TASK_TTL_SECONDS = 30 * 60
 SEARCH_PROGRESS_INTERVAL_SECONDS = 30
 TELEGRAM_SEND_TIMEOUT_SECONDS = 30
@@ -184,7 +191,7 @@ def _extract_douban_metadata(payload: dict) -> dict | None:
     }
 
 
-def _query_from_plex_metadata(metadata: dict) -> str:
+def _query_from_naming_metadata(metadata: dict) -> str:
     query = metadata.get("english_title") or metadata.get("chinese_title") or ""
     year = metadata.get("year") or ""
     if query and year and year not in query:
@@ -192,31 +199,31 @@ def _query_from_plex_metadata(metadata: dict) -> str:
     return _collapse_title_spaces(query)
 
 
-def _metadata_from_plex_metadata(plex_metadata: dict, query: str = "", original_url: str = "") -> dict:
+def _metadata_from_naming_metadata(naming_metadata: dict, query: str = "", original_url: str = "") -> dict:
     external_ids = {}
-    source = plex_metadata.get("source") or ""
-    if source == "douban" and plex_metadata.get("subject_id"):
-        external_ids["douban_subject"] = plex_metadata["subject_id"]
+    source = naming_metadata.get("source") or ""
+    if source == "douban" and naming_metadata.get("subject_id"):
+        external_ids["douban_subject"] = naming_metadata["subject_id"]
 
     return build_search_metadata(
         source=source,
-        media_type=plex_metadata.get("media_type") or "",
-        chinese_title=plex_metadata.get("chinese_title") or "",
-        english_title=plex_metadata.get("english_title") or "",
-        year=plex_metadata.get("year") or "",
-        query=query or _query_from_plex_metadata(plex_metadata),
+        media_type=naming_metadata.get("media_type") or "",
+        chinese_title=naming_metadata.get("chinese_title") or "",
+        english_title=naming_metadata.get("english_title") or "",
+        year=naming_metadata.get("year") or "",
+        query=query or _query_from_naming_metadata(naming_metadata),
         original_url=original_url,
-        collection_chinese_title=plex_metadata.get("collection_chinese_title")
-        or plex_metadata.get("chinese_collection_title")
+        collection_chinese_title=naming_metadata.get("collection_chinese_title")
+        or naming_metadata.get("chinese_collection_title")
         or "",
-        collection_english_title=plex_metadata.get("collection_english_title")
-        or plex_metadata.get("english_collection_title")
+        collection_english_title=naming_metadata.get("collection_english_title")
+        or naming_metadata.get("english_collection_title")
         or "",
         external_ids=external_ids,
         evidence=[
             {
                 "source": source,
-                "field": "plex_metadata",
+                "field": "naming_metadata",
             }
         ],
     )
@@ -230,7 +237,7 @@ def _metadata_matches_plain_query(metadata: dict, query: str) -> bool:
     candidates = [
         metadata.get("chinese_title"),
         metadata.get("english_title"),
-        _query_from_plex_metadata(metadata),
+        _query_from_naming_metadata(metadata),
     ]
     return any(_normalize_match_title(candidate) == normalized_query for candidate in candidates)
 
@@ -317,7 +324,7 @@ def _metadata_lookup_query_from_ai_candidate(item: dict) -> str:
 
 def _fetch_douban_metadata_for_external_title(title: str, year: str = "") -> tuple[dict | None, str]:
     query = _clean_prowlarr_query(
-        _query_from_plex_metadata(
+        _query_from_naming_metadata(
             {
                 "english_title": title,
                 "year": year,
@@ -436,11 +443,63 @@ def _build_entry_confirmation_text(candidates: list[dict]) -> str:
     return "\n".join(lines).strip()
 
 
-def _candidate_plex_metadata(candidate: dict):
-    if candidate.get("plex_metadata") is not None:
-        return candidate.get("plex_metadata")
-    if candidate.get("media_type") == "series":
-        return None
+def _unique_candidate_tvdb_id(candidates: list[dict]) -> str:
+    ids = {
+        str((candidate.get("external_ids") or {}).get("tvdb") or "").strip()
+        for candidate in candidates or []
+        if isinstance(candidate.get("external_ids"), dict)
+    }
+    ids.discard("")
+    return next(iter(ids)) if len(ids) == 1 else ""
+
+
+async def _backfill_single_series_cover(candidates: list[dict]) -> list[dict]:
+    series_id = _unique_candidate_tvdb_id(candidates)
+    if not series_id:
+        return candidates
+    if any(candidate.get("cover_url") for candidate in candidates or []):
+        return candidates
+
+    try:
+        cover_url = await asyncio.to_thread(get_tvdb_series_artwork_url, series_id)
+    except (TvdbConfigError, TvdbRequestError) as e:
+        _log_warn(f"TVDB 封面读取失败 series_id={series_id}: {e}")
+        return candidates
+    if not cover_url:
+        return candidates
+
+    backfilled = []
+    for candidate in candidates or []:
+        item = candidate.copy()
+        item["cover_url"] = cover_url
+        backfilled.append(item)
+    return backfilled
+
+
+async def _send_single_series_info_card(update: Update, candidates: list[dict]):
+    series_id = _unique_candidate_tvdb_id(candidates)
+    if not series_id:
+        return
+    candidate = next((item for item in candidates if item.get("cover_url")), None)
+    if not candidate:
+        return
+
+    lines = [
+        f"已识别剧集：{_candidate_display_title(candidate)}",
+        f"TVDB：`{series_id}`",
+    ]
+    if candidate.get("year"):
+        lines.append(f"年份：{candidate['year']}")
+    caption = "\n".join(lines)
+    try:
+        await update.message.reply_photo(photo=candidate["cover_url"], caption=caption)
+    except Exception as e:
+        _log_warn(f"TVDB 封面消息发送失败 series_id={series_id}: {e}")
+
+
+def _candidate_naming_metadata(candidate: dict):
+    if candidate.get("naming_metadata") is not None:
+        return candidate.get("naming_metadata")
     english_title = candidate.get("english_title") or candidate.get("title") or ""
     return {
         "source": candidate.get("source") or "confirmed",
@@ -471,13 +530,125 @@ def _candidate_search_metadata(candidate: dict):
     }
 
 
+async def _backfill_missing_chinese_title(naming_metadata: dict | None, metadata: dict | None) -> tuple[dict | None, dict | None]:
+    if not naming_metadata:
+        return naming_metadata, metadata
+    if naming_metadata.get("chinese_title") or (metadata or {}).get("chinese_title"):
+        return naming_metadata, metadata
+
+    english_title = naming_metadata.get("english_title") or (metadata or {}).get("english_title") or ""
+    year = naming_metadata.get("year") or (metadata or {}).get("year") or ""
+    if not english_title or not year:
+        return naming_metadata, metadata
+
+    douban_metadata, lookup_query = await asyncio.to_thread(
+        _fetch_douban_metadata_for_external_title,
+        english_title,
+        year,
+    )
+    if not douban_metadata or not douban_metadata.get("chinese_title"):
+        _log_info(
+            f"metadata_backfill source=douban reason=missing_chinese_title "
+            f"query={lookup_query or _clean_prowlarr_query(f'{english_title} {year}'.strip())} status=miss"
+        )
+        external_ids = (metadata or {}).get("external_ids") if isinstance((metadata or {}).get("external_ids"), dict) else {}
+        ai_metadata = await asyncio.to_thread(
+            infer_metadata_backfill_with_ai,
+            {
+                "reason": "missing_chinese_title",
+                "media_type": naming_metadata.get("media_type") or (metadata or {}).get("media_type") or "",
+                "english_title": english_title,
+                "year": year,
+                "query": (metadata or {}).get("query") or _clean_prowlarr_query(f"{english_title} {year}".strip()),
+                "external_ids": external_ids.copy(),
+            },
+        )
+        if not ai_metadata or not ai_metadata.get("chinese_title"):
+            _log_info(
+                f"metadata_backfill source=ai_metadata_backfill reason=missing_chinese_title "
+                f"title={english_title} year={year} status=miss"
+            )
+            return naming_metadata, metadata
+
+        _log_info(
+            f"metadata_backfill source=ai_metadata_backfill reason=missing_chinese_title "
+            f"title={english_title} year={year} chinese_title={ai_metadata.get('chinese_title')}"
+        )
+        backfilled_naming = naming_metadata.copy()
+        backfilled_naming["chinese_title"] = ai_metadata["chinese_title"]
+        if ai_metadata.get("english_title"):
+            backfilled_naming["english_title"] = ai_metadata["english_title"]
+        if ai_metadata.get("year"):
+            backfilled_naming["year"] = ai_metadata["year"]
+        if ai_metadata.get("media_type"):
+            backfilled_naming["media_type"] = ai_metadata["media_type"]
+
+        backfilled_metadata = (metadata or {}).copy()
+        backfilled_metadata["chinese_title"] = ai_metadata["chinese_title"]
+        if ai_metadata.get("english_title"):
+            backfilled_metadata["english_title"] = ai_metadata["english_title"]
+        if ai_metadata.get("year"):
+            backfilled_metadata["year"] = ai_metadata["year"]
+        if ai_metadata.get("media_type"):
+            backfilled_metadata["media_type"] = ai_metadata["media_type"]
+        existing_external_ids = (
+            backfilled_metadata.get("external_ids").copy()
+            if isinstance(backfilled_metadata.get("external_ids"), dict)
+            else {}
+        )
+        for key, value in (ai_metadata.get("external_ids") or {}).items():
+            if value and key not in existing_external_ids:
+                existing_external_ids[key] = value
+        backfilled_metadata["external_ids"] = existing_external_ids
+        evidence = backfilled_metadata.get("evidence")
+        if isinstance(evidence, list):
+            evidence = list(evidence)
+        else:
+            evidence = []
+        evidence.append(
+            {
+                "source": "ai_metadata_backfill",
+                "field": "missing_chinese_title_backfill",
+                "title": english_title,
+                "year": year,
+            }
+        )
+        backfilled_metadata["evidence"] = evidence
+        return backfilled_naming, backfilled_metadata
+
+    _log_info(
+        f"metadata_backfill source=douban reason=missing_chinese_title "
+        f"query={lookup_query or _clean_prowlarr_query(f'{english_title} {year}'.strip())} "
+        f"chinese_title={douban_metadata.get('chinese_title')}"
+    )
+    backfilled_naming = naming_metadata.copy()
+    backfilled_naming["chinese_title"] = douban_metadata["chinese_title"]
+
+    backfilled_metadata = (metadata or {}).copy()
+    backfilled_metadata["chinese_title"] = douban_metadata["chinese_title"]
+    evidence = backfilled_metadata.get("evidence")
+    if isinstance(evidence, list):
+        evidence = list(evidence)
+    else:
+        evidence = []
+    evidence.append(
+        {
+            "source": "douban",
+            "field": "missing_chinese_title_backfill",
+            "query": lookup_query,
+        }
+    )
+    backfilled_metadata["evidence"] = evidence
+    return backfilled_naming, backfilled_metadata
+
+
 async def _send_confirmed_candidate_search(update: Update, context: ContextTypes.DEFAULT_TYPE, candidate: dict):
     query = candidate_to_prowlarr_query(candidate)
     return await _send_search_results(
         update,
         context,
         query,
-        plex_metadata=_candidate_plex_metadata(candidate),
+        naming_metadata=_candidate_naming_metadata(candidate),
         metadata=_candidate_search_metadata(candidate),
     )
 
@@ -863,7 +1034,7 @@ async def _resolve_query(raw_query: str) -> str | None:
     return request.get("query") if request else None
 
 
-async def _resolve_search_request(raw_query: str) -> dict | None:
+async def _resolve_search_request(raw_query: str, allow_ai_fallback: bool = True) -> dict | None:
     if not is_supported_metadata_url(raw_query):
         query = _clean_prowlarr_query(raw_query)
         if not query:
@@ -872,72 +1043,73 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
         try:
             metadata = await asyncio.to_thread(_fetch_douban_metadata_for_plain_query, query)
             if metadata:
-                resolved_query = _clean_prowlarr_query(_query_from_plex_metadata(metadata))
+                resolved_query = _clean_prowlarr_query(_query_from_naming_metadata(metadata))
                 return {
                     "query": resolved_query,
-                    "plex_metadata": metadata,
-                    "metadata": _metadata_from_plex_metadata(metadata, query=resolved_query),
+                    "naming_metadata": metadata,
+                    "metadata": _metadata_from_naming_metadata(metadata, query=resolved_query),
                 }
         except Exception as e:
             _log_warn(f"普通片名豆瓣反查失败: {e}")
 
-        _log_info(f"AI搜索清洗开始 raw={raw_query}")
-        normalized = await asyncio.to_thread(normalize_search_query_with_ai, raw_query)
-        if normalized:
-            _log_info(f"AI搜索清洗完成 raw={raw_query} status={normalized.get('status')} candidates={len(normalized.get('lookup_candidates') or [])}")
-        else:
-            _log_info(f"AI搜索清洗无结果 raw={raw_query}")
-        for item in (normalized or {}).get("lookup_candidates") or []:
-            candidate_query = _metadata_lookup_query_from_ai_candidate(item)
-            if not candidate_query:
-                continue
-            try:
-                metadata = await asyncio.to_thread(_fetch_douban_metadata_for_plain_query, candidate_query)
-                if metadata:
-                    resolved_query = _clean_prowlarr_query(_query_from_plex_metadata(metadata))
-                    search_metadata = _metadata_from_plex_metadata(metadata, query=resolved_query)
-                    if item.get("title"):
-                        search_metadata["normalized_title"] = _collapse_title_spaces(item.get("title"))
-                    scope = item.get("scope")
-                    if scope:
-                        search_metadata["selected_scope"] = scope
-                        if scope in {"whole_series", "season", "episode"}:
-                            search_metadata["media_type"] = "series"
-                    if item.get("season_number") is not None:
-                        search_metadata["season_number"] = item.get("season_number")
-                    if item.get("episode_number") is not None:
-                        search_metadata["episode_number"] = item.get("episode_number")
-                    return {"query": resolved_query, "plex_metadata": metadata, "metadata": search_metadata}
-            except Exception as e:
-                _log_warn(f"AI清洗候选豆瓣反查失败 query={candidate_query}: {e}")
+        if allow_ai_fallback:
+            _log_info(f"AI搜索清洗开始 raw={raw_query}")
+            normalized = await asyncio.to_thread(normalize_search_query_with_ai, raw_query)
+            if normalized:
+                _log_info(f"AI搜索清洗完成 raw={raw_query} status={normalized.get('status')} candidates={len(normalized.get('lookup_candidates') or [])}")
+            else:
+                _log_info(f"AI搜索清洗无结果 raw={raw_query}")
+            for item in (normalized or {}).get("lookup_candidates") or []:
+                candidate_query = _metadata_lookup_query_from_ai_candidate(item)
+                if not candidate_query:
+                    continue
+                try:
+                    metadata = await asyncio.to_thread(_fetch_douban_metadata_for_plain_query, candidate_query)
+                    if metadata:
+                        resolved_query = _clean_prowlarr_query(_query_from_naming_metadata(metadata))
+                        search_metadata = _metadata_from_naming_metadata(metadata, query=resolved_query)
+                        if item.get("title"):
+                            search_metadata["normalized_title"] = _collapse_title_spaces(item.get("title"))
+                        scope = item.get("scope")
+                        if scope:
+                            search_metadata["selected_scope"] = scope
+                            if scope in {"whole_series", "season", "episode"}:
+                                search_metadata["media_type"] = "series"
+                        if item.get("season_number") is not None:
+                            search_metadata["season_number"] = item.get("season_number")
+                        if item.get("episode_number") is not None:
+                            search_metadata["episode_number"] = item.get("episode_number")
+                        return {"query": resolved_query, "naming_metadata": metadata, "metadata": search_metadata}
+                except Exception as e:
+                    _log_warn(f"AI清洗候选豆瓣反查失败 query={candidate_query}: {e}")
 
-        _log_info(f"AI验证兜底开始 raw={raw_query}")
-        verified = await asyncio.to_thread(infer_verified_search_match_with_ai, raw_query)
-        if verified:
-            _log_info(f"AI验证兜底完成 raw={raw_query} status={verified.get('status')} candidates={len(verified.get('candidates') or [])}")
-        else:
-            _log_info(f"AI验证兜底无结果 raw={raw_query}")
-        if verified and verified.get("status") == "ok" and verified.get("candidates"):
-            first = verified["candidates"][0]
-            title = first.get("title") or ""
-            year = first.get("year") or ""
-            query = _clean_prowlarr_query(f"{title} {year}".strip())
-            if query:
-                metadata = build_external_metadata(
-                    source="ai_verified",
-                    title=title,
-                    year=year,
-                    external_id="",
-                    original_url="",
-                    media_type=first.get("media_type") or "",
-                )
-                metadata["external_ids"] = (first.get("external_ids") or {}).copy()
-                metadata["selected_scope"] = first.get("scope") or ""
-                if first.get("season_number") is not None:
-                    metadata["season_number"] = first.get("season_number")
-                if first.get("episode_number") is not None:
-                    metadata["episode_number"] = first.get("episode_number")
-                return {"query": query, "plex_metadata": None, "metadata": metadata}
+            _log_info(f"AI验证兜底开始 raw={raw_query}")
+            verified = await asyncio.to_thread(infer_verified_search_match_with_ai, raw_query)
+            if verified:
+                _log_info(f"AI验证兜底完成 raw={raw_query} status={verified.get('status')} candidates={len(verified.get('candidates') or [])}")
+            else:
+                _log_info(f"AI验证兜底无结果 raw={raw_query}")
+            if verified and verified.get("status") == "ok" and verified.get("candidates"):
+                first = verified["candidates"][0]
+                title = first.get("title") or ""
+                year = first.get("year") or ""
+                query = _clean_prowlarr_query(f"{title} {year}".strip())
+                if query:
+                    metadata = build_external_metadata(
+                        source="ai_verified",
+                        title=title,
+                        year=year,
+                        external_id="",
+                        original_url="",
+                        media_type=first.get("media_type") or "",
+                    )
+                    metadata["external_ids"] = (first.get("external_ids") or {}).copy()
+                    metadata["selected_scope"] = first.get("scope") or ""
+                    if first.get("season_number") is not None:
+                        metadata["season_number"] = first.get("season_number")
+                    if first.get("episode_number") is not None:
+                        metadata["episode_number"] = first.get("episode_number")
+                    return {"query": query, "naming_metadata": None, "metadata": metadata}
 
         return None
 
@@ -945,12 +1117,12 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
         if _is_douban_url(raw_query):
             metadata = await asyncio.to_thread(_fetch_builtin_douban_metadata, raw_query)
             if metadata:
-                query = _clean_prowlarr_query(_query_from_plex_metadata(metadata))
+                query = _clean_prowlarr_query(_query_from_naming_metadata(metadata))
                 _log_info(f"豆瓣链接解析为搜索词 raw={raw_query} query={query} metadata={metadata}")
                 return {
                     "query": query,
-                    "plex_metadata": metadata,
-                    "metadata": _metadata_from_plex_metadata(metadata, query=query, original_url=raw_query),
+                    "naming_metadata": metadata,
+                    "metadata": _metadata_from_naming_metadata(metadata, query=query, original_url=raw_query),
                 }
 
         external_metadata = await asyncio.to_thread(_fetch_external_title_metadata, raw_query)
@@ -961,13 +1133,13 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
                 external_metadata.get("year"),
             )
             if metadata:
-                query = _clean_prowlarr_query(_query_from_plex_metadata(metadata))
+                query = _clean_prowlarr_query(_query_from_naming_metadata(metadata))
                 _log_info(
                     f"外站链接经豆瓣反查解析为搜索词 raw={raw_query} "
                     f"title={external_metadata.get('title')} year={external_metadata.get('year')} "
                     f"query={query} metadata={metadata}"
                 )
-                search_metadata = _metadata_from_plex_metadata(metadata, query=query, original_url=raw_query)
+                search_metadata = _metadata_from_naming_metadata(metadata, query=query, original_url=raw_query)
                 search_metadata["evidence"].append(
                     {
                         "source": external_metadata.get("source") or _metadata_source_from_url(raw_query),
@@ -976,7 +1148,7 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
                         "year": external_metadata.get("year"),
                     }
                 )
-                return {"query": query, "plex_metadata": metadata, "metadata": search_metadata}
+                return {"query": query, "naming_metadata": metadata, "metadata": search_metadata}
 
             if query:
                 source = external_metadata.get("source") or _metadata_source_from_url(raw_query)
@@ -992,7 +1164,7 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
                     f"外站链接解析为英文搜索词 raw={raw_query} "
                     f"title={external_metadata.get('title')} year={external_metadata.get('year')} query={query}"
                 )
-                return {"query": query, "plex_metadata": None, "metadata": search_metadata}
+                return {"query": query, "naming_metadata": None, "metadata": search_metadata}
 
         return None
     except Exception as e:
@@ -1000,8 +1172,8 @@ async def _resolve_search_request(raw_query: str) -> dict | None:
         return None
 
 
-def _plex_metadata_for_selected_release(task: dict, selected_item: dict):
-    metadata = task.get("plex_metadata")
+def _naming_metadata_for_selected_release(task: dict, selected_item: dict):
+    metadata = task.get("naming_metadata")
     if not metadata:
         return None
 
@@ -1106,7 +1278,7 @@ def _search_prowlarr_release_categories(query: str) -> list[dict]:
     return results
 
 
-async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, plex_metadata=None, metadata=None):
+async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, naming_metadata=None, metadata=None):
     await _reply_or_send(update, context, f"🔍 正在搜索片源：{query}")
     _log_info(f"搜索片源开始 query={query}")
 
@@ -1130,6 +1302,7 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
         await _send_search_message(context, update.effective_chat.id, "⚠️ 未找到可用片源，请调整关键词后重试。")
         return ConversationHandler.END
 
+    naming_metadata, metadata = await _backfill_missing_chinese_title(naming_metadata, metadata)
     _log_info(f"搜索片源完成 query={query} results={len(results)}")
     task_id = uuid.uuid4().hex[:10]
     pending_search_tasks[task_id] = {
@@ -1137,8 +1310,8 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
         "query": query,
         "results": results,
         "user_id": update.effective_user.id,
-        "plex_metadata": plex_metadata,
-        "metadata": metadata or (_metadata_from_plex_metadata(plex_metadata, query=query) if plex_metadata else None),
+        "naming_metadata": naming_metadata,
+        "metadata": metadata or (_metadata_from_naming_metadata(naming_metadata, query=query) if naming_metadata else None),
     }
 
     await _send_search_message(
@@ -1152,7 +1325,7 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def _send_resolved_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, request: dict):
-    kwargs = {"plex_metadata": request.get("plex_metadata")}
+    kwargs = {"naming_metadata": request.get("naming_metadata")}
     if request.get("metadata") is not None:
         kwargs["metadata"] = request.get("metadata")
     return await _send_search_results(update, context, request["query"], **kwargs)
@@ -1161,21 +1334,21 @@ async def _send_resolved_search_results(update: Update, context: ContextTypes.DE
 def _entry_from_request(request: dict) -> dict | None:
     if not request:
         return None
-    plex_metadata = request.get("plex_metadata") or {}
+    naming_metadata = request.get("naming_metadata") or {}
     metadata = request.get("metadata") or {}
     external_ids = metadata.get("external_ids") if isinstance(metadata.get("external_ids"), dict) else {}
     title = (
-        plex_metadata.get("english_title")
+        naming_metadata.get("english_title")
         or metadata.get("english_title")
         or request.get("query")
-        or plex_metadata.get("chinese_title")
+        or naming_metadata.get("chinese_title")
         or metadata.get("chinese_title")
         or ""
     )
     if not title:
         return None
     selected_scope = metadata.get("selected_scope") or metadata.get("scope") or ""
-    media_type = metadata.get("media_type") or plex_metadata.get("media_type") or ""
+    media_type = metadata.get("media_type") or naming_metadata.get("media_type") or ""
     if selected_scope in {"whole_series", "season", "episode"}:
         media_type = "series"
         if metadata.get("normalized_title"):
@@ -1189,12 +1362,12 @@ def _entry_from_request(request: dict) -> dict | None:
         "media_type": media_type if media_type in {"movie", "series"} else "movie",
         "scope": scope,
         "title": title,
-        "english_title": plex_metadata.get("english_title") or metadata.get("english_title") or title,
-        "chinese_title": plex_metadata.get("chinese_title") or metadata.get("chinese_title") or "",
-        "year": plex_metadata.get("year") or metadata.get("year") or "",
+        "english_title": naming_metadata.get("english_title") or metadata.get("english_title") or title,
+        "chinese_title": naming_metadata.get("chinese_title") or metadata.get("chinese_title") or "",
+        "year": naming_metadata.get("year") or metadata.get("year") or "",
         "external_ids": external_ids.copy(),
-        "source": plex_metadata.get("source") or metadata.get("source") or "metadata",
-        "plex_metadata": request.get("plex_metadata"),
+        "source": naming_metadata.get("source") or metadata.get("source") or "metadata",
+        "naming_metadata": request.get("naming_metadata"),
         "metadata": request.get("metadata"),
         "season_number": metadata.get("season_number"),
         "episode_number": metadata.get("episode_number"),
@@ -1227,6 +1400,110 @@ def _entry_external_id(entry: dict, key: str) -> str:
     return str(external_ids.get(key) or entry.get(f"{key}_id") or entry.get(f"{key}_series_id") or "").strip()
 
 
+def _episode_key_from_item(episode: dict):
+    try:
+        return int(episode.get("season_number")), int(episode.get("episode_number"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _episode_air_date_value(episode: dict) -> str:
+    return str(
+        episode.get("aired")
+        or episode.get("first_aired")
+        or episode.get("firstAired")
+        or ""
+    ).strip()
+
+
+def _requested_scope_text(intent: dict) -> str:
+    scope = (intent or {}).get("scope") or ""
+    if scope == "episode":
+        return f"S{int((intent or {}).get('season_number') or 0):02d}E{int((intent or {}).get('episode_number') or 0):02d}"
+    if scope == "season":
+        return f"S{int((intent or {}).get('season_number') or 0):02d}"
+    return "请求范围"
+
+
+def _blocked_tvdb_resolution(status: str, message: str) -> dict:
+    return {"status": status, "message": message}
+
+
+def _candidate_block_reason(entries: list[dict], intent: dict, episodes_by_series: dict) -> dict:
+    scope = (intent or {}).get("scope") or ""
+    if scope not in {"episode", "season"}:
+        return _blocked_tvdb_resolution(
+            "blocked_unreleased",
+            "未找到可确认的可搜索剧集范围，已停止搜索。",
+        )
+
+    requested_scope = _requested_scope_text(intent)
+    has_series_entry = False
+    for entry in entries or []:
+        series_id = _entry_external_id(entry, "tvdb")
+        if not series_id:
+            continue
+        has_series_entry = True
+        episodes = episodes_by_series.get(series_id)
+        if episodes is None:
+            return _blocked_tvdb_resolution(
+                "blocked_tvdb_unavailable",
+                f"已识别剧集，但 TVDB 剧集列表暂时不可用，无法确认 {requested_scope} 是否可搜索。请稍后重试，或提供更明确的豆瓣/IMDb/TVDB 链接。",
+            )
+
+        episodes = episodes or []
+        if scope == "episode":
+            requested = (int((intent or {}).get("season_number") or 0), int((intent or {}).get("episode_number") or 0))
+            episode = next((item for item in episodes if _episode_key_from_item(item) == requested), None)
+            if episode:
+                if not _episode_air_date_value(episode):
+                    return _blocked_tvdb_resolution(
+                        "blocked_air_date_unknown",
+                        f"已识别剧集和 {requested_scope}，但 TVDB 缺少播出日期，无法确认是否已播出，已停止自动搜索以避免误投。",
+                    )
+                if is_unreleased_episode(episode):
+                    return _blocked_tvdb_resolution(
+                        "blocked_unreleased",
+                        f"TVDB 显示 {requested_scope} 尚未播出，已停止搜索。",
+                    )
+            elif episodes:
+                return _blocked_tvdb_resolution(
+                    "blocked_episode_missing",
+                    f"已识别剧集，但 TVDB 未找到 {requested_scope}，可能尚未收录或输入范围有误。",
+                )
+
+        if scope == "season":
+            requested_season = int((intent or {}).get("season_number") or 0)
+            season_episodes = [
+                item for item in episodes if _episode_key_from_item(item) and _episode_key_from_item(item)[0] == requested_season
+            ]
+            if season_episodes and any(not _episode_air_date_value(item) for item in season_episodes):
+                return _blocked_tvdb_resolution(
+                    "blocked_air_date_unknown",
+                    f"已识别剧集和 {requested_scope}，但 TVDB 存在缺少播出日期的剧集，无法完整确认该季可搜索范围。",
+                )
+            if season_episodes:
+                return _blocked_tvdb_resolution(
+                    "blocked_unreleased",
+                    f"TVDB 显示 {requested_scope} 暂无已播出剧集，已停止搜索。",
+                )
+            if episodes:
+                return _blocked_tvdb_resolution(
+                    "blocked_episode_missing",
+                    f"已识别剧集，但 TVDB 未找到 {requested_scope}，可能尚未收录或输入范围有误。",
+                )
+
+    if has_series_entry:
+        return _blocked_tvdb_resolution(
+            "blocked_episode_missing",
+            f"已识别剧集，但无法在 TVDB 确认 {requested_scope}，已停止自动搜索。",
+        )
+    return _blocked_tvdb_resolution(
+        "blocked_no_verified_match",
+        "未匹配到明确的影视条目，请提供豆瓣/TVDB/IMDb/TMDB 链接或更明确的关键词。",
+    )
+
+
 def _entry_from_tvdb_series(item: dict) -> dict | None:
     if not item or not item.get("tvdb_series_id"):
         return None
@@ -1249,10 +1526,96 @@ def _entry_from_tvdb_series(item: dict) -> dict | None:
     }
 
 
+def _intent_from_ai_lookup_candidate(item: dict, fallback: dict) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    title = _collapse_title_spaces(item.get("title") or "")
+    query = _collapse_title_spaces(item.get("query") or "")
+    parsed = parse_search_intent(query or title)
+    scope = item.get("scope") or parsed.get("scope") or fallback.get("scope") or "movie_or_series"
+    intent = {
+        "raw_query": fallback.get("raw_query") or "",
+        "title": title or parsed.get("title") or query,
+        "scope": scope,
+        "season_number": item.get("season_number") if item.get("season_number") is not None else parsed.get("season_number"),
+        "episode_number": item.get("episode_number") if item.get("episode_number") is not None else parsed.get("episode_number"),
+        "year": _collapse_title_spaces(item.get("year") or parsed.get("year") or fallback.get("year") or ""),
+    }
+    return intent if intent["title"] else None
+
+
+async def _resolve_entries_with_primary_sources(raw_query: str, base_intent: dict) -> tuple[list[dict], dict, dict]:
+    entries = []
+    episodes_by_series = {}
+    intent = base_intent.copy()
+
+    request = await _resolve_search_request(raw_query, allow_ai_fallback=False)
+    entry = _entry_from_request(request) if request else None
+    if entry:
+        entries.append(entry)
+        intent.update(_intent_override_from_request(request))
+
+    tvdb_entries, tvdb_episodes = await asyncio.to_thread(_lookup_tvdb_entries, intent)
+    entries.extend(tvdb_entries)
+    episodes_by_series.update(tvdb_episodes)
+    return entries, episodes_by_series, intent
+
+
+async def _resolve_entries_with_ai_fallback(raw_query: str, base_intent: dict) -> tuple[list[dict], dict, dict]:
+    normalized = await asyncio.to_thread(normalize_search_query_with_ai, raw_query)
+    if normalized:
+        _log_info(
+            f"AI搜索清洗兜底 raw={raw_query} "
+            f"status={normalized.get('status')} candidates={len(normalized.get('lookup_candidates') or [])}"
+        )
+    else:
+        _log_info(f"AI搜索清洗兜底无结果 raw={raw_query}")
+
+    seen = set()
+    for item in (normalized or {}).get("lookup_candidates") or []:
+        intent = _intent_from_ai_lookup_candidate(item, base_intent)
+        if not intent:
+            continue
+        candidate_query = _metadata_lookup_query_from_ai_candidate(item) or intent.get("title") or item.get("query") or ""
+        key = (
+            candidate_query,
+            intent.get("title"),
+            intent.get("scope"),
+            intent.get("season_number"),
+            intent.get("episode_number"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        entries, episodes_by_series, resolved_intent = await _resolve_entries_with_primary_sources(candidate_query, intent)
+        if entries:
+            return entries, episodes_by_series, resolved_intent
+
+    verified = await asyncio.to_thread(infer_verified_search_match_with_ai, raw_query)
+    if verified:
+        _log_info(
+            f"AI验证兜底 raw={raw_query} status={verified.get('status')} "
+            f"candidates={len(verified.get('candidates') or [])}"
+        )
+    for item in (verified or {}).get("candidates") or []:
+        intent = _intent_from_ai_lookup_candidate(item, base_intent)
+        if not intent:
+            continue
+        candidate_query = _clean_prowlarr_query(f"{item.get('title') or intent.get('title')} {item.get('year') or intent.get('year') or ''}".strip())
+        entries, episodes_by_series, resolved_intent = await _resolve_entries_with_primary_sources(candidate_query, intent)
+        if entries:
+            return entries, episodes_by_series, resolved_intent
+    return [], {}, base_intent
+
+
 def _lookup_tvdb_entries(intent: dict) -> tuple[list[dict], dict]:
     title = intent.get("title") or intent.get("raw_query") or ""
     if not title:
         return [], {}
+    _log_info(
+        f"TVDB条目回查开始 query={title} scope={intent.get('scope') or ''} "
+        f"season={intent.get('season_number') or ''} episode={intent.get('episode_number') or ''}"
+    )
     try:
         series_items = search_tvdb_series(title, year=intent.get("year") or "")
     except (TvdbConfigError, TvdbRequestError) as e:
@@ -1271,24 +1634,16 @@ def _lookup_tvdb_entries(intent: dict) -> tuple[list[dict], dict]:
             episodes_by_series[series_id] = get_tvdb_series_episodes(series_id)
         except (TvdbConfigError, TvdbRequestError) as e:
             _log_warn(f"TVDB 剧集列表读取失败 series_id={series_id}: {e}")
-            episodes_by_series[series_id] = []
+            episodes_by_series[series_id] = None
+    _log_info(f"TVDB条目回查完成 query={title} entries={len(entries)}")
     return entries, episodes_by_series
 
 
 async def _resolve_entry_candidates(raw_query: str) -> dict:
     intent = parse_search_intent(raw_query)
-    entries = []
-    episodes_by_series = {}
-
-    request = await _resolve_search_request(raw_query)
-    entry = _entry_from_request(request) if request else None
-    if entry:
-        entries.append(entry)
-        intent.update(_intent_override_from_request(request))
-
-    tvdb_entries, tvdb_episodes = await asyncio.to_thread(_lookup_tvdb_entries, intent)
-    entries.extend(tvdb_entries)
-    episodes_by_series.update(tvdb_episodes)
+    entries, episodes_by_series, intent = await _resolve_entries_with_primary_sources(raw_query, intent)
+    if not entries:
+        entries, episodes_by_series, intent = await _resolve_entries_with_ai_fallback(raw_query, intent)
 
     for item in entries:
         series_id = _entry_external_id(item, "tvdb")
@@ -1298,7 +1653,7 @@ async def _resolve_entry_candidates(raw_query: str) -> dict:
             episodes_by_series[series_id] = await asyncio.to_thread(get_tvdb_series_episodes, series_id)
         except (TvdbConfigError, TvdbRequestError) as e:
             _log_warn(f"AI/外部ID TVDB 剧集列表读取失败 series_id={series_id}: {e}")
-            episodes_by_series[series_id] = []
+            episodes_by_series[series_id] = None
 
     seen = set()
     unique_entries = []
@@ -1318,10 +1673,8 @@ async def _resolve_entry_candidates(raw_query: str) -> dict:
 
     candidates = build_confirmation_candidates(unique_entries, intent, episodes_by_series)
     if not candidates:
-        return {
-            "status": "blocked_unreleased",
-            "message": "该剧集范围尚未播出或不存在，已停止搜索。",
-        }
+        return _candidate_block_reason(unique_entries, intent, episodes_by_series)
+    candidates = await _backfill_single_series_cover(candidates)
 
     is_link = is_supported_metadata_url(raw_query)
     if is_link and len(candidates) == 1 and candidates[0].get("media_type") == "movie":
@@ -1337,7 +1690,7 @@ async def _resolve_entry_candidates(raw_query: str) -> dict:
 async def _start_entry_resolution(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_query: str):
     resolution = await _resolve_entry_candidates(raw_query)
     status = resolution.get("status")
-    if status in {"blocked_no_verified_match", "blocked_unreleased"}:
+    if str(status or "").startswith("blocked_"):
         await update.message.reply_text(resolution.get("message") or "未匹配到明确的影视条目。")
         return ConversationHandler.END
 
@@ -1354,6 +1707,7 @@ async def _start_entry_resolution(update: Update, context: ContextTypes.DEFAULT_
             "user_id": update.effective_user.id,
             "candidates": resolution.get("candidates") or [],
         }
+        await _send_single_series_info_card(update, resolution.get("candidates") or [])
         await update.message.reply_text(
             _build_entry_confirmation_text(resolution.get("candidates") or []),
             reply_markup=_build_entry_confirmation_keyboard(task_id, resolution.get("candidates") or []),
@@ -1430,53 +1784,6 @@ async def unsupported_http_link_command(update: Update, context: ContextTypes.DE
     return ConversationHandler.END
 
 
-async def resolve_plain_search_metadata(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if not init.check_user(user_id):
-        await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
-        return ConversationHandler.END
-
-    pending_query = context.user_data.get("pending_plain_search_query")
-    if not pending_query:
-        await update.message.reply_text("⚠️ 未找到待补充的搜索任务，请重新发送 /search 或 /s。")
-        return ConversationHandler.END
-
-    text = (update.message.text or "").strip()
-    if not text:
-        await update.message.reply_text("请回复豆瓣链接，或直接回复中文片名。")
-        return SEARCH_RESOLVE_METADATA
-
-    if is_supported_metadata_url(text):
-        request = await _resolve_search_request(text)
-        metadata = request.get("plex_metadata") if request else None
-        if not metadata:
-            await update.message.reply_text("⚠️ 无法从该链接取得豆瓣元数据，请发送豆瓣链接或直接回复中文片名。")
-            return SEARCH_RESOLVE_METADATA
-
-        context.user_data.pop("pending_plain_search_query", None)
-        return await _send_resolved_search_results(update, context, request)
-
-    if re.match(r"(?i)^https?://", text):
-        await update.message.reply_text("⚠️ 该链接暂不支持，请发送豆瓣链接或直接回复中文片名。")
-        return SEARCH_RESOLVE_METADATA
-
-    chinese_title = _collapse_title_spaces(text)
-    if not chinese_title:
-        await update.message.reply_text("请回复豆瓣链接，或直接回复中文片名。")
-        return SEARCH_RESOLVE_METADATA
-
-    context.user_data.pop("pending_plain_search_query", None)
-    return await _send_search_results(
-        update,
-        context,
-        pending_query,
-        plex_metadata={
-            "source": "search_query",
-            "chinese_title": chinese_title,
-        },
-    )
-
-
 async def select_search_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1531,6 +1838,7 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
             await query.edit_message_text("⚠️ 未找到上次保存路径或候选链接，请重新选择。")
             return ConversationHandler.END
 
+        await query.edit_message_text("⏳ 正在解析下载链接，请稍候。")
         try:
             link = await _resolve_selected_link(context)
         except ProwlarrRequestError as e:
@@ -1538,7 +1846,7 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
             return ConversationHandler.END
 
         selected_item = context.user_data.get("search_selected_item") or {}
-        plex_metadata = _plex_metadata_for_selected_release(task, selected_item)
+        naming_metadata = _naming_metadata_for_selected_release(task, selected_item)
         metadata = _metadata_for_selected_release(task, selected_item)
         await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到 115 离线下载，请稍后查看结果。")
         download_executor.submit(
@@ -1546,7 +1854,7 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
             link,
             selected_path,
             update.effective_user.id,
-            plex_metadata=plex_metadata,
+            naming_metadata=naming_metadata,
             metadata=metadata,
         )
         pending_search_tasks.pop(task_id, None)
@@ -1574,6 +1882,7 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
         await query.edit_message_text("⚠️ 候选链接已失效，请重新搜索。")
         return ConversationHandler.END
 
+    await query.edit_message_text("⏳ 正在解析下载链接，请稍候。")
     try:
         link = await _resolve_selected_link(context)
     except ProwlarrRequestError as e:
@@ -1581,7 +1890,7 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
         return ConversationHandler.END
 
     selected_item = context.user_data.get("search_selected_item") or {}
-    plex_metadata = _plex_metadata_for_selected_release(task, selected_item)
+    naming_metadata = _naming_metadata_for_selected_release(task, selected_item)
     metadata = _metadata_for_selected_release(task, selected_item)
     await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到 115 离线下载，请稍后查看结果。")
     download_executor.submit(
@@ -1589,7 +1898,7 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
         link,
         selected_path,
         update.effective_user.id,
-        plex_metadata=plex_metadata,
+        naming_metadata=naming_metadata,
         metadata=metadata,
     )
     pending_search_tasks.pop(task_id, None)
@@ -1613,9 +1922,6 @@ def register_search_handlers(application):
             MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(HTTP_URL_PATTERN), unsupported_http_link_command),
         ],
         states={
-            SEARCH_RESOLVE_METADATA: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, resolve_plain_search_metadata)
-            ],
             SEARCH_CONFIRM_ENTRY_SCOPE: [
                 CallbackQueryHandler(confirm_entry_scope, pattern=r"^entry_(confirm|cancel):")
             ],

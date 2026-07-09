@@ -28,7 +28,6 @@ Telepiplex 是基于 Telegram-115Bot 的个人媒体自动化 fork，用 Telegra
 | `/m 磁力链接` | `/magnet` 的短命令 |
 | `/retry` | 查看离线失败后的重试列表 |
 | `/r` | `/retry` 的短命令 |
-| `/strm` | 同步目录并创建 STRM 文件 |
 | `/q` | 取消当前会话 |
 
 ### 推荐使用方式
@@ -124,12 +123,12 @@ search:
   prowlarr:
     base_url: "http://your-prowlarr:9696"
     api_key: "your_prowlarr_api_key"
-    timeout: 20
+    timeout: 150
     indexer_ids: "-2"
     result_limit: 8
 ```
 
-`search.prowlarr.api_key` 是运行时必须填写的位置。Unraid 部署时同样应写入 `/config/config.yaml`。
+`search.prowlarr.api_key` 是运行时必须填写的位置。Unraid 部署时同样应写入 `/config/config.yaml`。`search.prowlarr.timeout` 会按配置值真实生效；默认推荐 150 秒以兼容较慢索引器，如需快速失败可以自行调小。
 
 ### 115 保存目录
 
@@ -161,19 +160,11 @@ media:
   plex:
     base_url: ""
     token: ""
-    library_id: ""
-  emby:
-    base_url: ""
-    api_key: ""
-    strm_mode: disable
-    strm_root: /media/115
-    openlist_root: /115
-    mount_root: /CloudNAS/115
 ```
 
 有可靠元数据时，下载流程会尝试按媒体库友好的名称整理。缺少元数据或整理失败时，会移动到 `media.unorganized_path`，避免混入已整理目录。
 
-Plex 配置完整时，整理完成后会先发送“确认刷新 Plex”按钮；只有用户确认后才会触发 Plex 媒体库刷新。
+Plex 配置完整时，整理完成后会先发送扫库确认按钮；匹配到 `plex_library_id` 时刷新对应资料库，没有匹配时默认刷新 Plex 全部资料库。只有用户确认后才会触发刷新。
 
 ## 搜索流程
 
@@ -200,7 +191,7 @@ docker logs -f telepiplex
 应能看到类似运行特性标记：
 
 ```text
-Telepiplex runtime features: direct_metadata_link_search=enabled, builtin_douban_title_priority=latin_or_original_first, external_metadata_douban_reverse_lookup=enabled, search_command=enabled, search_short_command=enabled, magnet_command=enabled, find_command_removed=enabled, retry_command=enabled, strm_command=enabled
+Telepiplex runtime features: direct_metadata_link_search=enabled, builtin_douban_title_priority=latin_or_original_first, external_metadata_douban_reverse_lookup=enabled, search_command=enabled, search_short_command=enabled, magnet_command=enabled, find_command_removed=enabled, retry_command=enabled
 Search处理器已注册
 ```
 
@@ -217,7 +208,6 @@ git -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol diff
 
 ## 重要风险
 
-- `/strm` 会删除目标目录下的所有文件后重新生成 STRM，包括元数据文件。大目录慎用。
 - 115 离线下载、重命名和移动都依赖 115 接口状态，接口限流或 Token 失效会导致任务失败。
 - Prowlarr 结果质量取决于索引器配置。建议先在 Prowlarr 中确认索引器可用，再排查 Bot。
 - 本仓库仍保留部分上游历史模块，用户可见命令以 `app/115bot.py` 注册内容和 README 为准。

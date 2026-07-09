@@ -8,6 +8,10 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 sys.path.append(current_dir)
 import init
+from app.utils.log_sanitizer import sanitize_log_value
+
+
+DEFAULT_AI_REQUEST_TIMEOUT_SECONDS = 60
 
 
 TVDB_EPISODE_PLAN_PROMPT = """你是媒体库剧集整理助手。根据输入的多源事实，推断 TVDB 剧集和文件重命名映射。
@@ -120,6 +124,35 @@ JSON结构：
 用户输入：
 """
 
+METADATA_BACKFILL_PROMPT = """你是影视元数据补全助手。只返回JSON，不要返回Markdown、解释或额外文字。
+
+任务：根据已验证的英文标题、年份和外部ID，补全媒体库重命名元数据，尤其是中文片名。
+
+硬性规则：
+1. 不要编造外部ID；只能复用输入中已有的外部ID，或在确定来自真实公开资料时返回。
+2. 如果无法确认中文片名和英文片名，返回 status=blocked。
+3. 不要输出Prowlarr query。
+4. 不要输出剧情、评分、演员或解释。
+
+JSON结构：
+{
+  "status": "ok|blocked",
+  "media_type": "movie|series",
+  "chinese_title": "string",
+  "english_title": "string",
+  "year": "string",
+  "external_ids": {
+    "douban_subject": "string",
+    "tvdb": "string",
+    "imdb": "string",
+    "tmdb": "string"
+  },
+  "reason": "string"
+}
+
+输入事实如下：
+"""
+
 def check_ai_api_available():
     url = init.bot_config.get("ai", {}).get("api_url", "")
     if not url:
@@ -138,6 +171,27 @@ def check_ai_api_available():
             init.logger.warn("AI API Key 未定义.")
         return False
     return True
+
+
+def _log_ai_info(message: str):
+    logger = getattr(init, "logger", None)
+    if logger:
+        logger.info(message)
+
+
+def _compact_json_for_log(value, max_chars=6000) -> str:
+    return sanitize_log_value(value, max_chars=max_chars)
+
+
+def _ai_request_timeout():
+    ai_config = (init.bot_config or {}).get("ai") or {}
+    value = ai_config.get("timeout", DEFAULT_AI_REQUEST_TIMEOUT_SECONDS)
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        timeout = DEFAULT_AI_REQUEST_TIMEOUT_SECONDS
+    return max(timeout, 1)
+
 
 def chat_completion(tip_words, max_tokens=8192):
     url = init.bot_config.get("ai").get("api_url")
@@ -160,9 +214,9 @@ def chat_completion(tip_words, max_tokens=8192):
     }
 
     try:
-        response = requests.post(url, json=payload, headers=headers)
+        response = requests.post(url, json=payload, headers=headers, timeout=_ai_request_timeout())
         if response.status_code != 200:
-            init.logger.warn(f"AI API请求失败: {response.text}")
+            init.logger.warn(f"AI API请求失败: {sanitize_log_value(response.text)}")
             return None
             
         result = response.json()
@@ -209,9 +263,10 @@ def infer_tvdb_episode_plan_with_ai(context: dict):
         return None
 
     prompt = TVDB_EPISODE_PLAN_PROMPT + json.dumps(context or {}, ensure_ascii=False, indent=2)
+    _log_ai_info(f"AI TVDB映射输入 context={_compact_json_for_log(context)}")
     result = chat_completion(prompt, max_tokens=4096)
     if getattr(init, "logger", None):
-        init.logger.info(f"AI TVDB映射原始响应: {result}")
+        init.logger.info(f"AI TVDB映射原始响应: {sanitize_log_value(result)}")
     plan = parse_ai_json_response(result)
     if not isinstance(plan, dict):
         return None
@@ -243,7 +298,9 @@ def normalize_search_query_with_ai(raw_query: str):
     if not check_ai_api_available():
         return None
 
+    _log_ai_info(f"AI搜索清洗输入 raw={raw_query}")
     result = chat_completion(SEARCH_QUERY_NORMALIZATION_PROMPT + str(raw_query or ""), max_tokens=2048)
+    _log_ai_info(f"AI搜索清洗原始响应 raw={raw_query} response={_compact_json_for_log(result)}")
     plan = parse_ai_json_response(result)
     if not isinstance(plan, dict):
         return None
@@ -255,6 +312,10 @@ def normalize_search_query_with_ai(raw_query: str):
     if not isinstance(warnings, list):
         plan["warnings"] = []
     plan["status"] = plan.get("status") or "ok"
+    _log_ai_info(
+        f"AI搜索清洗解析结果 raw={raw_query} status={plan.get('status')} "
+        f"candidates={len(plan.get('lookup_candidates') or [])} warnings={len(plan.get('warnings') or [])}"
+    )
     return _without_prowlarr_query(plan)
 
 
@@ -262,7 +323,9 @@ def infer_verified_search_match_with_ai(raw_query: str):
     if not check_ai_api_available():
         return None
 
+    _log_ai_info(f"AI验证兜底输入 raw={raw_query}")
     result = chat_completion(SEARCH_VERIFIED_MATCH_PROMPT + str(raw_query or ""), max_tokens=2048)
+    _log_ai_info(f"AI验证兜底原始响应 raw={raw_query} response={_compact_json_for_log(result)}")
     plan = parse_ai_json_response(result)
     if not isinstance(plan, dict):
         return None
@@ -282,7 +345,43 @@ def infer_verified_search_match_with_ai(raw_query: str):
     if not verified_candidates and plan.get("status") == "ok":
         plan["status"] = "blocked_no_verified_match"
     plan["status"] = plan.get("status") or "blocked_no_verified_match"
+    _log_ai_info(
+        f"AI验证兜底解析结果 raw={raw_query} status={plan.get('status')} "
+        f"candidates={len(plan.get('candidates') or [])}"
+    )
     return _without_prowlarr_query(plan)
+
+
+def infer_metadata_backfill_with_ai(context: dict):
+    if not check_ai_api_available():
+        return None
+
+    prompt = METADATA_BACKFILL_PROMPT + json.dumps(context or {}, ensure_ascii=False, indent=2)
+    _log_ai_info(f"AI元数据补全输入 context={_compact_json_for_log(context)}")
+    result = chat_completion(prompt, max_tokens=2048)
+    _log_ai_info(f"AI元数据补全原始响应 response={_compact_json_for_log(result)}")
+    plan = parse_ai_json_response(result)
+    if not isinstance(plan, dict) or plan.get("status") != "ok":
+        return None
+
+    chinese_title = str(plan.get("chinese_title") or "").strip()
+    english_title = str(plan.get("english_title") or "").strip()
+    if not chinese_title or not english_title:
+        return None
+
+    external_ids = plan.get("external_ids") if isinstance(plan.get("external_ids"), dict) else {}
+    return {
+        "source": "ai_metadata_backfill",
+        "media_type": str(plan.get("media_type") or (context or {}).get("media_type") or "").strip(),
+        "chinese_title": chinese_title,
+        "english_title": english_title,
+        "year": str(plan.get("year") or (context or {}).get("year") or "").strip(),
+        "external_ids": {
+            str(key): str(value).strip()
+            for key, value in external_ids.items()
+            if str(value or "").strip()
+        },
+    }
 
 def get_movie_tmdb_name_with_ai(movie_desc):
     
@@ -292,7 +391,7 @@ def get_movie_tmdb_name_with_ai(movie_desc):
     tip_words = f"'{movie_desc}' 请根据这个字符串，推断出可能的电影名称，然后根据电影名称，去TMDB网站(https://www.themoviedb.org)找到电影的TMDB ID，最后根据TMDB ID找到其对应的完整中文名称。注意：1. 优先匹配年份和英文原名。2. 如果有多个中文译名，请优先选择TMDB上的官方中文译名或最通用的译名。3. 有些系列电影可能会包含序号，比如：“侏罗纪公园2” 对应完整的中文名称应该是“侏罗纪公园2：失落的世界”。请返回json格式{{\"name\": \"完整的中文电影名称\"}} 。不要包含任何多余文字，如果找不到对应的中文名称请返回 {{\"name\": \"\"}}"
     try:
         result = chat_completion(tip_words)
-        init.logger.info(f"AI原始响应: {result}")
+        init.logger.info(f"AI原始响应: {sanitize_log_value(result)}")
         
         # 解析返回结果
         # 针对Anthropic/SiliconFlow messages接口: {'content': [{'text': '{"name": "..."}'...} ...}

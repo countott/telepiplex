@@ -19,9 +19,11 @@ from pathlib import Path
 from functools import wraps
 from app.utils.message_queue import add_task_to_queue
 from app.utils.alioss import upload_file_to_oss
+from app.utils.log_sanitizer import sanitize_log_value
 from telegram.helpers import escape_markdown
 
 RISK_THRESHOLD = 0.95
+DEFAULT_OPEN115_REQUEST_TIMEOUT_SECONDS = 30
 
 
 class RenameFailedError(Exception):
@@ -101,6 +103,16 @@ class OpenAPI_115:
             isinstance(user_info, dict)
             and isinstance(user_info.get("rt_space_info"), dict)
         )
+
+    @staticmethod
+    def request_timeout():
+        open115_config = ((init.bot_config or {}).get("open115") or {})
+        value = open115_config.get("timeout", DEFAULT_OPEN115_REQUEST_TIMEOUT_SECONDS)
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError):
+            timeout = DEFAULT_OPEN115_REQUEST_TIMEOUT_SECONDS
+        return max(timeout, 1)
         
     def get_token(self):
         if not self.refresh_token or not self.access_token:
@@ -146,7 +158,12 @@ class OpenAPI_115:
             "code_challenge": challenge,
             "code_challenge_method": "sha256"
         }
-        response = requests.post(f"https://passportapi.115.com/open/authDeviceCode", headers=header, data=data)
+        response = requests.post(
+            f"https://passportapi.115.com/open/authDeviceCode",
+            headers=header,
+            data=data,
+            timeout=self.request_timeout(),
+        )
         res = response.json()
         if response.status_code == 200:
             uid = res['data']['uid']
@@ -154,8 +171,9 @@ class OpenAPI_115:
             qr_data = res['data']['qrcode']
             sign = res['data']['sign']
         else:
-            init.logger.warn(f"获取二维码失败: {response.status_code} - {response.text}")
-            raise Exception(f"Error: {response.status_code} - {response.text}")
+            safe_text = sanitize_log_value(response.text)
+            init.logger.warn(f"获取二维码失败: {response.status_code} - {safe_text}")
+            raise Exception(f"Error: {response.status_code} - {safe_text}")
         
         # 2. 创建QRCode对象并生成图片
         qr = qrcode.QRCode(
@@ -183,7 +201,11 @@ class OpenAPI_115:
             "sign": sign
         }
         while True:
-            response = requests.get(f"https://qrcodeapi.115.com/get/status/", params=params)
+            response = requests.get(
+                f"https://qrcodeapi.115.com/get/status/",
+                params=params,
+                timeout=self.request_timeout(),
+            )
             if response.status_code == 200:
                 res = response.json()
                 if res['state'] == 0:
@@ -202,10 +224,15 @@ class OpenAPI_115:
                         # 2.扫码成功，获取access_token
                         init.logger.info("二维码扫码成功，正在获取access_token...")
                         time.sleep(1)
-                        response = requests.post("https://passportapi.115.com/open/deviceCodeToToken", headers=header, data={
-                            "uid": uid,
-                            "code_verifier": verifier
-                        })
+                        response = requests.post(
+                            "https://passportapi.115.com/open/deviceCodeToToken",
+                            headers=header,
+                            data={
+                                "uid": uid,
+                                "code_verifier": verifier
+                            },
+                            timeout=self.request_timeout(),
+                        )
                         res = response.json()
                         if response.status_code == 200 and 'data' in res:
                             self.access_token = res['data']['access_token']
@@ -262,7 +289,7 @@ class OpenAPI_115:
         }
         
         try:
-            response = requests.post(url, headers=header, data=data)
+            response = requests.post(url, headers=header, data=data, timeout=self.request_timeout())
             res = response.json()
         except Exception as e:
             init.logger.warn(f"刷新Token请求异常: {e}")
@@ -276,10 +303,10 @@ class OpenAPI_115:
                 self.save_token_to_file(self.access_token, self.refresh_token, init.TOKEN_FILE)
                 init.logger.info("Access token 更新成功.")
             else:
-                init.logger.warn(f"Access token 更新失败: 响应数据异常 - {res}")
+                init.logger.warn(f"Access token 更新失败: 响应数据异常 - {sanitize_log_value(res)}")
                 raise Exception(f"Failed to refresh access token: invalid data format")
         else:
-            init.logger.warn(f"Access token 更新失败: {res}")
+            init.logger.warn(f"Access token 更新失败: {sanitize_log_value(res)}")
             raise Exception(f"Failed to refresh access token: {res.get('message', 'unknown error')}")
         
 
@@ -309,17 +336,19 @@ class OpenAPI_115:
             if headers is None:
                 headers = self._get_headers()
         
+        timeout = self.request_timeout()
         if method.upper() == 'GET':
-            response = requests.get(url, headers=headers, params=params)
+            response = requests.get(url, headers=headers, params=params, timeout=timeout)
         elif method.upper() == 'POST':
-            response = requests.post(url, headers=headers, data=data)
+            response = requests.post(url, headers=headers, data=data, timeout=timeout)
         else:
             raise ValueError(f"不支持的HTTP方法: {method}")
         if response.status_code == 200:
             return response.json()
         else:
-            init.logger.warn(f"API请求失败: {response.status_code} - {response.text}")
-            return {"code": response.status_code, "message": response.text}
+            safe_text = sanitize_log_value(response.text)
+            init.logger.warn(f"API请求失败: {response.status_code} - {safe_text}")
+            return {"code": response.status_code, "message": safe_text}
     
     @handle_token_expiry
     def get_file_info(self, path: str):
@@ -338,12 +367,12 @@ class OpenAPI_115:
         
         # 如果成功获取文件信息，记录日志
         if isinstance(response, dict) and response.get('code') == 0:
-            init.logger.debug(f"获取文件信息成功: {response}")
+            init.logger.debug(f"获取文件信息成功: {sanitize_log_value(response)}")
             # 更新缓存
             self.file_info_cache[path] = (response['data'])
             return response['data']
         else:
-            init.logger.warn(f"获取文件信息失败: {response}")
+            init.logger.warn(f"获取文件信息失败: {sanitize_log_value(response)}")
             if response['code'] == 40140125:
                 return response
             return None
@@ -356,10 +385,10 @@ class OpenAPI_115:
         
         # 如果成功获取文件信息，记录日志
         if isinstance(response, dict) and response.get('code') == 0:
-            init.logger.debug(f"获取文件信息成功: {response}")
+            init.logger.debug(f"获取文件信息成功: {sanitize_log_value(response)}")
             return response['data']
         else:
-            init.logger.warn(f"获取文件信息失败: {response}")
+            init.logger.warn(f"获取文件信息失败: {sanitize_log_value(response)}")
             if response['code'] == 40140125:
                 return response
             return None
@@ -415,7 +444,7 @@ class OpenAPI_115:
         }
         response = self._make_api_request('POST', url, data=data, headers=self._get_headers())
         if response['state'] == True:
-            init.logger.info(f"离线下载任务添加成功: {response}")
+            init.logger.info(f"离线下载任务添加成功: {sanitize_log_value(response)}")
             return True
         else:
             if response['code'] == 40140125:
@@ -431,7 +460,7 @@ class OpenAPI_115:
         if isinstance(response, dict) and response.get('code') == 0 and 'data' in response:
             return response['data'] 
         else:
-            init.logger.warn(f"获取离线下载任务列表失败: {response}")
+            init.logger.warn(f"获取离线下载任务列表失败: {sanitize_log_value(response)}")
             if isinstance(response, dict) and response.get('code') == 40140125:
                 if response['code'] == 40140125:
                     return response
@@ -461,7 +490,7 @@ class OpenAPI_115:
                 time.sleep(2)  # 避免请求过快
             return task_list  
         else:
-            init.logger.warn(f"获取离线下载任务列表失败: {response}")
+            init.logger.warn(f"获取离线下载任务列表失败: {sanitize_log_value(response)}")
             if isinstance(response, dict) and response.get('code') == 40140125:
                 if response['code'] == 40140125:
                     return response
@@ -604,10 +633,10 @@ class OpenAPI_115:
         response = self._make_api_request('GET', url, params=params, headers=self._get_headers())
         
         if isinstance(response, dict) and response.get('code') == 0:
-            init.logger.debug(f"获取文件列表成功: {response}")
+            init.logger.debug(f"获取文件列表成功: {sanitize_log_value(response)}")
             return response['data']
         else:
-            init.logger.warn(f"获取文件列表失败: {response}")
+            init.logger.warn(f"获取文件列表失败: {sanitize_log_value(response)}")
             if response['code'] == 40140125:
                 return response
             return None
@@ -640,7 +669,7 @@ class OpenAPI_115:
             init.logger.info(f"目录已存在: {file_name}")
             return True
         else:
-            init.logger.warn(f"目录创建失败: {response}")
+            init.logger.warn(f"目录创建失败: {sanitize_log_value(response)}")
             if response['code'] == 40140125:
                 return response
             return None
@@ -661,7 +690,7 @@ class OpenAPI_115:
             init.logger.info(f"文件或目录删除成功: {file_ids}")
             return True
         else:
-            init.logger.warn(f"文件或目录删除失败: {response}")
+            init.logger.warn(f"文件或目录删除失败: {sanitize_log_value(response)}")
             if response['code'] == 40140125:
                 return response
             return False
@@ -705,7 +734,7 @@ class OpenAPI_115:
                         init.logger.warn(f"第 {batch_num} 批删除失败，{sleep_time}秒后进行第 {attempt + 2} 次重试...")
                         time.sleep(sleep_time)
                     else:
-                        init.logger.error(f"第 {batch_num} 批删除在 {max_retries} 次尝试后最终失败: {result}")
+                        init.logger.error(f"第 {batch_num} 批删除在 {max_retries} 次尝试后最终失败: {sanitize_log_value(result)}")
             
             # 批次间添加短暂延迟，避免请求过快
             if i + batch_size < total_files:
@@ -766,7 +795,7 @@ class OpenAPI_115:
             }
         response = self._make_api_request('POST', url, data=data, headers=self._get_headers())
         if isinstance(response, dict) and response.get('code') == 0:
-            init.logger.info(response['data'])
+            init.logger.info(f"文件上传初始化成功: {sanitize_log_value(response['data'])}")
             # 需要二次认证
             if response['data']['sign_key'] and response['data']['sign_check'] and kwargs.get('request_times') == 1:
                 sign_check = response['data']['sign_check'].split('-')
@@ -846,10 +875,10 @@ class OpenAPI_115:
         response = self._make_api_request('GET', url)
         
         if isinstance(response, dict) and response.get('code') == 0:
-            init.logger.info(f"获取上传token成功: {response}")
+            init.logger.info(f"获取上传token成功: {sanitize_log_value(response)}")
             return response['data']
         else:
-            init.logger.warn(f"获取上传token失败: {response}")
+            init.logger.warn(f"获取上传token失败: {sanitize_log_value(response)}")
             if response['code'] == 40140125:
                     return response
         return None
@@ -862,10 +891,10 @@ class OpenAPI_115:
         response = self._make_api_request('GET', url)
         
         if isinstance(response, dict) and response.get('code') == 0:
-            init.logger.info(f"获取用户信息成功: {response}")
+            init.logger.info(f"获取用户信息成功: {sanitize_log_value(response)}")
             return response['data']
         else:
-            init.logger.warn(f"获取用户信息失败: {response}")
+            init.logger.warn(f"获取用户信息失败: {sanitize_log_value(response)}")
             if response['code'] in [40140125, 40140126]:
                 return response
             return None
@@ -877,10 +906,10 @@ class OpenAPI_115:
         response = self._make_api_request('GET', url)
         
         if isinstance(response, dict) and response.get('code') == 0:
-            init.logger.info(f"获取配额信息成功: {response}")
+            init.logger.info(f"获取配额信息成功: {sanitize_log_value(response)}")
             return response['data']
         else:
-            init.logger.warn(f"获取配额信息失败: {response}")
+            init.logger.warn(f"获取配额信息失败: {sanitize_log_value(response)}")
             if response['code'] == 40140125:
                 return response
             return None
@@ -907,10 +936,10 @@ class OpenAPI_115:
         }
         response = self._make_api_request('GET', url, params=params)
         if isinstance(response, dict) and response.get('code') == 0:
-            init.logger.info(f"获取视频播放链接成功: {response}")
+            init.logger.info(f"获取视频播放链接成功: {sanitize_log_value(response)}")
             return response['data']['video_url'][0]['url']
         else:
-            init.logger.warn(f"获取视频播放链接失败: {response}")
+            init.logger.warn(f"获取视频播放链接失败: {sanitize_log_value(response)}")
             if response['code'] == 40140125:
                 return response
         return None
@@ -936,11 +965,11 @@ class OpenAPI_115:
             }
             response = self._make_api_request('POST', url, data=data, headers=self._get_headers())
             if response['state'] == True:
-                init.logger.info(f"获取文件下载链接成功: {response}")
+                init.logger.info(f"获取文件下载链接成功: {sanitize_log_value(response)}")
                 download_urls.append(response['data'][videos[i]['fid']]['url']['url'])
                 time.sleep(3)  # 避免请求过快
             else:
-                init.logger.warn(f"获取文件下载链接失败: {response}")
+                init.logger.warn(f"获取文件下载链接失败: {sanitize_log_value(response)}")
                 if response['code'] == 40140125:
                     return response
         return download_urls
@@ -1034,27 +1063,30 @@ class OpenAPI_115:
 
 
     def check_offline_download_success(self, url, offline_timeout=300):
-        time_out = 0
+        elapsed = 0
+        poll_interval = 10
         task_name = ""
         info_hash = ""
-        while time_out < offline_timeout:
+        last_progress = 0
+        while elapsed < offline_timeout:
             tasks = self.get_offline_tasks()
-            if not tasks:
-                return False, "", ""
-            for task in tasks:
+            for task in tasks or []:
                 # 判断任务的URL是否匹配
                 if task.get('url') == url:
                     task_name = task.get('name', '')
                     info_hash = task.get('info_hash', '')
+                    try:
+                        last_progress = float(task.get('percentDone') or 0)
+                    except (TypeError, ValueError):
+                        last_progress = 0
                     # 检查任务状态
                     if task.get('status') == 2 or task.get('percentDone') == 100:
-                        return True, task_name, info_hash
-                    else:
-                        time.sleep(10)
-                        time_out += 10
+                        return True, task_name, info_hash, 100
                     break
+            time.sleep(poll_interval)
+            elapsed += poll_interval
         init.logger.warn(f"[{task_name}]离线下载超时!")
-        return False, task_name, info_hash
+        return False, task_name, info_hash, last_progress
     
     # def check_offline_download_success(self, url, offline_timeout=180):
     #     time.sleep(offline_timeout)  # 等待下载完成
@@ -1095,37 +1127,6 @@ class OpenAPI_115:
         file_list = self.get_file_list(params)
         for file in file_list:
             video_list.append(file['fn'])
-        return video_list
-    
-    def get_sync_dir(self, path, file_type=4, offset=0, limit=1150):
-        """获取指定目录下的所有文件"""
-        video_list = []
-        file_info = self.get_file_info(path)
-        if not file_info:
-            init.logger.warn(f"获取目录信息失败: {file_info}")
-            return video_list
-        
-        # 文件类型；1.文档；2.图片；3.音乐；4.视频；5.压缩；6.应用；7.书籍
-        params = {
-            "cid": file_info['file_id'],
-            "type": file_type,
-            "limit": limit,
-            "offset": offset
-        }
-        file_list = self.get_file_list(params)
-        if not file_list:
-            init.logger.warn(f"目录 {path} 中没有找到视频文件")
-            return video_list
-        
-        if len(file_list) >= limit:
-            offset += limit
-            self.get_sync_dir(path, file_type, offset, limit)
-        else:
-            for file in file_list:
-                file_info = self.get_file_info_by_id(file['pid'])
-                folder_name = file_info['file_name']
-                video_list.append(f"{folder_name}/{file['fn']}")
-
         return video_list
     
     def is_directory(self, path):
@@ -1404,7 +1405,7 @@ class OpenAPI_115:
         result = []
         for video in video_list:
             for item in success_task:
-                # 兼容 offline_task_retry.py 传入的包装结构 {"task": task, "save_path": ...}
+                # 兼容带附加整理信息的包装结构 {"task": task, "save_path": ...}
                 task = item['task'] if isinstance(item, dict) and 'task' in item else item
                 if video['pid'] == task.get('file_id'):
                     # 优先从item中获取image_path，如果没有则尝试从task中获取
@@ -1626,7 +1627,6 @@ if __name__ == "__main__":
     # else:
     #     for dir in empty_dir_list:
     #         init.logger.info(f"找到空目录: {dir['fn']}")
-    vedio_list = app.get_sync_dir("/影视/电影/老电影")
     # app.offline_download_specify_path("magnet:?xt=urn:btih:2A93EFB4E2E8ED96B52207D9C5AA4FF2F7E8D9DF", "/test")
     # time.sleep(10)
     # dl_flg, resource_name = app.check_offline_download_success_no_waite("magnet:?xt=urn:btih:2A93EFB4E2E8ED96B52207D9C5AA4FF2F7E8D9DF")

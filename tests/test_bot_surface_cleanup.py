@@ -35,23 +35,24 @@ class BotSurfaceCleanupTest(unittest.TestCase):
         self.assertIn('BotCommand("m"', bot_source)
         self.assertIn('BotCommand("retry"', bot_source)
         self.assertIn('BotCommand("r"', bot_source)
-        self.assertIn('BotCommand("strm"', bot_source)
         self.assertIn('CommandHandler("search"', search_source)
         self.assertIn('CommandHandler("s"', search_source)
         self.assertIn('CommandHandler("magnet"', download_source)
         self.assertIn('CommandHandler("m"', download_source)
         self.assertIn('CommandHandler("retry"', offline_source)
         self.assertIn('CommandHandler("r"', offline_source)
-        self.assertIn('CommandHandler("strm"', bot_source + (ROOT / "app" / "handlers" / "sync_handler.py").read_text(encoding="utf-8"))
         self.assertNotRegex(bot_source, r'BotCommand\("mag"\s*,')
         self.assertNotRegex(bot_source, r'BotCommand\("rl"\s*,')
         self.assertNotRegex(bot_source, r'BotCommand\("sync"\s*,')
         self.assertNotRegex(download_source, r'CommandHandler\("mag"\s*,')
         self.assertNotRegex(offline_source, r'CommandHandler\("rl"\s*,')
+        self.assertNotIn('BotCommand("strm"', bot_source)
+        self.assertNotIn('CommandHandler("strm"', bot_source)
         self.assertNotIn("`/sync`", (ROOT / "README.md").read_text(encoding="utf-8"))
         self.assertNotIn("`/sync`", (ROOT / "README_EN.md").read_text(encoding="utf-8"))
         self.assertNotIn('CommandHandler("find"', search_source)
         self.assertNotIn("find_command", search_source)
+        self.assertFalse((ROOT / "app" / "handlers" / "sync_handler.py").exists())
 
     def test_adult_rss_and_tmdb_subscription_code_is_removed_but_aria_helpers_remain(self):
         removed_paths = [
@@ -134,10 +135,63 @@ class BotSurfaceCleanupTest(unittest.TestCase):
         self.assertIn("magnet_command=enabled", bot_source)
         self.assertIn("find_command_removed=enabled", bot_source)
         self.assertIn("retry_command=enabled", bot_source)
-        self.assertIn("strm_command=enabled", bot_source)
+        self.assertNotIn("strm_command=enabled", bot_source)
         self.assertIn("tvdb_adapter=enabled", bot_source)
         self.assertIn("ai_tvdb_inference=enabled", bot_source)
         self.assertIn("tvdb_ai_115_tree_rename=enabled", bot_source)
+
+    def test_legacy_search_resolve_metadata_state_is_removed(self):
+        search_source = (ROOT / "app" / "handlers" / "search_handler.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("SEARCH_RESOLVE_METADATA", search_source)
+        self.assertNotIn("resolve_plain_search_metadata", search_source)
+        self.assertNotIn("pending_plain_search_query", search_source)
+
+    def test_legacy_bulk_retry_callbacks_are_removed(self):
+        download_source = (ROOT / "app" / "handlers" / "download_handler.py").read_text(encoding="utf-8")
+        scheduler_source = (ROOT / "app" / "core" / "scheduler.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("handle_retry_callback", download_source)
+        self.assertNotIn("callback_data=f\"retry_", download_source)
+        self.assertNotIn("cancel_download", download_source)
+        self.assertNotIn("try_to_offline2115_again", scheduler_source)
+        self.assertNotIn("retry_failed_downloads", scheduler_source)
+
+    def test_runtime_config_logging_uses_redacted_snapshot(self):
+        bot_source = (ROOT / "app" / "115bot.py").read_text(encoding="utf-8")
+
+        self.assertIn("sanitize_config_for_log", bot_source)
+        self.assertNotIn("json.dumps(init.bot_config)", bot_source)
+
+    def test_english_readme_uses_media_naming_not_plex_naming(self):
+        readme_en_source = (ROOT / "README_EN.md").read_text(encoding="utf-8")
+
+        self.assertNotIn("automatic Plex naming", readme_en_source)
+        self.assertIn("media-library naming", readme_en_source)
+
+    def test_strm_and_emby_surfaces_are_removed(self):
+        bot_source = (ROOT / "app" / "115bot.py").read_text(encoding="utf-8")
+        download_source = (ROOT / "app" / "handlers" / "download_handler.py").read_text(encoding="utf-8")
+        open115_source = (ROOT / "app" / "core" / "open_115.py").read_text(encoding="utf-8")
+        readme_source = (ROOT / "README.md").read_text(encoding="utf-8")
+        readme_en_source = (ROOT / "README_EN.md").read_text(encoding="utf-8")
+        config_source = (ROOT / "config" / "config.yaml.example").read_text(encoding="utf-8")
+        app_config_source = (ROOT / "app" / "config.yaml.example").read_text(encoding="utf-8")
+
+        for source in (bot_source, readme_source, readme_en_source):
+            self.assertNotIn("`/strm`", source)
+            self.assertNotIn("<code>/strm</code>", source)
+
+        for source in (download_source, open115_source, config_source, app_config_source, readme_source, readme_en_source):
+            self.assertNotIn("emby", source.lower())
+            self.assertNotIn("strm", source.lower())
+            self.assertNotIn("mount_root", source)
+            self.assertNotIn("openlist_root", source)
+
+        self.assertNotIn("register_sync_handlers", bot_source)
+        self.assertNotIn("get_sync_dir", open115_source)
+        self.assertFalse((ROOT / "app" / "core" / "offline_task_retry.py").exists())
+        self.assertNotIn("offline_task_retry", open115_source)
 
     def test_scheduler_and_config_do_not_expose_removed_adult_or_tmdb_pipelines(self):
         scheduler_source = (ROOT / "app" / "core" / "scheduler.py").read_text(encoding="utf-8")

@@ -1,6 +1,8 @@
 import sys
+import importlib.util
 import json
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -10,31 +12,40 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
-if "yaml" not in sys.modules:
+def _module_available(name):
+    if name in sys.modules:
+        return True
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ModuleNotFoundError, ValueError):
+        return False
+
+
+if not _module_available("yaml"):
     yaml_stub = types.ModuleType("yaml")
     yaml_stub.safe_load = Mock(return_value={})
     sys.modules["yaml"] = yaml_stub
 
-if "telethon" not in sys.modules:
+if not _module_available("telethon"):
     telethon_stub = types.ModuleType("telethon")
     telethon_stub.TelegramClient = Mock()
     sys.modules["telethon"] = telethon_stub
 
-if "requests" not in sys.modules:
+if not _module_available("requests"):
     requests_stub = types.ModuleType("requests")
     requests_stub.get = Mock()
     requests_stub.post = Mock()
     sys.modules["requests"] = requests_stub
 
-if "qrcode" not in sys.modules:
+if not _module_available("qrcode"):
     sys.modules["qrcode"] = types.ModuleType("qrcode")
 
-if "telegram" not in sys.modules:
+if not _module_available("telegram"):
     telegram_stub = types.ModuleType("telegram")
     telegram_stub.Bot = Mock()
     sys.modules["telegram"] = telegram_stub
 
-if "telegram.helpers" not in sys.modules:
+if not _module_available("telegram.helpers"):
     telegram_helpers_stub = types.ModuleType("telegram.helpers")
     telegram_helpers_stub.escape_markdown = lambda text, version=2: text
     sys.modules["telegram.helpers"] = telegram_helpers_stub
@@ -92,6 +103,7 @@ class Open115StartupTest(unittest.TestCase):
         ):
             self.assertFalse(init.initialize_115open())
 
+        self.assertIsNone(init.openapi_115)
         init.logger.error.assert_called_with("115 OpenAPI客户端初始化失败: OpenAPI测试失败！")
 
     def test_get_user_info_refreshes_on_access_token_validation_failure(self):
@@ -157,6 +169,114 @@ class Open115StartupTest(unittest.TestCase):
         self.assertFalse(result)
         api._make_api_request.assert_not_called()
         init.logger.warn.assert_any_call("离线下载目录不可用，无法创建任务: /动画剧集")
+
+    @patch("app.core.open_115.time.sleep", return_value=None)
+    def test_check_offline_download_waits_for_task_to_appear_after_empty_list(self, sleep_mock):
+        api = object.__new__(OpenAPI_115)
+        target = "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567"
+        api.get_offline_tasks = Mock(
+            side_effect=[
+                [],
+                [
+                    {
+                        "url": target,
+                        "name": "Movie.Release",
+                        "info_hash": "HASH",
+                        "status": 2,
+                        "percentDone": 100,
+                    }
+                ],
+            ]
+        )
+
+        self.assertEqual(
+            api.check_offline_download_success(target, offline_timeout=20),
+            (True, "Movie.Release", "HASH", 100),
+        )
+        sleep_mock.assert_called_once_with(10)
+
+    @patch("app.core.open_115.time.sleep", return_value=None)
+    def test_check_offline_download_times_out_when_target_url_never_matches(self, sleep_mock):
+        api = object.__new__(OpenAPI_115)
+        target = "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567"
+        api.get_offline_tasks = Mock(
+            side_effect=[
+                [
+                    {
+                        "url": "magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        "name": "Other.Release",
+                        "info_hash": "OTHER",
+                        "status": 1,
+                        "percentDone": 10,
+                    }
+                ],
+                [
+                    {
+                        "url": "magnet:?xt=urn:btih:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+                        "name": "Another.Release",
+                        "info_hash": "ANOTHER",
+                        "status": 1,
+                        "percentDone": 30,
+                    }
+                ],
+                AssertionError("polling did not stop at timeout"),
+            ]
+        )
+
+        self.assertEqual(
+            api.check_offline_download_success(target, offline_timeout=20),
+            (False, "", "", 0),
+        )
+        self.assertEqual(sleep_mock.call_count, 2)
+
+    @patch("app.core.open_115.requests.get")
+    def test_make_api_request_uses_timeout_and_redacts_failure_response(self, get_mock):
+        init.bot_config = {"open115": {"timeout": 9}}
+        api = object.__new__(OpenAPI_115)
+        api.lock = threading.Lock()
+        api.last_req_time = 0
+        api.lifetime_vip = False
+        api.request_count = 0
+        api._get_headers = Mock(return_value={"Authorization": "Bearer secret-access"})
+        response = Mock()
+        response.status_code = 500
+        response.text = (
+            '{"access_token":"secret-access",'
+            '"url":"https://download.example/private.mkv"}'
+        )
+        get_mock.return_value = response
+
+        result = api._make_api_request("GET", "https://proapi.115.com/open/test")
+
+        self.assertEqual(result["code"], 500)
+        self.assertEqual(get_mock.call_args.kwargs["timeout"], 9)
+        log_message = init.logger.warn.call_args.args[0]
+        self.assertIn("***redacted***", log_message)
+        self.assertNotIn("secret-access", log_message)
+        self.assertNotIn("https://download.example/private.mkv", log_message)
+
+    def test_get_upload_token_redacts_sensitive_response_log(self):
+        api = object.__new__(OpenAPI_115)
+        api.base_url = "https://proapi.115.com"
+        api._make_api_request = Mock(
+            return_value={
+                "code": 0,
+                "data": {
+                    "AccessKeyId": "upload-access-key",
+                    "AccessKeySecret": "upload-secret",
+                    "SecurityToken": "upload-token",
+                    "endpoint": "https://oss.example/private",
+                },
+            }
+        )
+
+        self.assertEqual(api.get_upload_token()["AccessKeyId"], "upload-access-key")
+
+        log_message = init.logger.info.call_args.args[0]
+        self.assertIn("***redacted***", log_message)
+        self.assertNotIn("upload-secret", log_message)
+        self.assertNotIn("upload-token", log_message)
+        self.assertNotIn("https://oss.example/private", log_message)
 
 
 if __name__ == "__main__":

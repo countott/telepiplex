@@ -12,6 +12,7 @@ import init
 from app.adapters.tvdb import (
     TvdbConfigError,
     _token_cache,
+    get_tvdb_series_artwork_url,
     get_tvdb_series_episodes,
     search_tvdb_series,
 )
@@ -79,8 +80,48 @@ class TvdbAdapterTest(unittest.TestCase):
                     "type": "series",
                     "overview": "A crime drama.",
                     "aliases": ["嗜血法医"],
+                    "cover_url": "",
                 }
             ],
+        )
+
+    @patch("app.adapters.tvdb.requests.get")
+    @patch("app.adapters.tvdb.requests.post")
+    def test_get_tvdb_series_artwork_url_prefers_series_image(self, post_mock, get_mock):
+        login_response = Mock()
+        login_response.raise_for_status.return_value = None
+        login_response.json.return_value = {"data": {"token": "token-123"}}
+        post_mock.return_value = login_response
+
+        artwork_response = Mock()
+        artwork_response.raise_for_status.return_value = None
+        artwork_response.json.return_value = {
+            "data": {
+                "id": 275274,
+                "image": "https://artworks.thetvdb.com/banners/series/275274/posters/main.jpg",
+                "artworks": [
+                    {
+                        "id": 100,
+                        "image": "https://artworks.thetvdb.com/banners/series/275274/posters/alt.jpg",
+                        "thumbnail": "https://artworks.thetvdb.com/banners/series/275274/posters/alt_t.jpg",
+                        "type": 2,
+                        "language": "eng",
+                        "score": 9.5,
+                    }
+                ],
+            }
+        }
+        get_mock.return_value = artwork_response
+
+        self.assertEqual(
+            get_tvdb_series_artwork_url("275274"),
+            "https://artworks.thetvdb.com/banners/series/275274/posters/main.jpg",
+        )
+        get_mock.assert_called_once_with(
+            "https://api4.thetvdb.com/v4/series/275274/artworks",
+            headers={"Authorization": "Bearer token-123"},
+            params={},
+            timeout=12,
         )
 
     @patch("app.adapters.tvdb.requests.get")

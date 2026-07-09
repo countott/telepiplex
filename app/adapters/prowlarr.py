@@ -11,7 +11,7 @@ import requests
 import init
 
 
-MIN_PROWLARR_SEARCH_TIMEOUT = 180
+DEFAULT_PROWLARR_SEARCH_TIMEOUT = 150
 PROWLARR_STATUS_TIMEOUT = 15
 
 
@@ -46,10 +46,10 @@ def _get_prowlarr_config():
 
 def _search_timeout(prowlarr_config: dict):
     try:
-        timeout = float(prowlarr_config.get("timeout", MIN_PROWLARR_SEARCH_TIMEOUT))
+        timeout = float(prowlarr_config.get("timeout", DEFAULT_PROWLARR_SEARCH_TIMEOUT))
     except (TypeError, ValueError):
-        timeout = MIN_PROWLARR_SEARCH_TIMEOUT
-    return max(timeout, MIN_PROWLARR_SEARCH_TIMEOUT)
+        timeout = DEFAULT_PROWLARR_SEARCH_TIMEOUT
+    return max(timeout, 1)
 
 
 def _status_timeout(prowlarr_config: dict):
@@ -390,7 +390,7 @@ def resolve_prowlarr_download_url(item: dict, timeout=None) -> str:
         return link
 
     if timeout is None:
-        timeout = ((init.bot_config.get("search") or {}).get("prowlarr") or {}).get("timeout", 20)
+        timeout = _search_timeout(((init.bot_config.get("search") or {}).get("prowlarr") or {}))
 
     torrent_error = None
     try:

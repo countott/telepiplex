@@ -6,12 +6,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
-from app.utils.plex_naming import build_plex_naming_plan, infer_english_title_from_release, parse_episode_marker
+from app.utils.media_naming import build_media_naming_plan, infer_english_title_from_release, parse_episode_marker
 
 
-class PlexAutoRenameTest(unittest.TestCase):
+class MediaAutoRenameTest(unittest.TestCase):
     def test_build_movie_plan_uses_douban_chinese_and_english_titles(self):
-        plan = build_plex_naming_plan(
+        plan = build_media_naming_plan(
             {
                 "source": "douban",
                 "chinese_title": "布达佩斯大饭店",
@@ -26,7 +26,7 @@ class PlexAutoRenameTest(unittest.TestCase):
         self.assertEqual(plan.file_name, "The Grand Budapest Hotel.mkv")
 
     def test_build_movie_plan_uses_collection_parent_without_suffixes(self):
-        plan = build_plex_naming_plan(
+        plan = build_media_naming_plan(
             {
                 "source": "douban",
                 "chinese_title": "碟中谍7：致命清算（上）",
@@ -45,7 +45,7 @@ class PlexAutoRenameTest(unittest.TestCase):
         self.assertEqual(plan.file_name, "Mission Impossible Dead Reckoning Part One.mkv")
 
     def test_build_plan_normalizes_chinese_punctuation_at_final_path_stage(self):
-        plan = build_plex_naming_plan(
+        plan = build_media_naming_plan(
             {
                 "source": "douban",
                 "chinese_title": "随心所欲（十二章）——导演版",
@@ -62,7 +62,7 @@ class PlexAutoRenameTest(unittest.TestCase):
         self.assertEqual(plan.file_name, "Vivre sa vie: Film en douze tableaux.mkv")
 
     def test_build_episode_plan_formats_sxxexx_from_release_title(self):
-        plan = build_plex_naming_plan(
+        plan = build_media_naming_plan(
             {
                 "source": "douban",
                 "chinese_title": "绝命毒师",
@@ -77,7 +77,7 @@ class PlexAutoRenameTest(unittest.TestCase):
         self.assertEqual(plan.file_name, "Breaking Bad S01E02.mp4")
 
     def test_build_episode_plan_uses_specials_and_three_digit_episode_width(self):
-        special = build_plex_naming_plan(
+        special = build_media_naming_plan(
             {
                 "source": "douban",
                 "chinese_title": "神秘博士",
@@ -86,7 +86,7 @@ class PlexAutoRenameTest(unittest.TestCase):
             "Doctor.Who.S00E07.Special.1080p",
             "special.mkv",
         )
-        long_season = build_plex_naming_plan(
+        long_season = build_media_naming_plan(
             {
                 "source": "douban",
                 "chinese_title": "海贼王",
@@ -108,7 +108,7 @@ class PlexAutoRenameTest(unittest.TestCase):
 
     def test_build_plan_returns_none_without_douban_titles(self):
         self.assertIsNone(
-            build_plex_naming_plan(
+            build_media_naming_plan(
                 {"source": "manual", "chinese_title": "影"},
                 "Shadow.2018.1080p",
                 "shadow.mkv",
@@ -116,7 +116,7 @@ class PlexAutoRenameTest(unittest.TestCase):
         )
 
     def test_build_movie_plan_infers_english_title_for_plain_search(self):
-        plan = build_plex_naming_plan(
+        plan = build_media_naming_plan(
             {
                 "source": "search_query",
                 "chinese_title": "布达佩斯大饭店",
@@ -129,7 +129,7 @@ class PlexAutoRenameTest(unittest.TestCase):
         self.assertEqual(plan.file_name, "The Grand Budapest Hotel.mkv")
 
     def test_build_episode_plan_infers_show_title_for_plain_search(self):
-        plan = build_plex_naming_plan(
+        plan = build_media_naming_plan(
             {
                 "source": "search_query",
                 "chinese_title": "绝命毒师",
@@ -142,7 +142,7 @@ class PlexAutoRenameTest(unittest.TestCase):
         self.assertEqual(plan.file_name, "Breaking Bad S02E03.mp4")
 
     def test_build_plan_removes_forbidden_path_symbols(self):
-        plan = build_plex_naming_plan(
+        plan = build_media_naming_plan(
             {
                 "source": "douban",
                 "chinese_title": '异形/契约:导演剪辑版',

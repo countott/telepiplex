@@ -3,7 +3,7 @@
     <p>English | <a href="./README.md">[简体中文]</a></p>
 </div>
 
-A Python-based Telegram bot for managing and controlling 115 Network Disk, supporting offline downloads, video uploads, directory synchronization, and more.
+A Python-based Telegram bot for managing and controlling 115 Network Disk, supporting offline downloads, video uploads, release search, and Plex library updates.
 
 ## Tg group
 
@@ -12,27 +12,27 @@ Usage Issues & Bug Reports
 [Join](https://t.me/+FTPNla_7SCc3ZWVl)
 
 ## Update Log
-- Added `/search` for verified media-entry confirmation, release search, metadata link parsing, 115 offline download, and automatic Plex naming.
+- Added `/search` for verified media-entry confirmation, release search, metadata link parsing, 115 offline download, and automatic media-library naming.
 - Added `/magnet` and `/m` for direct magnet submission.
 - Unsupported HTTP/HTTPS web pages are rejected; existing magnet links should be submitted with `/magnet` or `/m`.
 - Removed obsolete command surfaces and manual naming flows.
-- Added media configuration for unorganized files and Plex/Emby library update extension points.
+- Added media configuration for unorganized files and Plex library update confirmation.
 
 ## Background
-This project originated from the need to optimize personal daily viewing experience. As a movie enthusiast, I use the combination of 115 Network Disk + CloudDrive2 + Emby to manage and watch media content.
+This project originated from the need to optimize personal daily viewing experience. As a movie enthusiast, I use the combination of 115 Network Disk and Plex to manage and watch media content.
 
 Imagine this scenario:
 
 While commuting, you come across an interesting movie. Simply send the magnet link to the TG bot, and it will:
 - Automatically download the movie to the specified 115 save directory
 - Intelligently clean up advertisement files
-- Automatically create STRM files and notify Emby for media library scanning
+- Automatically organize the downloaded media and ask before refreshing Plex
 
-When you return home after work, just prepare some snacks and drinks, open Emby, and enjoy a well-organized viewing experience. Let a good movie wash away your daily fatigue and help you relax.
+When you return home after work, just prepare some snacks and drinks, open Plex, and enjoy a well-organized viewing experience. Let a good movie wash away your daily fatigue and help you relax.
 
 ## Known Issues
 - Limited support for TV series. Downloading series directly may cause unexpected issues
-- Directory synchronization will clear the entire folder, including metadata (quite aggressive)
+- Prowlarr result quality depends on your indexer configuration.
 
 If you'd like to help improve this project, welcome to [join](https://t.me/qiqiandfei)!
 
@@ -47,11 +47,6 @@ If you'd like to help improve this project, welcome to [join](https://t.me/qiqia
   - Intelligent automatic save-path selection
   - Advertisement file cleanup
   - Automatic organization for media-library naming
-
-- 🔄 **Directory Synchronization**
-  - Automatic local symlink creation
-  - STRM file batch generation
-  - Seamless Emby media library integration
 
 - � **Video Processing**
   - Support automatic video file upload to 115 Network Disk (Note: Consumes VPS/proxy traffic, use with caution)
@@ -119,7 +114,7 @@ If you'd like to help improve this project, welcome to [join](https://t.me/qiqia
       volumes:
         - /path/to/config:/config  # Configuration path
         - /path/to/tmp:/tmp        # Temp path
-        - /path/to/media:/media    # Emby media library directory (symlink directory)
+        - /path/to/media:/media    # media directory
         - /path/to/CloudNAS:/CloudNAS:rslave # CloudDrive2 mount directory
    ```
 
@@ -164,7 +159,6 @@ Please refer to the comments in `config/config.yaml.example` for configuration d
 - `/m`       - Short magnet command
 - `/retry`   - Retry list
 - `/r`       - Short retry list command
-- `/strm`    - Sync directory and create STRM files
 - `/q`       - Cancel current session
 
 Use `/search movie name` or `/s movie name` to resolve and confirm a media entry before searching releases, or send a Douban, IMDb, TVDB, or TMDB link directly. Series requests can include scope such as `S02E05`; unreleased episodes are blocked before Prowlarr is queried. Use `/magnet magnet:?xt=urn:btih:...` or `/m magnet:?xt=urn:btih:...` when you already have a magnet link.
@@ -189,7 +183,7 @@ category_folder:
     plex_library_id: "11"
 ```
 
-When Plex is configured, `plex_library_id` maps each 115 save path to the corresponding Plex library. The bot sends a confirmation button after media organization, and Plex refresh is triggered only after the user confirms.
+When Plex is configured, `plex_library_id` can map each 115 save path to a specific Plex library. Without a matching library id, the confirmation button refreshes all Plex libraries. Plex refresh is triggered only after the user confirms.
 
 ### 115 Open Platform Application
 
@@ -219,10 +213,6 @@ tg_api_hash: 1yh3j4k9dsk0fj3jdufnwrhf62j1k33f
 ```
 
 > **Note**: If you don't configure this step, the bot will still work normally, but cannot handle video files larger than 20MB.
-
-### Important Warning
-
-⚠️ **STRM Sync Function Warning**: The `/strm` command will **delete all files in the target directory**, including metadata. Large-scale synchronization operations may trigger 115 Network Disk's risk control mechanism, please use with caution!
 
 ### License
 ```

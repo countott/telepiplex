@@ -2,7 +2,7 @@
 
 from pathlib import PurePosixPath
 
-from app.utils.plex_naming import sanitize_path_name
+from app.utils.media_naming import sanitize_path_name
 
 
 VIDEO_EXTENSIONS = {

@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from selenium.webdriver.common.by import By
 from selenium import webdriver
 import init
+from app.utils.log_sanitizer import sanitize_log_value
 from seleniumbase import SB
 import subprocess
 from selenium.webdriver.support.ui import WebDriverWait
@@ -314,7 +315,7 @@ class SeleniumBrowser:
                     else:
                         init.logger.info("Cloudflare 验证已通过")
             else:
-                init.logger.error(f"Flaresolverr 返回错误: {resp_data}")
+                init.logger.error(f"Flaresolverr 返回错误: {sanitize_log_value(resp_data)}")
 
         except Exception as e:
             init.logger.warn(f"Cloudflare 验证处理出错: {e}")

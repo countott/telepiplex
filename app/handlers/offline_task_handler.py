@@ -4,8 +4,6 @@ import init
 from app.utils.sqlitelib import *
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CommandHandler, MessageHandler, filters, CallbackQueryHandler
-from app.utils.message_queue import add_task_to_queue
-import time
 from warnings import filterwarnings
 from telegram.warnings import PTBUserWarning
 
@@ -15,130 +13,98 @@ filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBU
 def get_failed_tasks():
     """获取所有失败的下载任务"""
     with SqlLiteLib() as sqlite:
-        sql = "SELECT * FROM offline_task WHERE is_download = 0"
+        sql = "SELECT * FROM offline_task WHERE is_download = 0 ORDER BY created_at DESC"
         return sqlite.query_all(sql)
+
+
+def get_retry_task(task_id: int):
+    with SqlLiteLib() as sqlite:
+        rows = sqlite.query_all("SELECT * FROM offline_task WHERE id = ? AND is_download = 0", (task_id,))
+        return rows[0] if rows else None
 
 def mark_task_as_completed(task_id: int):
     """标记任务为已完成"""
     with SqlLiteLib() as sqlite:
         sql = "UPDATE offline_task SET is_download = 1, completed_at = datetime('now') WHERE id = ?"
         sqlite.execute_sql(sql, (task_id,))
-        
-def update_retry_time(task_id: int):
-    """更新重试次数"""
+
+
+def remove_task_from_retry_list(task_id: int):
+    """重试开始时从待重试列表移除，避免同一任务被重复调度。"""
     with SqlLiteLib() as sqlite:
-        sql = "UPDATE offline_task SET retry_count = retry_count + 1 WHERE id = ?"
+        sql = "DELETE FROM offline_task WHERE id = ?"
         sqlite.execute_sql(sql, (task_id,))
-        
+
+
 def clear_failed_tasks():
     """清空所有失败的重试任务"""
     with SqlLiteLib() as sqlite:
         sql = "DELETE FROM offline_task WHERE is_download = 0"
         sqlite.execute_sql(sql, ())
-    
 
-def try_to_offline2115_again():
-    """重新尝试失败的下载任务"""
-    failed_tasks = get_failed_tasks()
-    if not failed_tasks:
-        init.logger.info("重试列表为空，暂时没有需要重试的任务！")
-        return
-    
-    from app.core.offline_task_retry import create_offline_url
-    create_offline_url_list = create_offline_url(failed_tasks)
-    for offline_tasks in create_offline_url_list:
-        if not offline_tasks:
-            continue
-        offline_success = init.openapi_115.offline_download_specify_path(offline_tasks, failed_tasks[0]['save_path'])
-        if offline_success:
-            init.logger.info(f"重试任务 {offline_tasks} 添加离线成功")
-        else:
-            init.logger.error(f"重试任务 {offline_tasks} 添加离线失败")
-        time.sleep(2)  
 
-    time.sleep(300)  # 等待5秒，确保任务状态更新
-    
-    success_list= []
-    offline_task_status = init.openapi_115.get_offline_tasks()
-    for failed_task in failed_tasks:
-        task_id = failed_task['id']
-        link = failed_task['magnet']
-        title = failed_task['title']
-        save_path = failed_task['save_path']
-        retry_count = failed_task['retry_count']
-        for task in offline_task_status:
-            if task['url'] == link:
-                if task['status'] == 2 and task['percentDone'] == 100:
-                    resource_name = task['name']
-                    init.logger.info(f"重试任务 {title} 下载完成！")
-                    # 处理下载成功后的清理和媒体库通知
-                    if init.openapi_115.is_directory(f"{save_path}/{resource_name}"):
-                        # 清除垃圾文件
-                        init.openapi_115.auto_clean_all(f"{save_path}/{resource_name}")
-                        final_path = f"{save_path}/{resource_name}"
-                    else:
-                        final_path = save_path
+def _progress_percent(value) -> float:
+    try:
+        percent = float(value)
+    except (TypeError, ValueError):
+        percent = 0.0
+    return max(0.0, min(percent, 100.0))
 
-                    from app.handlers.download_handler import handle_media_library_update
-                    handle_media_library_update(final_path)
 
-                    # 避免link过长
-                    if len(link) > 600:
-                        link = link[:600] + "..."
-                    
-                    message = f"""✅ **重试任务 `{title}` 下载成功！**
+def _progress_bar(percent) -> str:
+    percent = _progress_percent(percent)
+    filled = int(percent // 5)
+    return "█" * filled + "░" * (20 - filled) + f" {percent:.1f}%"
 
-**资源名称:** `{title}`
-**磁力链接:** `{link}`
-**保存路径:** `{save_path}`
-        """
-                    add_task_to_queue(init.bot_config['allowed_user'], None, message=message)
-                    
-                    # 标记任务为完成
-                    mark_task_as_completed(task_id)
-                    success_list.append(task['info_hash'])
-                    
-                else:
-                    init.logger.warn(f"重试任务 {title} 下载超时！")
-                    # 更新重试次数
-                    update_retry_time(task_id)
-                    # 删除失败资源
-                    init.openapi_115.del_offline_task(task['info_hash'])
-                break
-    # 清除云端任务
-    for info_hash in success_list:
-        init.logger.info(f"清除云端任务 {info_hash} ...")
-        init.openapi_115.del_offline_task(info_hash, del_source_file=0)
-        time.sleep(2)
-    
+
+def _retry_list_keyboard(tasks: list[dict]) -> InlineKeyboardMarkup:
+    keyboard = [
+        [
+            InlineKeyboardButton(f"重试 {index}", callback_data=f"retry_task:{task.get('id')}"),
+            InlineKeyboardButton(f"丢弃 {index}", callback_data=f"drop_retry:{task.get('id')}"),
+        ]
+        for index, task in enumerate(tasks, start=1)
+        if task.get("id")
+    ]
+    keyboard.append([InlineKeyboardButton("清空所有", callback_data="clear_all")])
+    keyboard.append([InlineKeyboardButton("返回", callback_data="return")])
+    return InlineKeyboardMarkup(keyboard)
 
 
 async def view_retry_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查看重试任务列表"""
-    retry_list = get_failed_tasks()
+    user_id = update.message.from_user.id
+    if not init.check_user(user_id):
+        await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
+        return
+
+    retry_list = [
+        task for task in get_failed_tasks()
+        if (task.get("retry_category") or "partial") == "partial"
+    ]
     if not retry_list:
         await update.message.reply_text("🈳当前重试列表为空")
         return
-   
-    retry_text = "**重试列表：**\n\n"
-    for i, task in enumerate(retry_list):
-        # 使用magnet字段显示，因为offline_task表中可能没有title字段
-        retry_text += f"{i + 1}\\. `{task['title']}`\n"
-    
-    # 显示重试任务列表
-    keyboard = [
-        [InlineKeyboardButton("清空所有", callback_data="clear_all")],
-        [InlineKeyboardButton("返回", callback_data="return")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(retry_text, reply_markup=reply_markup, parse_mode='MarkdownV2')
+    retry_text = "重试列表：\n\n"
+    for i, task in enumerate(retry_list):
+        progress = _progress_bar(task.get("progress_percent"))
+        reason = task.get("last_error") or "下载未完成"
+        retry_text += f"{i + 1}. {task['title']}\n"
+        retry_text += f"进度：{progress}\n"
+        retry_text += f"原因：{reason}\n\n"
+
+    await update.message.reply_text(retry_text, reply_markup=_retry_list_keyboard(retry_list))
     
     
 async def handle_clear_retry_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理清空重试列表的回调"""
     query = update.callback_query
     await query.answer()
+    if not init.check_user(update.effective_user.id):
+        await query.edit_message_text("⚠️ 当前账号无权使用此机器人。")
+        return
+
     callback_data = query.data
     
     if callback_data == "clear_all":
@@ -148,12 +114,55 @@ async def handle_clear_retry_list(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("操作已取消")
 
 
+async def handle_single_retry_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not init.check_user(user_id):
+        await query.edit_message_text("⚠️ 当前账号无权使用此机器人。")
+        return
+
+    data = query.data or ""
+    action, task_id_text = data.split(":", 1)
+    try:
+        task_id = int(task_id_text)
+    except ValueError:
+        await query.edit_message_text("⚠️ 重试任务无效。")
+        return
+
+    task = get_retry_task(task_id)
+    if not task:
+        await query.edit_message_text("⚠️ 重试任务已不存在。")
+        return
+
+    if action == "drop_retry":
+        remove_task_from_retry_list(task_id)
+        await query.edit_message_text(f"已丢弃重试任务：{task.get('title') or '未知任务'}")
+        return
+
+    link = str(task.get("magnet") or "").strip()
+    save_path = str(task.get("save_path") or "").strip()
+    if not link or not save_path:
+        await query.edit_message_text("⚠️ 重试任务缺少下载链接或保存目录，已停止。")
+        return
+
+    from app.handlers.download_handler import download_executor, download_task
+
+    remove_task_from_retry_list(task_id)
+    download_executor.submit(download_task, link, save_path, user_id)
+    await query.edit_message_text(
+        f"已开始重试：{task.get('title') or '未知任务'}\n"
+        f"上次进度：{_progress_bar(task.get('progress_percent'))}"
+    )
+
+
 def register_offline_task_handlers(application):
     """注册离线任务处理器"""
     # 添加独立的命令处理器用于查看重试列表
     application.add_handler(CommandHandler("retry", view_retry_list))
     application.add_handler(CommandHandler("r", view_retry_list))
-    
+
     # 添加独立的清空重试列表处理器
     application.add_handler(CallbackQueryHandler(handle_clear_retry_list, pattern="^(clear_all|return)$"))
+    application.add_handler(CallbackQueryHandler(handle_single_retry_action, pattern=r"^(retry_task|drop_retry):"))
     init.logger.info("✅ Offline Task处理器已注册")

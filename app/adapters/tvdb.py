@@ -117,6 +117,7 @@ def _normalize_series(item: dict) -> dict:
         "type": str(item.get("type") or "").strip(),
         "overview": str(item.get("overview") or "").strip(),
         "aliases": item.get("aliases") if isinstance(item.get("aliases"), list) else [],
+        "cover_url": str(item.get("image") or "").strip(),
     }
 
 
@@ -158,3 +159,35 @@ def get_tvdb_series_episodes(series_id: str, season_type: str = "default", page:
     if not isinstance(episodes, list):
         return []
     return [_normalize_episode(item) for item in episodes if isinstance(item, dict)]
+
+
+def _artwork_url(item: dict | None) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("image") or item.get("thumbnail") or "").strip()
+
+
+def get_tvdb_series_artwork_url(series_id: str) -> str:
+    series_id = str(series_id or "").strip()
+    if not series_id:
+        return ""
+
+    data = _tvdb_get(f"/series/{series_id}/artworks")
+    payload = data.get("data") if isinstance(data, dict) else {}
+    if not isinstance(payload, dict):
+        return ""
+
+    primary = _artwork_url(payload)
+    if primary:
+        return primary
+
+    artworks = payload.get("artworks")
+    if not isinstance(artworks, list):
+        return ""
+
+    usable = [item for item in artworks if _artwork_url(item)]
+    if not usable:
+        return ""
+
+    usable.sort(key=lambda item: float(item.get("score") or 0), reverse=True)
+    return _artwork_url(usable[0])
