@@ -23,9 +23,29 @@ except ImportError:
 
 
 TELEGRAM_API_TIMEOUT = 30
+DEFAULT_ENABLED_MODULES = (
+    "app.modules.open115",
+    "app.modules.media_search",
+    "app.modules.renaming",
+)
+MODULE_CATALOG = {
+    "app.modules.open115": {
+        "label": "115 下载",
+        "description": "授权、保存目录和离线投递",
+    },
+    "app.modules.media_search": {
+        "label": "媒体搜索",
+        "description": "Prowlarr 搜索和候选确认",
+    },
+    "app.modules.renaming": {
+        "label": "下载后重命名",
+        "description": "下载完成后的反查、整理和重命名",
+    },
+}
 CORE_BOT_COMMANDS = [
     BotCommand("start", "获取核心状态"),
     BotCommand("reload", "重载配置"),
+    BotCommand("modules", "查看模块状态"),
 ]
 SENSITIVE_CONFIG_KEYWORDS = (
     "token",
@@ -80,31 +100,102 @@ def log_config_snapshot(prefix: str):
 
 
 def get_enabled_module_names(config=None):
-    config = config or init.bot_config
+    if config is None:
+        config = init.bot_config
     modules_config = (config or {}).get("modules") or {}
-    enabled = modules_config.get("enabled") or []
+    enabled = modules_config.get("enabled")
+    if enabled is None or enabled == []:
+        enabled = list(DEFAULT_ENABLED_MODULES)
     if isinstance(enabled, str):
-        enabled = [item.strip() for item in enabled.split(",")]
-    return [str(item).strip() for item in enabled if str(item).strip()]
+        if enabled.strip().lower() == "all":
+            enabled = list(DEFAULT_ENABLED_MODULES)
+        else:
+            enabled = [item.strip() for item in enabled.split(",")]
+    if isinstance(enabled, tuple):
+        enabled = list(enabled)
+    if isinstance(enabled, list) and any(str(item).strip().lower() == "all" for item in enabled):
+        enabled = list(DEFAULT_ENABLED_MODULES)
+
+    disabled = modules_config.get("disabled") or []
+    if isinstance(disabled, str):
+        disabled = [item.strip() for item in disabled.split(",")]
+    disabled = {str(item).strip() for item in disabled if str(item).strip()}
+
+    module_names = []
+    for item in enabled or []:
+        module_name = str(item).strip()
+        if module_name and module_name not in disabled and module_name not in module_names:
+            module_names.append(module_name)
+    return module_names
 
 
 def build_module_registry():
     registry = ModuleRegistry()
     loaded = load_enabled_modules(registry, get_enabled_module_names())
+    registry.loaded_module_names = loaded
     init.module_registry = registry
     if init.logger:
         init.logger.info(f"已加载 Telepiplex 模块: {loaded}")
     return registry
 
 
+def build_modules_status_text(config=None, registry=None):
+    if config is None:
+        config = init.bot_config
+    next_modules = get_enabled_module_names(config)
+    running_modules = getattr(registry, "loaded_module_names", None) if registry is not None else None
+    if running_modules is None:
+        running_modules = next_modules
+
+    lines = [
+        "<b>Telepiplex 模块状态</b>",
+        "",
+        "<b>当前运行</b>",
+    ]
+    for module_name in running_modules:
+        module_info = MODULE_CATALOG.get(module_name, {"label": module_name, "description": ""})
+        description = module_info.get("description")
+        suffix = f" - {description}" if description else ""
+        lines.append(f"✅ {module_info['label']}{suffix}")
+
+    configured = set(next_modules)
+    running = set(running_modules)
+    if configured != running:
+        lines.extend(["", "<b>下次启动</b>"])
+        for module_name in next_modules:
+            module_info = MODULE_CATALOG.get(module_name, {"label": module_name, "description": ""})
+            marker = "✅" if module_name in running else "⬆️"
+            lines.append(f"{marker} {module_info['label']}")
+
+    disabled = ((config or {}).get("modules") or {}).get("disabled") or []
+    if isinstance(disabled, str):
+        disabled = [item.strip() for item in disabled.split(",")]
+    disabled = [str(item).strip() for item in disabled if str(item).strip()]
+    if disabled:
+        lines.extend(["", "<b>已禁用</b>"])
+        for module_name in disabled:
+            module_info = MODULE_CATALOG.get(module_name, {"label": module_name})
+            lines.append(f"⏸ {module_info['label']}")
+
+    lines.extend(
+        [
+            "",
+            "模块代码更新或模块配置变更后，重启容器后生效。",
+            "当前 `/reload` 只重读配置，不会热加载 Telegram handler。",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def get_help_info():
     version = get_version()
     return f"""
-<b>Telepiplex Core {version}</b>\n\n
+<b>Telepiplex {version}</b>\n\n
 <b>命令列表</b>\n
 <code>/start</code> - 显示核心运行层状态\n
-<code>/reload</code> - 重载配置\n\n
-此分支只包含 Telepiplex 核心运行层，不包含 115 投递、媒体搜索或媒体整理业务能力。
+<code>/reload</code> - 重载配置\n
+<code>/modules</code> - 查看模块状态\n\n
+此运行版默认加载稳定模块。模块代码更新或模块配置变更后，重启容器后生效。
 """
 
 
@@ -143,6 +234,24 @@ async def reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=update.effective_chat.id,
         text="✅ 配置已重新加载。",
         parse_mode="html",
+    )
+
+
+async def modules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not init.check_user(update.effective_user.id):
+        await send_bot_message_safely(
+            context.bot,
+            chat_id=update.effective_chat.id,
+            text="⚠️ 当前账号无权使用此机器人。",
+            parse_mode="html",
+        )
+        return
+    await send_bot_message_safely(
+        context.bot,
+        chat_id=update.effective_chat.id,
+        text=build_modules_status_text(init.bot_config, context.application.bot_data.get("telepiplex_registry")),
+        parse_mode="html",
+        disable_web_page_preview=True,
     )
 
 
@@ -276,6 +385,7 @@ if __name__ == "__main__":
     application.bot_data["telepiplex_registry"] = registry
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reload", reload))
+    application.add_handler(CommandHandler("modules", modules))
     registry.register_handlers(application)
 
     try:

@@ -1,24 +1,56 @@
-# Telepiplex Core
+# Telepiplex
 
-`feature/telepiplex-core` 是 Telepiplex 的纯核心运行层分支，用来承载共享启动、配置读取、日志、消息队列、用户校验和基础 Telegram Bot runtime。
+Telepiplex 是一个面向 Telegram 的媒体投递与整理机器人。`main` 是可部署运行分支，默认组合稳定模块：
 
-这个分支不包含 115 投递、媒体搜索、Prowlarr、TVDB、Plex、Aria2、视频转存或媒体整理业务能力。业务功能应从当前 `main` 单独抽取到对应 feature 分支，再由 `main` 做最终缝合。
+- `app.modules.open115`：115 授权、保存目录和离线投递。
+- `app.modules.media_search`：Prowlarr 媒体搜索、候选确认和下载请求提交。
+- `app.modules.renaming`：下载完成后的反查、整理和重命名。
 
-## 命令
+`feature/telepiplex-core`、`feature/115`、`feature/media-search`、`feature/renaming` 仍作为模块开发边界使用；部署镜像建议跟随 `main`。
+
+## Telegram 命令
 
 | 命令 | 说明 |
 | --- | --- |
-| `/start` | 显示核心运行层状态 |
-| `/reload` | 重载 `/config/config.yaml` |
+| `/start` | 显示运行状态 |
+| `/modules` | 查看当前模块状态 |
+| `/reload` | 重载 `/config/config.yaml`，不会热加载 Telegram handler |
+| `/config` | 配置 115 Token |
+| `/auth` | 115 扫码授权 |
+| `/magnet`、`/m` | 投递磁力链接 |
+| `/search`、`/s` | 搜索媒体并提交下载请求 |
+
+模块代码更新或模块配置变更后，需要重启容器才会生效。
 
 ## 配置
 
-运行时配置路径仍是容器内 `/config/config.yaml`：
+运行时配置路径是容器内 `/config/config.yaml`。如果没有显式配置 `modules`，运行版默认等价于：
+
+```yaml
+modules:
+  enabled: all
+  disabled: []
+```
+
+需要临时禁用某个稳定模块时，可以写入 `disabled`：
+
+```yaml
+modules:
+  enabled: all
+  disabled:
+    - app.modules.renaming
+```
+
+基础配置示例：
 
 ```yaml
 log_level: info
 bot_token: "your_bot_token"
 allowed_user: 123456789
+
+modules:
+  enabled: all
+  disabled: []
 
 category_folder:
   - name: 真人电影
@@ -31,19 +63,20 @@ category_folder:
     path: /动画剧集
 ```
 
-`category_folder` 是共享保存目录合同，供业务分支复用；core 分支本身不会执行下载或整理。
+Prowlarr 配置仍放在 `/config/config.yaml` 的 `search.prowlarr` 下，尤其是 `search.prowlarr.api_key`。
+
+## 分支定位
+
+- `main`：可部署组合运行分支，镜像建议拉取这里。
+- `feature/telepiplex-core`：纯核心运行层。
+- `feature/115`：115 单点能力分支。
+- `feature/media-search`：媒体搜索能力分支。
+- `feature/renaming`：下载完成后的重命名与整理能力分支。
 
 ## 本地验证
 
 ```bash
-python3 -m unittest tests/test_telepiplex_core_surface.py
-python3 -m py_compile app/115bot.py app/init.py app/utils/message_queue.py app/utils/logger.py app/utils/log_sanitizer.py app/utils/directory_config.py
+python3 -m unittest tests/test_bot_runtime_startup.py tests/test_composable_integration.py tests/test_composable_core.py
+python3 -m py_compile $(git ls-files '*.py')
 git -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol diff --check
 ```
-
-## 分支定位
-
-- `main`：当前已缝合成功的完整业务代码。
-- `feature/telepiplex-core`：纯核心运行层。
-- `feature/115`：115 单点能力分支。
-- `feature/media-search`：媒体搜索能力分支，替代旧 `feature/prowlarr-search`。

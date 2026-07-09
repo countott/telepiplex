@@ -1,11 +1,15 @@
-# Telepiplex Core 配置模板；运行时配置路径为 /config/config.yaml。
+# Telepiplex 配置模板；运行时配置路径为 /config/config.yaml。
 
 log_level: info
 
 bot_token: "your_bot_token"
 allowed_user: 123456789
 
-# 共享保存目录合同。业务分支可复用该结构，不在 core 分支执行 115 投递。
+modules:
+  enabled: all
+  disabled: []
+
+# 共享保存目录合同。115 和媒体搜索模块会复用该结构。
 category_folder:
   - name: 真人电影
     path: /真人电影

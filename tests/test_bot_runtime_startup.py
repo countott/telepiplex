@@ -117,6 +117,62 @@ class BotRuntimeStartupTest(unittest.TestCase):
         self.assertIn(("write_timeout", 30), calls)
         self.assertIn(("pool_timeout", 30), calls)
 
+    def test_default_enabled_modules_load_all_stable_modules(self):
+        bot_module = load_bot_module()
+
+        self.assertEqual(
+            bot_module.get_enabled_module_names({}),
+            [
+                "app.modules.open115",
+                "app.modules.media_search",
+                "app.modules.renaming",
+            ],
+        )
+
+    def test_disabled_modules_are_removed_from_default_stable_modules(self):
+        bot_module = load_bot_module()
+
+        self.assertEqual(
+            bot_module.get_enabled_module_names(
+                {
+                    "modules": {
+                        "enabled": "all",
+                        "disabled": ["app.modules.renaming"],
+                    }
+                }
+            ),
+            [
+                "app.modules.open115",
+                "app.modules.media_search",
+            ],
+        )
+
+    def test_explicit_empty_config_uses_default_modules_not_global_config(self):
+        bot_module = load_bot_module()
+        original_config = bot_module.init.bot_config
+        bot_module.init.bot_config = {"modules": {"disabled": ["app.modules.renaming"]}}
+        try:
+            self.assertEqual(
+                bot_module.get_enabled_module_names({}),
+                [
+                    "app.modules.open115",
+                    "app.modules.media_search",
+                    "app.modules.renaming",
+                ],
+            )
+        finally:
+            bot_module.init.bot_config = original_config
+
+    def test_modules_status_text_reports_default_modules_and_restart_boundary(self):
+        bot_module = load_bot_module()
+
+        text = bot_module.build_modules_status_text({})
+
+        self.assertIn("115 下载", text)
+        self.assertIn("媒体搜索", text)
+        self.assertIn("下载后重命名", text)
+        self.assertIn("重启容器后生效", text)
+
     def test_bot_menu_and_help_include_config_command(self):
         bot_module = load_bot_module()
         from app.core.module_registry import ModuleRegistry
