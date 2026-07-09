@@ -30,6 +30,28 @@ except ModuleNotFoundError:
 
 
 try:
+    import requests  # noqa: F401
+except ModuleNotFoundError:
+    requests_module = types.ModuleType("requests")
+
+    class RequestException(Exception):
+        pass
+
+    class HTTPError(RequestException):
+        pass
+
+    def _missing_request(*args, **kwargs):
+        raise RequestException("requests is not installed in this test environment")
+
+    requests_module.get = _missing_request
+    requests_module.post = _missing_request
+    requests_module.RequestException = RequestException
+    requests_module.HTTPError = HTTPError
+    requests_module.exceptions = types.SimpleNamespace(RequestException=RequestException, HTTPError=HTTPError)
+    sys.modules["requests"] = requests_module
+
+
+try:
     import telegram  # noqa: F401
 except ModuleNotFoundError:
     telegram_module = types.ModuleType("telegram")
