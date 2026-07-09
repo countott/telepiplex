@@ -34,17 +34,16 @@ class MediaSearchSurfaceTest(unittest.TestCase):
             self.assertNotIn(symbol, source)
 
     def test_business_modules_outside_media_search_are_absent(self):
-        for path in (
-            ROOT / "app" / "core" / "open_115.py",
-            ROOT / "app" / "handlers" / "auth_handler.py",
-            ROOT / "app" / "handlers" / "config_handler.py",
-            ROOT / "app" / "handlers" / "offline_task_handler.py",
-            ROOT / "app" / "handlers" / "video_handler.py",
-            ROOT / "app" / "utils" / "aria2.py",
-            ROOT / "app" / "utils" / "media_naming.py",
-            ROOT / "app" / "utils" / "tvdb_rename.py",
+        source = (ROOT / "app" / "modules" / "media_search.py").read_text(encoding="utf-8")
+        for symbol in (
+            "register_auth_handlers",
+            "register_config_handlers",
+            "register_download_handlers",
+            "open_115",
+            "media_naming",
+            "tvdb_rename",
         ):
-            self.assertFalse(path.exists(), str(path))
+            self.assertNotIn(symbol, source)
 
     def test_search_uses_core_download_request_contract(self):
         source = (ROOT / "app" / "handlers" / "search_handler.py").read_text(encoding="utf-8")

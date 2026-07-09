@@ -44,25 +44,15 @@ class Feature115SurfaceTest(unittest.TestCase):
         for symbol in removed_symbols:
             self.assertNotIn(symbol, bot_source)
 
-        for path in [
-            ROOT / "app" / "handlers" / "search_handler.py",
-            ROOT / "app" / "handlers" / "video_handler.py",
-            ROOT / "app" / "handlers" / "offline_task_handler.py",
-            ROOT / "app" / "handlers" / "aria2_handler.py",
-            ROOT / "app" / "adapters" / "prowlarr.py",
-            ROOT / "app" / "adapters" / "tvdb.py",
-            ROOT / "app" / "core" / "scheduler.py",
-            ROOT / "app" / "core" / "selenium_browser.py",
-            ROOT / "app" / "core" / "video_downloader.py",
-            ROOT / "app" / "utils" / "ai.py",
-            ROOT / "app" / "utils" / "aria2.py",
-            ROOT / "app" / "utils" / "fast_telethon.py",
-            ROOT / "app" / "utils" / "media_naming.py",
-            ROOT / "app" / "utils" / "search_query.py",
-            ROOT / "app" / "utils" / "search_resolution.py",
-            ROOT / "app" / "utils" / "tvdb_rename.py",
-        ]:
-            self.assertFalse(path.exists(), str(path))
+        module_source = (ROOT / "app" / "modules" / "open115.py").read_text(encoding="utf-8")
+        for symbol in (
+            "register_search_handlers",
+            "register_renaming",
+            "app.handlers.search_handler",
+            "app.modules.media_search",
+            "app.modules.renaming",
+        ):
+            self.assertNotIn(symbol, module_source)
 
     def test_config_templates_only_expose_minimal_115_settings(self):
         for config_path in (ROOT / "config" / "modules" / "115.yaml.example",):
@@ -88,17 +78,9 @@ class Feature115SurfaceTest(unittest.TestCase):
                 self.assertNotIn(term, source)
 
     def test_115_module_does_not_include_search_or_renaming_files(self):
-        for path in [
-            ROOT / "app" / "handlers" / "search_handler.py",
-            ROOT / "app" / "adapters" / "prowlarr.py",
-            ROOT / "app" / "adapters" / "tvdb.py",
-            ROOT / "app" / "utils" / "ai.py",
-            ROOT / "app" / "utils" / "media_naming.py",
-            ROOT / "app" / "utils" / "search_query.py",
-            ROOT / "app" / "utils" / "search_resolution.py",
-            ROOT / "app" / "utils" / "tvdb_rename.py",
-        ]:
-            self.assertFalse(path.exists(), str(path))
+        module_source = (ROOT / "app" / "modules" / "open115.py").read_text(encoding="utf-8")
+        for term in ("Prowlarr", "search_handler", "media_naming", "tvdb_rename"):
+            self.assertNotIn(term, module_source)
 
 
 if __name__ == "__main__":
