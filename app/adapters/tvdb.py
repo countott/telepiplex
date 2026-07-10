@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 
 import requests
@@ -111,24 +112,135 @@ def _tvdb_get(path: str, params: dict | None = None):
         raise TvdbRequestError(f"TVDB 请求失败: {e}") from e
 
 
-def _normalize_series(item: dict) -> dict:
-    return {
-        "tvdb_series_id": str(item.get("tvdb_id") or item.get("id") or "").strip(),
+def _contains_latin(value: str) -> bool:
+    return bool(re.search(r"[A-Za-z]", str(value or "")))
+
+
+def _alias_values(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    aliases = []
+    for item in value:
+        if isinstance(item, dict):
+            text = item.get("name") or item.get("title") or ""
+        else:
+            text = item
+        text = " ".join(str(text or "").split())
+        if text and text not in aliases:
+            aliases.append(text)
+    return aliases
+
+
+def _search_alias_values(item: dict) -> list[str]:
+    aliases = _alias_values(item.get("aliases"))
+    translated_values = [item.get("name_translated")]
+    translations = item.get("translations")
+    if isinstance(translations, dict):
+        translated_values.extend(translations.values())
+    translated_values.extend(_alias_values(item.get("translationsWithLang")))
+
+    for value in translated_values:
+        value = " ".join(str(value or "").split())
+        if value and value not in aliases:
+            aliases.append(value)
+    return aliases
+
+
+def _strip_alias_qualifiers(value: str) -> str:
+    value = " ".join(str(value or "").split())
+    while value:
+        cleaned = re.sub(r"\s*\((?:(?:19|20)\d{2}|[A-Za-z]{2,3})\)\s*$", "", value).strip()
+        if cleaned == value:
+            return value
+        value = cleaned
+    return ""
+
+
+def _translated_name(item: dict) -> str:
+    translated = item.get("name_translated")
+    if _contains_latin(translated):
+        return _strip_alias_qualifiers(translated)
+
+    translations = item.get("translations")
+    if isinstance(translations, dict):
+        translated = translations.get("eng") or translations.get("en") or ""
+        if _contains_latin(translated):
+            return _strip_alias_qualifiers(translated)
+    return ""
+
+
+def _preferred_english_title(item: dict) -> str:
+    translated = _translated_name(item)
+    if translated:
+        return translated
+
+    for alias in _alias_values(item.get("aliases")):
+        if _contains_latin(alias):
+            return _strip_alias_qualifiers(alias)
+
+    for key in ("title", "name"):
+        value = str(item.get(key) or "").strip()
+        if _contains_latin(value):
+            return _strip_alias_qualifiers(value)
+    return ""
+
+
+def _search_cover_url(item: dict) -> str:
+    for key in ("image_url", "poster"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+
+    posters = item.get("posters")
+    if isinstance(posters, list):
+        for poster in posters:
+            value = _artwork_url(poster) if isinstance(poster, dict) else str(poster or "").strip()
+            if value:
+                return value
+
+    for key in ("thumbnail", "image"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _normalize_search_item(item: dict, media_type: str) -> dict:
+    entity_type = "series" if media_type == "series" else "movie"
+    entity_id = str(item.get("tvdb_id") or item.get("id") or "").strip()
+    normalized = {
+        "tvdb_id": entity_id,
+        "media_type": entity_type,
         "name": str(item.get("name") or "").strip(),
+        "english_title": _preferred_english_title(item),
         "year": str(item.get("year") or item.get("first_air_time") or item.get("firstAired") or "").strip()[:4],
-        "type": str(item.get("type") or "").strip(),
+        "type": str(item.get("type") or entity_type).strip(),
         "overview": str(item.get("overview") or "").strip(),
-        "aliases": item.get("aliases") if isinstance(item.get("aliases"), list) else [],
-        "cover_url": str(item.get("image") or "").strip(),
+        "aliases": _search_alias_values(item),
+        "cover_url": _search_cover_url(item),
     }
+    normalized[f"tvdb_{entity_type}_id"] = entity_id
+    return normalized
 
 
-def search_tvdb_series(query: str, year: str = "") -> list[dict]:
+def _translation_name(entity_type: str, entity_id: str) -> str:
+    if not entity_id:
+        return ""
+    data = _tvdb_get(f"/{entity_type}/{entity_id}/translations/eng")
+    payload = data.get("data") if isinstance(data, dict) else {}
+    if not isinstance(payload, dict):
+        return ""
+    return _preferred_english_title(payload)
+
+
+def _search_tvdb(query: str, entity_type: str, year: str = "") -> list[dict]:
     query = str(query or "").strip()
+    entity_type = "series" if entity_type == "series" else "movies"
     if not query:
         return []
 
-    params = {"query": query, "type": "series"}
+    search_type = "series" if entity_type == "series" else "movie"
+    params = {"query": query, "type": search_type}
     if str(year or "").strip():
         params["year"] = str(year).strip()
 
@@ -136,7 +248,31 @@ def search_tvdb_series(query: str, year: str = "") -> list[dict]:
     items = data.get("data") if isinstance(data, dict) else []
     if not isinstance(items, list):
         return []
-    return [_normalize_series(item) for item in items if isinstance(item, dict)]
+
+    normalized_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        normalized = _normalize_search_item(item, "series" if search_type == "series" else "movie")
+        if not normalized.get("english_title") and normalized.get("tvdb_id"):
+            try:
+                normalized["english_title"] = _translation_name(entity_type, normalized["tvdb_id"])
+            except (TvdbConfigError, TvdbRequestError) as e:
+                logger = getattr(init, "logger", None)
+                if logger:
+                    logger.warn(
+                        f"TVDB英文翻译读取失败 type={search_type} id={normalized['tvdb_id']}: {e}"
+                    )
+        normalized_items.append(normalized)
+    return normalized_items
+
+
+def search_tvdb_series(query: str, year: str = "") -> list[dict]:
+    return _search_tvdb(query, "series", year)
+
+
+def search_tvdb_movies(query: str, year: str = "") -> list[dict]:
+    return _search_tvdb(query, "movies", year)
 
 
 def _normalize_episode(item: dict) -> dict:
@@ -191,5 +327,29 @@ def get_tvdb_series_artwork_url(series_id: str) -> str:
     if not usable:
         return ""
 
+    usable.sort(key=lambda item: float(item.get("score") or 0), reverse=True)
+    return _artwork_url(usable[0])
+
+
+def get_tvdb_movie_artwork_url(movie_id: str) -> str:
+    movie_id = str(movie_id or "").strip()
+    if not movie_id:
+        return ""
+
+    data = _tvdb_get(f"/movies/{movie_id}/extended", params={"short": True})
+    payload = data.get("data") if isinstance(data, dict) else {}
+    if not isinstance(payload, dict):
+        return ""
+
+    primary = _artwork_url(payload)
+    if primary:
+        return primary
+
+    artworks = payload.get("artworks")
+    if not isinstance(artworks, list):
+        return ""
+    usable = [item for item in artworks if _artwork_url(item)]
+    if not usable:
+        return ""
     usable.sort(key=lambda item: float(item.get("score") or 0), reverse=True)
     return _artwork_url(usable[0])

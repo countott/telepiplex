@@ -29,8 +29,10 @@ from app.adapters.prowlarr import (
 from app.adapters.tvdb import (
     TvdbConfigError,
     TvdbRequestError,
+    get_tvdb_movie_artwork_url,
     get_tvdb_series_artwork_url,
     get_tvdb_series_episodes,
+    search_tvdb_movies,
     search_tvdb_series,
 )
 from app.utils.ai import infer_metadata_backfill_with_ai, infer_verified_search_match_with_ai, normalize_search_query_with_ai
@@ -40,6 +42,7 @@ from app.utils.search_resolution import (
     build_confirmation_candidates,
     candidate_to_prowlarr_query,
     is_unreleased_episode,
+    merge_primary_entries,
     parse_search_intent,
 )
 from app.utils.search_query import (
@@ -143,6 +146,40 @@ def _clean_english_title(title: str) -> str:
     return _collapse_title_spaces(title)
 
 
+def _douban_media_type(data: dict) -> str:
+    raw_types = {
+        str(data.get("type") or "").strip().lower(),
+        str(data.get("subtype") or "").strip().lower(),
+    }
+    if data.get("is_tv") or raw_types.intersection({"tv", "series", "tv_series", "show"}):
+        return "series"
+    if raw_types.intersection({"movie", "film"}):
+        return "movie"
+    return ""
+
+
+def _douban_cover_url(data: dict) -> str:
+    direct = data.get("cover_url")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+
+    pic = data.get("pic") if isinstance(data.get("pic"), dict) else {}
+    for key in ("large", "normal", "small"):
+        value = pic.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    cover = data.get("cover")
+    if isinstance(cover, str):
+        return cover.strip()
+    if isinstance(cover, dict):
+        for key in ("large", "normal", "url"):
+            value = cover.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
 def _extract_douban_metadata(payload: dict) -> dict | None:
     if not isinstance(payload, dict):
         return None
@@ -182,14 +219,17 @@ def _extract_douban_metadata(payload: dict) -> dict | None:
     if not english_title and chinese_title and _title_contains_latin(chinese_title):
         english_title = _clean_english_title(chinese_title)
 
-    if not chinese_title or not english_title:
+    if not chinese_title:
         return None
 
     return {
         "source": "douban",
+        "subject_id": str(data.get("id") or data.get("subject_id") or "").strip(),
+        "media_type": _douban_media_type(data),
         "chinese_title": chinese_title,
         "english_title": english_title,
         "year": year,
+        "cover_url": _douban_cover_url(data),
     }
 
 
@@ -207,7 +247,7 @@ def _metadata_from_naming_metadata(naming_metadata: dict, query: str = "", origi
     if source == "douban" and naming_metadata.get("subject_id"):
         external_ids["douban_subject"] = naming_metadata["subject_id"]
 
-    return build_search_metadata(
+    metadata = build_search_metadata(
         source=source,
         media_type=naming_metadata.get("media_type") or "",
         chinese_title=naming_metadata.get("chinese_title") or "",
@@ -229,6 +269,10 @@ def _metadata_from_naming_metadata(naming_metadata: dict, query: str = "", origi
             }
         ],
     )
+    if naming_metadata.get("cover_url"):
+        metadata["cover_url"] = naming_metadata["cover_url"]
+        metadata["cover_source"] = naming_metadata.get("cover_source") or source
+    return metadata
 
 
 def _metadata_matches_plain_query(metadata: dict, query: str) -> bool:
@@ -445,91 +489,105 @@ def _build_entry_confirmation_text(candidates: list[dict]) -> str:
     return "\n".join(lines).strip()
 
 
-def _unique_candidate_tvdb_id(candidates: list[dict]) -> str:
-    ids = {
-        str((candidate.get("external_ids") or {}).get("tvdb") or "").strip()
-        for candidate in candidates or []
-        if isinstance(candidate.get("external_ids"), dict)
-    }
-    ids.discard("")
-    return next(iter(ids)) if len(ids) == 1 else ""
+def _candidate_tvdb_id(candidate: dict) -> str:
+    external_ids = candidate.get("external_ids") if isinstance(candidate.get("external_ids"), dict) else {}
+    return str(
+        external_ids.get("tvdb")
+        or candidate.get("tvdb_id")
+        or candidate.get("tvdb_series_id")
+        or candidate.get("tvdb_movie_id")
+        or ""
+    ).strip()
 
 
-async def _backfill_single_series_cover(candidates: list[dict]) -> list[dict]:
-    series_id = _unique_candidate_tvdb_id(candidates)
-    if not series_id:
-        return candidates
-    if any(candidate.get("cover_url") for candidate in candidates or []):
-        return candidates
-
-    try:
-        cover_url = await asyncio.to_thread(get_tvdb_series_artwork_url, series_id)
-    except (TvdbConfigError, TvdbRequestError) as e:
-        _log_warn(f"TVDB 封面读取失败 series_id={series_id}: {e}")
-        return candidates
-    if not cover_url:
-        return candidates
-
+async def _backfill_candidate_covers(candidates: list[dict]) -> list[dict]:
     backfilled = []
     for candidate in candidates or []:
         item = candidate.copy()
-        item["cover_url"] = cover_url
+        tvdb_id = _candidate_tvdb_id(item)
+        if not tvdb_id or (item.get("cover_source") == "tvdb" and item.get("cover_url")):
+            backfilled.append(item)
+            continue
+
+        try:
+            if item.get("media_type") == "movie":
+                cover_url = await asyncio.to_thread(get_tvdb_movie_artwork_url, tvdb_id)
+            else:
+                cover_url = await asyncio.to_thread(get_tvdb_series_artwork_url, tvdb_id)
+        except (TvdbConfigError, TvdbRequestError) as e:
+            _log_warn(f"TVDB 封面读取失败 type={item.get('media_type')} id={tvdb_id}: {e}")
+            cover_url = ""
+
+        if cover_url:
+            item["cover_url"] = cover_url
+            item["cover_source"] = "tvdb"
         backfilled.append(item)
     return backfilled
 
 
-async def _send_single_series_info_card(update: Update, candidates: list[dict]):
-    series_id = _unique_candidate_tvdb_id(candidates)
-    if not series_id:
-        return
-    candidate = next((item for item in candidates if item.get("cover_url")), None)
-    if not candidate:
+async def _send_candidate_info_card(update: Update, candidate: dict):
+    if not candidate.get("cover_url"):
         return
 
-    lines = [
-        f"已识别剧集：{_candidate_display_title(candidate)}",
-        f"TVDB：`{series_id}`",
-    ]
+    message = getattr(update, "message", None)
+    if message is None and getattr(update, "callback_query", None) is not None:
+        message = getattr(update.callback_query, "message", None)
+    if message is None:
+        return
+
+    media_label = "电影" if candidate.get("media_type") == "movie" else "剧集"
+    lines = [f"已识别{media_label}：{_candidate_display_title(candidate)}"]
+    tvdb_id = _candidate_tvdb_id(candidate)
+    if tvdb_id:
+        lines.append(f"TVDB：`{tvdb_id}`")
     if candidate.get("year"):
         lines.append(f"年份：{candidate['year']}")
     caption = "\n".join(lines)
     try:
-        await update.message.reply_photo(photo=candidate["cover_url"], caption=caption)
+        await message.reply_photo(photo=candidate["cover_url"], caption=caption)
     except Exception as e:
-        _log_warn(f"TVDB 封面消息发送失败 series_id={series_id}: {e}")
+        _log_warn(f"媒体封面消息发送失败 type={candidate.get('media_type')} tvdb_id={tvdb_id}: {e}")
 
 
 def _candidate_naming_metadata(candidate: dict):
-    if candidate.get("naming_metadata") is not None:
-        return candidate.get("naming_metadata")
+    metadata = candidate.get("naming_metadata")
+    result = metadata.copy() if isinstance(metadata, dict) else {}
     english_title = candidate.get("english_title") or candidate.get("title") or ""
-    return {
-        "source": candidate.get("source") or "confirmed",
-        "media_type": candidate.get("media_type") or "",
-        "chinese_title": candidate.get("chinese_title") or "",
-        "english_title": english_title,
-        "year": candidate.get("year") or "",
-    }
+    result.update(
+        {
+            "source": result.get("source") or candidate.get("source") or "confirmed",
+            "media_type": candidate.get("media_type") or "",
+            "chinese_title": candidate.get("chinese_title") or "",
+            "english_title": english_title,
+            "year": candidate.get("year") or "",
+            "cover_url": candidate.get("cover_url") or "",
+            "cover_source": candidate.get("cover_source") or "",
+        }
+    )
+    return result
 
 
 def _candidate_search_metadata(candidate: dict):
     metadata = candidate.get("metadata")
-    if isinstance(metadata, dict):
-        return metadata
+    result = metadata.copy() if isinstance(metadata, dict) else {}
     external_ids = candidate.get("external_ids") if isinstance(candidate.get("external_ids"), dict) else {}
-    return {
-        "source": candidate.get("source") or "confirmed",
-        "media_type": candidate.get("media_type") or "",
-        "english_title": candidate.get("english_title") or candidate.get("title") or "",
-        "chinese_title": candidate.get("chinese_title") or "",
-        "year": candidate.get("year") or "",
-        "query": candidate_to_prowlarr_query(candidate),
-        "external_ids": external_ids.copy(),
-        "selected_scope": candidate.get("scope") or "",
-        "season_number": candidate.get("season_number"),
-        "episode_number": candidate.get("episode_number"),
-        "cover_url": candidate.get("cover_url") or "",
-    }
+    result.update(
+        {
+            "source": result.get("source") or candidate.get("source") or "confirmed",
+            "media_type": candidate.get("media_type") or "",
+            "english_title": candidate.get("english_title") or candidate.get("title") or "",
+            "chinese_title": candidate.get("chinese_title") or "",
+            "year": candidate.get("year") or "",
+            "query": candidate_to_prowlarr_query(candidate),
+            "external_ids": external_ids.copy(),
+            "selected_scope": candidate.get("scope") or "",
+            "season_number": candidate.get("season_number"),
+            "episode_number": candidate.get("episode_number"),
+            "cover_url": candidate.get("cover_url") or "",
+            "cover_source": candidate.get("cover_source") or "",
+        }
+    )
+    return result
 
 
 async def _backfill_missing_chinese_title(naming_metadata: dict | None, metadata: dict | None) -> tuple[dict | None, dict | None]:
@@ -646,6 +704,7 @@ async def _backfill_missing_chinese_title(naming_metadata: dict | None, metadata
 
 async def _send_confirmed_candidate_search(update: Update, context: ContextTypes.DEFAULT_TYPE, candidate: dict):
     query = candidate_to_prowlarr_query(candidate)
+    await _send_candidate_info_card(update, candidate)
     return await _send_search_results(
         update,
         context,
@@ -1381,6 +1440,11 @@ def _entry_from_request(request: dict) -> dict | None:
         "source": naming_metadata.get("source") or metadata.get("source") or "metadata",
         "naming_metadata": request.get("naming_metadata"),
         "metadata": request.get("metadata"),
+        "aliases": [],
+        "cover_url": naming_metadata.get("cover_url") or metadata.get("cover_url") or "",
+        "cover_source": naming_metadata.get("cover_source") or metadata.get("cover_source") or (
+            "douban" if (naming_metadata.get("source") or metadata.get("source")) == "douban" else ""
+        ),
         "season_number": metadata.get("season_number"),
         "episode_number": metadata.get("episode_number"),
     }
@@ -1391,11 +1455,14 @@ def _intent_override_from_request(request: dict) -> dict:
     if not isinstance(metadata, dict):
         return {}
 
-    scope = metadata.get("selected_scope") or metadata.get("scope")
-    if scope not in {"whole_series", "season", "episode"}:
-        return {}
+    override = {}
+    media_type = metadata.get("media_type") or (request.get("naming_metadata") or {}).get("media_type")
+    if media_type in {"movie", "series"}:
+        override["media_type"] = media_type
 
-    override = {"scope": scope}
+    scope = metadata.get("selected_scope") or metadata.get("scope")
+    if scope in {"whole_series", "season", "episode"}:
+        override["scope"] = scope
     if metadata.get("normalized_title") or metadata.get("english_title") or metadata.get("chinese_title"):
         override["title"] = metadata.get("normalized_title") or metadata.get("english_title") or metadata.get("chinese_title")
     if metadata.get("year"):
@@ -1519,21 +1586,55 @@ def _candidate_block_reason(entries: list[dict], intent: dict, episodes_by_serie
 def _entry_from_tvdb_series(item: dict) -> dict | None:
     if not item or not item.get("tvdb_series_id"):
         return None
+    english_title = item.get("english_title") or item.get("name") or ""
     return {
         "media_type": "series",
         "scope": "whole_series",
-        "title": item.get("name") or "",
-        "english_title": item.get("name") or "",
+        "title": english_title,
+        "english_title": english_title,
         "chinese_title": "",
         "year": item.get("year") or "",
         "external_ids": {"tvdb": str(item.get("tvdb_series_id"))},
+        "tvdb_id": str(item.get("tvdb_id") or item.get("tvdb_series_id")),
+        "tvdb_series_id": str(item.get("tvdb_series_id")),
+        "aliases": list(item.get("aliases") or []),
+        "cover_url": item.get("cover_url") or "",
+        "cover_source": "tvdb" if item.get("cover_url") else "",
         "source": "tvdb",
         "metadata": build_external_metadata(
             source="tvdb",
-            title=item.get("name") or "",
+            title=english_title,
             year=item.get("year") or "",
             external_id=str(item.get("tvdb_series_id")),
             media_type="series",
+        ),
+    }
+
+
+def _entry_from_tvdb_movie(item: dict) -> dict | None:
+    if not item or not item.get("tvdb_movie_id"):
+        return None
+    english_title = item.get("english_title") or item.get("name") or ""
+    return {
+        "media_type": "movie",
+        "scope": "movie",
+        "title": english_title,
+        "english_title": english_title,
+        "chinese_title": "",
+        "year": item.get("year") or "",
+        "external_ids": {"tvdb": str(item.get("tvdb_movie_id"))},
+        "tvdb_id": str(item.get("tvdb_id") or item.get("tvdb_movie_id")),
+        "tvdb_movie_id": str(item.get("tvdb_movie_id")),
+        "aliases": list(item.get("aliases") or []),
+        "cover_url": item.get("cover_url") or "",
+        "cover_source": "tvdb" if item.get("cover_url") else "",
+        "source": "tvdb",
+        "metadata": build_external_metadata(
+            source="tvdb",
+            title=english_title,
+            year=item.get("year") or "",
+            external_id=str(item.get("tvdb_movie_id")),
+            media_type="movie",
         ),
     }
 
@@ -1570,7 +1671,7 @@ async def _resolve_entries_with_primary_sources(raw_query: str, base_intent: dic
     tvdb_entries, tvdb_episodes = await asyncio.to_thread(_lookup_tvdb_entries, intent)
     entries.extend(tvdb_entries)
     episodes_by_series.update(tvdb_episodes)
-    return entries, episodes_by_series, intent
+    return merge_primary_entries(entries), episodes_by_series, intent
 
 
 async def _resolve_entries_with_ai_fallback(raw_query: str, base_intent: dict) -> tuple[list[dict], dict, dict]:
@@ -1628,25 +1729,37 @@ def _lookup_tvdb_entries(intent: dict) -> tuple[list[dict], dict]:
         f"TVDB条目回查开始 query={title} scope={intent.get('scope') or ''} "
         f"season={intent.get('season_number') or ''} episode={intent.get('episode_number') or ''}"
     )
-    try:
-        series_items = search_tvdb_series(title, year=intent.get("year") or "")
-    except (TvdbConfigError, TvdbRequestError) as e:
-        _log_warn(f"TVDB 搜索跳过 query={title}: {e}")
-        return [], {}
-
     entries = []
     episodes_by_series = {}
-    for item in series_items[:5]:
-        entry = _entry_from_tvdb_series(item)
-        if not entry:
-            continue
-        entries.append(entry)
-        series_id = entry["external_ids"]["tvdb"]
+    requested_type = intent.get("media_type")
+    scope = intent.get("scope") or ""
+    lookup_types = [requested_type] if requested_type in {"movie", "series"} else ["movie", "series"]
+    if scope in {"whole_series", "season", "episode"}:
+        lookup_types = ["series"]
+
+    for lookup_type in lookup_types:
         try:
-            episodes_by_series[series_id] = get_tvdb_series_episodes(series_id)
+            if lookup_type == "movie":
+                items = search_tvdb_movies(title, year=intent.get("year") or "")
+            else:
+                items = search_tvdb_series(title, year=intent.get("year") or "")
         except (TvdbConfigError, TvdbRequestError) as e:
-            _log_warn(f"TVDB 剧集列表读取失败 series_id={series_id}: {e}")
-            episodes_by_series[series_id] = None
+            _log_warn(f"TVDB 搜索跳过 type={lookup_type} query={title}: {e}")
+            continue
+
+        for item in items[:5]:
+            entry = _entry_from_tvdb_movie(item) if lookup_type == "movie" else _entry_from_tvdb_series(item)
+            if not entry:
+                continue
+            entries.append(entry)
+            if lookup_type != "series":
+                continue
+            series_id = entry["external_ids"]["tvdb"]
+            try:
+                episodes_by_series[series_id] = get_tvdb_series_episodes(series_id)
+            except (TvdbConfigError, TvdbRequestError) as e:
+                _log_warn(f"TVDB 剧集列表读取失败 series_id={series_id}: {e}")
+                episodes_by_series[series_id] = None
     _log_info(f"TVDB条目回查完成 query={title} entries={len(entries)}")
     return entries, episodes_by_series
 
@@ -1658,6 +1771,8 @@ async def _resolve_entry_candidates(raw_query: str) -> dict:
         entries, episodes_by_series, intent = await _resolve_entries_with_ai_fallback(raw_query, intent)
 
     for item in entries:
+        if item.get("media_type") != "series":
+            continue
         series_id = _entry_external_id(item, "tvdb")
         if not series_id or series_id in episodes_by_series:
             continue
@@ -1686,7 +1801,7 @@ async def _resolve_entry_candidates(raw_query: str) -> dict:
     candidates = build_confirmation_candidates(unique_entries, intent, episodes_by_series)
     if not candidates:
         return _candidate_block_reason(unique_entries, intent, episodes_by_series)
-    candidates = await _backfill_single_series_cover(candidates)
+    candidates = await _backfill_candidate_covers(candidates)
 
     is_link = is_supported_metadata_url(raw_query)
     if is_link and len(candidates) == 1 and candidates[0].get("media_type") == "movie":
@@ -1719,7 +1834,6 @@ async def _start_entry_resolution(update: Update, context: ContextTypes.DEFAULT_
             "user_id": update.effective_user.id,
             "candidates": resolution.get("candidates") or [],
         }
-        await _send_single_series_info_card(update, resolution.get("candidates") or [])
         await update.message.reply_text(
             _build_entry_confirmation_text(resolution.get("candidates") or []),
             reply_markup=_build_entry_confirmation_keyboard(task_id, resolution.get("candidates") or []),

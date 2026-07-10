@@ -190,6 +190,117 @@ def _external_id(entry: dict, key: str = "tvdb") -> str:
     return str(external_ids.get(key) or entry.get(f"{key}_series_id") or entry.get(f"{key}_id") or "").strip()
 
 
+def _merge_source(entry: dict) -> str:
+    source = entry.get("source")
+    if not source and isinstance(entry.get("metadata"), dict):
+        source = entry["metadata"].get("source")
+    source = str(source or "").lower()
+    if "douban" in source and "tvdb" in source:
+        return "merged"
+    if "douban" in source:
+        return "douban"
+    if "tvdb" in source:
+        return "tvdb"
+    return source
+
+
+def _merge_title_value(value: str) -> str:
+    value = _collapse_spaces(value).casefold()
+    while value:
+        cleaned = re.sub(r"\s*\((?:(?:19|20)\d{2}|[a-z]{2,3})\)\s*$", "", value).strip()
+        if cleaned == value:
+            break
+        value = cleaned
+    value = re.sub(r"\b(?:19|20)\d{2}\b\s*$", "", value).strip()
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", value, flags=re.UNICODE)
+
+
+def _merge_title_set(entry: dict) -> set[str]:
+    values = [entry.get("title"), entry.get("chinese_title"), entry.get("english_title"), entry.get("name")]
+    aliases = entry.get("aliases")
+    if isinstance(aliases, list):
+        for alias in aliases:
+            if isinstance(alias, dict):
+                values.append(alias.get("name") or alias.get("title"))
+            else:
+                values.append(alias)
+    return {normalized for value in values if (normalized := _merge_title_value(value))}
+
+
+def _primary_entries_match(left: dict, right: dict) -> bool:
+    if {_merge_source(left), _merge_source(right)} != {"douban", "tvdb"}:
+        return False
+
+    left_type = str(left.get("media_type") or "").strip()
+    right_type = str(right.get("media_type") or "").strip()
+    if left_type and right_type and left_type != right_type:
+        return False
+
+    left_year = str(left.get("year") or "").strip()
+    right_year = str(right.get("year") or "").strip()
+    if left_year and right_year and left_year != right_year:
+        return False
+
+    return bool(_merge_title_set(left).intersection(_merge_title_set(right)))
+
+
+def _merge_primary_entry_pair(left: dict, right: dict) -> dict:
+    douban = left if _merge_source(left) == "douban" else right
+    tvdb = left if _merge_source(left) == "tvdb" else right
+    merged = douban.copy()
+
+    douban_ids = douban.get("external_ids") if isinstance(douban.get("external_ids"), dict) else {}
+    tvdb_ids = tvdb.get("external_ids") if isinstance(tvdb.get("external_ids"), dict) else {}
+    external_ids = {**douban_ids, **tvdb_ids}
+
+    aliases = []
+    for source in (douban, tvdb):
+        for alias in source.get("aliases") or []:
+            value = alias.get("name") if isinstance(alias, dict) else alias
+            value = _collapse_spaces(value)
+            if value and value not in aliases:
+                aliases.append(value)
+
+    english_title = douban.get("english_title") or tvdb.get("english_title") or ""
+    chinese_title = douban.get("chinese_title") or tvdb.get("chinese_title") or ""
+    tvdb_cover = str(tvdb.get("cover_url") or "").strip()
+    douban_cover = str(douban.get("cover_url") or "").strip()
+
+    merged.update(
+        {
+            "source": "douban+tvdb",
+            "media_type": tvdb.get("media_type") or douban.get("media_type") or "",
+            "scope": tvdb.get("scope") or douban.get("scope") or "",
+            "title": english_title or douban.get("title") or tvdb.get("title") or "",
+            "english_title": english_title,
+            "chinese_title": chinese_title,
+            "year": douban.get("year") or tvdb.get("year") or "",
+            "external_ids": external_ids,
+            "aliases": aliases,
+            "cover_url": tvdb_cover or douban_cover,
+            "cover_source": "tvdb" if tvdb_cover else ("douban" if douban_cover else ""),
+        }
+    )
+    for key in ("tvdb_id", "tvdb_series_id", "tvdb_movie_id"):
+        if tvdb.get(key):
+            merged[key] = tvdb[key]
+    return merged
+
+
+def merge_primary_entries(entries: list[dict]) -> list[dict]:
+    merged_entries = []
+    for entry in entries or []:
+        match_index = next(
+            (index for index, existing in enumerate(merged_entries) if _primary_entries_match(existing, entry)),
+            None,
+        )
+        if match_index is None:
+            merged_entries.append(entry.copy())
+        else:
+            merged_entries[match_index] = _merge_primary_entry_pair(merged_entries[match_index], entry)
+    return merged_entries
+
+
 def _episode_key(episode: dict):
     try:
         return int(episode.get("season_number")), int(episode.get("episode_number"))
@@ -218,7 +329,7 @@ def is_unreleased_episode(episode: dict, today: date | None = None) -> bool:
 
 def _base_candidate(entry: dict, scope: str) -> dict:
     external_ids = entry.get("external_ids") if isinstance(entry.get("external_ids"), dict) else {}
-    return {
+    candidate = {
         "media_type": entry.get("media_type") or ("series" if _external_id(entry, "tvdb") else "movie"),
         "scope": scope,
         "title": _candidate_title(entry),
@@ -227,8 +338,17 @@ def _base_candidate(entry: dict, scope: str) -> dict:
         "year": str(entry.get("year") or ""),
         "external_ids": external_ids.copy(),
         "cover_url": entry.get("cover_url") or "",
+        "cover_source": entry.get("cover_source") or "",
+        "aliases": list(entry.get("aliases") or []),
+        "source": entry.get("source") or "",
+        "metadata": entry.get("metadata"),
+        "naming_metadata": entry.get("naming_metadata"),
         "recommended": False,
     }
+    for key in ("tvdb_id", "tvdb_series_id", "tvdb_movie_id"):
+        if entry.get(key):
+            candidate[key] = entry[key]
+    return candidate
 
 
 def build_confirmation_candidates(

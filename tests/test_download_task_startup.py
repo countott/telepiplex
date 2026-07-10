@@ -235,7 +235,7 @@ class DownloadTaskStartupTest(unittest.TestCase):
         )
 
         self.assertIn("离线下载未完成", add_task_mock.call_args.kwargs["message"])
-        self.assertIn("35.0%", add_task_mock.call_args.kwargs["message"])
+        self.assertIn(r"35\.0%", add_task_mock.call_args.kwargs["message"])
         source = (ROOT / "app" / "handlers" / "download_handler.py").read_text(encoding="utf-8")
         self.assertNotIn("save_failed_download_to_db", source)
 
