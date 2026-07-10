@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from inspect import signature
 from typing import Any, Callable
 
 try:
@@ -94,13 +95,22 @@ class ModuleRegistry:
 
     def run_startup_hooks(self, application=None):
         for hook in self.startup_hooks:
+            if application is None:
+                hook()
+                continue
+
             try:
-                if application is None:
-                    hook()
-                else:
-                    hook(application)
+                hook_signature = signature(hook)
+            except (TypeError, ValueError):
+                hook(application)
+                continue
+
+            try:
+                hook_signature.bind(application)
             except TypeError:
                 hook()
+            else:
+                hook(application)
 
     def add_config_sections(self, section_names):
         for section_name in section_names or []:

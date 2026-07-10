@@ -1,10 +1,11 @@
+import asyncio
 import sys
 import tempfile
 import textwrap
 import unittest
 import importlib.util
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,6 +126,61 @@ class ComposableCoreTest(unittest.TestCase):
         self.assertIsNone(args[1])
         self.assertIn("Telepiplex 启动完成", kwargs["message"])
         self.assertIn("115 下载", kwargs["message"])
+
+    def test_startup_hooks_support_zero_or_one_application_argument(self):
+        from app.core.module_registry import ModuleRegistry
+
+        calls = []
+        application = object()
+        registry = ModuleRegistry()
+        registry.add_startup_hook(lambda: calls.append(("zero", None)))
+        registry.add_startup_hook(lambda app: calls.append(("one", app)))
+
+        registry.run_startup_hooks(application)
+
+        self.assertEqual(calls, [("zero", None), ("one", application)])
+
+    def test_startup_hook_internal_type_error_is_not_retried(self):
+        from app.core.module_registry import ModuleRegistry
+
+        application = object()
+        calls = []
+
+        def broken_hook(app):
+            calls.append(app)
+            raise TypeError("hook implementation failed")
+
+        registry = ModuleRegistry()
+        registry.add_startup_hook(broken_hook)
+
+        with self.assertRaisesRegex(TypeError, "hook implementation failed"):
+            registry.run_startup_hooks(application)
+
+        self.assertEqual(calls, [application])
+
+    def test_reload_rejects_unauthorized_user_without_reloading_config(self):
+        bot_module = load_bot_module()
+        update = Mock()
+        update.effective_user.id = 999
+        update.effective_chat.id = 999
+        context = Mock()
+        context.bot.send_message = AsyncMock()
+        original_check_user = bot_module.init.check_user
+        original_load_yaml_config = bot_module.init.load_yaml_config
+        original_logger = bot_module.init.logger
+        bot_module.init.check_user = Mock(return_value=False)
+        bot_module.init.load_yaml_config = Mock()
+        bot_module.init.logger = Mock()
+        try:
+            asyncio.run(bot_module.reload(update, context))
+        finally:
+            bot_module.init.check_user = original_check_user
+            load_yaml_config = bot_module.init.load_yaml_config
+            bot_module.init.load_yaml_config = original_load_yaml_config
+            bot_module.init.logger = original_logger
+
+        load_yaml_config.assert_not_called()
+        self.assertIn("无权", context.bot.send_message.await_args.kwargs["text"])
 
 
 if __name__ == "__main__":
