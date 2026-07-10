@@ -417,6 +417,9 @@ def candidate_to_prowlarr_query(candidate: dict) -> str:
         return _collapse_spaces(f"{title} {year}" if year and year not in title else title)
 
     title = _clean_prowlarr_query_text(_strip_trailing_season_suffix(title))
+    if scope == "whole_series":
+        year = str(candidate.get("year") or "").strip()
+        return _collapse_spaces(f"{title} {year}" if year and year not in title else title)
     if scope == "episode":
         return _collapse_spaces(f"{title} S{int(candidate.get('season_number')):02d}E{int(candidate.get('episode_number')):02d}")
     if scope == "season":

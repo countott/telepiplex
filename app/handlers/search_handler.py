@@ -1310,8 +1310,11 @@ async def _search_prowlarr_with_progress(
     context: ContextTypes.DEFAULT_TYPE,
     query: str,
     progress_interval: float = SEARCH_PROGRESS_INTERVAL_SECONDS,
+    media_type: str = "",
 ):
-    search_task = asyncio.create_task(asyncio.to_thread(_search_prowlarr_release_categories, query))
+    search_task = asyncio.create_task(
+        asyncio.to_thread(_search_prowlarr_release_categories, query, media_type=media_type)
+    )
     elapsed = 0.0
     while True:
         done, _ = await asyncio.wait({search_task}, timeout=progress_interval)
@@ -1330,11 +1333,15 @@ async def _search_prowlarr_with_progress(
         )
 
 
-def _search_prowlarr_release_categories(query: str) -> list[dict]:
+def _search_prowlarr_release_categories(query: str, media_type: str = "") -> list[dict]:
     results = []
     seen = set()
-    for media_type in ("movie", "tv"):
-        for item in search_prowlarr(query, media_type):
+    lookup_types = {
+        "movie": ("movie",),
+        "series": ("tv",),
+    }.get(str(media_type or "").strip(), ("movie", "tv"))
+    for lookup_type in lookup_types:
+        for item in search_prowlarr(query, lookup_type):
             key = (
                 item.get("magnet_url")
                 or item.get("download_url")
@@ -1350,11 +1357,23 @@ def _search_prowlarr_release_categories(query: str) -> list[dict]:
 
 
 async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, naming_metadata=None, metadata=None):
+    media_type = str(
+        (metadata or {}).get("media_type")
+        or (naming_metadata or {}).get("media_type")
+        or ""
+    ).strip()
+    if media_type not in {"movie", "series"}:
+        media_type = ""
     await _reply_or_send(update, context, f"🔍 正在搜索片源：{query}")
-    _log_info(f"搜索片源开始 query={query}")
+    _log_info(f"搜索片源开始 query={query} media_type={media_type or 'movie_and_series'}")
 
     try:
-        items = await _search_prowlarr_with_progress(update, context, query)
+        items = await _search_prowlarr_with_progress(
+            update,
+            context,
+            query,
+            media_type=media_type,
+        )
         results = rank_releases(items, _get_result_limit())
         indexer_summary = await asyncio.to_thread(get_prowlarr_indexer_summary, results)
     except ProwlarrConfigError as e:
@@ -1374,7 +1393,10 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     naming_metadata, metadata = await _backfill_missing_chinese_title(naming_metadata, metadata)
-    _log_info(f"搜索片源完成 query={query} results={len(results)}")
+    _log_info(
+        f"搜索片源完成 query={query} media_type={media_type or 'movie_and_series'} "
+        f"results={len(results)}"
+    )
     task_id = uuid.uuid4().hex[:10]
     pending_search_tasks[task_id] = {
         "created_at": time.time(),
@@ -1666,7 +1688,17 @@ async def _resolve_entries_with_primary_sources(raw_query: str, base_intent: dic
     entry = _entry_from_request(request) if request else None
     if entry:
         entries.append(entry)
-        intent.update(_intent_override_from_request(request))
+        if is_supported_metadata_url(raw_query):
+            intent.update(_intent_override_from_request(request))
+            _log_info(
+                f"主来源意图采用显式链接约束 query={raw_query} "
+                f"media_type={intent.get('media_type') or ''} year={intent.get('year') or ''}"
+            )
+        else:
+            _log_info(
+                f"主来源意图保留普通标题歧义 query={raw_query} "
+                f"douban_media_type={entry.get('media_type') or ''} douban_year={entry.get('year') or ''}"
+            )
 
     tvdb_entries, tvdb_episodes = await asyncio.to_thread(_lookup_tvdb_entries, intent)
     entries.extend(tvdb_entries)

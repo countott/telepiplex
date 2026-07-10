@@ -27,6 +27,18 @@ class MediaSearchUtilsTest(unittest.TestCase):
         )
         self.assertEqual(query, "Rick and Morty S09E07")
 
+    def test_candidate_to_prowlarr_query_adds_year_for_whole_series(self):
+        query = candidate_to_prowlarr_query(
+            {
+                "media_type": "series",
+                "scope": "whole_series",
+                "english_title": "Someday or One Day",
+                "year": "2019",
+            }
+        )
+
+        self.assertEqual(query, "Someday or One Day 2019")
+
     def test_parse_search_intent_recognizes_chinese_episode(self):
         intent = parse_search_intent("瑞克和莫蒂 第九季第七集")
         self.assertEqual(intent["season_number"], 9)
