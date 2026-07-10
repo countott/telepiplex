@@ -269,6 +269,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not init.check_user(update.effective_user.id):
+        await send_bot_message_safely(
+            context.bot,
+            chat_id=update.effective_chat.id,
+            text="⚠️ 当前账号无权使用此机器人。",
+            parse_mode="html",
+        )
+        return
     init.load_yaml_config()
     log_config_snapshot("配置已重新加载:")
     await send_bot_message_safely(
