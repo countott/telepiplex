@@ -19,6 +19,18 @@ def _storage(event: DownloadCompletedEvent):
     return storage
 
 
+def _cleanup_source_directory(storage, path):
+    try:
+        result = storage.delete_single_file(path)
+    except Exception as exc:
+        init.logger.warn(f"自动整理已完成，但源目录清理失败 path={path}: {exc}")
+        return False
+    if result is not True:
+        init.logger.warn(f"自动整理已完成，但源目录未能清理 path={path}")
+        return False
+    return True
+
+
 def _list_response_items(response):
     if isinstance(response, list):
         return response
@@ -234,7 +246,7 @@ def _attempt_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metadata):
             raise RuntimeError(f"TVDB整理失败：移动失败 {current_source_path}")
 
     if event.final_path != rename_plan["target_root"]:
-        storage.delete_single_file(event.final_path)
+        _cleanup_source_directory(storage, event.final_path)
 
     return rename_plan
 
@@ -271,6 +283,12 @@ def _attempt_media_auto_rename(event: DownloadCompletedEvent, naming_metadata):
     if not file_list:
         init.logger.warn(f"自动整理跳过：目录中未找到视频文件 {event.final_path}")
         return None
+    if len(file_list) != 1:
+        init.logger.warn(
+            f"自动整理跳过：通用重命名仅支持单视频目录 "
+            f"path={event.final_path} video_count={len(file_list)}"
+        )
+        return None
 
     original_file_name = file_list[0]
     release_title = naming_metadata.get("release_title") or event.resource_name
@@ -280,16 +298,19 @@ def _attempt_media_auto_rename(event: DownloadCompletedEvent, naming_metadata):
         return None
 
     target_path = f"{event.selected_path}/{plan.target_relative_dir}"
-    storage.create_dir_recursive(target_path)
+    if not storage.create_dir_recursive(target_path):
+        raise RuntimeError(f"自动整理失败：无法创建目标目录 {target_path}")
 
     original_file_path = f"{event.final_path}/{original_file_name}"
     renamed_file_path = f"{event.final_path}/{plan.file_name}"
     if original_file_name != plan.file_name:
-        storage.rename(original_file_path, plan.file_name)
+        if storage.rename(original_file_path, plan.file_name) is not True:
+            raise RuntimeError(f"自动整理失败：重命名失败 {original_file_path}")
 
-    storage.move_file(renamed_file_path, target_path)
+    if storage.move_file(renamed_file_path, target_path) is not True:
+        raise RuntimeError(f"自动整理失败：移动失败 {renamed_file_path}")
     if event.final_path != target_path:
-        storage.delete_single_file(event.final_path)
+        _cleanup_source_directory(storage, event.final_path)
 
     return target_path, plan
 
@@ -311,4 +332,3 @@ def register_module(registry):
     registry.add_config_sections(["media", "metadata.tvdb", "ai"])
     registry.add_post_download_processor(process_tvdb_episode, priority=100, name="renaming.tvdb_episode")
     registry.add_post_download_processor(process_generic_media, priority=110, name="renaming.generic_media")
-
