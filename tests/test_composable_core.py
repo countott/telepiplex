@@ -87,6 +87,37 @@ class ComposableCoreTest(unittest.TestCase):
         self.assertEqual(loaded, ["samplepkg.mod"])
         self.assertEqual(registry.config_sections, ["sample"])
 
+    def test_startup_hooks_support_zero_or_one_application_argument(self):
+        from app.core.module_registry import ModuleRegistry
+
+        calls = []
+        application = object()
+        registry = ModuleRegistry()
+        registry.add_startup_hook(lambda: calls.append(("zero", None)))
+        registry.add_startup_hook(lambda app: calls.append(("one", app)))
+
+        registry.run_startup_hooks(application)
+
+        self.assertEqual(calls, [("zero", None), ("one", application)])
+
+    def test_startup_hook_internal_type_error_is_not_retried(self):
+        from app.core.module_registry import ModuleRegistry
+
+        application = object()
+        calls = []
+
+        def broken_hook(app):
+            calls.append(app)
+            raise TypeError("hook implementation failed")
+
+        registry = ModuleRegistry()
+        registry.add_startup_hook(broken_hook)
+
+        with self.assertRaisesRegex(TypeError, "hook implementation failed"):
+            registry.run_startup_hooks(application)
+
+        self.assertEqual(calls, [application])
+
 
 if __name__ == "__main__":
     unittest.main()
