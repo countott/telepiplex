@@ -71,6 +71,30 @@ class BotRuntimeStartupTest(unittest.TestCase):
 
         context.bot.send_message.assert_awaited_once()
 
+    def test_reload_rejects_unauthorized_user_without_reloading_config(self):
+        bot_module = load_bot_module()
+        update = Mock()
+        update.effective_user.id = 999
+        update.effective_chat.id = 999
+        context = Mock()
+        context.bot.send_message = AsyncMock()
+        original_check_user = bot_module.init.check_user
+        original_load_yaml_config = bot_module.init.load_yaml_config
+        original_logger = bot_module.init.logger
+        bot_module.init.check_user = Mock(return_value=False)
+        bot_module.init.load_yaml_config = Mock()
+        bot_module.init.logger = Mock()
+        try:
+            asyncio.run(bot_module.reload(update, context))
+        finally:
+            bot_module.init.check_user = original_check_user
+            load_yaml_config = bot_module.init.load_yaml_config
+            bot_module.init.load_yaml_config = original_load_yaml_config
+            bot_module.init.logger = original_logger
+
+        load_yaml_config.assert_not_called()
+        self.assertIn("无权", context.bot.send_message.await_args.kwargs["text"])
+
     def test_build_application_uses_longer_telegram_timeouts(self):
         bot_module = load_bot_module()
         calls = []
