@@ -329,7 +329,15 @@ def download_task(link, selected_path=None, user_id=None, target_folder_name=Non
         )
     finally:
         if init.openapi_115 is not None and info_hash:
-            init.openapi_115.del_offline_task(info_hash, del_source_file=0)
+            try:
+                cleanup_result = init.openapi_115.del_offline_task(info_hash, del_source_file=0)
+                if cleanup_result is not True:
+                    init.logger.warn(f"115 离线任务清理未完成 info_hash={sanitize_log_value(info_hash)}")
+            except Exception as cleanup_error:
+                init.logger.warn(
+                    f"115 离线任务清理失败 info_hash={sanitize_log_value(info_hash)}: "
+                    f"{sanitize_log_value(str(cleanup_error))}"
+                )
 
 
 def register_download_handlers(application):

@@ -239,6 +239,24 @@ class DownloadTaskStartupTest(unittest.TestCase):
         source = (ROOT / "app" / "handlers" / "download_handler.py").read_text(encoding="utf-8")
         self.assertNotIn("save_failed_download_to_db", source)
 
+    @patch("app.handlers.download_handler.add_task_to_queue")
+    def test_download_task_ignores_offline_task_cleanup_failure(self, add_task_mock):
+        api = Mock()
+        api.offline_download_specify_path.return_value = True
+        api.check_offline_download_success.return_value = (False, "Timeout.Release", "HASH", 35)
+        api.del_offline_task.side_effect = RuntimeError("cleanup failed")
+        init.openapi_115 = api
+
+        download_task(
+            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
+            "/电影",
+            123,
+            target_folder_name="目标",
+        )
+
+        self.assertIn("离线下载未完成", add_task_mock.call_args.kwargs["message"])
+        init.logger.warn.assert_called()
+
 
 if __name__ == "__main__":
     unittest.main()
