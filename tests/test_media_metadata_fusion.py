@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import sys
 import unittest
 from pathlib import Path
@@ -208,7 +209,7 @@ class PrimaryResolutionIntegrationTest(unittest.TestCase):
 
     @patch.object(search_handler, "_lookup_tvdb_entries")
     @patch.object(search_handler, "_resolve_search_request", new_callable=AsyncMock)
-    def test_primary_resolution_merges_douban_and_tvdb_before_candidates(self, request_mock, tvdb_mock):
+    def test_explicit_douban_link_locks_type_and_merges_tvdb_before_candidates(self, request_mock, tvdb_mock):
         request_mock.return_value = {
             "query": "The Glory 2022",
             "naming_metadata": {
@@ -248,8 +249,13 @@ class PrimaryResolutionIntegrationTest(unittest.TestCase):
 
         entries, episodes, intent = asyncio.run(
             search_handler._resolve_entries_with_primary_sources(
-                "黑暗荣耀",
-                {"raw_query": "黑暗荣耀", "title": "黑暗荣耀", "scope": "movie_or_series", "year": ""},
+                "https://movie.douban.com/subject/35314632/",
+                {
+                    "raw_query": "https://movie.douban.com/subject/35314632/",
+                    "title": "黑暗荣耀",
+                    "scope": "movie_or_series",
+                    "year": "",
+                },
             )
         )
 
@@ -258,6 +264,70 @@ class PrimaryResolutionIntegrationTest(unittest.TestCase):
         self.assertEqual(entries[0]["external_ids"]["tvdb"], "411469")
         self.assertEqual(intent["media_type"], "series")
         self.assertEqual(episodes, {"411469": []})
+
+    @patch.object(search_handler, "_lookup_tvdb_entries")
+    @patch.object(search_handler, "_resolve_search_request", new_callable=AsyncMock)
+    def test_plain_title_douban_hit_keeps_movie_and_series_lookup_ambiguous(self, request_mock, tvdb_mock):
+        request_mock.return_value = {
+            "query": "Someday or One Day 2019",
+            "naming_metadata": {
+                "source": "douban",
+                "media_type": "series",
+                "chinese_title": "想见你",
+                "english_title": "Someday or One Day",
+                "year": "2019",
+            },
+            "metadata": {
+                "source": "douban",
+                "media_type": "series",
+                "chinese_title": "想见你",
+                "english_title": "Someday or One Day",
+                "year": "2019",
+                "external_ids": {"douban_subject": "30468961"},
+            },
+        }
+        tvdb_mock.return_value = (
+            [
+                {
+                    "source": "tvdb",
+                    "media_type": "movie",
+                    "scope": "movie",
+                    "title": "Someday or One Day",
+                    "english_title": "Someday or One Day",
+                    "year": "2022",
+                    "external_ids": {"tvdb": "movie-2022"},
+                },
+                {
+                    "source": "tvdb",
+                    "media_type": "series",
+                    "scope": "whole_series",
+                    "title": "Someday or One Day",
+                    "english_title": "Someday or One Day",
+                    "year": "2019",
+                    "external_ids": {"tvdb": "series-2019"},
+                },
+            ],
+            {"series-2019": []},
+        )
+        base_intent = {
+            "raw_query": "想见你",
+            "title": "想见你",
+            "scope": "movie_or_series",
+            "year": "",
+        }
+
+        entries, episodes, intent = asyncio.run(
+            search_handler._resolve_entries_with_primary_sources("想见你", base_intent)
+        )
+
+        lookup_intent = tvdb_mock.call_args.args[0]
+        self.assertEqual(lookup_intent, base_intent)
+        self.assertEqual(intent, base_intent)
+        self.assertEqual(
+            {(entry["media_type"], entry["year"]) for entry in entries},
+            {("series", "2019"), ("movie", "2022")},
+        )
+        self.assertEqual(episodes, {"series-2019": []})
 
     @patch.object(search_handler, "search_tvdb_movies", create=True)
     @patch.object(search_handler, "search_tvdb_series")
@@ -411,6 +481,54 @@ class CoverAndHandoffTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, 42)
         card_mock.assert_awaited_once()
         search_mock.assert_awaited_once()
+
+    @patch.object(search_handler, "search_prowlarr")
+    async def test_prowlarr_category_lookup_uses_confirmed_series_type(self, search_mock):
+        search_mock.return_value = []
+        self.assertIn(
+            "media_type",
+            inspect.signature(search_handler._search_prowlarr_release_categories).parameters,
+        )
+
+        search_handler._search_prowlarr_release_categories(
+            "Someday or One Day 2019",
+            media_type="series",
+        )
+
+        search_mock.assert_called_once_with("Someday or One Day 2019", "tv")
+
+    @patch.object(search_handler, "_send_search_message", new_callable=AsyncMock)
+    @patch.object(search_handler, "_search_prowlarr_with_progress", new_callable=AsyncMock)
+    @patch.object(search_handler, "_reply_or_send", new_callable=AsyncMock)
+    async def test_search_results_forwards_confirmed_media_type(
+        self,
+        reply_mock,
+        progress_mock,
+        send_mock,
+    ):
+        progress_mock.return_value = []
+        update = SimpleNamespace(
+            effective_chat=SimpleNamespace(id=1),
+            effective_user=SimpleNamespace(id=1),
+            callback_query=None,
+            message=SimpleNamespace(),
+        )
+        context = SimpleNamespace(bot=SimpleNamespace())
+
+        await search_handler._send_search_results(
+            update,
+            context,
+            "Someday or One Day 2019",
+            metadata={"media_type": "series"},
+        )
+
+        progress_mock.assert_awaited_once_with(
+            update,
+            context,
+            "Someday or One Day 2019",
+            media_type="series",
+        )
+        send_mock.assert_awaited_once()
 
     @patch.object(search_handler, "_backfill_candidate_covers", new_callable=AsyncMock)
     @patch.object(search_handler, "get_tvdb_series_episodes")
