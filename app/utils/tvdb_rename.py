@@ -158,6 +158,7 @@ def build_tvdb_rename_plan(
         return None
 
     source_lookup = _source_index(file_tree)
+    source_video_paths = {node["relative_path"] for node in _video_file_nodes(file_tree)}
     known_episode_ids = _episode_ids(tvdb_episodes)
     target_root = _target_root(selected_path, metadata, ai_plan)
     if not target_root:
@@ -165,6 +166,7 @@ def build_tvdb_rename_plan(
     series_name = sanitize_path_name(ai_plan.get("series_name") or metadata.get("english_title") or metadata.get("query"))
 
     operations = []
+    seen_sources = set()
     seen_targets = set()
     for item in ai_plan["episode_map"]:
         if not isinstance(item, dict):
@@ -174,6 +176,10 @@ def build_tvdb_rename_plan(
         source_node = source_lookup.get(source_file)
         if not source_node:
             return None
+        source_relative_path = source_node["relative_path"]
+        if source_relative_path in seen_sources:
+            return None
+        seen_sources.add(source_relative_path)
 
         tvdb_episode_id = str(item.get("tvdb_episode_id") or "").strip()
         if tvdb_episode_id and known_episode_ids and tvdb_episode_id not in known_episode_ids:
@@ -202,6 +208,9 @@ def build_tvdb_rename_plan(
                 "target_relative_path": target_relative_path,
             }
         )
+
+    if seen_sources != source_video_paths:
+        return None
 
     return {
         "target_root": target_root,

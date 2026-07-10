@@ -185,6 +185,71 @@ class TvdbRenamePlanTest(unittest.TestCase):
 
         self.assertIsNone(plan)
 
+    def test_build_plan_rejects_partial_video_mapping(self):
+        plan = build_tvdb_rename_plan(
+            final_path="/真人剧集/Release.Name",
+            selected_path="/真人剧集",
+            metadata={"chinese_title": "测试剧", "english_title": "Test Show"},
+            ai_plan={
+                "tvdb_series_id": "100",
+                "series_name": "Test Show",
+                "episode_map": [
+                    {
+                        "source_file": "Test.Show.S01E01.mkv",
+                        "tvdb_episode_id": "101",
+                        "season_number": 1,
+                        "episode_number": 1,
+                    }
+                ],
+            },
+            file_tree=[
+                {"name": "Test.Show.S01E01.mkv", "relative_path": "Test.Show.S01E01.mkv", "is_dir": False},
+                {"name": "Test.Show.S01E02.mkv", "relative_path": "Test.Show.S01E02.mkv", "is_dir": False},
+            ],
+            tvdb_candidates=[{"tvdb_series_id": "100", "name": "Test Show"}],
+            tvdb_episodes=[
+                {"tvdb_episode_id": "101", "season_number": 1, "episode_number": 1},
+                {"tvdb_episode_id": "102", "season_number": 1, "episode_number": 2},
+            ],
+        )
+
+        self.assertIsNone(plan)
+
+    def test_build_plan_rejects_duplicate_source_mapping(self):
+        plan = build_tvdb_rename_plan(
+            final_path="/真人剧集/Release.Name",
+            selected_path="/真人剧集",
+            metadata={"chinese_title": "测试剧", "english_title": "Test Show"},
+            ai_plan={
+                "tvdb_series_id": "100",
+                "series_name": "Test Show",
+                "episode_map": [
+                    {
+                        "source_file": "Test.Show.S01E01.mkv",
+                        "tvdb_episode_id": "101",
+                        "season_number": 1,
+                        "episode_number": 1,
+                    },
+                    {
+                        "source_file": "Test.Show.S01E01.mkv",
+                        "tvdb_episode_id": "102",
+                        "season_number": 1,
+                        "episode_number": 2,
+                    },
+                ],
+            },
+            file_tree=[
+                {"name": "Test.Show.S01E01.mkv", "relative_path": "Test.Show.S01E01.mkv", "is_dir": False}
+            ],
+            tvdb_candidates=[{"tvdb_series_id": "100", "name": "Test Show"}],
+            tvdb_episodes=[
+                {"tvdb_episode_id": "101", "season_number": 1, "episode_number": 1},
+                {"tvdb_episode_id": "102", "season_number": 1, "episode_number": 2},
+            ],
+        )
+
+        self.assertIsNone(plan)
+
 
 if __name__ == "__main__":
     unittest.main()
