@@ -97,6 +97,31 @@ class PlexModuleTest(unittest.TestCase):
         self.assertEqual(on_download_completed(completion)["id"], 9)
         executor.submit.assert_called_once_with(service.run_job, 9)
 
+    @patch("app.modules.plex_management.plex_executor")
+    @patch("app.modules.plex_management.get_plex_management_service")
+    def test_rejected_contract_completion_never_submits_background_job(
+        self, get_service, executor
+    ):
+        from app.core.module_registry import (
+            DownloadCompletedEvent,
+            DownloadPipelineCompletion,
+            PostDownloadResult,
+        )
+        from app.modules.plex_management import on_download_completed
+
+        service = Mock(enabled=True)
+        service.enqueue_completion.return_value = None
+        get_service.return_value = service
+        event = DownloadCompletedEvent("link", "/电影", 1, "/电影/a", "a")
+        completion = DownloadPipelineCompletion(
+            event,
+            PostDownloadResult(True, final_path=event.final_path),
+            "renaming.media_metadata",
+        )
+
+        self.assertIsNone(on_download_completed(completion))
+        executor.submit.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

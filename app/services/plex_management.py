@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import time
+from copy import deepcopy
 
 from app.core.media_metadata import (
     MEDIA_METADATA_KEY,
@@ -57,9 +58,13 @@ class PlexManagementService:
     def _completion_payload(completion):
         event = completion.event
         metadata = {}
-        for value in (event.metadata, event.naming_metadata, completion.result.metadata):
+        for value in (
+            event.naming_metadata,
+            event.metadata,
+            completion.result.metadata,
+        ):
             if isinstance(value, dict):
-                metadata.update(value)
+                metadata.update(deepcopy(value))
         return {
             "provider": str(event.provider or ""),
             "selected_path": str(event.selected_path or ""),
@@ -70,13 +75,62 @@ class PlexManagementService:
             "metadata": metadata,
         }
 
+    @staticmethod
+    def _log_contract_rejection(reason):
+        try:
+            import init
+
+            if init.logger:
+                init.logger.warn(
+                    f"plex_contract_completion_rejected reason={str(reason)}"
+                )
+        except Exception:
+            pass
+
     def enqueue_completion(self, completion):
         if not str(completion.terminal_processor or "").startswith("renaming."):
             return None
         payload = self._completion_payload(completion)
-        identity = "\x1f".join(
-            (payload["provider"], payload["final_path"], payload["resource_name"])
-        )
+        metadata = payload["metadata"]
+        contract_present = MEDIA_METADATA_KEY in metadata
+        contract = extract_confirmed_media_metadata(metadata)
+        if contract_present and contract is None:
+            self._log_contract_rejection("invalid_contract")
+            return None
+        if contract:
+            placement = contract["placement"]
+            mapping_kind = placement["mapping_kind"]
+            if mapping_kind in SERIES_EPISODE_MAPPINGS:
+                target = (
+                    int(placement["season_number"]),
+                    int(placement["episode_number"]),
+                )
+                resolved = []
+                for item in contract.get("items") or []:
+                    try:
+                        item_target = (
+                            int(item.get("season_number")),
+                            int(item.get("episode_number")),
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    if item_target == target and str(item.get("final_path") or "").strip():
+                        resolved.append(item)
+                if not resolved:
+                    self._log_contract_rejection("locked_episode_unresolved")
+                    return None
+            elif not payload["final_path"]:
+                self._log_contract_rejection("terminal_path_missing")
+                return None
+            identity = str(contract["metadata_id"])
+        else:
+            identity = "\x1f".join(
+                (
+                    payload["provider"],
+                    payload["final_path"],
+                    payload["resource_name"],
+                )
+            )
         key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         return self.jobs.create_or_get(key, payload)
 

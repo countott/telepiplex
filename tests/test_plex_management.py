@@ -669,6 +669,93 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertEqual(first["id"], second["id"])
         self.assertIsNone(service.enqueue_completion(completion))
 
+    def test_contract_completion_persists_metadata_id_and_resolved_items(self):
+        completion = make_media_metadata_completion("temporary_related_special")
+
+        job = self.make_service().enqueue_completion(completion)
+
+        contract = job["payload"]["metadata"]["media_metadata"]
+        self.assertEqual(contract["metadata_id"], "metadata-a")
+        self.assertTrue(contract["items"][0]["final_path"].endswith("S00E100.mkv"))
+
+    def test_unresolved_locked_special_is_not_enqueued(self):
+        completion = make_media_metadata_completion("temporary_related_special")
+        completion.event.metadata["media_metadata"]["items"] = []
+        completion.result.metadata = completion.event.metadata
+
+        self.assertIsNone(self.make_service().enqueue_completion(completion))
+
+    def test_unrelated_resolved_episode_cannot_satisfy_locked_special(self):
+        completion = make_media_metadata_completion("temporary_related_special")
+        completion.event.metadata["media_metadata"]["items"] = [{
+            "content_role": "extension_movie",
+            "season_number": 0,
+            "episode_number": 101,
+            "final_path": "/真人剧集/Series/Season 00/Series S00E101.mkv",
+        }]
+        completion.result.metadata = completion.event.metadata
+
+        self.assertIsNone(self.make_service().enqueue_completion(completion))
+
+    def test_standalone_contract_uses_terminal_path_without_inventing_items(self):
+        completion = make_media_metadata_completion("standalone")
+
+        job = self.make_service().enqueue_completion(completion)
+
+        self.assertIsNotNone(job)
+        contract = job["payload"]["metadata"]["media_metadata"]
+        self.assertEqual(contract["metadata_id"], "metadata-a")
+        self.assertEqual(contract["items"], [])
+        self.assertEqual(job["payload"]["final_path"], "/真人电影/想见你")
+
+    def test_present_but_invalid_contract_never_falls_back_to_legacy_job(self):
+        completion = make_media_metadata_completion("standalone")
+        completion.event.metadata["media_metadata"]["schema_version"] = 999
+        completion.result.metadata = completion.event.metadata
+
+        self.assertIsNone(self.make_service().enqueue_completion(completion))
+
+    def test_same_metadata_id_is_idempotent_when_terminal_path_changes(self):
+        service = self.make_service()
+        first = make_media_metadata_completion("temporary_related_special")
+        second = make_media_metadata_completion("temporary_related_special")
+        object.__setattr__(second.result, "final_path", "/retry/changed/path")
+
+        first_job = service.enqueue_completion(first)
+        second_job = service.enqueue_completion(second)
+
+        self.assertEqual(first_job["id"], second_job["id"])
+        self.assertEqual(
+            first_job["idempotency_key"],
+            second_job["idempotency_key"],
+        )
+        self.assertNotEqual(first_job["payload"]["final_path"], "/retry/changed/path")
+
+    def test_completion_payload_is_deep_copied_from_terminal_metadata(self):
+        completion = make_media_metadata_completion("temporary_related_special")
+        service = self.make_service()
+
+        payload = service._completion_payload(completion)
+        completion.result.metadata["media_metadata"]["identity"]["chinese_title"] = "已篡改"
+
+        self.assertEqual(
+            payload["metadata"]["media_metadata"]["identity"]["chinese_title"],
+            "想见你",
+        )
+
+    def test_event_metadata_overrides_stale_naming_metadata(self):
+        completion = make_media_metadata_completion("temporary_related_special")
+        completion.event.naming_metadata = {
+            "source": "stale-naming",
+            "nested": {"value": "stale"},
+        }
+        completion.event.metadata["source"] = "confirmed-event"
+        completion.result.metadata = None
+
+        payload = self.make_service()._completion_payload(completion)
+
+        self.assertEqual(payload["metadata"]["source"], "confirmed-event")
+
     def test_restart_reuses_persisted_pre_scan_snapshot(self):
         plex = FakePlex()
         service = self.make_service(plex=plex)
