@@ -83,6 +83,11 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         }
+        log_patcher = patch(
+            "app.services.search_planner._log_info", create=True
+        )
+        log_mock = log_patcher.start()
+        self.addCleanup(log_patcher.stop)
 
         plan = await build_confirmable_plan(
             "想见你",
@@ -96,6 +101,11 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(plan_mock.call_args.args[0]["sources"]), 3)
         for provider in providers.values():
             provider.assert_called_once()
+        log_text = "\n".join(call.args[0] for call in log_mock.call_args_list)
+        self.assertIn("ai_stage=hypothesis status=ok", log_text)
+        self.assertIn("source=wikipedia status=server_down", log_text)
+        self.assertIn("ai_stage=download_plan status=ok", log_text)
+        self.assertIn("plan_id=plan-a", log_text)
 
     @patch(
         "app.services.search_planner.infer_search_hypotheses_with_ai",
