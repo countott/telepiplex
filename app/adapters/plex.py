@@ -57,6 +57,54 @@ class PlexAdapter:
             if str(self._value(item, "ratingKey", "") or "") not in before
         ]
 
+    def find_series_episode(
+        self,
+        library_id,
+        *,
+        tvdb_series_id="",
+        title="",
+        year="",
+        season_number=0,
+        episode_number=0,
+        expected_final_paths=(),
+    ):
+        section = self.server.library.sectionByID(int(library_id))
+        try:
+            if str(tvdb_series_id or "").strip():
+                show = section.getGuid(f"tvdb://{str(tvdb_series_id).strip()}")
+            else:
+                kwargs = {"libtype": "show"}
+                if str(year or "").strip():
+                    kwargs["year"] = int(year)
+                shows = section.search(title=str(title or "") or None, **kwargs)
+                if len(shows) != 1:
+                    return None
+                show = shows[0]
+            episode = show.episode(
+                season=int(season_number),
+                episode=int(episode_number),
+            )
+        except Exception:
+            return None
+
+        item = self._item_dict(episode)
+        expected = [
+            str(path).replace("\\", "/").rstrip("/")
+            for path in expected_final_paths
+            if str(path or "").strip()
+        ]
+        actual = [
+            str(part.get("file") or "").replace("\\", "/").rstrip("/")
+            for part in item.get("parts") or []
+        ]
+        if expected and not any(
+            actual_path == expected_path or actual_path.endswith(expected_path)
+            for actual_path in actual
+            for expected_path in expected
+        ):
+            return None
+        return item
+
     @staticmethod
     def _value(obj, name, default=None):
         value = getattr(obj, name, default)
@@ -115,6 +163,26 @@ class PlexAdapter:
 
     def get_item(self, rating_key):
         return self._item_dict(self.server.fetchItem(int(rating_key)))
+
+    def edit_custom_episode_metadata(
+        self,
+        rating_key,
+        *,
+        title="",
+        summary="",
+        original_release_date="",
+        year="",
+    ):
+        item = self.server.fetchItem(int(rating_key))
+        if title:
+            item.editTitle(str(title), locked=True)
+        if summary:
+            item.editSummary(str(summary), locked=True)
+        if original_release_date:
+            item.editOriginallyAvailable(str(original_release_date), locked=True)
+        elif year:
+            item.editField("year", int(year), locked=True)
+        return self._item_dict(item.reload())
 
     @classmethod
     def _match_dict(cls, candidate):
