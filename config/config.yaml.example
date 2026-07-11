@@ -102,8 +102,15 @@ media:
     base_url: ""
     token: ""
 
-# 元数据：TVDB 用于剧集确认、播出校验、封面反馈和剧集重命名。
+# 元数据：Wikipedia 是搜索关系证据；TVDB 用于编号和多语言元数据校对。
 metadata:
+  wikipedia:
+    enable: true
+    languages:
+      - zh
+      - en
+    timeout: 10
+
   tvdb:
     enable: false
     base_url: "https://api4.thetvdb.com/v4"
@@ -111,9 +118,9 @@ metadata:
     subscriber_pin: ""
     timeout: 15
 
-# AI 兜底：用于搜索推断、口误修正和少量元数据补全。
+# AI 主决策：每次搜索都必须完成两阶段规划；缺少连接配置时搜索会停止。
 ai:
-  enable: false
+  enable: true
   api_url: ""
   api_key: ""
   model: ""

@@ -14,6 +14,7 @@ def register_module(registry):
             ("s", "搜索片源"),
         ]
     )
-    registry.add_config_sections(["search.prowlarr", "metadata.tvdb", "ai"])
+    registry.add_config_sections(
+        ["search.prowlarr", "metadata.wikipedia", "metadata.tvdb", "ai"]
+    )
     registry.add_handlers(_register_handlers)
-
