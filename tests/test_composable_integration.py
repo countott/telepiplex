@@ -10,54 +10,63 @@ sys.path.insert(0, str(ROOT / "app"))
 
 
 class ComposableIntegrationTest(unittest.TestCase):
-    def test_confirmed_download_plan_survives_request_event_and_renaming_pipeline(self):
+    def test_confirmed_media_metadata_survives_request_event_pipeline(self):
+        from app.core.media_metadata import attach_media_metadata
         from app.core.module_registry import (
             DownloadCompletedEvent,
             DownloadRequest,
             ModuleRegistry,
         )
-        from app.utils.search_plan import attach_download_plan, confirm_download_plan
 
-        plan = confirm_download_plan(
-            {
-                "schema_version": 1,
-                "plan_id": "plan-a",
-                "display_title": "想见你",
+        contract = {
+            "schema_version": 1,
+            "metadata_id": "plan-a",
+            "confirmed": True,
+            "identity": {
+                "chinese_title": "想见你",
                 "english_title": "Someday or One Day The Movie",
                 "year": "2022",
-                "content_identity": "extension_movie",
-                "relation": {
-                    "type": "sequel",
-                    "target_series_title": "Someday or One Day",
-                    "target_series_year": "2019",
-                    "source": "wikipedia",
+                "content_kind": "extension_movie",
+                "summary": "电影版延续电视剧故事。",
+                "original_release_date": "2022-12-24",
+                "poster_url": "https://image.example/poster.jpg",
+                "poster_source": "douban",
+                "external_ids": {},
+            },
+            "relation": {
+                "type": "sequel",
+                "target_series": {
+                    "chinese_title": "想见你",
+                    "english_title": "Someday or One Day",
+                    "year": "2019",
+                    "external_ids": {},
                 },
-                "placement": {
-                    "library_type": "series",
-                    "category_kind": "live_action_series",
-                    "season_number": 0,
-                    "episode_number": 100,
-                    "mapping_kind": "temporary_related_special",
-                    "mapping_source": "local_allocator",
-                },
-                "source_entry": {
-                    "title": "想见你 (电影)",
-                    "url": "https://zh.wikipedia.org/wiki/想見你_(電影)",
-                    "provider": "wikipedia",
-                    "availability": "ok",
-                    "verification": "verified",
-                },
-                "prowlarr_queries": ["Someday or One Day The Movie 2022"],
-                "evidence": {},
-                "warnings": [],
-                "confirmed": False,
-            }
-        )
+                "source": "wikipedia",
+            },
+            "placement": {
+                "library_type": "series",
+                "category_kind": "live_action_series",
+                "season_number": 0,
+                "episode_number": 100,
+                "mapping_kind": "temporary_related_special",
+                "mapping_source": "local_allocator",
+                "tvdb_episode_id": "",
+            },
+            "source_entry": {
+                "title": "想见你 (电影)",
+                "url": "https://zh.wikipedia.org/wiki/想見你_(電影)",
+                "provider": "wikipedia",
+                "verification": "verified",
+            },
+            "items": [],
+            "evidence": {},
+            "warnings": [],
+        }
         request = DownloadRequest(
             link="magnet:?xt=urn:btih:" + "a" * 40,
             selected_path="/真人剧集",
             user_id=1,
-            metadata=attach_download_plan({"source": "confirmed"}, plan),
+            metadata=attach_media_metadata({"source": "confirmed"}, contract),
         )
         event = DownloadCompletedEvent(
             link=request.link,
@@ -70,9 +79,9 @@ class ComposableIntegrationTest(unittest.TestCase):
         seen = []
         registry = ModuleRegistry()
         registry.add_post_download_processor(
-            lambda current: seen.append(current.metadata["download_plan"]) or None,
+            lambda current: seen.append(current.metadata["media_metadata"]) or None,
             priority=100,
-            name="test.capture_plan",
+            name="test.capture_metadata",
         )
         registry.run_post_download_pipeline(event)
         self.assertEqual(seen[0]["placement"]["episode_number"], 100)
