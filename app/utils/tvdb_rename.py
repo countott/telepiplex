@@ -219,3 +219,117 @@ def build_tvdb_rename_plan(
         "operations": operations,
         "warnings": [str(item) for item in ai_plan.get("warnings") or [] if str(item).strip()],
     }
+
+
+def build_confirmed_rename_plan(
+    final_path: str,
+    selected_path: str,
+    metadata: dict,
+    confirmed_plan: dict,
+    ai_plan: dict,
+    file_tree: list[dict],
+) -> dict | None:
+    placement = confirmed_plan.get("placement") or {}
+    relation = confirmed_plan.get("relation") or {}
+    if (
+        confirmed_plan.get("confirmed") is not True
+        or placement.get("library_type") != "series"
+    ):
+        return None
+
+    allowed_targets = set()
+    for item in confirmed_plan.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        season_number = _safe_season_int(item.get("season_number"))
+        episode_number = _safe_episode_int(item.get("episode_number"))
+        if season_number is not None and episode_number is not None:
+            allowed_targets.add((season_number, episode_number))
+    if not allowed_targets:
+        season_number = _safe_season_int(placement.get("season_number"))
+        episode_number = _safe_episode_int(placement.get("episode_number"))
+        if season_number is None or episode_number is None:
+            return None
+        allowed_targets.add((season_number, episode_number))
+
+    source_lookup = _source_index(file_tree)
+    source_video_paths = {
+        node["relative_path"] for node in _video_file_nodes(file_tree)
+    }
+    series_name = sanitize_path_name(
+        relation.get("target_series_title")
+        or metadata.get("english_title")
+        or metadata.get("query")
+    )
+    chinese_title = sanitize_path_name(metadata.get("chinese_title"))
+    if not series_name:
+        return None
+
+    target_root = _join_path(
+        selected_path, _display_folder(chinese_title, series_name)
+    )
+    operations = []
+    seen_sources = set()
+    seen_targets = set()
+    for item in ai_plan.get("episode_map") or []:
+        if not isinstance(item, dict):
+            continue
+        source_file = _clean_path(item.get("source_file") or "")
+        source_node = source_lookup.get(source_file)
+        if not source_node:
+            continue
+        season_number = _safe_season_int(item.get("season_number"))
+        episode_number = _safe_episode_int(item.get("episode_number"))
+        if (
+            season_number is None
+            or episode_number is None
+            or (season_number, episode_number) not in allowed_targets
+        ):
+            continue
+
+        source_relative_path = source_node["relative_path"]
+        if source_relative_path in seen_sources:
+            continue
+        marker = _episode_marker_text(season_number, episode_number)
+        suffix = PurePosixPath(source_relative_path).suffix
+        rename_to = f"{series_name} {marker}{suffix}"
+        target_dir = _join_path(
+            target_root, f"{series_name} Season {season_number:02d}"
+        )
+        target_relative_path = _join_path(
+            f"{series_name} Season {season_number:02d}", rename_to
+        )
+        target_key = _join_path(target_dir, rename_to)
+        if target_key in seen_targets:
+            continue
+
+        seen_sources.add(source_relative_path)
+        seen_targets.add(target_key)
+        source_path = _join_path(final_path, source_relative_path)
+        source_parent = "/".join(source_relative_path.split("/")[:-1])
+        operations.append(
+            {
+                "source_relative_path": source_relative_path,
+                "source_path": source_path,
+                "rename_to": rename_to,
+                "renamed_source_path": _join_path(
+                    final_path, source_parent, rename_to
+                ),
+                "target_dir": target_dir,
+                "target_relative_path": target_relative_path,
+            }
+        )
+
+    if not operations:
+        return None
+    return {
+        "target_root": target_root,
+        "series_name": series_name,
+        "operations": operations,
+        "unmatched_sources": sorted(source_video_paths - seen_sources),
+        "warnings": [
+            str(item)
+            for item in confirmed_plan.get("warnings") or []
+            if str(item).strip()
+        ],
+    }

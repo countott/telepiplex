@@ -6,10 +6,112 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
-from app.utils.tvdb_rename import build_tvdb_rename_plan
+from app.utils.tvdb_rename import build_confirmed_rename_plan, build_tvdb_rename_plan
 
 
 class TvdbRenamePlanTest(unittest.TestCase):
+    def test_confirmed_temporary_special_uses_locked_s00e100_without_tvdb_ids(self):
+        plan = build_confirmed_rename_plan(
+            final_path="/真人剧集/Raw.Release",
+            selected_path="/真人剧集",
+            metadata={
+                "chinese_title": "想见你",
+                "english_title": "Someday or One Day",
+            },
+            confirmed_plan={
+                "schema_version": 1,
+                "confirmed": True,
+                "relation": {"target_series_title": "Someday or One Day"},
+                "placement": {
+                    "library_type": "series",
+                    "season_number": 0,
+                    "episode_number": 100,
+                    "mapping_kind": "temporary_related_special",
+                },
+                "source_entry": {
+                    "title": "想见你 (电影)",
+                    "url": "https://zh.wikipedia.org/wiki/想見你_(電影)",
+                },
+            },
+            ai_plan={
+                "episode_map": [
+                    {
+                        "source_file": "Movie.mkv",
+                        "season_number": 0,
+                        "episode_number": 100,
+                    }
+                ]
+            },
+            file_tree=[
+                {"name": "Movie.mkv", "relative_path": "Movie.mkv", "is_dir": False}
+            ],
+        )
+        self.assertEqual(
+            plan["operations"][0]["rename_to"],
+            "Someday or One Day S00E100.mkv",
+        )
+        self.assertEqual(plan["unmatched_sources"], [])
+
+    def test_confirmed_plan_allows_partial_mapping_and_reports_unmatched(self):
+        plan = build_confirmed_rename_plan(
+            final_path="/真人剧集/Raw.Release",
+            selected_path="/真人剧集",
+            metadata={"chinese_title": "测试剧", "english_title": "Test Show"},
+            confirmed_plan={
+                "schema_version": 1,
+                "confirmed": True,
+                "relation": {"target_series_title": "Test Show"},
+                "placement": {
+                    "library_type": "series",
+                    "season_number": 1,
+                    "episode_number": 1,
+                    "mapping_kind": "tvdb_official",
+                },
+                "source_entry": {},
+                "items": [
+                    {
+                        "content_role": "main_episode",
+                        "season_number": 1,
+                        "episode_number": 1,
+                    },
+                    {
+                        "content_role": "ova",
+                        "season_number": 0,
+                        "episode_number": 3,
+                    },
+                ],
+            },
+            ai_plan={
+                "episode_map": [
+                    {
+                        "source_file": "Main.mkv",
+                        "season_number": 1,
+                        "episode_number": 1,
+                    },
+                    {
+                        "source_file": "OVA.mkv",
+                        "season_number": 0,
+                        "episode_number": 3,
+                    },
+                ]
+            },
+            file_tree=[
+                {"name": "Main.mkv", "relative_path": "Main.mkv", "is_dir": False},
+                {"name": "OVA.mkv", "relative_path": "OVA.mkv", "is_dir": False},
+                {
+                    "name": "Unknown.mkv",
+                    "relative_path": "Unknown.mkv",
+                    "is_dir": False,
+                },
+            ],
+        )
+        self.assertEqual(len(plan["operations"]), 2)
+        self.assertEqual(
+            {operation["rename_to"] for operation in plan["operations"]},
+            {"Test Show S01E01.mkv", "Test Show S00E03.mkv"},
+        )
+        self.assertEqual(plan["unmatched_sources"], ["Unknown.mkv"])
+
     def test_build_plan_uses_tvdb_season_folder_and_chinese_parent(self):
         plan = build_tvdb_rename_plan(
             final_path="/真人剧集/Release.Name",
