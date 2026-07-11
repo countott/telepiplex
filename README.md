@@ -1,5 +1,8 @@
 # Telepiplex
 
+> [!WARNING]
+> 此分支已废弃，不再继续开发。请使用 `feature/plex-management`；该模块在稳定运行管线中位于 `app.modules.renaming` 之后。
+
 Telepiplex 是基于 Telegram-115Bot 的个人媒体自动化 fork，用 Telegram 控制 115 网盘离线下载，并把“找片源、选候选、投递 115、整理媒体库”放到同一条流程里。
 
 当前重点是电影片源搜索和 115 离线投递：
