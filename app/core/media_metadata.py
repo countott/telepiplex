@@ -41,6 +41,44 @@ SERIES_EPISODE_MAPPINGS = {
 INVALID_NAME_CHARS = re.compile(r'[\\/*?"<>|]+')
 
 
+def resolve_category_route(config: dict | None, category_kind: str) -> dict | None:
+    if category_kind not in CATEGORY_LIBRARY_TYPES:
+        return None
+    for item in (config or {}).get("category_folder") or []:
+        if not isinstance(item, dict) or item.get("kind") != category_kind:
+            continue
+        path = "/" + str(item.get("path") or "").strip("/")
+        if path == "/":
+            return None
+        return {
+            "kind": category_kind,
+            "name": str(item.get("name") or category_kind),
+            "path": path,
+            "plex_library_id": str(item.get("plex_library_id") or ""),
+        }
+    return None
+
+
+def require_complete_category_routes(config: dict | None) -> None:
+    routes = (config or {}).get("category_folder")
+    if not isinstance(routes, list):
+        raise ValueError("category_folder must define four routes with kind")
+    seen = set()
+    for item in routes:
+        if not isinstance(item, dict):
+            raise ValueError("category_folder entries must be objects with kind")
+        kind = item.get("kind")
+        if kind not in CATEGORY_LIBRARY_TYPES or kind in seen:
+            raise ValueError("category_folder has missing, duplicate, or invalid kind")
+        if not str(item.get("path") or "").strip("/"):
+            raise ValueError(f"category_folder.{kind}.path is required")
+        if "plex_library_id" not in item:
+            raise ValueError(f"category_folder.{kind}.plex_library_id key is required")
+        seen.add(kind)
+    if seen != set(CATEGORY_LIBRARY_TYPES):
+        raise ValueError("category_folder must contain exactly four kind values")
+
+
 def sanitize_contract_name(value) -> str:
     value = str(value or "").replace("：", ": ").replace("（", "(").replace("）", ")")
     value = re.sub(r"\s*(?:——|—|–|－)\s*", " - ", value)
