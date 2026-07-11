@@ -62,8 +62,30 @@ async def handle_plex_match_confirmation(update, context):
     _, job_id, selection = query.data.split(":", 2)
     from app.modules.plex_management import get_plex_management_service
 
+    service = get_plex_management_service()
+    job = service.get_job(int(job_id))
+    if selection.isdigit() and job:
+        waiting = next(
+            (
+                result
+                for result in (job.get("step_results") or {}).values()
+                if isinstance(result, dict) and result.get("status") == "waiting"
+            ),
+            None,
+        )
+        candidates = (waiting or {}).get("candidates") or []
+        index = int(selection)
+        if index >= len(candidates):
+            await query.answer("候选已失效", show_alert=True)
+            return
+        candidate = candidates[index]
+        selection = (
+            candidate.get("rating_key")
+            if waiting.get("kind") == "location"
+            else candidate.get("guid")
+        )
     result = await asyncio.to_thread(
-        get_plex_management_service().confirm_match,
+        service.confirm_match,
         int(job_id),
         selection,
     )

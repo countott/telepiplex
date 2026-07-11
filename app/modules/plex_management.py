@@ -12,13 +12,14 @@ _mcp_handle = None
 
 def _queue_notifier(user_id, message, confirmation=None):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.helpers import escape_markdown
     from app.utils.message_queue import add_task_to_queue
 
     keyboard = None
     if confirmation:
         rows = []
         kind = confirmation.get("kind")
-        for candidate in confirmation.get("candidates") or []:
+        for index, candidate in enumerate(confirmation.get("candidates") or []):
             value = candidate.get("rating_key") if kind == "location" else candidate.get("guid")
             if not value:
                 continue
@@ -29,12 +30,17 @@ def _queue_notifier(user_id, message, confirmation=None):
             rows.append([
                 InlineKeyboardButton(
                     str(label)[:50],
-                    callback_data=f"plex_match_confirm:{confirmation.get('job_id', '')}:{value}",
+                    callback_data=f"plex_match_confirm:{confirmation.get('job_id', '')}:{index}",
                 )
             ])
         if rows:
             keyboard = InlineKeyboardMarkup(rows)
-    return add_task_to_queue(user_id, None, message, keyboard=keyboard)
+    return add_task_to_queue(
+        user_id,
+        None,
+        escape_markdown(str(message), version=2),
+        keyboard=keyboard,
+    )
 
 
 def _service_config():

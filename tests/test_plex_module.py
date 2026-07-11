@@ -10,6 +10,25 @@ sys.path.insert(0, str(ROOT / "app"))
 
 
 class PlexModuleTest(unittest.TestCase):
+    def test_match_notification_uses_compact_telegram_callbacks(self):
+        import init
+        import app.utils.message_queue
+        from app.modules.plex_management import _queue_notifier
+
+        with patch("app.utils.message_queue.add_task_to_queue") as add_task:
+            _queue_notifier(1, "候选 (测试)", {
+                "job_id": 9,
+                "kind": "match",
+                "candidates": [{"guid": "plex://movie/" + "x" * 100, "title": "电影"}],
+            })
+
+            keyboard = add_task.call_args.kwargs["keyboard"]
+            message = add_task.call_args.args[2]
+        callback = keyboard.inline_keyboard[0][0].callback_data
+        self.assertEqual(callback, "plex_match_confirm:9:0")
+        self.assertLessEqual(len(callback.encode("utf-8")), 64)
+        self.assertIn(r"\(测试\)", message)
+
     def test_plex_module_registers_completion_hook_command_and_config(self):
         from app.core.module_registry import ModuleRegistry
         from app.modules.plex_management import register_module
