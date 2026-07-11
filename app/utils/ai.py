@@ -153,6 +153,25 @@ JSON结构：
 输入事实如下：
 """
 
+SEARCH_HYPOTHESIS_PROMPT = """你是影视搜索检索假设生成器。只返回JSON。
+每次搜索必须执行本步骤。区分用户明确表达与模型推断；保留同名电影/剧集歧义。
+输出 status、hypotheses、source_queries 和 warnings。source_queries 必须分别包含 wikipedia、douban、tvdb 数组。
+不得输出 Prowlarr query，不得冻结最终目录，不得分配临时 S00E100+。
+JSON结构：
+{"status":"ok|blocked","hypotheses":[{"title":"string","year":"string","content_identity":"movie|series|main_episode|ova|narrative_bonus|non_narrative_extra|special|prequel_movie|sequel_movie|extension_movie|spin_off","scope":"movie|whole_series|season|episode","season_number":null,"episode_number":null,"possible_related_series":["string"],"explicit_facts":["string"],"inferred_facts":["string"]}],"source_queries":{"wikipedia":["string"],"douban":["string"],"tvdb":["string"]},"warnings":["string"]}
+用户输入：
+"""
+
+DOWNLOAD_PLAN_PROMPT = """你是影视下载方案规划器。只返回JSON。
+AI是主决策层；Wikipedia、豆瓣和TVDB仅提供可选证据，全部server_down时仍须规划。
+临时关联特别篇必须提供可定位source_entry；找不到标题加URL或外部ID时不得选择temporary_related_special。
+TVDB官方Special优先；强叙事关系可归入主线剧集Season 00；弱演员或主创关系不得合并。
+AI推断TVDB具体编号必须添加未实时校验警告。temporary_related_special的episode_number必须为null，由确定性分配器填写。
+把所有证据中已知的Season 00集号写入evidence.occupied_special_numbers整数数组，供确定性分配器避让。
+输出schema_version=1、plan_id、标题、content_identity、relation、placement、source_entry、prowlarr_queries、evidence、warnings、confirmed=false。
+输入事实：
+"""
+
 def check_ai_api_available():
     url = init.bot_config.get("ai", {}).get("api_url", "")
     if not url:
@@ -292,6 +311,40 @@ def _without_prowlarr_query(value):
         for item in value:
             _without_prowlarr_query(item)
     return value
+
+
+def infer_search_hypotheses_with_ai(raw_query: str):
+    if not check_ai_api_available():
+        return None
+
+    prompt = SEARCH_HYPOTHESIS_PROMPT + str(raw_query or "").strip()
+    _log_ai_info(f"AI搜索假设输入 raw={_compact_json_for_log(raw_query)}")
+    result = chat_completion(prompt, max_tokens=4096)
+    _log_ai_info(f"AI搜索假设原始响应 result={_compact_json_for_log(result)}")
+    parsed = parse_ai_json_response(result)
+    if not isinstance(parsed, dict):
+        return None
+    source_queries = parsed.get("source_queries")
+    if not isinstance(source_queries, dict):
+        return None
+    for name in ("wikipedia", "douban", "tvdb"):
+        if not isinstance(source_queries.get(name), list):
+            return None
+    return _without_prowlarr_query(parsed)
+
+
+def infer_download_plan_with_ai(context: dict):
+    if not check_ai_api_available():
+        return None
+
+    prompt = DOWNLOAD_PLAN_PROMPT + json.dumps(
+        context or {}, ensure_ascii=False, indent=2
+    )
+    _log_ai_info(f"AI下载方案输入 context={_compact_json_for_log(context)}")
+    result = chat_completion(prompt, max_tokens=8192)
+    _log_ai_info(f"AI下载方案原始响应 result={_compact_json_for_log(result)}")
+    parsed = parse_ai_json_response(result)
+    return parsed if isinstance(parsed, dict) else None
 
 
 def normalize_search_query_with_ai(raw_query: str):
