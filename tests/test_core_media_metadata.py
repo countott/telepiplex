@@ -8,6 +8,7 @@ from app.core.media_metadata import (
     extract_confirmed_media_metadata,
     locked_episode,
     merge_resolved_items,
+    resolve_category_route,
     series_folder_name,
     series_scope_key,
     series_season_directory_name,
@@ -16,6 +17,31 @@ from app.core.media_metadata import (
 
 
 class CoreMediaMetadataTest(unittest.TestCase):
+    def test_category_route_uses_kind_not_display_name(self):
+        route = resolve_category_route({
+            "category_folder": [{
+                "kind": "live_action_series",
+                "name": "可改显示名",
+                "path": "/真人剧集/",
+                "plex_library_id": "13",
+            }]
+        }, "live_action_series")
+
+        self.assertEqual(route, {
+            "kind": "live_action_series",
+            "name": "可改显示名",
+            "path": "/真人剧集",
+            "plex_library_id": "13",
+        })
+        self.assertIsNone(resolve_category_route({"category_folder": []}, "live_action_series"))
+        self.assertIsNone(resolve_category_route({
+            "category_folder": [{
+                "name": "live_action_series",
+                "path": "/真人剧集",
+                "plex_library_id": "13",
+            }]
+        }, "live_action_series"))
+
     def _value(self):
         return {
             "schema_version": 1,
