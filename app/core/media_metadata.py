@@ -120,7 +120,7 @@ def validate_media_metadata(value: object, require_confirmed: bool = False):
     if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION:
         return None
     try:
-        json.dumps(value, ensure_ascii=False)
+        json.dumps(value, ensure_ascii=False, allow_nan=False)
     except (TypeError, ValueError):
         return None
     if not _text(value.get("metadata_id")):
@@ -137,40 +137,62 @@ def validate_media_metadata(value: object, require_confirmed: bool = False):
         return None
     if _text(identity.get("content_kind")) not in CONTENT_KINDS:
         return None
-    if not isinstance(identity.get("external_ids") or {}, dict):
+    if "external_ids" in identity and not isinstance(identity.get("external_ids"), dict):
+        return None
+
+    target = relation.get("target_series")
+    if isinstance(target, dict) and (
+        "external_ids" in target and not isinstance(target.get("external_ids"), dict)
+    ):
         return None
 
     category_kind = placement.get("category_kind")
     library_type = placement.get("library_type")
-    if CATEGORY_LIBRARY_TYPES.get(category_kind) != library_type:
+    if (
+        category_kind not in CATEGORY_LIBRARY_TYPES
+        or CATEGORY_LIBRARY_TYPES[category_kind] != library_type
+    ):
         return None
     mapping_kind = placement.get("mapping_kind")
     if mapping_kind not in MAPPING_KINDS:
         return None
-    if not isinstance(value.get("evidence") or {}, dict):
+    evidence = value.get("evidence")
+    warnings = value.get("warnings")
+    items = value.get("items")
+    if not isinstance(evidence, dict):
         return None
-    if not isinstance(value.get("warnings") or [], list):
+    if not isinstance(warnings, list):
         return None
-    if not _valid_items(value.get("items") or []):
+    if not isinstance(items, list) or not _valid_items(items):
         return None
 
     if mapping_kind in SERIES_EPISODE_MAPPINGS:
         season = _integer(placement.get("season_number"))
         episode = _integer(placement.get("episode_number"))
-        target = relation.get("target_series")
         if library_type != "series" or season != 0 or episode is None or episode < 1:
             return None
         if not isinstance(target, dict) or not (
             _text(target.get("chinese_title")) or _text(target.get("english_title"))
         ):
             return None
+        if any(
+            (
+                _integer(item.get("season_number")),
+                _integer(item.get("episode_number")),
+            ) != (season, episode)
+            for item in items
+        ):
+            return None
 
     if mapping_kind == "tvdb_official":
-        target_ids = ((relation.get("target_series") or {}).get("external_ids") or {})
+        target_ids = target.get("external_ids") or {}
         if not _text(target_ids.get("tvdb")) or not _text(placement.get("tvdb_episode_id")):
             return None
 
-    if mapping_kind == "ai_inferred_tvdb" and not value.get("warnings"):
+    if mapping_kind == "ai_inferred_tvdb" and not any(
+        isinstance(warning, str) and warning.strip()
+        for warning in warnings
+    ):
         return None
 
     if mapping_kind == "temporary_related_special":
@@ -184,7 +206,6 @@ def validate_media_metadata(value: object, require_confirmed: bool = False):
             return None
 
     if mapping_kind == "standalone":
-        target = relation.get("target_series")
         if placement.get("season_number") is not None or placement.get("episode_number") is not None:
             return None
         if isinstance(target, dict) and (
@@ -192,7 +213,6 @@ def validate_media_metadata(value: object, require_confirmed: bool = False):
         ):
             return None
         if library_type == "series":
-            items = value.get("items") or []
             if not items or any(
                 item.get("season_number") is None or item.get("episode_number") is None
                 for item in items
@@ -234,15 +254,18 @@ def merge_resolved_items(value: dict, resolved_items: list[dict]) -> dict:
     contract = validate_media_metadata(value, require_confirmed=True)
     if contract is None:
         raise ValueError("invalid confirmed media_metadata")
-    allowed = {
-        (int(item["season_number"]), int(item["episode_number"]))
-        for item in contract.get("items") or []
-        if item.get("season_number") is not None and item.get("episode_number") is not None
-    }
-    if not allowed:
+    allowed = set()
+    mapping_kind = contract["placement"]["mapping_kind"]
+    if mapping_kind in SERIES_EPISODE_MAPPINGS:
         episode = locked_episode(contract)
         if episode:
             allowed.add(episode)
+    else:
+        allowed = {
+            (int(item["season_number"]), int(item["episode_number"]))
+            for item in contract.get("items") or []
+            if item.get("season_number") is not None and item.get("episode_number") is not None
+        }
 
     items = deepcopy(contract.get("items") or [])
     for resolved in resolved_items or []:

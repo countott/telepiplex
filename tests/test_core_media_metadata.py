@@ -79,6 +79,18 @@ class CoreMediaMetadataTest(unittest.TestCase):
         legacy_key = "_".join(("download", "plan"))
         self.assertIsNone(extract_confirmed_media_metadata({legacy_key: self._value()}))
 
+    def test_rejects_unknown_category_with_none_library_type(self):
+        value = self._value()
+        value["relation"]["target_series"] = {}
+        value["placement"].update({
+            "library_type": None,
+            "category_kind": "invented",
+            "season_number": None,
+            "episode_number": None,
+            "mapping_kind": "standalone",
+        })
+        self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
+
     def test_accepts_exactly_the_four_category_library_pairs(self):
         pairs = {
             "live_action_series": "series",
@@ -187,6 +199,84 @@ class CoreMediaMetadataTest(unittest.TestCase):
         self.assertIsNotNone(validate_media_metadata(value, require_confirmed=True))
         value["source_entry"]["title"] = ""
         self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
+
+    def test_series_episode_mapping_rejects_item_outside_top_level_lock(self):
+        value = self._value()
+        value["items"] = [{
+            "item_id": "wrong-episode",
+            "content_role": "extension_movie",
+            "season_number": 0,
+            "episode_number": 101,
+        }]
+        self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
+
+    def test_merge_rejects_prebound_item_outside_series_mapping_lock(self):
+        value = self._value()
+        value["items"] = [{
+            "item_id": "wrong-episode",
+            "content_role": "extension_movie",
+            "season_number": 0,
+            "episode_number": 101,
+        }]
+        with self.assertRaisesRegex(ValueError, "locked target|invalid confirmed"):
+            merge_resolved_items(value, [{
+                "season_number": 0,
+                "episode_number": 101,
+                "final_path": "/wrong.mkv",
+            }])
+
+    def test_ai_inferred_mapping_requires_nonblank_warning_string(self):
+        for warnings in ([{}], [None], [""]):
+            with self.subTest(warnings=warnings):
+                value = self._value()
+                value["placement"]["mapping_kind"] = "ai_inferred_tvdb"
+                value["warnings"] = warnings
+                self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
+        value = self._value()
+        value["placement"]["mapping_kind"] = "ai_inferred_tvdb"
+        value["warnings"] = ["TVDB episode mapping inferred by AI"]
+        self.assertIsNotNone(validate_media_metadata(value, require_confirmed=True))
+
+    def test_required_containers_reject_falsy_wrong_types(self):
+        for field_name in ("items", "warnings", "evidence"):
+            with self.subTest(field_name=field_name):
+                value = self._value()
+                value[field_name] = ()
+                self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
+
+    def test_external_ids_reject_malformed_types_without_raising(self):
+        cases = []
+
+        identity_tuple = self._value()
+        identity_tuple["identity"]["external_ids"] = ()
+        cases.append(("identity_empty_tuple", identity_tuple))
+
+        target_tuple = self._value()
+        target_tuple["relation"]["target_series"]["external_ids"] = ()
+        cases.append(("target_empty_tuple", target_tuple))
+
+        target_list = self._value()
+        target_list["placement"].update({
+            "mapping_kind": "tvdb_official",
+            "tvdb_episode_id": "episode-100",
+        })
+        target_list["relation"]["target_series"]["external_ids"] = ["malformed"]
+        cases.append(("target_list", target_list))
+
+        for case_name, value in cases:
+            with self.subTest(case_name=case_name):
+                try:
+                    result = validate_media_metadata(value, require_confirmed=True)
+                except Exception as exc:
+                    self.fail(f"validation raised {type(exc).__name__}: {exc}")
+                self.assertIsNone(result)
+
+    def test_rejects_non_finite_json_numbers(self):
+        for non_finite in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(non_finite=non_finite):
+                value = self._value()
+                value["evidence"]["score"] = non_finite
+                self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
 
     def test_merge_resolved_items_cannot_change_locked_target(self):
         value = self._value()
