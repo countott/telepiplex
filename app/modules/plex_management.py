@@ -104,7 +104,7 @@ def start_plex_module_services(_application=None):
         return None
     service.resume_incomplete_jobs(plex_executor)
     if service.mcp_enabled:
-        from app.mcp.plex_server import start_plex_mcp_server
+        from app.plex_mcp.server import start_plex_mcp_server
 
         _mcp_handle = start_plex_mcp_server(service, service.mcp_config)
     return _mcp_handle
