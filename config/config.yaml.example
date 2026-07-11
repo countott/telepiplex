@@ -30,12 +30,16 @@ clean_policy:
 category_folder:
   - name: 真人电影
     path: /真人电影
+    plex_library_id: ""
   - name: 动画电影
     path: /动画电影
+    plex_library_id: ""
   - name: 真人剧集
     path: /真人剧集
+    plex_library_id: ""
   - name: 动画剧集
     path: /动画剧集
+    plex_library_id: ""
 
 # 搜索与 Prowlarr：启用后使用 /search 和 /s 找片源。
 search:
@@ -101,8 +105,23 @@ media:
   plex:
     base_url: ""
     token: ""
+    timeout: 30
+    management:
+      enabled: true
+      database_path: "/config/plex_management.db"
+      scan_poll_interval: 5
+      scan_timeout: 300
+    mcp:
+      enabled: false
+      host: "127.0.0.1"
+      port: 8765
+      path: "/mcp"
+      auth_token: ""
+    ai:
+      enabled: false
+      max_tool_rounds: 3
 
-# 元数据：Wikipedia 是搜索关系证据；TVDB 用于编号和多语言元数据校对。
+# 元数据：Wikipedia 用于搜索关系证据；TMDB 用于 Plex 原声和海报；TVDB 用于编号校对。
 metadata:
   wikipedia:
     enable: true
@@ -111,11 +130,21 @@ metadata:
       - en
     timeout: 10
 
+  tmdb:
+    api_key: ""
+    timeout: 15
+
   tvdb:
     enable: false
     base_url: "https://api4.thetvdb.com/v4"
     api_key: ""
     subscriber_pin: ""
+    timeout: 15
+
+# 无字海报的可选补充来源；lang=00 才会参与自动选择。
+artwork:
+  fanart:
+    api_key: ""
     timeout: 15
 
 # AI 主决策：每次搜索都必须完成两阶段规划；缺少连接配置时搜索会停止。

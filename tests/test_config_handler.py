@@ -201,6 +201,8 @@ class ConfigHandlerTest(unittest.TestCase):
             [
                 "config_optional:prowlarr",
                 "config_optional:plex",
+                "config_optional:tmdb",
+                "config_optional:fanart",
                 "config_optional:tvdb",
                 "config_optional:ai",
                 "config_back",

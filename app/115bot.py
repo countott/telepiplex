@@ -30,6 +30,7 @@ DEFAULT_ENABLED_MODULES = (
     "app.modules.open115",
     "app.modules.media_search",
     "app.modules.renaming",
+    "app.modules.plex_management",
 )
 MODULE_CATALOG = {
     "app.modules.open115": {
@@ -43,6 +44,10 @@ MODULE_CATALOG = {
     "app.modules.renaming": {
         "label": "下载后重命名",
         "description": "下载完成后的反查、整理和重命名",
+    },
+    "app.modules.plex_management": {
+        "label": "Plex 管理",
+        "description": "扫库、匹配、中文化、海报和默认流选择",
     },
 }
 CORE_BOT_COMMANDS = [

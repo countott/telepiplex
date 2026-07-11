@@ -66,7 +66,6 @@ class Feature115SurfaceTest(unittest.TestCase):
             removed_terms = [
                 "aria2:",
                 "selenium",
-                "plex_library_id",
                 "tg_api_id",
                 "tg_api_hash",
                 "bot_name",

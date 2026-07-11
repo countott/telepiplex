@@ -51,6 +51,32 @@ OPTIONAL_CONFIG_ITEMS = {
             "发送 /q 可取消。"
         ),
     },
+    "tmdb": {
+        "label": "TMDB",
+        "path": ("metadata", "tmdb"),
+        "fields": ("api_key", "timeout"),
+        "required": ("api_key",),
+        "prompt": (
+            "请发送 TMDB 配置。\n\n"
+            "示例：\n"
+            "api_key=xxxx\n"
+            "timeout=15\n\n"
+            "发送 /q 可取消。"
+        ),
+    },
+    "fanart": {
+        "label": "Fanart.tv",
+        "path": ("artwork", "fanart"),
+        "fields": ("api_key", "timeout"),
+        "required": ("api_key",),
+        "prompt": (
+            "请发送 Fanart.tv 配置。\n\n"
+            "示例：\n"
+            "api_key=xxxx\n"
+            "timeout=15\n\n"
+            "发送 /q 可取消。"
+        ),
+    },
     "tvdb": {
         "label": "TVDB",
         "path": ("metadata", "tvdb"),
@@ -237,6 +263,8 @@ def build_optional_config_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("Prowlarr", callback_data="config_optional:prowlarr")],
             [InlineKeyboardButton("Plex", callback_data="config_optional:plex")],
+            [InlineKeyboardButton("TMDB", callback_data="config_optional:tmdb")],
+            [InlineKeyboardButton("Fanart.tv", callback_data="config_optional:fanart")],
             [InlineKeyboardButton("TVDB", callback_data="config_optional:tvdb")],
             [InlineKeyboardButton("AI", callback_data="config_optional:ai")],
             [InlineKeyboardButton("返回", callback_data="config_back")],
@@ -457,7 +485,7 @@ def register_config_handlers(application):
             states={
                 CONFIG_SELECT: [CallbackQueryHandler(select_config_item, pattern=top_level_pattern)],
                 CONFIG_SELECT_OPTIONAL_ITEM: [
-                    CallbackQueryHandler(select_optional_item, pattern=r"^config_optional:(prowlarr|plex|tvdb|ai)$"),
+                    CallbackQueryHandler(select_optional_item, pattern=r"^config_optional:(prowlarr|plex|tmdb|fanart|tvdb|ai)$"),
                     CallbackQueryHandler(select_optional_item, pattern=r"^config_(back|cancel)$"),
                 ],
                 CONFIG_SELECT_115_MODE: [

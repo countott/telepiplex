@@ -83,9 +83,10 @@ class ComposableIntegrationTest(unittest.TestCase):
         from app.modules.media_search import register_module as register_media_search
         from app.modules.open115 import register_module as register_open115
         from app.modules.renaming import register_module as register_renaming
+        from app.modules.plex_management import register_module as register_plex_management
 
         registry = ModuleRegistry()
-        for register in (register_open115, register_media_search, register_renaming):
+        for register in (register_open115, register_media_search, register_renaming, register_plex_management):
             register(registry)
 
         self.assertIsNotNone(registry.download_provider)
@@ -96,8 +97,9 @@ class ComposableIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(
             [command.command for command in registry.bot_commands()],
-            ["auth", "config", "magnet", "m", "q", "search", "s"],
+            ["auth", "config", "magnet", "m", "q", "search", "s", "plex"],
         )
+        self.assertEqual(registry.download_completion_hooks[0][0], "plex.management")
 
     def test_terminal_processor_prevents_unorganized_fallback(self):
         import init
