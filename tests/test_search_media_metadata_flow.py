@@ -104,7 +104,7 @@ class SearchMediaMetadataFlowTest(unittest.IsolatedAsyncioTestCase):
             return {
                 "source": name,
                 "status": "ok",
-                "facts": [],
+                "facts": [{"title": "想见你"}],
                 "source_urls": [],
                 "error": "",
             }

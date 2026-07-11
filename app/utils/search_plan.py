@@ -2,15 +2,37 @@ from __future__ import annotations
 
 from copy import deepcopy
 from threading import Lock
+from urllib.parse import urlsplit, urlunsplit
 
 from app.core.media_metadata import series_scope_key, validate_media_metadata
 
 
 TEMPORARY_MAPPING_KIND = "temporary_related_special"
+KNOWN_EVIDENCE_PROVIDERS = {"wikipedia", "douban", "tvdb"}
+SOFT_FAILURE_STATUSES = {"server_down", "not_found", "disabled"}
 
 
 def _text(value) -> str:
     return " ".join(str(value or "").split())
+
+
+def normalize_source_locator(value) -> str:
+    text = _text(value)
+    if not text:
+        return ""
+    parsed = urlsplit(text)
+    if not parsed.scheme or not parsed.netloc:
+        return text
+    path = parsed.path
+    if path != "/":
+        path = path.rstrip("/")
+    return urlunsplit((
+        parsed.scheme.casefold(),
+        parsed.netloc.casefold(),
+        path,
+        parsed.query,
+        "",
+    ))
 
 
 def validate_draft_search_plan(value: object):
@@ -36,47 +58,99 @@ def validate_draft_search_plan(value: object):
             return None
         if not (_text(source_entry.get("url")) or _text(source_entry.get("external_id"))):
             return None
-        provider = _text(source_entry.get("provider"))
+        provider = _text(source_entry.get("provider")).casefold()
+        if provider not in KNOWN_EVIDENCE_PROVIDERS:
+            return None
         evidence = contract.get("evidence")
         if not isinstance(evidence, dict):
             return None
         statuses = evidence.get("provider_statuses") or {}
         if not isinstance(statuses, dict):
             return None
-        status = _text(statuses.get(provider))
-        if status and status != "ok":
+        status = _text(statuses.get(provider)).casefold()
+        if not status:
+            return None
+        support_by_provider = evidence.get("provider_support") or {}
+        if not isinstance(support_by_provider, dict):
+            return None
+        support = support_by_provider.get(provider)
+        if not isinstance(support, dict):
+            return None
+        source_urls = support.get("source_urls")
+        if not isinstance(source_urls, list):
+            return None
+        normalized_urls = {
+            normalize_source_locator(item)
+            for item in source_urls
+            if normalize_source_locator(item)
+        }
+        locator = normalize_source_locator(
+            source_entry.get("url") or source_entry.get("external_id")
+        )
+        if status == "ok":
+            if support.get("has_facts") is not True and locator not in normalized_urls:
+                return None
+        elif status in SOFT_FAILURE_STATUSES:
             if _text(source_entry.get("availability")) != status:
                 return None
-            if _text(source_entry.get("verification")) in {"", "verified"}:
+            if _text(source_entry.get("verification")) != "ai_supplied_unverified":
                 return None
-            if not contract.get("warnings"):
+            if not any(
+                isinstance(warning, str) and _text(warning)
+                for warning in contract.get("warnings") or []
+            ):
                 return None
+        else:
+            return None
     evidence = contract.get("evidence")
     if not isinstance(evidence, dict):
         return None
-    official_hint = evidence.get("tvdb_official_special") or {}
-    if not isinstance(official_hint, dict):
+    if "tvdb_official_special" in evidence:
         return None
-    if official_hint and placement.get("mapping_kind") != "tvdb_official":
+    verified_candidates = evidence.get("verified_tvdb_special_candidates") or []
+    official_candidates = evidence.get("tvdb_official_special_candidates") or []
+    if not isinstance(verified_candidates, list) or not isinstance(official_candidates, list):
         return None
-    if official_hint:
+    verified_keys = set()
+    for candidate in verified_candidates:
+        if not isinstance(candidate, dict):
+            return None
+        series_id = _text(candidate.get("series_id"))
+        episode_id = _text(candidate.get("episode_id"))
+        if (
+            not series_id
+            or not episode_id
+            or candidate.get("season_number") != 0
+        ):
+            return None
+        verified_keys.add((series_id, episode_id))
+    official_keys = set()
+    for candidate in official_candidates:
+        if not isinstance(candidate, dict):
+            return None
+        series_id = _text(candidate.get("series_id"))
+        episode_id = _text(candidate.get("episode_id"))
+        if (
+            not series_id
+            or not episode_id
+            or candidate.get("season_number") != 0
+            or not _text(candidate.get("name"))
+            or (series_id, episode_id) not in verified_keys
+        ):
+            return None
+        official_keys.add((series_id, episode_id))
+    if official_keys and placement.get("mapping_kind") != "tvdb_official":
+        return None
+    if placement.get("mapping_kind") == "tvdb_official":
         target = relation.get("target_series") or {}
         target_ids = target.get("external_ids") or {} if isinstance(target, dict) else {}
         if not isinstance(target_ids, dict):
             return None
-        if _text(target_ids.get("tvdb")) != _text(official_hint.get("series_id")):
-            return None
-        if _text(placement.get("tvdb_episode_id")) != _text(official_hint.get("episode_id")):
-            return None
-        verified_key = (
-            f"{_text(official_hint.get('series_id'))}:"
-            f"{_text(official_hint.get('episode_id'))}"
+        selected_key = (
+            _text(target_ids.get("tvdb")),
+            _text(placement.get("tvdb_episode_id")),
         )
-        verified_values = evidence.get("verified_tvdb_episode_keys") or []
-        if not isinstance(verified_values, list):
-            return None
-        verified_keys = {_text(item) for item in verified_values}
-        if verified_key not in verified_keys:
+        if selected_key not in official_keys:
             return None
     result = deepcopy(value)
     result["prowlarr_queries"] = normalized_queries

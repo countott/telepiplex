@@ -58,7 +58,17 @@ class SearchPlanTest(unittest.TestCase):
                         "wikipedia": "ok",
                         "douban": "ok",
                         "tvdb": "not_found",
-                    }
+                    },
+                    "provider_support": {
+                        "wikipedia": {
+                            "has_facts": True,
+                            "source_urls": [
+                                "https://zh.wikipedia.org/wiki/想見你_(電影)"
+                            ],
+                        },
+                        "douban": {"has_facts": True, "source_urls": []},
+                        "tvdb": {"has_facts": False, "source_urls": []},
+                    },
                 },
                 "warnings": [],
             },
@@ -116,12 +126,53 @@ class SearchPlanTest(unittest.TestCase):
         ]
         self.assertIsNotNone(validate_draft_search_plan(draft))
 
+        draft["media_metadata"]["source_entry"]["verification"] = "claimed"
+        self.assertIsNone(validate_draft_search_plan(draft))
+
+    def test_temporary_requires_known_provider_in_injected_statuses(self):
+        draft = self._draft()
+        draft["media_metadata"]["source_entry"]["provider"] = ""
+        self.assertIsNone(validate_draft_search_plan(draft))
+
+        draft = self._draft()
+        draft["media_metadata"]["source_entry"]["provider"] = "invented"
+        self.assertIsNone(validate_draft_search_plan(draft))
+
+    def test_temporary_ok_provider_requires_actual_support(self):
+        draft = self._draft()
+        draft["media_metadata"]["evidence"]["provider_support"]["wikipedia"] = {
+            "has_facts": False,
+            "source_urls": [],
+        }
+        self.assertIsNone(validate_draft_search_plan(draft))
+
+    def test_temporary_ok_provider_accepts_normalized_matching_source_url(self):
+        draft = self._draft()
+        draft["media_metadata"]["evidence"]["provider_support"]["wikipedia"] = {
+            "has_facts": False,
+            "source_urls": [
+                "https://zh.wikipedia.org/wiki/想見你_(電影)"
+            ],
+        }
+        draft["media_metadata"]["source_entry"]["url"] = (
+            "HTTPS://ZH.WIKIPEDIA.ORG/wiki/想見你_(電影)/"
+        )
+        self.assertIsNotNone(validate_draft_search_plan(draft))
+
     def test_official_tvdb_hint_cannot_be_downgraded(self):
         draft = self._draft()
-        draft["media_metadata"]["evidence"]["tvdb_official_special"] = {
+        candidates = [{
             "series_id": "series-1",
             "episode_id": "episode-5",
-        }
+            "name": "Someday or One Day: The Movie",
+            "season_number": 0,
+        }]
+        draft["media_metadata"]["evidence"][
+            "verified_tvdb_special_candidates"
+        ] = candidates
+        draft["media_metadata"]["evidence"][
+            "tvdb_official_special_candidates"
+        ] = candidates
         self.assertIsNone(validate_draft_search_plan(draft))
 
     def test_standalone_drafts_cover_all_four_categories(self):
