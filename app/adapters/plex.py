@@ -118,8 +118,10 @@ class PlexAdapter:
 
     @classmethod
     def _match_dict(cls, candidate):
+        guid = str(cls._value(candidate, "guid", "") or "")
         return {
-            "guid": str(cls._value(candidate, "guid", "") or ""),
+            "guid": guid,
+            "guids": [guid] if guid else [],
             "title": str(cls._value(candidate, "name", "") or ""),
             "year": int(cls._value(candidate, "year", 0) or 0),
             "score": int(cls._value(candidate, "score", 0) or 0),
