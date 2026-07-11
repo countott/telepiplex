@@ -165,13 +165,20 @@ JSON结构：
 用户输入：
 """
 
-DOWNLOAD_PLAN_PROMPT = """你是影视下载方案规划器。只返回JSON。
-AI是主决策层；Wikipedia、豆瓣和TVDB仅提供可选证据，全部server_down时仍须规划。
-临时关联特别篇必须提供可定位source_entry；找不到标题加URL或外部ID时不得选择temporary_related_special。
-TVDB官方Special优先；强叙事关系可归入主线剧集Season 00；弱演员或主创关系不得合并。
-AI推断TVDB具体编号必须添加未实时校验警告。temporary_related_special的episode_number必须为null，由确定性分配器填写。
-把所有证据中已知的Season 00集号写入evidence.occupied_special_numbers整数数组，供确定性分配器避让。
-输出schema_version=1、plan_id、标题、content_identity、relation、placement、source_entry、prowlarr_queries、evidence、warnings、confirmed=false。
+MEDIA_METADATA_DRAFT_PROMPT = """你是影视中立元数据规划器。只返回JSON。
+AI是主决策层；Wikipedia、豆瓣和TVDB是可失败的证据提供者。
+每次搜索都必须使用两阶段AI，并读取Wikipedia、豆瓣和TVDB的状态；任一证据源server_down不能阻止第二阶段AI。
+引用server_down或AI补出的来源条目时，source_entry必须标明availability/verification，并在warnings中明确说明未实时验证。
+只要存在对应剧集版，电影版默认归入目标剧集Season 00；优先TVDB官方Special。
+standalone只允许在不存在剧集关联时使用，target_series必须为空，season_number和episode_number必须为null。
+普通主系列也使用standalone，但library_type=series时必须在items中列出用户确认的每个目标集（例如S01E01）；不得把普通集写进顶层Season 00锁。
+items中的season_number/episode_number是后续重命名不可改写的锁，content_role使用允许的content_kind值。
+temporary_related_special的episode_number必须为null，由本地分配器从S00E100开始填写。
+tvdb_official必须输出目标tvdb series ID和tvdb_episode_id。
+ai_inferred_tvdb必须输出明确的未实时验证warning。
+identity必须包含中英文标题、year、content_kind、summary、original_release_date、poster_url、poster_source和external_ids。
+只返回以下结构：
+{"plan_id":"string","media_metadata":{"schema_version":1,"metadata_id":"","confirmed":false,"identity":{},"relation":{"type":"string","target_series":{},"source":"string"},"placement":{"library_type":"movie|series","category_kind":"live_action_series|live_action_movie|animated_movie|animated_series","season_number":null,"episode_number":null,"mapping_kind":"tvdb_official|ai_inferred_tvdb|temporary_related_special|standalone","mapping_source":"string","tvdb_episode_id":"string"},"source_entry":{},"items":[{"item_id":"string","content_role":"main_episode|ova|narrative_bonus|non_narrative_extra|special","season_number":1,"episode_number":1}],"evidence":{},"warnings":[]},"prowlarr_queries":["string"]}
 输入事实：
 """
 
@@ -336,16 +343,16 @@ def infer_search_hypotheses_with_ai(raw_query: str):
     return _without_prowlarr_query(parsed)
 
 
-def infer_download_plan_with_ai(context: dict):
+def infer_media_metadata_draft_with_ai(context: dict):
     if not check_ai_api_available():
         return None
 
-    prompt = DOWNLOAD_PLAN_PROMPT + json.dumps(
+    prompt = MEDIA_METADATA_DRAFT_PROMPT + json.dumps(
         context or {}, ensure_ascii=False, indent=2
     )
-    _log_ai_info(f"AI下载方案输入 context={_compact_json_for_log(context)}")
+    _log_ai_info(f"AI中立元数据输入 context={_compact_json_for_log(context)}")
     result = chat_completion(prompt, max_tokens=8192)
-    _log_ai_info(f"AI下载方案原始响应 result={_compact_json_for_log(result)}")
+    _log_ai_info(f"AI中立元数据原始响应 result={_compact_json_for_log(result)}")
     parsed = parse_ai_json_response(result)
     return parsed if isinstance(parsed, dict) else None
 
