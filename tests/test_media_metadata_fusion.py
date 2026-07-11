@@ -527,6 +527,7 @@ class CoverAndHandoffTest(unittest.IsolatedAsyncioTestCase):
             context,
             "Someday or One Day 2019",
             media_type="series",
+            status_message=reply_mock.return_value,
         )
         send_mock.assert_awaited_once()
 

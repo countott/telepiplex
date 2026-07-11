@@ -59,7 +59,7 @@ filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBU
 
 SEARCH_SELECT_RESULT, SEARCH_SELECT_SUB_CATEGORY, SEARCH_CONFIRM_ENTRY_SCOPE = range(30, 33)
 SEARCH_TASK_TTL_SECONDS = 30 * 60
-SEARCH_PROGRESS_INTERVAL_SECONDS = 30
+SEARCH_PROGRESS_INTERVAL_SECONDS = 1
 TELEGRAM_SEND_TIMEOUT_SECONDS = 30
 METADATA_URL_PATTERN = r"(?i)^https?://(?:[^/\s]+\.)*(?:douban\.com|imdb\.com|thetvdb\.com|tvdb\.com|themoviedb\.org|tmdb\.org)(?::\d+)?/\S+$"
 HTTP_URL_PATTERN = r"(?i)^https?://[^\s]+$"
@@ -1305,31 +1305,68 @@ async def _send_search_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
         return None
 
 
+def _build_prowlarr_progress_text(
+    query: str,
+    elapsed_seconds: int,
+    completed: bool = False,
+) -> str:
+    if completed:
+        return f"✅ Prowlarr 搜索完成：{query}\n用时 {elapsed_seconds} 秒。"
+    return (
+        f"⏳ Prowlarr 正在搜索：{query}\n"
+        f"已等待 {elapsed_seconds} 秒。部分索引器需要 Cloudflare 解析，请继续等待。"
+    )
+
+
+async def _edit_prowlarr_progress_message(status_message, text: str):
+    edit_text = getattr(status_message, "edit_text", None)
+    if not callable(edit_text):
+        return
+    try:
+        await edit_text(
+            text=text,
+            disable_web_page_preview=True,
+            connect_timeout=TELEGRAM_SEND_TIMEOUT_SECONDS,
+            read_timeout=TELEGRAM_SEND_TIMEOUT_SECONDS,
+            write_timeout=TELEGRAM_SEND_TIMEOUT_SECONDS,
+            pool_timeout=TELEGRAM_SEND_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        _log_warn(f"Telegram Prowlarr 搜索进度更新失败，继续执行搜索流程: {e}")
+
+
 async def _search_prowlarr_with_progress(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     query: str,
     progress_interval: float = SEARCH_PROGRESS_INTERVAL_SECONDS,
     media_type: str = "",
+    status_message=None,
+    clock=time.monotonic,
 ):
     search_task = asyncio.create_task(
         asyncio.to_thread(_search_prowlarr_release_categories, query, media_type=media_type)
     )
-    elapsed = 0.0
+    started_at = clock()
     while True:
         done, _ = await asyncio.wait({search_task}, timeout=progress_interval)
         if done:
-            return search_task.result()
+            results = search_task.result()
+            elapsed_seconds = max(0, int(clock() - started_at))
+            await _edit_prowlarr_progress_message(
+                status_message,
+                _build_prowlarr_progress_text(
+                    query,
+                    elapsed_seconds,
+                    completed=True,
+                ),
+            )
+            return results
 
-        elapsed += progress_interval
-        await _send_search_message(
-            context,
-            update.effective_chat.id,
-            (
-                f"⏳ Prowlarr 仍在搜索：{query}\n"
-                f"已等待约 {int(elapsed)} 秒。部分索引器需要 Cloudflare 解析，请继续等待。"
-            ),
-            disable_web_page_preview=True,
+        elapsed_seconds = max(0, int(clock() - started_at))
+        await _edit_prowlarr_progress_message(
+            status_message,
+            _build_prowlarr_progress_text(query, elapsed_seconds),
         )
 
 
@@ -1364,7 +1401,12 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
     ).strip()
     if media_type not in {"movie", "series"}:
         media_type = ""
-    await _reply_or_send(update, context, f"🔍 正在搜索片源：{query}")
+    status_message = await _reply_or_send(
+        update,
+        context,
+        _build_prowlarr_progress_text(query, 0),
+        disable_web_page_preview=True,
+    )
     _log_info(f"搜索片源开始 query={query} media_type={media_type or 'movie_and_series'}")
 
     try:
@@ -1373,6 +1415,7 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
             context,
             query,
             media_type=media_type,
+            status_message=status_message,
         )
         results = rank_releases(items, _get_result_limit())
         indexer_summary = await asyncio.to_thread(get_prowlarr_indexer_summary, results)
