@@ -28,16 +28,20 @@ clean_policy:
 
 # 保存目录：115 投递和媒体搜索模块会复用该结构。
 category_folder:
-  - name: 真人电影
+  - kind: live_action_movie
+    name: 真人电影
     path: /真人电影
     plex_library_id: ""
-  - name: 动画电影
+  - kind: animated_movie
+    name: 动画电影
     path: /动画电影
     plex_library_id: ""
-  - name: 真人剧集
+  - kind: live_action_series
+    name: 真人剧集
     path: /真人剧集
     plex_library_id: ""
-  - name: 动画剧集
+  - kind: animated_series
+    name: 动画剧集
     path: /动画剧集
     plex_library_id: ""
 

@@ -6,6 +6,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigTemplateContractTest(unittest.TestCase):
+    def test_category_routes_cover_exactly_four_kinds(self):
+        import yaml
+
+        parsed = yaml.safe_load(
+            (ROOT / "config" / "config.yaml.example").read_text(encoding="utf-8")
+        )
+        routes = parsed["category_folder"]
+
+        self.assertEqual(
+            {item["kind"] for item in routes},
+            {
+                "live_action_series",
+                "live_action_movie",
+                "animated_movie",
+                "animated_series",
+            },
+        )
+        self.assertTrue(all(item.get("path") for item in routes))
+        self.assertTrue(all("plex_library_id" in item for item in routes))
+
     def test_runtime_config_examples_are_identical_full_templates(self):
         root_template = (ROOT / "config" / "config.yaml.example").read_text(encoding="utf-8")
         app_template = (ROOT / "app" / "config.yaml.example").read_text(encoding="utf-8")
