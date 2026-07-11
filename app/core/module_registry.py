@@ -51,6 +51,13 @@ class PostDownloadResult:
     metadata: dict | None = None
 
 
+@dataclass(frozen=True)
+class DownloadPipelineCompletion:
+    event: DownloadCompletedEvent
+    result: PostDownloadResult
+    terminal_processor: str | None = None
+
+
 @dataclass(order=True)
 class PostDownloadProcessor:
     priority: int
@@ -67,6 +74,7 @@ class ModuleRegistry:
         self.download_provider = None
         self.storage_provider = None
         self.post_download_processors: list[PostDownloadProcessor] = []
+        self.download_completion_hooks: list[tuple[str, Callable]] = []
 
     def add_commands(self, commands):
         for command in commands or []:
@@ -137,8 +145,12 @@ class ModuleRegistry:
         )
         self.post_download_processors.sort()
 
+    def add_download_completion_hook(self, hook: Callable, name: str):
+        self.download_completion_hooks.append((str(name), hook))
+
     def run_post_download_pipeline(self, event: DownloadCompletedEvent) -> PostDownloadResult:
         final_result = PostDownloadResult(False, final_path=event.final_path)
+        terminal_processor = None
         for item in self.post_download_processors:
             try:
                 result = item.processor(event)
@@ -160,5 +172,22 @@ class ModuleRegistry:
             if result.handled:
                 final_result = result
             if result.should_stop:
-                return result
+                terminal_processor = item.name
+                break
+        completion = DownloadPipelineCompletion(
+            event=event,
+            result=final_result,
+            terminal_processor=terminal_processor,
+        )
+        for name, hook in self.download_completion_hooks:
+            try:
+                hook(completion)
+            except Exception as exc:
+                try:
+                    import init
+
+                    if init.logger:
+                        init.logger.warn(f"download_completion_hook_failed name={name}: {exc}")
+                except Exception:
+                    pass
         return final_result
