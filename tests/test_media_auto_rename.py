@@ -10,6 +10,21 @@ from app.utils.media_naming import build_media_naming_plan, infer_english_title_
 
 
 class MediaAutoRenameTest(unittest.TestCase):
+    def test_build_movie_plan_accepts_complete_confirmed_metadata(self):
+        plan = build_media_naming_plan(
+            {
+                "source": "confirmed",
+                "chinese_title": "想见你",
+                "english_title": "Someday or One Day The Movie",
+            },
+            "Someday.or.One.Day.The.Movie.2022.2160p",
+            "movie.mkv",
+        )
+        self.assertEqual(
+            plan.target_relative_dir,
+            "想见你 (Someday or One Day The Movie)",
+        )
+
     def test_build_movie_plan_uses_douban_chinese_and_english_titles(self):
         plan = build_media_naming_plan(
             {
