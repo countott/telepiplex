@@ -128,8 +128,19 @@ def start_plex_module_services(_application=None):
     service.resume_incomplete_jobs(plex_executor)
     if service.mcp_enabled:
         from app.plex_mcp.server import start_plex_mcp_server
+        from app.services.plex_management import PlexManagementService
 
-        _mcp_handle = start_plex_mcp_server(service, service.mcp_config)
+        try:
+            _mcp_handle = start_plex_mcp_server(service, service.mcp_config)
+        except Exception as exc:
+            import init
+
+            _mcp_handle = None
+            if init.logger:
+                init.logger.error(
+                    "Plex MCP 启动失败："
+                    + PlexManagementService._safe_error(exc)
+                )
     return _mcp_handle
 
 

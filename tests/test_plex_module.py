@@ -41,6 +41,28 @@ class PlexModuleTest(unittest.TestCase):
         self.assertIn("media.plex.mcp", registry.config_sections)
         self.assertEqual(len(registry.startup_hooks), 1)
 
+    def test_mcp_start_failure_is_isolated_from_bot_startup(self):
+        import init
+        import app.plex_mcp.server
+        from app.modules import plex_management as module
+
+        service = Mock(mcp_enabled=True, mcp_config={"host": "0.0.0.0"})
+        original_logger = init.logger
+        init.logger = Mock()
+        try:
+            with patch.object(module, "get_plex_management_service", return_value=service), patch(
+                "app.plex_mcp.server.start_plex_mcp_server",
+                side_effect=ValueError("unsafe config token=secret"),
+            ):
+                result = module.start_plex_module_services()
+        finally:
+            logger = init.logger
+            init.logger = original_logger
+
+        self.assertIsNone(result)
+        service.resume_incomplete_jobs.assert_called_once_with(module.plex_executor)
+        self.assertNotIn("secret", logger.error.call_args.args[0])
+
     @patch("app.modules.plex_management.get_plex_management_service")
     def test_unorganized_completion_is_ignored(self, get_service):
         from app.core.module_registry import DownloadCompletedEvent, DownloadPipelineCompletion, PostDownloadResult

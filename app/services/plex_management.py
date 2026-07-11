@@ -75,7 +75,18 @@ class PlexManagementService:
 
     @staticmethod
     def _safe_error(exc):
-        return str(exc).replace("\n", " ")[:500]
+        message = str(exc).replace("\n", " ")
+        message = re.sub(
+            r"(?i)\b(x-plex-token|api_key|auth_token|token)(\s*[:=]\s*)[^&,\s]+",
+            r"\1\2***",
+            message,
+        )
+        message = re.sub(
+            r"(?i)(authorization\s*:\s*bearer|bearer)\s+[^,\s]+",
+            r"\1 ***",
+            message,
+        )
+        return message[:500]
 
     @staticmethod
     def _merge_step(job, name, result):
@@ -153,8 +164,21 @@ class PlexManagementService:
         return max(matches)[1]
 
     def _scan(self, job):
-        library_id = self._route_library(job)
-        before = sorted(self.plex.snapshot_recent(library_id))
+        existing = (job.get("step_results") or {}).get("scanning") or {}
+        library_id = str(existing.get("library_id") or self._route_library(job))
+        if "before_rating_keys" in existing:
+            before = list(existing.get("before_rating_keys") or [])
+        else:
+            before = sorted(self.plex.snapshot_recent(library_id))
+            started = {
+                "status": "started",
+                "library_id": library_id,
+                "before_rating_keys": before,
+            }
+            self.jobs.update(
+                job["id"],
+                step_results=self._merge_step(job, "scanning", started),
+            )
         self.plex.scan_library(library_id)
         return {"status": "success", "library_id": library_id, "before_rating_keys": before}
 

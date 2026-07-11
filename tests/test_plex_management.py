@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -139,6 +140,18 @@ class FakeTmdb:
 
 
 class PlexManagementServiceTest(unittest.TestCase):
+    def test_safe_error_redacts_tokens_from_upstream_urls(self):
+        from app.services.plex_management import PlexManagementService
+
+        message = PlexManagementService._safe_error(RuntimeError(
+            "GET /library?X-Plex-Token=plex-secret&api_key=fanart-secret Authorization: Bearer ai-secret"
+        ))
+
+        self.assertNotIn("plex-secret", message)
+        self.assertNotIn("fanart-secret", message)
+        self.assertNotIn("ai-secret", message)
+        self.assertIn("X-Plex-Token=***", message)
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         from app.repositories.plex_jobs import PlexJobRepository
@@ -239,6 +252,28 @@ class PlexManagementServiceTest(unittest.TestCase):
 
         self.assertEqual(first["id"], second["id"])
         self.assertIsNone(service.enqueue_completion(completion))
+
+    def test_restart_reuses_persisted_pre_scan_snapshot(self):
+        plex = FakePlex()
+        service = self.make_service(plex=plex)
+        job = service.enqueue_completion(make_completion())
+        self.jobs.update(
+            job["id"],
+            state="scanning",
+            step_results={
+                "scanning": {
+                    "status": "started",
+                    "library_id": "12",
+                    "before_rating_keys": ["41"],
+                }
+            },
+        )
+        plex.snapshot_recent = Mock(side_effect=AssertionError("snapshot must be reused"))
+
+        result = service.run_job(job["id"])
+
+        self.assertEqual(result["state"], "completed")
+        plex.snapshot_recent.assert_not_called()
 
     def test_prepare_and_apply_operation_requires_single_use_token(self):
         plex = FakePlex(wrong_match=True)
