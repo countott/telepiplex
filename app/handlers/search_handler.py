@@ -564,21 +564,42 @@ def _tvdb_plan_provider(hypotheses: dict) -> dict:
         for hypothesis in hypotheses.get("hypotheses") or []:
             title = hypothesis.get("title") or ""
             year = hypothesis.get("year") or ""
-            movies = search_tvdb_movies(title, year=year)
-            series = search_tvdb_series(title, year=year)
+            movies = [
+                item
+                for item in (search_tvdb_movies(title, year=year) or [])
+                if isinstance(item, dict)
+                and str(
+                    item.get("tvdb_movie_id")
+                    or item.get("tvdb_id")
+                    or item.get("id")
+                    or ""
+                ).strip()
+            ][:5]
+            series = [
+                item
+                for item in (search_tvdb_series(title, year=year) or [])
+                if isinstance(item, dict)
+                and str(
+                    item.get("tvdb_series_id")
+                    or item.get("tvdb_id")
+                    or item.get("id")
+                    or ""
+                ).strip()
+            ][:5]
             episodes_by_series = {}
-            for item in series[:5]:
+            for item in series:
                 series_id = str(item.get("tvdb_series_id") or "")
                 if series_id:
                     episodes_by_series[series_id] = get_tvdb_series_episodes(series_id)
-            facts.append(
-                {
-                    "hypothesis": hypothesis,
-                    "movies": movies[:5],
-                    "series": series[:5],
-                    "episodes_by_series": episodes_by_series,
-                }
-            )
+            if movies or series or any(episodes_by_series.values()):
+                facts.append(
+                    {
+                        "hypothesis": hypothesis,
+                        "movies": movies,
+                        "series": series,
+                        "episodes_by_series": episodes_by_series,
+                    }
+                )
     except TvdbConfigError as exc:
         return {
             "source": "tvdb",

@@ -571,6 +571,46 @@ class CoverAndHandoffTest(unittest.IsolatedAsyncioTestCase):
         episodes_mock.assert_not_called()
 
 
+class PlanEvidenceProviderTest(unittest.TestCase):
+    @patch.object(search_handler, "search_tvdb_series", return_value=[])
+    @patch.object(search_handler, "search_tvdb_movies", return_value=[])
+    def test_tvdb_empty_hypothesis_wrapper_is_not_ok(
+        self, _movies_mock, _series_mock
+    ):
+        result = search_handler._tvdb_plan_provider({
+            "hypotheses": [{"title": "Missing", "year": "2026"}]
+        })
+
+        self.assertEqual(result["status"], "not_found")
+        self.assertEqual(result["facts"], [])
+
+    @patch.object(search_handler, "search_tvdb_series", return_value=[])
+    @patch.object(search_handler, "search_tvdb_movies", return_value=[{}])
+    def test_tvdb_empty_result_object_is_not_real_support(
+        self, _movies_mock, _series_mock
+    ):
+        result = search_handler._tvdb_plan_provider({
+            "hypotheses": [{"title": "Missing", "year": "2026"}]
+        })
+
+        self.assertEqual(result["status"], "not_found")
+        self.assertEqual(result["facts"], [])
+
+    @patch.object(search_handler, "search_tvdb_series", return_value=[])
+    @patch.object(
+        search_handler,
+        "search_tvdb_movies",
+        return_value=[{"tvdb_movie_id": "movie-1", "name": "Found"}],
+    )
+    def test_tvdb_real_movie_result_is_ok(self, _movies_mock, _series_mock):
+        result = search_handler._tvdb_plan_provider({
+            "hypotheses": [{"title": "Found", "year": "2026"}]
+        })
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["facts"][0]["movies"][0]["tvdb_movie_id"], "movie-1")
+
+
 class TemporarySpecialStorageScopeTest(unittest.TestCase):
     def _draft(self, plan_id="plan-a"):
         return {
@@ -621,7 +661,17 @@ class TemporarySpecialStorageScopeTest(unittest.TestCase):
                         "wikipedia": "ok",
                         "douban": "ok",
                         "tvdb": "not_found",
-                    }
+                    },
+                    "provider_support": {
+                        "wikipedia": {
+                            "has_facts": True,
+                            "source_urls": [
+                                "https://zh.wikipedia.org/wiki/想見你_(電影)"
+                            ],
+                        },
+                        "douban": {"has_facts": True, "source_urls": []},
+                        "tvdb": {"has_facts": False, "source_urls": []},
+                    },
                 },
                 "warnings": [],
             },

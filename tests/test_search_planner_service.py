@@ -84,6 +84,32 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
             for name in ("wikipedia", "douban", "tvdb")
         }
 
+    def _providers_with_tvdb_episode(
+        self,
+        *,
+        season_number=0,
+        episode_id="episode-5",
+        name="someday or one day: THE MOVIE",
+    ):
+        providers = self._down_providers()
+        providers["tvdb"] = Mock(return_value={
+            "source": "tvdb",
+            "status": "ok",
+            "facts": [{
+                "episodes_by_series": {
+                    "series-1": [{
+                        "tvdb_episode_id": episode_id,
+                        "name": name,
+                        "season_number": season_number,
+                        "episode_number": 5,
+                    }]
+                }
+            }],
+            "source_urls": ["https://thetvdb.com/series/series-1"],
+            "error": "",
+        })
+        return providers
+
     @patch("app.services.search_planner.infer_media_metadata_draft_with_ai")
     @patch("app.services.search_planner.infer_search_hypotheses_with_ai")
     async def test_all_providers_run_and_soft_failures_reach_second_ai(
@@ -120,6 +146,14 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
                 "wikipedia": "server_down",
                 "douban": "server_down",
                 "tvdb": "server_down",
+            },
+        )
+        self.assertEqual(
+            contract["evidence"]["provider_support"],
+            {
+                "wikipedia": {"has_facts": False, "source_urls": []},
+                "douban": {"has_facts": False, "source_urls": []},
+                "tvdb": {"has_facts": False, "source_urls": []},
             },
         )
         for provider in providers.values():
@@ -173,30 +207,19 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.services.search_planner.infer_media_metadata_draft_with_ai")
     @patch("app.services.search_planner.infer_search_hypotheses_with_ai")
-    async def test_verified_official_hint_cannot_be_downgraded(
+    async def test_matching_verified_s00_candidate_cannot_be_downgraded_when_ai_omits_hint(
         self, hypothesis_mock, metadata_mock
     ):
         hypothesis_mock.return_value = self._hypotheses()
         draft = self._draft()
+        draft["media_metadata"]["identity"]["english_title"] = (
+            "Someday or One Day"
+        )
         draft["media_metadata"]["relation"]["target_series"]["external_ids"] = {
             "tvdb": "series-1"
         }
-        draft["media_metadata"]["evidence"]["tvdb_official_special"] = {
-            "series_id": "series-1",
-            "episode_id": "episode-5",
-        }
         metadata_mock.return_value = draft
-        providers = self._down_providers()
-        providers["tvdb"] = Mock(return_value={
-            "source": "tvdb",
-            "status": "ok",
-            "facts": [{
-                "episodes_by_series": {
-                    "series-1": [{"tvdb_episode_id": "episode-5"}]
-                }
-            }],
-            "source_urls": ["https://thetvdb.com/series/series-1"],
-        })
+        providers = self._providers_with_tvdb_episode()
 
         with self.assertRaisesRegex(SearchPlanningError, "invalid_media_metadata"):
             await build_confirmable_search_plan(
@@ -209,12 +232,13 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.services.search_planner.infer_media_metadata_draft_with_ai")
     @patch("app.services.search_planner.infer_search_hypotheses_with_ai")
-    async def test_verified_official_mapping_with_matching_ids_passes(
+    async def test_matching_verified_s00_candidate_exact_official_mapping_passes(
         self, hypothesis_mock, metadata_mock
     ):
         hypothesis_mock.return_value = self._hypotheses()
         draft = self._draft()
         contract = draft["media_metadata"]
+        contract["identity"]["english_title"] = "Someday or One Day"
         contract["relation"]["target_series"]["external_ids"] = {
             "tvdb": "series-1"
         }
@@ -224,22 +248,8 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
             "mapping_source": "tvdb",
             "tvdb_episode_id": "episode-5",
         })
-        contract["evidence"]["tvdb_official_special"] = {
-            "series_id": "series-1",
-            "episode_id": "episode-5",
-        }
         metadata_mock.return_value = draft
-        providers = self._down_providers()
-        providers["tvdb"] = Mock(return_value={
-            "source": "tvdb",
-            "status": "ok",
-            "facts": [{
-                "episodes_by_series": {
-                    "series-1": [{"tvdb_episode_id": "episode-5"}]
-                }
-            }],
-            "source_urls": ["https://thetvdb.com/series/series-1"],
-        })
+        providers = self._providers_with_tvdb_episode()
         occupied_loader = Mock(side_effect=AssertionError(
             "official mappings must not inspect temporary occupancy"
         ))
@@ -257,10 +267,120 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
             "tvdb_official",
         )
         self.assertEqual(
-            plan["media_metadata"]["evidence"]["verified_tvdb_episode_keys"],
-            ["series-1:episode-5"],
+            plan["media_metadata"]["evidence"][
+                "tvdb_official_special_candidates"
+            ],
+            [{
+                "series_id": "series-1",
+                "episode_id": "episode-5",
+                "name": "someday or one day: THE MOVIE",
+                "season_number": 0,
+            }],
         )
         occupied_loader.assert_not_called()
+
+    @patch("app.services.search_planner.infer_media_metadata_draft_with_ai")
+    @patch("app.services.search_planner.infer_search_hypotheses_with_ai")
+    async def test_s01_episode_cannot_validate_as_tvdb_official(
+        self, hypothesis_mock, metadata_mock
+    ):
+        hypothesis_mock.return_value = self._hypotheses()
+        draft = self._draft()
+        contract = draft["media_metadata"]
+        contract["identity"]["english_title"] = "Someday or One Day"
+        contract["relation"]["target_series"]["external_ids"] = {
+            "tvdb": "series-1"
+        }
+        contract["placement"].update({
+            "episode_number": 5,
+            "mapping_kind": "tvdb_official",
+            "mapping_source": "tvdb",
+            "tvdb_episode_id": "episode-5",
+        })
+        metadata_mock.return_value = draft
+
+        with self.assertRaisesRegex(SearchPlanningError, "invalid_media_metadata"):
+            await build_confirmable_search_plan(
+                "想见你",
+                "plan-a",
+                self._providers_with_tvdb_episode(season_number=1),
+                lambda _contract: set(),
+                TemporarySpecialAllocator(),
+            )
+
+    @patch("app.services.search_planner.infer_media_metadata_draft_with_ai")
+    @patch("app.services.search_planner.infer_search_hypotheses_with_ai")
+    async def test_unrelated_s00_candidate_does_not_force_queried_movie(
+        self, hypothesis_mock, metadata_mock
+    ):
+        hypothesis_mock.return_value = self._hypotheses()
+        draft = self._draft()
+        draft["media_metadata"]["relation"]["target_series"]["external_ids"] = {
+            "tvdb": "series-1"
+        }
+        metadata_mock.return_value = draft
+
+        plan = await build_confirmable_search_plan(
+            "想见你",
+            "plan-a",
+            self._providers_with_tvdb_episode(name="Behind the Scenes"),
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertEqual(
+            plan["media_metadata"]["placement"]["mapping_kind"],
+            "temporary_related_special",
+        )
+        self.assertEqual(
+            plan["media_metadata"]["evidence"][
+                "tvdb_official_special_candidates"
+            ],
+            [],
+        )
+
+    @patch("app.services.search_planner.infer_media_metadata_draft_with_ai")
+    @patch("app.services.search_planner.infer_search_hypotheses_with_ai")
+    async def test_provider_support_normalizes_actual_source_urls(
+        self, hypothesis_mock, metadata_mock
+    ):
+        hypothesis_mock.return_value = self._hypotheses()
+        draft = self._draft()
+        source_entry = draft["media_metadata"]["source_entry"]
+        source_entry.pop("availability", None)
+        source_entry["verification"] = "verified"
+        draft["media_metadata"]["warnings"] = []
+        metadata_mock.return_value = draft
+        providers = self._down_providers()
+        providers["wikipedia"] = Mock(return_value={
+            "source": "wikipedia",
+            "status": "ok",
+            "facts": [],
+            "source_urls": [
+                "HTTPS://ZH.WIKIPEDIA.ORG/wiki/想見你_(電影)/"
+            ],
+            "error": "",
+        })
+
+        plan = await build_confirmable_search_plan(
+            "想见你",
+            "plan-a",
+            providers,
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertEqual(
+            plan["media_metadata"]["evidence"]["provider_support"][
+                "wikipedia"
+            ],
+            {
+                "has_facts": False,
+                "source_urls": [
+                    "https://zh.wikipedia.org/wiki/想見你_(電影)"
+                ],
+            },
+        )
 
 
 if __name__ == "__main__":

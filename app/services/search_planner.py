@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import unicodedata
 from collections.abc import Callable
 
 from app.utils.ai import (
@@ -11,6 +12,7 @@ from app.utils.search_plan import (
     TEMPORARY_MAPPING_KIND,
     TemporarySpecialAllocator,
     finalize_search_plan,
+    normalize_source_locator,
 )
 
 
@@ -51,7 +53,9 @@ async def collect_evidence(
         if isinstance(result, Exception):
             evidence.append(_provider_failure(name, result))
         elif isinstance(result, dict):
-            evidence.append(result)
+            normalized = dict(result)
+            normalized["source"] = str(name).strip().casefold()
+            evidence.append(normalized)
         else:
             evidence.append(
                 _provider_failure(name, RuntimeError("invalid provider response"))
@@ -65,8 +69,48 @@ async def collect_evidence(
     return evidence
 
 
-def _verified_tvdb_episode_keys(sources: list[dict]) -> list[str]:
-    verified = set()
+def _provider_status_and_support(
+    sources: list[dict],
+) -> tuple[dict[str, str], dict[str, dict]]:
+    statuses = {}
+    support = {}
+    for item in sources:
+        if not isinstance(item, dict):
+            continue
+        provider = str(item.get("source") or "").strip().casefold()
+        if not provider:
+            continue
+        statuses[provider] = str(item.get("status") or "invalid").strip().casefold()
+        facts = item.get("facts")
+        has_facts = isinstance(facts, list) and any(bool(fact) for fact in facts)
+        raw_urls = item.get("source_urls")
+        source_urls = []
+        if isinstance(raw_urls, list):
+            for raw_url in raw_urls:
+                normalized_url = normalize_source_locator(raw_url)
+                if normalized_url and normalized_url not in source_urls:
+                    source_urls.append(normalized_url)
+        support[provider] = {
+            "has_facts": has_facts,
+            "source_urls": source_urls,
+        }
+    return statuses, support
+
+
+def _text(value) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _integer(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _verified_tvdb_special_candidates(sources: list[dict]) -> list[dict]:
+    candidates = []
+    seen = set()
     for source in sources:
         if not (
             isinstance(source, dict)
@@ -81,15 +125,78 @@ def _verified_tvdb_episode_keys(sources: list[dict]) -> list[str]:
             if not isinstance(episodes_by_series, dict):
                 continue
             for series_id, episodes in episodes_by_series.items():
+                series_id = _text(series_id)
+                if not series_id or not isinstance(episodes, list):
+                    continue
                 for episode in episodes or []:
                     if not isinstance(episode, dict):
                         continue
-                    episode_id = str(
+                    if _integer(episode.get("season_number")) != 0:
+                        continue
+                    episode_id = _text(
                         episode.get("tvdb_episode_id") or episode.get("id") or ""
-                    ).strip()
-                    if episode_id:
-                        verified.add(f"{series_id}:{episode_id}")
-    return sorted(verified)
+                    )
+                    key = (series_id, episode_id)
+                    if not episode_id or key in seen:
+                        continue
+                    seen.add(key)
+                    candidates.append({
+                        "series_id": series_id,
+                        "episode_id": episode_id,
+                        "name": _text(
+                            episode.get("name") or episode.get("title") or ""
+                        ),
+                        "season_number": 0,
+                    })
+    return candidates
+
+
+def _normalized_media_title(value) -> str:
+    normalized = unicodedata.normalize("NFKC", _text(value)).casefold()
+    normalized = "".join(character for character in normalized if character.isalnum())
+    suffixes = (
+        "themovie",
+        "电影版",
+        "劇場版",
+        "剧场版",
+        "movie",
+        "电影",
+    )
+    changed = True
+    while normalized and changed:
+        changed = False
+        for suffix in suffixes:
+            if normalized.endswith(suffix) and len(normalized) > len(suffix):
+                normalized = normalized[: -len(suffix)]
+                changed = True
+                break
+    return normalized
+
+
+def _matching_tvdb_official_candidates(
+    contract: dict,
+    candidates: list[dict],
+) -> list[dict]:
+    relation = contract.get("relation") if isinstance(contract, dict) else None
+    target = relation.get("target_series") if isinstance(relation, dict) else None
+    target_ids = target.get("external_ids") if isinstance(target, dict) else None
+    target_series_id = _text(
+        target_ids.get("tvdb") if isinstance(target_ids, dict) else ""
+    )
+    identity = contract.get("identity") if isinstance(contract, dict) else None
+    title_keys = {
+        _normalized_media_title((identity or {}).get(field))
+        for field in ("chinese_title", "english_title")
+    }
+    title_keys.discard("")
+    if not target_series_id or not title_keys:
+        return []
+    return [
+        candidate
+        for candidate in candidates
+        if candidate["series_id"] == target_series_id
+        and _normalized_media_title(candidate.get("name")) in title_keys
+    ]
 
 
 async def build_confirmable_search_plan(
@@ -125,12 +232,19 @@ async def build_confirmable_search_plan(
     evidence = contract.get("evidence")
     if not isinstance(evidence, dict):
         raise SearchPlanningError("invalid_media_metadata")
-    evidence["provider_statuses"] = {
-        str(item.get("source") or ""): str(item.get("status") or "invalid")
-        for item in sources
-        if isinstance(item, dict) and str(item.get("source") or "")
-    }
-    evidence["verified_tvdb_episode_keys"] = _verified_tvdb_episode_keys(sources)
+    provider_statuses, provider_support = _provider_status_and_support(sources)
+    evidence["provider_statuses"] = provider_statuses
+    evidence["provider_support"] = provider_support
+    verified_specials = _verified_tvdb_special_candidates(sources)
+    evidence.pop("tvdb_official_special", None)
+    evidence["verified_tvdb_special_candidates"] = verified_specials
+    evidence["tvdb_official_special_candidates"] = (
+        _matching_tvdb_official_candidates(contract, verified_specials)
+    )
+    evidence["verified_tvdb_episode_keys"] = sorted(
+        f"{candidate['series_id']}:{candidate['episode_id']}"
+        for candidate in verified_specials
+    )
     try:
         occupied = (
             set(occupied_loader(contract) or set())
