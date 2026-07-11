@@ -87,6 +87,10 @@ Core does not:
     "english_title": "Someday or One Day The Movie",
     "year": "2022",
     "content_kind": "extension_movie",
+    "summary": "电影版延续电视剧故事。",
+    "original_release_date": "2022-12-24",
+    "poster_url": "https://image.example/poster.jpg",
+    "poster_source": "douban",
     "external_ids": {}
   },
   "relation": {
@@ -285,7 +289,7 @@ For `tvdb_official`, Plex scans the target series library and verifies the offic
 
 For `ai_inferred_tvdb`, Plex scans the locked Season 00 number and attempts to verify it against the now-visible Plex/TVDB identity. If verification succeeds, it leaves the official metadata untouched. If verification is still unavailable or conflicts, it preserves the confirmed file placement, writes no custom metadata, and records a recoverable warning/failure; it does not renumber the file or silently convert the mapping into a temporary Special.
 
-For `temporary_related_special`, Plex locates the exact Season 00 episode using the confirmed target series, episode number, and renamed final path. It writes the supported custom title, summary, original availability/year, and artwork fields from `identity`, `relation`, and `source_entry`. The source locator remains in the persisted Plex job payload and audit logs; the design does not invent a Plex metadata field for the URL.
+For `temporary_related_special`, Plex locates the exact Season 00 episode using the confirmed target series, episode number, and renamed final path. It writes the supported custom title, summary, original availability date/year, and poster fields from `identity`, `relation`, and `source_entry`. `identity.poster_source` records which evidence provider supplied the selected poster. The source locator remains in the persisted Plex job payload and audit logs; the design does not invent a Plex metadata field for the URL.
 
 Contract-bound Plex jobs do not ask the user to choose a movie or series classification. Failure to locate the exact target enters the existing Plex job failure/retry path.
 
