@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from pathlib import PurePosixPath
 
+from app.core.media_metadata import (
+    merge_resolved_items,
+    series_folder_name,
+    series_titles,
+)
 from app.utils.media_naming import sanitize_path_name
 
 
@@ -225,100 +230,88 @@ def build_confirmed_rename_plan(
     final_path: str,
     selected_path: str,
     metadata: dict,
-    confirmed_plan: dict,
+    media_metadata: dict,
     ai_plan: dict,
     file_tree: list[dict],
 ) -> dict | None:
-    placement = confirmed_plan.get("placement") or {}
-    relation = confirmed_plan.get("relation") or {}
+    placement = media_metadata.get("placement") or {}
+    identity = media_metadata.get("identity") or {}
     if (
-        confirmed_plan.get("confirmed") is not True
+        media_metadata.get("confirmed") is not True
         or placement.get("library_type") != "series"
     ):
         return None
 
     allowed_targets = set()
-    for item in confirmed_plan.get("items") or []:
+    for item in media_metadata.get("items") or []:
         if not isinstance(item, dict):
             continue
-        season_number = _safe_season_int(item.get("season_number"))
-        episode_number = _safe_episode_int(item.get("episode_number"))
-        if season_number is not None and episode_number is not None:
-            allowed_targets.add((season_number, episode_number))
+        if item.get("season_number") is None or str(item.get("season_number")).strip() == "":
+            continue
+        season = _safe_season_int(item.get("season_number"))
+        episode = _safe_episode_int(item.get("episode_number"))
+        if season is not None and episode is not None:
+            allowed_targets.add((season, episode))
     if not allowed_targets:
-        season_number = _safe_season_int(placement.get("season_number"))
-        episode_number = _safe_episode_int(placement.get("episode_number"))
-        if season_number is None or episode_number is None:
+        if (
+            placement.get("season_number") is None
+            or str(placement.get("season_number")).strip() == ""
+        ):
             return None
-        allowed_targets.add((season_number, episode_number))
+        season = _safe_season_int(placement.get("season_number"))
+        episode = _safe_episode_int(placement.get("episode_number"))
+        if season is None or episode is None:
+            return None
+        allowed_targets.add((season, episode))
 
     source_lookup = _source_index(file_tree)
-    source_video_paths = {
-        node["relative_path"] for node in _video_file_nodes(file_tree)
-    }
-    series_name = sanitize_path_name(
-        relation.get("target_series_title")
-        or metadata.get("english_title")
-        or metadata.get("query")
-    )
-    chinese_title = sanitize_path_name(metadata.get("chinese_title"))
+    source_video_paths = {node["relative_path"] for node in _video_file_nodes(file_tree)}
+    chinese_title, english_title = series_titles(media_metadata)
+    series_name = english_title or chinese_title
     if not series_name:
         return None
 
-    target_root = _join_path(
-        selected_path, _display_folder(chinese_title, series_name)
-    )
+    target_root = _join_path(selected_path, series_folder_name(media_metadata))
     operations = []
     seen_sources = set()
     seen_targets = set()
     for item in ai_plan.get("episode_map") or []:
         if not isinstance(item, dict):
             continue
-        source_file = _clean_path(item.get("source_file") or "")
-        source_node = source_lookup.get(source_file)
-        if not source_node:
+        if item.get("season_number") is None or str(item.get("season_number")).strip() == "":
             continue
-        season_number = _safe_season_int(item.get("season_number"))
-        episode_number = _safe_episode_int(item.get("episode_number"))
-        if (
-            season_number is None
-            or episode_number is None
-            or (season_number, episode_number) not in allowed_targets
-        ):
+        source_node = source_lookup.get(_clean_path(item.get("source_file") or ""))
+        season = _safe_season_int(item.get("season_number"))
+        episode = _safe_episode_int(item.get("episode_number"))
+        if not source_node or (season, episode) not in allowed_targets:
             continue
 
         source_relative_path = source_node["relative_path"]
-        if source_relative_path in seen_sources:
-            continue
-        marker = _episode_marker_text(season_number, episode_number)
+        marker = _episode_marker_text(season, episode)
         suffix = PurePosixPath(source_relative_path).suffix
         rename_to = f"{series_name} {marker}{suffix}"
-        target_dir = _join_path(
-            target_root, f"{series_name} Season {season_number:02d}"
-        )
+        target_dir = _join_path(target_root, f"{series_name} Season {season:02d}")
         target_relative_path = _join_path(
-            f"{series_name} Season {season_number:02d}", rename_to
+            f"{series_name} Season {season:02d}", rename_to
         )
-        target_key = _join_path(target_dir, rename_to)
-        if target_key in seen_targets:
+        resolved_path = _join_path(target_dir, rename_to)
+        if source_relative_path in seen_sources or resolved_path in seen_targets:
             continue
-
         seen_sources.add(source_relative_path)
-        seen_targets.add(target_key)
-        source_path = _join_path(final_path, source_relative_path)
+        seen_targets.add(resolved_path)
         source_parent = "/".join(source_relative_path.split("/")[:-1])
-        operations.append(
-            {
-                "source_relative_path": source_relative_path,
-                "source_path": source_path,
-                "rename_to": rename_to,
-                "renamed_source_path": _join_path(
-                    final_path, source_parent, rename_to
-                ),
-                "target_dir": target_dir,
-                "target_relative_path": target_relative_path,
-            }
-        )
+        operations.append({
+            "content_role": item.get("content_role") or identity.get("content_kind"),
+            "season_number": season,
+            "episode_number": episode,
+            "source_relative_path": source_relative_path,
+            "source_path": _join_path(final_path, source_relative_path),
+            "rename_to": rename_to,
+            "renamed_source_path": _join_path(final_path, source_parent, rename_to),
+            "target_dir": target_dir,
+            "target_relative_path": target_relative_path,
+            "final_path": resolved_path,
+        })
 
     if not operations:
         return None
@@ -329,7 +322,21 @@ def build_confirmed_rename_plan(
         "unmatched_sources": sorted(source_video_paths - seen_sources),
         "warnings": [
             str(item)
-            for item in confirmed_plan.get("warnings") or []
+            for item in media_metadata.get("warnings") or []
             if str(item).strip()
         ],
     }
+
+
+def enrich_media_metadata_with_rename_plan(
+    media_metadata: dict,
+    rename_plan: dict,
+) -> dict:
+    resolved = [{
+        "content_role": operation.get("content_role"),
+        "season_number": operation["season_number"],
+        "episode_number": operation["episode_number"],
+        "source_relative_path": operation["source_relative_path"],
+        "final_path": operation["final_path"],
+    } for operation in rename_plan.get("operations") or []]
+    return merge_resolved_items(media_metadata, resolved)

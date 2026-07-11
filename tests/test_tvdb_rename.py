@@ -6,33 +6,61 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
-from app.utils.tvdb_rename import build_confirmed_rename_plan, build_tvdb_rename_plan
+from app.utils.tvdb_rename import (
+    build_confirmed_rename_plan,
+    build_tvdb_rename_plan,
+    enrich_media_metadata_with_rename_plan,
+)
 
 
 class TvdbRenamePlanTest(unittest.TestCase):
-    def test_confirmed_temporary_special_uses_locked_s00e100_without_tvdb_ids(self):
-        plan = build_confirmed_rename_plan(
+    def _confirmed_media_metadata(self):
+        return {
+            "schema_version": 1,
+            "metadata_id": "metadata-a",
+            "confirmed": True,
+            "identity": {
+                "chinese_title": "想见你",
+                "english_title": "Someday or One Day The Movie",
+                "year": "2022",
+                "content_kind": "extension_movie",
+                "external_ids": {},
+            },
+            "relation": {
+                "type": "sequel",
+                "target_series": {
+                    "chinese_title": "想见你",
+                    "english_title": "Someday or One Day",
+                    "year": "2019",
+                    "external_ids": {},
+                },
+                "source": "wikipedia",
+            },
+            "placement": {
+                "library_type": "series",
+                "category_kind": "live_action_series",
+                "season_number": 0,
+                "episode_number": 100,
+                "mapping_kind": "temporary_related_special",
+                "mapping_source": "local_allocator",
+                "tvdb_episode_id": "",
+            },
+            "source_entry": {
+                "title": "想见你 (电影)",
+                "url": "https://zh.wikipedia.org/wiki/想見你_(電影)",
+            },
+            "items": [],
+            "evidence": {},
+            "warnings": [],
+        }
+
+    def test_temporary_special_uses_locked_target_and_enriches_final_file(self):
+        media_metadata = self._confirmed_media_metadata()
+        rename_plan = build_confirmed_rename_plan(
             final_path="/真人剧集/Raw.Release",
             selected_path="/真人剧集",
-            metadata={
-                "chinese_title": "想见你",
-                "english_title": "Someday or One Day",
-            },
-            confirmed_plan={
-                "schema_version": 1,
-                "confirmed": True,
-                "relation": {"target_series_title": "Someday or One Day"},
-                "placement": {
-                    "library_type": "series",
-                    "season_number": 0,
-                    "episode_number": 100,
-                    "mapping_kind": "temporary_related_special",
-                },
-                "source_entry": {
-                    "title": "想见你 (电影)",
-                    "url": "https://zh.wikipedia.org/wiki/想見你_(電影)",
-                },
-            },
+            metadata={},
+            media_metadata=media_metadata,
             ai_plan={
                 "episode_map": [
                     {
@@ -46,41 +74,78 @@ class TvdbRenamePlanTest(unittest.TestCase):
                 {"name": "Movie.mkv", "relative_path": "Movie.mkv", "is_dir": False}
             ],
         )
+
+        enriched = enrich_media_metadata_with_rename_plan(media_metadata, rename_plan)
+
         self.assertEqual(
-            plan["operations"][0]["rename_to"],
+            rename_plan["operations"][0]["rename_to"],
             "Someday or One Day S00E100.mkv",
         )
-        self.assertEqual(plan["unmatched_sources"], [])
+        self.assertEqual(enriched["items"][0]["season_number"], 0)
+        self.assertTrue(
+            enriched["items"][0]["final_path"].endswith(
+                "Someday or One Day S00E100.mkv"
+            )
+        )
 
-    def test_confirmed_plan_allows_partial_mapping_and_reports_unmatched(self):
+    def test_missing_ai_season_does_not_default_to_locked_season_zero(self):
+        media_metadata = self._confirmed_media_metadata()
         plan = build_confirmed_rename_plan(
             final_path="/真人剧集/Raw.Release",
             selected_path="/真人剧集",
-            metadata={"chinese_title": "测试剧", "english_title": "Test Show"},
-            confirmed_plan={
-                "schema_version": 1,
-                "confirmed": True,
-                "relation": {"target_series_title": "Test Show"},
-                "placement": {
-                    "library_type": "series",
+            metadata={},
+            media_metadata=media_metadata,
+            ai_plan={
+                "episode_map": [
+                    {"source_file": "Movie.mkv", "episode_number": 100}
+                ]
+            },
+            file_tree=[
+                {"name": "Movie.mkv", "relative_path": "Movie.mkv", "is_dir": False}
+            ],
+        )
+
+        self.assertIsNone(plan)
+
+    def test_confirmed_metadata_allows_partial_mapping_and_reports_unmatched(self):
+        media_metadata = self._confirmed_media_metadata()
+        media_metadata.update({
+            "identity": {
+                "chinese_title": "测试剧",
+                "english_title": "Test Show",
+                "year": "2026",
+                "content_kind": "series",
+                "external_ids": {},
+            },
+            "relation": {"type": "primary", "target_series": {}, "source": "user"},
+            "placement": {
+                "library_type": "series",
+                "category_kind": "live_action_series",
+                "season_number": None,
+                "episode_number": None,
+                "mapping_kind": "standalone",
+                "mapping_source": "user",
+                "tvdb_episode_id": "",
+            },
+            "source_entry": {},
+            "items": [
+                {
+                    "content_role": "main_episode",
                     "season_number": 1,
                     "episode_number": 1,
-                    "mapping_kind": "tvdb_official",
                 },
-                "source_entry": {},
-                "items": [
-                    {
-                        "content_role": "main_episode",
-                        "season_number": 1,
-                        "episode_number": 1,
-                    },
-                    {
-                        "content_role": "ova",
-                        "season_number": 0,
-                        "episode_number": 3,
-                    },
-                ],
-            },
+                {
+                    "content_role": "ova",
+                    "season_number": 0,
+                    "episode_number": 3,
+                },
+            ],
+        })
+        plan = build_confirmed_rename_plan(
+            final_path="/真人剧集/Raw.Release",
+            selected_path="/真人剧集",
+            metadata={},
+            media_metadata=media_metadata,
             ai_plan={
                 "episode_map": [
                     {
