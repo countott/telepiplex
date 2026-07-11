@@ -121,10 +121,13 @@ class PlexManagementService:
                 waiting = {
                     "status": "waiting",
                     "kind": exc.kind,
+                    "job_id": int(job_id),
                     "candidates": exc.candidates,
                 }
                 self._record_step(job_id, state, waiting)
-                return self.jobs.update(job_id, state="waiting_match_confirmation")
+                waiting_job = self.jobs.update(job_id, state="waiting_match_confirmation")
+                self._notify_waiting(waiting_job, waiting)
+                return waiting_job
             except Exception as exc:
                 message = self._safe_error(exc)
                 if state in GATING_STEPS:
@@ -318,6 +321,15 @@ class PlexManagementService:
         self.notifier(job["payload"].get("user_id"), self.format_job_summary(job))
         steps["_notification"] = {"sent": True}
         self.jobs.update(job["id"], step_results=steps)
+
+    def _notify_waiting(self, job, waiting):
+        if not self.notifier:
+            return
+        self.notifier(
+            job["payload"].get("user_id"),
+            f"⚠️ Plex {waiting['kind']} 需要确认\n任务 {job['id']}",
+            waiting,
+        )
 
     @staticmethod
     def format_job_summary(job):

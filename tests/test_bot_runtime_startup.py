@@ -150,6 +150,7 @@ class BotRuntimeStartupTest(unittest.TestCase):
                 "app.modules.open115",
                 "app.modules.media_search",
                 "app.modules.renaming",
+                "app.modules.plex_management",
             ],
         )
 
@@ -168,6 +169,7 @@ class BotRuntimeStartupTest(unittest.TestCase):
             [
                 "app.modules.open115",
                 "app.modules.media_search",
+                "app.modules.plex_management",
             ],
         )
 
@@ -182,6 +184,7 @@ class BotRuntimeStartupTest(unittest.TestCase):
                     "app.modules.open115",
                     "app.modules.media_search",
                     "app.modules.renaming",
+                    "app.modules.plex_management",
                 ],
             )
         finally:
@@ -195,6 +198,7 @@ class BotRuntimeStartupTest(unittest.TestCase):
         self.assertIn("115 下载", text)
         self.assertIn("媒体搜索", text)
         self.assertIn("下载后重命名", text)
+        self.assertIn("Plex 管理", text)
         self.assertIn("重启容器后生效", text)
 
     def test_core_startup_notice_reports_loaded_modules(self):
