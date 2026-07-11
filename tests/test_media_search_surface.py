@@ -11,6 +11,75 @@ sys.modules.setdefault("yaml", types.SimpleNamespace(safe_load=lambda stream: {}
 
 
 class MediaSearchSurfaceTest(unittest.TestCase):
+    def test_core_metadata_contract_survives_download_request_handoff(self):
+        from app.core.media_metadata import attach_media_metadata
+        from app.core.module_registry import DownloadRequest
+
+        contract = {
+            "schema_version": 1,
+            "metadata_id": "metadata-a",
+            "confirmed": True,
+            "identity": {
+                "chinese_title": "想见你",
+                "english_title": "Someday or One Day The Movie",
+                "year": "2022",
+                "content_kind": "extension_movie",
+                "external_ids": {},
+            },
+            "relation": {
+                "type": "sequel",
+                "target_series": {
+                    "chinese_title": "想见你",
+                    "english_title": "Someday or One Day",
+                    "year": "2019",
+                    "external_ids": {},
+                },
+                "source": "wikipedia",
+            },
+            "placement": {
+                "library_type": "series",
+                "category_kind": "live_action_series",
+                "season_number": 0,
+                "episode_number": 100,
+                "mapping_kind": "temporary_related_special",
+                "mapping_source": "local_allocator",
+                "tvdb_episode_id": "",
+            },
+            "source_entry": {
+                "title": "想见你 (电影)",
+                "url": "https://zh.wikipedia.org/wiki/想見你_(電影)",
+            },
+            "items": [],
+            "evidence": {},
+            "warnings": [],
+        }
+        request = DownloadRequest(
+            link="magnet:?xt=urn:btih:" + "a" * 40,
+            selected_path="/真人剧集",
+            user_id=1,
+            metadata=attach_media_metadata({}, contract),
+        )
+
+        self.assertEqual(
+            request.metadata["media_metadata"]["metadata_id"],
+            "metadata-a",
+        )
+
+    def test_removed_search_plan_api_names_are_absent(self):
+        forbidden = (
+            "_".join(("download", "plan")),
+            "_".join(("attach", "download", "plan")),
+            "_".join(("confirm", "download", "plan")),
+            "_".join(("finalize", "download", "plan")),
+        )
+        for root_name in ("app", "config"):
+            for path in (ROOT / root_name).rglob("*"):
+                if not path.is_file() or path.suffix not in {".py", ".yaml", ".example"}:
+                    continue
+                source = path.read_text(encoding="utf-8")
+                for name in forbidden:
+                    self.assertNotIn(name, source, str(path))
+
     def test_bot_exposes_media_search_commands_only(self):
         from app.core.module_registry import ModuleRegistry
         from app.modules.media_search import register_module
