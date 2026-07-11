@@ -1,0 +1,206 @@
+import json
+import unittest
+
+from app.core.media_metadata import (
+    CONTENT_KINDS,
+    MEDIA_METADATA_KEY,
+    attach_media_metadata,
+    extract_confirmed_media_metadata,
+    locked_episode,
+    merge_resolved_items,
+    series_folder_name,
+    series_scope_key,
+    series_season_directory_name,
+    validate_media_metadata,
+)
+
+
+class CoreMediaMetadataTest(unittest.TestCase):
+    def _value(self):
+        return {
+            "schema_version": 1,
+            "metadata_id": "metadata-a",
+            "confirmed": True,
+            "identity": {
+                "chinese_title": "想见你",
+                "english_title": "Someday or One Day The Movie",
+                "year": "2022",
+                "content_kind": "extension_movie",
+                "summary": "电影版延续电视剧故事。",
+                "original_release_date": "2022-12-24",
+                "poster_url": "https://image.example/poster.jpg",
+                "poster_source": "douban",
+                "external_ids": {},
+            },
+            "relation": {
+                "type": "sequel",
+                "target_series": {
+                    "chinese_title": "想见你",
+                    "english_title": "Someday or One Day",
+                    "year": "2019",
+                    "external_ids": {},
+                },
+                "source": "wikipedia",
+            },
+            "placement": {
+                "library_type": "series",
+                "category_kind": "live_action_series",
+                "season_number": 0,
+                "episode_number": 100,
+                "mapping_kind": "temporary_related_special",
+                "mapping_source": "local_allocator",
+                "tvdb_episode_id": "",
+            },
+            "source_entry": {
+                "title": "想见你 (电影)",
+                "url": "https://zh.wikipedia.org/wiki/想見你_(電影)",
+                "provider": "wikipedia",
+                "verification": "verified",
+            },
+            "items": [],
+            "evidence": {},
+            "warnings": [],
+        }
+
+    def test_valid_contract_round_trips_and_is_deep_copied(self):
+        value = self._value()
+        attached = attach_media_metadata({"source": "confirmed"}, value)
+        extracted = extract_confirmed_media_metadata(attached)
+        self.assertEqual(MEDIA_METADATA_KEY, "media_metadata")
+        self.assertEqual(locked_episode(extracted), (0, 100))
+        self.assertEqual(json.loads(json.dumps(extracted, ensure_ascii=False)), extracted)
+        extracted["identity"]["chinese_title"] = "changed"
+        self.assertEqual(value["identity"]["chinese_title"], "想见你")
+
+    def test_rejects_wrong_category_pair_and_old_public_key(self):
+        value = self._value()
+        value["placement"]["category_kind"] = "animated_movie"
+        self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
+        legacy_key = "_".join(("download", "plan"))
+        self.assertIsNone(extract_confirmed_media_metadata({legacy_key: self._value()}))
+
+    def test_accepts_exactly_the_four_category_library_pairs(self):
+        pairs = {
+            "live_action_series": "series",
+            "live_action_movie": "movie",
+            "animated_movie": "movie",
+            "animated_series": "series",
+        }
+        for category_kind, library_type in pairs.items():
+            with self.subTest(category_kind=category_kind):
+                value = self._value()
+                value["placement"].update({
+                    "category_kind": category_kind,
+                    "library_type": library_type,
+                    "season_number": None,
+                    "episode_number": None,
+                    "mapping_kind": "standalone",
+                })
+                value["relation"]["target_series"] = {}
+                if library_type == "series":
+                    value["identity"]["content_kind"] = "series"
+                    value["items"] = [{
+                        "content_role": "main_episode",
+                        "season_number": 1,
+                        "episode_number": 1,
+                    }]
+                self.assertIsNotNone(validate_media_metadata(value, require_confirmed=True))
+
+    def test_standalone_has_no_series_target_or_episode_lock(self):
+        value = self._value()
+        value["relation"]["target_series"] = {}
+        value["placement"].update({
+            "library_type": "movie",
+            "category_kind": "live_action_movie",
+            "season_number": None,
+            "episode_number": None,
+            "mapping_kind": "standalone",
+        })
+        self.assertIsNotNone(validate_media_metadata(value, require_confirmed=True))
+        value["relation"]["target_series"] = {"english_title": "Someday or One Day"}
+        self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
+
+    def test_primary_series_uses_confirmed_items_for_ordinary_episodes(self):
+        value = self._value()
+        value["identity"]["content_kind"] = "series"
+        value["relation"]["target_series"] = {}
+        value["placement"].update({
+            "mapping_kind": "standalone",
+            "season_number": None,
+            "episode_number": None,
+        })
+        value["items"] = [{
+            "item_id": "episode-1",
+            "content_role": "main_episode",
+            "season_number": 1,
+            "episode_number": 1,
+        }]
+        self.assertIsNotNone(validate_media_metadata(value, require_confirmed=True))
+        value["items"] = []
+        self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
+
+    def test_all_v1_content_kinds_are_explicit_and_unknown_is_rejected(self):
+        for content_kind in CONTENT_KINDS:
+            with self.subTest(content_kind=content_kind):
+                value = self._value()
+                value["identity"]["content_kind"] = content_kind
+                self.assertIsNotNone(validate_media_metadata(value, require_confirmed=True))
+        value = self._value()
+        value["identity"]["content_kind"] = "invented"
+        self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
+
+    def test_rejects_non_json_values(self):
+        value = self._value()
+        value["evidence"]["bad"] = {"not-json"}
+        self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
+
+    def test_series_storage_names_are_shared_by_search_and_renaming(self):
+        value = self._value()
+        self.assertEqual(series_folder_name(value), "想见你 (Someday or One Day)")
+        self.assertEqual(series_season_directory_name(value, 0), "Someday or One Day Season 00")
+        self.assertEqual(series_scope_key(value), "title:someday or one day:2019")
+
+    def test_attach_rejects_a_legacy_outer_key_instead_of_dual_writing(self):
+        legacy_key = "_".join(("download", "plan"))
+        with self.assertRaisesRegex(ValueError, "legacy metadata key"):
+            attach_media_metadata({legacy_key: {}}, self._value())
+
+    def test_official_mapping_requires_tvdb_series_and_episode_ids(self):
+        value = self._value()
+        value["placement"].update({
+            "mapping_kind": "tvdb_official",
+            "episode_number": 5,
+            "tvdb_episode_id": "",
+        })
+        self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
+        value["placement"]["tvdb_episode_id"] = "episode-5"
+        value["relation"]["target_series"]["external_ids"]["tvdb"] = "series-1"
+        self.assertIsNotNone(validate_media_metadata(value, require_confirmed=True))
+        value["placement"]["season_number"] = 1
+        self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
+
+    def test_temporary_mapping_requires_source_locator(self):
+        value = self._value()
+        value["source_entry"]["url"] = ""
+        self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
+        value["source_entry"]["external_id"] = "wikipedia:想見你_(電影)"
+        self.assertIsNotNone(validate_media_metadata(value, require_confirmed=True))
+        value["source_entry"]["title"] = ""
+        self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
+
+    def test_merge_resolved_items_cannot_change_locked_target(self):
+        value = self._value()
+        merged = merge_resolved_items(value, [{
+            "content_role": "extension_movie",
+            "season_number": 0,
+            "episode_number": 100,
+            "source_relative_path": "Movie.mkv",
+            "final_path": "/真人剧集/想见你/Someday or One Day Season 00/Someday or One Day S00E100.mkv",
+        }])
+        self.assertEqual(merged["items"][0]["final_path"].rsplit("/", 1)[-1], "Someday or One Day S00E100.mkv")
+        with self.assertRaisesRegex(ValueError, "locked target"):
+            merge_resolved_items(value, [{
+                "season_number": 0,
+                "episode_number": 101,
+                "final_path": "/wrong.mkv",
+            }])
