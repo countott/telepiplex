@@ -6,14 +6,19 @@ from pathlib import Path
 
 import init
 from app.adapters.tvdb import TvdbConfigError, TvdbRequestError, get_tvdb_series_episodes, search_tvdb_series
+from app.core.media_metadata import (
+    MEDIA_METADATA_KEY,
+    attach_media_metadata,
+    extract_confirmed_media_metadata,
+)
 from app.core.module_registry import DownloadCompletedEvent, PostDownloadResult
 from app.utils.ai import infer_tvdb_episode_plan_with_ai
-from app.utils.confirmed_download_plan import extract_confirmed_download_plan
 from app.utils.media_naming import build_media_naming_plan, infer_english_title_from_release
 from app.utils.tvdb_rename import (
     VIDEO_EXTENSIONS,
     build_confirmed_rename_plan,
     build_tvdb_rename_plan,
+    enrich_media_metadata_with_rename_plan,
 )
 
 
@@ -256,12 +261,18 @@ def _attempt_legacy_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metada
     return rename_plan
 
 
-def _confirmed_series_plan(event: DownloadCompletedEvent):
-    plan = extract_confirmed_download_plan(event.metadata)
-    placement = plan.get("placement") if isinstance(plan, dict) else None
+def _media_metadata_state(event: DownloadCompletedEvent):
+    metadata = event.metadata if isinstance(event.metadata, dict) else {}
+    present = MEDIA_METADATA_KEY in metadata
+    return extract_confirmed_media_metadata(metadata), present
+
+
+def _confirmed_series_metadata(event: DownloadCompletedEvent):
+    contract = extract_confirmed_media_metadata(event.metadata)
+    placement = contract.get("placement") if isinstance(contract, dict) else None
     if not isinstance(placement, dict) or placement.get("library_type") != "series":
         return None
-    return plan
+    return contract
 
 
 def _unorganized_root() -> str:
@@ -321,10 +332,11 @@ def _assert_no_target_conflicts(storage, rename_plan):
             )
 
 
-def _attempt_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metadata):
-    confirmed_plan = _confirmed_series_plan(event)
-    if not confirmed_plan:
-        return _attempt_legacy_tvdb_ai_episode_rename(event, metadata)
+def _attempt_confirmed_series_rename(
+    event: DownloadCompletedEvent,
+    metadata: dict,
+    media_metadata: dict,
+):
     if not metadata or not _has_ai_episode_inference_config():
         return None
 
@@ -339,7 +351,7 @@ def _attempt_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metadata):
 
     context = {
         "metadata": metadata,
-        "confirmed_download_plan": confirmed_plan,
+        "confirmed_media_metadata": media_metadata,
         "release_title": metadata.get("release_title") or event.resource_name,
         "resource_name": event.resource_name,
         "download_path": event.final_path,
@@ -352,7 +364,7 @@ def _attempt_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metadata):
         final_path=event.final_path,
         selected_path=event.selected_path,
         metadata=metadata,
-        confirmed_plan=confirmed_plan,
+        media_metadata=media_metadata,
         ai_plan=ai_plan or {},
         file_tree=file_tree,
     )
@@ -386,17 +398,44 @@ def _attempt_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metadata):
     rename_plan["unmatched_target"] = unmatched_dir
     if event.final_path != rename_plan["target_root"]:
         _cleanup_source_directory(storage, event.final_path)
+    rename_plan["media_metadata"] = enrich_media_metadata_with_rename_plan(
+        media_metadata,
+        rename_plan,
+    )
     return rename_plan
 
 
+def _attempt_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metadata):
+    media_metadata, contract_present = _media_metadata_state(event)
+    confirmed_series = _confirmed_series_metadata(event)
+    if contract_present:
+        if confirmed_series:
+            return _attempt_confirmed_series_rename(
+                event,
+                metadata,
+                confirmed_series,
+            )
+        return None
+    return _attempt_legacy_tvdb_ai_episode_rename(event, metadata)
+
+
 def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
+    media_metadata, contract_present = _media_metadata_state(event)
+    if contract_present and media_metadata is None:
+        return PostDownloadResult(
+            True,
+            final_path=event.final_path,
+            message="⚠️ media_metadata 无效或版本不受支持；文件保持原位。",
+            should_stop=True,
+            metadata=event.metadata,
+        )
     filename_metadata = _filename_metadata_from_resource(event.resource_name)
     metadata = _merge_tvdb_metadata(
         naming_metadata=event.naming_metadata,
         metadata=event.metadata,
         filename_metadata=filename_metadata,
     )
-    confirmed_plan = _confirmed_series_plan(event)
+    confirmed_series = _confirmed_series_metadata(event)
     try:
         rename_plan = _attempt_tvdb_ai_episode_rename(event, metadata)
     except ConfirmedPlanConflict as exc:
@@ -407,7 +446,7 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
             should_stop=True,
         )
     if not rename_plan:
-        if confirmed_plan:
+        if confirmed_series:
             unorganized_target = _move_confirmed_failure_to_unorganized(event)
             return PostDownloadResult(
                 True,
@@ -429,7 +468,19 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
         message += f"\nTVDB：`{rename_plan['tvdb_series_id']}`"
     if rename_plan.get("warnings"):
         message += f"\n提示：{'; '.join(rename_plan['warnings'][:2])}"
-    return PostDownloadResult(True, final_path=rename_plan["target_root"], message=message, should_stop=True)
+    result_metadata = event.metadata
+    if rename_plan.get("media_metadata"):
+        result_metadata = attach_media_metadata(
+            event.metadata,
+            rename_plan["media_metadata"],
+        )
+    return PostDownloadResult(
+        True,
+        final_path=rename_plan["target_root"],
+        message=message,
+        should_stop=True,
+        metadata=result_metadata,
+    )
 
 
 def _attempt_media_auto_rename(event: DownloadCompletedEvent, naming_metadata):
@@ -473,9 +524,26 @@ def _attempt_media_auto_rename(event: DownloadCompletedEvent, naming_metadata):
     return target_path, plan
 
 
+def _standalone_contract_naming_metadata(event: DownloadCompletedEvent):
+    media_metadata = extract_confirmed_media_metadata(event.metadata)
+    placement = (
+        media_metadata.get("placement")
+        if isinstance(media_metadata, dict)
+        else None
+    )
+    if not isinstance(placement, dict) or placement.get("mapping_kind") != "standalone":
+        return None
+    identity = media_metadata.get("identity")
+    if not isinstance(identity, dict):
+        return None
+    result = dict(identity)
+    result["source"] = "media_metadata"
+    return result
+
+
 def process_generic_media(event: DownloadCompletedEvent) -> PostDownloadResult:
     filename_metadata = _filename_metadata_from_resource(event.resource_name)
-    naming_auto_metadata = event.naming_metadata or (
+    naming_auto_metadata = _standalone_contract_naming_metadata(event) or event.naming_metadata or (
         filename_metadata if not event.metadata and not event.naming_metadata else None
     )
     result = _attempt_media_auto_rename(event, naming_auto_metadata)
@@ -483,7 +551,13 @@ def process_generic_media(event: DownloadCompletedEvent) -> PostDownloadResult:
         return PostDownloadResult(False, final_path=event.final_path)
     target_path, plan = result
     message = f"✅ 自动整理完成：`{plan.file_name}`\n\n保存目录：`{target_path}`"
-    return PostDownloadResult(True, final_path=target_path, message=message, should_stop=True)
+    return PostDownloadResult(
+        True,
+        final_path=target_path,
+        message=message,
+        should_stop=True,
+        metadata=event.metadata,
+    )
 
 
 def register_module(registry):
