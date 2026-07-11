@@ -1,5 +1,7 @@
 # AI + Wikipedia Download Planner Implementation Plan
 
+> Superseded on 2026-07-12 by `2026-07-12-core-media-metadata-contract-design.md`; active code uses only `metadata["media_metadata"]`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make every `/search` and `/s` request pass through two mandatory AI stages, enrich it with soft-failing Wikipedia/Douban/TVDB evidence, obtain one confirmed download plan, and let the renaming module safely consume official or temporary `S00E100+` placement without coupling search to Plex.

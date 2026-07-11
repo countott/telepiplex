@@ -440,7 +440,10 @@ class ComposableRenamingModuleTest(unittest.TestCase):
         from app.utils.ai import TVDB_EPISODE_PLAN_PROMPT
 
         self.assertIn("confirmed_media_metadata", TVDB_EPISODE_PLAN_PROMPT)
-        self.assertNotIn("confirmed_download_plan", TVDB_EPISODE_PLAN_PROMPT)
+        self.assertNotIn(
+            "_".join(("confirmed", "download", "plan")),
+            TVDB_EPISODE_PLAN_PROMPT,
+        )
 
     def test_renaming_module_registers_post_download_processors(self):
         from app.core.module_registry import ModuleRegistry

@@ -1,5 +1,7 @@
 # AI + Wikipedia 全量搜索与下载方案设计
 
+> Superseded on 2026-07-12 by `2026-07-12-core-media-metadata-contract-design.md`; active code uses only `metadata["media_metadata"]`.
+
 日期：2026-07-11
 状态：已确认设计，待实施计划
 
