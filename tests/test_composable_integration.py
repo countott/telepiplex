@@ -10,6 +10,74 @@ sys.path.insert(0, str(ROOT / "app"))
 
 
 class ComposableIntegrationTest(unittest.TestCase):
+    def test_confirmed_download_plan_survives_request_event_and_renaming_pipeline(self):
+        from app.core.module_registry import (
+            DownloadCompletedEvent,
+            DownloadRequest,
+            ModuleRegistry,
+        )
+        from app.utils.search_plan import attach_download_plan, confirm_download_plan
+
+        plan = confirm_download_plan(
+            {
+                "schema_version": 1,
+                "plan_id": "plan-a",
+                "display_title": "想见你",
+                "english_title": "Someday or One Day The Movie",
+                "year": "2022",
+                "content_identity": "extension_movie",
+                "relation": {
+                    "type": "sequel",
+                    "target_series_title": "Someday or One Day",
+                    "target_series_year": "2019",
+                    "source": "wikipedia",
+                },
+                "placement": {
+                    "library_type": "series",
+                    "category_kind": "live_action_series",
+                    "season_number": 0,
+                    "episode_number": 100,
+                    "mapping_kind": "temporary_related_special",
+                    "mapping_source": "local_allocator",
+                },
+                "source_entry": {
+                    "title": "想见你 (电影)",
+                    "url": "https://zh.wikipedia.org/wiki/想見你_(電影)",
+                    "provider": "wikipedia",
+                    "availability": "ok",
+                    "verification": "verified",
+                },
+                "prowlarr_queries": ["Someday or One Day The Movie 2022"],
+                "evidence": {},
+                "warnings": [],
+                "confirmed": False,
+            }
+        )
+        request = DownloadRequest(
+            link="magnet:?xt=urn:btih:" + "a" * 40,
+            selected_path="/真人剧集",
+            user_id=1,
+            metadata=attach_download_plan({"source": "confirmed"}, plan),
+        )
+        event = DownloadCompletedEvent(
+            link=request.link,
+            selected_path=request.selected_path,
+            user_id=request.user_id,
+            final_path="/真人剧集/Raw.Release",
+            resource_name="Raw.Release",
+            metadata=request.metadata,
+        )
+        seen = []
+        registry = ModuleRegistry()
+        registry.add_post_download_processor(
+            lambda current: seen.append(current.metadata["download_plan"]) or None,
+            priority=100,
+            name="test.capture_plan",
+        )
+        registry.run_post_download_pipeline(event)
+        self.assertEqual(seen[0]["placement"]["episode_number"], 100)
+        self.assertTrue(seen[0]["confirmed"])
+
     def test_all_modules_register_without_rewriting_core_entrypoint(self):
         from app.core.module_registry import ModuleRegistry
         from app.modules.media_search import register_module as register_media_search
