@@ -2,76 +2,157 @@ import unittest
 
 from app.utils.search_plan import (
     TemporarySpecialAllocator,
-    attach_download_plan,
-    confirm_download_plan,
-    finalize_download_plan,
-    validate_draft_download_plan,
+    confirm_media_metadata,
+    finalize_search_plan,
+    validate_draft_search_plan,
 )
 
 
 class SearchPlanTest(unittest.TestCase):
     def _draft(self):
         return {
-            "schema_version": 1,
             "plan_id": "plan-a",
-            "display_title": "想见你",
-            "english_title": "Someday or One Day The Movie",
-            "year": "2022",
-            "content_identity": "extension_movie",
-            "relation": {
-                "type": "sequel",
-                "target_series_title": "Someday or One Day",
-                "target_series_year": "2019",
-                "source": "wikipedia",
-            },
-            "placement": {
-                "library_type": "series",
-                "category_kind": "live_action_series",
-                "season_number": 0,
-                "episode_number": None,
-                "mapping_kind": "temporary_related_special",
-                "mapping_source": "local_allocator",
-            },
-            "source_entry": {
-                "title": "想见你 (电影)",
-                "url": "https://zh.wikipedia.org/wiki/想見你_(電影)",
-                "provider": "wikipedia",
-                "availability": "ok",
-                "verification": "verified",
+            "media_metadata": {
+                "schema_version": 1,
+                "metadata_id": "",
+                "confirmed": False,
+                "identity": {
+                    "chinese_title": "想见你",
+                    "english_title": "Someday or One Day The Movie",
+                    "year": "2022",
+                    "content_kind": "extension_movie",
+                    "summary": "电影版延续电视剧故事。",
+                    "original_release_date": "2022-12-24",
+                    "poster_url": "https://image.example/poster.jpg",
+                    "poster_source": "douban",
+                    "external_ids": {},
+                },
+                "relation": {
+                    "type": "sequel",
+                    "target_series": {
+                        "chinese_title": "想见你",
+                        "english_title": "Someday or One Day",
+                        "year": "2019",
+                        "external_ids": {},
+                    },
+                    "source": "wikipedia",
+                },
+                "placement": {
+                    "library_type": "series",
+                    "category_kind": "live_action_series",
+                    "season_number": 0,
+                    "episode_number": None,
+                    "mapping_kind": "temporary_related_special",
+                    "mapping_source": "local_allocator",
+                    "tvdb_episode_id": "",
+                },
+                "source_entry": {
+                    "title": "想见你 (电影)",
+                    "url": "https://zh.wikipedia.org/wiki/想見你_(電影)",
+                    "provider": "wikipedia",
+                    "verification": "verified",
+                },
+                "items": [],
+                "evidence": {
+                    "provider_statuses": {
+                        "wikipedia": "ok",
+                        "douban": "ok",
+                        "tvdb": "not_found",
+                    }
+                },
+                "warnings": [],
             },
             "prowlarr_queries": ["Someday or One Day The Movie 2022"],
-            "evidence": {},
-            "warnings": [],
-            "confirmed": False,
         }
 
-    def test_temporary_plan_requires_findable_source_entry(self):
+    def test_finalize_allocates_then_confirm_returns_only_core_contract(self):
         draft = self._draft()
-        draft["source_entry"]["url"] = ""
-        self.assertIsNone(validate_draft_download_plan(draft))
+        final = finalize_search_plan(draft, TemporarySpecialAllocator(), {100})
+        contract = confirm_media_metadata(final)
+        self.assertEqual(final["media_metadata"]["placement"]["episode_number"], 101)
+        self.assertEqual(contract["metadata_id"], "plan-a")
+        self.assertTrue(contract["confirmed"])
+        self.assertNotIn("prowlarr_queries", contract)
+        self.assertNotIn("plan_id", contract)
 
-    def test_allocator_starts_at_100_and_skips_occupied_and_reserved(self):
+    def test_allocator_starts_at_100_and_skips_occupied_and_reserved_values(self):
         allocator = TemporarySpecialAllocator()
-        self.assertEqual(allocator.reserve("plan-a", {100}), 101)
-        self.assertEqual(allocator.reserve("plan-b", {100}), 102)
-        self.assertEqual(allocator.reserve("plan-a", set()), 101)
+        self.assertEqual(allocator.reserve("plan-a", "show-a", set()), 100)
+        self.assertEqual(allocator.reserve("plan-a", "show-a", {100, 101}), 100)
+        self.assertEqual(allocator.reserve("plan-b", "show-a", {100, 102}), 101)
+        self.assertEqual(allocator.reserve("plan-c", "show-a", {100, 101, 102}), 103)
+        self.assertEqual(allocator.reserve("plan-d", "show-b", set()), 100)
+        self.assertEqual(
+            TemporarySpecialAllocator().reserve("after-restart", "show-a", set()),
+            100,
+        )
 
-    def test_finalize_then_confirm_and_attach_is_non_mutating(self):
+    def test_draft_requires_search_queries_and_findable_source(self):
         draft = self._draft()
-        allocator = TemporarySpecialAllocator()
-        final_plan = finalize_download_plan(draft, allocator, {100})
-        confirmed = confirm_download_plan(final_plan)
-        metadata = attach_download_plan({"source": "confirmed"}, confirmed)
-        self.assertEqual(final_plan["placement"]["episode_number"], 101)
-        self.assertFalse(final_plan["confirmed"])
-        self.assertTrue(metadata["download_plan"]["confirmed"])
-        self.assertEqual(draft["placement"]["episode_number"], None)
+        draft["prowlarr_queries"] = []
+        self.assertIsNone(validate_draft_search_plan(draft))
+        draft = self._draft()
+        draft["media_metadata"]["source_entry"]["url"] = ""
+        self.assertIsNone(validate_draft_search_plan(draft))
 
-    def test_new_allocator_after_restart_has_no_old_reservations(self):
-        allocator = TemporarySpecialAllocator()
-        self.assertEqual(allocator.reserve("plan-a", set()), 100)
-        restarted_allocator = TemporarySpecialAllocator()
-        self.assertEqual(restarted_allocator.reserve("plan-b", set()), 100)
+    def test_queries_are_normalized_before_first_query_is_consumed(self):
+        draft = self._draft()
+        draft["prowlarr_queries"] = ["", "  valid query  "]
+        normalized = validate_draft_search_plan(draft)
+        self.assertEqual(normalized["prowlarr_queries"], ["valid query"])
+
+    def test_temporary_source_down_requires_explicit_unverified_warning(self):
+        draft = self._draft()
+        draft["media_metadata"]["evidence"]["provider_statuses"][
+            "wikipedia"
+        ] = "server_down"
+        draft["media_metadata"]["source_entry"].update({
+            "availability": "server_down",
+            "verification": "ai_supplied_unverified",
+        })
+        self.assertIsNone(validate_draft_search_plan(draft))
+        draft["media_metadata"]["warnings"] = [
+            "Wikipedia不可用，来源条目由AI提供，未实时验证。"
+        ]
+        self.assertIsNotNone(validate_draft_search_plan(draft))
+
+    def test_official_tvdb_hint_cannot_be_downgraded(self):
+        draft = self._draft()
+        draft["media_metadata"]["evidence"]["tvdb_official_special"] = {
+            "series_id": "series-1",
+            "episode_id": "episode-5",
+        }
+        self.assertIsNone(validate_draft_search_plan(draft))
+
+    def test_standalone_drafts_cover_all_four_categories(self):
+        pairs = {
+            "live_action_series": "series",
+            "live_action_movie": "movie",
+            "animated_movie": "movie",
+            "animated_series": "series",
+        }
+        for category_kind, library_type in pairs.items():
+            with self.subTest(category_kind=category_kind):
+                draft = self._draft()
+                draft["media_metadata"]["relation"]["target_series"] = {}
+                draft["media_metadata"]["placement"].update({
+                    "library_type": library_type,
+                    "category_kind": category_kind,
+                    "season_number": None,
+                    "episode_number": None,
+                    "mapping_kind": "standalone",
+                    "mapping_source": "ai",
+                })
+                if library_type == "series":
+                    draft["media_metadata"]["identity"]["content_kind"] = "series"
+                    draft["media_metadata"]["items"] = [{
+                        "content_role": "main_episode",
+                        "season_number": 1,
+                        "episode_number": 1,
+                    }]
+                self.assertIsNotNone(
+                    finalize_search_plan(draft, TemporarySpecialAllocator(), set())
+                )
 
 
 if __name__ == "__main__":
