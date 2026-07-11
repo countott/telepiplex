@@ -19,8 +19,18 @@ from telegram.warnings import PTBUserWarning
 
 import init
 from app.adapters.wikipedia import lookup_wikipedia_evidence
+from app.core.media_metadata import (
+    attach_media_metadata,
+    extract_confirmed_media_metadata,
+    resolve_category_route,
+    series_folder_name,
+    series_season_directory_name,
+)
 from app.core.module_registry import DownloadProviderUnavailable, DownloadRequest
-from app.services.search_planner import SearchPlanningError, build_confirmable_plan
+from app.services.search_planner import (
+    SearchPlanningError,
+    build_confirmable_search_plan,
+)
 from app.utils.directory_config import get_save_directories
 from app.adapters.prowlarr import (
     ProwlarrConfigError,
@@ -59,13 +69,12 @@ from app.utils.search_query import (
 )
 from app.utils.search_plan import (
     TemporarySpecialAllocator,
-    attach_download_plan,
-    confirm_download_plan,
+    confirm_media_metadata,
 )
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
-SEARCH_SELECT_RESULT, SEARCH_CONFIRM_DOWNLOAD_PLAN = range(30, 32)
+SEARCH_SELECT_RESULT, SEARCH_CONFIRM_MEDIA_METADATA = range(30, 32)
 SEARCH_TASK_TTL_SECONDS = 30 * 60
 SEARCH_PROGRESS_INTERVAL_SECONDS = 30
 TELEGRAM_SEND_TIMEOUT_SECONDS = 30
@@ -430,8 +439,7 @@ def get_pending_search_task(task_id: str):
 
     if time.time() - task.get("created_at", 0) > SEARCH_TASK_TTL_SECONDS:
         pending_search_tasks.pop(task_id, None)
-        plan = task.get("download_plan") or {}
-        temporary_special_allocator.release(str(plan.get("plan_id") or ""))
+        _release_search_plan(task.get("search_plan"))
         return None
 
     return task
@@ -448,58 +456,58 @@ def get_pending_entry_confirmation(task_id: str):
     return task
 
 
-def _build_download_plan_text(plan: dict) -> str:
-    placement = plan.get("placement") or {}
-    relation = plan.get("relation") or {}
-    source_entry = plan.get("source_entry") or {}
+def _contract_from_search_plan(plan: dict) -> dict:
+    value = plan.get("media_metadata") if isinstance(plan, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def _build_media_metadata_text(plan: dict) -> str:
+    contract = _contract_from_search_plan(plan)
+    identity = contract.get("identity") or {}
+    relation = contract.get("relation") or {}
+    target = relation.get("target_series") or {}
+    placement = contract.get("placement") or {}
+    source_entry = contract.get("source_entry") or {}
     episode = placement.get("episode_number")
     episode_number = int(episode) if episode is not None else None
-    episode_width = 3 if episode_number is not None and episode_number >= 100 else 2
-    episode_text = (
-        f"S{int(placement.get('season_number') or 0):02d}"
-        f"E{episode_number:0{episode_width}d}"
+    width = 3 if episode_number is not None and episode_number >= 100 else 2
+    marker = (
+        f"S{int(placement.get('season_number') or 0):02d}E{episode_number:0{width}d}"
         if episode_number is not None
         else "未分配"
     )
-    source_locator = source_entry.get("url") or source_entry.get("external_id") or ""
     lines = [
-        "📋 下载方案",
-        "",
-        (
-            f"目标：{plan.get('display_title') or ''} / "
-            f"{plan.get('english_title') or ''} ({plan.get('year') or '年份未知'})"
-        ),
-        f"内容身份：{plan.get('content_identity') or 'unknown'}",
-        f"关联剧集：{relation.get('target_series_title') or '无'}",
+        "📋 媒体元数据方案",
+        f"目标：{identity.get('chinese_title') or ''} / {identity.get('english_title') or ''} ({identity.get('year') or '年份未知'})",
+        f"内容身份：{identity.get('content_kind') or 'unknown'}",
+        f"关联剧集：{target.get('chinese_title') or target.get('english_title') or '无'}",
         f"关系依据：{relation.get('source') or 'ai'}",
-        (
-            f"归属：{placement.get('library_type') or 'unknown'} / "
-            f"Season {int(placement.get('season_number') or 0):02d}"
-        ),
-        f"集号：{episode_text}",
+        f"归属：{placement.get('category_kind') or 'unknown'} / {marker}",
         f"来源条目：{source_entry.get('title') or '无'}",
     ]
-    if source_locator:
-        lines.append(f"来源定位：{source_locator}")
+    item_markers = []
+    for item in contract.get("items") or []:
+        season = item.get("season_number")
+        episode = item.get("episode_number")
+        if season is not None and episode is not None:
+            item_markers.append(f"S{int(season):02d}E{int(episode):02d}")
+    if item_markers:
+        lines.append(f"已锁定集：{', '.join(item_markers)}")
+    locator = source_entry.get("url") or source_entry.get("external_id") or ""
+    if locator:
+        lines.append(f"来源定位：{locator}")
     lines.append(f"搜索词：{(plan.get('prowlarr_queries') or [''])[0]}")
-    for warning in plan.get("warnings") or []:
-        lines.append(f"⚠️ {warning}")
+    lines.extend(f"⚠️ {warning}" for warning in contract.get("warnings") or [])
     return "\n".join(lines)
 
 
 def _resolve_plan_selected_path(plan: dict) -> str:
-    expected_name = {
-        "live_action_movie": "真人电影",
-        "animated_movie": "动画电影",
-        "live_action_series": "真人剧集",
-        "animated_series": "动画剧集",
-    }.get((plan.get("placement") or {}).get("category_kind"))
-    if not expected_name:
-        return ""
-    for item in get_save_directories():
-        if item.get("name") == expected_name and item.get("path"):
-            return str(item["path"])
-    return ""
+    contract = _contract_from_search_plan(plan)
+    route = resolve_category_route(
+        init.bot_config,
+        (contract.get("placement") or {}).get("category_kind"),
+    )
+    return str((route or {}).get("path") or "")
 
 
 def _wikipedia_plan_provider(hypotheses: dict) -> dict:
@@ -596,16 +604,40 @@ def _tvdb_plan_provider(hypotheses: dict) -> dict:
     }
 
 
-def _occupied_special_numbers_from_draft(draft: dict) -> set[int]:
-    values = ((draft.get("evidence") or {}).get("occupied_special_numbers") or [])
-    occupied = set()
-    for value in values:
-        try:
-            episode = int(value)
-        except (TypeError, ValueError):
-            continue
-        if episode > 0:
-            occupied.add(episode)
+def _occupied_special_numbers(contract: dict) -> set[int]:
+    evidence_values = (
+        ((contract.get("evidence") or {}).get("occupied_special_numbers") or [])
+        if isinstance(contract, dict)
+        else []
+    )
+    occupied = {
+        int(value)
+        for value in evidence_values
+        if str(value).isdigit() and int(value) >= 100
+    }
+    route = resolve_category_route(
+        init.bot_config,
+        (contract.get("placement") or {}).get("category_kind"),
+    )
+    storage = getattr(init, "openapi_115", None)
+    category_info = storage.get_file_info(route["path"]) if storage and route else None
+    if not category_info:
+        raise RuntimeError("cannot inspect configured category root")
+    season_path = "/".join((
+        route["path"].rstrip("/"),
+        series_folder_name(contract),
+        series_season_directory_name(contract, 0),
+    ))
+    if storage.get_file_info(season_path):
+        for item in storage.get_files_from_dir(season_path) or []:
+            name = (
+                str(item.get("name") or item.get("fn") or item)
+                if isinstance(item, dict)
+                else str(item)
+            )
+            match = re.search(r"(?i)\bS00E(\d{3,})\b", name)
+            if match:
+                occupied.add(int(match.group(1)))
     return occupied
 
 
@@ -1529,9 +1561,9 @@ def _search_prowlarr_release_categories(query: str, media_type: str = "") -> lis
     return results
 
 
-def _release_download_plan(download_plan):
-    if isinstance(download_plan, dict):
-        temporary_special_allocator.release(str(download_plan.get("plan_id") or ""))
+def _release_search_plan(search_plan):
+    if isinstance(search_plan, dict):
+        temporary_special_allocator.release(str(search_plan.get("plan_id") or ""))
 
 
 def _store_pending_search_task(
@@ -1540,7 +1572,7 @@ def _store_pending_search_task(
     results: list[dict],
     naming_metadata,
     metadata,
-    download_plan,
+    search_plan,
     selected_path: str,
 ) -> str:
     task_id = uuid.uuid4().hex[:10]
@@ -1550,14 +1582,9 @@ def _store_pending_search_task(
         "results": results,
         "user_id": update.effective_user.id,
         "naming_metadata": naming_metadata,
-        "metadata": metadata
-        or (
-            _metadata_from_naming_metadata(naming_metadata, query=query)
-            if naming_metadata
-            else None
-        ),
-        "download_plan": (
-            deepcopy(download_plan) if isinstance(download_plan, dict) else None
+        "metadata": deepcopy(metadata) if isinstance(metadata, dict) else None,
+        "search_plan": (
+            deepcopy(search_plan) if isinstance(search_plan, dict) else None
         ),
         "selected_path": selected_path,
     }
@@ -1570,7 +1597,7 @@ async def _send_search_results(
     query: str,
     naming_metadata=None,
     metadata=None,
-    download_plan=None,
+    search_plan=None,
     selected_path: str = "",
 ):
     media_type = str(
@@ -1593,21 +1620,21 @@ async def _send_search_results(
         results = rank_releases(items, _get_result_limit())
         indexer_summary = await asyncio.to_thread(get_prowlarr_indexer_summary, results)
     except ProwlarrConfigError as e:
-        _release_download_plan(download_plan)
+        _release_search_plan(search_plan)
         await _send_search_message(context, update.effective_chat.id, f"⚠️ {e}")
         return ConversationHandler.END
     except ProwlarrRequestError as e:
-        _release_download_plan(download_plan)
+        _release_search_plan(search_plan)
         await _send_search_message(context, update.effective_chat.id, f"❌ {e}")
         return ConversationHandler.END
     except Exception as e:
-        _release_download_plan(download_plan)
+        _release_search_plan(search_plan)
         _log_error(f"搜索处理失败: {e}")
         await _send_search_message(context, update.effective_chat.id, f"❌ 搜索失败：{e}")
         return ConversationHandler.END
 
     if not results:
-        _release_download_plan(download_plan)
+        _release_search_plan(search_plan)
         _log_info(f"搜索片源无结果 query={query}")
         await _send_search_message(context, update.effective_chat.id, "⚠️ 未找到可用片源，请调整关键词后重试。")
         return ConversationHandler.END
@@ -1617,7 +1644,7 @@ async def _send_search_results(
             naming_metadata, metadata
         )
     except Exception as e:
-        _release_download_plan(download_plan)
+        _release_search_plan(search_plan)
         _log_error(f"搜索元数据补全失败: {e}")
         await _send_search_message(
             context,
@@ -1635,7 +1662,7 @@ async def _send_search_results(
         results,
         naming_metadata,
         metadata,
-        download_plan,
+        search_plan,
         selected_path,
     )
 
@@ -2086,21 +2113,21 @@ async def _start_entry_resolution(update: Update, context: ContextTypes.DEFAULT_
         "tvdb": _tvdb_plan_provider,
     }
     try:
-        plan = await build_confirmable_plan(
+        plan = await build_confirmable_search_plan(
             raw_query,
             plan_id,
             providers,
-            _occupied_special_numbers_from_draft,
+            _occupied_special_numbers,
             temporary_special_allocator,
         )
     except SearchPlanningError as exc:
-        await update.message.reply_text(f"❌ 无法生成下载方案：{exc}")
+        await update.message.reply_text(f"❌ 无法生成媒体元数据：{exc}")
         return ConversationHandler.END
 
     selected_path = _resolve_plan_selected_path(plan)
     if not selected_path:
         temporary_special_allocator.release(plan_id)
-        await update.message.reply_text("❌ 下载方案无法对应到已配置的保存目录。")
+        await update.message.reply_text("❌ 媒体元数据无法对应到已配置的分类目录。")
         return ConversationHandler.END
 
     pending_entry_confirmations[plan_id] = {
@@ -2110,7 +2137,7 @@ async def _start_entry_resolution(update: Update, context: ContextTypes.DEFAULT_
         "selected_path": selected_path,
     }
     await update.message.reply_text(
-        _build_download_plan_text(plan),
+        _build_media_metadata_text(plan),
         reply_markup=InlineKeyboardMarkup(
             [
                 [
@@ -2125,7 +2152,7 @@ async def _start_entry_resolution(update: Update, context: ContextTypes.DEFAULT_
         ),
         disable_web_page_preview=True,
     )
-    return SEARCH_CONFIRM_DOWNLOAD_PLAN
+    return SEARCH_CONFIRM_MEDIA_METADATA
 
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2152,7 +2179,7 @@ async def search_metadata_link_command(update: Update, context: ContextTypes.DEF
     return await _start_entry_resolution(update, context, raw_query)
 
 
-async def confirm_download_plan_callback(
+async def confirm_media_metadata_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
     callback = update.callback_query
@@ -2160,12 +2187,12 @@ async def confirm_download_plan_callback(
     try:
         action, plan_id = (callback.data or "").split(":", 1)
     except ValueError:
-        await callback.edit_message_text("⚠️ 下载方案确认请求无效，请重新搜索。")
+        await callback.edit_message_text("⚠️ 媒体元数据确认请求无效，请重新搜索。")
         return ConversationHandler.END
 
     task = get_pending_entry_confirmation(plan_id)
     if not task or not _owner_matches(task, update.effective_user.id):
-        await callback.edit_message_text("⚠️ 下载方案已过期，请重新搜索。")
+        await callback.edit_message_text("⚠️ 媒体元数据已过期，请重新搜索。")
         return ConversationHandler.END
     if action == "plan_cancel":
         pending_entry_confirmations.pop(plan_id, None)
@@ -2173,30 +2200,27 @@ async def confirm_download_plan_callback(
         await callback.edit_message_text("已取消本次搜索。")
         return ConversationHandler.END
 
-    plan = confirm_download_plan(task["plan"])
+    search_plan = task["plan"]
+    contract = confirm_media_metadata(search_plan)
+    identity = contract["identity"]
+    metadata = attach_media_metadata({"source": "confirmed"}, contract)
     pending_entry_confirmations.pop(plan_id, None)
     await callback.edit_message_text(
-        f"✅ 已确认下载方案：{plan.get('display_title') or ''}"
+        f"✅ 已确认媒体元数据：{identity.get('chinese_title') or identity.get('english_title') or ''}"
     )
-    query = (plan.get("prowlarr_queries") or [""])[0]
-    metadata = attach_download_plan({"source": "confirmed"}, plan)
     return await _send_search_results(
         update,
         context,
-        query,
+        (search_plan.get("prowlarr_queries") or [""])[0],
         naming_metadata={
             "source": "confirmed",
-            "media_type": (
-                "series"
-                if plan["placement"]["library_type"] == "series"
-                else "movie"
-            ),
-            "chinese_title": plan.get("display_title") or "",
-            "english_title": plan.get("english_title") or "",
-            "year": plan.get("year") or "",
+            "media_type": contract["placement"]["library_type"],
+            "chinese_title": identity.get("chinese_title") or "",
+            "english_title": identity.get("english_title") or "",
+            "year": identity.get("year") or "",
         },
         metadata=metadata,
-        download_plan=plan,
+        search_plan=search_plan,
         selected_path=task["selected_path"],
     )
 
@@ -2218,7 +2242,7 @@ async def select_search_result(update: Update, context: ContextTypes.DEFAULT_TYP
     if data.startswith("search_cancel:"):
         task_id = data.split(":", 1)[1]
         task = pending_search_tasks.pop(task_id, None) or {}
-        _release_download_plan(task.get("download_plan"))
+        _release_search_plan(task.get("search_plan"))
         await callback.edit_message_text("已取消本次搜索。")
         return ConversationHandler.END
 
@@ -2249,16 +2273,22 @@ async def select_search_result(update: Update, context: ContextTypes.DEFAULT_TYP
         link = await _resolve_selected_link(context)
     except ProwlarrRequestError as e:
         pending_search_tasks.pop(task_id, None)
-        _release_download_plan(task.get("download_plan"))
+        _release_search_plan(task.get("search_plan"))
         await callback.edit_message_text(f"❌ {e}")
         return ConversationHandler.END
 
     naming_metadata = _naming_metadata_for_selected_release(task, selected_item)
-    plan = task.get("download_plan") or {}
-    metadata = attach_download_plan(
-        _metadata_for_selected_release(task, selected_item),
-        plan,
+    search_plan = task.get("search_plan") or {}
+    metadata = (
+        deepcopy(task.get("metadata"))
+        if isinstance(task.get("metadata"), dict)
+        else None
     )
+    if extract_confirmed_media_metadata(metadata) is None:
+        pending_search_tasks.pop(task_id, None)
+        _release_search_plan(search_plan)
+        await callback.edit_message_text("❌ 已确认媒体元数据无效，请重新搜索。")
+        return ConversationHandler.END
     try:
         _submit_download_request(
             context,
@@ -2273,13 +2303,13 @@ async def select_search_result(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     except DownloadProviderUnavailable as e:
         pending_search_tasks.pop(task_id, None)
-        _release_download_plan(plan)
+        _release_search_plan(search_plan)
         await callback.edit_message_text(f"❌ {e}")
         return ConversationHandler.END
 
     pending_search_tasks.pop(task_id, None)
     await callback.edit_message_text(
-        "✅ 已加入下载队列。\n系统将按已确认下载方案处理，请稍后查看结果。"
+        "✅ 已加入下载队列。\n系统将按已确认媒体元数据处理，请稍后查看结果。"
     )
     return ConversationHandler.END
 
@@ -2301,9 +2331,9 @@ def register_search_handlers(application):
             MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(HTTP_URL_PATTERN), unsupported_http_link_command),
         ],
         states={
-            SEARCH_CONFIRM_DOWNLOAD_PLAN: [
+            SEARCH_CONFIRM_MEDIA_METADATA: [
                 CallbackQueryHandler(
-                    confirm_download_plan_callback,
+                    confirm_media_metadata_callback,
                     pattern=r"^plan_(confirm|cancel):",
                 )
             ],

@@ -4,7 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +13,11 @@ sys.path.insert(0, str(ROOT / "app"))
 
 from app.handlers import search_handler
 from app.utils import search_resolution
+from app.utils.search_plan import (
+    TemporarySpecialAllocator,
+    confirm_media_metadata,
+    finalize_search_plan,
+)
 
 
 class DoubanMetadataFusionTest(unittest.TestCase):
@@ -563,6 +568,126 @@ class CoverAndHandoffTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "needs_confirmation")
         episodes_mock.assert_not_called()
+
+
+class TemporarySpecialStorageScopeTest(unittest.TestCase):
+    def _draft(self, plan_id="plan-a"):
+        return {
+            "plan_id": plan_id,
+            "media_metadata": {
+                "schema_version": 1,
+                "metadata_id": "",
+                "confirmed": False,
+                "identity": {
+                    "chinese_title": "想见你",
+                    "english_title": "Someday or One Day The Movie",
+                    "year": "2022",
+                    "content_kind": "extension_movie",
+                    "summary": "电影版延续电视剧故事。",
+                    "original_release_date": "2022-12-24",
+                    "poster_url": "https://image.example/poster.jpg",
+                    "poster_source": "douban",
+                    "external_ids": {},
+                },
+                "relation": {
+                    "type": "sequel",
+                    "target_series": {
+                        "chinese_title": "想见你",
+                        "english_title": "Someday or One Day",
+                        "year": "2019",
+                        "external_ids": {},
+                    },
+                    "source": "wikipedia",
+                },
+                "placement": {
+                    "library_type": "series",
+                    "category_kind": "live_action_series",
+                    "season_number": 0,
+                    "episode_number": None,
+                    "mapping_kind": "temporary_related_special",
+                    "mapping_source": "local_allocator",
+                    "tvdb_episode_id": "",
+                },
+                "source_entry": {
+                    "title": "想见你 (电影)",
+                    "url": "https://zh.wikipedia.org/wiki/想見你_(電影)",
+                    "provider": "wikipedia",
+                    "verification": "verified",
+                },
+                "items": [],
+                "evidence": {
+                    "provider_statuses": {
+                        "wikipedia": "ok",
+                        "douban": "ok",
+                        "tvdb": "not_found",
+                    }
+                },
+                "warnings": [],
+            },
+            "prowlarr_queries": ["Someday or One Day The Movie 2022"],
+        }
+
+    def test_restart_visible_temporary_numbers_are_scoped_by_target_series(self):
+        first_season_path = (
+            "/真人剧集/想见你 (Someday or One Day)/"
+            "Someday or One Day Season 00"
+        )
+        storage = Mock()
+        storage.get_file_info.side_effect = lambda path: (
+            {"file_id": "category-root"}
+            if path == "/真人剧集"
+            else {"file_id": "season-a"}
+            if path == first_season_path
+            else None
+        )
+        storage.get_files_from_dir.return_value = ["Existing S00E100.mkv"]
+        config = {
+            "category_folder": [{
+                "kind": "live_action_series",
+                "name": "显示名可变",
+                "path": "/真人剧集",
+                "plex_library_id": "13",
+            }]
+        }
+        allocator = TemporarySpecialAllocator()
+
+        with (
+            patch.object(search_handler.init, "bot_config", config),
+            patch.object(search_handler.init, "openapi_115", storage, create=True),
+        ):
+            first = self._draft("plan-a")
+            first_occupied = search_handler._occupied_special_numbers(
+                first["media_metadata"]
+            )
+            first_confirmed = confirm_media_metadata(
+                finalize_search_plan(first, allocator, first_occupied)
+            )
+
+            second = self._draft("plan-b")
+            second["media_metadata"]["relation"]["target_series"] = {
+                "chinese_title": "另一部剧",
+                "english_title": "Another Show",
+                "year": "2020",
+                "external_ids": {},
+            }
+            second_occupied = search_handler._occupied_special_numbers(
+                second["media_metadata"]
+            )
+            second_confirmed = confirm_media_metadata(
+                finalize_search_plan(second, allocator, second_occupied)
+            )
+
+        self.assertEqual(first_occupied, {100})
+        self.assertEqual(
+            first_confirmed["placement"]["episode_number"],
+            101,
+        )
+        self.assertEqual(second_occupied, set())
+        self.assertEqual(
+            second_confirmed["placement"]["episode_number"],
+            100,
+        )
+        storage.get_files_from_dir.assert_called_once_with(first_season_path)
 
 
 if __name__ == "__main__":
