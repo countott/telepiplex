@@ -137,7 +137,8 @@ Authorization: Bearer YOUR_MCP_TOKEN
 - `feature/115`：115 单点能力分支。
 - `feature/media-search`：媒体搜索能力分支。
 - `feature/renaming`：下载完成后的重命名与整理能力分支。
-- `feature/plex-management`：Plex 管理、MCP 与可选 AI 工具调用能力分支。
+- `feature/media-unifier`（已废弃）：旧媒体整理/扫库实验分支；由 `feature/plex-management` 替代，不再继续开发。
+- `feature/plex-management`：Plex 管理、MCP 与可选 AI 工具调用能力分支；稳定管线顺序为 `app.modules.renaming` → `app.modules.plex_management`。
 
 ## 本地验证
 

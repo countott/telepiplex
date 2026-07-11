@@ -154,6 +154,16 @@ class BotRuntimeStartupTest(unittest.TestCase):
             ],
         )
 
+    def test_plex_management_immediately_follows_renaming(self):
+        bot_module = load_bot_module()
+        modules = list(bot_module.DEFAULT_ENABLED_MODULES)
+
+        renaming_index = modules.index("app.modules.renaming")
+        self.assertEqual(
+            modules[renaming_index + 1],
+            "app.modules.plex_management",
+        )
+
     def test_disabled_modules_are_removed_from_default_stable_modules(self):
         bot_module = load_bot_module()
 
