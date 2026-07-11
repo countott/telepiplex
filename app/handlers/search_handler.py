@@ -7,6 +7,7 @@ import html
 import re
 import time
 import uuid
+from copy import deepcopy
 from warnings import filterwarnings
 from urllib.parse import unquote, unquote_plus, urlparse
 
@@ -17,7 +18,9 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Con
 from telegram.warnings import PTBUserWarning
 
 import init
+from app.adapters.wikipedia import lookup_wikipedia_evidence
 from app.core.module_registry import DownloadProviderUnavailable, DownloadRequest
+from app.services.search_planner import SearchPlanningError, build_confirmable_plan
 from app.utils.directory_config import get_save_directories
 from app.adapters.prowlarr import (
     ProwlarrConfigError,
@@ -54,10 +57,15 @@ from app.utils.search_query import (
     parse_douban_subject_abstract_title,
     parse_media_page_title,
 )
+from app.utils.search_plan import (
+    TemporarySpecialAllocator,
+    attach_download_plan,
+    confirm_download_plan,
+)
 
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
-SEARCH_SELECT_RESULT, SEARCH_SELECT_SUB_CATEGORY, SEARCH_CONFIRM_ENTRY_SCOPE = range(30, 33)
+SEARCH_SELECT_RESULT, SEARCH_CONFIRM_DOWNLOAD_PLAN = range(30, 32)
 SEARCH_TASK_TTL_SECONDS = 30 * 60
 SEARCH_PROGRESS_INTERVAL_SECONDS = 1
 TELEGRAM_SEND_TIMEOUT_SECONDS = 30
@@ -67,6 +75,7 @@ UNICODE_FORMAT_CODEPOINTS = {0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x2
 
 pending_search_tasks = {}
 pending_entry_confirmations = {}
+temporary_special_allocator = TemporarySpecialAllocator()
 
 
 def _log_info(message: str):
@@ -421,6 +430,8 @@ def get_pending_search_task(task_id: str):
 
     if time.time() - task.get("created_at", 0) > SEARCH_TASK_TTL_SECONDS:
         pending_search_tasks.pop(task_id, None)
+        plan = task.get("download_plan") or {}
+        temporary_special_allocator.release(str(plan.get("plan_id") or ""))
         return None
 
     return task
@@ -432,8 +443,170 @@ def get_pending_entry_confirmation(task_id: str):
         return None
     if time.time() - task.get("created_at", 0) > SEARCH_TASK_TTL_SECONDS:
         pending_entry_confirmations.pop(task_id, None)
+        temporary_special_allocator.release(task_id)
         return None
     return task
+
+
+def _build_download_plan_text(plan: dict) -> str:
+    placement = plan.get("placement") or {}
+    relation = plan.get("relation") or {}
+    source_entry = plan.get("source_entry") or {}
+    episode = placement.get("episode_number")
+    episode_number = int(episode) if episode is not None else None
+    episode_width = 3 if episode_number is not None and episode_number >= 100 else 2
+    episode_text = (
+        f"S{int(placement.get('season_number') or 0):02d}"
+        f"E{episode_number:0{episode_width}d}"
+        if episode_number is not None
+        else "未分配"
+    )
+    source_locator = source_entry.get("url") or source_entry.get("external_id") or ""
+    lines = [
+        "📋 下载方案",
+        "",
+        (
+            f"目标：{plan.get('display_title') or ''} / "
+            f"{plan.get('english_title') or ''} ({plan.get('year') or '年份未知'})"
+        ),
+        f"内容身份：{plan.get('content_identity') or 'unknown'}",
+        f"关联剧集：{relation.get('target_series_title') or '无'}",
+        f"关系依据：{relation.get('source') or 'ai'}",
+        (
+            f"归属：{placement.get('library_type') or 'unknown'} / "
+            f"Season {int(placement.get('season_number') or 0):02d}"
+        ),
+        f"集号：{episode_text}",
+        f"来源条目：{source_entry.get('title') or '无'}",
+    ]
+    if source_locator:
+        lines.append(f"来源定位：{source_locator}")
+    lines.append(f"搜索词：{(plan.get('prowlarr_queries') or [''])[0]}")
+    for warning in plan.get("warnings") or []:
+        lines.append(f"⚠️ {warning}")
+    return "\n".join(lines)
+
+
+def _resolve_plan_selected_path(plan: dict) -> str:
+    expected_name = {
+        "live_action_movie": "真人电影",
+        "animated_movie": "动画电影",
+        "live_action_series": "真人剧集",
+        "animated_series": "动画剧集",
+    }.get((plan.get("placement") or {}).get("category_kind"))
+    if not expected_name:
+        return ""
+    for item in get_save_directories():
+        if item.get("name") == expected_name and item.get("path"):
+            return str(item["path"])
+    return ""
+
+
+def _wikipedia_plan_provider(hypotheses: dict) -> dict:
+    config = (((init.bot_config or {}).get("metadata") or {}).get("wikipedia") or {})
+    if not config.get("enable", True):
+        return {
+            "source": "wikipedia",
+            "status": "disabled",
+            "facts": [],
+            "source_urls": [],
+            "error": "",
+        }
+    queries = ((hypotheses.get("source_queries") or {}).get("wikipedia") or [])
+    languages = tuple(
+        str(item)
+        for item in (config.get("languages") or ["zh", "en"])
+        if str(item).strip()
+    )
+    timeout = float(config.get("timeout") or 10)
+    return lookup_wikipedia_evidence(
+        queries,
+        languages=languages or ("zh", "en"),
+        timeout=timeout,
+    )
+
+
+def _douban_plan_provider(hypotheses: dict) -> dict:
+    facts = []
+    for query in ((hypotheses.get("source_queries") or {}).get("douban") or []):
+        try:
+            metadata = _fetch_douban_metadata_for_plain_query(query)
+        except Exception as exc:
+            return {
+                "source": "douban",
+                "status": "server_down",
+                "facts": [],
+                "source_urls": [],
+                "error": str(exc),
+            }
+        if metadata:
+            facts.append(metadata)
+    return {
+        "source": "douban",
+        "status": "ok" if facts else "not_found",
+        "facts": facts,
+        "source_urls": [],
+        "error": "",
+    }
+
+
+def _tvdb_plan_provider(hypotheses: dict) -> dict:
+    facts = []
+    try:
+        for hypothesis in hypotheses.get("hypotheses") or []:
+            title = hypothesis.get("title") or ""
+            year = hypothesis.get("year") or ""
+            movies = search_tvdb_movies(title, year=year)
+            series = search_tvdb_series(title, year=year)
+            episodes_by_series = {}
+            for item in series[:5]:
+                series_id = str(item.get("tvdb_series_id") or "")
+                if series_id:
+                    episodes_by_series[series_id] = get_tvdb_series_episodes(series_id)
+            facts.append(
+                {
+                    "hypothesis": hypothesis,
+                    "movies": movies[:5],
+                    "series": series[:5],
+                    "episodes_by_series": episodes_by_series,
+                }
+            )
+    except TvdbConfigError as exc:
+        return {
+            "source": "tvdb",
+            "status": "disabled",
+            "facts": [],
+            "source_urls": [],
+            "error": str(exc),
+        }
+    except (TvdbRequestError, OSError) as exc:
+        return {
+            "source": "tvdb",
+            "status": "server_down",
+            "facts": [],
+            "source_urls": [],
+            "error": str(exc),
+        }
+    return {
+        "source": "tvdb",
+        "status": "ok" if facts else "not_found",
+        "facts": facts,
+        "source_urls": [],
+        "error": "",
+    }
+
+
+def _occupied_special_numbers_from_draft(draft: dict) -> set[int]:
+    values = ((draft.get("evidence") or {}).get("occupied_special_numbers") or [])
+    occupied = set()
+    for value in values:
+        try:
+            episode = int(value)
+        except (TypeError, ValueError):
+            continue
+        if episode > 0:
+            occupied.add(episode)
+    return occupied
 
 
 def _candidate_display_scope(candidate: dict) -> str:
@@ -1393,7 +1566,50 @@ def _search_prowlarr_release_categories(query: str, media_type: str = "") -> lis
     return results
 
 
-async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, naming_metadata=None, metadata=None):
+def _release_download_plan(download_plan):
+    if isinstance(download_plan, dict):
+        temporary_special_allocator.release(str(download_plan.get("plan_id") or ""))
+
+
+def _store_pending_search_task(
+    update,
+    query: str,
+    results: list[dict],
+    naming_metadata,
+    metadata,
+    download_plan,
+    selected_path: str,
+) -> str:
+    task_id = uuid.uuid4().hex[:10]
+    pending_search_tasks[task_id] = {
+        "created_at": time.time(),
+        "query": query,
+        "results": results,
+        "user_id": update.effective_user.id,
+        "naming_metadata": naming_metadata,
+        "metadata": metadata
+        or (
+            _metadata_from_naming_metadata(naming_metadata, query=query)
+            if naming_metadata
+            else None
+        ),
+        "download_plan": (
+            deepcopy(download_plan) if isinstance(download_plan, dict) else None
+        ),
+        "selected_path": selected_path,
+    }
+    return task_id
+
+
+async def _send_search_results(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    query: str,
+    naming_metadata=None,
+    metadata=None,
+    download_plan=None,
+    selected_path: str = "",
+):
     media_type = str(
         (metadata or {}).get("media_type")
         or (naming_metadata or {}).get("media_type")
@@ -1420,35 +1636,51 @@ async def _send_search_results(update: Update, context: ContextTypes.DEFAULT_TYP
         results = rank_releases(items, _get_result_limit())
         indexer_summary = await asyncio.to_thread(get_prowlarr_indexer_summary, results)
     except ProwlarrConfigError as e:
+        _release_download_plan(download_plan)
         await _send_search_message(context, update.effective_chat.id, f"⚠️ {e}")
         return ConversationHandler.END
     except ProwlarrRequestError as e:
+        _release_download_plan(download_plan)
         await _send_search_message(context, update.effective_chat.id, f"❌ {e}")
         return ConversationHandler.END
     except Exception as e:
+        _release_download_plan(download_plan)
         _log_error(f"搜索处理失败: {e}")
         await _send_search_message(context, update.effective_chat.id, f"❌ 搜索失败：{e}")
         return ConversationHandler.END
 
     if not results:
+        _release_download_plan(download_plan)
         _log_info(f"搜索片源无结果 query={query}")
         await _send_search_message(context, update.effective_chat.id, "⚠️ 未找到可用片源，请调整关键词后重试。")
         return ConversationHandler.END
 
-    naming_metadata, metadata = await _backfill_missing_chinese_title(naming_metadata, metadata)
+    try:
+        naming_metadata, metadata = await _backfill_missing_chinese_title(
+            naming_metadata, metadata
+        )
+    except Exception as e:
+        _release_download_plan(download_plan)
+        _log_error(f"搜索元数据补全失败: {e}")
+        await _send_search_message(
+            context,
+            update.effective_chat.id,
+            f"❌ 搜索元数据补全失败：{e}",
+        )
+        return ConversationHandler.END
     _log_info(
         f"搜索片源完成 query={query} media_type={media_type or 'movie_and_series'} "
         f"results={len(results)}"
     )
-    task_id = uuid.uuid4().hex[:10]
-    pending_search_tasks[task_id] = {
-        "created_at": time.time(),
-        "query": query,
-        "results": results,
-        "user_id": update.effective_user.id,
-        "naming_metadata": naming_metadata,
-        "metadata": metadata or (_metadata_from_naming_metadata(naming_metadata, query=query) if naming_metadata else None),
-    }
+    task_id = _store_pending_search_task(
+        update,
+        query,
+        results,
+        naming_metadata,
+        metadata,
+        download_plan,
+        selected_path,
+    )
 
     await _send_search_message(
         context,
@@ -1890,34 +2122,53 @@ async def _resolve_entry_candidates(raw_query: str) -> dict:
 
 
 async def _start_entry_resolution(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_query: str):
-    resolution = await _resolve_entry_candidates(raw_query)
-    status = resolution.get("status")
-    if str(status or "").startswith("blocked_"):
-        await update.message.reply_text(resolution.get("message") or "未匹配到明确的影视条目。")
+    plan_id = uuid.uuid4().hex[:10]
+    providers = {
+        "wikipedia": _wikipedia_plan_provider,
+        "douban": _douban_plan_provider,
+        "tvdb": _tvdb_plan_provider,
+    }
+    try:
+        plan = await build_confirmable_plan(
+            raw_query,
+            plan_id,
+            providers,
+            _occupied_special_numbers_from_draft,
+            temporary_special_allocator,
+        )
+    except SearchPlanningError as exc:
+        await update.message.reply_text(f"❌ 无法生成下载方案：{exc}")
         return ConversationHandler.END
 
-    if status == "auto_confirm":
-        await update.message.reply_text(resolution.get("message") or "已识别电影。")
-        if is_supported_metadata_url(raw_query):
-            await asyncio.sleep(1)
-        return await _send_confirmed_candidate_search(update, context, resolution["candidate"])
+    selected_path = _resolve_plan_selected_path(plan)
+    if not selected_path:
+        temporary_special_allocator.release(plan_id)
+        await update.message.reply_text("❌ 下载方案无法对应到已配置的保存目录。")
+        return ConversationHandler.END
 
-    if status == "needs_confirmation":
-        task_id = uuid.uuid4().hex[:10]
-        pending_entry_confirmations[task_id] = {
-            "created_at": time.time(),
-            "user_id": update.effective_user.id,
-            "candidates": resolution.get("candidates") or [],
-        }
-        await update.message.reply_text(
-            _build_entry_confirmation_text(resolution.get("candidates") or []),
-            reply_markup=_build_entry_confirmation_keyboard(task_id, resolution.get("candidates") or []),
-            disable_web_page_preview=True,
-        )
-        return SEARCH_CONFIRM_ENTRY_SCOPE
-
-    await update.message.reply_text("未匹配到明确的影视条目，请提供更明确的关键词或元数据链接。")
-    return ConversationHandler.END
+    pending_entry_confirmations[plan_id] = {
+        "created_at": time.time(),
+        "user_id": update.effective_user.id,
+        "plan": plan,
+        "selected_path": selected_path,
+    }
+    await update.message.reply_text(
+        _build_download_plan_text(plan),
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "确认并搜索", callback_data=f"plan_confirm:{plan_id}"
+                    ),
+                    InlineKeyboardButton(
+                        "取消", callback_data=f"plan_cancel:{plan_id}"
+                    ),
+                ]
+            ]
+        ),
+        disable_web_page_preview=True,
+    )
+    return SEARCH_CONFIRM_DOWNLOAD_PLAN
 
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1944,35 +2195,53 @@ async def search_metadata_link_command(update: Update, context: ContextTypes.DEF
     return await _start_entry_resolution(update, context, raw_query)
 
 
-async def confirm_entry_scope(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data or ""
-
-    if data.startswith("entry_cancel:"):
-        await query.edit_message_text("已取消本次搜索。")
-        return ConversationHandler.END
-
+async def confirm_download_plan_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    callback = update.callback_query
+    await callback.answer()
     try:
-        _, task_id, index_text = data.split(":", 2)
+        action, plan_id = (callback.data or "").split(":", 1)
     except ValueError:
-        await query.edit_message_text("⚠️ 确认请求无效，请重新搜索。")
+        await callback.edit_message_text("⚠️ 下载方案确认请求无效，请重新搜索。")
         return ConversationHandler.END
 
-    task = get_pending_entry_confirmation(task_id)
+    task = get_pending_entry_confirmation(plan_id)
     if not task or not _owner_matches(task, update.effective_user.id):
-        await query.edit_message_text("⚠️ 确认请求已过期，请重新搜索。")
+        await callback.edit_message_text("⚠️ 下载方案已过期，请重新搜索。")
+        return ConversationHandler.END
+    if action == "plan_cancel":
+        pending_entry_confirmations.pop(plan_id, None)
+        temporary_special_allocator.release(plan_id)
+        await callback.edit_message_text("已取消本次搜索。")
         return ConversationHandler.END
 
-    try:
-        candidate = task["candidates"][int(index_text)]
-    except (IndexError, ValueError):
-        await query.edit_message_text("⚠️ 候选条目不可用，请重新搜索。")
-        return ConversationHandler.END
-
-    pending_entry_confirmations.pop(task_id, None)
-    await query.edit_message_text(f"✅ 已确认：{_candidate_display_title(candidate)} · {_candidate_display_scope(candidate)}")
-    return await _send_confirmed_candidate_search(update, context, candidate)
+    plan = confirm_download_plan(task["plan"])
+    pending_entry_confirmations.pop(plan_id, None)
+    await callback.edit_message_text(
+        f"✅ 已确认下载方案：{plan.get('display_title') or ''}"
+    )
+    query = (plan.get("prowlarr_queries") or [""])[0]
+    metadata = attach_download_plan({"source": "confirmed"}, plan)
+    return await _send_search_results(
+        update,
+        context,
+        query,
+        naming_metadata={
+            "source": "confirmed",
+            "media_type": (
+                "series"
+                if plan["placement"]["library_type"] == "series"
+                else "movie"
+            ),
+            "chinese_title": plan.get("display_title") or "",
+            "english_title": plan.get("english_title") or "",
+            "year": plan.get("year") or "",
+        },
+        metadata=metadata,
+        download_plan=plan,
+        selected_path=task["selected_path"],
+    )
 
 
 async def unsupported_http_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1986,126 +2255,59 @@ async def unsupported_http_link_command(update: Update, context: ContextTypes.DE
 
 
 async def select_search_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data
+    callback = update.callback_query
+    await callback.answer()
+    data = callback.data or ""
     if data.startswith("search_cancel:"):
-        await query.edit_message_text("已取消本次搜索。")
+        task_id = data.split(":", 1)[1]
+        task = pending_search_tasks.pop(task_id, None) or {}
+        _release_download_plan(task.get("download_plan"))
+        await callback.edit_message_text("已取消本次搜索。")
         return ConversationHandler.END
 
-    _, task_id, index_text = data.split(":", 2)
+    try:
+        _, task_id, index_text = data.split(":", 2)
+    except ValueError:
+        await callback.edit_message_text("⚠️ 搜索选择请求无效，请重新搜索。")
+        return ConversationHandler.END
     task = get_pending_search_task(task_id)
     if not task or not _owner_matches(task, update.effective_user.id):
-        await query.edit_message_text("⚠️ 搜索任务已过期，请重新发起搜索。")
+        await callback.edit_message_text("⚠️ 搜索任务已过期，请重新发起搜索。")
         return ConversationHandler.END
 
     try:
         selected_item = task["results"][int(index_text)]
     except (IndexError, ValueError):
-        await query.edit_message_text("⚠️ 候选资源不可用，请重新搜索。")
+        await callback.edit_message_text("⚠️ 候选资源不可用，请重新搜索。")
         return ConversationHandler.END
 
-    link = selected_item.get("magnet_url") or selected_item.get("download_url")
-    if not link:
-        await query.edit_message_text("⚠️ 该候选缺少可用下载链接，请选择其他结果。")
+    if not (selected_item.get("magnet_url") or selected_item.get("download_url")):
+        await callback.edit_message_text("⚠️ 该候选缺少可用下载链接，请选择其他结果。")
         return ConversationHandler.END
 
     context.user_data["search_task_id"] = task_id
     context.user_data["search_selected_item"] = selected_item
-
-    await query.edit_message_text("📁 请选择保存目录：", reply_markup=_build_main_category_keyboard(task_id))
-    return SEARCH_SELECT_SUB_CATEGORY
-
-
-async def select_search_sub_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if data.startswith("search_cancel:"):
-        await query.edit_message_text("已取消本次搜索。")
-        return ConversationHandler.END
-
-    if data.startswith("search_last:"):
-        task_id = data.split(":", 1)[1]
-        task = get_pending_search_task(task_id)
-        if not task or not _owner_matches(task, update.effective_user.id):
-            await query.edit_message_text("⚠️ 搜索任务已过期，请重新发起搜索。")
-            return ConversationHandler.END
-
-        selected_path = init.bot_session.get("movie_last_save") if hasattr(init, "bot_session") else None
-        if not selected_path or not _get_selected_link(context):
-            await query.edit_message_text("⚠️ 未找到上次保存路径或候选链接，请重新选择。")
-            return ConversationHandler.END
-
-        await query.edit_message_text("⏳ 正在解析下载链接，请稍候。")
-        try:
-            link = await _resolve_selected_link(context)
-        except ProwlarrRequestError as e:
-            await query.edit_message_text(f"❌ {e}")
-            return ConversationHandler.END
-
-        selected_item = context.user_data.get("search_selected_item") or {}
-        naming_metadata = _naming_metadata_for_selected_release(task, selected_item)
-        metadata = _metadata_for_selected_release(task, selected_item)
-        try:
-            _submit_download_request(
-                context,
-                DownloadRequest(
-                    link=link,
-                    selected_path=selected_path,
-                    user_id=update.effective_user.id,
-                    naming_metadata=naming_metadata,
-                    metadata=metadata,
-                    source="media-search",
-                ),
-            )
-        except DownloadProviderUnavailable as e:
-            await query.edit_message_text(f"❌ {e}")
-            return ConversationHandler.END
-        await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到已注册下载模块，请稍后查看结果。")
-        pending_search_tasks.pop(task_id, None)
-        return ConversationHandler.END
-
-    _, task_id, index_text = data.split(":", 2)
-    task = get_pending_search_task(task_id)
-    if not task or not _owner_matches(task, update.effective_user.id):
-        await query.edit_message_text("⚠️ 搜索任务已过期，请重新发起搜索。")
-        return ConversationHandler.END
-
-    sub_categories = get_save_directories()
-
-    try:
-        selected_path = sub_categories[int(index_text)]["path"]
-    except (IndexError, KeyError, TypeError, ValueError):
-        await query.edit_message_text("⚠️ 保存目录不可用，请重新搜索。")
-        return ConversationHandler.END
-
-    if not hasattr(init, "bot_session"):
-        init.bot_session = {}
-    init.bot_session["movie_last_save"] = selected_path
-
-    if not _get_selected_link(context):
-        await query.edit_message_text("⚠️ 候选链接已失效，请重新搜索。")
-        return ConversationHandler.END
-
-    await query.edit_message_text("⏳ 正在解析下载链接，请稍候。")
+    await callback.edit_message_text("⏳ 正在解析下载链接，请稍候。")
     try:
         link = await _resolve_selected_link(context)
     except ProwlarrRequestError as e:
-        await query.edit_message_text(f"❌ {e}")
+        pending_search_tasks.pop(task_id, None)
+        _release_download_plan(task.get("download_plan"))
+        await callback.edit_message_text(f"❌ {e}")
         return ConversationHandler.END
 
-    selected_item = context.user_data.get("search_selected_item") or {}
     naming_metadata = _naming_metadata_for_selected_release(task, selected_item)
-    metadata = _metadata_for_selected_release(task, selected_item)
+    plan = task.get("download_plan") or {}
+    metadata = attach_download_plan(
+        _metadata_for_selected_release(task, selected_item),
+        plan,
+    )
     try:
         _submit_download_request(
             context,
             DownloadRequest(
                 link=link,
-                selected_path=selected_path,
+                selected_path=task["selected_path"],
                 user_id=update.effective_user.id,
                 naming_metadata=naming_metadata,
                 metadata=metadata,
@@ -2113,10 +2315,15 @@ async def select_search_sub_category(update: Update, context: ContextTypes.DEFAU
             ),
         )
     except DownloadProviderUnavailable as e:
-        await query.edit_message_text(f"❌ {e}")
+        pending_search_tasks.pop(task_id, None)
+        _release_download_plan(plan)
+        await callback.edit_message_text(f"❌ {e}")
         return ConversationHandler.END
-    await query.edit_message_text("✅ 已加入下载队列。\n系统将投递到已注册下载模块，请稍后查看结果。")
+
     pending_search_tasks.pop(task_id, None)
+    await callback.edit_message_text(
+        "✅ 已加入下载队列。\n系统将按已确认下载方案处理，请稍后查看结果。"
+    )
     return ConversationHandler.END
 
 
@@ -2137,12 +2344,16 @@ def register_search_handlers(application):
             MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(HTTP_URL_PATTERN), unsupported_http_link_command),
         ],
         states={
-            SEARCH_CONFIRM_ENTRY_SCOPE: [
-                CallbackQueryHandler(confirm_entry_scope, pattern=r"^entry_(confirm|cancel):")
+            SEARCH_CONFIRM_DOWNLOAD_PLAN: [
+                CallbackQueryHandler(
+                    confirm_download_plan_callback,
+                    pattern=r"^plan_(confirm|cancel):",
+                )
             ],
-            SEARCH_SELECT_RESULT: [CallbackQueryHandler(select_search_result, pattern=r"^search_(pick|cancel):")],
-            SEARCH_SELECT_SUB_CATEGORY: [
-                CallbackQueryHandler(select_search_sub_category, pattern=r"^search_(path|last|cancel):")
+            SEARCH_SELECT_RESULT: [
+                CallbackQueryHandler(
+                    select_search_result, pattern=r"^search_(pick|cancel):"
+                )
             ],
         },
         fallbacks=[CommandHandler("q", quit_search_conversation)],
