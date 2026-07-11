@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackQueryHandler, CommandHandler
 
 import init
@@ -22,19 +23,35 @@ def format_job_status(job):
 
 async def plex_command(update, context):
     if not init.check_user(update.effective_user.id):
-        await update.message.reply_text("⚠️ 当前账号无权使用此机器人。")
+        await update.effective_message.reply_text("⚠️ 当前账号无权使用此机器人。")
         return
     from app.modules.plex_management import get_plex_management_service
 
     service = get_plex_management_service()
     if service is None:
-        await update.message.reply_text("Plex 管理未启用或缺少 base_url/token。")
+        await update.effective_message.reply_text("Plex 管理未启用或缺少 base_url/token。")
         return
-    jobs = await asyncio.to_thread(service.list_jobs, 5)
-    status = await asyncio.to_thread(service.server_status)
-    lines = [f"Plex：{status.get('name') or 'online'}", f"最近任务：{len(jobs)}"]
-    lines.extend(f"#{job['id']} {job['state']}" for job in jobs)
-    await update.message.reply_text("\n".join(lines))
+    if not getattr(service, "ai_enabled", False) or service.ai is None:
+        await update.effective_message.reply_text("Plex AI 管理未启用。")
+        return
+    request_text = " ".join(context.args or []).strip()
+    if not request_text:
+        await update.effective_message.reply_text("请在 /plex 后描述要查询或管理的 Plex 内容。")
+        return
+    result = await asyncio.to_thread(service.ai.run, request_text)
+    confirmation = result.get("confirmation") or {}
+    reply_markup = None
+    token = confirmation.get("confirmation_token")
+    if token:
+        context.user_data[f"plex_write:{token}"] = confirmation.get("action") or ""
+        context.user_data[f"plex_write_payload:{token}"] = confirmation.get("payload") or {}
+        reply_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("确认执行", callback_data=f"plex_write_confirm:{token}")
+        ]])
+    await update.effective_message.reply_text(
+        result.get("message") or "Plex AI 未返回内容。",
+        reply_markup=reply_markup,
+    )
 
 
 async def handle_plex_match_confirmation(update, context):

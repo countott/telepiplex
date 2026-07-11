@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import threading
 from dataclasses import dataclass
@@ -168,6 +169,39 @@ def create_plex_mcp(service, config):
         return _prepare_or_apply(service, "plex_retry_job", payload, confirmation_token)
 
     return mcp
+
+
+class PlexToolDispatcher:
+    """Expose the exact MCP tool schemas and dispatch semantics to local AI."""
+
+    def __init__(self, service):
+        self.mcp = create_plex_mcp(service, {})
+        self._schemas = None
+
+    def tool_schemas(self):
+        if self._schemas is None:
+            tools = asyncio.run(self.mcp.list_tools())
+            self._schemas = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "parameters": tool.inputSchema,
+                    },
+                }
+                for tool in tools
+            ]
+        return list(self._schemas)
+
+    def dispatch(self, name, arguments):
+        return asyncio.run(
+            self.mcp._tool_manager.call_tool(
+                str(name),
+                dict(arguments or {}),
+                convert_result=False,
+            )
+        )
 
 
 class BearerAuthMiddleware:

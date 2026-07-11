@@ -82,6 +82,23 @@ def get_plex_management_service():
     _service.mcp_config = dict(plex_config.get("mcp") or {})
     _service.mcp_enabled = bool(_service.mcp_config.get("enabled"))
     _service.ai_config = dict(plex_config.get("ai") or {})
+    global_ai = dict(config.get("ai") or {})
+    requested_ai = bool(_service.ai_config.get("enabled"))
+    has_ai_credentials = all(
+        str(global_ai.get(key) or "").strip()
+        for key in ("api_url", "api_key", "model")
+    )
+    _service.ai_enabled = requested_ai and has_ai_credentials
+    _service.ai = None
+    if _service.ai_enabled:
+        from app.plex_mcp.server import PlexToolDispatcher
+        from app.services.plex_ai import PlexAIOrchestrator
+
+        _service.ai = PlexAIOrchestrator(
+            global_ai,
+            PlexToolDispatcher(_service),
+            max_tool_rounds=_service.ai_config.get("max_tool_rounds", 3),
+        )
     return _service
 
 
