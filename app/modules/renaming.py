@@ -8,8 +8,13 @@ import init
 from app.adapters.tvdb import TvdbConfigError, TvdbRequestError, get_tvdb_series_episodes, search_tvdb_series
 from app.core.module_registry import DownloadCompletedEvent, PostDownloadResult
 from app.utils.ai import infer_tvdb_episode_plan_with_ai
+from app.utils.confirmed_download_plan import extract_confirmed_download_plan
 from app.utils.media_naming import build_media_naming_plan, infer_english_title_from_release
-from app.utils.tvdb_rename import VIDEO_EXTENSIONS, build_tvdb_rename_plan
+from app.utils.tvdb_rename import (
+    VIDEO_EXTENSIONS,
+    build_confirmed_rename_plan,
+    build_tvdb_rename_plan,
+)
 
 
 def _storage(event: DownloadCompletedEvent):
@@ -192,7 +197,7 @@ def _merge_tvdb_metadata(naming_metadata=None, metadata=None, filename_metadata=
     return merged or None
 
 
-def _attempt_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metadata):
+def _attempt_legacy_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metadata):
     if not metadata or not _has_ai_episode_inference_config():
         return None
 
@@ -251,6 +256,139 @@ def _attempt_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metadata):
     return rename_plan
 
 
+def _confirmed_series_plan(event: DownloadCompletedEvent):
+    plan = extract_confirmed_download_plan(event.metadata)
+    placement = plan.get("placement") if isinstance(plan, dict) else None
+    if not isinstance(placement, dict) or placement.get("library_type") != "series":
+        return None
+    return plan
+
+
+def _unorganized_root() -> str:
+    return str(
+        ((init.bot_config or {}).get("media") or {}).get("unorganized_path") or ""
+    ).rstrip("/")
+
+
+def _move_unmatched_to_unorganized(event, unmatched_sources):
+    if not unmatched_sources:
+        return ""
+    unorganized_root = _unorganized_root()
+    if not unorganized_root:
+        raise RuntimeError("未匹配文件存在，但 media.unorganized_path 未配置")
+    source_leaf = str(event.final_path or "").rstrip("/").rsplit("/", 1)[-1]
+    target_dir = f"{unorganized_root}/{source_leaf}"
+    storage = _storage(event)
+    if not storage.create_dir_recursive(target_dir):
+        raise RuntimeError(f"无法创建未整理目录 {target_dir}")
+    for relative_path in unmatched_sources:
+        source_path = (
+            f"{str(event.final_path).rstrip('/')}/"
+            f"{str(relative_path).strip('/')}"
+        )
+        if storage.move_file(source_path, target_dir) is not True:
+            raise RuntimeError(f"无法移动未匹配文件 {source_path}")
+    return target_dir
+
+
+def _move_confirmed_failure_to_unorganized(event):
+    unorganized_root = _unorganized_root()
+    if not unorganized_root:
+        raise RuntimeError("确认方案映射失败，但 media.unorganized_path 未配置")
+    storage = _storage(event)
+    source_path = str(event.final_path or "").rstrip("/")
+    source_leaf = source_path.rsplit("/", 1)[-1]
+    if not storage.create_dir_recursive(unorganized_root):
+        raise RuntimeError(f"无法创建未整理目录 {unorganized_root}")
+    if storage.move_file(source_path, unorganized_root) is not True:
+        raise RuntimeError(f"无法移动确认方案失败目录 {source_path}")
+    return f"{unorganized_root}/{source_leaf}"
+
+
+class ConfirmedPlanConflict(RuntimeError):
+    pass
+
+
+def _assert_no_target_conflicts(storage, rename_plan):
+    for operation in rename_plan.get("operations") or []:
+        target_path = (
+            f"{str(operation['target_dir']).rstrip('/')}/"
+            f"{operation['rename_to']}"
+        )
+        if storage.get_file_info(target_path):
+            raise ConfirmedPlanConflict(
+                f"已确认目标编号发生冲突：{operation['rename_to']}"
+            )
+
+
+def _attempt_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metadata):
+    confirmed_plan = _confirmed_series_plan(event)
+    if not confirmed_plan:
+        return _attempt_legacy_tvdb_ai_episode_rename(event, metadata)
+    if not metadata or not _has_ai_episode_inference_config():
+        return None
+
+    storage = _storage(event)
+    tvdb_candidates, tvdb_episodes = _get_tvdb_candidates_and_episodes(metadata)
+    file_tree = collect_storage_file_tree(storage, event.final_path)
+    if not [item for item in file_tree if not item.get("is_dir")]:
+        init.logger.warn(
+            f"确认方案整理跳过：目录中未找到视频文件 {event.final_path}"
+        )
+        return None
+
+    context = {
+        "metadata": metadata,
+        "confirmed_download_plan": confirmed_plan,
+        "release_title": metadata.get("release_title") or event.resource_name,
+        "resource_name": event.resource_name,
+        "download_path": event.final_path,
+        "file_tree": file_tree,
+        "tvdb_candidates": tvdb_candidates,
+        "tvdb_episodes": tvdb_episodes,
+    }
+    ai_plan = infer_tvdb_episode_plan_with_ai(context)
+    rename_plan = build_confirmed_rename_plan(
+        final_path=event.final_path,
+        selected_path=event.selected_path,
+        metadata=metadata,
+        confirmed_plan=confirmed_plan,
+        ai_plan=ai_plan or {},
+        file_tree=file_tree,
+    )
+    if not rename_plan:
+        init.logger.warn(
+            f"确认方案整理跳过：AI文件映射未通过锁定校验 path={event.final_path}"
+        )
+        return None
+
+    _assert_no_target_conflicts(storage, rename_plan)
+    for operation in rename_plan["operations"]:
+        if not storage.create_dir_recursive(operation["target_dir"]):
+            raise RuntimeError(
+                f"确认方案整理失败：无法创建 {operation['target_dir']}"
+            )
+        current_source_path = operation["source_path"]
+        if Path(operation["source_path"]).name != operation["rename_to"]:
+            if storage.rename(operation["source_path"], operation["rename_to"]) is not True:
+                raise RuntimeError(
+                    f"确认方案整理失败：重命名失败 {operation['source_path']}"
+                )
+            current_source_path = operation["renamed_source_path"]
+        if storage.move_file(current_source_path, operation["target_dir"]) is not True:
+            raise RuntimeError(
+                f"确认方案整理失败：移动失败 {current_source_path}"
+            )
+
+    unmatched_dir = _move_unmatched_to_unorganized(
+        event, rename_plan.get("unmatched_sources") or []
+    )
+    rename_plan["unmatched_target"] = unmatched_dir
+    if event.final_path != rename_plan["target_root"]:
+        _cleanup_source_directory(storage, event.final_path)
+    return rename_plan
+
+
 def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
     filename_metadata = _filename_metadata_from_resource(event.resource_name)
     metadata = _merge_tvdb_metadata(
@@ -258,8 +396,28 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
         metadata=event.metadata,
         filename_metadata=filename_metadata,
     )
-    rename_plan = _attempt_tvdb_ai_episode_rename(event, metadata)
+    confirmed_plan = _confirmed_series_plan(event)
+    try:
+        rename_plan = _attempt_tvdb_ai_episode_rename(event, metadata)
+    except ConfirmedPlanConflict as exc:
+        return PostDownloadResult(
+            True,
+            final_path=event.final_path,
+            message=f"⚠️ {exc}\n文件保持原位，请重新确认下载方案。",
+            should_stop=True,
+        )
     if not rename_plan:
+        if confirmed_plan:
+            unorganized_target = _move_confirmed_failure_to_unorganized(event)
+            return PostDownloadResult(
+                True,
+                final_path=unorganized_target,
+                message=(
+                    "⚠️ 下载后 AI 文件映射失败，已移入未整理目录。\n\n"
+                    f"保存目录：`{unorganized_target}`"
+                ),
+                should_stop=True,
+            )
         return PostDownloadResult(False, final_path=event.final_path)
 
     message = (

@@ -1,7 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +10,177 @@ sys.path.insert(0, str(ROOT / "app"))
 
 
 class ComposableRenamingModuleTest(unittest.TestCase):
+    def test_confirmed_temporary_special_runs_when_tvdb_is_down(self):
+        import init
+        from app.core.module_registry import DownloadCompletedEvent
+        from app.modules import renaming
+
+        init.logger = Mock()
+        init.bot_config = {
+            "ai": {
+                "api_url": "https://ai.example",
+                "api_key": "key",
+                "model": "model",
+            },
+            "media": {"unorganized_path": "/未整理"},
+        }
+        storage = Mock()
+        storage.create_dir_recursive.return_value = True
+        storage.rename.return_value = True
+        storage.move_file.return_value = True
+        storage.get_file_info.return_value = None
+        event = DownloadCompletedEvent(
+            link="magnet:?xt=urn:btih:" + "b" * 40,
+            selected_path="/真人剧集",
+            user_id=1,
+            final_path="/真人剧集/Raw.Release",
+            resource_name="Someday.or.One.Day.The.Movie.2022",
+            metadata={
+                "chinese_title": "想见你",
+                "english_title": "Someday or One Day",
+                "download_plan": {
+                    "schema_version": 1,
+                    "confirmed": True,
+                    "relation": {"target_series_title": "Someday or One Day"},
+                    "placement": {
+                        "library_type": "series",
+                        "season_number": 0,
+                        "episode_number": 100,
+                        "mapping_kind": "temporary_related_special",
+                    },
+                    "source_entry": {
+                        "title": "想见你 (电影)",
+                        "url": "https://zh.wikipedia.org/wiki/想見你_(電影)",
+                    },
+                },
+            },
+            storage=storage,
+        )
+        rename_plan = {
+            "target_root": "/真人剧集/想见你 (Someday or One Day)",
+            "series_name": "Someday or One Day",
+            "operations": [
+                {
+                    "target_dir": "/真人剧集/想见你 (Someday or One Day)/Someday or One Day Season 00",
+                    "source_path": "/真人剧集/Raw.Release/Movie.mkv",
+                    "rename_to": "Someday or One Day S00E100.mkv",
+                    "renamed_source_path": "/真人剧集/Raw.Release/Someday or One Day S00E100.mkv",
+                }
+            ],
+            "unmatched_sources": ["Bonus.mkv"],
+            "warnings": [],
+        }
+
+        with patch.object(
+            renaming,
+            "collect_storage_file_tree",
+            return_value=[
+                {"name": "Movie.mkv", "relative_path": "Movie.mkv", "is_dir": False},
+                {"name": "Bonus.mkv", "relative_path": "Bonus.mkv", "is_dir": False},
+            ],
+        ), patch.object(
+            renaming,
+            "infer_tvdb_episode_plan_with_ai",
+            return_value={
+                "episode_map": [
+                    {
+                        "source_file": "Movie.mkv",
+                        "season_number": 0,
+                        "episode_number": 100,
+                    }
+                ]
+            },
+        ), patch.object(
+            renaming, "build_confirmed_rename_plan", return_value=rename_plan
+        ), patch.object(
+            renaming, "_get_tvdb_candidates_and_episodes", return_value=([], [])
+        ):
+            result = renaming.process_tvdb_episode(event)
+
+        self.assertTrue(result.handled)
+        self.assertTrue(result.should_stop)
+        storage.create_dir_recursive.assert_any_call("/未整理/Raw.Release")
+        storage.move_file.assert_any_call(
+            "/真人剧集/Raw.Release/Bonus.mkv", "/未整理/Raw.Release"
+        )
+
+    def test_confirmed_target_conflict_is_reported_before_any_move(self):
+        from app.modules.renaming import (
+            ConfirmedPlanConflict,
+            _assert_no_target_conflicts,
+        )
+
+        storage = Mock()
+        storage.get_file_info.return_value = {"file_id": "occupied"}
+        rename_plan = {
+            "operations": [
+                {
+                    "target_dir": "/真人剧集/想见你 (Someday or One Day)/Someday or One Day Season 00",
+                    "rename_to": "Someday or One Day S00E100.mkv",
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(ConfirmedPlanConflict, "S00E100"):
+            _assert_no_target_conflicts(storage, rename_plan)
+
+        storage.rename.assert_not_called()
+        storage.move_file.assert_not_called()
+
+    def test_confirmed_mapping_failure_moves_source_directory_to_unorganized(self):
+        import init
+        from app.core.module_registry import DownloadCompletedEvent
+        from app.modules import renaming
+
+        init.logger = Mock()
+        init.bot_config = {
+            "ai": {
+                "api_url": "https://ai.example",
+                "api_key": "key",
+                "model": "model",
+            },
+            "media": {"unorganized_path": "/未整理"},
+        }
+        storage = Mock()
+        storage.create_dir_recursive.return_value = True
+        storage.move_file.return_value = True
+        event = DownloadCompletedEvent(
+            link="magnet:?xt=urn:btih:" + "c" * 40,
+            selected_path="/真人剧集",
+            user_id=1,
+            final_path="/真人剧集/Raw.Failed",
+            resource_name="Raw.Failed",
+            metadata={
+                "download_plan": {
+                    "schema_version": 1,
+                    "confirmed": True,
+                    "relation": {"target_series_title": "Someday or One Day"},
+                    "placement": {
+                        "library_type": "series",
+                        "season_number": 0,
+                        "episode_number": 100,
+                        "mapping_kind": "temporary_related_special",
+                    },
+                    "source_entry": {
+                        "title": "想见你 (电影)",
+                        "url": "https://zh.wikipedia.org/wiki/想見你_(電影)",
+                    },
+                }
+            },
+            storage=storage,
+        )
+
+        with patch.object(
+            renaming, "_attempt_tvdb_ai_episode_rename", return_value=None
+        ):
+            result = renaming.process_tvdb_episode(event)
+
+        self.assertTrue(result.handled)
+        self.assertEqual(result.final_path, "/未整理/Raw.Failed")
+        storage.move_file.assert_called_once_with(
+            "/真人剧集/Raw.Failed", "/未整理"
+        )
+
     def test_renaming_module_registers_post_download_processors(self):
         from app.core.module_registry import ModuleRegistry
         from app.modules.renaming import register_module
