@@ -279,7 +279,11 @@ def _normalize_episode(item: dict) -> dict:
     return {
         "tvdb_episode_id": item.get("id"),
         "name": str(item.get("name") or "").strip(),
-        "season_number": item.get("seasonNumber") or item.get("season_number"),
+        "season_number": (
+            item.get("seasonNumber")
+            if item.get("seasonNumber") not in (None, "")
+            else item.get("season_number")
+        ),
         "episode_number": item.get("number") or item.get("episodeNumber") or item.get("episode_number"),
         "aired": str(item.get("aired") or item.get("firstAired") or "").strip(),
     }

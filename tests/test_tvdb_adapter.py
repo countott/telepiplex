@@ -103,6 +103,24 @@ class TvdbAdapterTest(unittest.TestCase):
         )
         get_mock.assert_called_once_with("/movies/123/extended", params={"short": True})
 
+    @patch.object(tvdb, "_tvdb_get")
+    def test_series_episodes_preserve_special_season_zero(self, get_mock):
+        get_mock.return_value = {
+            "data": {
+                "episodes": [{
+                    "id": 100,
+                    "name": "The Movie",
+                    "seasonNumber": 0,
+                    "number": 5,
+                }]
+            }
+        }
+
+        result = tvdb.get_tvdb_series_episodes("series-1")
+
+        self.assertEqual(result[0]["season_number"], 0)
+        self.assertEqual(result[0]["episode_number"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()
