@@ -7,11 +7,19 @@ allowed_user: 123456789
 
 # 共享保存目录合同。业务分支可复用该结构，不在 core 分支执行 115 投递。
 category_folder:
-  - name: 真人电影
+  - kind: live_action_movie
+    name: 真人电影
     path: /真人电影
-  - name: 动画电影
+    plex_library_id: ""
+  - kind: animated_movie
+    name: 动画电影
     path: /动画电影
-  - name: 真人剧集
+    plex_library_id: ""
+  - kind: live_action_series
+    name: 真人剧集
     path: /真人剧集
-  - name: 动画剧集
+    plex_library_id: ""
+  - kind: animated_series
+    name: 动画剧集
     path: /动画剧集
+    plex_library_id: ""
