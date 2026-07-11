@@ -7,6 +7,13 @@ import json
 import re
 import time
 
+from app.core.media_metadata import (
+    MEDIA_METADATA_KEY,
+    SERIES_EPISODE_MAPPINGS,
+    extract_confirmed_media_metadata,
+    resolve_category_route,
+)
+
 from . import plex_rules
 
 
@@ -151,7 +158,43 @@ class PlexManagementService:
         self._notify_once(completed)
         return self.jobs.get(job_id)
 
+    def _media_metadata(self, job):
+        metadata = (job.get("payload") or {}).get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        contract = extract_confirmed_media_metadata(metadata)
+        if MEDIA_METADATA_KEY in metadata and contract is None:
+            raise ValueError("Invalid or unsupported media_metadata contract")
+        return contract
+
+    def _effective_metadata(self, job):
+        contract = self._media_metadata(job)
+        if not contract:
+            return (job.get("payload") or {}).get("metadata") or {}
+        identity = dict(contract.get("identity") or {})
+        identity["title"] = (
+            identity.get("chinese_title")
+            or identity.get("english_title")
+            or ""
+        )
+        identity["original_title"] = identity.get("english_title") or ""
+        identity["media_type"] = (
+            "tv"
+            if contract["placement"]["library_type"] == "series"
+            else "movie"
+        )
+        return identity
+
     def _route_library(self, job):
+        contract = self._media_metadata(job)
+        if contract:
+            category_kind = contract["placement"]["category_kind"]
+            route = resolve_category_route(
+                {"category_folder": self.category_folders},
+                category_kind,
+            )
+            if not route or not route.get("plex_library_id"):
+                raise LookupError(f"No Plex library route for {category_kind}")
+            return route["plex_library_id"]
         selected_path = str(job["payload"].get("selected_path") or "").rstrip("/")
         matches = []
         for entry in self.category_folders:
@@ -192,6 +235,54 @@ class PlexManagementService:
     def _locate(self, job):
         scan = job["step_results"]["scanning"]
         library_id = scan["library_id"]
+        contract = self._media_metadata(job)
+        if (
+            contract
+            and contract["placement"]["mapping_kind"] in SERIES_EPISODE_MAPPINGS
+        ):
+            placement = contract["placement"]
+            target = (contract.get("relation") or {}).get("target_series") or {}
+            expected_final_paths = [
+                item.get("final_path")
+                for item in contract.get("items") or []
+                if item.get("final_path")
+                and item.get("season_number") is not None
+                and item.get("episode_number") is not None
+                and int(item["season_number"]) == int(placement["season_number"])
+                and int(item["episode_number"]) == int(placement["episode_number"])
+            ]
+            if not expected_final_paths:
+                raise LookupError("Confirmed Plex Special has no resolved final path")
+            deadline = self._clock() + self.scan_timeout
+            item = None
+            while item is None:
+                item = self.plex.find_series_episode(
+                    library_id,
+                    tvdb_series_id=(
+                        (target.get("external_ids") or {}).get("tvdb") or ""
+                    ),
+                    title=(
+                        target.get("english_title")
+                        or target.get("chinese_title")
+                        or ""
+                    ),
+                    year=target.get("year") or "",
+                    season_number=placement["season_number"],
+                    episode_number=placement["episode_number"],
+                    expected_final_paths=expected_final_paths,
+                )
+                if item is not None or self._clock() >= deadline:
+                    break
+                self._sleep(self.scan_poll_interval)
+            if not item:
+                raise LookupError("Confirmed Plex Special was not found")
+            self.jobs.update(job["id"], rating_key=str(item["rating_key"]))
+            return {
+                "status": "success",
+                "rating_key": str(item["rating_key"]),
+                "candidates": [item],
+            }
+
         before = set(scan.get("before_rating_keys") or [])
         deadline = self._clock() + self.scan_timeout
         candidates = []
@@ -202,7 +293,7 @@ class PlexManagementService:
             self._sleep(self.scan_poll_interval)
         if not candidates:
             raise LookupError("Plex scan completed but no new item was located")
-        metadata = job["payload"].get("metadata") or {}
+        metadata = self._effective_metadata(job)
         expected = (
             str(metadata.get("title") or metadata.get("original_title") or "").strip().casefold(),
             int(metadata.get("year") or 0),
@@ -210,6 +301,8 @@ class PlexManagementService:
         exact = [item for item in candidates if self._candidate_identity(item) == expected]
         chosen = exact[0] if len(exact) == 1 else candidates[0] if len(candidates) == 1 else None
         if chosen is None:
+            if contract:
+                raise LookupError("Contract-bound Plex location is ambiguous")
             raise WaitingForMatchConfirmation(candidates, kind="location")
         self.jobs.update(job["id"], rating_key=str(chosen["rating_key"]))
         return {"status": "success", "rating_key": str(chosen["rating_key"]), "candidates": candidates}
@@ -218,6 +311,97 @@ class PlexManagementService:
         rating_key = str(job.get("rating_key") or "")
         if not rating_key:
             raise LookupError("Plex rating key is missing")
+        contract = self._media_metadata(job)
+        if contract:
+            mapping_kind = contract["placement"]["mapping_kind"]
+            item = self.plex.get_item(rating_key)
+            if mapping_kind == "temporary_related_special":
+                return {
+                    "status": "unchanged",
+                    "action": "custom_metadata_pending",
+                    "item": item,
+                }
+            if mapping_kind == "tvdb_official":
+                expected = {
+                    "tvdb": str(contract["placement"]["tvdb_episode_id"])
+                }
+                if not plex_rules.external_ids_match(expected, item.get("guids")):
+                    raise RuntimeError(
+                        "Official Plex Special does not match confirmed TVDB episode"
+                    )
+                return {"status": "success", "action": "verified", "item": item}
+            if mapping_kind == "ai_inferred_tvdb":
+                if not any(
+                    str(guid).startswith("tvdb://")
+                    for guid in item.get("guids") or []
+                ):
+                    raise RuntimeError(
+                        "AI-inferred Special is still not verified by TVDB"
+                    )
+                return {
+                    "status": "success",
+                    "action": "verified_after_scan",
+                    "item": item,
+                }
+            if mapping_kind == "standalone":
+                expected = {
+                    source: str(value)
+                    for source, value in (
+                        (contract.get("identity") or {}).get("external_ids") or {}
+                    ).items()
+                    if source in {"imdb", "tmdb", "tvdb"}
+                    and str(value).strip()
+                }
+                if expected and plex_rules.external_ids_match(
+                    expected, item.get("guids")
+                ):
+                    return {
+                        "status": "success",
+                        "action": "verified",
+                        "item": item,
+                    }
+                if expected:
+                    identity = contract.get("identity") or {}
+                    candidates = self.plex.list_match_candidates(
+                        rating_key,
+                        title=(
+                            identity.get("english_title")
+                            or identity.get("chinese_title")
+                        ),
+                        year=identity.get("year"),
+                    )
+                    exact = plex_rules.choose_exact_match(expected, candidates)
+                    if exact is None:
+                        raise RuntimeError(
+                            "Standalone Plex match could not be verified"
+                        )
+                    fixed = self.plex.fix_match(rating_key, exact["guid"])
+                    if not plex_rules.external_ids_match(
+                        expected, fixed.get("guids")
+                    ):
+                        raise RuntimeError(
+                            "Standalone Plex match verification failed"
+                        )
+                    return {
+                        "status": "success",
+                        "action": "fixed",
+                        "item": fixed,
+                    }
+                expected_identity = self._candidate_identity(
+                    self._effective_metadata(job)
+                )
+                if self._candidate_identity(item) != expected_identity:
+                    raise RuntimeError(
+                        "Standalone Plex title/year could not be verified"
+                    )
+                return {
+                    "status": "success",
+                    "action": "verified_by_title_year",
+                    "item": item,
+                }
+        return self._legacy_match(job, rating_key)
+
+    def _legacy_match(self, job, rating_key):
         metadata = job["payload"].get("metadata") or {}
         external_ids = metadata.get("external_ids") or {}
         item = self.plex.get_item(rating_key)
@@ -241,6 +425,37 @@ class PlexManagementService:
         return bool(re.search(r"[\u3400-\u9fff]", str(value or "")))
 
     def _localize(self, job):
+        contract = self._media_metadata(job)
+        mapping_kind = (
+            (contract.get("placement") or {}).get("mapping_kind")
+            if contract
+            else ""
+        )
+        if mapping_kind in {"tvdb_official", "ai_inferred_tvdb"}:
+            return {
+                "status": "unchanged",
+                "action": "official_metadata_preserved",
+            }
+        if mapping_kind == "temporary_related_special":
+            identity = contract["identity"]
+            item = self.plex.edit_custom_episode_metadata(
+                job["rating_key"],
+                title=(
+                    identity.get("chinese_title")
+                    or identity.get("english_title")
+                    or ""
+                ),
+                summary=identity.get("summary") or "",
+                original_release_date=(
+                    identity.get("original_release_date") or ""
+                ),
+                year=identity.get("year") or "",
+            )
+            return {
+                "status": "success",
+                "action": "custom_metadata",
+                "item": item,
+            }
         item = self.plex.refresh_zh_cn(job["rating_key"])
         localized = self._contains_chinese(item.get("title")) or self._contains_chinese(item.get("summary"))
         return {
@@ -279,10 +494,37 @@ class PlexManagementService:
         return tmdb_posters, fanart_posters, warnings
 
     def _artwork(self, job):
+        contract = self._media_metadata(job)
+        mapping_kind = (
+            (contract.get("placement") or {}).get("mapping_kind")
+            if contract
+            else ""
+        )
+        if mapping_kind in {"tvdb_official", "ai_inferred_tvdb"}:
+            return {
+                "status": "unchanged",
+                "action": "official_artwork_preserved",
+            }
+        if mapping_kind == "temporary_related_special":
+            identity = contract.get("identity") or {}
+            poster_url = str(identity.get("poster_url") or "").strip()
+            if not poster_url:
+                return {
+                    "status": "unchanged",
+                    "message": "No confirmed custom poster",
+                }
+            self.plex.set_poster_url(job["rating_key"], poster_url)
+            return {
+                "status": "success",
+                "selected": {
+                    "url": poster_url,
+                    "source": identity.get("poster_source") or "media_metadata",
+                },
+            }
         item = dict((job["step_results"].get("matching") or {}).get("item") or {})
         if not item:
             item = self.plex.get_item(job["rating_key"])
-        item["external_ids"] = job["payload"].get("metadata", {}).get("external_ids") or {}
+        item["external_ids"] = self._effective_metadata(job).get("external_ids") or {}
         tmdb_posters, fanart_posters, warnings = self._artwork_candidates(item)
         chosen = plex_rules.choose_textless_poster(tmdb_posters, fanart_posters)
         if chosen:
@@ -296,7 +538,7 @@ class PlexManagementService:
         }
 
     def _streams(self, job):
-        metadata = job["payload"].get("metadata") or {}
+        metadata = self._effective_metadata(job)
         tmdb_id = (metadata.get("external_ids") or {}).get("tmdb")
         media_type = "tv" if metadata.get("media_type") in {"show", "episode", "tv"} else "movie"
         warnings = []
