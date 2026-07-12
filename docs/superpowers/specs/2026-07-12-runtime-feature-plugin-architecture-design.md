@@ -128,7 +128,7 @@ The package includes its complete wheelhouse so installation uses
 /config/plugins/<plugin_id>/state/
 /config/plugins/<plugin_id>/releases/<version>/
 /config/plugins/<plugin_id>/active.json
-/config/plugins/<plugin_id>/runtime/
+/tmp/telepiplex/<instance_hash>.sock
 ```
 
 `/config/config.yaml` contains only core settings: Telegram credentials,
@@ -139,6 +139,10 @@ Core validates Feature configuration against the installed schema and exposes a
 generic Telegram configuration flow. A Feature never reads another Feature's
 configuration. Shared values are exposed as explicit core configuration
 capabilities or included in event/request envelopes.
+
+Unix sockets are ephemeral and use fixed-length hashed names under
+`/tmp/telepiplex`; deriving socket names from arbitrary install paths can exceed
+the platform `AF_UNIX` path limit.
 
 ## 7. Process and RPC Contract
 

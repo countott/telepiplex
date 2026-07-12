@@ -358,38 +358,38 @@ git commit -m "feat(core): route capabilities and journal Feature events"
 - Produces states: `starting`, `healthy`, `draining`, `stopped`, `failed`,
   `quarantined`.
 
-- [ ] **Step 1: Write supervisor RED tests**
+- [x] **Step 1: Write supervisor RED tests**
 
 Use executable fixture scripts, not mocks, to prove argv is not shell-expanded,
 startup token is not logged, socket cleanup, handshake timeout, healthy start,
 unexpected exit restart with bounded backoff, quarantine after three failures,
 drain result propagation, and unrelated-process survival.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `python3 -m unittest tests.test_plugin_supervisor -v`
 
 Expected: import failure for `app.core.plugin_supervisor`.
 
-- [ ] **Step 3: Implement safe process launch**
+- [x] **Step 3: Implement safe process launch**
 
 Launch with `asyncio.create_subprocess_exec` and a fixed argv list. Set only
 documented `TPX_*` environment variables, create socket directories mode 0700,
 capture bounded stdout/stderr lines, and sanitize token-like values.
 
-- [ ] **Step 4: Implement monitoring and lifecycle**
+- [x] **Step 4: Implement monitoring and lifecycle**
 
 Poll handshake/health until the startup deadline, monitor exits, apply bounded
 backoff, and quarantine after `restart_limit`. Drain before TERM; use KILL only
 after the shutdown deadline and record all unfinished task IDs as interrupted.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run: `python3 -m unittest tests.test_plugin_supervisor -v`
 
 Expected: all supervisor tests pass and no child process remains.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/core/plugin_supervisor.py tests/test_plugin_supervisor.py tests/fixtures/plugin_processes
