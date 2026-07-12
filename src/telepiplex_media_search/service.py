@@ -24,7 +24,6 @@ from .search_plan import TemporarySpecialAllocator, confirm_media_metadata
 
 
 _LATIN = re.compile(r"[A-Za-z]")
-_EPISODE_SCOPE = re.compile(r"\bS\d{1,2}(?:E\d{1,3})?\b", re.IGNORECASE)
 
 
 class MediaSearchFeature:
@@ -278,10 +277,6 @@ class MediaSearchFeature:
         year = " ".join(str(identity.get("year") or "").split())
         placement = contract.get("placement") or {}
         if placement.get("library_type") == "series":
-            for query in plan.get("prowlarr_queries") or []:
-                query = " ".join(str(query).split())
-                if _LATIN.search(query) and _EPISODE_SCOPE.search(query):
-                    return query
             season = placement.get("season_number")
             episode = placement.get("episode_number")
             if season is None:

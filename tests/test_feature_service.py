@@ -124,6 +124,21 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "English Title S09E07",
         )
 
+    async def test_series_query_never_reuses_mixed_chinese_ai_query(self):
+        plan = search_plan()
+        contract = plan["media_metadata"]
+        contract["placement"].update({
+            "library_type": "series", "category_kind": "live_action_series",
+            "season_number": 1, "episode_number": 2,
+        })
+        contract["items"] = [{"season_number": 1, "episode_number": 2}]
+        plan["prowlarr_queries"] = ["中文 English Title S01E02"]
+
+        self.assertEqual(
+            self.feature._english_prowlarr_query(plan, contract),
+            "English Title S01E02",
+        )
+
     async def test_selected_release_calls_download_provider_with_canonical_contract(self):
         command = await self.feature.command({
             "command": "search",
