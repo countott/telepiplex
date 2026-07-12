@@ -11,6 +11,14 @@ sys.modules.setdefault("yaml", types.SimpleNamespace(safe_load=lambda stream: {}
 
 
 class MediaSearchSurfaceTest(unittest.TestCase):
+    def test_media_search_is_the_only_business_module(self):
+        modules = sorted(
+            path.name
+            for path in (ROOT / "app/modules").glob("*.py")
+            if path.name != "__init__.py"
+        )
+        self.assertEqual(modules, ["media_search.py"])
+
     def test_core_metadata_contract_survives_download_request_handoff(self):
         from app.core.media_metadata import attach_media_metadata
         from app.core.module_registry import DownloadRequest
@@ -112,6 +120,11 @@ class MediaSearchSurfaceTest(unittest.TestCase):
             ROOT / "app" / "utils" / "aria2.py",
             ROOT / "app" / "utils" / "media_naming.py",
             ROOT / "app" / "utils" / "tvdb_rename.py",
+            ROOT / "app" / "modules" / "open115.py",
+            ROOT / "app" / "modules" / "renaming.py",
+            ROOT / "app" / "modules" / "plex_management.py",
+            ROOT / "app" / "adapters" / "plex.py",
+            ROOT / "app" / "services" / "plex_management.py",
         ):
             self.assertFalse(path.exists(), str(path))
 
@@ -120,6 +133,7 @@ class MediaSearchSurfaceTest(unittest.TestCase):
 
         self.assertIn("DownloadRequest", source)
         self.assertIn("registry.dispatch_download", source)
+        self.assertIn("attach_media_metadata", source)
         self.assertNotIn("app.handlers.download_handler", source)
 
     def test_config_exposes_search_not_delivery_or_organization(self):
@@ -136,6 +150,8 @@ class MediaSearchSurfaceTest(unittest.TestCase):
                 "media:",
                 "plex:",
                 "aria2:",
+                "unorganized_path:",
+                "renaming:",
             ):
                 self.assertNotIn(term, source)
 

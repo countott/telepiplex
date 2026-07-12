@@ -2267,7 +2267,7 @@ async def confirm_media_metadata_callback(
     search_plan = task["plan"]
     contract = confirm_media_metadata(search_plan)
     identity = contract["identity"]
-    metadata = attach_media_metadata({"source": "confirmed"}, contract)
+    metadata = attach_media_metadata({}, contract)
     pending_entry_confirmations.pop(plan_id, None)
     await callback.edit_message_text(
         f"✅ 已确认媒体元数据：{identity.get('chinese_title') or identity.get('english_title') or ''}"

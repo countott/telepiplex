@@ -15,6 +15,12 @@ def register_module(registry):
         ]
     )
     registry.add_config_sections(
-        ["search.prowlarr", "metadata.wikipedia", "metadata.tvdb", "ai"]
+        [
+            "search.prowlarr",
+            "metadata.wikipedia",
+            "metadata.douban",
+            "metadata.tvdb",
+            "ai",
+        ]
     )
     registry.add_handlers(_register_handlers)

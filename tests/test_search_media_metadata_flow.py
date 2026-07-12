@@ -262,10 +262,12 @@ class SearchMediaMetadataFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state, search_handler.ConversationHandler.END)
         request = submit_mock.call_args.args[1]
         self.assertEqual(request.selected_path, "/真人剧集")
-        self.assertIn("media_metadata", request.metadata)
+        self.assertEqual(set(request.metadata), {"media_metadata"})
         self.assertNotIn("_".join(("download", "plan")), request.metadata)
         self.assertEqual(request.metadata["media_metadata"]["metadata_id"], plan_id)
         self.assertTrue(request.metadata["media_metadata"]["confirmed"])
+        self.assertNotIn("plan_id", request.metadata["media_metadata"])
+        self.assertNotIn("prowlarr_queries", request.metadata["media_metadata"])
         self.assertEqual(timeline.count("confirmation"), 1)
         self.assertLess(timeline.index("ai:hypothesis"), timeline.index("ai:media_metadata"))
         for provider_name in ("wikipedia", "douban", "tvdb"):
