@@ -6,6 +6,7 @@ from telepiplex_plugin_sdk import FeatureRuntime, RuntimeContext
 
 from .client import Open115Client
 from .service import Open115Feature
+from .jobs import DownloadJobStore
 
 
 def main(context: RuntimeContext) -> FeatureRuntime:
@@ -14,6 +15,7 @@ def main(context: RuntimeContext) -> FeatureRuntime:
         config=config,
         core=context.core,
         client=Open115Client(config),
+        jobs=DownloadJobStore(context.state_path / "downloads.db"),
     )
     runtime = FeatureRuntime(
         manifest=context.manifest,

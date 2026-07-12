@@ -239,10 +239,24 @@ class Open115Client:
         return False
 
     def move_file(self, source_path: str, target_path: str):
+        return self.move_file_detailed(source_path, target_path)["state"] == "moved"
+
+    def move_file_detailed(self, source_path: str, target_path: str):
         self.create_dir_recursive(target_path)
         if not self.copy_file(source_path, target_path):
-            return False
-        return self.delete_single_file(source_path)
+            return {"state": "copy_failed", "copied": False, "source_deleted": False,
+                    "source_path": source_path, "target_path": f"{target_path.rstrip('/')}/{PurePosixPath(source_path).name}"}
+        target = f"{target_path.rstrip('/')}/{PurePosixPath(source_path).name}"
+        try:
+            deleted = self.delete_single_file(source_path)
+        except Exception as exc:
+            deleted = False
+            error = type(exc).__name__
+        else:
+            error = "" if deleted else "delete_failed"
+        return {"state": "moved" if deleted else "copied_source_retained",
+                "copied": True, "source_deleted": bool(deleted),
+                "source_path": source_path, "target_path": target, "error": error}
 
     def is_directory(self, path: str):
         info = self.get_file_info(path)

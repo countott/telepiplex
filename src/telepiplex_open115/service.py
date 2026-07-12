@@ -21,22 +21,31 @@ _STORAGE_METHODS = {
     "copy_file",
     "delete_single_file",
     "move_file",
+    "move_file_detailed",
     "is_directory",
     "get_files_from_dir",
 }
 
 
 class Open115Feature:
-    def __init__(self, *, config: dict, core, client):
+    def __init__(self, *, config: dict, core, client, jobs=None):
         self.config = config
         self.core = core
         self.client = client
         self.runtime = None
         self.sessions = {}
         self.active_job_ids = set()
+        self.jobs = jobs
 
     def bind_runtime(self, runtime):
         self.runtime = runtime
+        if self.jobs:
+            for job in self.jobs.resumable():
+                runtime.spawn(
+                    self._publish_downloaded(job) if job["state"] == "downloaded"
+                    else self._download_job(job["job_id"], job["payload"]),
+                    task_id=job["job_id"],
+                )
 
     async def download_capability(self, request: dict) -> dict:
         if request.get("method") != "submit":
@@ -133,8 +142,14 @@ class Open115Feature:
         ).hexdigest()
         if job_id in self.active_job_ids:
             return {"accepted": True, "job_id": job_id, "duplicate": True}
+        if self.jobs:
+            job = self.jobs.create_or_get(job_id, payload | {"link": link, "selected_path": selected_path})
+            if job["state"] in {"completed", "failed", "downloaded", "running"}:
+                return {"accepted": True, "job_id": job_id, "duplicate": True, "state": job["state"]}
         self.active_job_ids.add(job_id)
         try:
+            if self.jobs:
+                self.jobs.update(job_id, "running")
             self.runtime.spawn(self._download_job(job_id, payload | {
                 "link": link,
                 "selected_path": selected_path,
@@ -187,18 +202,14 @@ class Open115Feature:
                 "media_metadata": payload.get("media_metadata"),
                 "naming_metadata": payload.get("naming_metadata"),
             }
-            await self.core.publish_event(
-                "download.completed",
-                event_payload,
-                idempotency_key=f"{job_id}:completed",
-            )
-            if user_id:
-                await self.core.notify_user(
-                    user_id,
-                    f"✅ 115 下载完成，已交给整理管线。\n保存目录：{final_path}",
-                    idempotency_key=f"{job_id}:download-notice",
-                )
+            if self.jobs:
+                self.jobs.update(job_id, "downloaded", result=event_payload)
+            await self._publish_downloaded({"job_id": job_id, "state": "downloaded", "result": event_payload})
         except Exception as exc:
+            if self.jobs and (self.jobs.get(job_id) or {}).get("state") == "downloaded":
+                return
+            if self.jobs:
+                self.jobs.update(job_id, "failed", error=type(exc).__name__)
             failure = {
                 "job_id": job_id,
                 "provider": "open115",
@@ -206,15 +217,17 @@ class Open115Feature:
                 "link": link,
                 "error": type(exc).__name__,
             }
-            await self.core.publish_event(
-                "download.failed", failure, idempotency_key=f"{job_id}:failed"
-            )
-            if user_id:
-                await self.core.notify_user(
-                    user_id,
-                    f"❌ 115 下载任务失败：{type(exc).__name__}",
-                    idempotency_key=f"{job_id}:failed-notice",
+            try:
+                await self.core.publish_event(
+                    "download.failed", failure, idempotency_key=f"{job_id}:failed"
                 )
+            except Exception:
+                pass
+            if user_id:
+                try:
+                    await self.core.notify_user(user_id, f"❌ 115 下载任务失败：{type(exc).__name__}", idempotency_key=f"{job_id}:failed-notice")
+                except Exception:
+                    pass
         finally:
             if info_hash:
                 try:
@@ -222,6 +235,19 @@ class Open115Feature:
                 except Exception:
                     pass
             self.active_job_ids.discard(job_id)
+
+    async def _publish_downloaded(self, job):
+        payload = job.get("result") or {}
+        job_id = str(job["job_id"])
+        await self.core.publish_event("download.completed", payload, idempotency_key=f"{job_id}:completed")
+        if self.jobs:
+            self.jobs.update(job_id, "completed", result=payload)
+        user_id = int(payload.get("user_id") or 0)
+        if user_id:
+            try:
+                await self.core.notify_user(user_id, f"✅ 115 下载完成，已交给整理管线。\n保存目录：{payload.get('final_path')}", idempotency_key=f"{job_id}:download-notice")
+            except Exception:
+                pass
 
     @staticmethod
     def _sanitize_name(value) -> str:

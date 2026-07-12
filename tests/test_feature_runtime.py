@@ -13,8 +13,11 @@ class FakeCore:
     def __init__(self):
         self.events = []
         self.notifications = []
+        self.fail_publish = False
 
     async def publish_event(self, event_type, payload, **kwargs):
+        if self.fail_publish:
+            raise RuntimeError("core unavailable")
         self.events.append((event_type, payload, kwargs))
         return {"event_id": "event-1"}
 
@@ -122,6 +125,53 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
                 "method": "__getattribute__",
                 "payload": {"args": ["access_token"]},
             })
+
+    async def test_completed_job_is_persistently_idempotent(self):
+        from telepiplex_open115.jobs import DownloadJobStore
+        from telepiplex_open115.service import Open115Feature
+
+        jobs = DownloadJobStore(Path(self._testMethodName + ".db"))
+        self.addCleanup(Path(self._testMethodName + ".db").unlink, missing_ok=True)
+        feature = Open115Feature(
+            config={"download_timeout": 30, "poll_interval": 0.01},
+            core=self.core, client=self.client, jobs=jobs,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+        request = {"method": "submit", "payload": {
+            "link": "magnet:?xt=urn:btih:" + "c" * 40,
+            "selected_path": "/Downloads",
+        }, "context": {"idempotency_key": "durable-1"}}
+
+        await feature.download_capability(request)
+        await runtime.tasks.pop("durable-1")
+        duplicate = await feature.download_capability(request)
+
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(duplicate["state"], "completed")
+        self.assertEqual(runtime.tasks, {})
+
+    async def test_completion_publish_failure_is_not_mislabeled_as_download_failure(self):
+        from telepiplex_open115.jobs import DownloadJobStore
+        from telepiplex_open115.service import Open115Feature
+
+        path = Path(self._testMethodName + ".db")
+        self.addCleanup(path.unlink, missing_ok=True)
+        jobs = DownloadJobStore(path)
+        feature = Open115Feature(
+            config={"download_timeout": 30, "poll_interval": 0.01},
+            core=self.core, client=self.client, jobs=jobs,
+        )
+        runtime = FakeRuntime(); feature.bind_runtime(runtime)
+        self.core.fail_publish = True
+        await feature.download_capability({"method": "submit", "payload": {
+            "link": "magnet:?xt=urn:btih:" + "d" * 40,
+            "selected_path": "/Downloads",
+        }, "context": {"idempotency_key": "outbox-1"}})
+
+        await runtime.tasks.pop("outbox-1")
+
+        self.assertEqual(jobs.get("outbox-1")["state"], "downloaded")
 
     async def test_magnet_command_uses_session_and_namespaced_callback(self):
         self.feature.config["save_directories"] = [
