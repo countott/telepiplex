@@ -152,6 +152,16 @@ class PluginRuntimeEndToEndTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(first, {"text": "hello", "version": "1.0.0"})
 
+        process = self.supervisor.process("echo")
+        process.child.kill()
+        async with asyncio.timeout(5):
+            while process.restart_count < 1 or process.state != "healthy":
+                await asyncio.sleep(0.02)
+        recovered = await self.router.call(
+            "demo.echo", "echo", {"text": "recovered"}, {"deadline": 3}
+        )
+        self.assertEqual(recovered["text"], "recovered")
+
         self.journal.set_subscriptions("audit", ["demo.echoed"])
         published = await self.router.call(
             "demo.echo",
