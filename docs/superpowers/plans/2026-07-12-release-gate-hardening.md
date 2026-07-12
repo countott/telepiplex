@@ -6,7 +6,7 @@
 
 **Architecture:** Enforce active-consumer compatibility while the router snapshot is still only prepared, classify untyped Feature failures as retryable, and validate dependency isolation at requirements input, plugin wheel metadata, and final wheelhouse boundaries. Each change is protected by a regression test that must fail before production code changes.
 
-**Tech Stack:** Python 3.12, `asyncio`, `unittest`, immutable `.tpx` ZIP artifacts, wheel `METADATA`, Unix RPC.
+**Tech Stack:** Python 3.12, `asyncio`, `unittest`, `packaging>=24,<27`, immutable `.tpx` ZIP artifacts, wheel `METADATA`, Unix RPC.
 
 ## Global Constraints
 
@@ -121,6 +121,7 @@ git commit -m "fix(core): retry untyped Feature event failures"
 ### Task 3: Close Feature Dependency Isolation Bypasses
 
 **Files:**
+- Modify: `requirements.txt`
 - Modify: `tests/test_feature_builder.py`
 - Modify: `tools/build_feature.py:1-140`
 
@@ -152,14 +153,14 @@ Expected: new bypass tests fail because indirections and wheel metadata are not 
 
 - [ ] **Step 3: Implement fail-closed dependency validation**
 
-Add focused helpers in `tools/build_feature.py`:
+Declare `packaging>=24,<27` in `requirements.txt`, then add focused helpers in `tools/build_feature.py`:
 
 ```python
 _DISTRIBUTION_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def _validate_distribution_name(name: str):
-    normalized = name.casefold().replace("_", "-").replace(".", "-")
+    normalized = re.sub(r"[-_.]+", "-", name).casefold()
     if normalized.startswith("telepiplex-") and normalized != "telepiplex-plugin-sdk":
         raise FeatureBuildError(
             f"forbidden Feature distribution dependency: {normalized}"
@@ -171,19 +172,17 @@ def validate_feature_requirements(source: str):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if (
-            line.startswith("-")
-            or "://" in line
-            or " @ " in line
-            or "/" in line
-            or "\\" in line
-            or line.casefold().endswith((".whl", ".zip", ".tar.gz", ".tgz"))
-        ):
-            raise FeatureBuildError("Feature requirements must use named distributions")
-        match = _DISTRIBUTION_NAME.match(line)
-        if match is None:
-            raise FeatureBuildError("Feature requirement has no distribution name")
-        _validate_distribution_name(match.group(0))
+        try:
+            requirement = Requirement(line)
+        except InvalidRequirement as exc:
+            raise FeatureBuildError(
+                "Feature requirements must use named distributions"
+            ) from exc
+        if requirement.url is not None:
+            raise FeatureBuildError(
+                "Feature requirements must not use direct references"
+            )
+        _validate_distribution_name(requirement.name)
 
 
 def _wheel_metadata(path: Path):
@@ -226,7 +225,7 @@ Expected: all builder tests pass, including the existing installable echo `.tpx`
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/test_feature_builder.py tools/build_feature.py
+git add requirements.txt tests/test_feature_builder.py tools/build_feature.py
 git commit -m "fix(core): close Feature dependency isolation bypasses"
 ```
 

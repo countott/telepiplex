@@ -36,7 +36,7 @@ The source builder adopts a fail-closed dependency policy.
 
 ### Requirements input
 
-`requirements-feature.txt` accepts only normalized named distribution requirements. It rejects pip directives and indirections such as `-r`, `-c`, `-e`, index/find-links options, local paths, and URL requirements. This prevents dependency content from escaping the file that Core validates.
+`requirements-feature.txt` accepts only normalized named PEP 508 distribution requirements. The builder uses `packaging.requirements.Requirement` and accepts only successfully parsed requirements whose `url` is empty. It rejects pip directives and indirections such as `-r`, `-c`, `-e`, index/find-links options, local paths, bare VCS links, and named URL requirements. This prevents dependency content from escaping the file that Core validates. Core declares `packaging>=24,<27` explicitly so the same parser is available in Docker and release environments.
 
 Every accepted named requirement is normalized. Any `telepiplex-*` distribution other than `telepiplex-plugin-sdk` is rejected.
 
