@@ -47,6 +47,20 @@ def _cleanup_source_directory(storage, path):
     return True
 
 
+def _move_file_with_outcome(storage, source_path, target_dir):
+    detailed = getattr(storage, "move_file_detailed", None)
+    if callable(detailed):
+        result = detailed(source_path, target_dir)
+        if isinstance(result, dict) and "copied" in result:
+            return result
+    moved = storage.move_file(source_path, target_dir)
+    return {
+        "state": "moved" if moved is True else "move_failed",
+        "copied": moved is True,
+        "source_deleted": moved is True,
+    }
+
+
 def _list_response_items(response):
     if isinstance(response, list):
         return response
@@ -339,6 +353,18 @@ def _deterministic_episode_plan(media_metadata: dict, file_tree: list[dict]):
     if not allowed and placement.get("season_number") is not None and placement.get("episode_number") is not None:
         allowed.add((int(placement["season_number"]), int(placement["episode_number"])))
     mapped = {}
+    nodes_by_path = {
+        str(node.get("relative_path") or "").strip("/"): node
+        for node in file_tree if not node.get("is_dir")
+    }
+    for item in media_metadata.get("items") or []:
+        hint = str(item.get("source_hint") or "").strip("/")
+        if not hint:
+            continue
+        marker = (int(item["season_number"]), int(item["episode_number"]))
+        node = nodes_by_path.get(hint)
+        if marker in allowed and node is not None and marker not in mapped:
+            mapped[marker] = node
     for node in file_tree:
         if node.get("is_dir"):
             continue
@@ -426,7 +452,10 @@ def _attempt_confirmed_series_rename(
                 if storage.rename(operation["source_path"], operation["rename_to"]) is not True:
                     raise RuntimeError(f"重命名失败 {operation['source_path']}")
                 current_source_path = operation["renamed_source_path"]
-            if storage.move_file(current_source_path, operation["target_dir"]) is not True:
+            outcome = _move_file_with_outcome(
+                storage, current_source_path, operation["target_dir"]
+            )
+            if not outcome.get("copied"):
                 raise RuntimeError(f"移动失败 {current_source_path}")
         except Exception as exc:
             raise BatchRenameInterrupted(
@@ -574,10 +603,6 @@ def _attempt_media_auto_rename(event: DownloadCompletedEvent, naming_metadata):
         return None
     video_nodes.sort(key=lambda item: int(item.get("size") or 0), reverse=True)
     main_video = video_nodes[0]
-    for extra in video_nodes[1:]:
-        extra_path = f"{str(event.final_path).rstrip('/')}/{extra['relative_path']}"
-        if storage.delete_single_file(extra_path) is not True:
-            raise RuntimeError(f"自动整理失败：无法删除额外视频 {extra_path}")
 
     original_file_name = main_video["name"]
     original_relative_path = main_video["relative_path"]
@@ -601,7 +626,8 @@ def _attempt_media_auto_rename(event: DownloadCompletedEvent, naming_metadata):
         if storage.rename(original_file_path, plan.file_name) is not True:
             raise RuntimeError(f"自动整理失败：重命名失败 {original_file_path}")
 
-    if storage.move_file(renamed_file_path, target_path) is not True:
+    outcome = _move_file_with_outcome(storage, renamed_file_path, target_path)
+    if not outcome.get("copied"):
         raise RuntimeError(f"自动整理失败：移动失败 {renamed_file_path}")
     cleanup_complete = True
     if event.final_path != target_path:

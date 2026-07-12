@@ -1,4 +1,5 @@
 import ast
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -40,6 +41,11 @@ class FakeStorage:
     def move_file(self, source, target):
         self.moved.append((source, target))
         return True
+
+    def move_file_detailed(self, source, target):
+        moved = self.move_file(source, target)
+        return {"state": "moved" if moved else "copy_failed", "copied": moved,
+                "source_deleted": moved, "source_path": source, "target_path": target}
 
     def delete_single_file(self, path):
         self.deleted.append(path)
@@ -135,7 +141,6 @@ class RenamingProcessorTest(unittest.TestCase):
 
         self.assertTrue(result.handled)
         self.assertEqual(result.final_path, "/Movies/中文电影 (English Movie)")
-        self.assertIn("/Downloads/Release/sample.mp4", storage.deleted)
         self.assertIn("/Downloads/Release", storage.deleted)
         self.assertNotIn("/Downloads/Release/Movie.2024.1080p.mkv", storage.deleted)
         self.assertEqual(storage.moved[-1][1], "/Movies/中文电影 (English Movie)")
@@ -234,6 +239,7 @@ class FakeCore:
         ])
         self.events = []
         self.notifications = []
+        self.fail_notification = False
 
     async def call_capability(self, capability, method, payload, **_kwargs):
         self.assert_capability = capability
@@ -245,6 +251,8 @@ class FakeCore:
         return {"event_id": "organized-1"}
 
     async def notify_user(self, user_id, text, **kwargs):
+        if self.fail_notification:
+            raise RuntimeError("notification unavailable")
         self.notifications.append((user_id, text, kwargs))
         return {"accepted": True}
 
@@ -298,6 +306,31 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["organized"])
         self.assertEqual(core.events, [])
         self.assertIn("源目录清理未完成", core.notifications[0][1])
+
+    async def test_delivery_replay_does_not_repeat_destructive_storage_operations(self):
+        from telepiplex_renaming.jobs import RenamingJobStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            core = FakeCore()
+            feature = RenamingFeature(
+                config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+                core=core, jobs=RenamingJobStore(Path(tmpdir) / "jobs.db"),
+            )
+            request = {"event_id": "event-replay", "payload": {
+                "job_id": "job-replay", "selected_path": "/Movies", "user_id": 123,
+                "final_path": "/Downloads/Release", "resource_name": "Movie.2024",
+                "media_metadata": movie_contract(),
+            }}
+            core.fail_notification = True
+            with self.assertRaises(RuntimeError):
+                await feature.download_completed(request)
+            moved_count = len(core.storage.moved)
+            core.fail_notification = False
+
+            replay = await feature.download_completed(request)
+
+            self.assertEqual(len(core.storage.moved), moved_count)
+            self.assertTrue(replay["organized"])
 
 
 class FeatureSourceContractTest(unittest.TestCase):

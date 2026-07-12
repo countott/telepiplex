@@ -16,6 +16,7 @@ _STORAGE_METHODS = {
     "get_file_info", "get_file_info_by_id", "get_file_list",
     "create_directory", "create_dir_recursive", "rename", "copy_file",
     "delete_single_file", "move_file", "is_directory", "get_files_from_dir",
+    "move_file_detailed",
 }
 
 
@@ -45,9 +46,10 @@ class StorageProxy:
 
 
 class RenamingFeature:
-    def __init__(self, *, config: dict, core):
+    def __init__(self, *, config: dict, core, jobs=None):
         self.config = config
         self.core = core
+        self.jobs = jobs
 
     async def download_completed(self, request: dict) -> dict:
         payload = request.get("payload") or {}
@@ -80,24 +82,49 @@ class RenamingFeature:
             provider=str(payload.get("provider") or "open115"),
             storage=storage,
         )
-        result = await asyncio.to_thread(self._process, event)
+        if self.jobs:
+            existing = self.jobs.get(job_id)
+            if existing and existing["state"] in {"processed", "completed", "failed"}:
+                return await self._finish(job_id, existing["result"])
+            if not self.jobs.claim(job_id):
+                return {"accepted": True, "duplicate": True, "state": (existing or {}).get("state", "processing")}
+        try:
+            result = await asyncio.to_thread(self._process, event)
+        except Exception as exc:
+            outcome = {
+                "organized": False, "final_path": event.final_path,
+                "message": f"⚠️ 整理执行异常，已停止自动重试，请人工检查：{type(exc).__name__}",
+                "user_id": user_id, "job_id": job_id,
+            }
+            if self.jobs:
+                self.jobs.update(job_id, "failed", outcome)
+                return await self._finish(job_id, outcome)
+            raise
         organized = bool(
             result.handled
             and result.final_path
             and str(result.message or "").startswith("✅")
         )
+        contract = extract_confirmed_media_metadata(result.metadata or event.metadata)
+        outcome = {
+            "organized": organized,
+            "final_path": result.final_path or event.final_path,
+            "message": result.message or "",
+            "user_id": user_id,
+            "job_id": job_id,
+            "event_payload": {
+                "job_id": job_id, "user_id": user_id, "provider": event.provider,
+                "source_path": payload.get("final_path"), "final_path": result.final_path,
+                "media_metadata": contract,
+            },
+        }
+        if self.jobs:
+            self.jobs.update(job_id, "processed", outcome)
+            return await self._finish(job_id, outcome)
         if organized:
-            contract = extract_confirmed_media_metadata(result.metadata or event.metadata)
             await self.core.publish_event(
                 "media.organized",
-                {
-                    "job_id": job_id,
-                    "user_id": user_id,
-                    "provider": event.provider,
-                    "source_path": payload.get("final_path"),
-                    "final_path": result.final_path,
-                    "media_metadata": contract,
-                },
+                outcome["event_payload"],
                 idempotency_key=f"{job_id}:organized",
             )
         if user_id and result.message:
@@ -111,6 +138,22 @@ class RenamingFeature:
             "organized": organized,
             "final_path": result.final_path or event.final_path,
         }
+
+    async def _finish(self, job_id, outcome):
+        if outcome.get("organized"):
+            await self.core.publish_event(
+                "media.organized", outcome["event_payload"],
+                idempotency_key=f"{job_id}:organized",
+            )
+        if outcome.get("user_id") and outcome.get("message"):
+            await self.core.notify_user(
+                int(outcome["user_id"]), outcome["message"],
+                idempotency_key=f"{job_id}:renaming-notice",
+            )
+        if self.jobs:
+            self.jobs.update(job_id, "completed", outcome)
+        return {"accepted": True, "organized": bool(outcome.get("organized")),
+                "final_path": outcome.get("final_path"), "replayed": True}
 
     def _process(self, event: DownloadCompletedEvent) -> PostDownloadResult:
         result = process_tvdb_episode(event)

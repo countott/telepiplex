@@ -6,6 +6,7 @@ from telepiplex_plugin_sdk import FeatureRuntime, RuntimeContext
 
 from .context import runtime_context
 from .service import RenamingFeature
+from .jobs import RenamingJobStore
 
 
 def main(context: RuntimeContext) -> FeatureRuntime:
@@ -15,7 +16,10 @@ def main(context: RuntimeContext) -> FeatureRuntime:
         "metadata": config.get("metadata") or {},
         "media": {"unorganized_path": config.get("unorganized_path") or ""},
     })
-    feature = RenamingFeature(config=config, core=context.core)
+    feature = RenamingFeature(
+        config=config, core=context.core,
+        jobs=RenamingJobStore(context.state_path / "renaming.db"),
+    )
     return FeatureRuntime(
         manifest=context.manifest,
         token=context.token,
