@@ -54,6 +54,10 @@ def validate_draft_search_plan(value: object):
     relation = contract.get("relation")
     if not all(isinstance(item, dict) for item in (placement, identity, relation)):
         return None
+    # Canonical naming identity is finalized before Prowlarr; release search never
+    # performs title backfill and therefore cannot leave the contract stale.
+    if not _text(identity.get("chinese_title")) or not _text(identity.get("english_title")):
+        return None
     if placement.get("mapping_kind") == TEMPORARY_MAPPING_KIND:
         source_entry = contract.get("source_entry")
         if placement.get("season_number") != 0 or placement.get("episode_number") is not None:
