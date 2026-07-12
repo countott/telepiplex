@@ -193,6 +193,42 @@ class FeatureBuilderTest(unittest.TestCase):
                 with self.subTest(field=field), self.assertRaises(FeatureBuildError):
                     validate_plugin_wheel(wheel)
 
+    def test_rejects_unsupported_plugin_metadata_version(self):
+        from tools.build_feature import FeatureBuildError, validate_plugin_wheel
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wheel = Path(tmpdir) / "plugin.whl"
+            _write_wheel(
+                wheel,
+                "Metadata-Version: 999.999\n"
+                "Name: example\n"
+                "Version: 1.0.0\n",
+            )
+
+            with self.assertRaises(FeatureBuildError):
+                validate_plugin_wheel(wheel)
+
+    def test_rejects_duplicate_single_use_plugin_metadata_fields(self):
+        from tools.build_feature import FeatureBuildError, validate_plugin_wheel
+
+        for field, value in (
+            ("Metadata-Version", "2.1"),
+            ("Name", "example"),
+            ("Version", "1.0.0"),
+        ):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                wheel = Path(tmpdir) / "plugin.whl"
+                _write_wheel(
+                    wheel,
+                    "Metadata-Version: 2.1\n"
+                    "Name: example\n"
+                    "Version: 1.0.0\n"
+                    f"{field}: {value}\n",
+                )
+
+                with self.subTest(field=field), self.assertRaises(FeatureBuildError):
+                    validate_plugin_wheel(wheel)
+
     def test_rejects_malformed_plugin_wheel_metadata(self):
         from tools.build_feature import FeatureBuildError, validate_plugin_wheel
 

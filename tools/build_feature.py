@@ -3,19 +3,17 @@ from __future__ import annotations
 
 import argparse
 import ast
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import zipfile
-from email.parser import Parser
 from pathlib import Path
 
 import yaml
+from packaging.metadata import InvalidMetadata, Metadata
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import InvalidName, canonicalize_name
-from packaging.version import InvalidVersion, Version
 
 for _root in (Path(__file__).resolve().parents[1], Path("/")):
     if (_root / "app/core/plugin_artifact.py").is_file():
@@ -32,7 +30,6 @@ class FeatureBuildError(RuntimeError):
 
 
 _FORBIDDEN_ROOT_IMPORTS = {"app", "init", "telegram"}
-_METADATA_VERSION = re.compile(r"^[0-9]+\.[0-9]+$")
 
 
 def _validate_distribution_name(name: str, *, allow_feature_name: bool = False):
@@ -76,30 +73,21 @@ def _wheel_metadata(path: Path):
             ]
             if len(members) != 1:
                 raise FeatureBuildError("wheel must contain exactly one METADATA member")
-            return Parser().parsestr(wheel.read(members[0]).decode("utf-8"))
+            raw_metadata = wheel.read(members[0]).decode("utf-8")
     except (OSError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
         raise FeatureBuildError("wheel metadata cannot be read") from exc
+    try:
+        return Metadata.from_email(raw_metadata, validate=True)
+    except (ExceptionGroup, InvalidMetadata) as exc:
+        raise FeatureBuildError("wheel metadata is invalid") from exc
 
 
 def _validate_wheel_metadata(metadata, *, allow_feature_name: bool = False):
-    metadata_version = str(metadata.get("Metadata-Version") or "").strip()
-    if _METADATA_VERSION.fullmatch(metadata_version) is None:
-        raise FeatureBuildError("wheel metadata has an invalid Metadata-Version")
-
-    name = str(metadata.get("Name") or "").strip()
-    _validate_distribution_name(name, allow_feature_name=allow_feature_name)
-
-    version = str(metadata.get("Version") or "").strip()
-    try:
-        Version(version)
-    except InvalidVersion as exc:
-        raise FeatureBuildError("wheel metadata has an invalid Version") from exc
-
-    for requirement in metadata.get_all("Requires-Dist", []):
-        try:
-            parsed = Requirement(requirement.strip())
-        except InvalidRequirement as exc:
-            raise FeatureBuildError("wheel metadata has an invalid Requires-Dist") from exc
+    _validate_distribution_name(
+        metadata.name,
+        allow_feature_name=allow_feature_name,
+    )
+    for parsed in metadata.requires_dist or []:
         if parsed.url is not None:
             raise FeatureBuildError("wheel Requires-Dist must use named distributions")
         _validate_distribution_name(parsed.name)
