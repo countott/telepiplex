@@ -116,6 +116,9 @@ def build_plugin_manager(config=None, core_database=None):
         router,
         journal,
         retry_interval=float(plugin_config.get("event_retry_interval") or 1),
+        delivery_deadline=float(
+            plugin_config.get("event_delivery_timeout") or 1800
+        ),
     )
     broker = CoreBroker(
         router,

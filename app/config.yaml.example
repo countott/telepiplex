@@ -14,3 +14,5 @@ plugins:
   drain_timeout: 120
   stabilize_seconds: 10
   restart_limit: 3
+  # Renaming waits for storage operations before ACK; keep delivery durable.
+  event_delivery_timeout: 1800

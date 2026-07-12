@@ -59,6 +59,7 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
                     "runtime_root": str(root / "plugins" / ".runtime"),
                     "startup_timeout": 1,
                     "restart_limit": 2,
+                    "event_delivery_timeout": 777,
                 }
             }, core_database=root / "core.db")
             self.addAsyncCleanup(manager.close)
@@ -66,6 +67,7 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(manager.store.root, (root / "plugins").resolve())
             self.assertEqual(manager.journal.database_path, root / "core.db")
             self.assertEqual(manager.supervisor.restart_limit, 2)
+            self.assertEqual(manager.broker.dispatcher.delivery_deadline, 777)
             self.assertEqual(manager.broker.socket_path, root / "plugins" / ".runtime/core.sock")
 
             await manager.start()
