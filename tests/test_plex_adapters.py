@@ -116,6 +116,49 @@ class PlexAdapterTest(unittest.TestCase):
         self.assertEqual([item["rating_key"] for item in candidates], ["42"])
 
     @patch("app.adapters.plex.PlexServer")
+    def test_find_movie_uses_identity_and_exact_final_directory(self, plex_server):
+        from app.adapters.plex import PlexAdapter
+
+        matching_part = Mock(id=11, file="/mnt/movies/电影 (Movie)/Movie.mkv")
+        matching_part.audioStreams.return_value = []
+        matching_part.subtitleStreams.return_value = []
+        other_part = Mock(id=12, file="/mnt/movies/Other/Other.mkv")
+        other_part.audioStreams.return_value = []
+        other_part.subtitleStreams.return_value = []
+        matching = Mock(
+            ratingKey="42",
+            title="电影",
+            originalTitle="Movie",
+            year=2024,
+            type="movie",
+            summary="",
+            guids=[Mock(id="tmdb://20")],
+            media=[Mock(parts=[matching_part])],
+        )
+        other = Mock(
+            ratingKey="43",
+            title="电影",
+            originalTitle="Movie",
+            year=2024,
+            type="movie",
+            summary="",
+            guids=[Mock(id="tmdb://20")],
+            media=[Mock(parts=[other_part])],
+        )
+        section = plex_server.return_value.library.sectionByID.return_value
+        section.search.return_value = [other, matching]
+
+        result = PlexAdapter("http://plex:32400", "token").find_movie(
+            "12",
+            title="Movie",
+            year="2024",
+            expected_final_paths=["/电影 (Movie)"],
+        )
+
+        self.assertEqual(result["rating_key"], "42")
+        section.search.assert_called_once_with(title="Movie", year=2024, libtype="movie")
+
+    @patch("app.adapters.plex.PlexServer")
     def test_match_refresh_and_artwork_operations(self, plex_server):
         from app.adapters.plex import PlexAdapter
 

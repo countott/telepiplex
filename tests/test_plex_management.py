@@ -193,6 +193,25 @@ class FakePlex:
         self.calls.append("locate_candidates")
         return [{"rating_key": "42", "title": "电影", "year": 2024, "media_type": "movie"}]
 
+    def find_movie(
+        self,
+        library_id,
+        *,
+        title="",
+        year="",
+        expected_final_paths=(),
+    ):
+        self.calls.append("find_movie")
+        return {
+            "rating_key": "42",
+            "title": "电影",
+            "original_title": "Movie",
+            "year": 2024,
+            "media_type": "movie",
+            "summary": "中文简介",
+            "guids": ["tmdb://999" if self.wrong_match else "tmdb://20"],
+        }
+
     def find_series_episode(
         self,
         library_id,
@@ -599,10 +618,7 @@ class PlexManagementServiceTest(unittest.TestCase):
 
     def test_contract_location_ambiguity_fails_without_confirmation(self):
         plex = FakePlex()
-        plex.locate_candidates = Mock(return_value=[
-            {"rating_key": "42", "title": "候选一", "year": 2024, "media_type": "movie"},
-            {"rating_key": "43", "title": "候选二", "year": 2024, "media_type": "movie"},
-        ])
+        plex.find_movie = Mock(return_value=None)
         service = self.make_service(plex=plex)
 
         job = service.enqueue_completion(make_media_metadata_completion("standalone"))
@@ -751,6 +767,77 @@ class PlexManagementServiceTest(unittest.TestCase):
             job["payload"]["metadata"]["media_metadata"]["items"][0]["episode_number"],
             1,
         )
+
+    def test_completion_targets_expand_each_resolved_ordinary_episode(self):
+        completion = make_unresolved_standalone_series_completion()
+        contract = completion.result.metadata["media_metadata"]
+        contract["items"][0]["final_path"] = (
+            "/真人剧集/Test Show/Test Show Season 01/Test Show S01E01.mkv"
+        )
+        contract["items"].append({
+            "item_id": "episode-2",
+            "content_role": "main_episode",
+            "season_number": 1,
+            "episode_number": 2,
+            "final_path": "/真人剧集/Test Show/Test Show Season 01/Test Show S01E02.mkv",
+        })
+
+        targets = self.make_service().completion_targets(completion)
+
+        self.assertEqual([target["target_id"] for target in targets], ["episode-1", "episode-2"])
+        self.assertEqual([target["media_type"] for target in targets], ["episode", "episode"])
+        self.assertEqual([target["episode_number"] for target in targets], [1, 2])
+        self.assertTrue(all(target["final_path"].endswith(".mkv") for target in targets))
+
+    def test_enqueue_completion_jobs_creates_one_idempotent_job_per_resolved_target(self):
+        completion = make_unresolved_standalone_series_completion()
+        contract = completion.result.metadata["media_metadata"]
+        contract["items"][0]["final_path"] = (
+            "/真人剧集/Test Show/Test Show Season 01/Test Show S01E01.mkv"
+        )
+        contract["items"].append({
+            "item_id": "episode-2",
+            "content_role": "main_episode",
+            "season_number": 1,
+            "episode_number": 2,
+            "final_path": "/真人剧集/Test Show/Test Show Season 01/Test Show S01E02.mkv",
+        })
+        service = self.make_service()
+
+        first = service.enqueue_completion_jobs(completion)
+        second = service.enqueue_completion_jobs(completion)
+
+        self.assertEqual(len(first), 2)
+        self.assertEqual([job["target"]["target_id"] for job in first], ["episode-1", "episode-2"])
+        self.assertEqual([job["created"] for job in first], [True, True])
+        self.assertEqual([job["created"] for job in second], [False, False])
+        self.assertEqual([job["id"] for job in first], [job["id"] for job in second])
+
+    def test_ordinary_episode_location_uses_existing_show_episode_and_final_path(self):
+        completion = make_unresolved_standalone_series_completion()
+        contract = completion.result.metadata["media_metadata"]
+        contract["identity"]["external_ids"] = {"tvdb": "series-1"}
+        contract["items"][0]["final_path"] = (
+            "/真人剧集/Test Show/Test Show Season 01/Test Show S01E01.mkv"
+        )
+        plex = FakePlex()
+        service = self.make_service(plex=plex)
+        target = service.completion_targets(completion)[0]
+        payload = service._completion_payload(completion)
+        payload["target"] = target
+        job = {
+            "id": 999,
+            "payload": payload,
+            "step_results": {
+                "scanning": {"library_id": "11", "before_rating_keys": ["show-1"]}
+            },
+        }
+
+        located = service._locate(job)
+
+        self.assertEqual(located["rating_key"], "42")
+        self.assertIn("find_series_episode", plex.calls)
+        self.assertNotIn("locate_candidates", plex.calls)
 
     def test_present_but_invalid_contract_never_falls_back_to_legacy_job(self):
         completion = make_media_metadata_completion("standalone")

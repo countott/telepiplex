@@ -109,7 +109,8 @@ class PlexModuleTest(unittest.TestCase):
             init.logger = original_logger
 
         self.assertIsNone(result)
-        service.resume_incomplete_jobs.assert_called_once_with(module.plex_executor)
+        service.mark_interrupted_jobs.assert_called_once_with("process_restarted")
+        service.resume_incomplete_jobs.assert_not_called()
         self.assertNotIn("secret", logger.error.call_args.args[0])
 
     def test_base_service_start_failure_is_isolated_from_bot_startup(self):
@@ -138,7 +139,7 @@ class PlexModuleTest(unittest.TestCase):
         from app.modules import plex_management as module
 
         service = Mock(mcp_enabled=False)
-        service.resume_incomplete_jobs.side_effect = RuntimeError("resume failed")
+        service.mark_interrupted_jobs.side_effect = RuntimeError("mark failed")
         original_logger = init.logger
         init.logger = Mock()
         try:
@@ -177,7 +178,7 @@ class PlexModuleTest(unittest.TestCase):
         from app.modules.plex_management import on_download_completed
 
         service = Mock(enabled=True)
-        service.enqueue_completion.return_value = {"id": 9}
+        service.enqueue_completion_jobs.return_value = [{"id": 9, "created": True}]
         get_service.return_value = service
         event = DownloadCompletedEvent("link", "/电影", 1, "/电影/a", "a")
         completion = DownloadPipelineCompletion(
@@ -186,7 +187,31 @@ class PlexModuleTest(unittest.TestCase):
             "renaming.generic_media",
         )
 
-        self.assertEqual(on_download_completed(completion)["id"], 9)
+        self.assertEqual(on_download_completed(completion)[0]["id"], 9)
+        executor.submit.assert_called_once_with(service.run_job, 9)
+
+    @patch("app.modules.plex_management.plex_executor")
+    @patch("app.modules.plex_management.get_plex_management_service")
+    def test_duplicate_completion_does_not_resubmit_existing_job(self, get_service, executor):
+        from app.core.module_registry import DownloadCompletedEvent, DownloadPipelineCompletion, PostDownloadResult
+        from app.modules.plex_management import on_download_completed
+
+        service = Mock(enabled=True)
+        service.enqueue_completion_jobs.side_effect = [
+            [{"id": 9, "created": True}],
+            [{"id": 9, "created": False}],
+        ]
+        get_service.return_value = service
+        event = DownloadCompletedEvent("link", "/电影", 1, "/电影/a", "a")
+        completion = DownloadPipelineCompletion(
+            event,
+            PostDownloadResult(True, final_path=event.final_path),
+            "renaming.generic_media",
+        )
+
+        on_download_completed(completion)
+        on_download_completed(completion)
+
         executor.submit.assert_called_once_with(service.run_job, 9)
 
     @patch("app.modules.plex_management.plex_executor")
@@ -202,7 +227,7 @@ class PlexModuleTest(unittest.TestCase):
         from app.modules.plex_management import on_download_completed
 
         service = Mock(enabled=True)
-        service.enqueue_completion.return_value = None
+        service.enqueue_completion_jobs.return_value = []
         get_service.return_value = service
         event = DownloadCompletedEvent("link", "/电影", 1, "/电影/a", "a")
         completion = DownloadPipelineCompletion(
@@ -211,7 +236,7 @@ class PlexModuleTest(unittest.TestCase):
             "renaming.media_metadata",
         )
 
-        self.assertIsNone(on_download_completed(completion))
+        self.assertEqual(on_download_completed(completion), [])
         executor.submit.assert_not_called()
 
     @patch("app.modules.plex_management.plex_executor")
@@ -226,7 +251,7 @@ class PlexModuleTest(unittest.TestCase):
         )
 
         jobs = Mock()
-        jobs.create_or_get.return_value = {"id": 9}
+        jobs.create_or_get_with_status.return_value = ({"id": 9}, True)
         service = PlexManagementService(jobs, Mock())
         service.enabled = True
         get_service.return_value = service
@@ -235,8 +260,8 @@ class PlexModuleTest(unittest.TestCase):
             make_unresolved_standalone_series_completion()
         )
 
-        self.assertIsNone(result)
-        jobs.create_or_get.assert_not_called()
+        self.assertEqual(result, [])
+        jobs.create_or_get_with_status.assert_not_called()
         executor.submit.assert_not_called()
 
 

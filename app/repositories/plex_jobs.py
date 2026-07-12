@@ -68,8 +68,13 @@ class PlexJobRepository:
         }
 
     def create_or_get(self, idempotency_key, payload):
+        job, _created = self.create_or_get_with_status(idempotency_key, payload)
+        return job
+
+    def create_or_get_with_status(self, idempotency_key, payload):
         now = float(self._clock())
         payload_json = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)
+        created = False
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -77,6 +82,7 @@ class PlexJobRepository:
                 (str(idempotency_key),),
             ).fetchone()
             if row is None:
+                created = True
                 cursor = connection.execute(
                     """
                     INSERT INTO plex_jobs (
@@ -91,7 +97,30 @@ class PlexJobRepository:
                     (cursor.lastrowid,),
                 ).fetchone()
             connection.commit()
-        return self._decode_job(row)
+        return self._decode_job(row), created
+
+    def mark_active_interrupted(self, reason="process_restarted"):
+        active_states = (
+            "queued",
+            "scanning",
+            "locating",
+            "matching",
+            "localizing",
+            "artwork",
+            "streams",
+        )
+        now = float(self._clock())
+        placeholders = ", ".join("?" for _ in active_states)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE plex_jobs
+                SET state = 'interrupted', error = ?, updated_at = ?
+                WHERE state IN ({placeholders})
+                """,
+                (str(reason), now, *active_states),
+            )
+        return int(cursor.rowcount or 0)
 
     def get(self, job_id):
         with self._connect() as connection:

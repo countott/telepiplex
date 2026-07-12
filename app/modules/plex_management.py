@@ -145,10 +145,11 @@ def on_download_completed(completion):
     service = get_plex_management_service()
     if service is None or not getattr(service, "enabled", False):
         return None
-    job = service.enqueue_completion(completion)
-    if job:
-        plex_executor.submit(service.run_job, job["id"])
-    return job
+    jobs = service.enqueue_completion_jobs(completion)
+    for job in jobs:
+        if job.get("created"):
+            plex_executor.submit(service.run_job, job["id"])
+    return jobs
 
 
 def _safe_startup_error(exc):
@@ -182,7 +183,7 @@ def start_plex_module_services(_application=None):
     if service is None:
         return None
     try:
-        service.resume_incomplete_jobs(plex_executor)
+        service.mark_interrupted_jobs("process_restarted")
     except Exception as exc:
         _log_startup_failure("Plex 任务恢复", exc)
     if service.mcp_enabled:

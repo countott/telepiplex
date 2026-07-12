@@ -33,6 +33,49 @@ class PlexJobRepositoryTest(unittest.TestCase):
         self.assertEqual(first["state"], "queued")
         self.assertEqual(first["payload"]["final_path"], "/Movies/Cars")
 
+    def test_create_or_get_with_status_marks_only_first_insert_created(self):
+        first, first_created = self.repo.create_or_get_with_status(
+            "115:/Movies/Cars",
+            {"final_path": "/Movies/Cars"},
+        )
+        second, second_created = self.repo.create_or_get_with_status(
+            "115:/Movies/Cars",
+            {"final_path": "/Movies/Cars"},
+        )
+
+        self.assertTrue(first_created)
+        self.assertFalse(second_created)
+        self.assertEqual(first["id"], second["id"])
+
+    def test_mark_active_interrupted_leaves_terminal_and_waiting_jobs_unchanged(self):
+        active_states = [
+            "queued",
+            "scanning",
+            "locating",
+            "matching",
+            "localizing",
+            "artwork",
+            "streams",
+        ]
+        active_jobs = []
+        for state in active_states:
+            job = self.repo.create_or_get(f"active-{state}", {})
+            active_jobs.append(self.repo.update(job["id"], state=state))
+        preserved = []
+        for state in ("completed", "failed", "waiting_match_confirmation", "interrupted"):
+            job = self.repo.create_or_get(f"preserved-{state}", {})
+            preserved.append(self.repo.update(job["id"], state=state))
+
+        changed = self.repo.mark_active_interrupted("process_restarted")
+
+        self.assertEqual(changed, len(active_states))
+        for job in active_jobs:
+            current = self.repo.get(job["id"])
+            self.assertEqual(current["state"], "interrupted")
+            self.assertEqual(current["error"], "process_restarted")
+        for job in preserved:
+            self.assertEqual(self.repo.get(job["id"])["state"], job["state"])
+
     def test_update_persists_state_rating_key_results_and_error(self):
         job = self.repo.create_or_get("key", {"final_path": "/x"})
 
