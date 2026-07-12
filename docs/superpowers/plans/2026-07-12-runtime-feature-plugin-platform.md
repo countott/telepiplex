@@ -468,7 +468,7 @@ git commit -m "feat(core): manage transactional Feature lifecycle"
 - Produces: generic unknown-command and callback gateways that dispatch typed
   envelopes and render validated response actions.
 
-- [ ] **Step 1: Write handler RED tests**
+- [x] **Step 1: Write handler RED tests**
 
 Prove administrator authorization, exact parsing for all lifecycle subcommands,
 no shell syntax, progress/final messages, dynamic command routing after install,
@@ -476,37 +476,37 @@ route removal after disable, callback namespace routing, response-action
 validation, Telegram length bounds, and manager failures returning sanitized
 errors without stopping polling.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `python3 -m unittest tests.test_plugin_handler tests.test_bot_runtime_startup -v`
 
 Expected: `/plugin` and dynamic gateways are absent.
 
-- [ ] **Step 3: Implement the control handler**
+- [x] **Step 3: Implement the control handler**
 
 Use `context.args`, an explicit subcommand dispatch dictionary, and one
 operation lock per plugin. Never pass user input to a shell. Restrict lifecycle
 methods to `allowed_user` and render status from typed manager results.
 
-- [ ] **Step 4: Implement permanent dynamic gateways**
+- [x] **Step 4: Implement permanent dynamic gateways**
 
 Register core commands first, then one generic command gateway and one generic
 callback gateway. Query current immutable routes per update so a newly
 installed Feature is immediately reachable without Telegram handler reload.
 
-- [ ] **Step 5: Wire core startup and shutdown**
+- [x] **Step 5: Wire core startup and shutdown**
 
 Construct `PluginManager` from core config, store it in `application.bot_data`,
 call `restore_active()` after Telegram startup, and drain/stop all Features in
 the application's shutdown callback.
 
-- [ ] **Step 6: Verify GREEN**
+- [x] **Step 6: Verify GREEN**
 
 Run: `python3 -m unittest tests.test_plugin_handler tests.test_bot_runtime_startup -v`
 
 Expected: tests pass and no in-process business module is loaded by default.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add app/handlers app/115bot.py tests/test_plugin_handler.py tests/test_bot_runtime_startup.py

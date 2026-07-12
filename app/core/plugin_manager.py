@@ -213,6 +213,10 @@ class PluginManager:
             item.plugin_id for item in self.store.list_installed()
         })]
 
+    async def close(self):
+        await self.supervisor.close_all()
+        self.journal.close()
+
     def _verify(self, artifact_path: Path, expected_sha256: str):
         try:
             verified = verify_tpx(artifact_path, expected_sha256)
