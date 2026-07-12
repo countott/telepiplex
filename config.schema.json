@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "category_folder": {"type": "array", "items": {"type": ["string", "integer"]}},
+    "plex": {
+      "type": "object",
+      "properties": {
+        "base_url": {"type": "string"},
+        "token": {"type": "string"},
+        "timeout": {"type": "number", "minimum": 1, "maximum": 300},
+        "scan_poll_interval": {"type": "number", "minimum": 0, "maximum": 300},
+        "scan_timeout": {"type": "number", "minimum": 1, "maximum": 3600}
+      },
+      "required": ["base_url", "token", "timeout", "scan_poll_interval", "scan_timeout"],
+      "additionalProperties": false
+    },
+    "tmdb": {"$ref": "#/$defs/metadata_provider"},
+    "fanart": {"$ref": "#/$defs/metadata_provider"},
+    "ai": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "api_url": {"type": "string"},
+        "api_key": {"type": "string"},
+        "model": {"type": "string"},
+        "timeout": {"type": "number", "minimum": 1, "maximum": 300},
+        "max_tool_rounds": {"type": "integer", "minimum": 1, "maximum": 10}
+      },
+      "required": ["enabled", "api_url", "api_key", "model", "timeout", "max_tool_rounds"],
+      "additionalProperties": false
+    },
+    "mcp": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "host": {"type": "string"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "api_key": {"type": "string"}
+      },
+      "required": ["enabled", "host", "port", "api_key"],
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "metadata_provider": {
+      "type": "object",
+      "properties": {
+        "api_key": {"type": "string"},
+        "timeout": {"type": "number", "minimum": 1, "maximum": 300}
+      },
+      "required": ["api_key", "timeout"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["category_folder", "plex", "tmdb", "fanart", "ai", "mcp"],
+  "additionalProperties": false
+}

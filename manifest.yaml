@@ -1,0 +1,23 @@
+plugin_id: plex-management
+name: Plex Management
+version: 1.0.0
+core_api: ">=1.0,<2.0"
+entry_point: telepiplex_plex.runtime:main
+provides:
+  - name: plex.management
+    exclusive: true
+requires: []
+subscribes:
+  - media.organized
+publishes: []
+commands:
+  - name: plex
+    description: 查看 Plex 任务或使用隔离的 Plex AI
+callbacks:
+  - plex
+config_schema_version: 1
+state_schema_version: 1
+source:
+  repository: origin
+  branch: feature/plex-management
+  commit: "0000000000000000000000000000000000000000"

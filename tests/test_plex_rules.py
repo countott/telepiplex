@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / "app"))
 
 class PlexRuleTest(unittest.TestCase):
     def test_external_ids_match_normalizes_plex_guids(self):
-        from app.services.plex_rules import external_ids_match
+        from telepiplex_plex.rules import external_ids_match
 
         self.assertTrue(
             external_ids_match(
@@ -26,7 +26,7 @@ class PlexRuleTest(unittest.TestCase):
         )
 
     def test_choose_exact_match_requires_one_unique_candidate(self):
-        from app.services.plex_rules import choose_exact_match
+        from telepiplex_plex.rules import choose_exact_match
 
         candidates = [
             {"rating_key": "1", "guids": ["tmdb://10"]},
@@ -45,7 +45,7 @@ class PlexRuleTest(unittest.TestCase):
         )
 
     def test_choose_textless_poster_prefers_ranked_tmdb_then_fanart(self):
-        from app.services.plex_rules import choose_textless_poster
+        from telepiplex_plex.rules import choose_textless_poster
 
         tmdb = [
             {"file_path": "/text.jpg", "iso_639_1": "en", "vote_count": 100},
@@ -64,7 +64,7 @@ class PlexRuleTest(unittest.TestCase):
         )
 
     def test_audio_prefers_original_language_lossless_track(self):
-        from app.services.plex_rules import choose_original_audio
+        from telepiplex_plex.rules import choose_original_audio
 
         streams = [
             {"id": 1, "language_code": "jpn", "codec": "eac3", "channels": 8, "bitrate": 1536},
@@ -77,7 +77,7 @@ class PlexRuleTest(unittest.TestCase):
         self.assertEqual(selected["id"], 2)
 
     def test_audio_keeps_current_state_when_best_tracks_are_tied(self):
-        from app.services.plex_rules import choose_original_audio
+        from telepiplex_plex.rules import choose_original_audio
 
         streams = [
             {"id": 1, "language_code": "eng", "codec": "truehd", "channels": 8, "bitrate": 4000},
@@ -87,7 +87,7 @@ class PlexRuleTest(unittest.TestCase):
         self.assertIsNone(choose_original_audio(streams, "en"))
 
     def test_subtitle_prefers_external_chi_then_embedded_chi(self):
-        from app.services.plex_rules import choose_chi_subtitle
+        from telepiplex_plex.rules import choose_chi_subtitle
 
         streams = [
             {"id": 1, "language_code": "chi", "external": False},

@@ -10,9 +10,9 @@ sys.path.insert(0, str(ROOT / "app"))
 
 
 class PlexAdapterTest(unittest.TestCase):
-    @patch("app.adapters.plex.PlexServer")
+    @patch("telepiplex_plex.adapters.plex.PlexServer")
     def test_server_status_returns_plain_identity(self, plex_server):
-        from app.adapters.plex import PlexAdapter
+        from telepiplex_plex.adapters.plex import PlexAdapter
 
         server = plex_server.return_value
         server.friendlyName = "Living Room Plex"
@@ -29,9 +29,9 @@ class PlexAdapterTest(unittest.TestCase):
             },
         )
 
-    @patch("app.adapters.plex.PlexServer")
+    @patch("telepiplex_plex.adapters.plex.PlexServer")
     def test_scan_targets_library_section(self, plex_server):
-        from app.adapters.plex import PlexAdapter
+        from telepiplex_plex.adapters.plex import PlexAdapter
 
         section = plex_server.return_value.library.sectionByID.return_value
 
@@ -40,9 +40,9 @@ class PlexAdapterTest(unittest.TestCase):
         plex_server.return_value.library.sectionByID.assert_called_once_with(12)
         section.update.assert_called_once_with()
 
-    @patch("app.adapters.plex.PlexServer")
+    @patch("telepiplex_plex.adapters.plex.PlexServer")
     def test_get_item_normalizes_guids_and_media_streams(self, plex_server):
-        from app.adapters.plex import PlexAdapter
+        from telepiplex_plex.adapters.plex import PlexAdapter
 
         audio = Mock(
             id=21,
@@ -83,9 +83,9 @@ class PlexAdapterTest(unittest.TestCase):
         self.assertEqual(result["parts"][0]["audio_streams"][0]["language_code"], "jpn")
         self.assertTrue(result["parts"][0]["subtitle_streams"][0]["external"])
 
-    @patch("app.adapters.plex.PlexServer")
+    @patch("telepiplex_plex.adapters.plex.PlexServer")
     def test_library_queries_return_plain_data_and_recent_keys(self, plex_server):
-        from app.adapters.plex import PlexAdapter
+        from telepiplex_plex.adapters.plex import PlexAdapter
 
         section = Mock(key=12, title="电影", type="movie", locations=["/media/Movies"])
         section.recentlyAdded.return_value = [Mock(ratingKey="41"), Mock(ratingKey="42")]
@@ -99,9 +99,9 @@ class PlexAdapterTest(unittest.TestCase):
         self.assertEqual(libraries[0]["locations"], ["/media/Movies"])
         self.assertEqual(adapter.snapshot_recent("12"), {"41", "42"})
 
-    @patch("app.adapters.plex.PlexServer")
+    @patch("telepiplex_plex.adapters.plex.PlexServer")
     def test_locate_candidates_returns_only_new_recent_items(self, plex_server):
-        from app.adapters.plex import PlexAdapter
+        from telepiplex_plex.adapters.plex import PlexAdapter
 
         old = Mock(ratingKey="41", title="旧片", year=2020, type="movie", summary="", guids=[], media=[])
         new = Mock(ratingKey="42", title="新片", year=2024, type="movie", summary="", guids=[], media=[])
@@ -115,9 +115,9 @@ class PlexAdapterTest(unittest.TestCase):
 
         self.assertEqual([item["rating_key"] for item in candidates], ["42"])
 
-    @patch("app.adapters.plex.PlexServer")
+    @patch("telepiplex_plex.adapters.plex.PlexServer")
     def test_match_refresh_and_artwork_operations(self, plex_server):
-        from app.adapters.plex import PlexAdapter
+        from telepiplex_plex.adapters.plex import PlexAdapter
 
         candidate = Mock(guid="tmdb://20", name="电影", year="2024", score=98)
         reloaded = Mock(
@@ -147,9 +147,9 @@ class PlexAdapterTest(unittest.TestCase):
         item.uploadPoster.assert_called_once_with(url="https://image.example/poster.jpg")
         self.assertEqual(uploaded["rating_key"], "42")
 
-    @patch("app.adapters.plex.PlexServer")
+    @patch("telepiplex_plex.adapters.plex.PlexServer")
     def test_stream_operations_target_part_and_stream_ids(self, plex_server):
-        from app.adapters.plex import PlexAdapter
+        from telepiplex_plex.adapters.plex import PlexAdapter
 
         audio = Mock(id=21, languageCode="jpn", codec="truehd", channels=8, bitrate=4000, selected=False)
         subtitle = Mock(id=31, languageCode="chi", codec="ass", key="/stream/31", selected=False)
@@ -170,9 +170,9 @@ class PlexAdapterTest(unittest.TestCase):
 
 
 class TmdbAdapterTest(unittest.TestCase):
-    @patch("app.adapters.tmdb.requests.get")
+    @patch("telepiplex_plex.adapters.tmdb.requests.get")
     def test_details_and_textless_posters_use_bearer_and_filter_null_language(self, get):
-        from app.adapters.tmdb import TmdbAdapter
+        from telepiplex_plex.adapters.tmdb import TmdbAdapter
 
         details_response = Mock()
         details_response.json.return_value = {"id": 20, "original_language": "ja"}
@@ -199,9 +199,9 @@ class TmdbAdapterTest(unittest.TestCase):
 
 
 class FanartAdapterTest(unittest.TestCase):
-    @patch("app.adapters.fanart.requests.get")
+    @patch("telepiplex_plex.adapters.fanart.requests.get")
     def test_textless_posters_use_correct_external_id_and_filter_lang_00(self, get):
-        from app.adapters.fanart import FanartAdapter
+        from telepiplex_plex.adapters.fanart import FanartAdapter
 
         response = get.return_value
         response.json.return_value = {

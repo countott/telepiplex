@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / "app"))
 class PlexJobRepositoryTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        from app.repositories.plex_jobs import PlexJobRepository
+        from telepiplex_plex.jobs import PlexJobRepository
 
         self.repo = PlexJobRepository(Path(self.temp_dir.name) / "plex.db")
 
@@ -72,7 +72,7 @@ class PlexJobRepositoryTest(unittest.TestCase):
         self.assertEqual([job["id"] for job in jobs], [second["id"], first["id"]])
 
     def test_expired_confirmation_token_is_rejected(self):
-        from app.repositories.plex_jobs import PlexJobRepository
+        from telepiplex_plex.jobs import PlexJobRepository
 
         now = [100.0]
         repo = PlexJobRepository(
@@ -84,6 +84,22 @@ class PlexJobRepositoryTest(unittest.TestCase):
         now[0] = 111.0
 
         self.assertIsNone(repo.consume_confirmation(token, "fix_match"))
+
+    def test_claim_prevents_duplicate_execution_and_completed_never_reopens(self):
+        job = self.repo.create_or_get("key", {"final_path": "/x"})
+        self.assertTrue(self.repo.claim(job["id"]))
+        self.assertFalse(self.repo.claim(job["id"]))
+        self.repo.update(job["id"], state="completed")
+        self.assertFalse(self.repo.claim(job["id"]))
+
+    def test_restart_marks_in_progress_jobs_interrupted(self):
+        job = self.repo.create_or_get("key", {"final_path": "/x"})
+        self.repo.update(job["id"], state="scanning")
+
+        interrupted = self.repo.mark_incomplete_interrupted()
+
+        self.assertEqual(interrupted, [job["id"]])
+        self.assertEqual(self.repo.get(job["id"])["state"], "interrupted")
 
 
 if __name__ == "__main__":

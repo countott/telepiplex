@@ -1,8 +1,7 @@
 import sys
-import asyncio
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,9 +56,9 @@ class PlexAIOrchestratorTest(unittest.TestCase):
             "timeout": 12,
         }
 
-    @patch("app.services.plex_ai.requests.post")
+    @patch("telepiplex_plex.ai.requests.post")
     def test_read_tool_call_executes_and_returns_final_message(self, post):
-        from app.services.plex_ai import PlexAIOrchestrator
+        from telepiplex_plex.ai import PlexAIOrchestrator
 
         first = Mock()
         first.json.return_value = tool_response()
@@ -78,9 +77,9 @@ class PlexAIOrchestratorTest(unittest.TestCase):
         first.raise_for_status.assert_called_once_with()
         second.raise_for_status.assert_called_once_with()
 
-    @patch("app.services.plex_ai.requests.post")
+    @patch("telepiplex_plex.ai.requests.post")
     def test_tool_round_limit_stops_loop_at_three(self, post):
-        from app.services.plex_ai import PlexAIOrchestrator
+        from telepiplex_plex.ai import PlexAIOrchestrator
 
         responses = []
         for index in range(4):
@@ -98,9 +97,9 @@ class PlexAIOrchestratorTest(unittest.TestCase):
         self.assertEqual(len(dispatcher.calls), 3)
         self.assertEqual(post.call_count, 3)
 
-    @patch("app.services.plex_ai.requests.post")
+    @patch("telepiplex_plex.ai.requests.post")
     def test_write_preview_is_returned_as_confirmation_not_auto_applied(self, post):
-        from app.services.plex_ai import PlexAIOrchestrator
+        from telepiplex_plex.ai import PlexAIOrchestrator
 
         preview = {
             "status": "confirmation_required",
@@ -122,9 +121,9 @@ class PlexAIOrchestratorTest(unittest.TestCase):
         self.assertEqual(result["confirmation"]["confirmation_token"], "once")
         self.assertEqual(result["message"], "需要确认匹配")
 
-    @patch("app.services.plex_ai.requests.post")
+    @patch("telepiplex_plex.ai.requests.post")
     def test_ai_cannot_forward_confirmation_token_to_apply_a_write(self, post):
-        from app.services.plex_ai import PlexAIOrchestrator
+        from telepiplex_plex.ai import PlexAIOrchestrator
 
         first = Mock()
         first.json.return_value = tool_response(
@@ -139,52 +138,6 @@ class PlexAIOrchestratorTest(unittest.TestCase):
         PlexAIOrchestrator(self.config(), dispatcher).run("执行写操作")
 
         self.assertNotIn("confirmation_token", dispatcher.calls[0][1])
-
-
-class PlexAIHandlerTest(unittest.TestCase):
-    @patch("app.modules.plex_management.get_plex_management_service")
-    def test_disabled_ai_returns_concise_message(self, get_service):
-        from app.handlers.plex_handler import plex_command
-
-        service = Mock(ai_enabled=False, ai=None)
-        get_service.return_value = service
-        update = Mock()
-        update.effective_user.id = 1
-        update.effective_message.reply_text = AsyncMock()
-        context = Mock(args=["状态"], user_data={})
-        with patch("app.handlers.plex_handler.init.check_user", return_value=True):
-            asyncio.run(plex_command(update, context))
-
-        self.assertEqual(
-            update.effective_message.reply_text.await_args.args[0],
-            "Plex AI 管理未启用。",
-        )
-
-    @patch("app.modules.plex_management.get_plex_management_service")
-    def test_write_preview_creates_telegram_confirmation_button(self, get_service):
-        from app.handlers.plex_handler import plex_command
-
-        service = Mock(ai_enabled=True)
-        service.ai.run.return_value = {
-            "message": "需要确认匹配",
-            "confirmation": {
-                "action": "fix_match",
-                "payload": {"job_id": 1},
-                "confirmation_token": "once",
-            },
-        }
-        get_service.return_value = service
-        update = Mock()
-        update.effective_user.id = 1
-        update.effective_message.reply_text = AsyncMock()
-        context = Mock(args=["修复", "匹配"], user_data={})
-        with patch("app.handlers.plex_handler.init.check_user", return_value=True):
-            asyncio.run(plex_command(update, context))
-
-        kwargs = update.effective_message.reply_text.await_args.kwargs
-        button = kwargs["reply_markup"].inline_keyboard[0][0]
-        self.assertEqual(button.callback_data, "plex_write_confirm:once")
-        self.assertEqual(context.user_data["plex_write:once"], "fix_match")
 
 
 if __name__ == "__main__":

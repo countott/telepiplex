@@ -1,7 +1,9 @@
 import sys
 import tempfile
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock
 
 
@@ -10,13 +12,36 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
 
-def make_completion():
-    from app.core.module_registry import (
-        DownloadCompletedEvent,
-        DownloadPipelineCompletion,
-        PostDownloadResult,
-    )
+@dataclass
+class DownloadCompletedEvent:
+    link: str
+    selected_path: str
+    user_id: int
+    final_path: str
+    resource_name: str
+    naming_metadata: dict | None = None
+    metadata: dict | None = None
+    provider: str = "115"
+    storage: Any = None
 
+
+@dataclass
+class PostDownloadResult:
+    handled: bool
+    final_path: str | None = None
+    message: str | None = None
+    should_stop: bool = False
+    metadata: dict | None = None
+
+
+@dataclass(frozen=True)
+class DownloadPipelineCompletion:
+    event: DownloadCompletedEvent
+    result: PostDownloadResult
+    terminal_processor: str | None = None
+
+
+def make_completion():
     event = DownloadCompletedEvent(
         link="magnet:?xt=urn:btih:" + "a" * 40,
         selected_path="/电影",
@@ -40,12 +65,7 @@ def make_completion():
 
 
 def make_media_metadata_completion(mapping_kind):
-    from app.core.media_metadata import attach_media_metadata
-    from app.core.module_registry import (
-        DownloadCompletedEvent,
-        DownloadPipelineCompletion,
-        PostDownloadResult,
-    )
+    from telepiplex_plugin_sdk.media_metadata import attach_media_metadata
 
     episode = 100 if mapping_kind == "temporary_related_special" else 5
     episode_marker = f"E{episode:03d}" if episode >= 100 else f"E{episode:02d}"
@@ -316,7 +336,7 @@ class FakeTmdb:
 
 class PlexManagementServiceTest(unittest.TestCase):
     def test_safe_error_redacts_tokens_from_upstream_urls(self):
-        from app.services.plex_management import PlexManagementService
+        from telepiplex_plex.management import PlexManagementService
 
         message = PlexManagementService._safe_error(RuntimeError(
             "GET /library?X-Plex-Token=plex-secret&api_key=fanart-secret Authorization: Bearer ai-secret"
@@ -329,7 +349,7 @@ class PlexManagementServiceTest(unittest.TestCase):
 
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
-        from app.repositories.plex_jobs import PlexJobRepository
+        from telepiplex_plex.jobs import PlexJobRepository
 
         self.jobs = PlexJobRepository(Path(self.tempdir.name) / "plex.db")
 
@@ -346,7 +366,7 @@ class PlexManagementServiceTest(unittest.TestCase):
         scan_poll_interval=0,
         scan_timeout=0,
     ):
-        from app.services.plex_management import PlexManagementService
+        from telepiplex_plex.management import PlexManagementService
 
         return PlexManagementService(
             self.jobs,
@@ -729,7 +749,7 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertEqual(job["payload"]["final_path"], "/真人电影/想见你")
 
     def test_unresolved_standalone_series_is_not_enqueued_from_terminal_path(self):
-        from app.core.media_metadata import extract_confirmed_media_metadata
+        from telepiplex_plugin_sdk.media_metadata import extract_confirmed_media_metadata
 
         completion = make_unresolved_standalone_series_completion()
         self.assertIsNotNone(

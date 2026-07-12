@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from app.adapters.plex import PlexAdapter
+from telepiplex_plex.adapters.plex import PlexAdapter
 
 
 class PlexMediaMetadataAdapterTest(unittest.TestCase):

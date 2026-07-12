@@ -24,13 +24,13 @@ class PlexMcpTest(unittest.TestCase):
         self.service.apply_operation.return_value = {"status": "applied"}
 
     def test_non_loopback_requires_token(self):
-        from app.plex_mcp.server import PlexMcpConfigError, create_plex_mcp_app
+        from telepiplex_plex.mcp_server import PlexMcpConfigError, create_plex_mcp_app
 
         with self.assertRaises(PlexMcpConfigError):
             create_plex_mcp_app(self.service, {"host": "0.0.0.0", "auth_token": ""})
 
     def test_registers_exact_approved_tool_surface(self):
-        from app.plex_mcp.server import create_plex_mcp
+        from telepiplex_plex.mcp_server import create_plex_mcp
 
         mcp = create_plex_mcp(self.service, {})
         names = {tool.name for tool in asyncio.run(mcp.list_tools())}
@@ -46,7 +46,7 @@ class PlexMcpTest(unittest.TestCase):
         })
 
     def test_read_tool_calls_shared_service(self):
-        from app.plex_mcp.server import create_plex_mcp
+        from telepiplex_plex.mcp_server import create_plex_mcp
 
         mcp = create_plex_mcp(self.service, {})
         result = asyncio.run(
@@ -57,7 +57,7 @@ class PlexMcpTest(unittest.TestCase):
         self.service.server_status.assert_called_once_with()
 
     def test_write_prepare_and_apply_use_confirmation_token(self):
-        from app.plex_mcp.server import create_plex_mcp
+        from telepiplex_plex.mcp_server import create_plex_mcp
 
         mcp = create_plex_mcp(self.service, {})
         arguments = {"job_id": 1, "rating_key": "42", "candidate_guid": "tmdb://20"}
@@ -79,7 +79,7 @@ class PlexMcpTest(unittest.TestCase):
         self.service.apply_operation.assert_called_once()
 
     def test_bearer_auth_rejects_missing_token_before_mcp_dispatch(self):
-        from app.plex_mcp.server import create_plex_mcp_app
+        from telepiplex_plex.mcp_server import create_plex_mcp_app
 
         app = create_plex_mcp_app(
             self.service,
