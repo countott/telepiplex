@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
+from email.parser import Parser
 from pathlib import Path
 
 import yaml
@@ -27,6 +29,15 @@ class FeatureBuildError(RuntimeError):
 
 
 _FORBIDDEN_ROOT_IMPORTS = {"app", "init", "telegram"}
+_DISTRIBUTION_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _validate_distribution_name(name: str):
+    normalized = name.casefold().replace("_", "-").replace(".", "-")
+    if normalized.startswith("telepiplex-") and normalized != "telepiplex-plugin-sdk":
+        raise FeatureBuildError(
+            f"forbidden Feature distribution dependency: {normalized}"
+        )
 
 
 def validate_feature_requirements(source: str):
@@ -34,9 +45,51 @@ def validate_feature_requirements(source: str):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        name = re.split(r"[<>=!~;\[\s]", line, maxsplit=1)[0].casefold().replace("_", "-")
-        if name.startswith("telepiplex-") and name != "telepiplex-plugin-sdk":
-            raise FeatureBuildError(f"forbidden Feature distribution dependency: {name}")
+        if (
+            line.startswith("-")
+            or "://" in line
+            or " @ " in line
+            or "/" in line
+            or "\\" in line
+            or line.casefold().endswith((".whl", ".zip", ".tar.gz", ".tgz"))
+        ):
+            raise FeatureBuildError("Feature requirements must use named distributions")
+        match = _DISTRIBUTION_NAME.match(line)
+        if match is None:
+            raise FeatureBuildError("Feature requirement has no distribution name")
+        _validate_distribution_name(match.group(0))
+
+
+def _wheel_metadata(path: Path):
+    try:
+        with zipfile.ZipFile(path) as wheel:
+            members = [
+                name
+                for name in wheel.namelist()
+                if name.endswith(".dist-info/METADATA")
+            ]
+            if len(members) != 1:
+                raise FeatureBuildError("wheel must contain exactly one METADATA member")
+            return Parser().parsestr(wheel.read(members[0]).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
+        raise FeatureBuildError("wheel metadata cannot be read") from exc
+
+
+def validate_plugin_wheel(path: Path):
+    metadata = _wheel_metadata(path)
+    for requirement in metadata.get_all("Requires-Dist", []):
+        match = _DISTRIBUTION_NAME.match(requirement.strip())
+        if match is None:
+            raise FeatureBuildError("plugin wheel has an invalid Requires-Dist")
+        _validate_distribution_name(match.group(0))
+
+
+def validate_wheelhouse(path: Path):
+    for wheel in sorted(path.glob("*.whl")):
+        name = str(_wheel_metadata(wheel).get("Name") or "").strip()
+        if not name:
+            raise FeatureBuildError("wheel metadata is missing Name")
+        _validate_distribution_name(name)
 
 
 def validate_feature_imports(source_dir: Path):
@@ -113,6 +166,7 @@ def build_feature_artifact(
         sdk_candidates = sorted(sdk_wheels.glob("*.whl"))
         if len(plugin_candidates) != 1 or len(sdk_candidates) != 1:
             raise FeatureBuildError("Feature and SDK builds must each produce exactly one wheel")
+        validate_plugin_wheel(plugin_candidates[0])
         shutil.copy2(plugin_candidates[0], package / "plugin.whl")
         shutil.copy2(sdk_candidates[0], wheelhouse / sdk_candidates[0].name)
 
@@ -150,6 +204,7 @@ def build_feature_artifact(
         shutil.copy2(source_dir / "config.schema.json", package / "config.schema.json")
         shutil.copy2(source_dir / "config.default.yaml", package / "config.default.yaml")
         output.parent.mkdir(parents=True, exist_ok=True)
+        validate_wheelhouse(wheelhouse)
         return build_tpx(package, output)
 
 
