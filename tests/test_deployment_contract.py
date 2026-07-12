@@ -19,7 +19,14 @@ class DeploymentContractTest(unittest.TestCase):
         self.assertIn("pip install -r requirements.txt", dockerfile)
 
     def test_plex_mcp_secrets_are_empty_in_committed_template(self):
-        config = yaml.safe_load((ROOT / "config" / "config.yaml.example").read_text(encoding="utf-8"))
+        config = yaml.safe_load(
+            (
+                ROOT
+                / "config"
+                / "modules"
+                / "plex-management.yaml.example"
+            ).read_text(encoding="utf-8")
+        )
 
         self.assertEqual(config["media"]["plex"]["token"], "")
         self.assertEqual(config["media"]["plex"]["mcp"]["auth_token"], "")

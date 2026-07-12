@@ -34,30 +34,30 @@ class BotRuntimeStartupTest(unittest.TestCase):
         config = {
             "bot_token": "123456:telegram-secret",
             "allowed_user": 472943219,
-            "115_app_id": "app-id-secret",
-            "access_token": "access-secret",
-            "open115": {
-                "base_url": "http://open115.example",
-                "api_key": "api-secret",
+            "media": {
+                "plex": {
+                    "base_url": "http://plex.example",
+                    "token": "plex-secret",
+                }
             },
-            "nested": [{"refresh_token": "refresh-secret"}],
+            "ai": {"api_key": "api-secret"},
+            "nested": [{"auth_token": "mcp-secret"}],
         }
 
         redacted = bot_module.sanitize_config_for_log(config)
         dumped = json.dumps(redacted, ensure_ascii=False)
 
-        self.assertIn("http://open115.example", dumped)
+        self.assertIn("http://plex.example", dumped)
         self.assertIn("472943219", dumped)
         for secret in (
             "telegram-secret",
-            "app-id-secret",
-            "access-secret",
+            "plex-secret",
             "api-secret",
-            "refresh-secret",
+            "mcp-secret",
         ):
             self.assertNotIn(secret, dumped)
         self.assertEqual(redacted["bot_token"], "***redacted***")
-        self.assertEqual(redacted["open115"]["api_key"], "***redacted***")
+        self.assertEqual(redacted["media"]["plex"]["token"], "***redacted***")
 
     def test_start_treats_telegram_timeout_as_possible_delivery(self):
         bot_module = load_bot_module()
@@ -141,20 +141,15 @@ class BotRuntimeStartupTest(unittest.TestCase):
         self.assertIn(("write_timeout", 30), calls)
         self.assertIn(("pool_timeout", 30), calls)
 
-    def test_default_enabled_modules_load_all_stable_modules(self):
+    def test_default_enabled_modules_load_only_plex(self):
         bot_module = load_bot_module()
 
         self.assertEqual(
             bot_module.get_enabled_module_names({}),
-            [
-                "app.modules.open115",
-                "app.modules.media_search",
-                "app.modules.renaming",
-                "app.modules.plex_management",
-            ],
+            ["app.modules.plex_management"],
         )
 
-    def test_disabled_modules_are_removed_from_default_stable_modules(self):
+    def test_disabled_plex_module_is_removed_from_default(self):
         bot_module = load_bot_module()
 
         self.assertEqual(
@@ -162,30 +157,23 @@ class BotRuntimeStartupTest(unittest.TestCase):
                 {
                     "modules": {
                         "enabled": "all",
-                        "disabled": ["app.modules.renaming"],
+                        "disabled": ["app.modules.plex_management"],
                     }
                 }
             ),
-            [
-                "app.modules.open115",
-                "app.modules.media_search",
-                "app.modules.plex_management",
-            ],
+            [],
         )
 
     def test_explicit_empty_config_uses_default_modules_not_global_config(self):
         bot_module = load_bot_module()
         original_config = bot_module.init.bot_config
-        bot_module.init.bot_config = {"modules": {"disabled": ["app.modules.renaming"]}}
+        bot_module.init.bot_config = {
+            "modules": {"disabled": ["app.modules.plex_management"]}
+        }
         try:
             self.assertEqual(
                 bot_module.get_enabled_module_names({}),
-                [
-                    "app.modules.open115",
-                    "app.modules.media_search",
-                    "app.modules.renaming",
-                    "app.modules.plex_management",
-                ],
+                ["app.modules.plex_management"],
             )
         finally:
             bot_module.init.bot_config = original_config
@@ -195,31 +183,29 @@ class BotRuntimeStartupTest(unittest.TestCase):
 
         text = bot_module.build_modules_status_text({})
 
-        self.assertIn("115 下载", text)
-        self.assertIn("媒体搜索", text)
-        self.assertIn("下载后重命名", text)
         self.assertIn("Plex 管理", text)
+        self.assertNotIn("115 下载", text)
+        self.assertNotIn("媒体搜索", text)
+        self.assertNotIn("下载后重命名", text)
         self.assertIn("重启容器后生效", text)
 
     def test_core_startup_notice_reports_loaded_modules(self):
         bot_module = load_bot_module()
         registry = Mock()
-        registry.loaded_module_names = [
-            "app.modules.open115",
-            "app.modules.media_search",
-        ]
+        registry.loaded_module_names = ["app.modules.plex_management"]
 
         text = bot_module.build_core_startup_notice_text({}, registry)
 
         self.assertIn("Telepiplex 启动完成", text)
-        self.assertIn("115 下载", text)
-        self.assertIn("媒体搜索", text)
+        self.assertIn("Plex 管理", text)
+        self.assertNotIn("115 下载", text)
+        self.assertNotIn("媒体搜索", text)
         self.assertNotIn("下载后重命名", text)
 
     def test_core_startup_notice_is_queued_for_allowed_user(self):
         bot_module = load_bot_module()
         registry = Mock()
-        registry.loaded_module_names = ["app.modules.open115"]
+        registry.loaded_module_names = ["app.modules.plex_management"]
         bot_module.init.bot_config = {"allowed_user": "472943219"}
         bot_module.add_task_to_queue = Mock(return_value=True)
 
@@ -230,22 +216,22 @@ class BotRuntimeStartupTest(unittest.TestCase):
         self.assertEqual(args[0], "472943219")
         self.assertIsNone(args[1])
         self.assertIn("Telepiplex 启动完成", kwargs["message"])
-        self.assertIn("115 下载", kwargs["message"])
+        self.assertIn("Plex 管理", kwargs["message"])
 
-    def test_bot_menu_and_help_include_config_command(self):
+    def test_bot_menu_includes_plex_command(self):
         bot_module = load_bot_module()
         from app.core.module_registry import ModuleRegistry
-        from app.modules.open115 import register_module
+        from app.modules.plex_management import register_module
 
         registry = ModuleRegistry()
         register_module(registry)
         commands = [item.command for item in bot_module.get_bot_menu(registry)]
 
-        self.assertIn("config", commands)
+        self.assertIn("plex", commands)
 
-    def test_open115_module_registers_startup_hook(self):
+    def test_plex_module_registers_startup_hook(self):
         from app.core.module_registry import ModuleRegistry
-        from app.modules.open115 import register_module
+        from app.modules.plex_management import register_module
 
         registry = ModuleRegistry()
         register_module(registry)

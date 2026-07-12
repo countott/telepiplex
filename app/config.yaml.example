@@ -1,32 +1,11 @@
-# Telepiplex 配置模板；运行时配置路径为 /config/config.yaml。
+# Telepiplex Plex Feature 核心配置模板；运行时配置路径为 /config/config.yaml。
 
-# 基础日志：可选 debug / info / warning / error / critical。
 log_level: info
 
-# Telegram Bot：bot_token 和 allowed_user 必填。
 bot_token: "your_bot_token"
 allowed_user: 123456789
 
-# 模块开关：main 运行版默认启用所有稳定模块，可通过 disabled 临时禁用。
-modules:
-  enabled: all
-  disabled: []
-
-# 115 授权：OpenAPI 填 115_app_id；直连 Token 填 access_token / refresh_token。
-115_app_id: null
-access_token: ""
-refresh_token: ""
-
-# 115 OpenAPI。
-open115:
-  timeout: 30
-
-# 清理策略：下载完成后按体积清理广告小文件。
-clean_policy:
-  switch: "on"
-  less_than: 400M
-
-# 保存目录：115 投递和媒体搜索模块会复用该结构。
+# 四类媒体目录合同；Plex 业务参数见 config/modules/plex-management.yaml.example。
 category_folder:
   - kind: live_action_movie
     name: 真人电影
@@ -44,110 +23,3 @@ category_folder:
     name: 动画剧集
     path: /动画剧集
     plex_library_id: ""
-
-# 搜索与 Prowlarr：启用后使用 /search 和 /s 找片源。
-search:
-  enable: false
-
-  prowlarr:
-    base_url: "http://your-prowlarr:9696"
-    api_key: ""
-    timeout: 150
-    status_timeout: 15
-    indexer_ids: "-2"
-    categories:
-      movie: 2000
-      tv: 5000
-    result_limit: 8
-
-  scoring:
-    prefer_resolution:
-      - "2160p"
-      - "1080p"
-    prefer_source:
-      - "WEB-DL"
-      - "BluRay"
-      - "Remux"
-    prefer_codec:
-      - "HEVC"
-      - "H.265"
-      - "x265"
-      - "H.264"
-      - "x264"
-    prefer_audio:
-      - "Atmos"
-      - "TrueHD"
-      - "DTS-HD"
-      - "EAC3"
-    reject_keywords:
-      - "CAM"
-      - "TS"
-      - "TC"
-      - "枪版"
-      - "抢先"
-      - "HC"
-      - "HDTC"
-      - "HDCAM"
-    keyword_scores:
-      "2160p": 35
-      "1080p": 25
-      "WEB-DL": 25
-      "BluRay": 22
-      "Remux": 24
-      "国配": 10
-      "中字": 8
-      "CAM": -90
-      "枪版": -90
-    indexer_scores:
-      "M-Team": 30
-      "TorrentLeech": 10
-
-# 媒体整理：unorganized_path 接收缺少元数据或整理失败的文件。
-media:
-  unorganized_path: /未整理
-
-  plex:
-    base_url: ""
-    token: ""
-    timeout: 30
-    management:
-      enabled: true
-      database_path: "/config/plex_management.db"
-      scan_poll_interval: 5
-      scan_timeout: 300
-    mcp:
-      enabled: false
-      host: "127.0.0.1"
-      port: 8765
-      path: "/mcp"
-      auth_token: ""
-    ai:
-      enabled: false
-      max_tool_rounds: 3
-
-# 元数据：TVDB 用于剧集确认、播出校验、封面反馈和剧集重命名。
-metadata:
-  tmdb:
-    api_key: ""
-    timeout: 15
-
-  tvdb:
-    enable: false
-    base_url: "https://api4.thetvdb.com/v4"
-    api_key: ""
-    subscriber_pin: ""
-    timeout: 15
-
-# 无字海报的可选补充来源；lang=00 才会参与自动选择。
-artwork:
-  fanart:
-    api_key: ""
-    timeout: 15
-
-# AI 兜底：用于搜索推断、口误修正和少量元数据补全。
-ai:
-  enable: false
-  api_url: ""
-  api_key: ""
-  model: ""
-  timeout: 60

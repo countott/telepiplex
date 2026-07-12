@@ -26,28 +26,11 @@ except ImportError:
 
 
 TELEGRAM_API_TIMEOUT = 30
-DEFAULT_ENABLED_MODULES = (
-    "app.modules.open115",
-    "app.modules.media_search",
-    "app.modules.renaming",
-    "app.modules.plex_management",
-)
+DEFAULT_ENABLED_MODULES = ("app.modules.plex_management",)
 MODULE_CATALOG = {
-    "app.modules.open115": {
-        "label": "115 下载",
-        "description": "授权、保存目录和离线投递",
-    },
-    "app.modules.media_search": {
-        "label": "媒体搜索",
-        "description": "Prowlarr 搜索和候选确认",
-    },
-    "app.modules.renaming": {
-        "label": "下载后重命名",
-        "description": "下载完成后的反查、整理和重命名",
-    },
     "app.modules.plex_management": {
         "label": "Plex 管理",
-        "description": "扫库、匹配、中文化、海报和默认流选择",
+        "description": "扫库、匹配、中文化、海报、默认流和确认特别篇元数据",
     },
 }
 CORE_BOT_COMMANDS = [

@@ -18,11 +18,6 @@ def _ensure_module_paths():
 
 _ensure_module_paths()
 
-try:
-    from app.core.open_115 import OpenAPI_115
-except ModuleNotFoundError:
-    OpenAPI_115 = None
-
 from app.core.media_metadata import require_complete_category_routes
 from app.utils.logger import Logger
 
@@ -30,7 +25,6 @@ from app.utils.logger import Logger
 debug_mode = False
 logger: Optional[Logger] = None
 bot_config = {}
-openapi_115 = None
 module_registry = None
 
 CONFIG_FILE = "/config/config.yaml"
@@ -117,32 +111,6 @@ def create_tmp():
     if not os.path.exists(TEMP):
         os.mkdir(TEMP, mode=0o777)
         os.chmod(TEMP, 0o777)
-
-
-def initialize_115open():
-    global openapi_115
-    if OpenAPI_115 is None:
-        if logger:
-            logger.error("115 OpenAPI 模块不存在，无法初始化。")
-        openapi_115 = None
-        return False
-    try:
-        openapi_115 = OpenAPI_115()
-        if openapi_115.access_token and openapi_115.refresh_token:
-            user_info = openapi_115.get_user_info()
-            if not OpenAPI_115.is_valid_user_info(user_info):
-                logger.error("115 OpenAPI客户端初始化失败: OpenAPI测试失败！")
-                openapi_115 = None
-                return False
-            logger.info("115 OpenAPI客户端初始化成功")
-            return True
-        logger.error("115 OpenAPI客户端初始化失败: 无法获取有效的token")
-        openapi_115 = None
-        return False
-    except Exception as e:
-        logger.error(f"115 OpenAPI客户端初始化失败: {e}")
-        openapi_115 = None
-        return False
 
 
 def check_user(user_id):
