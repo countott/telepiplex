@@ -277,6 +277,46 @@ def extract_confirmed_media_metadata(metadata: dict | None):
     return validate_media_metadata(metadata.get(MEDIA_METADATA_KEY), require_confirmed=True)
 
 
+def enrich_media_metadata_identity(
+    metadata: dict | None,
+    *,
+    chinese_title: str,
+    source: str,
+    evidence: dict | None = None,
+) -> dict:
+    result = deepcopy(metadata) if isinstance(metadata, dict) else {}
+    contract_present = MEDIA_METADATA_KEY in result
+    contract = extract_confirmed_media_metadata(result)
+    if contract is None:
+        if contract_present:
+            raise ValueError("invalid confirmed media_metadata")
+        return result
+
+    title = _text(chinese_title)
+    if not title or _text((contract.get("identity") or {}).get("chinese_title")):
+        return result
+
+    contract["identity"]["chinese_title"] = title
+    contract_evidence = deepcopy(contract.get("evidence") or {})
+    backfills = list(contract_evidence.get("identity_backfills") or [])
+    entry = {
+        "field": "chinese_title",
+        "source": _text(source) or "unknown",
+    }
+    for key, value in (evidence or {}).items():
+        if _text(value):
+            entry[str(key)] = deepcopy(value)
+    backfills.append(entry)
+    contract_evidence["identity_backfills"] = backfills
+    contract["evidence"] = contract_evidence
+
+    validated = validate_media_metadata(contract, require_confirmed=True)
+    if validated is None:
+        raise ValueError("identity enrichment produced invalid media_metadata")
+    result[MEDIA_METADATA_KEY] = validated
+    return result
+
+
 def locked_episode(value: dict):
     placement = value.get("placement") if isinstance(value, dict) else None
     if not isinstance(placement, dict) or placement.get("library_type") != "series":

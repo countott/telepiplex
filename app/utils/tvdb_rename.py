@@ -233,6 +233,7 @@ def build_confirmed_rename_plan(
     media_metadata: dict,
     ai_plan: dict,
     file_tree: list[dict],
+    mapping_coverage: dict | None = None,
 ) -> dict | None:
     placement = media_metadata.get("placement") or {}
     identity = media_metadata.get("identity") or {}
@@ -315,11 +316,15 @@ def build_confirmed_rename_plan(
 
     if not operations:
         return None
+    coverage = dict(mapping_coverage or {})
     return {
         "target_root": target_root,
         "series_name": series_name,
         "operations": operations,
-        "unmatched_sources": sorted(source_video_paths - seen_sources),
+        "unmatched_sources": sorted(
+            coverage.get("unexpected_sources") or (source_video_paths - seen_sources)
+        ),
+        "mapping_coverage": coverage,
         "warnings": [
             str(item)
             for item in media_metadata.get("warnings") or []

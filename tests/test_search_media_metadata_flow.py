@@ -337,6 +337,56 @@ class SearchMediaMetadataFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         prowlarr_mock.assert_not_awaited()
 
+    async def test_chinese_backfill_updates_canonical_identity_without_changing_query(self):
+        contract = self._plan()["media_metadata"]
+        contract["metadata_id"] = "plan-backfill"
+        contract["confirmed"] = True
+        contract["identity"]["chinese_title"] = ""
+        contract["placement"]["episode_number"] = 100
+        naming_metadata = {
+            "english_title": "Someday or One Day The Movie",
+            "chinese_title": "",
+            "year": "2022",
+            "media_type": "movie",
+        }
+        metadata = {
+            "query": "Someday or One Day The Movie 2022",
+            "media_metadata": contract,
+        }
+
+        with patch.object(
+            search_handler,
+            "_fetch_douban_metadata_for_external_title",
+            return_value=(
+                {"chinese_title": "想见你"},
+                "Someday or One Day The Movie 2022",
+            ),
+        ):
+            backfilled_naming, backfilled_metadata = (
+                await search_handler._backfill_missing_chinese_title(
+                    naming_metadata,
+                    metadata,
+                )
+            )
+
+        self.assertEqual(backfilled_naming["chinese_title"], "想见你")
+        self.assertEqual(
+            backfilled_metadata["query"],
+            "Someday or One Day The Movie 2022",
+        )
+        self.assertEqual(
+            backfilled_metadata["media_metadata"]["identity"]["chinese_title"],
+            "想见你",
+        )
+        self.assertEqual(
+            backfilled_metadata["media_metadata"]["placement"]["episode_number"],
+            100,
+        )
+        self.assertEqual(
+            backfilled_metadata["media_metadata"]["evidence"]["identity_backfills"][0]["source"],
+            "douban",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

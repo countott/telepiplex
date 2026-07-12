@@ -13,6 +13,10 @@ from app.core.media_metadata import (
 )
 from app.core.module_registry import DownloadCompletedEvent, PostDownloadResult
 from app.utils.ai import infer_tvdb_episode_plan_with_ai
+from app.utils.confirmed_file_mapping import (
+    map_confirmed_files,
+    unresolved_mapping_context,
+)
 from app.utils.media_naming import build_media_naming_plan, infer_english_title_from_release
 from app.utils.tvdb_rename import (
     VIDEO_EXTENSIONS,
@@ -359,14 +363,25 @@ def _attempt_confirmed_series_rename(
         "tvdb_candidates": tvdb_candidates,
         "tvdb_episodes": tvdb_episodes,
     }
-    ai_plan = infer_tvdb_episode_plan_with_ai(context)
+    coverage = map_confirmed_files(media_metadata, file_tree)
+    if coverage["missing_items"] and coverage["unexpected_sources"]:
+        context.update(
+            unresolved_mapping_context(media_metadata, file_tree, coverage)
+        )
+        ai_plan = infer_tvdb_episode_plan_with_ai(context) or {}
+        coverage = map_confirmed_files(
+            media_metadata,
+            file_tree,
+            ai_plan.get("episode_map") or [],
+        )
     rename_plan = build_confirmed_rename_plan(
         final_path=event.final_path,
         selected_path=event.selected_path,
         metadata=metadata,
         media_metadata=media_metadata,
-        ai_plan=ai_plan or {},
+        ai_plan={"episode_map": coverage["mappings"]},
         file_tree=file_tree,
+        mapping_coverage=coverage,
     )
     if not rename_plan:
         init.logger.warn(

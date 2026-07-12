@@ -5,6 +5,7 @@ from app.core.media_metadata import (
     CONTENT_KINDS,
     MEDIA_METADATA_KEY,
     attach_media_metadata,
+    enrich_media_metadata_identity,
     extract_confirmed_media_metadata,
     locked_episode,
     merge_resolved_items,
@@ -320,3 +321,50 @@ class CoreMediaMetadataTest(unittest.TestCase):
                 "episode_number": 101,
                 "final_path": "/wrong.mkv",
             }])
+
+    def test_identity_enrichment_updates_only_missing_canonical_chinese_title(self):
+        value = self._value()
+        value["identity"]["chinese_title"] = ""
+        metadata = attach_media_metadata(
+            {"query": "Someday or One Day The Movie 2022"},
+            value,
+        )
+        original_placement = json.loads(json.dumps(value["placement"]))
+        original_items = json.loads(json.dumps(value["items"]))
+
+        enriched = enrich_media_metadata_identity(
+            metadata,
+            chinese_title="想见你",
+            source="douban",
+            evidence={"query": "Someday or One Day The Movie 2022"},
+        )
+        contract = extract_confirmed_media_metadata(enriched)
+
+        self.assertEqual(enriched["query"], "Someday or One Day The Movie 2022")
+        self.assertEqual(contract["identity"]["chinese_title"], "想见你")
+        self.assertEqual(contract["identity"]["english_title"], value["identity"]["english_title"])
+        self.assertEqual(contract["metadata_id"], "metadata-a")
+        self.assertEqual(contract["placement"], original_placement)
+        self.assertEqual(contract["items"], original_items)
+        self.assertEqual(
+            contract["evidence"]["identity_backfills"],
+            [{
+                "field": "chinese_title",
+                "source": "douban",
+                "query": "Someday or One Day The Movie 2022",
+            }],
+        )
+        self.assertEqual(metadata["media_metadata"]["identity"]["chinese_title"], "")
+
+    def test_identity_enrichment_never_overwrites_confirmed_chinese_title(self):
+        metadata = attach_media_metadata({}, self._value())
+
+        enriched = enrich_media_metadata_identity(
+            metadata,
+            chinese_title="错误覆盖",
+            source="ai_metadata_backfill",
+        )
+
+        contract = extract_confirmed_media_metadata(enriched)
+        self.assertEqual(contract["identity"]["chinese_title"], "想见你")
+        self.assertNotIn("identity_backfills", contract["evidence"])

@@ -21,6 +21,7 @@ import init
 from app.adapters.wikipedia import lookup_wikipedia_evidence
 from app.core.media_metadata import (
     attach_media_metadata,
+    enrich_media_metadata_identity,
     extract_confirmed_media_metadata,
     resolve_category_route,
     series_folder_name,
@@ -900,6 +901,15 @@ async def _backfill_missing_chinese_title(naming_metadata: dict | None, metadata
             }
         )
         backfilled_metadata["evidence"] = evidence
+        backfilled_metadata = enrich_media_metadata_identity(
+            backfilled_metadata,
+            chinese_title=ai_metadata["chinese_title"],
+            source="ai_metadata_backfill",
+            evidence={
+                "title": english_title,
+                "year": year,
+            },
+        )
         return backfilled_naming, backfilled_metadata
 
     _log_info(
@@ -925,6 +935,12 @@ async def _backfill_missing_chinese_title(naming_metadata: dict | None, metadata
         }
     )
     backfilled_metadata["evidence"] = evidence
+    backfilled_metadata = enrich_media_metadata_identity(
+        backfilled_metadata,
+        chinese_title=douban_metadata["chinese_title"],
+        source="douban",
+        evidence={"query": lookup_query},
+    )
     return backfilled_naming, backfilled_metadata
 
 
