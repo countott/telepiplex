@@ -33,7 +33,7 @@ _DISTRIBUTION_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def _validate_distribution_name(name: str):
-    normalized = name.casefold().replace("_", "-").replace(".", "-")
+    normalized = re.sub(r"[-_.]+", "-", name).casefold()
     if normalized.startswith("telepiplex-") and normalized != "telepiplex-plugin-sdk":
         raise FeatureBuildError(
             f"forbidden Feature distribution dependency: {normalized}"
@@ -48,7 +48,7 @@ def validate_feature_requirements(source: str):
         if (
             line.startswith("-")
             or "://" in line
-            or " @ " in line
+            or "@" in line
             or "/" in line
             or "\\" in line
             or line.casefold().endswith((".whl", ".zip", ".tar.gz", ".tgz"))

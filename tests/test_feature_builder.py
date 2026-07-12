@@ -72,8 +72,18 @@ class FeatureBuilderTest(unittest.TestCase):
         from tools.build_feature import validate_feature_requirements
 
         validate_feature_requirements(
-            "requests>=2\ntelepiplex-plugin-sdk==1.0.0\n"
+            "requests>=2\n"
+            "telepiplex-plugin-sdk==1.0.0\n"
+            "telepiplex..plugin__sdk==1.0.0\n"
         )
+
+    def test_rejects_direct_reference_without_whitespace(self):
+        from tools.build_feature import FeatureBuildError, validate_feature_requirements
+
+        with self.assertRaises(FeatureBuildError):
+            validate_feature_requirements(
+                "requests@git+ssh:git@example.com:repo\n"
+            )
 
     def test_rejects_unsafe_requirement_sources(self):
         from tools.build_feature import FeatureBuildError, validate_feature_requirements
