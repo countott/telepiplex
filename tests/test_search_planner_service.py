@@ -3,6 +3,7 @@ from unittest.mock import Mock, patch
 
 from app.services.search_planner import (
     SearchPlanningError,
+    _provider_status_and_support,
     build_confirmable_search_plan,
 )
 from app.utils.search_plan import TemporarySpecialAllocator
@@ -151,9 +152,21 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             contract["evidence"]["provider_support"],
             {
-                "wikipedia": {"has_facts": False, "source_urls": []},
-                "douban": {"has_facts": False, "source_urls": []},
-                "tvdb": {"has_facts": False, "source_urls": []},
+                "wikipedia": {
+                    "has_facts": False,
+                    "source_urls": [],
+                    "stable_ids": [],
+                },
+                "douban": {
+                    "has_facts": False,
+                    "source_urls": [],
+                    "stable_ids": [],
+                },
+                "tvdb": {
+                    "has_facts": False,
+                    "source_urls": [],
+                    "stable_ids": [],
+                },
             },
         )
         for provider in providers.values():
@@ -355,10 +368,12 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
         providers["wikipedia"] = Mock(return_value={
             "source": "wikipedia",
             "status": "ok",
-            "facts": [],
-            "source_urls": [
-                "HTTPS://ZH.WIKIPEDIA.ORG/wiki/想見你_(電影)/"
-            ],
+            "facts": [{
+                "title": "想见你 (电影)",
+                "original_url": "HTTPS://ZH.WIKIPEDIA.ORG/wiki/想見你_(電影)/#intro",
+                "wikibase_item": "Q115000000",
+            }],
+            "source_urls": [],
             "error": "",
         })
 
@@ -375,12 +390,101 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
                 "wikipedia"
             ],
             {
-                "has_facts": False,
+                "has_facts": True,
                 "source_urls": [
                     "https://zh.wikipedia.org/wiki/想見你_(電影)"
                 ],
+                "stable_ids": ["Q115000000"],
             },
         )
+
+    @patch("app.services.search_planner.infer_media_metadata_draft_with_ai")
+    @patch("app.services.search_planner.infer_search_hypotheses_with_ai")
+    async def test_ok_provider_rejects_ai_url_unrelated_to_actual_evidence(
+        self, hypothesis_mock, metadata_mock
+    ):
+        hypothesis_mock.return_value = self._hypotheses()
+        draft = self._draft()
+        source_entry = draft["media_metadata"]["source_entry"]
+        source_entry.pop("availability", None)
+        source_entry["verification"] = "verified"
+        draft["media_metadata"]["warnings"] = []
+        metadata_mock.return_value = draft
+        providers = self._down_providers()
+        providers["wikipedia"] = Mock(return_value={
+            "source": "wikipedia",
+            "status": "ok",
+            "facts": [{
+                "title": "无关作品",
+                "url": "https://zh.wikipedia.org/wiki/無關作品",
+                "wikibase_item": "Q999999",
+            }],
+            "source_urls": ["https://zh.wikipedia.org/wiki/無關作品"],
+            "error": "",
+        })
+
+        with self.assertRaisesRegex(SearchPlanningError, "invalid_media_metadata"):
+            await build_confirmable_search_plan(
+                "想见你",
+                "plan-a",
+                providers,
+                lambda _contract: set(),
+                TemporarySpecialAllocator(),
+            )
+
+    def test_provider_support_collects_only_provider_specific_stable_ids(self):
+        statuses, support = _provider_status_and_support([
+            {
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [{
+                    "url": "HTTPS://EN.WIKIPEDIA.ORG/wiki/Example/",
+                    "wikibase_item": "Q42",
+                    "id": "generic-wikipedia-id",
+                }],
+                "source_urls": [],
+            },
+            {
+                "source": "douban",
+                "status": "ok",
+                "facts": [{
+                    "subject_id": 35314632,
+                    "external_ids": {"douban_subject": "30468961"},
+                    "id": "generic-douban-id",
+                }],
+                "source_urls": [],
+            },
+            {
+                "source": "tvdb",
+                "status": "ok",
+                "facts": [{
+                    "movies": [{
+                        "tvdb_movie_id": 123,
+                        "id": "generic-tvdb-id",
+                    }],
+                    "episodes": [{"tvdb_episode_id": "episode-5"}],
+                }],
+                "source_urls": [],
+            },
+        ])
+
+        self.assertEqual(
+            statuses,
+            {"wikipedia": "ok", "douban": "ok", "tvdb": "ok"},
+        )
+        self.assertEqual(
+            support["wikipedia"],
+            {
+                "has_facts": True,
+                "source_urls": ["https://en.wikipedia.org/wiki/Example"],
+                "stable_ids": ["Q42"],
+            },
+        )
+        self.assertEqual(support["douban"]["stable_ids"], ["35314632", "30468961"])
+        self.assertEqual(support["tvdb"]["stable_ids"], ["123", "episode-5"])
+        self.assertNotIn("generic-wikipedia-id", support["wikipedia"]["stable_ids"])
+        self.assertNotIn("generic-douban-id", support["douban"]["stable_ids"])
+        self.assertNotIn("generic-tvdb-id", support["tvdb"]["stable_ids"])
 
 
 if __name__ == "__main__":
