@@ -55,8 +55,7 @@ class MediaSearchSurfaceTest(unittest.TestCase):
     def test_unified_config_template_exposes_search_contract(self):
         for config_path in (ROOT / "config" / "config.yaml.example", ROOT / "app" / "config.yaml.example"):
             source = config_path.read_text(encoding="utf-8")
-            self.assertIn("search:", source)
-            self.assertIn("enable: false", source)
+            self.assertIn("search:\n  enable: true", source)
             self.assertIn("prowlarr:", source)
             self.assertIn("result_limit:", source)
             self.assertIn("scoring:", source)
