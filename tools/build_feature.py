@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,16 @@ class FeatureBuildError(RuntimeError):
 
 
 _FORBIDDEN_ROOT_IMPORTS = {"app", "init", "telegram"}
+
+
+def validate_feature_requirements(source: str):
+    for raw in str(source or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name = re.split(r"[<>=!~;\[\s]", line, maxsplit=1)[0].casefold().replace("_", "-")
+        if name.startswith("telepiplex-") and name != "telepiplex-plugin-sdk":
+            raise FeatureBuildError(f"forbidden Feature distribution dependency: {name}")
 
 
 def validate_feature_imports(source_dir: Path):
@@ -106,9 +117,11 @@ def build_feature_artifact(
         shutil.copy2(sdk_candidates[0], wheelhouse / sdk_candidates[0].name)
 
         requirements = source_dir / "requirements-feature.txt"
+        requirement_source = requirements.read_text(encoding="utf-8") if requirements.is_file() else ""
+        validate_feature_requirements(requirement_source)
         if requirements.is_file() and any(
             line.strip() and not line.lstrip().startswith("#")
-            for line in requirements.read_text(encoding="utf-8").splitlines()
+            for line in requirement_source.splitlines()
         ):
             _run([
                 str(python_executable),

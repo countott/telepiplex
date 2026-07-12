@@ -21,7 +21,8 @@ class PoisonAwareClient(SubscriberClient):
     async def request(self, method, params, *, deadline, idempotency_key=""):
         self.calls.append((method, params, deadline, idempotency_key))
         if params.get("payload", {}).get("poison"):
-            raise RuntimeError("permanent failure")
+            from app.core.plugin_contract import ContractError
+            raise ContractError("internal_error", "permanent failure")
         return {"accepted": True}
 
 
@@ -79,6 +80,26 @@ class EventDispatcherTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await dispatcher.deliver_once(), 1)
             self.assertEqual(journal.pending("renaming"), [])
             self.assertEqual(len(journal.dead_letters("renaming")), 1)
+
+    async def test_transport_failure_never_consumes_poison_attempt_budget(self):
+        from app.core.capability_router import CapabilityRouter
+        from app.core.event_dispatcher import EventDispatcher
+        from app.core.event_journal import EventJournal
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            journal = EventJournal(Path(tmpdir) / "core.db")
+            self.addCleanup(journal.close)
+            router = CapabilityRouter(); client = SubscriberClient()
+            subscriber = manifest("renaming", subscribes=("download.completed",))
+            router.activate("renaming", subscriber, client)
+            journal.set_subscriptions("renaming", subscriber.subscribes)
+            journal.publish("download.completed", {"path": "/download"}, "transient")
+            dispatcher = EventDispatcher(router, journal, max_attempts=1)
+
+            await dispatcher.deliver_once()
+
+            self.assertEqual(len(journal.pending("renaming")), 1)
+            self.assertEqual(journal.dead_letters("renaming"), [])
 
 
 if __name__ == "__main__":

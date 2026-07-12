@@ -56,6 +56,12 @@ class FeatureBuilderTest(unittest.TestCase):
             with self.assertRaises(FeatureBuildError):
                 validate_feature_imports(Path(tmpdir))
 
+    def test_rejects_sibling_feature_distribution_in_requirements(self):
+        from tools.build_feature import FeatureBuildError, validate_feature_requirements
+
+        with self.assertRaises(FeatureBuildError):
+            validate_feature_requirements("requests\ntelepiplex-open115==1.0.0\n")
+
 
 if __name__ == "__main__":
     unittest.main()

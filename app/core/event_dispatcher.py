@@ -4,6 +4,13 @@ import asyncio
 
 from app.core.capability_router import CapabilityRouter
 from app.core.event_journal import EventJournal
+from app.core.plugin_contract import ContractError
+
+
+_POISON_CODES = {
+    "internal_error", "invalid_request", "not_found", "method_not_allowed",
+    "invalid_callback", "english_title_missing",
+}
 
 
 class EventDispatcher:
@@ -70,12 +77,10 @@ class EventDispatcher:
                         idempotency_key=event.event_id,
                     )
                 except Exception as exc:
-                    self.journal.record_failure(
-                        event.event_id,
-                        plugin_id,
-                        type(exc).__name__,
-                        self.max_attempts,
-                    )
+                    if isinstance(exc, ContractError) and exc.code in _POISON_CODES:
+                        self.journal.record_failure(
+                            event.event_id, plugin_id, exc.code, self.max_attempts,
+                        )
                     continue
                 if self.journal.ack(event.event_id, plugin_id):
                     delivered += 1
