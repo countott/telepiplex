@@ -58,6 +58,18 @@ class DoubanMetadataFusionTest(unittest.TestCase):
         self.assertEqual(metadata["english_title"], "")
         self.assertEqual(metadata["cover_url"], "https://img.example/movie.jpg")
 
+    def test_latin_only_douban_title_does_not_claim_chinese_title(self):
+        metadata = search_handler._extract_douban_metadata(
+            {
+                "id": "2",
+                "title": "Rick and Morty",
+                "year": "2024",
+                "type": "tv",
+            }
+        )
+
+        self.assertIsNone(metadata)
+
 
 class PrimaryEntryMergeTest(unittest.TestCase):
     def test_douban_and_tvdb_glory_merge_into_one_series(self):

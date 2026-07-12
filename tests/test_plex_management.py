@@ -813,6 +813,26 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertEqual([job["created"] for job in second], [False, False])
         self.assertEqual([job["id"] for job in first], [job["id"] for job in second])
 
+    def test_episode_job_identity_includes_locked_target_when_item_ids_repeat(self):
+        completion = make_unresolved_standalone_series_completion()
+        contract = completion.result.metadata["media_metadata"]
+        contract["items"][0].update({
+            "item_id": "episode",
+            "final_path": "/真人剧集/Test Show/Test Show Season 01/Test Show S01E01.mkv",
+        })
+        contract["items"].append({
+            "item_id": "episode",
+            "content_role": "main_episode",
+            "season_number": 1,
+            "episode_number": 2,
+            "final_path": "/真人剧集/Test Show/Test Show Season 01/Test Show S01E02.mkv",
+        })
+
+        jobs = self.make_service().enqueue_completion_jobs(completion)
+
+        self.assertEqual(len({job["id"] for job in jobs}), 2)
+        self.assertEqual([job["created"] for job in jobs], [True, True])
+
     def test_ordinary_episode_location_uses_existing_show_episode_and_final_path(self):
         completion = make_unresolved_standalone_series_completion()
         contract = completion.result.metadata["media_metadata"]

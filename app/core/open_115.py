@@ -704,11 +704,12 @@ class OpenAPI_115:
             batch_size: 每批删除的文件数量，默认100
         """
         if not fid_list:
-            return
+            return []
             
         # 去重
         fid_list = list(set(fid_list))
         total_files = len(fid_list)
+        deleted_ids = []
         init.logger.info(f"准备分批删除 {total_files} 个文件，每批 {batch_size} 个")
         
         # 分批处理
@@ -728,6 +729,7 @@ class OpenAPI_115:
                 
                 if result is True:
                     init.logger.info(f"第 {batch_num} 批删除成功")
+                    deleted_ids.extend(batch)
                     break
                 else:
                     if attempt < max_retries - 1:
@@ -742,6 +744,7 @@ class OpenAPI_115:
                 time.sleep(2)
         # 等待服务器处理删除请求
         time.sleep(10)
+        return deleted_ids
         
     @handle_token_expiry
     def delete_single_file(self, path):
@@ -1275,8 +1278,19 @@ class OpenAPI_115:
                 pid_list.append(file['pid'])
         
         if fid_list:
-            self._batch_delete_files(fid_list)
-            summary["count"] = len(fid_list)
+            deleted = self._batch_delete_files(fid_list)
+            if deleted is True:
+                deleted_ids = set(fid_list)
+            elif isinstance(deleted, (list, tuple, set)):
+                deleted_ids = {str(file_id) for file_id in deleted}
+            else:
+                deleted_ids = set()
+            summary["files"] = [
+                str(file.get('fn') or '')
+                for file in junk_file_list
+                if str(file.get('fid') or '') in deleted_ids
+            ]
+            summary["count"] = len(summary["files"])
         
         # 清理空目录
         if clean_empty_dir:

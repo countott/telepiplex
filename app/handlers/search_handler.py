@@ -210,7 +210,8 @@ def _extract_douban_metadata(payload: dict) -> dict | None:
     raw_title = _collapse_title_spaces(data.get("title") or data.get("name"))
     year = _collapse_title_spaces(data.get("release_year") or data.get("year"))
     chinese_title, mixed_english_title = _split_mixed_douban_title(raw_title)
-    chinese_title = chinese_title or raw_title
+    if not chinese_title and re.search(r"[\u4e00-\u9fff]", raw_title):
+        chinese_title = raw_title
     english_candidates = [
         data.get("original_title"),
         data.get("originalTitle"),

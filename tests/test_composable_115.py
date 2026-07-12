@@ -34,6 +34,25 @@ class Composable115ModuleTest(unittest.TestCase):
         })
         api._batch_delete_files.assert_called_once_with(["1", "2"])
 
+    def test_auto_clean_all_does_not_report_failed_batch_as_deleted(self):
+        import init
+        from app.core.open_115 import OpenAPI_115
+
+        init.logger = Mock()
+        init.bot_config = {
+            "clean_policy": {"switch": "on", "less_than": "400M"}
+        }
+        api = object.__new__(OpenAPI_115)
+        api.get_file_info = Mock(return_value={"file_id": "root"})
+        api.find_all_junk_files = Mock(return_value=[
+            {"fid": "1", "fn": "sample.mkv", "pid": "root"},
+        ])
+        api._batch_delete_files = Mock(return_value=[])
+
+        summary = api.auto_clean_all("/电影/Raw.Release")
+
+        self.assertEqual(summary, {"count": 0, "files": []})
+
     def test_open115_module_registers_provider_and_commands(self):
         from app.core.module_registry import ModuleRegistry
         from app.modules.open115 import register_module

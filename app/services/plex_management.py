@@ -109,7 +109,12 @@ class PlexManagementService:
         for target in targets:
             payload = deepcopy(base_payload)
             payload["target"] = deepcopy(target)
-            target_identity = f"{identity}\x1f{target['target_id']}"
+            target_identity = "\x1f".join((
+                identity,
+                str(target["target_id"]),
+                str(target.get("season_number") or ""),
+                str(target.get("episode_number") or ""),
+            ))
             key = hashlib.sha256(target_identity.encode("utf-8")).hexdigest()
             job, created = self.jobs.create_or_get_with_status(key, payload)
             result = dict(job)
