@@ -50,6 +50,21 @@ class CoreClient:
             idempotency_key=idempotency_key,
         )
 
+    async def notify_user(
+        self,
+        user_id: int,
+        text: str,
+        *,
+        deadline: float = 10,
+        idempotency_key: str = "",
+    ) -> dict:
+        return await self._request(
+            "notification.send",
+            {"user_id": user_id, "text": str(text)},
+            deadline=deadline,
+            idempotency_key=idempotency_key,
+        )
+
     async def _request(
         self,
         method: str,

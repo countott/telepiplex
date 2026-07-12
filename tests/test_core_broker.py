@@ -45,7 +45,13 @@ class CoreBrokerTest(unittest.IsolatedAsyncioTestCase):
         root = Path(self.temp.name)
         self.router = CapabilityRouter()
         self.journal = EventJournal(root / "core.db")
-        self.broker = CoreBroker(self.router, self.journal, root / "core.sock")
+        self.notifications = []
+        self.broker = CoreBroker(
+            self.router,
+            self.journal,
+            root / "core.sock",
+            notification_sink=lambda user_id, text: self.notifications.append((user_id, text)),
+        )
         await self.broker.start()
 
     async def asyncTearDown(self):
@@ -110,6 +116,19 @@ class CoreBrokerTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(FeatureError) as raised:
             await client.publish_event("download.completed", {}, deadline=1)
         self.assertEqual(raised.exception.code, "unauthorized")
+
+    async def test_authenticated_feature_can_send_bounded_user_notification(self):
+        from telepiplex_plugin_sdk import CoreClient, FeatureError
+
+        self.broker.register("open115", "notify-token", manifest("open115"))
+        client = CoreClient(self.broker.socket_path, "notify-token")
+        result = await client.notify_user(123, "下载完成", deadline=1)
+        self.assertTrue(result["accepted"])
+        self.assertEqual(self.notifications, [(123, "下载完成")])
+
+        with self.assertRaises(FeatureError) as raised:
+            await client.notify_user(123, "x" * 5000, deadline=1)
+        self.assertEqual(raised.exception.code, "invalid_notification")
 
 
 if __name__ == "__main__":

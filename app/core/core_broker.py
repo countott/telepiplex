@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import inspect
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,7 @@ class CoreBroker:
         socket_path: Path,
         *,
         dispatcher=None,
+        notification_sink=None,
         max_frame_bytes: int = 1024 * 1024,
         max_deadline: float = 300,
     ):
@@ -39,6 +41,7 @@ class CoreBroker:
         self.journal = journal
         self.socket_path = Path(socket_path)
         self.dispatcher = dispatcher
+        self.notification_sink = notification_sink
         self.max_frame_bytes = int(max_frame_bytes)
         self.max_deadline = max(1, float(max_deadline))
         self._identities: dict[str, BrokerIdentity] = {}
@@ -182,4 +185,21 @@ class CoreBroker:
             if self.dispatcher is not None:
                 self.dispatcher.wake()
             return {"event_id": event_id}
+        if method == "notification.send":
+            try:
+                user_id = int(params.get("user_id"))
+            except (TypeError, ValueError):
+                user_id = 0
+            text = str(params.get("text") or "")
+            if user_id <= 0 or not text or len(text) > 4096:
+                raise BrokerError(
+                    "invalid_notification",
+                    "notification requires a valid user and at most 4096 characters",
+                )
+            if self.notification_sink is None:
+                raise BrokerError("notification_unavailable", "Core notification sink is unavailable")
+            accepted = self.notification_sink(user_id, text)
+            if inspect.isawaitable(accepted):
+                accepted = await accepted
+            return {"accepted": accepted is not False}
         raise BrokerError("not_found", f"unknown Core RPC method: {method}")

@@ -122,6 +122,9 @@ def build_plugin_manager(config=None, core_database=None):
         journal,
         runtime_root / "core.sock",
         dispatcher=dispatcher,
+        notification_sink=lambda user_id, text: add_task_to_queue(
+            user_id, None, message=text
+        ),
     )
     supervisor = PluginSupervisor(
         startup_timeout=float(plugin_config.get("startup_timeout") or 30),
