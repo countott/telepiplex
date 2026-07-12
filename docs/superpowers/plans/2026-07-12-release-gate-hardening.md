@@ -85,7 +85,7 @@ git commit -m "fix(core): preserve consumers during provider updates"
 
 - [ ] **Step 1: Write the failing retry regression test**
 
-Add a client that returns `ContractError("internal_error", ...)` twice and succeeds on the third call. With `max_attempts=2`, assert the event remains pending and has no dead letter after two calls, then is acknowledged on the third call. Change the existing deterministic poison fixture to return `invalid_request` so dead-letter behavior remains covered.
+Add a client that returns `ContractError("internal_error", "temporary failure")` twice and succeeds on the third call. With `max_attempts=2`, assert the event remains pending and has no dead letter after two calls, then is acknowledged on the third call. Change the existing deterministic poison fixture to return `invalid_request` so dead-letter behavior remains covered.
 
 - [ ] **Step 2: Run the targeted test and verify RED**
 
