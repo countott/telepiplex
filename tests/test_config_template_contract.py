@@ -5,12 +5,6 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CATEGORY_KINDS = {
-    "live_action_series",
-    "live_action_movie",
-    "animated_movie",
-    "animated_series",
-}
 BUSINESS_TERMS = (
     "115_app_id",
     "access_token",
@@ -23,14 +17,9 @@ BUSINESS_TERMS = (
     "tvdb",
     "plex",
     "ai",
+    "category_folder",
+    "modules",
 )
-
-
-def assert_four_routes(test_case, routes):
-    test_case.assertEqual(len(routes), 4)
-    test_case.assertEqual({item["kind"] for item in routes}, CATEGORY_KINDS)
-    test_case.assertTrue(all(item.get("path") for item in routes))
-    test_case.assertTrue(all("plex_library_id" in item for item in routes))
 
 
 class ConfigTemplateContractTest(unittest.TestCase):
@@ -40,20 +29,17 @@ class ConfigTemplateContractTest(unittest.TestCase):
 
         self.assertEqual(app_source, runtime_source)
         parsed = yaml.safe_load(runtime_source)
-        self.assertIn("bot_token", parsed)
-        self.assertIn("allowed_user", parsed)
-        assert_four_routes(self, parsed["category_folder"])
+        self.assertEqual(
+            set(parsed),
+            {"log_level", "bot_token", "allowed_user", "plugins"},
+        )
+        self.assertEqual(parsed["plugins"]["root"], "/config/plugins")
+        self.assertEqual(parsed["plugins"]["catalog"], "/config/plugins/catalog.yaml")
         for term in BUSINESS_TERMS:
             self.assertNotIn(term, parsed)
 
-    def test_core_module_snippet_contains_only_modules_and_four_routes(self):
-        parsed = yaml.safe_load(
-            (ROOT / "config/modules/core.yaml.example").read_text(encoding="utf-8")
-        )
-
-        self.assertEqual(set(parsed), {"modules", "category_folder"})
-        self.assertEqual(parsed["modules"], {"enabled": []})
-        assert_four_routes(self, parsed["category_folder"])
+    def test_legacy_core_module_snippet_is_removed(self):
+        self.assertFalse((ROOT / "config/modules/core.yaml.example").exists())
 
 
 if __name__ == "__main__":

@@ -53,10 +53,11 @@ class TelepiplexCoreSurfaceTest(unittest.TestCase):
         for config_path in (
             ROOT / "config" / "config.yaml.example",
             ROOT / "app" / "config.yaml.example",
-            ROOT / "config" / "modules" / "core.yaml.example",
         ):
             source = config_path.read_text(encoding="utf-8")
-            self.assertIn("category_folder:", source)
+            self.assertIn("plugins:", source)
+            self.assertNotIn("category_folder:", source)
+            self.assertNotIn("modules:", source)
             for term in (
                 "115_app_id",
                 "access_token",

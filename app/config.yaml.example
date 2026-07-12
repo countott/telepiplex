@@ -5,21 +5,12 @@ log_level: info
 bot_token: "your_bot_token"
 allowed_user: 123456789
 
-# 共享保存目录合同。业务分支可复用该结构，不在 core 分支执行 115 投递。
-category_folder:
-  - kind: live_action_movie
-    name: 真人电影
-    path: /真人电影
-    plex_library_id: ""
-  - kind: animated_movie
-    name: 动画电影
-    path: /动画电影
-    plex_library_id: ""
-  - kind: live_action_series
-    name: 真人剧集
-    path: /真人剧集
-    plex_library_id: ""
-  - kind: animated_series
-    name: 动画剧集
-    path: /动画剧集
-    plex_library_id: ""
+# Feature 插件宿主。业务配置分别位于 /config/plugins/<plugin_id>/config.yaml。
+plugins:
+  root: /config/plugins
+  catalog: /config/plugins/catalog.yaml
+  install_timeout: 300
+  startup_timeout: 30
+  drain_timeout: 120
+  stabilize_seconds: 10
+  restart_limit: 3

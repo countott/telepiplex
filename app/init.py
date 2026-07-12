@@ -18,7 +18,6 @@ def _ensure_module_paths():
 
 _ensure_module_paths()
 
-from app.core.media_metadata import require_complete_category_routes
 from app.utils.logger import Logger
 
 
@@ -62,8 +61,6 @@ def load_yaml_config():
     global bot_config
     yaml_path = CONFIG_FILE
     example_config_path = f"{APP}/config.yaml.example"
-    loaded_config = False
-
     try:
         shutil.copy2(example_config_path, CONFIG_FILE_EXAMPLE)
     except Exception as e:
@@ -73,24 +70,18 @@ def load_yaml_config():
         if os.path.exists(yaml_path):
             with open(yaml_path, "r", encoding="utf-8") as f:
                 bot_config = yaml.safe_load(f) or {}
-            loaded_config = True
         elif os.path.exists(example_config_path):
             os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
             shutil.copy2(example_config_path, yaml_path)
             print(f"已复制示例配置文件到 {yaml_path}")
             with open(yaml_path, "r", encoding="utf-8") as f:
                 bot_config = yaml.safe_load(f) or {}
-            loaded_config = True
         else:
             print("Config example file not found!")
             bot_config = {}
     except Exception:
         print(f"配置文件[{yaml_path}]格式有误，请检查!")
         bot_config = {}
-
-    if loaded_config:
-        require_complete_category_routes(bot_config)
-
 
 def get_bot_token():
     global bot_config

@@ -156,8 +156,13 @@ git commit -m "feat(core): build and verify immutable Feature artifacts"
 - Create: `app/core/plugin_store.py`
 - Test: `tests/test_plugin_store.py`
 - Modify: `requirements.txt`
+- Modify: `app/init.py`
 - Modify: `app/config.yaml.example`
 - Modify: `config/config.yaml.example`
+- Delete: `config/modules/core.yaml.example`
+- Test: `tests/test_category_route_startup.py`
+- Test: `tests/test_config_template_contract.py`
+- Test: `tests/test_telepiplex_core_surface.py`
 
 **Interfaces:**
 - Consumes: `VerifiedArtifact`.
@@ -168,20 +173,20 @@ git commit -m "feat(core): build and verify immutable Feature artifacts"
 - Produces: `PluginStore.list_installed() -> list[InstalledPlugin]`.
 - Produces: `PluginStore.validate_config(release, value) -> dict`.
 
-- [ ] **Step 1: Write plugin-store RED tests**
+- [x] **Step 1: Write plugin-store RED tests**
 
 Prove exact `/config/plugins/<id>` layout, safe extraction, default config
 creation, JSON Schema validation, atomic `active.json`, preservation of the
 previous release, corrupt active-record quarantine, and no writes outside the
 temporary plugin root.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `python3 -m unittest tests.test_plugin_store -v`
 
 Expected: import failure for `app.core.plugin_store`.
 
-- [ ] **Step 3: Add the schema dependency and core-only config**
+- [x] **Step 3: Add the schema dependency and core-only config**
 
 Add `jsonschema>=4.23,<5` to `requirements.txt`. Replace `modules.enabled` with:
 
@@ -198,13 +203,13 @@ plugins:
 
 Keep the two example files byte-identical.
 
-- [ ] **Step 4: Implement store transactions and config validation**
+- [x] **Step 4: Implement store transactions and config validation**
 
 Extract verified members into `.staging/<uuid>`, validate
 `config.default.yaml` against `config.schema.json`, atomically move to
 `releases/<version>`, and write `active.json` through fsync + `os.replace`.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run:
 
@@ -215,7 +220,7 @@ cmp -s app/config.yaml.example config/config.yaml.example
 
 Expected: tests pass and `cmp` exits 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/core/plugin_store.py requirements.txt app/config.yaml.example config/config.yaml.example tests/test_plugin_store.py

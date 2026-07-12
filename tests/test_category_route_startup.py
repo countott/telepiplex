@@ -67,13 +67,12 @@ class CategoryRouteStartupTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "category_folder"):
                     require_complete_category_routes({"category_folder": routes})
 
-    def test_live_config_validation_propagates_without_rewriting_user_file(self):
-        pre_kind_config = {"category_folder": [
-            {"name": "真人剧集", "path": "/真人剧集", "plex_library_id": "11"},
-            {"name": "真人电影", "path": "/真人电影", "plex_library_id": "12"},
-            {"name": "动画电影", "path": "/动画电影", "plex_library_id": "13"},
-            {"name": "动画剧集", "path": "/动画剧集", "plex_library_id": "14"},
-        ]}
+    def test_core_config_loads_without_business_category_routes(self):
+        core_config = {
+            "bot_token": "token",
+            "allowed_user": 1,
+            "plugins": {"root": "/config/plugins"},
+        }
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -81,11 +80,11 @@ class CategoryRouteStartupTest(unittest.TestCase):
             app_dir.mkdir()
             live_path = root / "config.yaml"
             copied_example_path = root / "config.yaml.example"
-            live_text = yaml.safe_dump(pre_kind_config, allow_unicode=True, sort_keys=False)
+            live_text = yaml.safe_dump(core_config, allow_unicode=True, sort_keys=False)
             live_path.write_text(live_text, encoding="utf-8")
             (app_dir / "config.yaml.example").write_text(
                 yaml.safe_dump(
-                    {"category_folder": complete_routes()},
+                    core_config,
                     allow_unicode=True,
                     sort_keys=False,
                 ),
@@ -100,40 +99,9 @@ class CategoryRouteStartupTest(unittest.TestCase):
                 CONFIG_FILE=str(live_path),
                 CONFIG_FILE_EXAMPLE=str(copied_example_path),
             ):
-                with self.assertRaisesRegex(ValueError, "category_folder.*kind"):
-                    init.load_yaml_config()
+                init.load_yaml_config()
 
             self.assertEqual(live_path.read_text(encoding="utf-8"), live_text)
-
-    def test_copied_pre_kind_template_is_validated_without_rewriting_it(self):
-        pre_kind_config = {"category_folder": [
-            {"name": "真人剧集", "path": "/真人剧集", "plex_library_id": "11"},
-            {"name": "真人电影", "path": "/真人电影", "plex_library_id": "12"},
-            {"name": "动画电影", "path": "/动画电影", "plex_library_id": "13"},
-            {"name": "动画剧集", "path": "/动画剧集", "plex_library_id": "14"},
-        ]}
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            app_dir = root / "app"
-            app_dir.mkdir()
-            live_path = root / "config.yaml"
-            copied_example_path = root / "config.yaml.example"
-            template_text = yaml.safe_dump(pre_kind_config, allow_unicode=True, sort_keys=False)
-            (app_dir / "config.yaml.example").write_text(template_text, encoding="utf-8")
-
-            old_config = init.bot_config
-            self.addCleanup(setattr, init, "bot_config", old_config)
-            with patch.multiple(
-                init,
-                APP=str(app_dir),
-                CONFIG_FILE=str(live_path),
-                CONFIG_FILE_EXAMPLE=str(copied_example_path),
-            ):
-                with self.assertRaisesRegex(ValueError, "category_folder.*kind"):
-                    init.load_yaml_config()
-
-            self.assertEqual(live_path.read_text(encoding="utf-8"), template_text)
 
     def test_yaml_parse_error_remains_distinct_from_route_migration_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -145,7 +113,7 @@ class CategoryRouteStartupTest(unittest.TestCase):
             live_path.write_text("category_folder: [", encoding="utf-8")
             (app_dir / "config.yaml.example").write_text(
                 yaml.safe_dump(
-                    {"category_folder": complete_routes()},
+                    {"plugins": {"root": "/config/plugins"}},
                     allow_unicode=True,
                     sort_keys=False,
                 ),
