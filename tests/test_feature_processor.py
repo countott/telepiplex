@@ -46,6 +46,24 @@ class FakeStorage:
         return True
 
 
+class CleanupFailureStorage(FakeStorage):
+    def delete_single_file(self, path):
+        self.deleted.append(path)
+        return path != "/Downloads/Release"
+
+
+class SecondMoveFailureStorage(FakeStorage):
+    def move_file(self, source, target):
+        self.moved.append((source, target))
+        return len(self.moved) < 2
+
+
+class ExtraVideoDeleteFailureStorage(FakeStorage):
+    def delete_single_file(self, path):
+        self.deleted.append(path)
+        return not path.endswith("sample.mp4")
+
+
 def movie_contract():
     return {
         "schema_version": 1,
@@ -122,6 +140,22 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertNotIn("/Downloads/Release/Movie.2024.1080p.mkv", storage.deleted)
         self.assertEqual(storage.moved[-1][1], "/Movies/中文电影 (English Movie)")
 
+    def test_source_cleanup_failure_is_reported_as_incomplete(self):
+        storage = CleanupFailureStorage([
+            {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1_000_000},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Movies", user_id=1,
+            final_path="/Downloads/Release", resource_name="Movie.2024",
+            metadata=attach_media_metadata({}, movie_contract()), storage=storage,
+        )
+
+        result = process_generic_media(event)
+
+        self.assertTrue(result.handled)
+        self.assertTrue(result.message.startswith("⚠️"))
+        self.assertIn("源目录清理未完成", result.message)
+
     @patch("telepiplex_renaming.processor.infer_tvdb_episode_plan_with_ai")
     def test_normal_series_filename_mapping_precedes_ai_and_deletes_extra_video(self, ai_mock):
         storage = FakeStorage([
@@ -149,10 +183,52 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertIn("/Downloads/Series.Release", storage.deleted)
         self.assertTrue(storage.moved[-1][1].endswith("English Series Season 01"))
 
+    @patch("telepiplex_renaming.processor.infer_tvdb_episode_plan_with_ai")
+    def test_series_mid_batch_failure_becomes_partial_business_result(self, ai_mock):
+        contract = series_contract()
+        contract["items"].append({
+            "item_id": "e2", "content_role": "main_episode",
+            "season_number": 1, "episode_number": 2,
+        })
+        storage = SecondMoveFailureStorage([
+            {"fn": "English.Series.S01E01.mkv", "fid": "1", "fc": "1", "fs": 1000},
+            {"fn": "English.Series.S01E02.mkv", "fid": "2", "fc": "1", "fs": 1000},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Series", user_id=1,
+            final_path="/Downloads/Series.Release", resource_name="English.Series.S01",
+            naming_metadata={"english_title": "English Series"},
+            metadata=attach_media_metadata({}, contract), storage=storage,
+        )
+
+        result = process_tvdb_episode(event)
+
+        self.assertTrue(result.handled)
+        self.assertTrue(result.message.startswith("⚠️"))
+        self.assertIn("部分完成（1/2）", result.message)
+        ai_mock.assert_not_called()
+
+    def test_series_extra_video_cleanup_failure_is_not_reported_as_success(self):
+        storage = ExtraVideoDeleteFailureStorage([
+            {"fn": "English.Series.S01E01.mkv", "fid": "1", "fc": "1", "fs": 1000},
+            {"fn": "sample.mp4", "fid": "2", "fc": "1", "fs": 10},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Series", user_id=1,
+            final_path="/Downloads/Series.Release", resource_name="English.Series.S01E01",
+            naming_metadata={"english_title": "English Series"},
+            metadata=attach_media_metadata({}, series_contract()), storage=storage,
+        )
+
+        result = process_tvdb_episode(event)
+
+        self.assertTrue(result.message.startswith("⚠️"))
+        self.assertIn("部分完成（1/2）", result.message)
+
 
 class FakeCore:
-    def __init__(self):
-        self.storage = FakeStorage([
+    def __init__(self, storage=None):
+        self.storage = storage or FakeStorage([
             {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
             {"fn": "sample.mp4", "fid": "2", "fc": "1", "fs": 1},
         ])
@@ -200,6 +276,28 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(core.events[0][1]["job_id"], "job-1")
         self.assertEqual(core.events[0][1]["final_path"], "/Movies/中文电影 (English Movie)")
         self.assertIn("整理完成", core.notifications[0][1])
+
+    async def test_incomplete_cleanup_notifies_without_publishing_organized(self):
+        core = FakeCore(CleanupFailureStorage([
+            {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
+        ]))
+        feature = RenamingFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            core=core,
+        )
+
+        result = await feature.download_completed({
+            "event_id": "event-cleanup-failed",
+            "payload": {
+                "job_id": "job-cleanup-failed", "selected_path": "/Movies",
+                "user_id": 123, "final_path": "/Downloads/Release",
+                "resource_name": "Movie.2024", "media_metadata": movie_contract(),
+            },
+        })
+
+        self.assertFalse(result["organized"])
+        self.assertEqual(core.events, [])
+        self.assertIn("源目录清理未完成", core.notifications[0][1])
 
 
 class FeatureSourceContractTest(unittest.TestCase):

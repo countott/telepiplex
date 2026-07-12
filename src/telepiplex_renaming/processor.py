@@ -39,10 +39,10 @@ def _cleanup_source_directory(storage, path):
     try:
         result = storage.delete_single_file(path)
     except Exception as exc:
-        runtime_context.logger.warn(f"自动整理已完成，但源目录清理失败 path={path}: {exc}")
+        runtime_context.logger.warning(f"自动整理已完成，但源目录清理失败 path={path}: {exc}")
         return False
     if result is not True:
-        runtime_context.logger.warn(f"自动整理已完成，但源目录未能清理 path={path}")
+        runtime_context.logger.warning(f"自动整理已完成，但源目录未能清理 path={path}")
         return False
     return True
 
@@ -319,6 +319,15 @@ class ConfirmedPlanConflict(RuntimeError):
     pass
 
 
+class BatchRenameInterrupted(RuntimeError):
+    def __init__(self, *, completed, total, target_root, failed_path, cause):
+        super().__init__(str(cause))
+        self.completed = int(completed)
+        self.total = int(total)
+        self.target_root = str(target_root)
+        self.failed_path = str(failed_path)
+
+
 def _deterministic_episode_plan(media_metadata: dict, file_tree: list[dict]):
     placement = media_metadata.get("placement") or {}
     allowed = {
@@ -406,29 +415,46 @@ def _attempt_confirmed_series_rename(
         return None
 
     _assert_no_target_conflicts(storage, rename_plan)
-    for operation in rename_plan["operations"]:
-        if not storage.create_dir_recursive(operation["target_dir"]):
-            raise RuntimeError(
-                f"确认方案整理失败：无法创建 {operation['target_dir']}"
-            )
+    operations = rename_plan["operations"]
+    completed = 0
+    for operation in operations:
         current_source_path = operation["source_path"]
-        if Path(operation["source_path"]).name != operation["rename_to"]:
-            if storage.rename(operation["source_path"], operation["rename_to"]) is not True:
-                raise RuntimeError(
-                    f"确认方案整理失败：重命名失败 {operation['source_path']}"
-                )
-            current_source_path = operation["renamed_source_path"]
-        if storage.move_file(current_source_path, operation["target_dir"]) is not True:
-            raise RuntimeError(
-                f"确认方案整理失败：移动失败 {current_source_path}"
-            )
+        try:
+            if not storage.create_dir_recursive(operation["target_dir"]):
+                raise RuntimeError(f"无法创建 {operation['target_dir']}")
+            if Path(operation["source_path"]).name != operation["rename_to"]:
+                if storage.rename(operation["source_path"], operation["rename_to"]) is not True:
+                    raise RuntimeError(f"重命名失败 {operation['source_path']}")
+                current_source_path = operation["renamed_source_path"]
+            if storage.move_file(current_source_path, operation["target_dir"]) is not True:
+                raise RuntimeError(f"移动失败 {current_source_path}")
+        except Exception as exc:
+            raise BatchRenameInterrupted(
+                completed=completed,
+                total=len(operations),
+                target_root=rename_plan["target_root"],
+                failed_path=current_source_path,
+                cause=exc,
+            ) from exc
+        completed += 1
 
-    unmatched_dir = _move_unmatched_to_unorganized(
-        event, rename_plan.get("unmatched_sources") or []
-    )
+    unmatched_sources = rename_plan.get("unmatched_sources") or []
+    try:
+        unmatched_dir = _move_unmatched_to_unorganized(event, unmatched_sources)
+    except Exception as exc:
+        raise BatchRenameInterrupted(
+            completed=len(operations),
+            total=len(operations) + len(unmatched_sources),
+            target_root=rename_plan["target_root"],
+            failed_path=str(event.final_path),
+            cause=exc,
+        ) from exc
     rename_plan["unmatched_target"] = unmatched_dir
+    rename_plan["cleanup_complete"] = True
     if event.final_path != rename_plan["target_root"]:
-        _cleanup_source_directory(storage, event.final_path)
+        rename_plan["cleanup_complete"] = _cleanup_source_directory(
+            storage, event.final_path
+        )
     rename_plan["media_metadata"] = enrich_media_metadata_with_rename_plan(
         media_metadata,
         rename_plan,
@@ -476,6 +502,19 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
             message=f"⚠️ {exc}\n文件保持原位，请重新确认下载方案。",
             should_stop=True,
         )
+    except BatchRenameInterrupted as exc:
+        return PostDownloadResult(
+            True,
+            final_path=exc.target_root,
+            message=(
+                f"⚠️ 批量整理部分完成（{exc.completed}/{exc.total}），"
+                "已停止自动重试，请人工检查。\n"
+                f"失败位置：`{exc.failed_path}`\n"
+                f"目标目录：`{exc.target_root}`"
+            ),
+            should_stop=True,
+            metadata=event.metadata,
+        )
     if not rename_plan:
         if confirmed_series:
             unorganized_target = _move_confirmed_failure_to_unorganized(event)
@@ -499,6 +538,11 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
         message += f"\nTVDB：`{rename_plan['tvdb_series_id']}`"
     if rename_plan.get("warnings"):
         message += f"\n提示：{'; '.join(rename_plan['warnings'][:2])}"
+    if not rename_plan.get("cleanup_complete", True):
+        message = (
+            "⚠️ 视频已完成整理，但源目录清理未完成，请人工检查。\n\n"
+            f"保存目录：`{rename_plan['target_root']}`"
+        )
     result_metadata = event.metadata
     if rename_plan.get("media_metadata"):
         result_metadata = attach_media_metadata(
@@ -559,10 +603,11 @@ def _attempt_media_auto_rename(event: DownloadCompletedEvent, naming_metadata):
 
     if storage.move_file(renamed_file_path, target_path) is not True:
         raise RuntimeError(f"自动整理失败：移动失败 {renamed_file_path}")
+    cleanup_complete = True
     if event.final_path != target_path:
-        _cleanup_source_directory(storage, event.final_path)
+        cleanup_complete = _cleanup_source_directory(storage, event.final_path)
 
-    return target_path, plan
+    return target_path, plan, cleanup_complete
 
 
 def _standalone_contract_naming_metadata(event: DownloadCompletedEvent):
@@ -590,8 +635,15 @@ def process_generic_media(event: DownloadCompletedEvent) -> PostDownloadResult:
     result = _attempt_media_auto_rename(event, naming_auto_metadata)
     if not result:
         return PostDownloadResult(False, final_path=event.final_path)
-    target_path, plan = result
-    message = f"✅ 自动整理完成：`{plan.file_name}`\n\n保存目录：`{target_path}`"
+    target_path, plan, cleanup_complete = result
+    message = (
+        f"✅ 自动整理完成：`{plan.file_name}`\n\n保存目录：`{target_path}`"
+        if cleanup_complete
+        else (
+            "⚠️ 视频已完成整理，但源目录清理未完成，请人工检查。\n\n"
+            f"保存目录：`{target_path}`"
+        )
+    )
     return PostDownloadResult(
         True,
         final_path=target_path,
@@ -599,9 +651,3 @@ def process_generic_media(event: DownloadCompletedEvent) -> PostDownloadResult:
         should_stop=True,
         metadata=event.metadata,
     )
-
-
-def register_module(registry):
-    registry.add_config_sections(["media", "metadata.tvdb", "ai"])
-    registry.add_post_download_processor(process_tvdb_episode, priority=100, name="renaming.tvdb_episode")
-    registry.add_post_download_processor(process_generic_media, priority=110, name="renaming.generic_media")
