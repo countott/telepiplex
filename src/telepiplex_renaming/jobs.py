@@ -15,7 +15,7 @@ class RenamingJobStore:
                 job_id TEXT PRIMARY KEY, state TEXT NOT NULL,
                 result_json TEXT NOT NULL DEFAULT '{}', updated_at REAL NOT NULL
             )""")
-            db.execute("UPDATE renaming_jobs SET state='interrupted' WHERE state='processing'")
+            db.execute("UPDATE renaming_jobs SET state='failed' WHERE state='processing'")
 
     def get(self, job_id):
         with sqlite3.connect(self.path) as db:
@@ -26,8 +26,6 @@ class RenamingJobStore:
     def claim(self, job_id):
         with sqlite3.connect(self.path) as db:
             cursor = db.execute("INSERT OR IGNORE INTO renaming_jobs(job_id,state,updated_at) VALUES (?,'processing',?)", (str(job_id), time.time()))
-            if cursor.rowcount == 0:
-                cursor = db.execute("UPDATE renaming_jobs SET state='processing', updated_at=? WHERE job_id=? AND state='interrupted'", (time.time(), str(job_id)))
             return cursor.rowcount == 1
 
     def update(self, job_id, state, result):

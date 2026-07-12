@@ -88,6 +88,13 @@ class RenamingFeature:
                 return await self._finish(job_id, existing["result"])
             if not self.jobs.claim(job_id):
                 return {"accepted": True, "duplicate": True, "state": (existing or {}).get("state", "processing")}
+            self.jobs.update(job_id, "processing", {
+                "organized": False,
+                "final_path": event.final_path,
+                "message": "⚠️ 整理进程在完成前中断，已停止自动重放，请人工检查。",
+                "user_id": user_id,
+                "job_id": job_id,
+            })
         try:
             result = await asyncio.to_thread(self._process, event)
         except Exception as exc:
