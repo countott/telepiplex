@@ -87,6 +87,10 @@ class PlexManagementService:
         return self._enqueue_payload(payload)
 
     def enqueue_organized_event(self, event: dict):
+        jobs = self.enqueue_organized_event_jobs(event)
+        return jobs[0] if jobs else None
+
+    def enqueue_organized_event_jobs(self, event: dict):
         event = dict(event or {})
         metadata = {}
         if isinstance(event.get("media_metadata"), dict):
@@ -101,59 +105,20 @@ class PlexManagementService:
             "terminal_processor": "renaming.feature",
             "metadata": metadata,
         }
-        return self._enqueue_payload(payload)
+        return self._enqueue_payload_jobs(payload)
 
     def _enqueue_payload(self, payload):
+        jobs = self._enqueue_payload_jobs(payload)
+        return jobs[0] if jobs else None
+
+    def _enqueue_payload_jobs(self, payload):
         metadata = payload["metadata"]
         contract_present = MEDIA_METADATA_KEY in metadata
         contract = extract_confirmed_media_metadata(metadata)
         if contract_present and contract is None:
             self._log_contract_rejection("invalid_contract")
-            return None
+            return []
         if contract:
-            placement = contract["placement"]
-            mapping_kind = placement["mapping_kind"]
-            if placement["library_type"] == "series":
-                if mapping_kind in SERIES_EPISODE_MAPPINGS:
-                    confirmed_targets = {(
-                        int(placement["season_number"]),
-                        int(placement["episode_number"]),
-                    )}
-                else:
-                    confirmed_targets = set()
-                    for item in contract.get("items") or []:
-                        try:
-                            confirmed_targets.add((
-                                int(item.get("season_number")),
-                                int(item.get("episode_number")),
-                            ))
-                        except (TypeError, ValueError):
-                            continue
-                resolved = []
-                for item in contract.get("items") or []:
-                    try:
-                        item_target = (
-                            int(item.get("season_number")),
-                            int(item.get("episode_number")),
-                        )
-                    except (TypeError, ValueError):
-                        continue
-                    if (
-                        item_target in confirmed_targets
-                        and str(item.get("final_path") or "").strip()
-                    ):
-                        resolved.append(item)
-                if not resolved:
-                    reason = (
-                        "locked_episode_unresolved"
-                        if mapping_kind in SERIES_EPISODE_MAPPINGS
-                        else "confirmed_series_unresolved"
-                    )
-                    self._log_contract_rejection(reason)
-                    return None
-            elif not payload["final_path"]:
-                self._log_contract_rejection("terminal_path_missing")
-                return None
             identity = str(contract["metadata_id"])
         else:
             identity = "\x1f".join(
@@ -163,8 +128,59 @@ class PlexManagementService:
                     payload["resource_name"],
                 )
             )
-        key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-        return self.jobs.create_or_get(key, payload)
+        targets = self._payload_targets(payload, contract)
+        jobs = []
+        for target in targets:
+            job_payload = deepcopy(payload)
+            job_payload["target"] = deepcopy(target)
+            target_identity = "\x1f".join((
+                identity, str(target["target_id"]),
+                str(target.get("season_number") or ""),
+                str(target.get("episode_number") or ""),
+            ))
+            key = hashlib.sha256(target_identity.encode("utf-8")).hexdigest()
+            job, created = self.jobs.create_or_get_with_status(key, job_payload)
+            result = dict(job)
+            result["created"] = created
+            result["target"] = deepcopy(target)
+            jobs.append(result)
+        return jobs
+
+    def _payload_targets(self, payload, contract):
+        if not contract:
+            if not payload["final_path"]:
+                return []
+            return [{"target_id": "legacy", "media_type": "movie", "final_path": payload["final_path"]}]
+        placement = contract["placement"]
+        if placement["library_type"] == "movie":
+            if not payload["final_path"]:
+                self._log_contract_rejection("terminal_path_missing")
+                return []
+            return [{"target_id": "movie", "media_type": "movie", "final_path": payload["final_path"], "mapping_kind": placement["mapping_kind"]}]
+        locked = (
+            (int(placement["season_number"]), int(placement["episode_number"]))
+            if placement["mapping_kind"] in SERIES_EPISODE_MAPPINGS else None
+        )
+        targets = []
+        for item in contract.get("items") or []:
+            try:
+                season, episode = int(item.get("season_number")), int(item.get("episode_number"))
+            except (TypeError, ValueError):
+                continue
+            final_path = str(item.get("final_path") or "").strip()
+            if not final_path or (locked and (season, episode) != locked):
+                continue
+            targets.append({
+                "target_id": str(item.get("item_id") or f"S{season:02d}E{episode:03d}"),
+                "media_type": "episode", "final_path": final_path,
+                "season_number": season, "episode_number": episode,
+                "mapping_kind": placement["mapping_kind"],
+            })
+        if not targets:
+            self._log_contract_rejection(
+                "locked_episode_unresolved" if locked else "confirmed_series_unresolved"
+            )
+        return targets
 
     @staticmethod
     def _safe_error(exc):
@@ -322,52 +338,59 @@ class PlexManagementService:
         scan = job["step_results"]["scanning"]
         library_id = scan["library_id"]
         contract = self._media_metadata(job)
-        if (
-            contract
-            and contract["placement"]["mapping_kind"] in SERIES_EPISODE_MAPPINGS
-        ):
+        plex_target = (job.get("payload") or {}).get("target") or {}
+        if contract and plex_target.get("media_type") == "episode":
             placement = contract["placement"]
-            target = (contract.get("relation") or {}).get("target_series") or {}
-            expected_final_paths = [
-                item.get("final_path")
-                for item in contract.get("items") or []
-                if item.get("final_path")
-                and item.get("season_number") is not None
-                and item.get("episode_number") is not None
-                and int(item["season_number"]) == int(placement["season_number"])
-                and int(item["episode_number"]) == int(placement["episode_number"])
-            ]
-            if not expected_final_paths:
-                raise LookupError("Confirmed Plex Special has no resolved final path")
+            identity = ((contract.get("relation") or {}).get("target_series") or {}) if placement["mapping_kind"] in SERIES_EPISODE_MAPPINGS else (contract.get("identity") or {})
+            expected_final_paths = [plex_target.get("final_path")]
             deadline = self._clock() + self.scan_timeout
             item = None
             while item is None:
                 item = self.plex.find_series_episode(
                     library_id,
                     tvdb_series_id=(
-                        (target.get("external_ids") or {}).get("tvdb") or ""
+                        (identity.get("external_ids") or {}).get("tvdb") or ""
                     ),
                     title=(
-                        target.get("english_title")
-                        or target.get("chinese_title")
+                        identity.get("english_title")
+                        or identity.get("chinese_title")
                         or ""
                     ),
-                    year=target.get("year") or "",
-                    season_number=placement["season_number"],
-                    episode_number=placement["episode_number"],
+                    year=identity.get("year") or "",
+                    season_number=plex_target["season_number"],
+                    episode_number=plex_target["episode_number"],
                     expected_final_paths=expected_final_paths,
                 )
                 if item is not None or self._clock() >= deadline:
                     break
                 self._sleep(self.scan_poll_interval)
             if not item:
-                raise LookupError("Confirmed Plex Special was not found")
+                raise LookupError("Confirmed Plex episode was not found")
             self.jobs.update(job["id"], rating_key=str(item["rating_key"]))
             return {
                 "status": "success",
                 "rating_key": str(item["rating_key"]),
                 "candidates": [item],
             }
+
+        if contract and plex_target.get("media_type") == "movie":
+            identity = contract.get("identity") or {}
+            deadline = self._clock() + self.scan_timeout
+            item = None
+            while item is None:
+                item = self.plex.find_movie(
+                    library_id,
+                    title=identity.get("english_title") or identity.get("chinese_title") or "",
+                    year=identity.get("year") or "",
+                    expected_final_paths=[plex_target.get("final_path")],
+                )
+                if item is not None or self._clock() >= deadline:
+                    break
+                self._sleep(self.scan_poll_interval)
+            if not item:
+                raise LookupError("Confirmed Plex movie was not found")
+            self.jobs.update(job["id"], rating_key=str(item["rating_key"]))
+            return {"status": "success", "rating_key": str(item["rating_key"]), "candidates": [item]}
 
         before = set(scan.get("before_rating_keys") or [])
         deadline = self._clock() + self.scan_timeout
@@ -430,6 +453,9 @@ class PlexManagementService:
                     "item": item,
                 }
             if mapping_kind == "standalone":
+                target = (job.get("payload") or {}).get("target") or {}
+                if target.get("media_type") == "episode":
+                    return {"status": "success", "action": "verified_by_series_episode_path", "item": item}
                 expected = {
                     source: str(value)
                     for source, value in (

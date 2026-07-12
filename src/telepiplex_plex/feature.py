@@ -47,31 +47,37 @@ class PlexFeature:
     async def media_organized(self, request: dict) -> dict:
         service = await self._ensure_service()
         payload = request.get("payload") or {}
-        job = await asyncio.to_thread(service.enqueue_organized_event, payload)
-        if not job:
+        jobs = await asyncio.to_thread(service.enqueue_organized_event_jobs, payload)
+        if not jobs:
             if payload.get("user_id"):
                 await self.core.notify_user(
                     int(payload["user_id"]),
                     "⚠️ Plex 管理拒绝了不完整的 canonical metadata；请人工检查。",
                 )
             return {"accepted": True, "state": "rejected"}
-        if job["state"] == "completed":
-            return {"accepted": True, "job_id": job["id"], "state": "completed", "duplicate": True}
-        claimed = await asyncio.to_thread(self.jobs.claim, job["id"])
-        if not claimed:
-            current = self.jobs.get(job["id"])
-            return {
-                "accepted": True,
-                "job_id": job["id"],
-                "state": (current or job)["state"],
-                "duplicate": True,
-            }
-        try:
-            self.runtime.spawn(self._run_job(job["id"]), task_id=f"plex-job-{job['id']}")
-        except Exception:
-            self.jobs.update(job["id"], state="interrupted", error="failed to start Plex job task")
-            raise
-        return {"accepted": True, "job_id": job["id"], "state": "running"}
+        started = []
+        states = []
+        for job in jobs:
+            if job["state"] == "completed":
+                states.append("completed")
+                continue
+            if not await asyncio.to_thread(self.jobs.claim, job["id"]):
+                states.append((self.jobs.get(job["id"]) or job)["state"])
+                continue
+            try:
+                self.runtime.spawn(self._run_job(job["id"]), task_id=f"plex-job-{job['id']}")
+            except Exception:
+                self.jobs.update(job["id"], state="interrupted", error="failed to start Plex job task")
+                raise
+            started.append(job["id"])
+            states.append("running")
+        return {
+            "accepted": True,
+            "job_ids": [job["id"] for job in jobs],
+            "job_id": jobs[0]["id"],
+            "state": "running" if started else states[0],
+            "duplicate": not started,
+        }
 
     async def command(self, request: dict) -> dict:
         try:
@@ -152,7 +158,7 @@ class PlexFeature:
         """Expose stable read-only job inspection to other Features."""
         service = await self._ensure_service()
         method = str(request.get("method") or "")
-        params = request.get("params") or {}
+        params = request.get("payload") or {}
         if method == "get_job":
             return {
                 "job": await asyncio.to_thread(

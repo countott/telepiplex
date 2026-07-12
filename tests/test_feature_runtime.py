@@ -45,6 +45,9 @@ class FakeService:
             },
         )
 
+    def enqueue_organized_event_jobs(self, payload):
+        return [self.enqueue_organized_event(payload)]
+
     def run_job(self, job_id):
         self.runs += 1
         return self.jobs.update(job_id, state="completed")
@@ -135,17 +138,17 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         status = await self.feature.management_capability({
             "method": "get_job",
-            "params": {"job_id": job["id"]},
+            "payload": {"job_id": job["id"]},
         })
         listing = await self.feature.management_capability({
             "method": "list_jobs",
-            "params": {"limit": 1},
+            "payload": {"limit": 1},
         })
 
         self.assertEqual(status["job"]["id"], job["id"])
         self.assertEqual(listing["jobs"][0]["id"], job["id"])
         with self.assertRaises(ValueError):
-            await self.feature.management_capability({"method": "run_job", "params": {}})
+            await self.feature.management_capability({"method": "run_job", "payload": {}})
 
 
 class FeatureSourceContractTest(unittest.TestCase):

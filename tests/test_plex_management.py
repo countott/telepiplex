@@ -213,6 +213,10 @@ class FakePlex:
         self.calls.append("locate_candidates")
         return [{"rating_key": "42", "title": "电影", "year": 2024, "media_type": "movie"}]
 
+    def find_movie(self, library_id, **_kwargs):
+        self.calls.append("find_movie")
+        return {"rating_key": "42", "title": "电影", "year": 2024, "media_type": "movie"}
+
     def find_series_episode(
         self,
         library_id,
@@ -617,8 +621,28 @@ class PlexManagementServiceTest(unittest.TestCase):
             "verified_by_title_year",
         )
 
+    def test_organized_ordinary_series_creates_one_job_per_resolved_episode(self):
+        completion = make_unresolved_standalone_series_completion()
+        contract = completion.result.metadata["media_metadata"]
+        contract["items"][0]["final_path"] = "/Series/Test/Season 01/Test S01E01.mkv"
+        contract["items"].append({
+            "item_id": "episode-2", "content_role": "main_episode",
+            "season_number": 1, "episode_number": 2,
+            "final_path": "/Series/Test/Season 01/Test S01E02.mkv",
+        })
+
+        jobs = self.make_service().enqueue_organized_event_jobs({
+            "final_path": "/Series/Test",
+            "selected_path": "/Series",
+            "media_metadata": contract,
+        })
+
+        self.assertEqual(len(jobs), 2)
+        self.assertEqual([job["target"]["episode_number"] for job in jobs], [1, 2])
+
     def test_contract_location_ambiguity_fails_without_confirmation(self):
         plex = FakePlex()
+        plex.find_movie = Mock(return_value=None)
         plex.locate_candidates = Mock(return_value=[
             {"rating_key": "42", "title": "候选一", "year": 2024, "media_type": "movie"},
             {"rating_key": "43", "title": "候选二", "year": 2024, "media_type": "movie"},

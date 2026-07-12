@@ -57,6 +57,36 @@ class PlexAdapter:
             if str(self._value(item, "ratingKey", "") or "") not in before
         ]
 
+    @staticmethod
+    def _media_path_matches(actual_path, expected_path):
+        actual = str(actual_path or "").replace("\\", "/").rstrip("/")
+        expected = str(expected_path or "").replace("\\", "/").rstrip("/")
+        if not actual or not expected:
+            return False
+        return actual == expected or actual.endswith(expected) or f"{expected}/" in actual
+
+    def find_movie(self, library_id, *, title="", year="", expected_final_paths=()):
+        section = self.server.library.sectionByID(int(library_id))
+        kwargs = {"libtype": "movie"}
+        if str(year or "").strip():
+            kwargs["year"] = int(year)
+        try:
+            candidates = section.search(title=str(title or "") or None, **kwargs)
+        except Exception:
+            return None
+        expected = [str(path) for path in expected_final_paths or [] if str(path or "").strip()]
+        matches = []
+        for candidate in candidates:
+            item = self._item_dict(candidate)
+            actual_paths = [part.get("file") for part in item.get("parts") or []]
+            if expected and not any(
+                self._media_path_matches(actual, wanted)
+                for actual in actual_paths for wanted in expected
+            ):
+                continue
+            matches.append(item)
+        return matches[0] if len(matches) == 1 else None
+
     def find_series_episode(
         self,
         library_id,
@@ -98,7 +128,7 @@ class PlexAdapter:
             for part in item.get("parts") or []
         ]
         if expected and not any(
-            actual_path == expected_path or actual_path.endswith(expected_path)
+            self._media_path_matches(actual_path, expected_path)
             for actual_path in actual
             for expected_path in expected
         ):
