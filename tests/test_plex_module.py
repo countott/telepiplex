@@ -122,6 +122,31 @@ class PlexModuleTest(unittest.TestCase):
         self.assertIsNone(on_download_completed(completion))
         executor.submit.assert_not_called()
 
+    @patch("app.modules.plex_management.plex_executor")
+    @patch("app.modules.plex_management.get_plex_management_service")
+    def test_unresolved_standalone_series_never_submits_background_job(
+        self, get_service, executor
+    ):
+        from app.modules.plex_management import on_download_completed
+        from app.services.plex_management import PlexManagementService
+        from tests.test_plex_management import (
+            make_unresolved_standalone_series_completion,
+        )
+
+        jobs = Mock()
+        jobs.create_or_get.return_value = {"id": 9}
+        service = PlexManagementService(jobs, Mock())
+        service.enabled = True
+        get_service.return_value = service
+
+        result = on_download_completed(
+            make_unresolved_standalone_series_completion()
+        )
+
+        self.assertIsNone(result)
+        jobs.create_or_get.assert_not_called()
+        executor.submit.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
