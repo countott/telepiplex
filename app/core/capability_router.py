@@ -74,6 +74,21 @@ class CapabilityRouter:
                     "missing_capability",
                     f"missing required capabilities: {', '.join(missing)}",
                 )
+            newly_blocked = sorted(
+                blocked_plugin_id
+                for blocked_plugin_id in snapshot.blocked
+                if blocked_plugin_id != plugin_id
+                and blocked_plugin_id not in self._snapshot.blocked
+            )
+            if newly_blocked:
+                dependents = ", ".join(
+                    f"{blocked_plugin_id} ({', '.join(snapshot.blocked[blocked_plugin_id])})"
+                    for blocked_plugin_id in newly_blocked
+                )
+                raise RoutingError(
+                    "dependent_capability_lost",
+                    f"activation would block active Features: {dependents}",
+                )
             return PreparedRoutes(
                 base_snapshot=self._snapshot,
                 registrations=MappingProxyType(candidate),

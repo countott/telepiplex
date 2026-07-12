@@ -299,6 +299,40 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.active("echo").previous_version, "2.0.0")
         self.assertEqual(self.router.snapshot.capabilities["demo.echo"].client.version, "1.0.0")
 
+    async def test_update_rejects_provider_capability_loss_that_blocks_consumer(self):
+        from app.core.plugin_manager import PluginOperationError
+
+        await self.manager.install(self._artifact(
+            plugin_id="provider",
+            version="1.0.0",
+            provides=(("download.provider", True), ("storage.provider", True)),
+            commands=("provider",),
+        ))
+        provider_v1 = self.supervisor.process("provider")
+        await self.manager.install(self._artifact(
+            plugin_id="consumer",
+            provides=(),
+            requires=("storage.provider",),
+            commands=("consume",),
+            commit="b" * 40,
+        ))
+
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.update(self._artifact(
+                plugin_id="provider",
+                version="2.0.0",
+                provides=(("download.provider", True),),
+                commands=("provider",),
+                commit="c" * 40,
+            ))
+
+        self.assertEqual(raised.exception.code, "dependent_capability_lost")
+        self.assertEqual(self.store.active("provider").version, "1.0.0")
+        self.assertEqual(provider_v1.state, "healthy")
+        self.assertIs(self.supervisor.process("provider"), provider_v1)
+        self.assertTrue(self.store.active("consumer").enabled)
+        self.assertIsNotNone(self.router.command_route("consume"))
+
     async def test_failed_stabilization_restores_old_routes_process_and_record(self):
         from app.core.plugin_manager import PluginOperationError
 
