@@ -173,6 +173,20 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(jobs.get("outbox-1")["state"], "downloaded")
 
+    async def test_interrupted_external_transfer_requires_manual_retry(self):
+        from telepiplex_open115.jobs import DownloadJobStore
+
+        path = Path(self._testMethodName + ".db")
+        self.addCleanup(path.unlink, missing_ok=True)
+        jobs = DownloadJobStore(path)
+        jobs.create_or_get("crashed", {"link": "magnet:?x"})
+        jobs.update("crashed", "running")
+
+        restarted = DownloadJobStore(path)
+
+        self.assertEqual(restarted.get("crashed")["state"], "interrupted")
+        self.assertEqual(restarted.resumable(), [])
+
     async def test_magnet_command_uses_session_and_namespaced_callback(self):
         self.feature.config["save_directories"] = [
             {"name": "剧集", "path": "/Series"},

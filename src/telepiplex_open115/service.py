@@ -41,11 +41,7 @@ class Open115Feature:
         self.runtime = runtime
         if self.jobs:
             for job in self.jobs.resumable():
-                runtime.spawn(
-                    self._publish_downloaded(job) if job["state"] == "downloaded"
-                    else self._download_job(job["job_id"], job["payload"]),
-                    task_id=job["job_id"],
-                )
+                runtime.spawn(self._publish_downloaded(job), task_id=job["job_id"])
 
     async def download_capability(self, request: dict) -> dict:
         if request.get("method") != "submit":
@@ -144,7 +140,7 @@ class Open115Feature:
             return {"accepted": True, "job_id": job_id, "duplicate": True}
         if self.jobs:
             job = self.jobs.create_or_get(job_id, payload | {"link": link, "selected_path": selected_path})
-            if job["state"] in {"completed", "failed", "downloaded", "running"}:
+            if job["state"] in {"completed", "failed", "downloaded", "running", "interrupted"}:
                 return {"accepted": True, "job_id": job_id, "duplicate": True, "state": job["state"]}
         self.active_job_ids.add(job_id)
         try:

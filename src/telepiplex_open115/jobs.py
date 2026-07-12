@@ -43,5 +43,5 @@ class DownloadJobStore:
     def resumable(self):
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
-            rows = db.execute("SELECT job_id FROM download_jobs WHERE state IN ('interrupted','downloaded') ORDER BY updated_at").fetchall()
+            rows = db.execute("SELECT job_id FROM download_jobs WHERE state='downloaded' ORDER BY updated_at").fetchall()
         return [self.get(row["job_id"]) for row in rows]
