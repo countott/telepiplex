@@ -193,6 +193,21 @@ class FeatureBuilderTest(unittest.TestCase):
                 with self.subTest(field=field), self.assertRaises(FeatureBuildError):
                     validate_plugin_wheel(wheel)
 
+    def test_accepts_legacy_metadata_with_license_file(self):
+        from tools.build_feature import validate_plugin_wheel
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wheel = Path(tmpdir) / "plugin.whl"
+            _write_wheel(
+                wheel,
+                "Metadata-Version: 2.3\n"
+                "Name: annotated-types\n"
+                "Version: 0.7.0\n"
+                "License-File: LICENSE\n",
+            )
+
+            validate_plugin_wheel(wheel)
+
     def test_rejects_unsupported_plugin_metadata_version(self):
         from tools.build_feature import FeatureBuildError, validate_plugin_wheel
 

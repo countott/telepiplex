@@ -77,17 +77,26 @@ def _wheel_metadata(path: Path):
     except (OSError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
         raise FeatureBuildError("wheel metadata cannot be read") from exc
     try:
-        return Metadata.from_email(raw_metadata, validate=True)
+        return Metadata.from_email(raw_metadata, validate=False)
     except (ExceptionGroup, InvalidMetadata) as exc:
         raise FeatureBuildError("wheel metadata is invalid") from exc
 
 
 def _validate_wheel_metadata(metadata, *, allow_feature_name: bool = False):
+    try:
+        validated_identity = (
+            metadata.metadata_version,
+            metadata.name,
+            metadata.version,
+        )
+        requirements = metadata.requires_dist or []
+    except (ExceptionGroup, InvalidMetadata) as exc:
+        raise FeatureBuildError("wheel metadata is invalid") from exc
     _validate_distribution_name(
-        metadata.name,
+        validated_identity[1],
         allow_feature_name=allow_feature_name,
     )
-    for parsed in metadata.requires_dist or []:
+    for parsed in requirements:
         if parsed.url is not None:
             raise FeatureBuildError("wheel Requires-Dist must use named distributions")
         _validate_distribution_name(parsed.name)
