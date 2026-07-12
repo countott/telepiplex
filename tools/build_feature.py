@@ -14,6 +14,8 @@ from pathlib import Path
 
 import yaml
 from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import InvalidName, canonicalize_name
+from packaging.version import InvalidVersion, Version
 
 for _root in (Path(__file__).resolve().parents[1], Path("/")):
     if (_root / "app/core/plugin_artifact.py").is_file():
@@ -30,12 +32,19 @@ class FeatureBuildError(RuntimeError):
 
 
 _FORBIDDEN_ROOT_IMPORTS = {"app", "init", "telegram"}
-_DISTRIBUTION_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*")
+_METADATA_VERSION = re.compile(r"^[0-9]+\.[0-9]+$")
 
 
-def _validate_distribution_name(name: str):
-    normalized = re.sub(r"[-_.]+", "-", name).casefold()
-    if normalized.startswith("telepiplex-") and normalized != "telepiplex-plugin-sdk":
+def _validate_distribution_name(name: str, *, allow_feature_name: bool = False):
+    try:
+        normalized = canonicalize_name(name, validate=True)
+    except InvalidName as exc:
+        raise FeatureBuildError("invalid distribution name") from exc
+    if (
+        not allow_feature_name
+        and normalized.startswith("telepiplex-")
+        and normalized != "telepiplex-plugin-sdk"
+    ):
         raise FeatureBuildError(
             f"forbidden Feature distribution dependency: {normalized}"
         )
@@ -72,21 +81,37 @@ def _wheel_metadata(path: Path):
         raise FeatureBuildError("wheel metadata cannot be read") from exc
 
 
-def validate_plugin_wheel(path: Path):
-    metadata = _wheel_metadata(path)
+def _validate_wheel_metadata(metadata, *, allow_feature_name: bool = False):
+    metadata_version = str(metadata.get("Metadata-Version") or "").strip()
+    if _METADATA_VERSION.fullmatch(metadata_version) is None:
+        raise FeatureBuildError("wheel metadata has an invalid Metadata-Version")
+
+    name = str(metadata.get("Name") or "").strip()
+    _validate_distribution_name(name, allow_feature_name=allow_feature_name)
+
+    version = str(metadata.get("Version") or "").strip()
+    try:
+        Version(version)
+    except InvalidVersion as exc:
+        raise FeatureBuildError("wheel metadata has an invalid Version") from exc
+
     for requirement in metadata.get_all("Requires-Dist", []):
-        match = _DISTRIBUTION_NAME.match(requirement.strip())
-        if match is None:
-            raise FeatureBuildError("plugin wheel has an invalid Requires-Dist")
-        _validate_distribution_name(match.group(0))
+        try:
+            parsed = Requirement(requirement.strip())
+        except InvalidRequirement as exc:
+            raise FeatureBuildError("wheel metadata has an invalid Requires-Dist") from exc
+        if parsed.url is not None:
+            raise FeatureBuildError("wheel Requires-Dist must use named distributions")
+        _validate_distribution_name(parsed.name)
+
+
+def validate_plugin_wheel(path: Path):
+    _validate_wheel_metadata(_wheel_metadata(path), allow_feature_name=True)
 
 
 def validate_wheelhouse(path: Path):
     for wheel in sorted(path.glob("*.whl")):
-        name = str(_wheel_metadata(wheel).get("Name") or "").strip()
-        if not name:
-            raise FeatureBuildError("wheel metadata is missing Name")
-        _validate_distribution_name(name)
+        _validate_wheel_metadata(_wheel_metadata(wheel))
 
 
 def validate_feature_imports(source_dir: Path):

@@ -128,6 +128,71 @@ class FeatureBuilderTest(unittest.TestCase):
             with self.assertRaises(FeatureBuildError):
                 validate_plugin_wheel(wheel)
 
+    def test_rejects_direct_reference_in_plugin_wheel_metadata(self):
+        from tools.build_feature import FeatureBuildError, validate_plugin_wheel
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wheel = Path(tmpdir) / "plugin.whl"
+            _write_wheel(
+                wheel,
+                "Metadata-Version: 2.1\n"
+                "Name: example\n"
+                "Version: 1.0.0\n"
+                "Requires-Dist: requests @ https://example.invalid/pkg.whl\n",
+            )
+
+            with self.assertRaises(FeatureBuildError):
+                validate_plugin_wheel(wheel)
+
+    def test_rejects_empty_plugin_wheel_metadata(self):
+        from tools.build_feature import FeatureBuildError, validate_plugin_wheel
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wheel = Path(tmpdir) / "plugin.whl"
+            _write_wheel(wheel, "")
+
+            with self.assertRaises(FeatureBuildError):
+                validate_plugin_wheel(wheel)
+
+    def test_rejects_invalid_requires_dist_in_plugin_wheel_metadata(self):
+        from tools.build_feature import FeatureBuildError, validate_plugin_wheel
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wheel = Path(tmpdir) / "plugin.whl"
+            _write_wheel(
+                wheel,
+                "Metadata-Version: 2.1\n"
+                "Name: example\n"
+                "Version: 1.0.0\n"
+                "Requires-Dist: requests, telepiplex-open115\n",
+            )
+
+            with self.assertRaises(FeatureBuildError):
+                validate_plugin_wheel(wheel)
+
+    def test_rejects_invalid_plugin_wheel_core_metadata_fields(self):
+        from tools.build_feature import FeatureBuildError, validate_plugin_wheel
+
+        for field, value in (
+            ("Metadata-Version", "2.1 trailing"),
+            ("Version", "not valid!"),
+        ):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                metadata = {
+                    "Metadata-Version": "2.1",
+                    "Name": "example",
+                    "Version": "1.0.0",
+                }
+                metadata[field] = value
+                wheel = Path(tmpdir) / "plugin.whl"
+                _write_wheel(
+                    wheel,
+                    "".join(f"{name}: {item}\n" for name, item in metadata.items()),
+                )
+
+                with self.subTest(field=field), self.assertRaises(FeatureBuildError):
+                    validate_plugin_wheel(wheel)
+
     def test_rejects_malformed_plugin_wheel_metadata(self):
         from tools.build_feature import FeatureBuildError, validate_plugin_wheel
 
@@ -152,6 +217,43 @@ class FeatureBuilderTest(unittest.TestCase):
 
             with self.assertRaises(FeatureBuildError):
                 validate_wheelhouse(wheelhouse)
+
+    def test_rejects_invalid_distribution_name_in_wheelhouse_metadata(self):
+        from tools.build_feature import FeatureBuildError, validate_wheelhouse
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wheelhouse = Path(tmpdir)
+            _write_wheel(
+                wheelhouse / "invalid.whl",
+                "Metadata-Version: 2.1\n"
+                "Name: requests invalid\n"
+                "Version: 1.0.0\n",
+            )
+
+            with self.assertRaises(FeatureBuildError):
+                validate_wheelhouse(wheelhouse)
+
+    def test_rejects_unsafe_requires_dist_in_wheelhouse_metadata(self):
+        from tools.build_feature import FeatureBuildError, validate_wheelhouse
+
+        for requirement in (
+            "requests @ https://example.invalid/pkg.whl",
+            "telepiplex-open115",
+        ):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                wheelhouse = Path(tmpdir)
+                _write_wheel(
+                    wheelhouse / "dependency.whl",
+                    "Metadata-Version: 2.1\n"
+                    "Name: requests\n"
+                    "Version: 1.0.0\n"
+                    f"Requires-Dist: {requirement}\n",
+                )
+
+                with self.subTest(requirement=requirement), self.assertRaises(
+                    FeatureBuildError
+                ):
+                    validate_wheelhouse(wheelhouse)
 
 
 if __name__ == "__main__":
