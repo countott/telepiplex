@@ -75,6 +75,7 @@ class FeatureBuilderTest(unittest.TestCase):
             "requests>=2\n"
             "telepiplex-plugin-sdk==1.0.0\n"
             "telepiplex..plugin__sdk==1.0.0\n"
+            'requests; platform_release == "foo@bar"\n'
         )
 
     def test_rejects_direct_reference_without_whitespace(self):
@@ -84,6 +85,19 @@ class FeatureBuilderTest(unittest.TestCase):
             validate_feature_requirements(
                 "requests@git+ssh:git@example.com:repo\n"
             )
+
+    def test_rejects_bare_vcs_urls(self):
+        from tools.build_feature import FeatureBuildError, validate_feature_requirements
+
+        for requirement in (
+            "git+ssh:example.com:repo\n",
+            "hg+ssh:example.com:repo\n",
+            "git+file:../repo\n",
+        ):
+            with self.subTest(requirement=requirement), self.assertRaises(
+                FeatureBuildError
+            ):
+                validate_feature_requirements(requirement)
 
     def test_rejects_unsafe_requirement_sources(self):
         from tools.build_feature import FeatureBuildError, validate_feature_requirements

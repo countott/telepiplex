@@ -13,6 +13,7 @@ from email.parser import Parser
 from pathlib import Path
 
 import yaml
+from packaging.requirements import InvalidRequirement, Requirement
 
 for _root in (Path(__file__).resolve().parents[1], Path("/")):
     if (_root / "app/core/plugin_artifact.py").is_file():
@@ -45,19 +46,15 @@ def validate_feature_requirements(source: str):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if (
-            line.startswith("-")
-            or "://" in line
-            or "@" in line
-            or "/" in line
-            or "\\" in line
-            or line.casefold().endswith((".whl", ".zip", ".tar.gz", ".tgz"))
-        ):
+        try:
+            requirement = Requirement(line)
+        except InvalidRequirement as exc:
+            raise FeatureBuildError(
+                "Feature requirements must use named distributions"
+            ) from exc
+        if requirement.url is not None:
             raise FeatureBuildError("Feature requirements must use named distributions")
-        match = _DISTRIBUTION_NAME.match(line)
-        if match is None:
-            raise FeatureBuildError("Feature requirement has no distribution name")
-        _validate_distribution_name(match.group(0))
+        _validate_distribution_name(requirement.name)
 
 
 def _wheel_metadata(path: Path):
