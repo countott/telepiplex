@@ -37,7 +37,7 @@
 - Produces: immutable `CapabilityDeclaration`, `CommandDeclaration`, and `PluginManifest` dataclasses.
 - Produces: `PluginManifest.supports_core(version: str) -> bool`.
 
-- [ ] **Step 1: Write manifest RED tests**
+- [x] **Step 1: Write manifest RED tests**
 
 Test a valid manifest, missing identity, invalid semantic version, unsupported
 core range, duplicate capabilities, duplicate commands, unsafe entry points,
@@ -61,26 +61,26 @@ assert manifest.plugin_id == "echo"
 assert manifest.supports_core("1.0")
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `python3 -m unittest tests.test_plugin_manifest -v`
 
 Expected: import failure for `app.core.plugin_manifest`.
 
-- [ ] **Step 3: Implement strict manifest parsing**
+- [x] **Step 3: Implement strict manifest parsing**
 
 Use only parsed argv/module strings; reject whitespace, `/`, `\\`, `..`, empty
 lists with invalid members, duplicate declarations, and unrecognized provider
 modes. Implement the supported API range for the exact grammar
 `>=MAJOR.MINOR,<MAJOR.MINOR` without adding a packaging-library dependency.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `python3 -m unittest tests.test_plugin_manifest -v`
 
 Expected: all manifest tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/core/plugin_contract.py app/core/plugin_manifest.py tests/test_plugin_manifest.py
