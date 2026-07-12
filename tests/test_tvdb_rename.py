@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
-from app.utils.tvdb_rename import (
+from telepiplex_renaming.tvdb_rename import (
     build_confirmed_rename_plan,
     build_tvdb_rename_plan,
     enrich_media_metadata_with_rename_plan,

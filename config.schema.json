@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "unorganized_path": {"type": "string", "pattern": "^/"},
+    "storage_timeout": {"type": "number", "minimum": 1, "maximum": 600},
+    "metadata": {"type": "object"},
+    "ai": {"type": "object"}
+  },
+  "required": ["unorganized_path", "storage_timeout", "metadata", "ai"],
+  "additionalProperties": false
+}

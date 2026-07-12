@@ -1,14 +1,8 @@
 # -*- coding: utf-8 -*-
 import requests
-import sys
-import os
 import json
-current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-parent_dir = os.path.dirname(current_dir)
-sys.path.append(parent_dir)
-sys.path.append(current_dir)
-import init
-from app.utils.log_sanitizer import sanitize_log_value
+from .context import runtime_context
+from .log_sanitizer import sanitize_log_value
 
 
 DEFAULT_AI_REQUEST_TIMEOUT_SECONDS = 60
@@ -157,27 +151,27 @@ JSON结构：
 """
 
 def check_ai_api_available():
-    url = init.bot_config.get("ai", {}).get("api_url", "")
+    url = runtime_context.config.get("ai", {}).get("api_url", "")
     if not url:
-        if getattr(init, "logger", None):
-            init.logger.warn("AI API URL 未定义.")
+        if runtime_context.logger:
+            runtime_context.logger.warn("AI API URL 未定义.")
         return False
-    model = init.bot_config.get("ai", {}).get("model", "")
+    model = runtime_context.config.get("ai", {}).get("model", "")
     if not model:
-        if getattr(init, "logger", None):
-            init.logger.warn("AI 模型未定义.")
+        if runtime_context.logger:
+            runtime_context.logger.warn("AI 模型未定义.")
         return False
     
-    api_key = init.bot_config.get("ai", {}).get("api_key", "")
+    api_key = runtime_context.config.get("ai", {}).get("api_key", "")
     if not api_key:
-        if getattr(init, "logger", None):
-            init.logger.warn("AI API Key 未定义.")
+        if runtime_context.logger:
+            runtime_context.logger.warn("AI API Key 未定义.")
         return False
     return True
 
 
 def _log_ai_info(message: str):
-    logger = getattr(init, "logger", None)
+    logger = runtime_context.logger
     if logger:
         logger.info(message)
 
@@ -187,7 +181,7 @@ def _compact_json_for_log(value, max_chars=6000) -> str:
 
 
 def _ai_request_timeout():
-    ai_config = (init.bot_config or {}).get("ai") or {}
+    ai_config = (runtime_context.config or {}).get("ai") or {}
     value = ai_config.get("timeout", DEFAULT_AI_REQUEST_TIMEOUT_SECONDS)
     try:
         timeout = float(value)
@@ -197,7 +191,7 @@ def _ai_request_timeout():
 
 
 def chat_completion(tip_words, max_tokens=8192):
-    url = init.bot_config.get("ai").get("api_url")
+    url = runtime_context.config.get("ai").get("api_url")
     # 智能判断是否需要拼接 /chat/completions
     # 如果URL中不包含 chat/completions 也不包含 messages (适配Anthropic风格)，且不以 / 结尾，则尝试拼接
     if "chat/completions" not in url and "messages" not in url:
@@ -207,26 +201,26 @@ def chat_completion(tip_words, max_tokens=8192):
             url = url + "/chat/completions"
             
     payload = {
-        "model": init.bot_config.get("ai").get("model"),
+        "model": runtime_context.config.get("ai").get("model"),
         "messages": [{"role": "user", "content": tip_words}],
         "max_tokens": max_tokens
     }
     headers = {
-        "Authorization": f"Bearer {init.bot_config.get('ai').get('api_key')}",
+        "Authorization": f"Bearer {runtime_context.config.get('ai').get('api_key')}",
         "Content-Type": "application/json"
     }
 
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=_ai_request_timeout())
         if response.status_code != 200:
-            init.logger.warn(f"AI API请求失败: {sanitize_log_value(response.text)}")
+            runtime_context.logger.warn(f"AI API请求失败: {sanitize_log_value(response.text)}")
             return None
             
         result = response.json()
         return result
         
     except Exception as e:
-        init.logger.error(f"调用AI接口出错: {e}")
+        runtime_context.logger.error(f"调用AI接口出错: {e}")
         return None
 
 
@@ -255,7 +249,7 @@ def parse_ai_json_response(result):
     try:
         return json.loads(text_content)
     except json.JSONDecodeError:
-        logger = getattr(init, "logger", None)
+        logger = runtime_context.logger
         if logger:
             logger.warn(f"AI返回的不是有效的JSON格式: {text_content}")
         return None
@@ -268,8 +262,8 @@ def infer_tvdb_episode_plan_with_ai(context: dict):
     prompt = TVDB_EPISODE_PLAN_PROMPT + json.dumps(context or {}, ensure_ascii=False, indent=2)
     _log_ai_info(f"AI TVDB映射输入 context={_compact_json_for_log(context)}")
     result = chat_completion(prompt, max_tokens=4096)
-    if getattr(init, "logger", None):
-        init.logger.info(f"AI TVDB映射原始响应: {sanitize_log_value(result)}")
+    if runtime_context.logger:
+        runtime_context.logger.info(f"AI TVDB映射原始响应: {sanitize_log_value(result)}")
     plan = parse_ai_json_response(result)
     if not isinstance(plan, dict):
         return None
@@ -394,7 +388,7 @@ def get_movie_tmdb_name_with_ai(movie_desc):
     tip_words = f"'{movie_desc}' 请根据这个字符串，推断出可能的电影名称，然后根据电影名称，去TMDB网站(https://www.themoviedb.org)找到电影的TMDB ID，最后根据TMDB ID找到其对应的完整中文名称。注意：1. 优先匹配年份和英文原名。2. 如果有多个中文译名，请优先选择TMDB上的官方中文译名或最通用的译名。3. 有些系列电影可能会包含序号，比如：“侏罗纪公园2” 对应完整的中文名称应该是“侏罗纪公园2：失落的世界”。请返回json格式{{\"name\": \"完整的中文电影名称\"}} 。不要包含任何多余文字，如果找不到对应的中文名称请返回 {{\"name\": \"\"}}"
     try:
         result = chat_completion(tip_words)
-        init.logger.info(f"AI原始响应: {sanitize_log_value(result)}")
+        runtime_context.logger.info(f"AI原始响应: {sanitize_log_value(result)}")
         
         # 解析返回结果
         # 针对Anthropic/SiliconFlow messages接口: {'content': [{'text': '{"name": "..."}'...} ...}
@@ -408,7 +402,7 @@ def get_movie_tmdb_name_with_ai(movie_desc):
                 json_data = json.loads(text_content)
                 return json_data.get('name')
             except json.JSONDecodeError:
-                init.logger.warn(f"AI返回的不是有效的JSON格式: {text_content}")
+                runtime_context.logger.warn(f"AI返回的不是有效的JSON格式: {text_content}")
                 return None
 
         # 兼容OpenAI格式: choices[0].message.content
@@ -425,13 +419,6 @@ def get_movie_tmdb_name_with_ai(movie_desc):
         return None
         
     except Exception as e:
-        init.logger.error(f"调用AI接口出错: {e}")
+        runtime_context.logger.error(f"调用AI接口出错: {e}")
         return None
 
-
-if __name__ == "__main__":
-    init.init_log()
-    init.load_yaml_config()
-    test_desc = "Die My Love (2025) iTA-ENG.WEBDL.1080p.x264-Dr4gon.mkv"
-    movie_name = get_movie_tmdb_name_with_ai(test_desc)
-    print(f"识别到的电影名称: {movie_name}")

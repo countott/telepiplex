@@ -1,0 +1,20 @@
+plugin_id: renaming
+name: Media Renaming
+version: 1.0.0
+core_api: ">=1.0,<2.0"
+entry_point: telepiplex_renaming.runtime:main
+provides: []
+requires:
+  - storage.provider
+subscribes:
+  - download.completed
+publishes:
+  - media.organized
+commands: []
+callbacks: []
+config_schema_version: 1
+state_schema_version: 1
+source:
+  repository: origin
+  branch: feature/renaming
+  commit: "0000000000000000000000000000000000000000"

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from pathlib import PurePosixPath
 
-from app.core.media_metadata import (
+from telepiplex_plugin_sdk.media_metadata import (
     merge_resolved_items,
     series_folder_name,
     series_titles,
 )
-from app.utils.media_naming import sanitize_path_name
+from .media_naming import sanitize_path_name
 
 
 VIDEO_EXTENSIONS = {

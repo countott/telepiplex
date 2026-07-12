@@ -1,20 +1,26 @@
 # -*- coding: utf-8 -*-
 
+"""Renaming pipeline: ordinary naming first, canonical series patch second."""
+
 from __future__ import annotations
 
 from pathlib import Path
 
-import init
-from app.adapters.tvdb import TvdbConfigError, TvdbRequestError, get_tvdb_series_episodes, search_tvdb_series
-from app.core.media_metadata import (
+from .context import runtime_context
+from .tvdb import TvdbConfigError, TvdbRequestError, get_tvdb_series_episodes, search_tvdb_series
+from telepiplex_plugin_sdk.media_metadata import (
     MEDIA_METADATA_KEY,
     attach_media_metadata,
     extract_confirmed_media_metadata,
 )
-from app.core.module_registry import DownloadCompletedEvent, PostDownloadResult
-from app.utils.ai import infer_tvdb_episode_plan_with_ai
-from app.utils.media_naming import build_media_naming_plan, infer_english_title_from_release
-from app.utils.tvdb_rename import (
+from .models import DownloadCompletedEvent, PostDownloadResult
+from .ai import infer_tvdb_episode_plan_with_ai
+from .media_naming import (
+    build_media_naming_plan,
+    infer_english_title_from_release,
+    parse_episode_marker,
+)
+from .tvdb_rename import (
     VIDEO_EXTENSIONS,
     build_confirmed_rename_plan,
     build_tvdb_rename_plan,
@@ -23,7 +29,7 @@ from app.utils.tvdb_rename import (
 
 
 def _storage(event: DownloadCompletedEvent):
-    storage = event.storage or getattr(init, "openapi_115", None)
+    storage = event.storage
     if storage is None:
         raise RuntimeError("renaming processor requires a storage provider")
     return storage
@@ -33,10 +39,10 @@ def _cleanup_source_directory(storage, path):
     try:
         result = storage.delete_single_file(path)
     except Exception as exc:
-        init.logger.warn(f"自动整理已完成，但源目录清理失败 path={path}: {exc}")
+        runtime_context.logger.warn(f"自动整理已完成，但源目录清理失败 path={path}: {exc}")
         return False
     if result is not True:
-        init.logger.warn(f"自动整理已完成，但源目录未能清理 path={path}")
+        runtime_context.logger.warn(f"自动整理已完成，但源目录未能清理 path={path}")
         return False
     return True
 
@@ -76,12 +82,12 @@ def _is_dir_115_item(item):
 def collect_storage_file_tree(storage, root_path, max_depth=4, limit=1000):
     root_info = storage.get_file_info(root_path)
     if not root_info:
-        init.logger.warn(f"TVDB整理跳过：无法读取目录 {root_path}")
+        runtime_context.logger.warn(f"TVDB整理跳过：无法读取目录 {root_path}")
         return []
 
     root_id = str(root_info.get("file_id") or root_info.get("cid") or root_info.get("fid") or "").strip()
     if not root_id:
-        init.logger.warn(f"TVDB整理跳过：目录缺少ID {root_path}")
+        runtime_context.logger.warn(f"TVDB整理跳过：目录缺少ID {root_path}")
         return []
 
     tree = []
@@ -129,16 +135,16 @@ def _tvdb_title_from_metadata(metadata):
 def _get_tvdb_candidates_and_episodes(metadata):
     title = _tvdb_title_from_metadata(metadata)
     if not title:
-        init.logger.warn(f"TVDB整理跳过：元数据缺少英文标题 {metadata}")
+        runtime_context.logger.warn(f"TVDB整理跳过：元数据缺少英文标题 {metadata}")
         return [], []
 
     try:
         candidates = search_tvdb_series(title, year=str((metadata or {}).get("year") or "").strip())[:3]
     except TvdbConfigError as e:
-        init.logger.info(f"TVDB整理跳过：{e}")
+        runtime_context.logger.info(f"TVDB整理跳过：{e}")
         return [], []
     except TvdbRequestError as e:
-        init.logger.warn(f"TVDB搜索失败，跳过TVDB整理: {e}")
+        runtime_context.logger.warn(f"TVDB搜索失败，跳过TVDB整理: {e}")
         return [], []
 
     episodes = []
@@ -149,7 +155,7 @@ def _get_tvdb_candidates_and_episodes(metadata):
         try:
             series_episodes = get_tvdb_series_episodes(series_id, season_type="default")
         except TvdbRequestError as e:
-            init.logger.warn(f"TVDB剧集列表获取失败 series_id={series_id}: {e}")
+            runtime_context.logger.warn(f"TVDB剧集列表获取失败 series_id={series_id}: {e}")
             continue
         for episode in series_episodes:
             item = dict(episode)
@@ -159,7 +165,7 @@ def _get_tvdb_candidates_and_episodes(metadata):
 
 
 def _has_ai_episode_inference_config():
-    ai_config = init.bot_config.get("ai") or {}
+    ai_config = runtime_context.config.get("ai") or {}
     return bool(
         str(ai_config.get("api_url") or ai_config.get("base_url") or "").strip()
         and str(ai_config.get("api_key") or "").strip()
@@ -214,7 +220,7 @@ def _attempt_legacy_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metada
     file_tree = collect_storage_file_tree(storage, event.final_path)
     video_count = len([item for item in file_tree if not item.get("is_dir")])
     if not video_count:
-        init.logger.warn(f"TVDB整理跳过：目录中未找到视频文件 {event.final_path}")
+        runtime_context.logger.warn(f"TVDB整理跳过：目录中未找到视频文件 {event.final_path}")
         return None
 
     context = {
@@ -242,7 +248,7 @@ def _attempt_legacy_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metada
         tvdb_episodes=tvdb_episodes,
     )
     if not rename_plan:
-        init.logger.warn(f"TVDB整理跳过：AI映射未通过交叉校验 path={event.final_path}")
+        runtime_context.logger.warn(f"TVDB整理跳过：AI映射未通过交叉校验 path={event.final_path}")
         return None
 
     for operation in rename_plan["operations"]:
@@ -277,29 +283,22 @@ def _confirmed_series_metadata(event: DownloadCompletedEvent):
 
 def _unorganized_root() -> str:
     return str(
-        ((init.bot_config or {}).get("media") or {}).get("unorganized_path") or ""
+        ((runtime_context.config or {}).get("media") or {}).get("unorganized_path") or ""
     ).rstrip("/")
 
 
 def _move_unmatched_to_unorganized(event, unmatched_sources):
     if not unmatched_sources:
         return ""
-    unorganized_root = _unorganized_root()
-    if not unorganized_root:
-        raise RuntimeError("未匹配文件存在，但 media.unorganized_path 未配置")
-    source_leaf = str(event.final_path or "").rstrip("/").rsplit("/", 1)[-1]
-    target_dir = f"{unorganized_root}/{source_leaf}"
     storage = _storage(event)
-    if not storage.create_dir_recursive(target_dir):
-        raise RuntimeError(f"无法创建未整理目录 {target_dir}")
     for relative_path in unmatched_sources:
         source_path = (
             f"{str(event.final_path).rstrip('/')}/"
             f"{str(relative_path).strip('/')}"
         )
-        if storage.move_file(source_path, target_dir) is not True:
-            raise RuntimeError(f"无法移动未匹配文件 {source_path}")
-    return target_dir
+        if storage.delete_single_file(source_path) is not True:
+            raise RuntimeError(f"无法删除未匹配视频 {source_path}")
+    return ""
 
 
 def _move_confirmed_failure_to_unorganized(event):
@@ -320,6 +319,36 @@ class ConfirmedPlanConflict(RuntimeError):
     pass
 
 
+def _deterministic_episode_plan(media_metadata: dict, file_tree: list[dict]):
+    placement = media_metadata.get("placement") or {}
+    allowed = {
+        (int(item["season_number"]), int(item["episode_number"]))
+        for item in media_metadata.get("items") or []
+        if item.get("season_number") is not None
+        and item.get("episode_number") is not None
+    }
+    if not allowed and placement.get("season_number") is not None and placement.get("episode_number") is not None:
+        allowed.add((int(placement["season_number"]), int(placement["episode_number"])))
+    mapped = {}
+    for node in file_tree:
+        if node.get("is_dir"):
+            continue
+        marker = parse_episode_marker(node.get("relative_path") or node.get("name"))
+        if marker in allowed and marker not in mapped:
+            mapped[marker] = node
+    if not allowed or set(mapped) != allowed:
+        return None
+    return {
+        "episode_map": [{
+            "source_file": node["relative_path"],
+            "season_number": season,
+            "episode_number": episode,
+            "content_role": media_metadata.get("identity", {}).get("content_kind"),
+        } for (season, episode), node in sorted(mapped.items())],
+        "warnings": [],
+    }
+
+
 def _assert_no_target_conflicts(storage, rename_plan):
     for operation in rename_plan.get("operations") or []:
         target_path = (
@@ -337,29 +366,31 @@ def _attempt_confirmed_series_rename(
     metadata: dict,
     media_metadata: dict,
 ):
-    if not metadata or not _has_ai_episode_inference_config():
+    if not metadata:
         return None
 
     storage = _storage(event)
-    tvdb_candidates, tvdb_episodes = _get_tvdb_candidates_and_episodes(metadata)
     file_tree = collect_storage_file_tree(storage, event.final_path)
     if not [item for item in file_tree if not item.get("is_dir")]:
-        init.logger.warn(
+        runtime_context.logger.warn(
             f"确认方案整理跳过：目录中未找到视频文件 {event.final_path}"
         )
         return None
 
-    context = {
-        "metadata": metadata,
-        "confirmed_media_metadata": media_metadata,
-        "release_title": metadata.get("release_title") or event.resource_name,
-        "resource_name": event.resource_name,
-        "download_path": event.final_path,
-        "file_tree": file_tree,
-        "tvdb_candidates": tvdb_candidates,
-        "tvdb_episodes": tvdb_episodes,
-    }
-    ai_plan = infer_tvdb_episode_plan_with_ai(context)
+    ai_plan = _deterministic_episode_plan(media_metadata, file_tree)
+    if ai_plan is None and _has_ai_episode_inference_config():
+        tvdb_candidates, tvdb_episodes = _get_tvdb_candidates_and_episodes(metadata)
+        context = {
+            "metadata": metadata,
+            "confirmed_media_metadata": media_metadata,
+            "release_title": metadata.get("release_title") or event.resource_name,
+            "resource_name": event.resource_name,
+            "download_path": event.final_path,
+            "file_tree": file_tree,
+            "tvdb_candidates": tvdb_candidates,
+            "tvdb_episodes": tvdb_episodes,
+        }
+        ai_plan = infer_tvdb_episode_plan_with_ai(context)
     rename_plan = build_confirmed_rename_plan(
         final_path=event.final_path,
         selected_path=event.selected_path,
@@ -369,7 +400,7 @@ def _attempt_confirmed_series_rename(
         file_tree=file_tree,
     )
     if not rename_plan:
-        init.logger.warn(
+        runtime_context.logger.warn(
             f"确认方案整理跳过：AI文件映射未通过锁定校验 path={event.final_path}"
         )
         return None
@@ -488,30 +519,40 @@ def _attempt_media_auto_rename(event: DownloadCompletedEvent, naming_metadata):
         return None
 
     storage = _storage(event)
-    file_list = storage.get_files_from_dir(event.final_path)
-    if not file_list:
-        init.logger.warn(f"自动整理跳过：目录中未找到视频文件 {event.final_path}")
+    file_tree = collect_storage_file_tree(storage, event.final_path)
+    video_nodes = [
+        item for item in file_tree
+        if not item.get("is_dir")
+        and Path(str(item.get("name") or "")).suffix.lower() in VIDEO_EXTENSIONS
+    ]
+    if not video_nodes:
+        runtime_context.logger.warn(f"自动整理跳过：目录中未找到视频文件 {event.final_path}")
         return None
-    if len(file_list) != 1:
-        init.logger.warn(
-            f"自动整理跳过：通用重命名仅支持单视频目录 "
-            f"path={event.final_path} video_count={len(file_list)}"
-        )
-        return None
+    video_nodes.sort(key=lambda item: int(item.get("size") or 0), reverse=True)
+    main_video = video_nodes[0]
+    for extra in video_nodes[1:]:
+        extra_path = f"{str(event.final_path).rstrip('/')}/{extra['relative_path']}"
+        if storage.delete_single_file(extra_path) is not True:
+            raise RuntimeError(f"自动整理失败：无法删除额外视频 {extra_path}")
 
-    original_file_name = file_list[0]
+    original_file_name = main_video["name"]
+    original_relative_path = main_video["relative_path"]
     release_title = naming_metadata.get("release_title") or event.resource_name
     plan = build_media_naming_plan(naming_metadata, release_title, original_file_name)
     if not plan:
-        init.logger.warn(f"自动整理跳过：元数据不足 {naming_metadata}")
+        runtime_context.logger.warn(f"自动整理跳过：元数据不足 {naming_metadata}")
         return None
 
     target_path = f"{event.selected_path}/{plan.target_relative_dir}"
     if not storage.create_dir_recursive(target_path):
         raise RuntimeError(f"自动整理失败：无法创建目标目录 {target_path}")
 
-    original_file_path = f"{event.final_path}/{original_file_name}"
-    renamed_file_path = f"{event.final_path}/{plan.file_name}"
+    original_file_path = f"{event.final_path}/{original_relative_path}"
+    source_parent = "/".join(original_relative_path.split("/")[:-1])
+    renamed_file_path = "/".join(
+        item for item in (str(event.final_path).rstrip("/"), source_parent, plan.file_name)
+        if item
+    )
     if original_file_name != plan.file_name:
         if storage.rename(original_file_path, plan.file_name) is not True:
             raise RuntimeError(f"自动整理失败：重命名失败 {original_file_path}")

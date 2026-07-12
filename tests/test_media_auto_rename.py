@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
-from app.utils.media_naming import build_media_naming_plan, infer_english_title_from_release, parse_episode_marker
+from telepiplex_renaming.media_naming import build_media_naming_plan, infer_english_title_from_release, parse_episode_marker
 
 
 class MediaAutoRenameTest(unittest.TestCase):

@@ -7,7 +7,7 @@ import time
 
 import requests
 
-import init
+from .context import runtime_context
 
 
 TVDB_BASE_URL = "https://api4.thetvdb.com/v4"
@@ -30,7 +30,7 @@ class TvdbRequestError(Exception):
 
 
 def _get_tvdb_config():
-    metadata_config = init.bot_config.get("metadata") or {}
+    metadata_config = runtime_context.config.get("metadata") or {}
     tvdb_config = metadata_config.get("tvdb") or {}
     if not tvdb_config.get("enable", False):
         raise TvdbConfigError("metadata.tvdb.enable 未开启")
@@ -258,7 +258,7 @@ def _search_tvdb(query: str, entity_type: str, year: str = "") -> list[dict]:
             try:
                 normalized["english_title"] = _translation_name(entity_type, normalized["tvdb_id"])
             except (TvdbConfigError, TvdbRequestError) as e:
-                logger = getattr(init, "logger", None)
+                logger = runtime_context.logger
                 if logger:
                     logger.warn(
                         f"TVDB英文翻译读取失败 type={search_type} id={normalized['tvdb_id']}: {e}"
