@@ -305,38 +305,38 @@ git commit -m "feat(core): add Unix RPC Feature SDK"
 - Produces: `EventJournal.pending(plugin_id, limit=100) -> list[EventDelivery]`.
 - Produces: `EventJournal.ack(event_id, plugin_id) -> bool`.
 
-- [ ] **Step 1: Write router and journal RED tests**
+- [x] **Step 1: Write router and journal RED tests**
 
 Cover one exclusive provider, ambiguous provider rejection, missing required
 capability, activation rollback, dependent blocked state, context propagation,
 event fan-out, duplicate idempotency keys, per-subscriber acknowledgement, and
 pending delivery after a simulated process restart.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `python3 -m unittest tests.test_capability_router tests.test_event_journal -v`
 
 Expected: module import failures.
 
-- [ ] **Step 3: Implement atomic route snapshots**
+- [x] **Step 3: Implement atomic route snapshots**
 
 Build a candidate route table, validate command/callback/capability conflicts
 and all required capabilities, then swap the immutable snapshot under a lock.
 Never mutate live routes before validation succeeds.
 
-- [ ] **Step 4: Implement SQLite journal transactions**
+- [x] **Step 4: Implement SQLite journal transactions**
 
 Use WAL, foreign keys, unique `(event_type, idempotency_key)`, and delivery rows
 keyed by `(event_id, plugin_id)`. `ack` may transition only `pending` or
 `delivering` rows to `acked`.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run: `python3 -m unittest tests.test_capability_router tests.test_event_journal -v`
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/core/capability_router.py app/core/event_journal.py tests/test_capability_router.py tests/test_event_journal.py
