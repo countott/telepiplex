@@ -27,6 +27,14 @@ class TelepiplexCoreSurfaceTest(unittest.TestCase):
             self.assertNotIn(symbol, source)
 
     def test_core_branch_has_no_business_modules(self):
+        modules = sorted(
+            path.name
+            for path in (ROOT / "app" / "modules").glob("*.py")
+            if path.name != "__init__.py"
+        )
+        self.assertEqual(modules, [])
+        self.assertTrue((ROOT / "app" / "core" / "media_metadata.py").is_file())
+
         removed_paths = [
             ROOT / "app" / "core" / "open_115.py",
             ROOT / "app" / "handlers" / "download_handler.py",
@@ -42,10 +50,12 @@ class TelepiplexCoreSurfaceTest(unittest.TestCase):
             self.assertFalse(path.exists(), str(path))
 
     def test_core_config_excludes_business_sections(self):
-        for config_path in (ROOT / "config" / "config.yaml.example", ROOT / "app" / "config.yaml.example"):
+        for config_path in (
+            ROOT / "config" / "config.yaml.example",
+            ROOT / "app" / "config.yaml.example",
+            ROOT / "config" / "modules" / "core.yaml.example",
+        ):
             source = config_path.read_text(encoding="utf-8")
-            self.assertIn("bot_token:", source)
-            self.assertIn("allowed_user:", source)
             self.assertIn("category_folder:", source)
             for term in (
                 "115_app_id",

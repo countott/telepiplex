@@ -1,2 +1,20 @@
 modules:
   enabled: []
+
+category_folder:
+  - kind: live_action_movie
+    name: 真人电影
+    path: /真人电影
+    plex_library_id: ""
+  - kind: animated_movie
+    name: 动画电影
+    path: /动画电影
+    plex_library_id: ""
+  - kind: live_action_series
+    name: 真人剧集
+    path: /真人剧集
+    plex_library_id: ""
+  - kind: animated_series
+    name: 动画剧集
+    path: /动画剧集
+    plex_library_id: ""
