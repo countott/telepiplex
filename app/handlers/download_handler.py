@@ -2,6 +2,7 @@
 
 import re
 import time
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from pathlib import Path
@@ -282,13 +283,18 @@ def download_task(link, selected_path=None, user_id=None, target_folder_name=Non
 
         final_leaf = resource_name
         final_path = _join_path(selected_path, final_leaf)
+        cleanup_summary = None
         if init.openapi_115.is_directory(final_path):
-            init.openapi_115.auto_clean_all(final_path)
+            cleanup_summary = init.openapi_115.auto_clean_all(final_path)
         else:
             final_leaf = Path(resource_name).stem
             init.openapi_115.create_dir_for_file(selected_path, final_leaf)
             init.openapi_115.move_file(final_path, _join_path(selected_path, final_leaf))
             final_path = _join_path(selected_path, final_leaf)
+
+        if isinstance(cleanup_summary, dict):
+            metadata = deepcopy(metadata) if isinstance(metadata, dict) else {}
+            metadata["download_cleanup"] = deepcopy(cleanup_summary)
 
         if target_folder_name is not None:
             final_path, renamed, rename_warning = _rename_top_folder(selected_path, final_leaf, target_folder_name)

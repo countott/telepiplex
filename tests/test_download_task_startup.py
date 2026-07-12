@@ -219,6 +219,51 @@ class DownloadTaskStartupTest(unittest.TestCase):
         self.assertIn("重命名失败", add_task_mock.call_args.kwargs["message"])
         self.assertIn("/电影/Original.Release.2026", add_task_mock.call_args.kwargs["message"])
 
+    @patch("app.handlers.download_handler.time.sleep", return_value=None)
+    @patch("app.handlers.download_handler.add_task_to_queue")
+    @patch("app.handlers.download_handler._run_post_download_pipeline")
+    def test_download_task_forwards_cleanup_summary_to_pipeline_metadata(
+        self,
+        pipeline_mock,
+        add_task_mock,
+        sleep_mock,
+    ):
+        from app.core.module_registry import PostDownloadResult
+
+        api = Mock()
+        api.offline_download_specify_path.return_value = True
+        api.check_offline_download_success.return_value = (
+            True,
+            "Test.Show.S01",
+            "HASH",
+        )
+        api.is_directory.return_value = True
+        api.auto_clean_all.return_value = {
+            "count": 2,
+            "files": ["sample.mkv", "subtitle.srt"],
+        }
+        api.del_offline_task.return_value = True
+        init.openapi_115 = api
+        pipeline_mock.return_value = PostDownloadResult(
+            False,
+            final_path="/剧集/Test.Show.S01",
+        )
+
+        download_task(
+            "magnet:?xt=urn:btih:" + "9" * 40,
+            "/剧集",
+            123,
+            metadata={"media_metadata": {"sentinel": True}},
+        )
+
+        event = pipeline_mock.call_args.args[0]
+        self.assertEqual(event.metadata["media_metadata"], {"sentinel": True})
+        self.assertEqual(event.metadata["download_cleanup"]["count"], 2)
+        self.assertEqual(
+            event.metadata["download_cleanup"]["files"],
+            ["sample.mkv", "subtitle.srt"],
+        )
+
     @patch("app.handlers.download_handler.add_task_to_queue")
     def test_download_timeout_only_notifies_failure_without_retry_db(self, add_task_mock):
         api = Mock()

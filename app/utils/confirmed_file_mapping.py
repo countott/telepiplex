@@ -77,6 +77,8 @@ def _source_nodes(file_tree: list[dict]) -> list[dict]:
     for raw in file_tree or []:
         if not isinstance(raw, dict) or raw.get("is_dir"):
             continue
+        if raw.get("is_video") is False:
+            continue
         relative_path = _clean_path(raw.get("relative_path") or raw.get("name"))
         if not relative_path:
             continue

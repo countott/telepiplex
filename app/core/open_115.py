@@ -1238,14 +1238,15 @@ class OpenAPI_115:
             
     
     def auto_clean_all(self, path, clean_empty_dir=False):
-         # 开关关闭直接返回
+        summary = {"count": 0, "files": []}
+        # 开关关闭直接返回
         if str(init.bot_config['clean_policy']['switch']).lower() == "off":
-            return
+            return summary
         
         file_info = self.get_file_info(path)
         if not file_info:
             init.logger.warn(f"获取目录信息失败: {file_info}")
-            return
+            return summary
 
         # 换算字节大小
         byte_size = 0
@@ -1262,31 +1263,34 @@ class OpenAPI_115:
         junk_file_list = self.find_all_junk_files(file_info['file_id'], 0, byte_size)
         if not junk_file_list:
             init.logger.info(f"[{path}]下没有找到需要清理的垃圾文件！")
-            return
+            return summary
                 
         fid_list = []
         pid_list = []
         for file in junk_file_list:
             fid_list.append(file['fid'])
+            summary["files"].append(str(file.get('fn') or ''))
             init.logger.info(f"[{file['fn']}]已添加到清理列表")
             if file['pid'] not in pid_list:
                 pid_list.append(file['pid'])
         
         if fid_list:
             self._batch_delete_files(fid_list)
+            summary["count"] = len(fid_list)
         
         # 清理空目录
         if clean_empty_dir:
             empty_dir_list = self.find_all_empty_dirs(pid_list)
             if not empty_dir_list:
                 init.logger.info(f"[{path}]下没有找到需要清理的空目录！")
-                return
+                return summary
             fid_list = []
             for dir_id in empty_dir_list:
                 fid_list.append(dir_id)
                 init.logger.info(f"[{dir_id}]已添加到清理列表")
             if fid_list:
                 self._batch_delete_files(fid_list)
+        return summary
 
     def find_all_junk_files(self, cid, offset, byte_size, file_list=None, limit=1150):
         """

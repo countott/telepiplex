@@ -514,6 +514,140 @@ class ComposableRenamingModuleTest(unittest.TestCase):
             [1, 2],
         )
 
+    def test_confirmed_series_mid_batch_failure_returns_terminal_partial_summary(self):
+        import init
+        from app.core.module_registry import DownloadCompletedEvent
+        from app.modules import renaming
+
+        init.logger = Mock()
+        init.bot_config = {
+            "ai": {"api_url": "https://ai.example", "api_key": "key", "model": "model"},
+            "media": {"unorganized_path": "/未整理"},
+        }
+        storage = Mock()
+        storage.create_dir_recursive.return_value = True
+        storage.rename.return_value = True
+        storage.get_file_info.return_value = None
+        storage.move_file.side_effect = [True, False, True]
+        storage.delete_single_file.return_value = True
+        contract = self._standalone_media_metadata("live_action_series", "series")
+        contract["items"].append({
+            "item_id": "episode-2",
+            "content_role": "main_episode",
+            "season_number": 1,
+            "episode_number": 2,
+        })
+        event = DownloadCompletedEvent(
+            link="magnet:?xt=urn:btih:" + "a" * 40,
+            selected_path="/真人剧集",
+            user_id=1,
+            final_path="/真人剧集/Test.Show.S01",
+            resource_name="Test.Show.S01",
+            metadata={
+                "download_cleanup": {"count": 3, "files": ["sample.mkv", "poster.jpg", "subtitle.srt"]},
+                "media_metadata": contract,
+            },
+            storage=storage,
+        )
+
+        with patch.object(
+            renaming,
+            "collect_storage_file_tree",
+            return_value=[
+                {"name": "Test.Show.S01E01.mkv", "relative_path": "Test.Show.S01E01.mkv", "is_dir": False, "is_video": True},
+                {"name": "Test.Show.S01E02.mkv", "relative_path": "Test.Show.S01E02.mkv", "is_dir": False, "is_video": True},
+                {"name": "large.nfo", "relative_path": "large.nfo", "is_dir": False, "is_video": False},
+            ],
+        ), patch.object(
+            renaming,
+            "_get_tvdb_candidates_and_episodes",
+            return_value=([], []),
+        ), patch.object(
+            renaming,
+            "infer_tvdb_episode_plan_with_ai",
+        ) as ai_mapper:
+            result = renaming.process_tvdb_episode(event)
+
+        self.assertTrue(result.handled)
+        self.assertTrue(result.should_stop)
+        self.assertIn("部分完成", result.message)
+        self.assertIn("正式目录：1", result.message)
+        self.assertIn("未整理：1", result.message)
+        self.assertIn("清理：4", result.message)
+        self.assertIn("移动失败", result.message)
+        resolved = [
+            item
+            for item in result.metadata["media_metadata"]["items"]
+            if item.get("final_path")
+        ]
+        self.assertEqual([item["episode_number"] for item in resolved], [1])
+        self.assertEqual(result.final_path, "/真人剧集/测试影视 (Test Media)")
+        ai_mapper.assert_not_called()
+        storage.delete_single_file.assert_called_once_with(
+            "/真人剧集/Test.Show.S01/large.nfo"
+        )
+        storage.move_file.assert_any_call(
+            "/真人剧集/Test.Show.S01/Test Media S01E02.mkv",
+            "/未整理/Test.Show.S01",
+        )
+
+    def test_confirmed_series_failed_mapping_cleans_non_video_and_unorganizes_large_video(self):
+        import init
+        from app.core.module_registry import DownloadCompletedEvent
+        from app.modules import renaming
+
+        init.logger = Mock()
+        init.bot_config = {
+            "ai": {"api_url": "https://ai.example", "api_key": "key", "model": "model"},
+            "media": {"unorganized_path": "/未整理"},
+        }
+        storage = Mock()
+        storage.create_dir_recursive.return_value = True
+        storage.move_file.return_value = True
+        storage.delete_single_file.return_value = True
+        contract = self._standalone_media_metadata("live_action_series", "series")
+        event = DownloadCompletedEvent(
+            link="magnet:?xt=urn:btih:" + "b" * 40,
+            selected_path="/真人剧集",
+            user_id=1,
+            final_path="/真人剧集/Unknown.Release",
+            resource_name="Unknown.Release",
+            metadata={"media_metadata": contract},
+            storage=storage,
+        )
+
+        with patch.object(
+            renaming,
+            "collect_storage_file_tree",
+            return_value=[
+                {"name": "Unknown.Video.mkv", "relative_path": "Unknown.Video.mkv", "is_dir": False, "is_video": True},
+                {"name": "large.nfo", "relative_path": "large.nfo", "is_dir": False, "is_video": False},
+            ],
+        ), patch.object(
+            renaming,
+            "_get_tvdb_candidates_and_episodes",
+            return_value=([], []),
+        ), patch.object(
+            renaming,
+            "infer_tvdb_episode_plan_with_ai",
+            return_value={"episode_map": [], "warnings": ["无法判断"]},
+        ):
+            result = renaming.process_tvdb_episode(event)
+
+        self.assertTrue(result.handled)
+        self.assertTrue(result.should_stop)
+        self.assertIn("自动整理失败", result.message)
+        self.assertIn("正式目录：0", result.message)
+        self.assertIn("未整理：1", result.message)
+        self.assertIn("清理：1", result.message)
+        storage.delete_single_file.assert_called_once_with(
+            "/真人剧集/Unknown.Release/large.nfo"
+        )
+        storage.move_file.assert_called_once_with(
+            "/真人剧集/Unknown.Release/Unknown.Video.mkv",
+            "/未整理/Unknown.Release",
+        )
+
     def test_all_four_standalone_categories_use_contract_generic_naming(self):
         import init
         from app.core.module_registry import DownloadCompletedEvent

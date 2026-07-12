@@ -208,6 +208,23 @@ class ConfirmedFileMappingTest(unittest.TestCase):
         self.assertEqual(result["state"], "completed")
         self.assertEqual(result["mappings"][0]["item_id"], "S00E100")
 
+    def test_non_video_nodes_are_not_mapping_sources_or_unexpected_videos(self):
+        files = self._files("Test.Show.S01E01.mkv")
+        files.append({
+            "name": "Test.Show.S01E01.srt",
+            "relative_path": "Test.Show.S01E01.srt",
+            "is_dir": False,
+            "is_video": False,
+            "size": 2048,
+        })
+        contract = self._contract()
+        contract["items"] = contract["items"][:1]
+
+        result = map_confirmed_files(contract, files)
+
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(result["unexpected_sources"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
