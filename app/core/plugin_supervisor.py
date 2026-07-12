@@ -71,6 +71,7 @@ class PluginSupervisor:
         restart_backoff: float = 1,
         max_log_lines: int = 200,
         runtime_root: Path = Path("/tmp/telepiplex"),
+        broker=None,
     ):
         self.startup_timeout = float(startup_timeout)
         self.restart_limit = max(0, int(restart_limit))
@@ -78,6 +79,7 @@ class PluginSupervisor:
         self.max_log_lines = max(1, int(max_log_lines))
         self.runtime_root = Path(runtime_root).resolve()
         self.runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.broker = broker
         self._active: dict[str, PluginProcess] = {}
         self._instances: dict[str, PluginProcess] = {}
 
@@ -134,7 +136,14 @@ class PluginSupervisor:
         if not executable.is_file() or not os.access(executable, os.X_OK):
             raise SupervisorError("invalid_runtime", f"Feature Python is not executable: {executable}")
         process.socket_path.unlink(missing_ok=True)
+        self._revoke_token(process)
         process.startup_token = secrets.token_urlsafe(32)
+        if self.broker is not None:
+            self.broker.register(
+                process.plugin_id,
+                process.startup_token,
+                process.release.manifest,
+            )
         process.state = "starting"
         environment = {
             key: value
@@ -150,6 +159,11 @@ class PluginSupervisor:
             "TPX_CONFIG_PATH": str(process.release.path.parent.parent / "config.yaml"),
             "TPX_STATE_PATH": str(process.release.path.parent.parent / "state"),
             "TPX_STARTUP_TOKEN": process.startup_token,
+            "TPX_CORE_SOCKET_PATH": str(
+                self.broker.socket_path
+                if self.broker is not None
+                else self.runtime_root / "core.sock"
+            ),
         })
         process.child = await asyncio.create_subprocess_exec(
             *process.argv,
@@ -217,6 +231,7 @@ class PluginSupervisor:
             return
         process.last_error = f"Feature exited unexpectedly with code {return_code}"
         process.state = "failed"
+        self._revoke_token(process)
         await self._restart(process)
 
     async def _restart(self, process: PluginProcess):
@@ -335,6 +350,7 @@ class PluginSupervisor:
                     await process.child.wait()
         await asyncio.gather(*process.log_tasks, return_exceptions=True)
         process.socket_path.unlink(missing_ok=True)
+        self._revoke_token(process)
         process.state = "stopped"
         if self._active.get(process.plugin_id) is process:
             self._active.pop(process.plugin_id, None)
@@ -355,6 +371,11 @@ class PluginSupervisor:
                 await child.wait()
         await asyncio.gather(*process.log_tasks, return_exceptions=True)
         process.socket_path.unlink(missing_ok=True)
+        self._revoke_token(process)
+
+    def _revoke_token(self, process: PluginProcess):
+        if self.broker is not None and process.startup_token:
+            self.broker.unregister(process.startup_token)
 
     async def close_all(self):
         for process in list(self._instances.values()):

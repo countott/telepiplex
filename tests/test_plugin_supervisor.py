@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -135,6 +136,20 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(marker.exists())
         self.assertEqual(process.argv[1:], ("-m", "telepiplex_plugin_sdk.runner"))
         self.assertLess(len(str(process.socket_path).encode("utf-8")), 104)
+
+    async def test_registers_and_revokes_rotating_token_with_core_broker(self):
+        broker = Mock()
+        broker.socket_path = self.root / "runtime/core.sock"
+        supervisor = self._supervisor(broker=broker)
+        release = self._release("healthy")
+
+        process = await supervisor.start(release)
+        broker.register.assert_called_once_with(
+            "healthy", process.startup_token, release.manifest
+        )
+
+        await supervisor.stop(process)
+        broker.unregister.assert_called_with(process.startup_token)
 
     async def _wait_for(self, predicate, timeout=1):
         import asyncio

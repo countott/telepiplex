@@ -19,13 +19,14 @@ class FeatureSdkRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.temp.cleanup()
 
-    async def _start(self, capability):
+    async def _start(self, capability, *, messages=None):
         from telepiplex_plugin_sdk.runtime import FeatureRuntime
 
         runtime = FeatureRuntime(
             manifest={"plugin_id": "echo", "version": "1.0.0"},
             token="token",
             capabilities={"demo.echo": capability},
+            messages=messages,
         )
         task = asyncio.create_task(runtime.serve(self.socket_path))
         for _ in range(100):
@@ -96,6 +97,38 @@ class FeatureSdkRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["state"], "stopped")
         self.assertFalse(self.socket_path.exists())
+
+    def test_runtime_context_exposes_core_client(self):
+        from telepiplex_plugin_sdk import CoreClient, RuntimeContext
+
+        core = CoreClient(self.socket_path, "token")
+        context = RuntimeContext(
+            manifest={"plugin_id": "echo"},
+            token="token",
+            socket_path=self.socket_path,
+            core_socket_path=self.socket_path,
+            config_path=Path("/config/echo.yaml"),
+            state_path=Path("/config/state"),
+            core=core,
+        )
+        self.assertIs(context.core, core)
+
+    async def test_message_dispatch_uses_session_handler(self):
+        from app.core.plugin_rpc import RpcClient
+
+        async def echo(request):
+            return request["payload"]
+
+        async def message(request):
+            return {"actions": [{"kind": "send_message", "text": request["text"]}]}
+
+        await self._start(echo, messages=message)
+        result = await RpcClient(self.socket_path, "token").request(
+            "message.dispatch",
+            {"text": "follow up", "user_id": 1, "chat_id": 10},
+            deadline=1,
+        )
+        self.assertEqual(result["actions"][0]["text"], "follow up")
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ class FeatureRuntime:
         events: dict[str, Handler] | None = None,
         commands: dict[str, Handler] | None = None,
         callbacks: dict[str, Handler] | None = None,
+        messages: Handler | None = None,
         config_validator: Handler | None = None,
         max_frame_bytes: int = 1024 * 1024,
     ):
@@ -34,6 +35,7 @@ class FeatureRuntime:
         self.events = dict(events or {})
         self.commands = dict(commands or {})
         self.callbacks = dict(callbacks or {})
+        self.messages = messages
         self.config_validator = config_validator
         self.max_frame_bytes = int(max_frame_bytes)
         self.state = "starting"
@@ -180,6 +182,12 @@ class FeatureRuntime:
             return await self._business_call(
                 self.callbacks,
                 str(params.get("namespace") or ""),
+                params,
+            )
+        if method == "message.dispatch" and self.messages is not None:
+            return await self._business_call(
+                {"message": self.messages},
+                "message",
                 params,
             )
         if method == "config.validate" and self.config_validator is not None:

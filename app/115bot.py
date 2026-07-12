@@ -23,6 +23,8 @@ from telegram.helpers import escape_markdown
 
 import init
 from app.core.capability_router import CapabilityRouter
+from app.core.core_broker import CoreBroker
+from app.core.event_dispatcher import EventDispatcher
 from app.core.event_journal import EventJournal
 from app.core.plugin_catalog import PluginCatalog
 from app.core.plugin_manager import PluginManager
@@ -31,6 +33,7 @@ from app.core.plugin_supervisor import PluginSupervisor
 from app.handlers.plugin_handler import (
     dynamic_callback_gateway,
     dynamic_command_gateway,
+    dynamic_message_gateway,
     plugin_command,
 )
 try:
@@ -108,10 +111,23 @@ def build_plugin_manager(config=None, core_database=None):
         core_database = root.parent / "core.db"
     router = CapabilityRouter()
     journal = EventJournal(Path(core_database))
+    runtime_root = Path(str(plugin_config.get("runtime_root") or "/tmp/telepiplex"))
+    dispatcher = EventDispatcher(
+        router,
+        journal,
+        retry_interval=float(plugin_config.get("event_retry_interval") or 1),
+    )
+    broker = CoreBroker(
+        router,
+        journal,
+        runtime_root / "core.sock",
+        dispatcher=dispatcher,
+    )
     supervisor = PluginSupervisor(
         startup_timeout=float(plugin_config.get("startup_timeout") or 30),
         restart_limit=int(plugin_config.get("restart_limit") or 3),
-        runtime_root=Path(str(plugin_config.get("runtime_root") or "/tmp/telepiplex")),
+        runtime_root=runtime_root,
+        broker=broker,
     )
     catalog_path = Path(str(plugin_config.get("catalog") or root / "catalog.yaml"))
     catalog = PluginCatalog(catalog_path, root / ".cache")
@@ -121,6 +137,7 @@ def build_plugin_manager(config=None, core_database=None):
         router=router,
         journal=journal,
         artifact_resolver=catalog,
+        broker=broker,
         install_timeout=float(plugin_config.get("install_timeout") or 300),
         drain_timeout=float(plugin_config.get("drain_timeout") or 120),
         stabilize_seconds=float(plugin_config.get("stabilize_seconds") or 10),
@@ -316,10 +333,11 @@ def configure_application(application, manager):
     application.add_handler(CommandHandler("plugin", plugin_command))
     application.add_handler(CallbackQueryHandler(dynamic_callback_gateway))
     application.add_handler(MessageHandler(filters.COMMAND, dynamic_command_gateway))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, dynamic_message_gateway))
 
 
 async def start_core_runtime(manager):
-    await manager.restore_active()
+    await manager.start()
     queue_core_startup_notice()
 
 

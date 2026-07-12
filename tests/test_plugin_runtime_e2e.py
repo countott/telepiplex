@@ -19,6 +19,8 @@ SDK_SOURCE = ROOT / "sdk"
 class PluginRuntimeEndToEndTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from app.core.capability_router import CapabilityRouter
+        from app.core.core_broker import CoreBroker
+        from app.core.event_dispatcher import EventDispatcher
         from app.core.event_journal import EventJournal
         from app.core.plugin_manager import PluginManager
         from app.core.plugin_store import PluginStore
@@ -31,21 +33,31 @@ class PluginRuntimeEndToEndTest(unittest.IsolatedAsyncioTestCase):
         self.sdk_wheel = await asyncio.to_thread(self._build_wheel, SDK_SOURCE, self.wheels / "sdk")
         self.router = CapabilityRouter()
         self.journal = EventJournal(self.root / "core.db")
+        self.dispatcher = EventDispatcher(self.router, self.journal, retry_interval=0.01)
+        self.broker = CoreBroker(
+            self.router,
+            self.journal,
+            self.root / "runtime/core.sock",
+            dispatcher=self.dispatcher,
+        )
         self.supervisor = PluginSupervisor(
             startup_timeout=5,
             restart_limit=1,
             restart_backoff=0.01,
             runtime_root=self.root / "runtime",
+            broker=self.broker,
         )
         self.manager = PluginManager(
             store=PluginStore(self.root / "plugins"),
             supervisor=self.supervisor,
             router=self.router,
             journal=self.journal,
+            broker=self.broker,
             install_timeout=30,
             drain_timeout=2,
             stabilize_seconds=0,
         )
+        await self.manager.start()
 
     async def asyncTearDown(self):
         if hasattr(self, "manager"):
@@ -107,7 +119,7 @@ class PluginRuntimeEndToEndTest(unittest.IsolatedAsyncioTestCase):
             "provides": [{"name": "demo.echo", "exclusive": True}],
             "requires": [],
             "subscribes": [],
-            "publishes": [],
+            "publishes": ["demo.echoed"],
             "commands": [{"name": "echo", "description": "Echo text"}],
             "callbacks": ["echo"],
             "source": {
@@ -139,6 +151,16 @@ class PluginRuntimeEndToEndTest(unittest.IsolatedAsyncioTestCase):
             "demo.echo", "echo", {"text": "hello"}, {"deadline": 3}
         )
         self.assertEqual(first, {"text": "hello", "version": "1.0.0"})
+
+        self.journal.set_subscriptions("audit", ["demo.echoed"])
+        published = await self.router.call(
+            "demo.echo",
+            "echo",
+            {"text": "journal", "publish": True},
+            {"deadline": 3, "idempotency_key": "echo-publish-1"},
+        )
+        self.assertTrue(published["event_id"])
+        self.assertEqual(self.journal.pending("audit")[0].payload["text"], "journal")
 
         route = self.router.command_route("echo")
         command = await route.client.request(

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .core_client import CoreClient
 
 
 class FeatureError(RuntimeError):
@@ -16,8 +20,10 @@ class RuntimeContext:
     manifest: dict
     token: str
     socket_path: Path
+    core_socket_path: Path
     config_path: Path
     state_path: Path
+    core: "CoreClient"
 
 
 @dataclass(frozen=True)

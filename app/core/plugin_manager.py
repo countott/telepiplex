@@ -43,6 +43,7 @@ class PluginManager:
         journal: EventJournal,
         venv_installer=None,
         artifact_resolver=None,
+        broker=None,
         core_api_version: str = CORE_API_VERSION,
         install_timeout: float = 300,
         drain_timeout: float = 120,
@@ -52,6 +53,7 @@ class PluginManager:
         self.supervisor = supervisor
         self.router = router
         self.journal = journal
+        self.broker = broker
         self.core_api_version = str(core_api_version)
         self.install_timeout = float(install_timeout)
         self.drain_timeout = float(drain_timeout)
@@ -196,6 +198,11 @@ class PluginManager:
                 ))
         return results
 
+    async def start(self) -> list[PluginOperationResult]:
+        if self.broker is not None:
+            await self.broker.start()
+        return await self.restore_active()
+
     def status(self, plugin_id: str) -> dict:
         release = self.store.active(plugin_id)
         if release is None:
@@ -224,6 +231,8 @@ class PluginManager:
 
     async def close(self):
         await self.supervisor.close_all()
+        if self.broker is not None:
+            await self.broker.close()
         self.journal.close()
 
     async def _resolve_artifact(self, reference: str | Path) -> tuple[Path, str]:

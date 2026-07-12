@@ -624,6 +624,44 @@ git commit -m "feat(core): ship core-only hot Feature runtime"
 
 ## Follow-on Migration Plans
 
+### Task 11: Feature-to-Core broker and durable event dispatcher
+
+**Files:**
+- Create: `app/core/core_broker.py`
+- Create: `app/core/event_dispatcher.py`
+- Create: `sdk/src/telepiplex_plugin_sdk/core_client.py`
+- Modify: `sdk/src/telepiplex_plugin_sdk/types.py`
+- Modify: `sdk/src/telepiplex_plugin_sdk/runner.py`
+- Modify: `app/core/plugin_supervisor.py`
+- Modify: `app/core/plugin_manager.py`
+- Modify: `app/115bot.py`
+- Test: `tests/test_core_broker.py`
+- Test: `tests/test_event_dispatcher.py`
+- Test: `tests/test_plugin_sdk_runtime.py`
+
+- [x] Prove a Feature can call only declared required capabilities.
+- [x] Prove a Feature can publish only declared event types.
+- [x] Authenticate each child with its rotating startup token.
+- [x] Deliver journaled events at least once and ACK only successful handlers.
+- [x] Keep failed deliveries pending across Feature/process restarts.
+- [x] Start broker before restoring Features and stop it after Features drain.
+- [x] Verify the echo E2E still keeps the Core PID unchanged.
+
+### Task 12: Typed Telegram session gateway
+
+**Files:**
+- Modify: `app/handlers/plugin_handler.py`
+- Modify: `app/115bot.py`
+- Modify: `sdk/src/telepiplex_plugin_sdk/runtime.py`
+- Test: `tests/test_plugin_handler.py`
+- Test: `tests/test_plugin_sdk_runtime.py`
+
+- [x] Route follow-up text only to the Feature that opened that user/chat session.
+- [x] Route callback namespaces through immutable current routes.
+- [x] Validate inline keyboard actions and reject cross-Feature callback data.
+- [x] Clear sessions on explicit completion, Feature disable, or route loss.
+- [x] Keep Core commands available while a Feature session is active.
+
 After this plan is green, write and execute one plan per source branch in this
 order:
 

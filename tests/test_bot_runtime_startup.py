@@ -56,6 +56,7 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             manager = bot_module.build_plugin_manager({
                 "plugins": {
                     "root": str(root / "plugins"),
+                    "runtime_root": str(root / "plugins" / ".runtime"),
                     "startup_timeout": 1,
                     "restart_limit": 2,
                 }
@@ -65,6 +66,10 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(manager.store.root, (root / "plugins").resolve())
             self.assertEqual(manager.journal.database_path, root / "core.db")
             self.assertEqual(manager.supervisor.restart_limit, 2)
+            self.assertEqual(manager.broker.socket_path, root / "plugins" / ".runtime/core.sock")
+
+            await manager.start()
+            self.assertTrue(manager.broker.socket_path.exists())
 
     async def test_shutdown_stops_telegram_intake_before_feature_manager(self):
         bot_module = await asyncio.to_thread(load_bot_module)

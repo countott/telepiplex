@@ -203,6 +203,12 @@ class CapabilityRouter:
     def callback_route(self, namespace: str) -> PluginRoute | None:
         return self._snapshot.callbacks.get(str(namespace))
 
+    def plugin_route(self, plugin_id: str) -> PluginRoute | None:
+        plugin_id = str(plugin_id)
+        if plugin_id in self._snapshot.blocked:
+            return None
+        return self._registrations.get(plugin_id)
+
     def plugin_status(self, plugin_id: str) -> dict:
         plugin_id = str(plugin_id)
         if plugin_id not in self._snapshot.plugin_ids:

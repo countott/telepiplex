@@ -140,6 +140,82 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_request[1]["command"], "echo")
         self.assertEqual(first_request[1]["args"], ["hello", "world"])
 
+    async def test_feature_session_routes_followup_text_and_closes_explicitly(self):
+        from app.handlers.plugin_handler import (
+            dynamic_command_gateway,
+            dynamic_message_gateway,
+        )
+
+        client = AsyncMock()
+        client.request.side_effect = [
+            {"actions": [{"kind": "send_message", "text": "请输入名称"}],
+             "session": {"state": "open"}},
+            {"actions": [{"kind": "send_message", "text": "已完成"}],
+             "session": {"state": "close"}},
+        ]
+        route = SimpleNamespace(plugin_id="open115", client=client)
+        router = Mock()
+        router.command_route.return_value = route
+        router.plugin_route.return_value = route
+        update, context, _manager = self._request([], user_id=1)
+        context.application.bot_data["telepiplex_plugin_router"] = router
+        update.effective_message.text = "/auth"
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await dynamic_command_gateway(update, context)
+            update.effective_message.text = "授权码"
+            await dynamic_message_gateway(update, context)
+
+        methods = [call.args[0] for call in client.request.await_args_list]
+        self.assertEqual(methods, ["command.dispatch", "message.dispatch"])
+        self.assertNotIn("telepiplex_plugin_sessions", context.application.bot_data)
+
+    async def test_route_loss_closes_feature_session_without_dispatch(self):
+        from app.handlers.plugin_handler import dynamic_message_gateway
+
+        update, context, _manager = self._request([], user_id=1)
+        update.effective_message.text = "follow up"
+        context.application.bot_data.update({
+            "telepiplex_plugin_router": Mock(),
+            "telepiplex_plugin_sessions": {
+                (10, 1): {"plugin_id": "open115", "expires_at": 9999999999},
+            },
+        })
+        context.application.bot_data["telepiplex_plugin_router"].plugin_route.return_value = None
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await dynamic_message_gateway(update, context)
+
+        self.assertNotIn("telepiplex_plugin_sessions", context.application.bot_data)
+        self.assertIn("已结束", update.effective_message.reply_text.await_args.args[0])
+
+    async def test_inline_keyboard_callback_must_belong_to_feature_namespace(self):
+        from app.handlers.plugin_handler import dynamic_command_gateway
+
+        client = AsyncMock()
+        client.request.return_value = {
+            "actions": [{
+                "kind": "send_message",
+                "text": "选择",
+                "data": {"keyboard": [[
+                    {"text": "安全", "callback_data": "echo:next"},
+                    {"text": "越权", "callback_data": "other:next"},
+                ]]},
+            }]
+        }
+        manifest = SimpleNamespace(callbacks=("echo",))
+        route = SimpleNamespace(plugin_id="echo", client=client, manifest=manifest)
+        router = Mock()
+        router.command_route.return_value = route
+        update, context, _manager = self._request([], user_id=1)
+        update.effective_message.text = "/echo"
+        context.application.bot_data["telepiplex_plugin_router"] = router
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await dynamic_command_gateway(update, context)
+
+        self.assertIn("无效响应", update.effective_message.reply_text.await_args.args[0])
+
     async def test_callback_routes_namespace_and_rejects_unknown_response_action(self):
         from app.handlers.plugin_handler import dynamic_callback_gateway
 
@@ -181,6 +257,20 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         message = update.effective_message.reply_text.await_args_list[-1].args[0]
         self.assertIn("enable_failed", message)
         self.assertNotIn("secret-value", message)
+
+    async def test_disabling_feature_clears_its_sessions(self):
+        from app.handlers.plugin_handler import plugin_command
+
+        update, context, manager = self._request(["disable", "echo"])
+        context.application.bot_data["telepiplex_plugin_sessions"] = {
+            (10, 1): {"plugin_id": "echo", "expires_at": 9999999999},
+            (20, 2): {"plugin_id": "other", "expires_at": 9999999999},
+        }
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_command(update, context)
+
+        sessions = context.application.bot_data["telepiplex_plugin_sessions"]
+        self.assertEqual(list(sessions.values())[0]["plugin_id"], "other")
 
 
 if __name__ == "__main__":
