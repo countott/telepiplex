@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 class FeatureError(RuntimeError):
@@ -11,6 +12,15 @@ class FeatureError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class RuntimeContext:
+    manifest: dict
+    token: str
+    socket_path: Path
+    config_path: Path
+    state_path: Path
+
+
+@dataclass(frozen=True)
 class ResponseAction:
     kind: str
     text: str = ""
@@ -18,4 +28,3 @@ class ResponseAction:
 
     def to_mapping(self) -> dict:
         return {"kind": self.kind, "text": self.text, "data": dict(self.data)}
-

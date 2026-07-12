@@ -1,5 +1,7 @@
 import json
+import asyncio
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -174,6 +176,35 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.router.snapshot.capabilities["demo.echo"].plugin_id, "echo")
         self.assertEqual(self.supervisor.process("echo").release.version, "1.0.0")
 
+    async def test_artifact_verification_and_extraction_do_not_block_core_loop(self):
+        original_stage = self.store.stage
+
+        def slow_stage(artifact):
+            time.sleep(0.1)
+            return original_stage(artifact)
+
+        self.store.stage = slow_stage
+        ticks = []
+        running = True
+
+        async def heartbeat():
+            while running:
+                ticks.append(asyncio.get_running_loop().time())
+                await asyncio.sleep(0.01)
+
+        ticker = asyncio.create_task(heartbeat())
+        try:
+            await self.manager.install(self._artifact(
+                plugin_id="responsive",
+                provides=(("demo.responsive", True),),
+                commands=("responsive",),
+            ))
+        finally:
+            running = False
+            await ticker
+
+        self.assertGreaterEqual(len(ticks), 5)
+
     async def test_incompatible_core_and_venv_failure_leave_no_active_record(self):
         from app.core.plugin_manager import PluginOperationError, PluginManager
 
@@ -289,6 +320,36 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.code, "required_by_plugin")
         self.assertIn("consumer", str(raised.exception))
+
+    async def test_remove_large_release_tree_does_not_block_core_loop(self):
+        await self.manager.install(self._artifact(
+            plugin_id="removable",
+            provides=(("demo.removable", True),),
+            commands=("removable",),
+        ))
+        original_remove = self.store.remove_plugin
+
+        def slow_remove(plugin_id):
+            time.sleep(0.1)
+            return original_remove(plugin_id)
+
+        self.store.remove_plugin = slow_remove
+        ticks = []
+        running = True
+
+        async def heartbeat():
+            while running:
+                ticks.append(asyncio.get_running_loop().time())
+                await asyncio.sleep(0.01)
+
+        ticker = asyncio.create_task(heartbeat())
+        try:
+            await self.manager.remove("removable")
+        finally:
+            running = False
+            await ticker
+
+        self.assertGreaterEqual(len(ticks), 5)
 
 
 if __name__ == "__main__":

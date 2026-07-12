@@ -70,6 +70,8 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
         return supervisor
 
     async def test_starts_real_child_health_drains_and_stops(self):
+        import asyncio
+
         supervisor = self._supervisor()
         core_pid = os.getpid()
 
@@ -79,10 +81,12 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(process.pid, core_pid)
         health = await supervisor.health("healthy")
         self.assertEqual(health.state, "healthy")
+        started_at = asyncio.get_running_loop().time()
         drained = await supervisor.drain("healthy", timeout=1)
         self.assertEqual(drained.state, "draining")
-        self.assertEqual(drained.active_tasks, 1)
-        self.assertEqual(drained.interrupted_task_ids, ("task-1",))
+        self.assertEqual(drained.active_tasks, 0)
+        self.assertEqual(drained.interrupted_task_ids, ())
+        self.assertGreaterEqual(asyncio.get_running_loop().time() - started_at, 0.04)
         resumed = await supervisor.resume("healthy")
         self.assertEqual(resumed.state, "healthy")
         await supervisor.stop("healthy")

@@ -266,17 +266,35 @@ class PluginSupervisor:
         process = self._resolve(target)
         if process.client is None:
             raise SupervisorError("unavailable", "Feature RPC client is unavailable")
+        loop = asyncio.get_running_loop()
+        deadline_at = loop.time() + float(timeout)
         try:
             result = await process.client.request("drain", {}, deadline=float(timeout))
         except ContractError as exc:
             raise SupervisorError(exc.code, self._safe_error(exc)) from None
         process.state = "draining"
+        active_tasks = int(result.get("active_tasks") or 0)
+        while active_tasks and loop.time() < deadline_at:
+            await asyncio.sleep(min(0.05, max(0, deadline_at - loop.time())))
+            remaining = deadline_at - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                health = await process.client.request(
+                    "health",
+                    {},
+                    deadline=min(1, remaining),
+                )
+            except ContractError:
+                break
+            active_tasks = int(health.get("active_tasks") or 0)
         return DrainResult(
             plugin_id=process.plugin_id,
             state=str(result.get("state") or "draining"),
-            active_tasks=int(result.get("active_tasks") or 0),
-            interrupted_task_ids=tuple(
-                str(value) for value in result.get("interrupted_task_ids") or []
+            active_tasks=active_tasks,
+            interrupted_task_ids=(
+                tuple(str(value) for value in result.get("interrupted_task_ids") or [])
+                if active_tasks else ()
             ),
         )
 

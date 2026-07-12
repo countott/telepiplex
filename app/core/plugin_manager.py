@@ -59,7 +59,9 @@ class PluginManager:
 
     async def install(self, artifact_path: Path, expected_sha256: str = "") -> PluginOperationResult:
         async with self._lifecycle_lock:
-            verified = self._verify(artifact_path, expected_sha256)
+            verified = await asyncio.to_thread(
+                self._verify, artifact_path, expected_sha256
+            )
             if self.store.active(verified.manifest.plugin_id) is not None:
                 raise PluginOperationError(
                     "already_installed",
@@ -71,7 +73,9 @@ class PluginManager:
 
     async def update(self, artifact_path: Path, expected_sha256: str = "") -> PluginOperationResult:
         async with self._lifecycle_lock:
-            verified = self._verify(artifact_path, expected_sha256)
+            verified = await asyncio.to_thread(
+                self._verify, artifact_path, expected_sha256
+            )
             old_release = self.store.active(verified.manifest.plugin_id)
             if old_release is None:
                 raise PluginOperationError("not_installed", "Feature is not installed")
@@ -160,7 +164,7 @@ class PluginManager:
             self.journal.set_subscriptions(plugin_id, [])
             if process is not None:
                 await self.supervisor.stop(process)
-            self.store.remove_plugin(plugin_id)
+            await asyncio.to_thread(self.store.remove_plugin, plugin_id)
             return PluginOperationResult(
                 state="removed",
                 plugin_id=plugin_id,
@@ -232,12 +236,12 @@ class PluginManager:
     async def _prepare_release(self, verified) -> ActiveRelease:
         staged = None
         try:
-            staged = self.store.stage(verified)
+            staged = await asyncio.to_thread(self.store.stage, verified)
             await self._venv_installer(staged)
-            return self.store.commit(staged)
+            return await asyncio.to_thread(self.store.commit, staged)
         except Exception as exc:
             if staged is not None and staged.path.exists():
-                self.store.discard(staged)
+                await asyncio.to_thread(self.store.discard, staged)
             raise self._operation_error(exc, "install_failed") from None
 
     async def _activate_release(

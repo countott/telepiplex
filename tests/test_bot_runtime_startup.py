@@ -24,7 +24,7 @@ def load_bot_module():
 
 class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
     async def test_async_after_start_is_awaited_before_polling_wait(self):
-        bot_module = load_bot_module()
+        bot_module = await asyncio.to_thread(load_bot_module)
         application = Mock()
         application.initialize = AsyncMock()
         application.start = AsyncMock()
@@ -50,7 +50,7 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
         application.shutdown.assert_awaited_once()
 
     async def test_build_plugin_manager_uses_core_config_paths(self):
-        bot_module = load_bot_module()
+        bot_module = await asyncio.to_thread(load_bot_module)
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             manager = bot_module.build_plugin_manager({
@@ -67,7 +67,7 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(manager.supervisor.restart_limit, 2)
 
     async def test_shutdown_stops_telegram_intake_before_feature_manager(self):
-        bot_module = load_bot_module()
+        bot_module = await asyncio.to_thread(load_bot_module)
         events = []
         manager = Mock()
         manager.close = AsyncMock(side_effect=lambda: events.append("manager.close"))

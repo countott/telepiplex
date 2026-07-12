@@ -528,38 +528,38 @@ git commit -m "feat(core): control hot-pluggable Features from Telegram"
 - Provides exclusive capability `demo.echo` and Telegram command `/echo`.
 - Implements lifecycle health/drain/shutdown through the SDK.
 
-- [ ] **Step 1: Write E2E RED test**
+- [x] **Step 1: Write E2E RED test**
 
 Start a core manager in a temporary root, record the current core PID, build and
 install echo v1, call `/echo`, update to v2 with an in-flight request, observe
 drain and route switch, rollback to v1, disable, enable, remove, and assert the
 core PID never changes.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `python3 -m unittest tests.test_plugin_runtime_e2e -v`
 
 Expected: echo artifact/source is absent.
 
-- [ ] **Step 3: Implement the reference Feature**
+- [x] **Step 3: Implement the reference Feature**
 
 Return a typed `send_message` action from the command handler and a JSON result
 from `demo.echo`. Include a deterministic delay option so the test can hold one
 request in flight during update.
 
-- [ ] **Step 4: Build SDK and plugin wheels for the fixture**
+- [x] **Step 4: Build SDK and plugin wheels for the fixture**
 
 Use isolated temporary build directories. Put both wheels in the `.tpx`
 wheelhouse so the same offline artifact is installed by the manager.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run: `python3 -m unittest tests.test_plugin_runtime_e2e -v`
 
 Expected: all lifecycle states pass, the core PID is constant, and no child
 process survives cleanup.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add examples/echo_feature tests/test_plugin_runtime_e2e.py

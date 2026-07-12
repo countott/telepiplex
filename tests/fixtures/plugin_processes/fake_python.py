@@ -3,6 +3,7 @@ import asyncio
 import hmac
 import json
 import os
+import time
 from pathlib import Path
 
 
@@ -20,7 +21,7 @@ async def main():
         print(f"startup token={TOKEN}", flush=True)
 
     stop = asyncio.Event()
-    state = {"value": "healthy"}
+    state = {"value": "healthy", "drain_started": 0.0}
 
     async def handle(reader, writer):
         try:
@@ -37,13 +38,18 @@ async def main():
                 if method == "handshake":
                     result = {"plugin_id": PLUGIN_ID, "version": VERSION, "state": state["value"]}
                 elif method == "health":
-                    result = {"state": state["value"], "active_tasks": 0}
+                    active_tasks = int(
+                        state["value"] == "draining"
+                        and time.monotonic() - state["drain_started"] < 0.05
+                    )
+                    result = {"state": state["value"], "active_tasks": active_tasks}
                 elif method == "drain":
                     state["value"] = "draining"
+                    state["drain_started"] = time.monotonic()
                     result = {
                         "state": "draining",
                         "active_tasks": 1,
-                        "interrupted_task_ids": ["task-1"],
+                        "interrupted_task_ids": [],
                     }
                 elif method == "resume":
                     state["value"] = "healthy"
