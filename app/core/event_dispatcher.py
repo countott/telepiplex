@@ -8,7 +8,7 @@ from app.core.plugin_contract import ContractError
 
 
 _POISON_CODES = {
-    "internal_error", "invalid_request", "not_found", "method_not_allowed",
+    "invalid_request", "not_found", "method_not_allowed",
     "invalid_callback", "english_title_missing",
 }
 

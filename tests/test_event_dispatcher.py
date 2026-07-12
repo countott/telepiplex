@@ -22,7 +22,16 @@ class PoisonAwareClient(SubscriberClient):
         self.calls.append((method, params, deadline, idempotency_key))
         if params.get("payload", {}).get("poison"):
             from app.core.plugin_contract import ContractError
-            raise ContractError("internal_error", "permanent failure")
+            raise ContractError("invalid_request", "permanent failure")
+        return {"accepted": True}
+
+
+class InternalErrorThenSuccessClient(SubscriberClient):
+    async def request(self, method, params, *, deadline, idempotency_key=""):
+        self.calls.append((method, params, deadline, idempotency_key))
+        if len(self.calls) <= 2:
+            from app.core.plugin_contract import ContractError
+            raise ContractError("internal_error", "temporary failure")
         return {"accepted": True}
 
 
@@ -100,6 +109,30 @@ class EventDispatcherTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(len(journal.pending("renaming")), 1)
             self.assertEqual(journal.dead_letters("renaming"), [])
+
+    async def test_internal_error_does_not_consume_poison_attempt_budget(self):
+        from app.core.capability_router import CapabilityRouter
+        from app.core.event_dispatcher import EventDispatcher
+        from app.core.event_journal import EventJournal
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            journal = EventJournal(Path(tmpdir) / "core.db")
+            self.addCleanup(journal.close)
+            router = CapabilityRouter(); client = InternalErrorThenSuccessClient()
+            subscriber = manifest("renaming", subscribes=("download.completed",))
+            router.activate("renaming", subscriber, client)
+            journal.set_subscriptions("renaming", subscriber.subscribes)
+            journal.publish("download.completed", {"path": "/download"}, "transient")
+            dispatcher = EventDispatcher(router, journal, max_attempts=2)
+
+            await dispatcher.deliver_once()
+            await dispatcher.deliver_once()
+
+            self.assertEqual(len(journal.pending("renaming")), 1)
+            self.assertEqual(journal.dead_letters("renaming"), [])
+
+            self.assertEqual(await dispatcher.deliver_once(), 1)
+            self.assertEqual(journal.pending("renaming"), [])
 
 
 if __name__ == "__main__":
