@@ -10,6 +10,55 @@ sys.path.insert(0, str(ROOT / "app"))
 
 
 class PlexModuleTest(unittest.TestCase):
+    def test_service_construction_does_not_eagerly_build_plex_ai(self):
+        import init
+        from app.modules import plex_management as module
+
+        original_service = module._service
+        original_ai = getattr(module, "_ai", None)
+        init.bot_config = {
+            "category_folder": [],
+            "media": {
+                "plex": {
+                    "base_url": "http://plex:32400",
+                    "token": "token",
+                    "management": {"enabled": True, "database_path": ":memory:"},
+                    "ai": {"enabled": True},
+                }
+            },
+            "ai": {
+                "api_url": "https://ai.example/v1",
+                "api_key": "key",
+                "model": "model",
+            },
+        }
+        module._service = None
+        module._ai = None
+        service = Mock()
+        try:
+            with patch(
+                "app.services.plex_management.PlexManagementService",
+                return_value=service,
+            ), patch(
+                "app.repositories.plex_jobs.PlexJobRepository",
+            ), patch(
+                "app.adapters.plex.PlexAdapter",
+            ), patch(
+                "app.services.plex_ai.PlexAIOrchestrator",
+            ) as orchestrator, patch(
+                "app.plex_mcp.server.PlexToolDispatcher",
+            ) as dispatcher:
+                result = module.get_plex_management_service()
+        finally:
+            module._service = original_service
+            module._ai = original_ai
+
+        self.assertIs(result, service)
+        self.assertTrue(service.ai_enabled)
+        self.assertIsNone(service.ai)
+        orchestrator.assert_not_called()
+        dispatcher.assert_not_called()
+
     def test_match_notification_uses_compact_telegram_callbacks(self):
         import init
         import app.utils.message_queue
@@ -62,6 +111,49 @@ class PlexModuleTest(unittest.TestCase):
         self.assertIsNone(result)
         service.resume_incomplete_jobs.assert_called_once_with(module.plex_executor)
         self.assertNotIn("secret", logger.error.call_args.args[0])
+
+    def test_base_service_start_failure_is_isolated_from_bot_startup(self):
+        import init
+        from app.modules import plex_management as module
+
+        original_logger = init.logger
+        init.logger = Mock()
+        try:
+            with patch.object(
+                module,
+                "get_plex_management_service",
+                side_effect=RuntimeError("database token=secret"),
+            ):
+                result = module.start_plex_module_services()
+        finally:
+            logger = init.logger
+            init.logger = original_logger
+
+        self.assertIsNone(result)
+        self.assertIn("Plex service", logger.error.call_args.args[0])
+        self.assertNotIn("secret", logger.error.call_args.args[0])
+
+    def test_job_recovery_failure_is_isolated_from_bot_startup(self):
+        import init
+        from app.modules import plex_management as module
+
+        service = Mock(mcp_enabled=False)
+        service.resume_incomplete_jobs.side_effect = RuntimeError("resume failed")
+        original_logger = init.logger
+        init.logger = Mock()
+        try:
+            with patch.object(
+                module,
+                "get_plex_management_service",
+                return_value=service,
+            ):
+                result = module.start_plex_module_services()
+        finally:
+            logger = init.logger
+            init.logger = original_logger
+
+        self.assertIsNone(result)
+        self.assertIn("恢复", logger.error.call_args.args[0])
 
     @patch("app.modules.plex_management.get_plex_management_service")
     def test_unorganized_completion_is_ignored(self, get_service):

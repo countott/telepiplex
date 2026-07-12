@@ -25,20 +25,35 @@ async def plex_command(update, context):
     if not init.check_user(update.effective_user.id):
         await update.effective_message.reply_text("⚠️ 当前账号无权使用此机器人。")
         return
-    from app.modules.plex_management import get_plex_management_service
+    from app.modules.plex_management import (
+        get_plex_ai_orchestrator,
+        get_plex_management_service,
+    )
 
     service = get_plex_management_service()
     if service is None:
         await update.effective_message.reply_text("Plex 管理未启用或缺少 base_url/token。")
         return
-    if not getattr(service, "ai_enabled", False) or service.ai is None:
+    if not getattr(service, "ai_enabled", False):
         await update.effective_message.reply_text("Plex AI 管理未启用。")
         return
     request_text = " ".join(context.args or []).strip()
     if not request_text:
         await update.effective_message.reply_text("请在 /plex 后描述要查询或管理的 Plex 内容。")
         return
-    result = await asyncio.to_thread(service.ai.run, request_text)
+    try:
+        ai = await asyncio.to_thread(get_plex_ai_orchestrator)
+        if ai is None:
+            await update.effective_message.reply_text("Plex AI 管理未启用。")
+            return
+        result = await asyncio.to_thread(ai.run, request_text)
+    except Exception as exc:
+        safe_error = getattr(service, "_safe_error", None)
+        message = safe_error(exc) if callable(safe_error) else type(exc).__name__
+        await update.effective_message.reply_text(
+            f"Plex AI 初始化或执行失败：{message}"
+        )
+        return
     confirmation = result.get("confirmation") or {}
     reply_markup = None
     token = confirmation.get("confirmation_token")

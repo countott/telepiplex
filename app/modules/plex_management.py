@@ -7,6 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 plex_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="plex-management")
 _service = None
+_ai = None
+_ai_error = ""
 _mcp_handle = None
 
 
@@ -95,17 +97,46 @@ def get_plex_management_service():
         for key in ("api_url", "api_key", "model")
     )
     _service.ai_enabled = requested_ai and has_ai_credentials
+    _service.global_ai_config = global_ai
     _service.ai = None
-    if _service.ai_enabled:
+    _service.ai_error = ""
+    return _service
+
+
+def get_plex_ai_orchestrator():
+    global _ai, _ai_error
+    service = get_plex_management_service()
+    if service is None or not getattr(service, "ai_enabled", False):
+        return None
+    existing = getattr(service, "ai", None)
+    if existing is not None:
+        _ai = existing
+        return existing
+    if _ai is not None:
+        service.ai = _ai
+        return _ai
+
+    try:
         from app.plex_mcp.server import PlexToolDispatcher
         from app.services.plex_ai import PlexAIOrchestrator
 
-        _service.ai = PlexAIOrchestrator(
-            global_ai,
-            PlexToolDispatcher(_service),
-            max_tool_rounds=_service.ai_config.get("max_tool_rounds", 3),
+        _ai = PlexAIOrchestrator(
+            getattr(service, "global_ai_config", {}) or {},
+            PlexToolDispatcher(service),
+            max_tool_rounds=(getattr(service, "ai_config", {}) or {}).get(
+                "max_tool_rounds",
+                3,
+            ),
         )
-    return _service
+    except Exception as exc:
+        _ai = None
+        _ai_error = _safe_startup_error(exc)
+        service.ai_error = _ai_error
+        raise
+    _ai_error = ""
+    service.ai_error = ""
+    service.ai = _ai
+    return _ai
 
 
 def on_download_completed(completion):
@@ -120,27 +151,48 @@ def on_download_completed(completion):
     return job
 
 
+def _safe_startup_error(exc):
+    try:
+        from app.services.plex_management import PlexManagementService
+
+        return PlexManagementService._safe_error(exc)
+    except Exception:
+        return type(exc).__name__
+
+
+def _log_startup_failure(component, exc):
+    try:
+        import init
+
+        if init.logger:
+            init.logger.error(
+                f"{component}启动失败：{_safe_startup_error(exc)}"
+            )
+    except Exception:
+        pass
+
+
 def start_plex_module_services(_application=None):
     global _mcp_handle
-    service = get_plex_management_service()
+    try:
+        service = get_plex_management_service()
+    except Exception as exc:
+        _log_startup_failure("Plex service", exc)
+        return None
     if service is None:
         return None
-    service.resume_incomplete_jobs(plex_executor)
+    try:
+        service.resume_incomplete_jobs(plex_executor)
+    except Exception as exc:
+        _log_startup_failure("Plex 任务恢复", exc)
     if service.mcp_enabled:
         from app.plex_mcp.server import start_plex_mcp_server
-        from app.services.plex_management import PlexManagementService
 
         try:
             _mcp_handle = start_plex_mcp_server(service, service.mcp_config)
         except Exception as exc:
-            import init
-
             _mcp_handle = None
-            if init.logger:
-                init.logger.error(
-                    "Plex MCP 启动失败："
-                    + PlexManagementService._safe_error(exc)
-                )
+            _log_startup_failure("Plex MCP", exc)
     return _mcp_handle
 
 

@@ -142,6 +142,41 @@ class PlexAIOrchestratorTest(unittest.TestCase):
 
 
 class PlexAIHandlerTest(unittest.TestCase):
+    @patch("app.modules.plex_management.get_plex_ai_orchestrator")
+    @patch("app.modules.plex_management.get_plex_management_service")
+    def test_enabled_ai_is_initialized_in_worker_outside_telegram_event_loop(
+        self,
+        get_service,
+        get_ai,
+    ):
+        from app.handlers.plex_handler import plex_command
+
+        service = Mock(ai_enabled=True, ai=None)
+        ai = Mock()
+        ai.run.return_value = {"message": "Plex 正常运行"}
+
+        def build_ai():
+            with self.assertRaises(RuntimeError):
+                asyncio.get_running_loop()
+            return ai
+
+        get_service.return_value = service
+        get_ai.side_effect = build_ai
+        update = Mock()
+        update.effective_user.id = 1
+        update.effective_message.reply_text = AsyncMock()
+        context = Mock(args=["状态"], user_data={})
+
+        with patch("app.handlers.plex_handler.init.check_user", return_value=True):
+            asyncio.run(plex_command(update, context))
+
+        get_ai.assert_called_once_with()
+        ai.run.assert_called_once_with("状态")
+        self.assertEqual(
+            update.effective_message.reply_text.await_args.args[0],
+            "Plex 正常运行",
+        )
+
     @patch("app.modules.plex_management.get_plex_management_service")
     def test_disabled_ai_returns_concise_message(self, get_service):
         from app.handlers.plex_handler import plex_command
