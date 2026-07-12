@@ -45,9 +45,9 @@ category_folder:
     path: /动画剧集
     plex_library_id: ""
 
-# 搜索与 Prowlarr：启用后使用 /search 和 /s 找片源。
+# 搜索与 Prowlarr：默认启用；使用 /search 和 /s 找片源。
 search:
-  enable: false
+  enable: true
 
   prowlarr:
     base_url: "http://your-prowlarr:9696"
@@ -125,7 +125,8 @@ media:
       enabled: false
       max_tool_rounds: 3
 
-# 元数据：Wikipedia 用于搜索关系证据；TMDB 用于 Plex 原声和海报；TVDB 用于编号校对。
+# 元数据：Wikipedia、豆瓣和 TVDB 每次搜索都会执行；豆瓣没有独立开关。
+# TMDB 用于 Plex 原声和海报；外部元数据服务失败时由搜索管线按软失败处理。
 metadata:
   wikipedia:
     enable: true
@@ -139,7 +140,7 @@ metadata:
     timeout: 15
 
   tvdb:
-    enable: false
+    enable: true
     base_url: "https://api4.thetvdb.com/v4"
     api_key: ""
     subscriber_pin: ""

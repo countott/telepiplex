@@ -6,6 +6,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigTemplateContractTest(unittest.TestCase):
+    def test_composed_template_enables_the_approved_default_runtime(self):
+        import yaml
+
+        parsed = yaml.safe_load(
+            (ROOT / "config" / "config.yaml.example").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(parsed["modules"], {"enabled": "all", "disabled": []})
+        self.assertTrue(parsed["search"]["enable"])
+        self.assertTrue(parsed["metadata"]["wikipedia"]["enable"])
+        self.assertTrue(parsed["metadata"]["tvdb"]["enable"])
+        self.assertTrue(parsed["ai"]["enable"])
+        self.assertTrue(parsed["media"]["plex"]["management"]["enabled"])
+
     def test_category_routes_cover_exactly_four_kinds(self):
         import yaml
 
