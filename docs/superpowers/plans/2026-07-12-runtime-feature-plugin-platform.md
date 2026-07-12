@@ -662,6 +662,18 @@ git commit -m "feat(core): ship core-only hot Feature runtime"
 - [x] Clear sessions on explicit completion, Feature disable, or route loss.
 - [x] Keep Core commands available while a Feature session is active.
 
+### Task 13: Source-branch artifact builder
+
+**Files:**
+- Create: `tools/build_feature.py`
+- Test: `tests/test_feature_builder.py`
+
+- [x] Build the Feature wheel and released SDK wheel from source.
+- [x] Bundle all Feature dependencies for offline runtime installation.
+- [x] Record repository, source branch, and exact commit in the manifest.
+- [x] Reject dirty worktrees and forbidden imports of Core, `init`, or Telegram.
+- [x] Produce a verified immutable `.tpx` through the same artifact verifier.
+
 After this plan is green, write and execute one plan per source branch in this
 order:
 

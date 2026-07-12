@@ -21,7 +21,7 @@ COPY ./tools /opt/telepiplex/tools
 
 RUN mkdir -p /config/plugins /tmp/telepiplex
 
-ENV PYTHONPATH="/app:/app/utils:/opt/telepiplex/sdk/src"
+ENV PYTHONPATH="/:/app:/app/utils:/opt/telepiplex/sdk/src"
 
 VOLUME ["/config"]
 
