@@ -74,7 +74,15 @@ The resulting coverage has these sets:
 - `mapped`: real sources bound to confirmed items.
 - `missing`: confirmed items with no real source.
 - `unexpected`: eligible large videos not bound to the plan.
+- `ineligible`: videos below the active `clean_policy` threshold; these never
+  enter either deterministic or AI mapping, even when an earlier deletion
+  attempt failed.
 - `rejected`: invalid AI bindings and their reasons.
+
+Deterministic mapping never depends on AI configuration. Missing AI credentials
+only disable the unresolved-file inference step. Canonical validation rejects
+duplicate logical `(season_number, episode_number)` targets before indexes are
+built.
 
 The state is:
 
@@ -108,6 +116,13 @@ Each mapped episode is one execution unit. A unit records:
 - `failed`;
 - its source path, target path, and sanitized error.
 
+The storage adapter exposes the copy and source-delete phases separately. A
+successful copy followed by a failed source deletion is recorded as
+`copied_source_retained`: the formal target is a successful canonical result,
+the operation is partial, and the retained source is reported but is not sent
+to unorganized. Cleanup failures for non-video and ineligible small-video files
+are likewise explicit ledger entries.
+
 Execution stops at the first operational failure. Successfully moved units stay
 in the formal library. Remaining eligible videos are moved to unorganized when
 possible. The renaming processor returns a terminal handled result so the
@@ -139,6 +154,9 @@ to both:
 The helper preserves `metadata_id`, English title, relationship, placement,
 items, source entry, and warnings. It records the title source under the
 contract evidence without changing classification or episode locks.
+Latin-only Douban results retain their subject ID, media type, English title,
+and cover with an empty Chinese title; they remain eligible as enrichment
+evidence without being mislabeled as Chinese.
 
 ## 7. Plex Module Fault Isolation
 
@@ -152,6 +170,8 @@ schemas.
   `/plex` error.
 - Base service construction, interrupted-job marking, AI, and MCP startup each
   have separate exception boundaries.
+- MCP dependency import is inside the MCP boundary, so a missing or incompatible
+  optional dependency cannot unwind bot startup.
 - No Plex startup failure escapes the module startup hook into core bot
   shutdown.
 
@@ -258,6 +278,12 @@ The implementation must add failing tests first for:
 10. Ordinary movie handling remaining unchanged by Special patches.
 11. One Plex target per resolved ordinary episode.
 12. Newly created jobs auto-submit once; repeated completions do not resubmit.
+13. Rule-resolved packages complete without AI credentials.
+14. Copy success plus source-delete failure is a partial formal success and is
+    never duplicated into unorganized.
+15. Small videos remain ineligible after cleanup failure and are reported.
+16. Duplicate logical episode targets and MCP import failures are rejected or
+    isolated at their module boundaries.
 13. Active jobs becoming interrupted at startup and not auto-resuming.
 
 Full main tests, tracked-Python compilation, `pip check`, YAML parsing, and

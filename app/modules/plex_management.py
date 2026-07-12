@@ -187,9 +187,9 @@ def start_plex_module_services(_application=None):
     except Exception as exc:
         _log_startup_failure("Plex 任务恢复", exc)
     if service.mcp_enabled:
-        from app.plex_mcp.server import start_plex_mcp_server
-
         try:
+            from app.plex_mcp.server import start_plex_mcp_server
+
             _mcp_handle = start_plex_mcp_server(service, service.mcp_config)
         except Exception as exc:
             _mcp_handle = None

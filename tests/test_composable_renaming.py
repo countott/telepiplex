@@ -397,10 +397,7 @@ class ComposableRenamingModuleTest(unittest.TestCase):
         from app.modules import renaming
 
         init.logger = Mock()
-        init.bot_config = {
-            "ai": {"api_url": "https://ai.example", "api_key": "key", "model": "model"},
-            "media": {"unorganized_path": "/未整理"},
-        }
+        init.bot_config = {"media": {"unorganized_path": "/未整理"}}
         storage = Mock()
         storage.create_dir_recursive.return_value = True
         storage.rename.return_value = True
@@ -438,6 +435,119 @@ class ComposableRenamingModuleTest(unittest.TestCase):
 
         self.assertTrue(result.handled)
         self.assertEqual(result.metadata["media_metadata"]["items"][0]["final_path"].rsplit("/", 1)[-1], "Test Media S01E01.mkv")
+        ai_mapper.assert_not_called()
+
+    def test_confirmed_formal_copy_with_retained_source_is_partial_not_unorganized(self):
+        import init
+        from app.core.module_registry import DownloadCompletedEvent
+        from app.modules import renaming
+
+        init.logger = Mock()
+        init.bot_config = {"media": {"unorganized_path": "/未整理"}}
+        storage = Mock()
+        storage.create_dir_recursive.return_value = True
+        storage.rename.return_value = True
+        storage.get_file_info.return_value = None
+        storage.delete_single_file.return_value = True
+        storage.move_file_detailed.return_value = {
+            "state": "copied_source_retained",
+            "copied": True,
+            "source_deleted": False,
+            "target_path": "/真人剧集/测试影视 (Test Media)/Test Media Season 01/Test Media S01E01.mkv",
+        }
+        contract = self._standalone_media_metadata("live_action_series", "series")
+        event = DownloadCompletedEvent(
+            link="magnet:?xt=urn:btih:" + "c" * 40,
+            selected_path="/真人剧集",
+            user_id=1,
+            final_path="/真人剧集/Test.Show.S01E01",
+            resource_name="Test.Show.S01E01",
+            metadata={"media_metadata": contract},
+            storage=storage,
+        )
+
+        with patch.object(
+            renaming,
+            "collect_storage_file_tree",
+            return_value=[{
+                "name": "Test.Show.S01E01.mkv",
+                "relative_path": "Test.Show.S01E01.mkv",
+                "is_dir": False,
+                "is_video": True,
+                "size": 2 * 1024 * 1024 * 1024,
+            }],
+        ), patch.object(
+            renaming,
+            "_get_tvdb_candidates_and_episodes",
+            return_value=([], []),
+        ), patch.object(
+            renaming,
+            "infer_tvdb_episode_plan_with_ai",
+        ) as ai_mapper:
+            result = renaming.process_tvdb_episode(event)
+
+        self.assertTrue(result.handled)
+        self.assertIn("部分完成", result.message)
+        self.assertIn("源文件保留", result.message)
+        self.assertIn("Test Media S01E01.mkv", result.message)
+        self.assertEqual(
+            result.metadata["media_metadata"]["items"][0]["final_path"],
+            "/真人剧集/测试影视 (Test Media)/Test Media Season 01/Test Media S01E01.mkv",
+        )
+        storage.move_file.assert_not_called()
+        ai_mapper.assert_not_called()
+
+    def test_failed_small_video_cleanup_never_promotes_file_to_library_or_ai(self):
+        import init
+        from app.core.module_registry import DownloadCompletedEvent
+        from app.modules import renaming
+
+        init.logger = Mock()
+        init.bot_config = {
+            "clean_policy": {"switch": "on", "less_than": "400M"},
+            "media": {"unorganized_path": "/未整理"},
+        }
+        storage = Mock()
+        storage.create_dir_recursive.return_value = True
+        storage.get_file_info.return_value = None
+        storage.delete_single_file.return_value = False
+        contract = self._standalone_media_metadata("live_action_series", "series")
+        event = DownloadCompletedEvent(
+            link="magnet:?xt=urn:btih:" + "d" * 40,
+            selected_path="/真人剧集",
+            user_id=1,
+            final_path="/真人剧集/Test.Show.Sample",
+            resource_name="Test.Show.Sample",
+            metadata={"media_metadata": contract},
+            storage=storage,
+        )
+
+        with patch.object(
+            renaming,
+            "collect_storage_file_tree",
+            return_value=[{
+                "name": "Test.Show.S01E01.mkv",
+                "relative_path": "Test.Show.S01E01.mkv",
+                "is_dir": False,
+                "is_video": True,
+                "size": 100 * 1024 * 1024,
+            }],
+        ), patch.object(
+            renaming,
+            "_get_tvdb_candidates_and_episodes",
+            return_value=([], []),
+        ), patch.object(
+            renaming,
+            "infer_tvdb_episode_plan_with_ai",
+        ) as ai_mapper:
+            result = renaming.process_tvdb_episode(event)
+
+        self.assertTrue(result.handled)
+        self.assertIn("自动整理失败", result.message)
+        self.assertIn("清理失败", result.message)
+        self.assertIn("Test.Show.S01E01.mkv", result.message)
+        self.assertNotIn("final_path", result.metadata["media_metadata"]["items"][0])
+        storage.move_file.assert_not_called()
         ai_mapper.assert_not_called()
 
     def test_confirmed_series_ai_receives_only_rule_unresolved_files_and_items(self):
@@ -575,6 +685,10 @@ class ComposableRenamingModuleTest(unittest.TestCase):
         self.assertIn("未整理：1", result.message)
         self.assertIn("清理：4", result.message)
         self.assertIn("移动失败", result.message)
+        self.assertIn("正式文件：/真人剧集/测试影视 (Test Media)/Test Media Season 01/Test Media S01E01.mkv", result.message)
+        self.assertIn("未整理目录：`/未整理/Test.Show.S01`", result.message)
+        self.assertIn("未整理文件：Test Media S01E02.mkv", result.message)
+        self.assertIn("失败文件：Test.Show.S01E02.mkv", result.message)
         resolved = [
             item
             for item in result.metadata["media_metadata"]["items"]

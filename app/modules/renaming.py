@@ -181,6 +181,21 @@ def _has_ai_episode_inference_config():
     )
 
 
+def _minimum_video_size_bytes() -> int:
+    policy = (init.bot_config or {}).get("clean_policy") or {}
+    if str(policy.get("switch") or "off").lower() == "off":
+        return 0
+    raw = str(policy.get("less_than") or "").strip().upper()
+    multipliers = {"K": 1024, "M": 1024 ** 2, "G": 1024 ** 3}
+    if not raw:
+        return 0
+    suffix = raw[-1]
+    try:
+        return int(raw[:-1]) * multipliers[suffix] if suffix in multipliers else int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _has_metadata_value(value):
     return value is not None and value != "" and value != [] and value != {}
 
@@ -324,27 +339,54 @@ def _is_video_node(item):
     return Path(str(item.get("name") or item.get("relative_path") or "")).suffix.lower() in VIDEO_EXTENSIONS
 
 
-def _cleanup_non_video_files(event, file_tree):
+def _cleanup_discarded_files(event, file_tree, ineligible_sources=None):
     storage = _storage(event)
     deleted = []
     failed = []
+    ineligible = {
+        str(value or "").strip("/")
+        for value in ineligible_sources or []
+        if str(value or "").strip("/")
+    }
     for item in file_tree or []:
-        if not isinstance(item, dict) or item.get("is_dir") or _is_video_node(item):
+        if not isinstance(item, dict) or item.get("is_dir"):
             continue
         relative_path = str(item.get("relative_path") or item.get("name") or "").strip("/")
         if not relative_path:
             continue
+        is_video = _is_video_node(item)
+        if is_video and relative_path not in ineligible:
+            continue
+        reason = "below_minimum_size" if is_video else "non_video"
         source_path = f"{str(event.final_path).rstrip('/')}/{relative_path}"
         try:
             removed = storage.delete_single_file(source_path)
         except Exception as exc:
-            failed.append({"source": relative_path, "error": str(exc)})
+            failed.append({"source": relative_path, "reason": reason, "error": str(exc)})
             continue
         if removed is True:
             deleted.append(relative_path)
         else:
-            failed.append({"source": relative_path, "error": "删除失败"})
+            failed.append({"source": relative_path, "reason": reason, "error": "删除失败"})
     return {"deleted": deleted, "failed": failed}
+
+
+def _move_file_with_outcome(storage, source_path, target_dir):
+    detailed = getattr(storage, "move_file_detailed", None)
+    if callable(detailed):
+        result = detailed(source_path, target_dir)
+        if isinstance(result, dict) and "copied" in result:
+            return result
+    moved = storage.move_file(source_path, target_dir)
+    return {
+        "state": "moved" if moved is True else "move_failed",
+        "copied": moved is True,
+        "source_deleted": moved is True,
+        "source_path": source_path,
+        "target_path": (
+            f"{str(target_dir).rstrip('/')}/{Path(source_path).name}"
+        ),
+    }
 
 
 def _move_sources_to_unorganized(event, relative_paths):
@@ -380,12 +422,18 @@ def _move_sources_to_unorganized(event, relative_paths):
     for relative_path in sources:
         source_path = f"{str(event.final_path).rstrip('/')}/{relative_path}"
         try:
-            result = storage.move_file(source_path, target_dir)
+            outcome = _move_file_with_outcome(storage, source_path, target_dir)
         except Exception as exc:
             failed.append({"source": relative_path, "error": str(exc)})
             continue
-        if result is True:
+        if outcome.get("state") == "moved":
             moved.append(relative_path)
+        elif outcome.get("copied"):
+            moved.append(relative_path)
+            failed.append({
+                "source": relative_path,
+                "error": "已复制到未整理，但源文件删除失败",
+            })
         else:
             failed.append({"source": relative_path, "error": "移动到未整理失败"})
     return {"target_dir": target_dir, "moved": moved, "failed": failed}
@@ -401,9 +449,15 @@ def _execute_confirmed_rename_plan(event, rename_plan, file_tree):
     storage = _storage(event)
     planned = list(rename_plan.get("operations") or [])
     _assert_no_target_conflicts(storage, rename_plan)
-    cleanup = _cleanup_non_video_files(event, file_tree)
+    coverage = rename_plan.get("mapping_coverage") or {}
+    cleanup = _cleanup_discarded_files(
+        event,
+        file_tree,
+        coverage.get("ineligible_sources"),
+    )
     successful = []
     failed_operation = None
+    retained_sources = []
     remaining_sources = list(rename_plan.get("unmatched_sources") or [])
 
     for index, operation in enumerate(planned):
@@ -415,7 +469,20 @@ def _execute_confirmed_rename_plan(event, rename_plan, file_tree):
                 if storage.rename(operation["source_path"], operation["rename_to"]) is not True:
                     raise RuntimeError(f"重命名失败 {operation['source_path']}")
                 current_source_path = operation["renamed_source_path"]
-            if storage.move_file(current_source_path, operation["target_dir"]) is not True:
+            outcome = _move_file_with_outcome(
+                storage,
+                current_source_path,
+                operation["target_dir"],
+            )
+            if outcome.get("copied") and not outcome.get("source_deleted"):
+                successful.append(operation)
+                retained_sources.append({
+                    "source": _relative_to_source_root(event, current_source_path),
+                    "target": outcome.get("target_path"),
+                    "error": "正式文件已复制，但源文件删除失败",
+                })
+                continue
+            if outcome.get("state") != "moved":
                 raise RuntimeError(f"移动失败 {current_source_path}")
         except Exception as exc:
             failed_operation = {
@@ -432,9 +499,9 @@ def _execute_confirmed_rename_plan(event, rename_plan, file_tree):
         successful.append(operation)
 
     unorganized = _move_sources_to_unorganized(event, remaining_sources)
-    coverage = rename_plan.get("mapping_coverage") or {}
     has_problem = bool(
         failed_operation
+        or retained_sources
         or coverage.get("missing_items")
         or coverage.get("unexpected_sources")
         or coverage.get("rejected")
@@ -455,6 +522,7 @@ def _execute_confirmed_rename_plan(event, rename_plan, file_tree):
         "cleanup": cleanup,
         "unorganized": unorganized,
         "failed_operation": failed_operation,
+        "retained_sources": retained_sources,
     }
     if (
         state == "completed"
@@ -489,6 +557,26 @@ def _format_confirmed_execution_message(event, rename_plan):
         f"未整理：{len(unorganized.get('moved') or [])}",
         f"清理：{cleaned_count}",
     ]
+
+    def append_bounded(label, values, limit=5):
+        values = [
+            (str(value)[:237] + "…") if len(str(value)) > 238 else str(value)
+            for value in values
+            if str(value or "").strip()
+        ]
+        if not values:
+            return
+        shown = values[:limit]
+        suffix = f"（另有 {len(values) - limit} 项）" if len(values) > limit else ""
+        lines.append(f"{label}：" + "、".join(shown) + suffix)
+
+    append_bounded(
+        "正式文件",
+        [
+            f"{str(item.get('target_dir') or '').rstrip('/')}/{item.get('rename_to')}"
+            for item in successful
+        ],
+    )
     missing = coverage.get("missing_items") or []
     if missing:
         markers = [
@@ -498,14 +586,28 @@ def _format_confirmed_execution_message(event, rename_plan):
         lines.append("计划缺失：" + "、".join(markers))
     failure = execution.get("failed_operation")
     if failure:
+        lines.append(f"失败文件：{failure.get('source')}")
         lines.append(f"失败原因：{failure.get('error')}")
+    retained = execution.get("retained_sources") or []
+    append_bounded("源文件保留", [item.get("source") for item in retained])
+    cleanup_failures = list(download_cleanup.get("failed") or []) + list(cleanup.get("failed") or [])
+    append_bounded(
+        "清理失败",
+        [item.get("source") if isinstance(item, dict) else item for item in cleanup_failures],
+    )
     if unorganized.get("failed"):
         lines.append(f"未整理失败：{len(unorganized['failed'])}")
+    if unorganized.get("target_dir"):
+        lines.append(f"未整理目录：`{unorganized['target_dir']}`")
+    append_bounded("未整理文件", unorganized.get("moved") or [])
     if successful:
         lines.append(f"保存目录：`{rename_plan['target_root']}`")
     elif unorganized.get("target_dir"):
         lines.append(f"保存目录：`{unorganized['target_dir']}`")
-    return "\n".join(lines)
+    message = "\n".join(lines)
+    if len(message) > 3900:
+        message = message[:3875].rstrip() + "\n…内容已截断"
+    return message
 
 
 def _move_confirmed_failure_to_unorganized(event):
@@ -543,7 +645,7 @@ def _attempt_confirmed_series_rename(
     metadata: dict,
     media_metadata: dict,
 ):
-    if not metadata or not _has_ai_episode_inference_config():
+    if not metadata:
         return None
 
     storage = _storage(event)
@@ -569,8 +671,17 @@ def _attempt_confirmed_series_rename(
         "tvdb_candidates": tvdb_candidates,
         "tvdb_episodes": tvdb_episodes,
     }
-    coverage = map_confirmed_files(media_metadata, file_tree)
-    if coverage["missing_items"] and coverage["unexpected_sources"]:
+    minimum_video_size = _minimum_video_size_bytes()
+    coverage = map_confirmed_files(
+        media_metadata,
+        file_tree,
+        minimum_video_size=minimum_video_size,
+    )
+    if (
+        coverage["missing_items"]
+        and coverage["unexpected_sources"]
+        and _has_ai_episode_inference_config()
+    ):
         context.update(
             unresolved_mapping_context(media_metadata, file_tree, coverage)
         )
@@ -579,6 +690,7 @@ def _attempt_confirmed_series_rename(
             media_metadata,
             file_tree,
             ai_plan.get("episode_map") or [],
+            minimum_video_size=minimum_video_size,
         )
     rename_plan = build_confirmed_rename_plan(
         final_path=event.final_path,

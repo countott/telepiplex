@@ -225,6 +225,29 @@ class ConfirmedFileMappingTest(unittest.TestCase):
         self.assertEqual(result["state"], "completed")
         self.assertEqual(result["unexpected_sources"], [])
 
+    def test_video_below_minimum_size_is_never_available_to_rule_or_ai(self):
+        contract = self._contract()
+        contract["items"] = contract["items"][:1]
+        files = self._files("Test.Show.S01E01.mkv")
+        files[0]["size"] = 100 * 1024 * 1024
+
+        result = map_confirmed_files(
+            contract,
+            files,
+            ai_episode_map=[{
+                "source_file": "Test.Show.S01E01.mkv",
+                "season_number": 1,
+                "episode_number": 1,
+            }],
+            minimum_video_size=400 * 1024 * 1024,
+        )
+
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(result["mappings"], [])
+        self.assertEqual(result["unexpected_sources"], [])
+        self.assertEqual(result["ineligible_sources"], ["Test.Show.S01E01.mkv"])
+        self.assertEqual(result["rejected"][0]["reason"], "source_not_unresolved")
+
 
 if __name__ == "__main__":
     unittest.main()

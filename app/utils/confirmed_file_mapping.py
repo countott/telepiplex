@@ -72,12 +72,26 @@ def _expected_items(media_metadata: dict) -> list[dict]:
     return items
 
 
-def _source_nodes(file_tree: list[dict]) -> list[dict]:
+def _file_size(node: dict) -> int:
+    for key in ("size", "fs", "size_byte"):
+        value = _safe_int(node.get(key))
+        if value is not None:
+            return max(0, value)
+    return 0
+
+
+def _source_nodes(
+    file_tree: list[dict],
+    minimum_video_size: int = 0,
+) -> list[dict]:
     nodes = []
     for raw in file_tree or []:
         if not isinstance(raw, dict) or raw.get("is_dir"):
             continue
         if raw.get("is_video") is False:
+            continue
+        size = _file_size(raw)
+        if minimum_video_size > 0 and 0 < size < minimum_video_size:
             continue
         relative_path = _clean_path(raw.get("relative_path") or raw.get("name"))
         if not relative_path:
@@ -125,10 +139,18 @@ def map_confirmed_files(
     media_metadata: dict,
     file_tree: list[dict],
     ai_episode_map: list[dict] | None = None,
+    minimum_video_size: int = 0,
 ) -> dict:
     expected_items = _expected_items(media_metadata)
     targets = {_target_key(item): item for item in expected_items}
-    nodes = _source_nodes(file_tree)
+    nodes = _source_nodes(file_tree, minimum_video_size)
+    eligible_paths = {node["relative_path"] for node in nodes}
+    all_video_nodes = _source_nodes(file_tree)
+    ineligible_sources = [
+        node["relative_path"]
+        for node in all_video_nodes
+        if node["relative_path"] not in eligible_paths
+    ]
     aliases = _source_aliases(nodes)
     mapped_sources = set()
     mapped_targets = set()
@@ -208,6 +230,7 @@ def map_confirmed_files(
         "mappings": mappings,
         "missing_items": missing_items,
         "unexpected_sources": unexpected_sources,
+        "ineligible_sources": ineligible_sources,
         "rejected": rejected,
     }
 

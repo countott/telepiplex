@@ -1001,41 +1001,58 @@ class OpenAPI_115:
                 return response
             return None
         
-    def move_file(self, source_path, target_path):
-        """移动文件或目录"""
+    def move_file_detailed(self, source_path, target_path):
+        """复制后删除源文件，并保留可区分的两阶段执行结果。"""
         # copy_file 实际上是把文件复制到 target_path 目录下
         # 所以新文件的全路径是 target_path/basename(source_path)
-        
-        # 1. 执行复制
-        copy_result = self.copy_file(source_path, target_path)
-        if copy_result == True:
-            # 2. 清除目标位置可能存在的旧缓存（因为现在有了新文件）
-            try:
-                # 获取源文件/目录名称
-                msg_filename = os.path.basename(source_path.rstrip('/'))
-                
-                # 构造目标完整路径
-                target_path_clean = target_path.rstrip('/')
-                full_new_path = f"{target_path_clean}/{msg_filename}"
-                
-                if full_new_path in self.file_info_cache:
-                    init.logger.info(f"清除移动目标位置[{full_new_path}]的缓存")
-                    del self.file_info_cache[full_new_path]
-            except Exception as e:
-                init.logger.warn(f"清除移动目标缓存异常: {e}")
+        msg_filename = os.path.basename(source_path.rstrip('/'))
+        target_path_clean = target_path.rstrip('/')
+        full_new_path = f"{target_path_clean}/{msg_filename}"
 
-            # 3. 执行删除源文件
-            # delete_single_file 内部已经处理了 source_path 的缓存清除
+        copy_result = self.copy_file(source_path, target_path)
+        if copy_result is not True:
+            return {
+                "state": "copy_failed",
+                "copied": False,
+                "source_deleted": False,
+                "source_path": source_path,
+                "target_path": full_new_path,
+            }
+
+        try:
+            if full_new_path in self.file_info_cache:
+                init.logger.info(f"清除移动目标位置[{full_new_path}]的缓存")
+                del self.file_info_cache[full_new_path]
+        except Exception as e:
+            init.logger.warn(f"清除移动目标缓存异常: {e}")
+
+        delete_error = ""
+        try:
             delete_result = self.delete_single_file(source_path)
-            
-            if delete_result == True:
-                return True
-            else:
-                init.logger.warn(f"移动文件失败: 删除源文件失败")
-                return False
-        else:
-            init.logger.warn(f"移动文件失败: 复制文件失败")
-            return False
+        except Exception as exc:
+            delete_result = False
+            delete_error = str(exc)
+        if delete_result is True:
+            return {
+                "state": "moved",
+                "copied": True,
+                "source_deleted": True,
+                "source_path": source_path,
+                "target_path": full_new_path,
+            }
+        init.logger.warn("移动文件部分完成: 已复制但删除源文件失败")
+        return {
+            "state": "copied_source_retained",
+            "copied": True,
+            "source_deleted": False,
+            "source_path": source_path,
+            "target_path": full_new_path,
+            "error": delete_error or "删除源文件失败",
+        }
+
+    def move_file(self, source_path, target_path):
+        """兼容原布尔接口；仅复制且删源均成功时返回 True。"""
+        return self.move_file_detailed(source_path, target_path)["state"] == "moved"
     
     def clear_request_count(self):
         """清除请求计数"""

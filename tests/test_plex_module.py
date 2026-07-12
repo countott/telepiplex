@@ -113,6 +113,28 @@ class PlexModuleTest(unittest.TestCase):
         service.resume_incomplete_jobs.assert_not_called()
         self.assertNotIn("secret", logger.error.call_args.args[0])
 
+    def test_mcp_import_failure_is_isolated_from_bot_startup(self):
+        import init
+        from app.modules import plex_management as module
+
+        service = Mock(mcp_enabled=True, mcp_config={"host": "0.0.0.0"})
+        original_logger = init.logger
+        init.logger = Mock()
+        try:
+            with patch.object(
+                module,
+                "get_plex_management_service",
+                return_value=service,
+            ), patch.dict(sys.modules, {"app.plex_mcp.server": None}):
+                result = module.start_plex_module_services()
+        finally:
+            logger = init.logger
+            init.logger = original_logger
+
+        self.assertIsNone(result)
+        service.mark_interrupted_jobs.assert_called_once_with("process_restarted")
+        self.assertIn("Plex MCP", logger.error.call_args.args[0])
+
     def test_base_service_start_failure_is_isolated_from_bot_startup(self):
         import init
         from app.modules import plex_management as module

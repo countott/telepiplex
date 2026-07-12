@@ -118,6 +118,25 @@ class CoreMediaMetadataTest(unittest.TestCase):
         })
         self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
 
+    def test_rejects_duplicate_logical_episode_targets(self):
+        value = self._value()
+        value["items"] = [
+            {
+                "item_id": "episode-a",
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": 1,
+            },
+            {
+                "item_id": "episode-b",
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": 1,
+            },
+        ]
+
+        self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
+
     def test_accepts_exactly_the_four_category_library_pairs(self):
         pairs = {
             "live_action_series": "series",

@@ -68,7 +68,11 @@ class DoubanMetadataFusionTest(unittest.TestCase):
             }
         )
 
-        self.assertIsNone(metadata)
+        self.assertIsNotNone(metadata)
+        self.assertEqual(metadata["subject_id"], "2")
+        self.assertEqual(metadata["media_type"], "series")
+        self.assertEqual(metadata["chinese_title"], "")
+        self.assertEqual(metadata["english_title"], "Rick and Morty")
 
 
 class PrimaryEntryMergeTest(unittest.TestCase):

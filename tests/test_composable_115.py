@@ -10,6 +10,36 @@ sys.path.insert(0, str(ROOT / "app"))
 
 
 class Composable115ModuleTest(unittest.TestCase):
+    def test_move_detail_distinguishes_copy_success_from_source_delete_failure(self):
+        import init
+        from app.core.open_115 import OpenAPI_115
+
+        api = OpenAPI_115.__new__(OpenAPI_115)
+        api.file_info_cache = {}
+        api.copy_file = Mock(return_value=True)
+        api.delete_single_file = Mock(return_value=False)
+
+        result = api.move_file_detailed("/下载/Episode.mkv", "/剧集/Season 01")
+
+        self.assertEqual(result["state"], "copied_source_retained")
+        self.assertTrue(result["copied"])
+        self.assertFalse(result["source_deleted"])
+        self.assertEqual(result["target_path"], "/剧集/Season 01/Episode.mkv")
+
+    def test_move_detail_preserves_copy_success_when_source_delete_raises(self):
+        import init
+        from app.core.open_115 import OpenAPI_115
+
+        api = OpenAPI_115.__new__(OpenAPI_115)
+        api.file_info_cache = {}
+        api.copy_file = Mock(return_value=True)
+        api.delete_single_file = Mock(side_effect=RuntimeError("delete unavailable"))
+
+        result = api.move_file_detailed("/下载/Episode.mkv", "/剧集/Season 01")
+
+        self.assertEqual(result["state"], "copied_source_retained")
+        self.assertIn("delete unavailable", result["error"])
+
     def test_auto_clean_all_returns_deleted_file_summary(self):
         import init
         from app.core.open_115 import OpenAPI_115

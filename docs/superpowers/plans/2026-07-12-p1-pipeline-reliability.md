@@ -32,13 +32,13 @@
 - Produces: `enrich_media_metadata_identity(metadata: dict | None, *, chinese_title: str, source: str, evidence: dict | None = None) -> dict`
 - Preserves: `metadata_id`, English title, relation, placement, items, and Prowlarr query state.
 
-- [ ] **Step 1: Write failing core tests**
+- [x] **Step 1: Write failing core tests**
 
 Add tests proving that enrichment fills only a missing canonical Chinese title,
 records `evidence["identity_backfills"]`, and cannot overwrite an existing title
 or alter locked placement/items.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run:
 
@@ -48,19 +48,19 @@ PYTHONPATH=.:app python3 -m unittest tests.test_core_media_metadata -v
 
 Expected: import or assertion failure because the helper does not exist.
 
-- [ ] **Step 3: Implement the core helper**
+- [x] **Step 3: Implement the core helper**
 
 Implement a deep-copy helper that validates confirmed metadata, fills the
 missing title, appends a JSON-serializable evidence entry, and validates the
 result again before returning it.
 
-- [ ] **Step 4: Write and run the search-flow RED test**
+- [x] **Step 4: Write and run the search-flow RED test**
 
 Add an async test where Prowlarr receives the English query, Douban returns a
 Chinese title, and the stored pending task contains the updated nested
 `media_metadata.identity.chinese_title`.
 
-- [ ] **Step 5: Wire search backfill through the core helper and verify GREEN**
+- [x] **Step 5: Wire search backfill through the core helper and verify GREEN**
 
 Run:
 
@@ -83,13 +83,13 @@ English query.
 - Returns: `state`, `mappings`, `missing_items`, `unexpected_sources`, `rejected`.
 - Produces: `unresolved_mapping_context(media_metadata, file_tree, coverage) -> dict` for the existing AI mapper.
 
-- [ ] **Step 1: Write failing mapping tests**
+- [x] **Step 1: Write failing mapping tests**
 
 Cover exact `SxxEyy`, `NxEE`, unique `source_hint`, partial coverage, no-match
 failure, invented sources, targets outside the contract, duplicate sources, and
 duplicate targets.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run:
 
@@ -99,18 +99,18 @@ PYTHONPATH=.:app python3 -m unittest tests.test_confirmed_file_mapping -v
 
 Expected: module import failure.
 
-- [ ] **Step 3: Implement deterministic mapping and AI validation**
+- [x] **Step 3: Implement deterministic mapping and AI validation**
 
 Build indexes from real video paths and locked `(season, episode)` items. Apply
 rules first, then accept AI bindings only for unresolved real sources and
 unresolved locked targets. Derive completed/partial/failed from final coverage.
 
-- [ ] **Step 4: Update the mapping AI prompt**
+- [x] **Step 4: Update the mapping AI prompt**
 
 State explicitly that AI receives unresolved files/items only, must not repeat
 rule-resolved targets, and must return an empty map for ambiguity.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run the new tests plus `tests.test_tvdb_rename`.
 
@@ -130,14 +130,14 @@ Run the new tests plus `tests.test_tvdb_rename`.
 - Confirmed rename plans expose coverage and execution entries.
 - `process_tvdb_episode()` returns a terminal handled result for completed, partial, and failed confirmed mappings.
 
-- [ ] **Step 1: Write failing cleanup and partial-failure tests**
+- [x] **Step 1: Write failing cleanup and partial-failure tests**
 
 Cover returned cleanup counts, first move success/second move failure, stopping
 later formal moves, moving untouched eligible videos to unorganized, preserving
 only successful final paths, and a message that lists both formal and
 unorganized outcomes.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run:
 
@@ -147,23 +147,23 @@ PYTHONPATH=.:app python3 -m unittest tests.test_composable_renaming tests.test_d
 
 Expected: assertions fail against current exception/fallback behavior.
 
-- [ ] **Step 3: Capture cleanup summary**
+- [x] **Step 3: Capture cleanup summary**
 
 Return deleted file names/count from `auto_clean_all` and attach the summary to
 outer event metadata without modifying `media_metadata`.
 
-- [ ] **Step 4: Compose rules and AI only for unresolved items**
+- [x] **Step 4: Compose rules and AI only for unresolved items**
 
 Use Task 2 coverage before the AI call, skip AI when coverage is already
 complete, and merge only validated AI bindings.
 
-- [ ] **Step 5: Execute and persist the ledger**
+- [x] **Step 5: Execute and persist the ledger**
 
 Preflight all target conflicts, execute mapped units in order, stop after the
 first operational failure, route unmatched and untouched eligible videos to
 unorganized, enrich only successful items, and build one terminal summary.
 
-- [ ] **Step 6: Verify GREEN**
+- [x] **Step 6: Verify GREEN**
 
 Run all three focused test modules until they pass.
 
@@ -179,27 +179,27 @@ Run all three focused test modules until they pass.
 - Produces: `get_plex_ai_orchestrator()` which is synchronous and intended to run through `asyncio.to_thread`.
 - Produces module health fields for base service, AI, and MCP without changing core registry APIs.
 
-- [ ] **Step 1: Write failing async-loop and startup-isolation tests**
+- [x] **Step 1: Write failing async-loop and startup-isolation tests**
 
 Enable Plex AI inside an active event loop and assert bot startup does not call
 `asyncio.run`. Make service construction, interrupted-job marking, and MCP start
 raise separately and assert the startup hook never propagates.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run `tests.test_plex_module tests.test_plex_ai`.
 
-- [ ] **Step 3: Move AI construction behind the lazy accessor**
+- [x] **Step 3: Move AI construction behind the lazy accessor**
 
 Base service stores AI configuration but no orchestrator. `/plex` constructs
 and runs the orchestrator in a worker thread and reports initialization errors.
 
-- [ ] **Step 4: Add independent startup exception boundaries**
+- [x] **Step 4: Add independent startup exception boundaries**
 
 Catch and log base service, interrupted-job marking, and MCP failures
 independently; never raise from `start_plex_module_services`.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run the two focused modules and the async startup reproduction.
 
@@ -219,37 +219,37 @@ Run the two focused modules and the async startup reproduction.
 - Each target contains `target_id`, `final_path`, `media_type`, optional `season_number`/`episode_number`, and the unchanged contract.
 - `enqueue_completion(completion) -> list[dict]` returns one job record per resolved target.
 
-- [ ] **Step 1: Write failing target-expansion tests**
+- [x] **Step 1: Write failing target-expansion tests**
 
 Cover one movie target, one target per resolved ordinary episode, no target for
 missing items, and one target for each Special mapping kind.
 
-- [ ] **Step 2: Write failing exact-location tests**
+- [x] **Step 2: Write failing exact-location tests**
 
 Cover an episode added to an existing show, exact final-path validation, and an
 ordinary movie location path unaffected by Special rules.
 
-- [ ] **Step 3: Run focused tests and verify RED**
+- [x] **Step 3: Run focused tests and verify RED**
 
 Run the four Plex-focused modules listed above.
 
-- [ ] **Step 4: Implement target expansion and per-target payloads**
+- [x] **Step 4: Implement target expansion and per-target payloads**
 
 Derive stable target IDs and make the service operate on one movie/episode per
 job. Keep the full contract in each payload for matching and patches.
 
-- [ ] **Step 5: Implement ordinary path-first location**
+- [x] **Step 5: Implement ordinary path-first location**
 
 Extend the adapter with exact movie path lookup and reuse exact series episode
 lookup for ordinary episodes. Remove ordinary series dependence on new-show
 recent candidates.
 
-- [ ] **Step 6: Apply Special behavior as step overrides**
+- [x] **Step 6: Apply Special behavior as step overrides**
 
 Keep official/inferred verification and temporary custom metadata as match,
 localize, and artwork overrides after the common route/scan/location baseline.
 
-- [ ] **Step 7: Verify GREEN**
+- [x] **Step 7: Verify GREEN**
 
 Run all Plex target, adapter, and integration tests.
 
@@ -268,28 +268,28 @@ Run all Plex target, adapter, and integration tests.
 - Produces: `mark_active_interrupted(reason="process_restarted") -> int`.
 - Automatic submit happens only for the `created=True` jobs returned by target expansion.
 
-- [ ] **Step 1: Write failing repository and duplicate-submit tests**
+- [x] **Step 1: Write failing repository and duplicate-submit tests**
 
 Assert first creation returns true, repeated creation returns false, active
 states become interrupted, completed/failed/waiting remain unchanged, startup
 does not auto-resume, and duplicate completion submits once.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run `tests.test_plex_jobs tests.test_plex_management tests.test_plex_module`.
 
-- [ ] **Step 3: Implement repository semantics**
+- [x] **Step 3: Implement repository semantics**
 
 Return the creation flag from the existing immediate transaction and add one
 transactional update for queued/scanning/locating/matching/localizing/artwork/
 streams states to interrupted with a restart reason.
 
-- [ ] **Step 4: Update service and module callers**
+- [x] **Step 4: Update service and module callers**
 
 Submit only newly created target jobs. Replace startup resume with interrupted
 marking. Keep explicit `retry_job` as the manual recovery path.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run the focused modules and assert executor submission counts.
 
@@ -299,24 +299,24 @@ Run the focused modules and assert executor submission counts.
 - Verify: `docs/superpowers/specs/2026-07-12-p1-pipeline-reliability-design.md`
 - Verify: `docs/superpowers/plans/2026-07-12-p1-pipeline-reliability.md`
 
-- [ ] **Step 1: Run all tests**
+- [x] **Step 1: Run all tests**
 
 ```bash
 PYTHONPATH=.:app PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -t . -v
 PYTHONPATH=.:app PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q
 ```
 
-- [ ] **Step 2: Run static and dependency checks**
+- [x] **Step 2: Run static and dependency checks**
 
 Compile tracked Python in memory, run `python3 -m pip check`, parse all YAML
 examples, and run the Telepiplex-aware `git diff --check`.
 
-- [ ] **Step 3: Recheck scope**
+- [x] **Step 3: Recheck scope**
 
 Confirm no feature worktree changed, no P2/P3 item was silently implemented,
 and module branch composability remains a separate next phase.
 
-- [ ] **Step 4: Report exact state**
+- [x] **Step 4: Report exact state**
 
 Report changed files, test counts, remaining warnings, local commit state, and
 that nothing was pushed.

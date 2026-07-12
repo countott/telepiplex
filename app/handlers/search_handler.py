@@ -239,12 +239,13 @@ def _extract_douban_metadata(payload: dict) -> dict | None:
     if not english_title and chinese_title and _title_contains_latin(chinese_title):
         english_title = _clean_english_title(chinese_title)
 
-    if not chinese_title:
+    subject_id = str(data.get("id") or data.get("subject_id") or "").strip()
+    if not (chinese_title or english_title or subject_id):
         return None
 
     return {
         "source": "douban",
-        "subject_id": str(data.get("id") or data.get("subject_id") or "").strip(),
+        "subject_id": subject_id,
         "media_type": _douban_media_type(data),
         "chinese_title": chinese_title,
         "english_title": english_title,
