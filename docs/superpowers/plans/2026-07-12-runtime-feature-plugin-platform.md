@@ -246,32 +246,32 @@ git commit -m "feat(core): persist Feature releases and owned config"
 - Produces: stable error codes `invalid_request`, `unauthorized`, `not_found`,
   `deadline_exceeded`, `busy`, and `internal_error`.
 
-- [ ] **Step 1: Write RPC RED tests**
+- [x] **Step 1: Write RPC RED tests**
 
 Run an SDK server in a temporary Unix socket and prove handshake token
 validation, request IDs, deadlines, Unicode payloads, maximum frame rejection,
 unknown method errors, sanitized internal errors, concurrent requests, drain
 state, and graceful shutdown.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `python3 -m unittest tests.test_plugin_rpc tests.test_plugin_sdk_runtime -v`
 
 Expected: imports fail.
 
-- [ ] **Step 3: Implement the SDK server**
+- [x] **Step 3: Implement the SDK server**
 
 Use `asyncio.start_unix_server`, one NDJSON envelope per line, `hmac.compare_digest`
 for the startup token, bounded reads, and typed response actions. Do not import
 anything from `app` in `sdk/src`.
 
-- [ ] **Step 4: Implement the core client**
+- [x] **Step 4: Implement the core client**
 
 Use `asyncio.open_unix_connection`; apply `asyncio.timeout` from the requested
 deadline and always close the writer in `finally`. Convert protocol errors to
 `ContractError` without exposing tokens or raw tracebacks.
 
-- [ ] **Step 5: Verify GREEN and SDK independence**
+- [x] **Step 5: Verify GREEN and SDK independence**
 
 Run:
 
@@ -282,7 +282,7 @@ python3 -m unittest tests.test_plugin_rpc tests.test_plugin_sdk_runtime -v
 
 Expected: tests pass and the forbidden-import scan returns no matches.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/core/plugin_rpc.py sdk tests/test_plugin_rpc.py tests/test_plugin_sdk_runtime.py
