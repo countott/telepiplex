@@ -105,6 +105,25 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.search_queries, [("English Title 2024", "movie")])
         self.assertIn("找到 1 个", confirmed["actions"][0]["text"])
 
+    async def test_series_query_keeps_confirmed_episode_scope(self):
+        plan = search_plan()
+        contract = plan["media_metadata"]
+        contract["identity"]["content_kind"] = "series"
+        contract["placement"].update({
+            "library_type": "series",
+            "category_kind": "live_action_series",
+            "mapping_kind": "tvdb_official",
+            "season_number": 9,
+            "episode_number": 7,
+        })
+        contract["items"] = [{"season_number": 9, "episode_number": 7}]
+        plan["prowlarr_queries"] = ["中文标题 第九季第七集", "English Title S09E07"]
+
+        self.assertEqual(
+            self.feature._english_prowlarr_query(plan, contract),
+            "English Title S09E07",
+        )
+
     async def test_selected_release_calls_download_provider_with_canonical_contract(self):
         command = await self.feature.command({
             "command": "search",

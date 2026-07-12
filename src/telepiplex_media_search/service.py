@@ -24,6 +24,7 @@ from .search_plan import TemporarySpecialAllocator, confirm_media_metadata
 
 
 _LATIN = re.compile(r"[A-Za-z]")
+_EPISODE_SCOPE = re.compile(r"\bS\d{1,2}(?:E\d{1,3})?\b", re.IGNORECASE)
 
 
 class MediaSearchFeature:
@@ -275,6 +276,24 @@ class MediaSearchFeature:
         identity = contract.get("identity") or {}
         english = " ".join(str(identity.get("english_title") or "").split())
         year = " ".join(str(identity.get("year") or "").split())
+        placement = contract.get("placement") or {}
+        if placement.get("library_type") == "series":
+            for query in plan.get("prowlarr_queries") or []:
+                query = " ".join(str(query).split())
+                if _LATIN.search(query) and _EPISODE_SCOPE.search(query):
+                    return query
+            season = placement.get("season_number")
+            episode = placement.get("episode_number")
+            if season is None:
+                first = next(iter(contract.get("items") or []), {})
+                season = first.get("season_number")
+                episode = first.get("episode_number")
+            if english and _LATIN.search(english) and season is not None:
+                marker = f"S{int(season):02d}"
+                if episode is not None:
+                    width = 2 if int(episode) < 100 else 3
+                    marker += f"E{int(episode):0{width}d}"
+                return f"{english} {marker}"
         if english and _LATIN.search(english):
             return " ".join(item for item in (english, year) if item)
         for query in plan.get("prowlarr_queries") or []:
