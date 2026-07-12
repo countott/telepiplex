@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from app.utils.ai import (
+from telepiplex_media_search.ai import (
     infer_media_metadata_draft_with_ai,
     infer_search_hypotheses_with_ai,
 )
@@ -59,8 +59,8 @@ class SearchAiPipelineTest(unittest.TestCase):
             "prowlarr_queries": ["Someday or One Day The Movie 2022"],
         }
 
-    @patch("app.utils.ai.check_ai_api_available", return_value=True)
-    @patch("app.utils.ai.chat_completion")
+    @patch("telepiplex_media_search.ai.check_ai_api_available", return_value=True)
+    @patch("telepiplex_media_search.ai.chat_completion")
     def test_stage_one_returns_source_queries_without_prowlarr_query(
         self, chat_mock, _available
     ):
@@ -76,8 +76,8 @@ class SearchAiPipelineTest(unittest.TestCase):
         self.assertNotIn("prowlarr_query", result)
         self.assertIn("wikipedia", result["source_queries"])
 
-    @patch("app.utils.ai.check_ai_api_available", return_value=True)
-    @patch("app.utils.ai.chat_completion")
+    @patch("telepiplex_media_search.ai.check_ai_api_available", return_value=True)
+    @patch("telepiplex_media_search.ai.chat_completion")
     def test_stage_two_returns_search_local_queries_and_nested_contract(
         self, chat_mock, _available
     ):
@@ -91,13 +91,13 @@ class SearchAiPipelineTest(unittest.TestCase):
         self.assertIn("prowlarr_queries", payload)
         self.assertNotIn("_".join(("download", "plan")), payload)
 
-    @patch("app.utils.ai.check_ai_api_available", return_value=False)
+    @patch("telepiplex_media_search.ai.check_ai_api_available", return_value=False)
     def test_both_stages_fail_closed_without_ai(self, _available):
         self.assertIsNone(infer_search_hypotheses_with_ai("想见你"))
         self.assertIsNone(infer_media_metadata_draft_with_ai({"sources": []}))
 
-    @patch("app.utils.ai.check_ai_api_available", return_value=True)
-    @patch("app.utils.ai.chat_completion")
+    @patch("telepiplex_media_search.ai.check_ai_api_available", return_value=True)
+    @patch("telepiplex_media_search.ai.chat_completion")
     def test_ai_inferred_tvdb_episode_keeps_explicit_warning(
         self, chat_mock, _available
     ):

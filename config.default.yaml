@@ -1,0 +1,46 @@
+category_folder:
+  - kind: live_action_movie
+    name: 真人电影
+    path: /真人电影
+    plex_library_id: ""
+  - kind: animated_movie
+    name: 动画电影
+    path: /动画电影
+    plex_library_id: ""
+  - kind: live_action_series
+    name: 真人剧集
+    path: /真人剧集
+    plex_library_id: ""
+  - kind: animated_series
+    name: 动画剧集
+    path: /动画剧集
+    plex_library_id: ""
+search:
+  enable: true
+  prowlarr:
+    base_url: http://127.0.0.1:9696
+    api_key: ""
+    timeout: 150
+    status_timeout: 15
+    indexer_ids: "-2"
+    categories:
+      movie: 2000
+      tv: 5000
+    result_limit: 8
+metadata:
+  wikipedia:
+    enable: true
+    languages: [zh, en]
+    timeout: 10
+  tvdb:
+    enable: false
+    api_key: ""
+    base_url: https://api4.thetvdb.com/v4
+    subscriber_pin: ""
+    timeout: 15
+ai:
+  enable: true
+  api_url: ""
+  api_key: ""
+  model: ""
+  timeout: 60

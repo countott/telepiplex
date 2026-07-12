@@ -1,11 +1,11 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from app.adapters.wikipedia import lookup_wikipedia_evidence
+from telepiplex_media_search.adapters.wikipedia import lookup_wikipedia_evidence
 
 
 class WikipediaAdapterTest(unittest.TestCase):
-    @patch("app.adapters.wikipedia.requests.get")
+    @patch("telepiplex_media_search.adapters.wikipedia.requests.get")
     def test_returns_extract_and_findable_page_url(self, get_mock):
         response = Mock()
         response.raise_for_status.return_value = None
@@ -33,7 +33,7 @@ class WikipediaAdapterTest(unittest.TestCase):
             ["https://zh.wikipedia.org/wiki/想見你_(電影)"],
         )
 
-    @patch("app.adapters.wikipedia.requests.get", side_effect=OSError("dns failed"))
+    @patch("telepiplex_media_search.adapters.wikipedia.requests.get", side_effect=OSError("dns failed"))
     def test_server_failure_is_soft_evidence(self, _get_mock):
         result = lookup_wikipedia_evidence(["想见你"], languages=("zh",))
         self.assertEqual(result["status"], "server_down")

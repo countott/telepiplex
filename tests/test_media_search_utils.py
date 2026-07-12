@@ -9,9 +9,9 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 sys.modules.setdefault("yaml", types.SimpleNamespace(safe_load=lambda stream: {}))
 
-from app.utils.release_score import rank_releases
-from app.utils.search_query import parse_douban_page_title
-from app.utils.search_resolution import candidate_to_prowlarr_query, parse_search_intent
+from telepiplex_media_search.release_score import rank_releases
+from telepiplex_media_search.search_query import parse_douban_page_title
+from telepiplex_media_search.search_resolution import candidate_to_prowlarr_query, parse_search_intent
 
 
 class MediaSearchUtilsTest(unittest.TestCase):

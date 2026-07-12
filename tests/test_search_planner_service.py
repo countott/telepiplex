@@ -1,12 +1,12 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from app.services.search_planner import (
+from telepiplex_media_search.planner import (
     SearchPlanningError,
     _provider_status_and_support,
     build_confirmable_search_plan,
 )
-from app.utils.search_plan import TemporarySpecialAllocator
+from telepiplex_media_search.search_plan import TemporarySpecialAllocator
 
 
 class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
@@ -111,8 +111,8 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
         })
         return providers
 
-    @patch("app.services.search_planner.infer_media_metadata_draft_with_ai")
-    @patch("app.services.search_planner.infer_search_hypotheses_with_ai")
+    @patch("telepiplex_media_search.planner.infer_media_metadata_draft_with_ai")
+    @patch("telepiplex_media_search.planner.infer_search_hypotheses_with_ai")
     async def test_all_providers_run_and_soft_failures_reach_second_ai(
         self, hypothesis_mock, metadata_mock
     ):
@@ -120,7 +120,7 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
         metadata_mock.return_value = self._draft()
         providers = self._down_providers()
 
-        with patch("app.services.search_planner._log_info") as log_mock:
+        with patch("telepiplex_media_search.planner._log_info") as log_mock:
             plan = await build_confirmable_search_plan(
                 "想见你",
                 "plan-a",
@@ -178,7 +178,7 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("metadata_id=plan-a", log_text)
 
     @patch(
-        "app.services.search_planner.infer_search_hypotheses_with_ai",
+        "telepiplex_media_search.planner.infer_search_hypotheses_with_ai",
         return_value=None,
     )
     async def test_missing_first_ai_raises_before_providers(self, _hypothesis_mock):
@@ -196,10 +196,10 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
         provider.assert_not_called()
 
     @patch(
-        "app.services.search_planner.infer_media_metadata_draft_with_ai",
+        "telepiplex_media_search.planner.infer_media_metadata_draft_with_ai",
         return_value=None,
     )
-    @patch("app.services.search_planner.infer_search_hypotheses_with_ai")
+    @patch("telepiplex_media_search.planner.infer_search_hypotheses_with_ai")
     async def test_missing_second_ai_raises_after_all_evidence(
         self, hypothesis_mock, _metadata_mock
     ):
@@ -218,8 +218,8 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
         for provider in providers.values():
             provider.assert_called_once()
 
-    @patch("app.services.search_planner.infer_media_metadata_draft_with_ai")
-    @patch("app.services.search_planner.infer_search_hypotheses_with_ai")
+    @patch("telepiplex_media_search.planner.infer_media_metadata_draft_with_ai")
+    @patch("telepiplex_media_search.planner.infer_search_hypotheses_with_ai")
     async def test_matching_verified_s00_candidate_cannot_be_downgraded_when_ai_omits_hint(
         self, hypothesis_mock, metadata_mock
     ):
@@ -243,8 +243,8 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
                 TemporarySpecialAllocator(),
             )
 
-    @patch("app.services.search_planner.infer_media_metadata_draft_with_ai")
-    @patch("app.services.search_planner.infer_search_hypotheses_with_ai")
+    @patch("telepiplex_media_search.planner.infer_media_metadata_draft_with_ai")
+    @patch("telepiplex_media_search.planner.infer_search_hypotheses_with_ai")
     async def test_matching_verified_s00_candidate_exact_official_mapping_passes(
         self, hypothesis_mock, metadata_mock
     ):
@@ -292,8 +292,8 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         occupied_loader.assert_not_called()
 
-    @patch("app.services.search_planner.infer_media_metadata_draft_with_ai")
-    @patch("app.services.search_planner.infer_search_hypotheses_with_ai")
+    @patch("telepiplex_media_search.planner.infer_media_metadata_draft_with_ai")
+    @patch("telepiplex_media_search.planner.infer_search_hypotheses_with_ai")
     async def test_s01_episode_cannot_validate_as_tvdb_official(
         self, hypothesis_mock, metadata_mock
     ):
@@ -321,8 +321,8 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
                 TemporarySpecialAllocator(),
             )
 
-    @patch("app.services.search_planner.infer_media_metadata_draft_with_ai")
-    @patch("app.services.search_planner.infer_search_hypotheses_with_ai")
+    @patch("telepiplex_media_search.planner.infer_media_metadata_draft_with_ai")
+    @patch("telepiplex_media_search.planner.infer_search_hypotheses_with_ai")
     async def test_unrelated_s00_candidate_does_not_force_queried_movie(
         self, hypothesis_mock, metadata_mock
     ):
@@ -352,8 +352,8 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
             [],
         )
 
-    @patch("app.services.search_planner.infer_media_metadata_draft_with_ai")
-    @patch("app.services.search_planner.infer_search_hypotheses_with_ai")
+    @patch("telepiplex_media_search.planner.infer_media_metadata_draft_with_ai")
+    @patch("telepiplex_media_search.planner.infer_search_hypotheses_with_ai")
     async def test_provider_support_normalizes_actual_source_urls(
         self, hypothesis_mock, metadata_mock
     ):
@@ -398,8 +398,8 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    @patch("app.services.search_planner.infer_media_metadata_draft_with_ai")
-    @patch("app.services.search_planner.infer_search_hypotheses_with_ai")
+    @patch("telepiplex_media_search.planner.infer_media_metadata_draft_with_ai")
+    @patch("telepiplex_media_search.planner.infer_search_hypotheses_with_ai")
     async def test_ok_provider_rejects_ai_url_unrelated_to_actual_evidence(
         self, hypothesis_mock, metadata_mock
     ):

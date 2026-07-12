@@ -1,6 +1,6 @@
 import unittest
 
-from app.utils.search_plan import (
+from telepiplex_media_search.search_plan import (
     TemporarySpecialAllocator,
     confirm_media_metadata,
     finalize_search_plan,
