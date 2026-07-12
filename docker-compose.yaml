@@ -8,4 +8,5 @@ services:
       TZ: Asia/Shanghai
     volumes:
       - /to/your/path/config:/config
-      - /to/your/path/tmp:/tmp
+    tmpfs:
+      - /tmp/telepiplex

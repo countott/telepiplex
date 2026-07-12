@@ -26,6 +26,14 @@ class TelepiplexCoreSurfaceTest(unittest.TestCase):
         for symbol in removed_symbols:
             self.assertNotIn(symbol, source)
 
+        for legacy_symbol in (
+            "ModuleRegistry",
+            "load_enabled_modules",
+            "build_module_registry",
+            "modules_config",
+        ):
+            self.assertNotIn(legacy_symbol, source)
+
     def test_core_branch_has_no_business_modules(self):
         modules = sorted(
             path.name
@@ -45,6 +53,9 @@ class TelepiplexCoreSurfaceTest(unittest.TestCase):
             ROOT / "app" / "utils" / "media_naming.py",
             ROOT / "app" / "utils" / "search_resolution.py",
             ROOT / "app" / "utils" / "tvdb_rename.py",
+            ROOT / "app" / "utils" / "directory_config.py",
+            ROOT / "app" / "core" / "module_loader.py",
+            ROOT / "app" / "core" / "module_registry.py",
         ]
         for path in removed_paths:
             self.assertFalse(path.exists(), str(path))

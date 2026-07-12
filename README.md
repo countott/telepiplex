@@ -1,49 +1,69 @@
 # Telepiplex Core
 
-`feature/telepiplex-core` 是 Telepiplex 的纯核心运行层分支，用来承载共享启动、配置读取、日志、消息队列、用户校验和基础 Telegram Bot runtime。
+`feature/telepiplex-core` 是唯一常驻 Docker 运行层。容器内只有 Core 主进程；115、媒体搜索、重命名和 Plex 管理等业务能力均以独立 Feature 子进程运行，不再通过进程内模块或 `main` 分支缝合。
 
-这个分支不包含 115 投递、媒体搜索、Prowlarr、TVDB、Plex、Aria2、视频转存或媒体整理业务能力。业务功能应从当前 `main` 单独抽取到对应 feature 分支，再由 `main` 做最终缝合。
+每个 Feature 使用自己的 Python 虚拟环境、配置、状态和版本目录。Core 通过 Unix Domain Socket 调用 Feature 声明的 capability，并负责命令路由、事件投递、健康检查、排空、切换和回滚。正常安装、升级、启用、停用和回滚不重启 Core；只有 Core API 合同本身升级时，才允许升级镜像并重启一次。
 
-## 命令
+## 运行
 
-| 命令 | 说明 |
-| --- | --- |
-| `/start` | 显示核心运行层状态 |
-| `/reload` | 重载 `/config/config.yaml` |
+```bash
+docker compose up -d
+```
 
-## 配置
+持久化目录只有 `/config`。Feature 运行数据位于 `/config/plugins`，进程 socket 位于容器内临时目录 `/tmp/telepiplex`。
 
-运行时配置路径仍是容器内 `/config/config.yaml`：
+Core 配置示例：
 
 ```yaml
 log_level: info
 bot_token: "your_bot_token"
 allowed_user: 123456789
-
-category_folder:
-  - name: 真人电影
-    path: /真人电影
-  - name: 动画电影
-    path: /动画电影
-  - name: 真人剧集
-    path: /真人剧集
-  - name: 动画剧集
-    path: /动画剧集
+plugins:
+  root: /config/plugins
+  catalog: /config/plugins/catalog.yaml
+  install_timeout: 300
+  startup_timeout: 30
+  drain_timeout: 120
+  stabilize_seconds: 10
+  restart_limit: 3
 ```
 
-`category_folder` 是共享保存目录合同，供业务分支复用；core 分支本身不会执行下载或整理。
+## Feature 安装与升级
 
-## 本地验证
+Feature 分支是开发源代码；发布物是由该分支构建的、版本不可变的 `.tpx`。运行容器不 checkout Git 分支，也不把业务源码复制进 Core 镜像。
+
+`/config/plugins/catalog.yaml` 将 `name@version` 映射到带 SHA-256 固定值的本地路径或 HTTPS 发布地址：
+
+```yaml
+plugins:
+  media-search:
+    versions:
+      "1.2.0":
+        url: https://example.invalid/releases/media-search-1.2.0.tpx
+        sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+管理命令：
+
+```text
+/plugin install media-search@1.2.0
+/plugin update media-search@1.3.0
+/plugin enable media-search
+/plugin disable media-search
+/plugin rollback media-search
+/plugin remove media-search
+/plugin status media-search
+/plugin doctor
+```
+
+也可把已存在的绝对 `.tpx` 路径传给 `install` 或 `update`。更新过程先校验和安装新版本，再启动 shadow 子进程、检查健康、排空旧任务并原子切换路由；任何一步失败都保留旧版本。
+
+## 开发与验证
+
+Core、SDK 和 `.tpx` 构建工具位于同一仓库；Feature 分支只依赖 Core API/SDK 合同，不 import 其他 Feature。
 
 ```bash
-python3 -m unittest tests/test_telepiplex_core_surface.py
-python3 -m py_compile app/115bot.py app/init.py app/utils/message_queue.py app/utils/logger.py app/utils/log_sanitizer.py app/utils/directory_config.py
-git -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol diff --check
+python3 tools/build_tpx.py --help
+python3 -m unittest discover -s tests -t .
+git diff --check
 ```
-
-## 分支定位
-
-- `main`：当前已缝合成功的完整业务代码。
-- `feature/telepiplex-core`：纯核心运行层。
-- `feature/115`：115 单点能力分支。
-- `feature/media-search`：媒体搜索能力分支，替代旧 `feature/prowlarr-search`。

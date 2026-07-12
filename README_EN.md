@@ -1,49 +1,67 @@
 # Telepiplex Core
 
-`feature/telepiplex-core` is the core runtime branch for Telepiplex. It contains shared startup code, configuration loading, logging, the message queue, user checks, and the basic Telegram Bot runtime.
+`feature/telepiplex-core` is the only long-running Docker runtime. The container has one permanent Core process; business capabilities such as 115, media search, renaming, and Plex management run as isolated Feature child processes instead of in-process modules or a stitched `main` runtime.
 
-This branch does not include 115 delivery, media search, Prowlarr, TVDB, Plex, Aria2, video transfer, or media organization features. Business capabilities should be extracted from the current `main` branch into dedicated feature branches, then stitched together by `main`.
+Each Feature owns its Python virtual environment, configuration, state, and versioned release directory. Core talks to declared capabilities over Unix Domain Sockets and owns command routing, event delivery, health checks, draining, switching, and rollback. Installing, updating, enabling, disabling, or rolling back a Feature does not restart Core. A single restart is allowed only when the Core API contract itself changes.
 
-## Commands
+## Runtime
 
-| Command | Description |
-| --- | --- |
-| `/start` | Show core runtime status |
-| `/reload` | Reload `/config/config.yaml` |
+```bash
+docker compose up -d
+```
 
-## Configuration
-
-Runtime configuration still lives at `/config/config.yaml` inside the container:
+Only `/config` is persistent. Feature data lives under `/config/plugins`; process sockets live in the container's ephemeral `/tmp/telepiplex` directory.
 
 ```yaml
 log_level: info
 bot_token: "your_bot_token"
 allowed_user: 123456789
-
-category_folder:
-  - name: 真人电影
-    path: /真人电影
-  - name: 动画电影
-    path: /动画电影
-  - name: 真人剧集
-    path: /真人剧集
-  - name: 动画剧集
-    path: /动画剧集
+plugins:
+  root: /config/plugins
+  catalog: /config/plugins/catalog.yaml
+  install_timeout: 300
+  startup_timeout: 30
+  drain_timeout: 120
+  stabilize_seconds: 10
+  restart_limit: 3
 ```
 
-`category_folder` is the shared save-directory contract for business branches. The core branch itself does not download or organize media.
+## Feature installation and updates
 
-## Local Verification
+Feature branches are development source. Runtime releases are immutable `.tpx` artifacts built from those branches. The container never checks out Git branches and Core images never contain business source code.
+
+`/config/plugins/catalog.yaml` maps `name@version` to a local path or HTTPS release with a pinned SHA-256 digest:
+
+```yaml
+plugins:
+  media-search:
+    versions:
+      "1.2.0":
+        url: https://example.invalid/releases/media-search-1.2.0.tpx
+        sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+Commands:
+
+```text
+/plugin install media-search@1.2.0
+/plugin update media-search@1.3.0
+/plugin enable media-search
+/plugin disable media-search
+/plugin rollback media-search
+/plugin remove media-search
+/plugin status media-search
+/plugin doctor
+```
+
+An existing absolute `.tpx` path is also accepted by `install` and `update`. Core verifies and installs the new release, starts a shadow process, checks health, drains active work, and switches routes atomically. A failure at any stage keeps the old release active.
+
+## Development and verification
+
+Core, the SDK, and `.tpx` build tools stay in the same repository. Feature branches depend only on the Core API/SDK contract and never import another Feature.
 
 ```bash
-python3 -m unittest tests/test_telepiplex_core_surface.py
-python3 -m py_compile app/115bot.py app/init.py app/utils/message_queue.py app/utils/logger.py app/utils/log_sanitizer.py app/utils/directory_config.py
-git -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol diff --check
+python3 tools/build_tpx.py --help
+python3 -m unittest discover -s tests -t .
+git diff --check
 ```
-
-## Branch Role
-
-- `main`: current integrated business implementation.
-- `feature/telepiplex-core`: core runtime only.
-- `feature/115`: 115 single-feature branch.
-- `feature/media-search`: media search feature branch, replacing old `feature/prowlarr-search`.

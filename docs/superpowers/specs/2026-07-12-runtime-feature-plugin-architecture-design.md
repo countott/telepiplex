@@ -328,10 +328,10 @@ This architecture is implemented in bounded phases:
    tasks.
 7. Build an end-to-end artifact matrix and Docker runtime test.
 
-The existing in-process `ModuleRegistry` remains only as a temporary migration
-surface and is removed after all four Features pass subprocess integration.
-There is no compatibility promise for external third-party modules using the
-old Python import contract.
+The old in-process `ModuleRegistry` and its loader were removed when the Core
+host became executable. There is no compatibility layer for the old Python
+import contract: every business capability must cross the versioned Feature
+RPC/event boundary.
 
 ## 16. Acceptance Criteria
 

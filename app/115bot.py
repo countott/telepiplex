@@ -22,10 +22,9 @@ from telegram.ext import (
 from telegram.helpers import escape_markdown
 
 import init
-from app.core.module_loader import load_enabled_modules
-from app.core.module_registry import ModuleRegistry
 from app.core.capability_router import CapabilityRouter
 from app.core.event_journal import EventJournal
+from app.core.plugin_catalog import PluginCatalog
 from app.core.plugin_manager import PluginManager
 from app.core.plugin_store import PluginStore
 from app.core.plugin_supervisor import PluginSupervisor
@@ -50,11 +49,6 @@ CORE_BOT_COMMANDS = [
     BotCommand("reload", "重载配置"),
     BotCommand("plugin", "安装和管理 Feature"),
 ]
-MODULE_LABELS = {
-    "app.modules.open115": "115 下载",
-    "app.modules.media_search": "媒体搜索",
-    "app.modules.renaming": "下载后重命名",
-}
 SENSITIVE_CONFIG_KEYWORDS = (
     "token",
     "api_key",
@@ -76,11 +70,10 @@ def get_version(md_format=False):
 
 def log_runtime_features():
     revision = os.getenv("TELEPIPLEX_COMMIT") or os.getenv("GIT_COMMIT") or "unknown"
-    module_names = get_enabled_module_names()
     init.logger.info(
         "Telepiplex runtime features: telepiplex_core=enabled, "
         "basic_telegram_runtime=enabled, message_queue=enabled, "
-        f"modules={module_names}, revision={revision}"
+        f"plugin_host=enabled, revision={revision}"
     )
 
 
@@ -107,25 +100,6 @@ def log_config_snapshot(prefix: str):
     init.logger.info(json.dumps(sanitize_config_for_log(init.bot_config), ensure_ascii=False))
 
 
-def get_enabled_module_names(config=None):
-    config = config or init.bot_config
-    modules_config = (config or {}).get("modules") or {}
-    enabled = modules_config.get("enabled") or []
-    if isinstance(enabled, str):
-        enabled = [item.strip() for item in enabled.split(",")]
-    return [str(item).strip() for item in enabled if str(item).strip()]
-
-
-def build_module_registry():
-    registry = ModuleRegistry()
-    loaded = load_enabled_modules(registry, get_enabled_module_names())
-    registry.loaded_module_names = loaded
-    init.module_registry = registry
-    if init.logger:
-        init.logger.info(f"已加载 Telepiplex 模块: {loaded}")
-    return registry
-
-
 def build_plugin_manager(config=None, core_database=None):
     config = config or {}
     plugin_config = config.get("plugins") or {}
@@ -139,11 +113,14 @@ def build_plugin_manager(config=None, core_database=None):
         restart_limit=int(plugin_config.get("restart_limit") or 3),
         runtime_root=Path(str(plugin_config.get("runtime_root") or "/tmp/telepiplex")),
     )
+    catalog_path = Path(str(plugin_config.get("catalog") or root / "catalog.yaml"))
+    catalog = PluginCatalog(catalog_path, root / ".cache")
     manager = PluginManager(
         store=PluginStore(root),
         supervisor=supervisor,
         router=router,
         journal=journal,
+        artifact_resolver=catalog,
         install_timeout=float(plugin_config.get("install_timeout") or 300),
         drain_timeout=float(plugin_config.get("drain_timeout") or 120),
         stabilize_seconds=float(plugin_config.get("stabilize_seconds") or 10),
@@ -151,29 +128,11 @@ def build_plugin_manager(config=None, core_database=None):
     return manager
 
 
-def build_core_startup_notice_text(config=None, registry=None):
-    if config is None:
-        config = init.bot_config
-    running_modules = getattr(registry, "loaded_module_names", None) if registry is not None else None
-    if running_modules is None:
-        running_modules = get_enabled_module_names(config)
-
-    lines = [
-        "✅ Telepiplex 启动完成",
-        "",
-        "已加载模块",
-    ]
-    if running_modules:
-        for module_name in running_modules:
-            label = escape_markdown(MODULE_LABELS.get(module_name, module_name), version=2)
-            lines.append(f"✅ {label}")
-    else:
-        lines.append("✅ Core")
-    lines.extend(["", "可使用 /start 查看核心状态"])
-    return "\n".join(lines)
+def build_core_startup_notice_text():
+    return "✅ Telepiplex Core 启动完成\n\n可使用 /plugin doctor 查看 Feature 状态"
 
 
-def queue_core_startup_notice(registry=None):
+def queue_core_startup_notice():
     allowed_user = (init.bot_config or {}).get("allowed_user")
     if allowed_user is None or str(allowed_user).strip() == "":
         if init.logger:
@@ -183,13 +142,8 @@ def queue_core_startup_notice(registry=None):
     return add_task_to_queue(
         allowed_user,
         None,
-        message=build_core_startup_notice_text(init.bot_config, registry),
+        message=build_core_startup_notice_text(),
     )
-
-
-def run_core_startup_hooks(registry, application=None):
-    registry.run_startup_hooks(application)
-    queue_core_startup_notice(registry)
 
 
 def get_help_info():
@@ -199,6 +153,7 @@ def get_help_info():
 <b>命令列表</b>\n
 <code>/start</code> - 显示核心运行层状态\n
 <code>/reload</code> - 重载配置\n\n
+<code>/plugin</code> - 安装和管理 Feature\n\n
 此分支只包含 Telepiplex 核心运行层，不包含 115 投递、媒体搜索或媒体整理业务能力。
 """
 
@@ -274,16 +229,13 @@ def update_logger_level():
     logging.getLogger("telegram.Bot").setLevel(logging.WARNING)
 
 
-def get_bot_menu(registry=None):
-    commands = list(CORE_BOT_COMMANDS)
-    if registry is not None:
-        commands.extend(registry.bot_commands())
-    return commands
+def get_bot_menu():
+    return list(CORE_BOT_COMMANDS)
 
 
 async def set_bot_menu(application):
     try:
-        await application.bot.set_my_commands(get_bot_menu(application.bot_data.get("telepiplex_registry")))
+        await application.bot.set_my_commands(get_bot_menu())
         init.logger.info("Bot菜单命令已设置!")
     except Exception as e:
         init.logger.error(f"设置Bot菜单失败: {e}")
@@ -356,23 +308,19 @@ async def run_application_polling(application, after_start=None, stop_event=None
         await application.shutdown()
 
 
-def configure_application(application, manager, registry=None):
+def configure_application(application, manager):
     application.bot_data["telepiplex_plugin_manager"] = manager
     application.bot_data["telepiplex_plugin_router"] = manager.router
-    if registry is not None:
-        application.bot_data["telepiplex_registry"] = registry
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reload", reload))
     application.add_handler(CommandHandler("plugin", plugin_command))
     application.add_handler(CallbackQueryHandler(dynamic_callback_gateway))
     application.add_handler(MessageHandler(filters.COMMAND, dynamic_command_gateway))
-    if registry is not None:
-        registry.register_handlers(application)
 
 
-async def start_core_runtime(manager, registry, application):
+async def start_core_runtime(manager):
     await manager.restore_active()
-    run_core_startup_hooks(registry, application)
+    queue_core_startup_notice()
 
 
 if __name__ == "__main__":
@@ -400,14 +348,13 @@ if __name__ == "__main__":
     update_logger_level()
 
     application = build_application(init.bot_config["bot_token"])
-    registry = build_module_registry()
     plugin_manager = build_plugin_manager(init.bot_config)
-    configure_application(application, plugin_manager, registry)
+    configure_application(application, plugin_manager)
 
     try:
         asyncio.run(run_application_polling(
             application,
-            after_start=lambda: start_core_runtime(plugin_manager, registry, application),
+            after_start=lambda: start_core_runtime(plugin_manager),
         ))
     except KeyboardInterrupt:
         init.logger.info("程序已被用户终止（Ctrl+C）。")

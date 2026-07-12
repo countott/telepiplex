@@ -1,6 +1,5 @@
 import asyncio
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -65,8 +64,8 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         from app.handlers.plugin_handler import plugin_command
 
         cases = (
-            ("install", "/tmp/echo.tpx", Path("/tmp/echo.tpx")),
-            ("update", "/tmp/echo-2.tpx", Path("/tmp/echo-2.tpx")),
+            ("install", "echo@1.0.0", "echo@1.0.0"),
+            ("update", "echo@2.0.0", "echo@2.0.0"),
             ("enable", "echo", "echo"),
             ("disable", "echo", "echo"),
             ("rollback", "echo", "echo"),

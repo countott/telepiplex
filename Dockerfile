@@ -15,8 +15,14 @@ COPY requirements.txt /app/
 RUN pip install --upgrade pip --no-cache-dir && \
     pip install -r requirements.txt --no-cache-dir
 
-ADD ./app .
+COPY ./app /app
+COPY ./sdk /opt/telepiplex/sdk
+COPY ./tools /opt/telepiplex/tools
 
-ENV PYTHONPATH="/app:/app/utils:/app/.."
+RUN mkdir -p /config/plugins /tmp/telepiplex
+
+ENV PYTHONPATH="/app:/app/utils:/opt/telepiplex/sdk/src"
+
+VOLUME ["/config"]
 
 CMD ["python", "115bot.py"]

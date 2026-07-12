@@ -10,6 +10,7 @@ from pathlib import Path
 from app.core.capability_router import CapabilityRouter, RoutingError
 from app.core.event_journal import EventJournal
 from app.core.plugin_artifact import ArtifactError, verify_tpx
+from app.core.plugin_catalog import CatalogError, ResolvedArtifact
 from app.core.plugin_contract import CORE_API_VERSION
 from app.core.plugin_store import ActiveRelease, PluginStore, StagedRelease, StoreError
 from app.core.plugin_supervisor import PluginProcess, PluginSupervisor, SupervisorError
@@ -41,6 +42,7 @@ class PluginManager:
         router: CapabilityRouter,
         journal: EventJournal,
         venv_installer=None,
+        artifact_resolver=None,
         core_api_version: str = CORE_API_VERSION,
         install_timeout: float = 300,
         drain_timeout: float = 120,
@@ -55,12 +57,14 @@ class PluginManager:
         self.drain_timeout = float(drain_timeout)
         self.stabilize_seconds = max(0, float(stabilize_seconds))
         self._venv_installer = venv_installer or self._install_private_venv
+        self._artifact_resolver = artifact_resolver
         self._lifecycle_lock = asyncio.Lock()
 
-    async def install(self, artifact_path: Path, expected_sha256: str = "") -> PluginOperationResult:
+    async def install(self, reference: str | Path, expected_sha256: str = "") -> PluginOperationResult:
         async with self._lifecycle_lock:
+            artifact_path, pinned_sha256 = await self._resolve_artifact(reference)
             verified = await asyncio.to_thread(
-                self._verify, artifact_path, expected_sha256
+                self._verify, artifact_path, expected_sha256 or pinned_sha256
             )
             if self.store.active(verified.manifest.plugin_id) is not None:
                 raise PluginOperationError(
@@ -71,10 +75,11 @@ class PluginManager:
             active = await self._activate_release(release, None, None)
             return self._result("active", active, "Feature installed and active")
 
-    async def update(self, artifact_path: Path, expected_sha256: str = "") -> PluginOperationResult:
+    async def update(self, reference: str | Path, expected_sha256: str = "") -> PluginOperationResult:
         async with self._lifecycle_lock:
+            artifact_path, pinned_sha256 = await self._resolve_artifact(reference)
             verified = await asyncio.to_thread(
-                self._verify, artifact_path, expected_sha256
+                self._verify, artifact_path, expected_sha256 or pinned_sha256
             )
             old_release = self.store.active(verified.manifest.plugin_id)
             if old_release is None:
@@ -220,6 +225,17 @@ class PluginManager:
     async def close(self):
         await self.supervisor.close_all()
         self.journal.close()
+
+    async def _resolve_artifact(self, reference: str | Path) -> tuple[Path, str]:
+        if self._artifact_resolver is None:
+            return Path(reference), ""
+        try:
+            resolved = await self._artifact_resolver.resolve(reference)
+        except CatalogError as exc:
+            raise PluginOperationError(exc.code, self._sanitize(str(exc))) from None
+        if not isinstance(resolved, ResolvedArtifact):
+            raise PluginOperationError("resolver_failed", "Artifact resolver returned an invalid result")
+        return resolved.path, resolved.expected_sha256
 
     def _verify(self, artifact_path: Path, expected_sha256: str):
         try:

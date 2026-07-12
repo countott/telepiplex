@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
-
 import init
 
 from app.core.plugin_manager import PluginOperationError
@@ -12,8 +10,8 @@ MANAGER_KEY = "telepiplex_plugin_manager"
 ROUTER_KEY = "telepiplex_plugin_router"
 _USAGE = (
     "用法：\n"
-    "/plugin install <artifact.tpx>\n"
-    "/plugin update <artifact.tpx>\n"
+    "/plugin install <name@version|artifact.tpx>\n"
+    "/plugin update <name@version|artifact.tpx>\n"
     "/plugin enable <plugin_id>\n"
     "/plugin disable <plugin_id>\n"
     "/plugin rollback <plugin_id>\n"
@@ -52,7 +50,7 @@ async def plugin_command(update, context):
             if len(args) != 2:
                 await message.reply_text(_USAGE)
                 return
-            value = Path(args[1]) if command in {"install", "update"} else str(args[1])
+            value = str(args[1])
             await message.reply_text(f"⏳ Feature {command} 处理中：{args[1]}")
             result = await getattr(manager, command)(value)
             await message.reply_text(

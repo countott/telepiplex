@@ -176,6 +176,23 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.router.snapshot.capabilities["demo.echo"].plugin_id, "echo")
         self.assertEqual(self.supervisor.process("echo").release.version, "1.0.0")
 
+    async def test_install_resolves_name_and_uses_catalog_digest(self):
+        from app.core.plugin_catalog import ResolvedArtifact
+
+        artifact = self._artifact()
+        calls = []
+
+        class Resolver:
+            async def resolve(_self, reference):
+                calls.append(reference)
+                return ResolvedArtifact(artifact, "")
+
+        self.manager._artifact_resolver = Resolver()
+        result = await self.manager.install("echo@1.0.0")
+
+        self.assertEqual(calls, ["echo@1.0.0"])
+        self.assertEqual(result.plugin_id, "echo")
+
     async def test_artifact_verification_and_extraction_do_not_block_core_loop(self):
         original_stage = self.store.stage
 

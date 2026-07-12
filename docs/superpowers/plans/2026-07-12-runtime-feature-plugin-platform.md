@@ -581,26 +581,26 @@ git commit -m "test(core): prove no-restart Feature lifecycle"
 - Produces a core-only image with venv support, no business Feature source, and
   persistent `/config/plugins` storage.
 
-- [ ] **Step 1: Write deployment RED tests**
+- [x] **Step 1: Write deployment RED tests**
 
 Assert the image contains core/SDK/installer only, includes the runtime packages
 needed for venv installation, declares `/config`, does not list business
 modules as defaults, and documents `.tpx` build/install/update/rollback flows.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `python3 -m unittest tests.test_deployment_contract tests.test_telepiplex_core_surface -v`
 
 Expected: assertions fail against the old in-process module docs/config.
 
-- [ ] **Step 3: Update Docker and documentation**
+- [x] **Step 3: Update Docker and documentation**
 
 Install core dependencies, copy `app`, `sdk`, and `tools`, create
 `/config/plugins` with the runtime user permissions, expose no Feature ports,
 and keep `CMD ["python", "115bot.py"]`. Document that Docker always pulls core
 and Features are installed at runtime.
 
-- [ ] **Step 4: Run the full verification matrix**
+- [x] **Step 4: Run the full verification matrix**
 
 Run:
 
@@ -615,7 +615,7 @@ Also compile every tracked Python file in memory, parse all YAML/JSON manifests
 and schemas, scan `feature/telepiplex-core` for business module entry points,
 and confirm the other Feature worktrees remain unchanged.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Dockerfile Dockerfile.local docker-compose.yaml README.md README_EN.md tests/test_deployment_contract.py tests/test_telepiplex_core_surface.py
