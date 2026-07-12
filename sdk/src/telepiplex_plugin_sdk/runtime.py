@@ -149,6 +149,11 @@ class FeatureRuntime:
         if method == "drain":
             self.state = "draining"
             return {"state": self.state, "active_tasks": self.active_tasks}
+        if method == "resume":
+            if self.active_tasks:
+                raise FeatureError("busy", "Feature still has active tasks")
+            self.state = "healthy"
+            return {"state": self.state, "active_tasks": 0}
         if method == "shutdown":
             self.state = "stopped"
             asyncio.get_running_loop().call_soon(self._shutdown.set)

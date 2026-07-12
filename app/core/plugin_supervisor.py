@@ -280,6 +280,23 @@ class PluginSupervisor:
             ),
         )
 
+    async def resume(self, target: str | PluginProcess) -> PluginHealth:
+        process = self._resolve(target)
+        if process.client is None:
+            raise SupervisorError("unavailable", "Feature RPC client is unavailable")
+        try:
+            result = await process.client.request("resume", {}, deadline=2)
+        except ContractError as exc:
+            raise SupervisorError(exc.code, self._safe_error(exc)) from None
+        process.state = str(result.get("state") or "healthy")
+        return PluginHealth(
+            process.plugin_id,
+            process.state,
+            int(result.get("active_tasks") or 0),
+            process.restart_count,
+            process.last_error,
+        )
+
     async def stop(self, target: str | PluginProcess, timeout: float = 10):
         process = self._resolve(target)
         process.desired_stop = True

@@ -408,7 +408,7 @@ git commit -m "feat(core): supervise isolated Feature processes"
   `status`, `doctor`, and `restore_active` methods.
 - Produces: `PluginOperationResult(state, plugin_id, version, message, details)`.
 
-- [ ] **Step 1: Write lifecycle RED tests**
+- [x] **Step 1: Write lifecycle RED tests**
 
 Cover successful install, checksum failure, incompatible core API, pip failure,
 config failure, handshake failure, missing capability, command conflict,
@@ -416,37 +416,37 @@ enable/disable without core restart, update shadow start, drain timeout with
 interrupted tasks, atomic route switch, stabilization failure rollback,
 explicit rollback, remove refusal while required, and startup quarantine.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `python3 -m unittest tests.test_plugin_manager -v`
 
 Expected: import failure for `app.core.plugin_manager`.
 
-- [ ] **Step 3: Implement private venv installation**
+- [x] **Step 3: Implement private venv installation**
 
 Create `<release>/venv` with `python -m venv`; invoke that venv's pip with
 `--no-index --find-links <release>/wheelhouse <release>/plugin.whl`. Capture
 bounded output, enforce `install_timeout`, and delete a failed staged release.
 
-- [ ] **Step 4: Implement activation transactions**
+- [x] **Step 4: Implement activation transactions**
 
 Start shadow, verify handshake/health, build a candidate route snapshot, drain
 the old process, switch routes and `active.json`, observe stabilization, then
 stop the old process. Reverse every completed step on failure.
 
-- [ ] **Step 5: Implement status, doctor, and restore**
+- [x] **Step 5: Implement status, doctor, and restore**
 
 Report installed/active versions, source SHA, process state, health, provided
 and missing capabilities, pending events, last error, and rollback target.
 Restore active releases independently so one corrupt plugin cannot stop core.
 
-- [ ] **Step 6: Verify GREEN**
+- [x] **Step 6: Verify GREEN**
 
 Run: `python3 -m unittest tests.test_plugin_manager -v`
 
 Expected: all lifecycle tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add app/core/plugin_manager.py tests/test_plugin_manager.py

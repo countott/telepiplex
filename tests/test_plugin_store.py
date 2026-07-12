@@ -95,6 +95,21 @@ class PluginStoreTest(unittest.TestCase):
             ["1.0.0", "1.1.0"],
         )
 
+    def test_commit_release_does_not_activate_until_explicit_route_transaction(self):
+        from app.core.plugin_store import PluginStore
+
+        store = PluginStore(self.plugins_root)
+        committed = store.commit(store.stage(self._artifact()))
+
+        self.assertIsNone(store.active("echo"))
+        self.assertEqual(store.release("echo", "1.0.0").path, committed.path)
+
+        active = store.set_active(committed, enabled=True)
+        self.assertTrue(active.enabled)
+        disabled = store.set_enabled("echo", False)
+        self.assertFalse(disabled.enabled)
+        self.assertFalse(store.active("echo").enabled)
+
     def test_existing_invalid_config_rejects_stage_and_cleans_staging(self):
         from app.core.plugin_store import PluginStore, StoreError
 

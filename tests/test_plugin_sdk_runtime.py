@@ -79,6 +79,8 @@ class FeatureSdkRuntimeTest(unittest.IsolatedAsyncioTestCase):
         release.set()
         self.assertEqual((await active_call)["value"], 1)
         self.assertEqual(runtime.active_tasks, 0)
+        resumed = await client.request("resume", {}, deadline=1)
+        self.assertEqual(resumed["state"], "healthy")
 
     async def test_shutdown_closes_server_and_removes_socket(self):
         from app.core.plugin_rpc import RpcClient

@@ -30,6 +30,13 @@ class RouteSnapshot:
     blocked: object
 
 
+@dataclass(frozen=True)
+class PreparedRoutes:
+    base_snapshot: RouteSnapshot
+    registrations: object
+    snapshot: RouteSnapshot
+
+
 _EMPTY_SNAPSHOT = RouteSnapshot(
     plugin_ids=(),
     capabilities=MappingProxyType({}),
@@ -50,6 +57,10 @@ class CapabilityRouter:
         return self._snapshot
 
     def activate(self, plugin_id: str, manifest: PluginManifest, client):
+        prepared = self.prepare_activation(plugin_id, manifest, client)
+        self.commit(prepared)
+
+    def prepare_activation(self, plugin_id: str, manifest: PluginManifest, client) -> PreparedRoutes:
         plugin_id = str(plugin_id)
         if plugin_id != manifest.plugin_id:
             raise RoutingError("identity_mismatch", "plugin route identity does not match manifest")
@@ -63,8 +74,18 @@ class CapabilityRouter:
                     "missing_capability",
                     f"missing required capabilities: {', '.join(missing)}",
                 )
-            self._registrations = candidate
-            self._snapshot = snapshot
+            return PreparedRoutes(
+                base_snapshot=self._snapshot,
+                registrations=MappingProxyType(candidate),
+                snapshot=snapshot,
+            )
+
+    def commit(self, prepared: PreparedRoutes):
+        with self._lock:
+            if self._snapshot is not prepared.base_snapshot:
+                raise RoutingError("stale_routes", "route table changed after preparation")
+            self._registrations = dict(prepared.registrations)
+            self._snapshot = prepared.snapshot
 
     def deactivate(self, plugin_id: str):
         with self._lock:
@@ -193,3 +214,14 @@ class CapabilityRouter:
             "missing_capabilities": missing,
         }
 
+    def dependents(self, plugin_id: str) -> tuple[str, ...]:
+        route = self._registrations.get(str(plugin_id))
+        if route is None:
+            return ()
+        provided = {item.name for item in route.manifest.provides}
+        return tuple(sorted(
+            candidate.plugin_id
+            for candidate in self._registrations.values()
+            if candidate.plugin_id != route.plugin_id
+            and provided.intersection(candidate.manifest.requires)
+        ))

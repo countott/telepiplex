@@ -83,6 +83,8 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(drained.state, "draining")
         self.assertEqual(drained.active_tasks, 1)
         self.assertEqual(drained.interrupted_task_ids, ("task-1",))
+        resumed = await supervisor.resume("healthy")
+        self.assertEqual(resumed.state, "healthy")
         await supervisor.stop("healthy")
         self.assertEqual(process.state, "stopped")
         self.assertEqual(os.getpid(), core_pid)

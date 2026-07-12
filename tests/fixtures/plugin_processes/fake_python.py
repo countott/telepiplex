@@ -45,6 +45,9 @@ async def main():
                         "active_tasks": 1,
                         "interrupted_task_ids": ["task-1"],
                     }
+                elif method == "resume":
+                    state["value"] = "healthy"
+                    result = {"state": "healthy", "active_tasks": 0}
                 elif method == "shutdown":
                     state["value"] = "stopped"
                     result = {"state": "stopped", "active_tasks": 0}
@@ -70,4 +73,3 @@ async def main():
 
 
 asyncio.run(main())
-

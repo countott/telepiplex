@@ -156,7 +156,7 @@ size, request ID, method, deadline, trace ID, and idempotency key. Responses
 contain either a typed result or a stable error code plus sanitized detail.
 The first API version supports:
 
-- lifecycle: `handshake`, `health`, `drain`, `shutdown`;
+- lifecycle: `handshake`, `health`, `drain`, `resume`, `shutdown`;
 - capability request/response;
 - event delivery and acknowledgement;
 - command and callback delivery;

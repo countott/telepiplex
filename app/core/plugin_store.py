@@ -41,6 +41,7 @@ class ActiveRelease:
     manifest: PluginManifest
     artifact_sha256: str
     previous_version: str | None = None
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -149,7 +150,21 @@ class PluginStore:
             shutil.rmtree(staged_path, ignore_errors=True)
             raise
 
+    def discard(self, staged: StagedRelease):
+        if staged.path.parent != self.staging_root:
+            raise StoreError("invalid_staging", "release is not in this store staging area")
+        shutil.rmtree(staged.path, ignore_errors=True)
+
     def activate(self, staged: StagedRelease) -> ActiveRelease:
+        previous = self.active(staged.plugin_id)
+        committed = self.commit(staged)
+        return self.set_active(
+            committed,
+            previous_version=previous.version if previous else None,
+            enabled=True,
+        )
+
+    def commit(self, staged: StagedRelease) -> ActiveRelease:
         if staged.path.parent != self.staging_root or not staged.path.is_dir():
             raise StoreError("invalid_staging", "release is not in this store staging area")
         plugin_root = self._plugin_root(staged.plugin_id)
@@ -158,7 +173,6 @@ class PluginStore:
         if target.exists():
             raise StoreError("release_exists", f"release already exists: {staged.version}")
 
-        previous = self.active(staged.plugin_id)
         releases_root.mkdir(parents=True, exist_ok=True)
         os.replace(staged.path, target)
         plugin_root.joinpath("state").mkdir(parents=True, exist_ok=True)
@@ -172,25 +186,88 @@ class PluginStore:
             )
         (target / ".validated-default.json").unlink(missing_ok=True)
 
-        record = {
-            "plugin_id": staged.plugin_id,
-            "active_version": staged.version,
-            "previous_version": previous.version if previous else None,
+        _atomic_json(target / ".artifact.json", {
             "artifact_sha256": staged.artifact_sha256,
-            "source": {
-                "repository": staged.manifest.source.repository,
-                "branch": staged.manifest.source.branch,
-                "commit": staged.manifest.source.commit,
-            },
-        }
-        _atomic_json(plugin_root / "active.json", record)
+        })
         return ActiveRelease(
             plugin_id=staged.plugin_id,
             version=staged.version,
             path=target,
             manifest=staged.manifest,
             artifact_sha256=staged.artifact_sha256,
-            previous_version=previous.version if previous else None,
+            enabled=False,
+        )
+
+    def set_active(
+        self,
+        release: ActiveRelease,
+        *,
+        previous_version: str | None = None,
+        enabled: bool = True,
+    ) -> ActiveRelease:
+        current = self.active(release.plugin_id)
+        if previous_version is None and current and current.version != release.version:
+            previous_version = current.version
+        record = {
+            "plugin_id": release.plugin_id,
+            "active_version": release.version,
+            "previous_version": previous_version,
+            "enabled": bool(enabled),
+            "artifact_sha256": release.artifact_sha256,
+            "source": {
+                "repository": release.manifest.source.repository,
+                "branch": release.manifest.source.branch,
+                "commit": release.manifest.source.commit,
+            },
+        }
+        _atomic_json(self._plugin_root(release.plugin_id) / "active.json", record)
+        return ActiveRelease(
+            plugin_id=release.plugin_id,
+            version=release.version,
+            path=release.path,
+            manifest=release.manifest,
+            artifact_sha256=release.artifact_sha256,
+            previous_version=previous_version,
+            enabled=bool(enabled),
+        )
+
+    def set_enabled(self, plugin_id: str, enabled: bool) -> ActiveRelease:
+        current = self.active(plugin_id)
+        if current is None:
+            raise StoreError("not_installed", f"active release not found: {plugin_id}")
+        return self.set_active(
+            current,
+            previous_version=current.previous_version,
+            enabled=bool(enabled),
+        )
+
+    def clear_active(self, plugin_id: str):
+        self._plugin_root(str(plugin_id)).joinpath("active.json").unlink(missing_ok=True)
+
+    def remove_plugin(self, plugin_id: str):
+        plugin_root = self._plugin_root(str(plugin_id))
+        if plugin_root.parent != self.root:
+            raise StoreError("invalid_plugin_id", "plugin path escapes store root")
+        shutil.rmtree(plugin_root, ignore_errors=True)
+
+    def release(self, plugin_id: str, version: str) -> ActiveRelease | None:
+        path = self._plugin_root(str(plugin_id)) / "releases" / str(version)
+        if not path.is_dir():
+            return None
+        try:
+            manifest = _manifest_at(path)
+            artifact_record = json.loads(
+                (path / ".artifact.json").read_text(encoding="utf-8")
+            )
+        except Exception:
+            return None
+        return ActiveRelease(
+            plugin_id=manifest.plugin_id,
+            version=manifest.version,
+            path=path,
+            manifest=manifest,
+            artifact_sha256=str(artifact_record.get("artifact_sha256") or ""),
+            enabled=False,
         )
 
     def active(self, plugin_id: str) -> ActiveRelease | None:
@@ -214,6 +291,7 @@ class PluginStore:
                 manifest=manifest,
                 artifact_sha256=str(record.get("artifact_sha256") or ""),
                 previous_version=record.get("previous_version"),
+                enabled=bool(record.get("enabled", True)),
             )
         except Exception:
             quarantine = plugin_root / f"active.corrupt.{uuid.uuid4().hex}.json"

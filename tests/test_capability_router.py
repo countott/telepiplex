@@ -126,6 +126,24 @@ class CapabilityRouterTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(raised.exception.code, expected_code)
             self.assertIs(router.snapshot, baseline)
 
+    async def test_prepared_routes_do_not_switch_until_committed(self):
+        from app.core.capability_router import CapabilityRouter
+
+        router = CapabilityRouter()
+        manifest = self._manifest(
+            "echo",
+            provides=(("demo.echo", True),),
+            commands=("echo",),
+        )
+
+        prepared = router.prepare_activation("echo", manifest, FakeClient())
+
+        self.assertEqual(router.snapshot.plugin_ids, ())
+        self.assertIsNone(router.command_route("echo"))
+        router.commit(prepared)
+        self.assertEqual(router.snapshot.plugin_ids, ("echo",))
+        self.assertEqual(router.command_route("echo").plugin_id, "echo")
+
     async def test_provider_loss_blocks_dependents_but_not_unrelated_plugins(self):
         from app.core.capability_router import CapabilityRouter, RoutingError
 
