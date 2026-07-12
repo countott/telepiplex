@@ -26,11 +26,18 @@ async def plex_command(update, context):
         await update.effective_message.reply_text("⚠️ 当前账号无权使用此机器人。")
         return
     from app.modules.plex_management import (
+        _safe_startup_error,
         get_plex_ai_orchestrator,
         get_plex_management_service,
     )
 
-    service = get_plex_management_service()
+    try:
+        service = get_plex_management_service()
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"Plex 管理初始化失败：{_safe_startup_error(exc)}"
+        )
+        return
     if service is None:
         await update.effective_message.reply_text("Plex 管理未启用或缺少 base_url/token。")
         return

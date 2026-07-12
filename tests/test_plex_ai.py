@@ -142,6 +142,23 @@ class PlexAIOrchestratorTest(unittest.TestCase):
 
 
 class PlexAIHandlerTest(unittest.TestCase):
+    @patch("app.modules.plex_management.get_plex_management_service")
+    def test_service_initialization_failure_returns_user_error(self, get_service):
+        from app.handlers.plex_handler import plex_command
+
+        get_service.side_effect = RuntimeError("database token=secret")
+        update = Mock()
+        update.effective_user.id = 1
+        update.effective_message.reply_text = AsyncMock()
+        context = Mock(args=["状态"], user_data={})
+
+        with patch("app.handlers.plex_handler.init.check_user", return_value=True):
+            asyncio.run(plex_command(update, context))
+
+        message = update.effective_message.reply_text.await_args.args[0]
+        self.assertIn("Plex 管理初始化失败", message)
+        self.assertNotIn("secret", message)
+
     @patch("app.modules.plex_management.get_plex_ai_orchestrator")
     @patch("app.modules.plex_management.get_plex_management_service")
     def test_enabled_ai_is_initialized_in_worker_outside_telegram_event_loop(
