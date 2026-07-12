@@ -1,0 +1,34 @@
+plugin_id: open115
+name: 115 Storage and Download
+version: 1.0.0
+core_api: ">=1.0,<2.0"
+entry_point: telepiplex_open115.runtime:main
+provides:
+  - name: download.provider
+    exclusive: true
+  - name: storage.provider
+    exclusive: true
+requires: []
+subscribes: []
+publishes:
+  - download.completed
+  - download.failed
+commands:
+  - name: magnet
+    description: 投递磁力链接
+  - name: m
+    description: 投递磁力链接
+  - name: auth
+    description: 检查 115 授权
+  - name: config
+    description: 查看 115 Feature 配置路径
+  - name: q
+    description: 退出当前会话
+callbacks:
+  - open115
+config_schema_version: 1
+state_schema_version: 1
+source:
+  repository: origin
+  branch: feature/115
+  commit: "0000000000000000000000000000000000000000"

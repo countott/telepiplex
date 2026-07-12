@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "base_url": {"type": "string", "pattern": "^https://"},
+    "passport_url": {"type": "string", "pattern": "^https://"},
+    "access_token": {"type": "string"},
+    "refresh_token": {"type": "string"},
+    "app_id": {"type": "string"},
+    "timeout": {"type": "number", "minimum": 1, "maximum": 300},
+    "download_timeout": {"type": "number", "minimum": 10, "maximum": 86400},
+    "poll_interval": {"type": "number", "minimum": 0.1, "maximum": 300},
+    "request_interval": {"type": "number", "minimum": 0, "maximum": 30},
+    "save_directories": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "path": {"type": "string", "pattern": "^/"}
+        },
+        "required": ["name", "path"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["base_url", "passport_url", "access_token", "refresh_token", "timeout", "download_timeout", "poll_interval", "request_interval", "save_directories"],
+  "additionalProperties": false
+}
