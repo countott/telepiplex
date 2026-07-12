@@ -100,7 +100,7 @@ git commit -m "feat(core): define Feature plugin contract"
 - Produces: `verify_tpx(path: Path, expected_sha256: str = "") -> VerifiedArtifact`.
 - Produces: `VerifiedArtifact(path, sha256, manifest, members)`.
 
-- [ ] **Step 1: Write artifact RED tests**
+- [x] **Step 1: Write artifact RED tests**
 
 Create fixture archives in a temporary directory. Prove deterministic output,
 required-member enforcement, member checksum verification, expected archive
@@ -114,25 +114,25 @@ assert first.read_bytes() == second.read_bytes()
 assert verify_tpx(first).manifest.plugin_id == "echo"
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `python3 -m unittest tests.test_plugin_artifact -v`
 
 Expected: import failure for `app.core.plugin_artifact`.
 
-- [ ] **Step 3: Implement deterministic ZIP construction**
+- [x] **Step 3: Implement deterministic ZIP construction**
 
 Sort member names, use a fixed ZIP timestamp, store POSIX permissions without
 symlink bits, generate `checksums.sha256` for every member except itself, and
 write through a temporary file followed by `os.replace`.
 
-- [ ] **Step 4: Implement safe verification**
+- [x] **Step 4: Implement safe verification**
 
 Read and validate the archive without extracting. Reject encrypted entries,
 links, unsafe names, unexpected top-level files, missing required members,
 digest mismatches, and manifests that fail Task 1 validation.
 
-- [ ] **Step 5: Verify GREEN and CLI behavior**
+- [x] **Step 5: Verify GREEN and CLI behavior**
 
 Run:
 
@@ -143,7 +143,7 @@ python3 tools/build_tpx.py --help
 
 Expected: tests pass and help names `SOURCE_DIR` and `OUTPUT.tpx`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/core/plugin_artifact.py tools/build_tpx.py tests/test_plugin_artifact.py
