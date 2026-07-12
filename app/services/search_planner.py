@@ -87,14 +87,64 @@ def _provider_status_and_support(
         source_urls = []
         if isinstance(raw_urls, list):
             for raw_url in raw_urls:
-                normalized_url = normalize_source_locator(raw_url)
-                if normalized_url and normalized_url not in source_urls:
-                    source_urls.append(normalized_url)
+                _append_source_url(source_urls, raw_url)
+        stable_ids = []
+        _collect_fact_support(provider, facts, source_urls, stable_ids)
         support[provider] = {
             "has_facts": has_facts,
             "source_urls": source_urls,
+            "stable_ids": stable_ids,
         }
     return statuses, support
+
+
+def _append_source_url(source_urls: list[str], value) -> None:
+    normalized_url = normalize_source_locator(value)
+    if normalized_url and normalized_url not in source_urls:
+        source_urls.append(normalized_url)
+
+
+def _append_stable_id(stable_ids: list[str], value) -> None:
+    if value is None or isinstance(value, (bool, dict, list, tuple, set)):
+        return
+    stable_id = " ".join(str(value).split())
+    if stable_id and stable_id not in stable_ids:
+        stable_ids.append(stable_id)
+
+
+def _is_provider_stable_id_key(provider: str, key: str) -> bool:
+    if provider == "wikipedia":
+        return key == "wikibase_item"
+    if provider == "douban":
+        return key in {
+            "subject_id",
+            "douban",
+            "douban_id",
+            "douban_subject",
+            "douban_subject_id",
+        }
+    if provider == "tvdb":
+        return key.startswith("tvdb_") and key.endswith("_id")
+    return False
+
+
+def _collect_fact_support(
+    provider: str,
+    value,
+    source_urls: list[str],
+    stable_ids: list[str],
+) -> None:
+    if isinstance(value, dict):
+        for raw_key, nested in value.items():
+            key = str(raw_key).strip().casefold()
+            if key in {"url", "original_url"}:
+                _append_source_url(source_urls, nested)
+            if _is_provider_stable_id_key(provider, key):
+                _append_stable_id(stable_ids, nested)
+            _collect_fact_support(provider, nested, source_urls, stable_ids)
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            _collect_fact_support(provider, nested, source_urls, stable_ids)
 
 
 def _text(value) -> str:

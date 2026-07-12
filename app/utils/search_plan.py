@@ -35,6 +35,10 @@ def normalize_source_locator(value) -> str:
     ))
 
 
+def _normalize_source_external_id(value) -> str:
+    return _text(value).casefold()
+
+
 def validate_draft_search_plan(value: object):
     if not isinstance(value, dict) or not _text(value.get("plan_id")):
         return None
@@ -79,16 +83,28 @@ def validate_draft_search_plan(value: object):
         source_urls = support.get("source_urls")
         if not isinstance(source_urls, list):
             return None
+        stable_ids = support.get("stable_ids", [])
+        if not isinstance(stable_ids, list):
+            return None
         normalized_urls = {
             normalize_source_locator(item)
             for item in source_urls
             if normalize_source_locator(item)
         }
-        locator = normalize_source_locator(
-            source_entry.get("url") or source_entry.get("external_id")
-        )
+        normalized_ids = {
+            _normalize_source_external_id(item)
+            for item in stable_ids
+            if _normalize_source_external_id(item)
+        }
         if status == "ok":
-            if support.get("has_facts") is not True and locator not in normalized_urls:
+            source_url = _text(source_entry.get("url"))
+            external_id = _text(source_entry.get("external_id"))
+            if source_url and normalize_source_locator(source_url) not in normalized_urls:
+                return None
+            if (
+                external_id
+                and _normalize_source_external_id(external_id) not in normalized_ids
+            ):
                 return None
         elif status in SOFT_FAILURE_STATUSES:
             if _text(source_entry.get("availability")) != status:

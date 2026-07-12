@@ -101,11 +101,19 @@ class SearchMediaMetadataFlowTest(unittest.IsolatedAsyncioTestCase):
         def provider(_hypotheses):
             if timeline is not None:
                 timeline.append(f"provider:{name}")
+            wikipedia_url = (
+                "https://zh.wikipedia.org/wiki/想見你_(電影)"
+                if name == "wikipedia"
+                else ""
+            )
             return {
                 "source": name,
                 "status": "ok",
-                "facts": [{"title": "想见你"}],
-                "source_urls": [],
+                "facts": [{
+                    "title": "想见你",
+                    **({"url": wikipedia_url} if wikipedia_url else {}),
+                }],
+                "source_urls": [wikipedia_url] if wikipedia_url else [],
                 "error": "",
             }
 

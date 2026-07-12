@@ -65,9 +65,18 @@ class SearchPlanTest(unittest.TestCase):
                             "source_urls": [
                                 "https://zh.wikipedia.org/wiki/想見你_(電影)"
                             ],
+                            "stable_ids": ["Q115000000"],
                         },
-                        "douban": {"has_facts": True, "source_urls": []},
-                        "tvdb": {"has_facts": False, "source_urls": []},
+                        "douban": {
+                            "has_facts": True,
+                            "source_urls": [],
+                            "stable_ids": [],
+                        },
+                        "tvdb": {
+                            "has_facts": False,
+                            "source_urls": [],
+                            "stable_ids": [],
+                        },
                     },
                 },
                 "warnings": [],
@@ -143,8 +152,24 @@ class SearchPlanTest(unittest.TestCase):
         draft["media_metadata"]["evidence"]["provider_support"]["wikipedia"] = {
             "has_facts": False,
             "source_urls": [],
+            "stable_ids": [],
         }
         self.assertIsNone(validate_draft_search_plan(draft))
+
+    def test_temporary_ok_provider_rejects_unrelated_facts_and_source_url(self):
+        draft = self._draft()
+        draft["media_metadata"]["evidence"]["provider_support"]["wikipedia"] = {
+            "has_facts": True,
+            "source_urls": ["https://zh.wikipedia.org/wiki/無關作品"],
+            "stable_ids": ["Q999999"],
+        }
+
+        self.assertIsNone(validate_draft_search_plan(draft))
+
+        draft["media_metadata"]["source_entry"]["url"] = (
+            "HTTPS://ZH.WIKIPEDIA.ORG/wiki/無關作品/"
+        )
+        self.assertIsNotNone(validate_draft_search_plan(draft))
 
     def test_temporary_ok_provider_accepts_normalized_matching_source_url(self):
         draft = self._draft()
@@ -153,11 +178,37 @@ class SearchPlanTest(unittest.TestCase):
             "source_urls": [
                 "https://zh.wikipedia.org/wiki/想見你_(電影)"
             ],
+            "stable_ids": [],
         }
         draft["media_metadata"]["source_entry"]["url"] = (
             "HTTPS://ZH.WIKIPEDIA.ORG/wiki/想見你_(電影)/"
         )
         self.assertIsNotNone(validate_draft_search_plan(draft))
+
+    def test_temporary_ok_provider_external_id_must_match_stable_id(self):
+        draft = self._draft()
+        source_entry = draft["media_metadata"]["source_entry"]
+        source_entry["url"] = ""
+        source_entry["external_id"] = "Q-INVENTED"
+        draft["media_metadata"]["evidence"]["provider_support"]["wikipedia"] = {
+            "has_facts": True,
+            "source_urls": ["https://zh.wikipedia.org/wiki/無關作品"],
+            "stable_ids": ["Q115000000"],
+        }
+
+        self.assertIsNone(validate_draft_search_plan(draft))
+
+        source_entry["external_id"] = "q115000000"
+        self.assertIsNotNone(validate_draft_search_plan(draft))
+
+    def test_temporary_ok_provider_rejects_malformed_stable_id_container(self):
+        for malformed in ({}, "", 0, False):
+            with self.subTest(malformed=malformed):
+                draft = self._draft()
+                draft["media_metadata"]["evidence"]["provider_support"][
+                    "wikipedia"
+                ]["stable_ids"] = malformed
+                self.assertIsNone(validate_draft_search_plan(draft))
 
     def test_official_tvdb_hint_cannot_be_downgraded(self):
         draft = self._draft()
