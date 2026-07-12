@@ -100,11 +100,22 @@ class PlexManagementService:
         if contract:
             placement = contract["placement"]
             mapping_kind = placement["mapping_kind"]
-            if mapping_kind in SERIES_EPISODE_MAPPINGS:
-                target = (
-                    int(placement["season_number"]),
-                    int(placement["episode_number"]),
-                )
+            if placement["library_type"] == "series":
+                if mapping_kind in SERIES_EPISODE_MAPPINGS:
+                    confirmed_targets = {(
+                        int(placement["season_number"]),
+                        int(placement["episode_number"]),
+                    )}
+                else:
+                    confirmed_targets = set()
+                    for item in contract.get("items") or []:
+                        try:
+                            confirmed_targets.add((
+                                int(item.get("season_number")),
+                                int(item.get("episode_number")),
+                            ))
+                        except (TypeError, ValueError):
+                            continue
                 resolved = []
                 for item in contract.get("items") or []:
                     try:
@@ -114,10 +125,18 @@ class PlexManagementService:
                         )
                     except (TypeError, ValueError):
                         continue
-                    if item_target == target and str(item.get("final_path") or "").strip():
+                    if (
+                        item_target in confirmed_targets
+                        and str(item.get("final_path") or "").strip()
+                    ):
                         resolved.append(item)
                 if not resolved:
-                    self._log_contract_rejection("locked_episode_unresolved")
+                    reason = (
+                        "locked_episode_unresolved"
+                        if mapping_kind in SERIES_EPISODE_MAPPINGS
+                        else "confirmed_series_unresolved"
+                    )
+                    self._log_contract_rejection(reason)
                     return None
             elif not payload["final_path"]:
                 self._log_contract_rejection("terminal_path_missing")

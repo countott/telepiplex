@@ -146,6 +146,26 @@ def make_media_metadata_completion(mapping_kind):
     )
 
 
+def make_unresolved_standalone_series_completion():
+    completion = make_media_metadata_completion("standalone")
+    contract = completion.event.metadata["media_metadata"]
+    contract["identity"]["content_kind"] = "series"
+    contract["placement"].update({
+        "library_type": "series",
+        "category_kind": "live_action_series",
+    })
+    contract["items"] = [{
+        "item_id": "episode-1",
+        "content_role": "main_episode",
+        "season_number": 1,
+        "episode_number": 1,
+    }]
+    completion.event.selected_path = "/真人剧集"
+    completion.result.final_path = "/未整理/Test.Show.S01E01"
+    completion.result.metadata = completion.event.metadata
+    return completion
+
+
 def make_four_category_routes():
     return [
         {"kind": "live_action_series", "path": "/真人剧集", "plex_library_id": "11"},
@@ -707,6 +727,30 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertEqual(contract["metadata_id"], "metadata-a")
         self.assertEqual(contract["items"], [])
         self.assertEqual(job["payload"]["final_path"], "/真人电影/想见你")
+
+    def test_unresolved_standalone_series_is_not_enqueued_from_terminal_path(self):
+        from app.core.media_metadata import extract_confirmed_media_metadata
+
+        completion = make_unresolved_standalone_series_completion()
+        self.assertIsNotNone(
+            extract_confirmed_media_metadata(completion.result.metadata)
+        )
+
+        self.assertIsNone(self.make_service().enqueue_completion(completion))
+
+    def test_resolved_standalone_series_enqueues_confirmed_item(self):
+        completion = make_unresolved_standalone_series_completion()
+        completion.result.metadata["media_metadata"]["items"][0]["final_path"] = (
+            "/真人剧集/Test Show/Test Show Season 01/Test Show S01E01.mkv"
+        )
+
+        job = self.make_service().enqueue_completion(completion)
+
+        self.assertIsNotNone(job)
+        self.assertEqual(
+            job["payload"]["metadata"]["media_metadata"]["items"][0]["episode_number"],
+            1,
+        )
 
     def test_present_but_invalid_contract_never_falls_back_to_legacy_job(self):
         completion = make_media_metadata_completion("standalone")
