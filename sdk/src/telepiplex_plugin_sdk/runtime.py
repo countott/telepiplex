@@ -39,10 +39,40 @@ class FeatureRuntime:
         self.config_validator = config_validator
         self.max_frame_bytes = int(max_frame_bytes)
         self.state = "starting"
-        self.active_tasks = 0
+        self._active_requests = 0
+        self._background_tasks: dict[str, asyncio.Task] = {}
         self._server = None
         self._socket_path = None
         self._shutdown = asyncio.Event()
+
+    @property
+    def active_tasks(self) -> int:
+        return self._active_requests + len(self._background_tasks)
+
+    def spawn(self, awaitable, *, task_id: str) -> asyncio.Task:
+        task_id = str(task_id or "").strip()
+        if not task_id:
+            if inspect.iscoroutine(awaitable):
+                awaitable.close()
+            raise FeatureError("invalid_task", "background task ID is required")
+        if self.state == "draining":
+            if inspect.iscoroutine(awaitable):
+                awaitable.close()
+            raise FeatureError("busy", "Feature is draining")
+        if task_id in self._background_tasks:
+            if inspect.iscoroutine(awaitable):
+                awaitable.close()
+            raise FeatureError("duplicate_task", f"background task already exists: {task_id}")
+        task = asyncio.create_task(awaitable, name=f"feature:{task_id}")
+        self._background_tasks[task_id] = task
+
+        def finished(completed):
+            self._background_tasks.pop(task_id, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finished)
+        return task
 
     async def serve(self, socket_path: Path):
         self._socket_path = Path(socket_path)
@@ -150,7 +180,11 @@ class FeatureRuntime:
             return {"state": self.state, "active_tasks": self.active_tasks}
         if method == "drain":
             self.state = "draining"
-            return {"state": self.state, "active_tasks": self.active_tasks}
+            return {
+                "state": self.state,
+                "active_tasks": self.active_tasks,
+                "interrupted_task_ids": sorted(self._background_tasks),
+            }
         if method == "resume":
             if self.active_tasks:
                 raise FeatureError("busy", "Feature still has active tasks")
@@ -200,11 +234,11 @@ class FeatureRuntime:
         handler = handlers.get(key)
         if handler is None:
             raise FeatureError("not_found", f"handler is not registered: {key}")
-        self.active_tasks += 1
+        self._active_requests += 1
         try:
             return await self._invoke(handler, params)
         finally:
-            self.active_tasks -= 1
+            self._active_requests -= 1
 
     @staticmethod
     async def _invoke(handler: Handler, params: dict) -> dict:

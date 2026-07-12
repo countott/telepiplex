@@ -25,6 +25,7 @@ class FakeSupervisor:
         self.stopped = []
         self.resumed = []
         self.unhealthy_versions = set()
+        self.busy_versions = set()
 
     async def start(self, release, *, shadow=False):
         process = SimpleNamespace(
@@ -62,8 +63,8 @@ class FakeSupervisor:
         process.state = "draining"
         return SimpleNamespace(
             state="draining",
-            active_tasks=0,
-            interrupted_task_ids=(),
+            active_tasks=int(process.release.version in self.busy_versions),
+            interrupted_task_ids=("active-job",) if process.release.version in self.busy_versions else (),
         )
 
     async def resume(self, process):
@@ -315,6 +316,32 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("echo", "1.0.0"), self.supervisor.resumed)
         new = next(item for item in self.supervisor.instances if item.release.version == "2.0.0")
         self.assertEqual(new.state, "stopped")
+
+    async def test_update_refuses_to_stop_non_idempotent_work_that_did_not_drain(self):
+        from app.core.plugin_manager import PluginOperationError
+
+        await self.manager.install(self._artifact("echo", "1.0.0"))
+        old = self.supervisor.process("echo")
+        self.supervisor.busy_versions.add("1.0.0")
+
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.update(self._artifact("echo", "2.0.0", commit="b" * 40))
+
+        self.assertEqual(raised.exception.code, "drain_timeout")
+        self.assertEqual(self.store.active("echo").version, "1.0.0")
+        self.assertEqual(old.state, "healthy")
+        self.assertIn(("echo", "1.0.0"), self.supervisor.resumed)
+
+    async def test_disable_refuses_while_active_work_did_not_drain(self):
+        from app.core.plugin_manager import PluginOperationError
+
+        await self.manager.install(self._artifact())
+        self.supervisor.busy_versions.add("1.0.0")
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.disable("echo")
+        self.assertEqual(raised.exception.code, "drain_timeout")
+        self.assertTrue(self.store.active("echo").enabled)
+        self.assertIn("demo.echo", self.router.snapshot.capabilities)
 
     async def test_remove_refuses_provider_required_by_an_active_feature(self):
         from app.core.plugin_manager import PluginOperationError

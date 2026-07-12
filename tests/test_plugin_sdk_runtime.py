@@ -130,6 +130,29 @@ class FeatureSdkRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["actions"][0]["text"], "follow up")
 
+    async def test_spawned_background_work_is_visible_to_drain_and_health(self):
+        from app.core.plugin_rpc import RpcClient
+
+        release = asyncio.Event()
+
+        async def echo(request):
+            return request["payload"]
+
+        runtime, _task = await self._start(echo)
+        runtime.spawn(release.wait(), task_id="download-1")
+        client = RpcClient(self.socket_path, "token")
+        health = await client.request("health", {}, deadline=1)
+        drained = await client.request("drain", {}, deadline=1)
+        self.assertEqual(health["active_tasks"], 1)
+        self.assertEqual(drained["interrupted_task_ids"], ["download-1"])
+
+        release.set()
+        for _ in range(100):
+            if (await client.request("health", {}, deadline=1))["active_tasks"] == 0:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(runtime.active_tasks, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

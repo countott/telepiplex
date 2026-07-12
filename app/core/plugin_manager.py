@@ -112,7 +112,14 @@ class PluginManager:
                 raise PluginOperationError("not_installed", "Feature is not installed")
             process = self.supervisor.process(plugin_id)
             if process is not None:
-                await self.supervisor.drain(process, timeout=self.drain_timeout)
+                drained = await self.supervisor.drain(process, timeout=self.drain_timeout)
+                if drained.active_tasks:
+                    await self.supervisor.resume(process)
+                    raise PluginOperationError(
+                        "drain_timeout",
+                        "Feature still has active work; disable was cancelled",
+                        {"active_task_ids": list(drained.interrupted_task_ids)},
+                    )
             self.router.deactivate(plugin_id)
             self.journal.set_subscriptions(plugin_id, [])
             disabled = self.store.set_enabled(plugin_id, False)
@@ -166,7 +173,14 @@ class PluginManager:
                 )
             process = self.supervisor.process(plugin_id)
             if process is not None:
-                await self.supervisor.drain(process, timeout=self.drain_timeout)
+                drained = await self.supervisor.drain(process, timeout=self.drain_timeout)
+                if drained.active_tasks:
+                    await self.supervisor.resume(process)
+                    raise PluginOperationError(
+                        "drain_timeout",
+                        "Feature still has active work; removal was cancelled",
+                        {"active_task_ids": list(drained.interrupted_task_ids)},
+                    )
             self.router.deactivate(plugin_id)
             self.journal.set_subscriptions(plugin_id, [])
             if process is not None:
@@ -286,8 +300,14 @@ class PluginManager:
                 new_process.client,
             )
             if old_process is not None:
-                await self.supervisor.drain(old_process, timeout=self.drain_timeout)
+                drained = await self.supervisor.drain(old_process, timeout=self.drain_timeout)
                 old_drained = True
+                if drained.active_tasks:
+                    raise PluginOperationError(
+                        "drain_timeout",
+                        "Feature still has active work; update was cancelled",
+                        {"active_task_ids": list(drained.interrupted_task_ids)},
+                    )
             active = self.store.set_active(
                 release,
                 previous_version=old_release.version if old_release else None,
