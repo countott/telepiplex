@@ -395,6 +395,35 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreaterEqual(len(ticks), 5)
 
+    async def test_restore_starts_providers_before_alphabetically_earlier_consumers(self):
+        await self.manager.install(self._artifact(
+            plugin_id="zzz-provider", provides=(("storage.provider", True),),
+            commands=("storage",),
+        ))
+        await self.manager.install(self._artifact(
+            plugin_id="aaa-consumer", provides=(), requires=("storage.provider",),
+            commands=("consume",), commit="b" * 40,
+        ))
+        await self.supervisor.close_all()
+
+        from app.core.capability_router import CapabilityRouter
+        from app.core.plugin_manager import PluginManager
+
+        self.router = CapabilityRouter()
+        self.supervisor = FakeSupervisor()
+        self.manager = PluginManager(
+            store=self.store, supervisor=self.supervisor, router=self.router,
+            journal=self.journal, venv_installer=self._install_venv,
+            stabilize_seconds=0,
+        )
+        restored = await self.manager.restore_active()
+
+        self.assertEqual([item.plugin_id for item in restored], [
+            "zzz-provider", "aaa-consumer",
+        ])
+        self.assertIsNotNone(self.router.command_route("consume"))
+        self.assertTrue(self.store.active("aaa-consumer").enabled)
+
 
 if __name__ == "__main__":
     unittest.main()

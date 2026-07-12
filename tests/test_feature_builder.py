@@ -44,6 +44,18 @@ class FeatureBuilderTest(unittest.TestCase):
                     validate_feature_imports(Path(tmpdir))
                 path.unlink()
 
+    def test_rejects_importing_a_sibling_feature_package(self):
+        from tools.build_feature import FeatureBuildError, validate_feature_imports
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "src/telepiplex_example"
+            source.mkdir(parents=True)
+            (source / "__init__.py").write_text(
+                "import telepiplex_open115\n", encoding="utf-8"
+            )
+            with self.assertRaises(FeatureBuildError):
+                validate_feature_imports(Path(tmpdir))
+
 
 if __name__ == "__main__":
     unittest.main()

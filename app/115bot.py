@@ -119,6 +119,7 @@ def build_plugin_manager(config=None, core_database=None):
         delivery_deadline=float(
             plugin_config.get("event_delivery_timeout") or 1800
         ),
+        max_attempts=int(plugin_config.get("event_max_attempts") or 5),
     )
     broker = CoreBroker(
         router,

@@ -30,6 +30,11 @@ _FORBIDDEN_ROOT_IMPORTS = {"app", "init", "telegram"}
 
 def validate_feature_imports(source_dir: Path):
     source_dir = Path(source_dir)
+    own_packages = {
+        path.name
+        for path in (source_dir / "src").iterdir()
+        if path.is_dir() and path.name.startswith("telepiplex_")
+    }
     for path in sorted((source_dir / "src").rglob("*.py")):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -45,6 +50,15 @@ def validate_feature_imports(source_dir: Path):
                 if name.split(".", 1)[0] in _FORBIDDEN_ROOT_IMPORTS:
                     raise FeatureBuildError(
                         f"forbidden cross-runtime import in {path}: {name}"
+                    )
+                root = name.split(".", 1)[0]
+                if (
+                    root.startswith("telepiplex_")
+                    and root != "telepiplex_plugin_sdk"
+                    and root not in own_packages
+                ):
+                    raise FeatureBuildError(
+                        f"forbidden Feature-to-Feature import in {path}: {name}"
                     )
 
 

@@ -139,6 +139,7 @@ def _integer(value):
 def _valid_items(items) -> bool:
     if not isinstance(items, list):
         return False
+    logical_targets = set()
     for item in items:
         if not isinstance(item, dict):
             return False
@@ -153,6 +154,10 @@ def _valid_items(items) -> bool:
         episode = _integer(episode)
         if season is None or season < 0 or episode is None or episode < 1:
             return False
+        logical_target = (season, episode)
+        if logical_target in logical_targets:
+            return False
+        logical_targets.add(logical_target)
     return True
 
 

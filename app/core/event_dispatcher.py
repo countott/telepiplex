@@ -15,12 +15,14 @@ class EventDispatcher:
         retry_interval: float = 1,
         delivery_deadline: float = 30,
         batch_size: int = 100,
+        max_attempts: int = 5,
     ):
         self.router = router
         self.journal = journal
         self.retry_interval = max(0.01, float(retry_interval))
         self.delivery_deadline = max(0.1, float(delivery_deadline))
         self.batch_size = max(1, int(batch_size))
+        self.max_attempts = max(1, int(max_attempts))
         self._wake = asyncio.Event()
         self._closed = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -67,8 +69,14 @@ class EventDispatcher:
                         deadline=self.delivery_deadline,
                         idempotency_key=event.event_id,
                     )
-                except Exception:
-                    break
+                except Exception as exc:
+                    self.journal.record_failure(
+                        event.event_id,
+                        plugin_id,
+                        type(exc).__name__,
+                        self.max_attempts,
+                    )
+                    continue
                 if self.journal.ack(event.event_id, plugin_id):
                     delivered += 1
         return delivered

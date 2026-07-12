@@ -13,7 +13,12 @@ from app.core.plugin_artifact import ArtifactError, verify_tpx
 from app.core.plugin_catalog import CatalogError, ResolvedArtifact
 from app.core.plugin_contract import CORE_API_VERSION
 from app.core.plugin_store import ActiveRelease, PluginStore, StagedRelease, StoreError
-from app.core.plugin_supervisor import PluginProcess, PluginSupervisor, SupervisorError
+from app.core.plugin_supervisor import (
+    PluginProcess,
+    PluginSupervisor,
+    RoutedPluginClient,
+    SupervisorError,
+)
 
 
 class PluginOperationError(RuntimeError):
@@ -140,7 +145,7 @@ class PluginManager:
                 prepared = self.router.prepare_activation(
                     plugin_id,
                     release.manifest,
-                    process.client,
+                    self._route_client(process),
                 )
                 enabled = self.store.set_active(
                     release,
@@ -195,21 +200,43 @@ class PluginManager:
 
     async def restore_active(self) -> list[PluginOperationResult]:
         results = []
-        active_ids = sorted({item.plugin_id for item in self.store.list_installed() if item.active})
-        for plugin_id in active_ids:
-            release = self.store.active(plugin_id)
-            if release is None or not release.enabled:
-                continue
-            try:
-                results.append(await self.enable(plugin_id))
-            except PluginOperationError as exc:
-                results.append(PluginOperationResult(
-                    state="quarantined",
-                    plugin_id=plugin_id,
-                    version=release.version,
-                    message=str(exc),
-                    details={"code": exc.code},
-                ))
+        pending = {
+            item.plugin_id: self.store.active(item.plugin_id)
+            for item in self.store.list_installed()
+            if item.active
+        }
+        pending = {
+            plugin_id: release
+            for plugin_id, release in pending.items()
+            if release is not None and release.enabled
+        }
+        while pending:
+            available = set(self.router.snapshot.capabilities)
+            ready = [
+                plugin_id for plugin_id, release in pending.items()
+                if set(release.manifest.requires).issubset(available)
+            ]
+            if not ready:
+                for plugin_id, release in sorted(pending.items()):
+                    missing = sorted(set(release.manifest.requires) - available)
+                    results.append(PluginOperationResult(
+                        state="quarantined", plugin_id=plugin_id,
+                        version=release.version,
+                        message=f"missing required capabilities: {', '.join(missing)}",
+                        details={"code": "missing_capability", "missing": missing},
+                    ))
+                break
+            for plugin_id in sorted(ready):
+                release = pending.pop(plugin_id)
+                try:
+                    results.append(await self.enable(plugin_id))
+                except PluginOperationError as exc:
+                    self.store.set_enabled(plugin_id, True)
+                    results.append(PluginOperationResult(
+                        state="quarantined", plugin_id=plugin_id,
+                        version=release.version, message=str(exc),
+                        details={"code": exc.code},
+                    ))
         return results
 
     async def start(self) -> list[PluginOperationResult]:
@@ -236,6 +263,7 @@ class PluginManager:
             "requires": list(release.manifest.requires),
             "missing_capabilities": route_status.get("missing_capabilities", []),
             "pending_events": len(self.journal.pending(plugin_id)),
+            "dead_letter_events": len(self.journal.dead_letters(plugin_id)),
         }
 
     def doctor(self) -> list[dict]:
@@ -297,7 +325,7 @@ class PluginManager:
             prepared = self.router.prepare_activation(
                 release.plugin_id,
                 release.manifest,
-                new_process.client,
+                self._route_client(new_process),
             )
             if old_process is not None:
                 drained = await self.supervisor.drain(old_process, timeout=self.drain_timeout)
@@ -327,7 +355,7 @@ class PluginManager:
                     self.router.activate(
                         old_release.plugin_id,
                         old_release.manifest,
-                        old_process.client,
+                        self._route_client(old_process),
                     )
                 else:
                     self.router.deactivate(release.plugin_id)
@@ -356,6 +384,14 @@ class PluginManager:
                 "stabilization_failed",
                 self._sanitize(health.last_error or f"Feature health is {health.state}"),
             )
+
+    @staticmethod
+    def _route_client(process):
+        return (
+            RoutedPluginClient(process)
+            if isinstance(process, PluginProcess)
+            else process.client
+        )
 
     async def _safe_stop(self, process):
         try:

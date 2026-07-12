@@ -58,6 +58,14 @@ class EventJournal:
             );
             CREATE INDEX IF NOT EXISTS event_deliveries_pending
             ON event_deliveries(plugin_id, status, updated_at);
+            CREATE TABLE IF NOT EXISTS event_delivery_failures (
+                event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                plugin_id TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                dead_lettered_at REAL,
+                PRIMARY KEY (event_id, plugin_id)
+            );
         """)
 
     def close(self):
@@ -146,3 +154,43 @@ class EventJournal:
                 (time.time(), str(event_id), str(plugin_id)),
             )
             return cursor.rowcount == 1
+
+    def record_failure(
+        self, event_id: str, plugin_id: str, error: str, max_attempts: int
+    ) -> bool:
+        now = time.time()
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT INTO event_delivery_failures(event_id, plugin_id, attempt_count, last_error) "
+                "VALUES (?, ?, 1, ?) ON CONFLICT(event_id, plugin_id) DO UPDATE SET "
+                "attempt_count = attempt_count + 1, last_error = excluded.last_error",
+                (str(event_id), str(plugin_id), str(error)[:500]),
+            )
+            row = self._connection.execute(
+                "SELECT attempt_count FROM event_delivery_failures "
+                "WHERE event_id = ? AND plugin_id = ?",
+                (str(event_id), str(plugin_id)),
+            ).fetchone()
+            exhausted = int(row["attempt_count"]) >= max(1, int(max_attempts))
+            if exhausted:
+                self._connection.execute(
+                    "UPDATE event_delivery_failures SET dead_lettered_at = ? "
+                    "WHERE event_id = ? AND plugin_id = ?",
+                    (now, str(event_id), str(plugin_id)),
+                )
+                self._connection.execute(
+                    "UPDATE event_deliveries SET status = 'acked', updated_at = ? "
+                    "WHERE event_id = ? AND plugin_id = ?",
+                    (now, str(event_id), str(plugin_id)),
+                )
+            return exhausted
+
+    def dead_letters(self, plugin_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT event_id, attempt_count, last_error, dead_lettered_at "
+                "FROM event_delivery_failures WHERE plugin_id = ? "
+                "AND dead_lettered_at IS NOT NULL ORDER BY dead_lettered_at",
+                (str(plugin_id),),
+            ).fetchall()
+        return [dict(row) for row in rows]

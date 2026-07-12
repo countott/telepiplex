@@ -62,6 +62,19 @@ class PluginProcess:
         return self.child.pid if self.child is not None else None
 
 
+class RoutedPluginClient:
+    """Stable route handle that follows a process across token rotation."""
+
+    def __init__(self, process: PluginProcess):
+        self.process = process
+
+    async def request(self, *args, **kwargs):
+        client = self.process.client
+        if client is None:
+            raise ContractError("unavailable", "Feature RPC client is unavailable")
+        return await client.request(*args, **kwargs)
+
+
 class PluginSupervisor:
     def __init__(
         self,

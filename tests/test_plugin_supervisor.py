@@ -151,6 +151,21 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
         await supervisor.stop(process)
         broker.unregister.assert_called_with(process.startup_token)
 
+    async def test_route_client_follows_client_rotation_after_restart(self):
+        from app.core.plugin_supervisor import RoutedPluginClient
+
+        from unittest.mock import AsyncMock
+        first = Mock()
+        first.request = AsyncMock(return_value="first")
+        second = Mock()
+        second.request = AsyncMock(return_value="second")
+        process = Mock(client=first)
+        routed = RoutedPluginClient(process)
+
+        self.assertEqual(await routed.request("health", {}), "first")
+        process.client = second
+        self.assertEqual(await routed.request("health", {}), "second")
+
     async def _wait_for(self, predicate, timeout=1):
         import asyncio
 
