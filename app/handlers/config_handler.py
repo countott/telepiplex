@@ -17,6 +17,7 @@ from telegram.warnings import PTBUserWarning
 
 import init
 from app.core.plugin_manager import PluginOperationError
+from app.handlers.plugin_handler import ROUTER_KEY, handle_feature_result
 
 
 CONFIG_SELECT_PLUGIN, CONFIG_SELECT_SECTION, CONFIG_INPUT = range(80, 83)
@@ -28,6 +29,7 @@ _SESSION_KEYS = (
     "core_config_path",
 )
 _SCALAR_TYPES = {"boolean", "integer", "number", "string"}
+_CUSTOM_CONFIG_COMMAND = "x-telepiplex-config-command"
 _SECRET_NAME_RE = re.compile(
     r"(?i)(?:^|_)(?:token|secret|password|api_?key|authorization)(?:$|_)"
 )
@@ -51,6 +53,17 @@ class ConfigSection:
     path: tuple[str, ...]
     title: str
     fields: tuple[ConfigField, ...]
+
+
+def custom_config_command(schema: dict, route) -> str | None:
+    command = str((schema or {}).get(_CUSTOM_CONFIG_COMMAND) or "").strip()
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", command):
+        return None
+    declared = {
+        str(getattr(item, "name", ""))
+        for item in getattr(getattr(route, "manifest", None), "commands", ())
+    }
+    return command if command in declared else None
 
 
 def _resolve_schema(root: dict, schema: dict) -> dict:
@@ -255,6 +268,7 @@ async def _show_config_menu(update, context, *, edit: bool):
             await update.effective_message.reply_text(text)
         return ConversationHandler.END
 
+    router = context.application.bot_data.get(ROUTER_KEY)
     plugin_ids = []
     for status in manager.doctor():
         plugin_id = str(status.get("plugin_id") or "")
@@ -262,7 +276,11 @@ async def _show_config_menu(update, context, *, edit: bool):
             continue
         try:
             view = manager.config(plugin_id)
-            if discover_config_sections(view.get("schema"), view.get("config")):
+            route = router.plugin_route(plugin_id) if router is not None else None
+            if (
+                discover_config_sections(view.get("schema"), view.get("config"))
+                or custom_config_command(view.get("schema"), route)
+            ):
                 plugin_ids.append(plugin_id)
         except Exception:
             continue
@@ -331,11 +349,39 @@ async def select_config_plugin(update, context):
         plugin_id = context.user_data["core_config_plugins"][index]
         manager = context.application.bot_data[MANAGER_KEY]
         view = manager.config(plugin_id)
+        router = context.application.bot_data.get(ROUTER_KEY)
+        route = router.plugin_route(plugin_id) if router is not None else None
+        command = custom_config_command(view.get("schema"), route)
         sections = discover_config_sections(view["schema"], view["config"])
-        if not sections:
+        if not command and not sections:
             raise ConfigInputError("该 Feature 没有可视化配置区块")
     except (ConfigInputError, KeyError, IndexError, TypeError) as exc:
         await query.edit_message_text(f"❌ 配置会话已失效：{_safe_error(exc)}")
+        return ConversationHandler.END
+
+    if command:
+        try:
+            result = await route.client.request(
+                "command.dispatch",
+                {
+                    "command": command,
+                    "args": [],
+                    "text": "/config",
+                    "user_id": update.effective_user.id,
+                    "chat_id": update.effective_chat.id,
+                    "update_id": getattr(update, "update_id", None),
+                },
+                deadline=30,
+                idempotency_key=(
+                    f"telegram:{getattr(update, 'update_id', '')}:config"
+                ),
+            )
+            await handle_feature_result(update, context, route, result)
+        except Exception:
+            await query.edit_message_text(
+                "❌ custom_config_failed：Feature 自定义配置入口暂时不可用。"
+            )
+        _clear_session(context.user_data)
         return ConversationHandler.END
 
     context.user_data["core_config_plugin"] = plugin_id

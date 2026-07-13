@@ -148,6 +148,7 @@ class ConfigHandlerTest(unittest.IsolatedAsyncioTestCase):
     def request(self, *, callback_data="", text=""):
         manager = FakeManager()
         update = Mock()
+        update.update_id = 99
         update.effective_user.id = 1
         update.effective_chat.id = 10
         update.effective_message = Mock()
@@ -159,8 +160,159 @@ class ConfigHandlerTest(unittest.IsolatedAsyncioTestCase):
         update.callback_query.edit_message_text = AsyncMock()
         context = Mock()
         context.user_data = {}
-        context.application.bot_data = {"telepiplex_plugin_manager": manager}
+        context.application.bot_data = {
+            "telepiplex_plugin_manager": manager,
+            "telepiplex_plugin_router": Mock(),
+        }
         return update, context, manager
+
+    async def test_custom_config_feature_is_listed_and_handed_to_feature_session(self):
+        from app.handlers.config_handler import config_command, select_config_plugin
+
+        update, context, manager = self.request(text="/config")
+        manager.views["open115"] = {
+            "plugin_id": "open115",
+            "version": "1.0.0",
+            "schema": {
+                "type": "object",
+                "x-telepiplex-config-command": "config",
+                "properties": {"access_token": {"type": "string"}},
+            },
+            "config": {"access_token": "secret-value"},
+        }
+        manager.doctor = Mock(return_value=[
+            {"plugin_id": "media-search", "state": "healthy"},
+            {"plugin_id": "open115", "state": "healthy"},
+        ])
+        client = AsyncMock()
+        client.request.return_value = {
+            "actions": [{
+                "kind": "send_message",
+                "text": "请选择授权方式",
+                "data": {"keyboard": [[{
+                    "text": "Access / Refresh Token",
+                    "callback_data": "open115:auth:direct",
+                }]]},
+            }],
+            "session": {"state": "open"},
+        }
+        route = SimpleNamespace(
+            plugin_id="open115",
+            client=client,
+            manifest=SimpleNamespace(
+                commands=(SimpleNamespace(name="config"),),
+                callbacks=("open115",),
+            ),
+        )
+        router = context.application.bot_data["telepiplex_plugin_router"]
+        router.plugin_route.side_effect = (
+            lambda plugin_id: route if plugin_id == "open115" else None
+        )
+
+        with patch("app.handlers.config_handler.init.check_user", return_value=True):
+            await config_command(update, context)
+
+        menu = update.effective_message.reply_text.await_args.args[0]
+        self.assertIn("open115", menu)
+        self.assertNotIn("secret-value", menu)
+
+        index = context.user_data["core_config_plugins"].index("open115")
+        update.callback_query.data = f"core-config-plugin:{index}"
+        with patch("app.handlers.config_handler.init.check_user", return_value=True):
+            state = await select_config_plugin(update, context)
+
+        self.assertEqual(state, -1)
+        request = client.request.await_args.args
+        self.assertEqual(request[0], "command.dispatch")
+        self.assertEqual(request[1]["command"], "config")
+        self.assertEqual(
+            context.application.bot_data["telepiplex_plugin_sessions"][(10, 1)]["plugin_id"],
+            "open115",
+        )
+        self.assertEqual(
+            update.effective_message.reply_text.await_args.args[0],
+            "请选择授权方式",
+        )
+
+    async def test_invalid_custom_config_declaration_is_not_listed(self):
+        from app.handlers.config_handler import config_command
+
+        update, context, manager = self.request(text="/config")
+        manager.views = {
+            "open115": {
+                "plugin_id": "open115",
+                "version": "1.0.0",
+                "schema": {
+                    "type": "object",
+                    "x-telepiplex-config-command": "config",
+                    "properties": {"access_token": {"type": "string"}},
+                },
+                "config": {"access_token": "secret-value"},
+            }
+        }
+        manager.doctor = Mock(return_value=[
+            {"plugin_id": "open115", "state": "healthy"},
+        ])
+        route = SimpleNamespace(
+            plugin_id="open115",
+            client=AsyncMock(),
+            manifest=SimpleNamespace(
+                commands=(SimpleNamespace(name="auth"),),
+                callbacks=("open115",),
+            ),
+        )
+        context.application.bot_data["telepiplex_plugin_router"].plugin_route.return_value = route
+
+        with patch("app.handlers.config_handler.init.check_user", return_value=True):
+            state = await config_command(update, context)
+
+        self.assertEqual(state, -1)
+        message = update.effective_message.reply_text.await_args.args[0]
+        self.assertIn("没有已安装", message)
+        self.assertNotIn("secret-value", message)
+        route.client.request.assert_not_awaited()
+
+    async def test_custom_config_dispatch_error_is_sanitized(self):
+        from app.handlers.config_handler import config_command, select_config_plugin
+
+        update, context, manager = self.request(text="/config")
+        manager.views = {
+            "open115": {
+                "plugin_id": "open115",
+                "version": "1.0.0",
+                "schema": {
+                    "type": "object",
+                    "x-telepiplex-config-command": "config",
+                    "properties": {},
+                },
+                "config": {},
+            }
+        }
+        manager.doctor = Mock(return_value=[
+            {"plugin_id": "open115", "state": "healthy"},
+        ])
+        client = AsyncMock()
+        client.request.side_effect = RuntimeError("token=secret-value")
+        route = SimpleNamespace(
+            plugin_id="open115",
+            client=client,
+            manifest=SimpleNamespace(
+                commands=(SimpleNamespace(name="config"),),
+                callbacks=("open115",),
+            ),
+        )
+        context.application.bot_data["telepiplex_plugin_router"].plugin_route.return_value = route
+
+        with patch("app.handlers.config_handler.init.check_user", return_value=True):
+            await config_command(update, context)
+        update.callback_query.data = "core-config-plugin:0"
+        with patch("app.handlers.config_handler.init.check_user", return_value=True):
+            state = await select_config_plugin(update, context)
+
+        self.assertEqual(state, -1)
+        message = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("custom_config_failed", message)
+        self.assertNotIn("secret-value", message)
 
     async def test_command_lists_configurable_features_without_secret_values(self):
         from app.handlers.config_handler import CONFIG_SELECT_PLUGIN, config_command

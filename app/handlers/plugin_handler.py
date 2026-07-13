@@ -298,7 +298,7 @@ async def dynamic_command_gateway(update, context):
             deadline=30,
             idempotency_key=f"telegram:{getattr(update, 'update_id', '')}",
         )
-        await _handle_feature_result(update, context, route, result)
+        await handle_feature_result(update, context, route, result)
     except Exception as exc:
         code = getattr(exc, "code", "feature_command_failed")
         await update.effective_message.reply_text(f"❌ {code}：{_safe_error(exc)}")
@@ -330,7 +330,7 @@ async def dynamic_callback_gateway(update, context):
             deadline=30,
             idempotency_key=f"telegram:{getattr(update, 'update_id', '')}",
         )
-        await _handle_feature_result(update, context, route, result)
+        await handle_feature_result(update, context, route, result)
     except Exception as exc:
         code = getattr(exc, "code", "feature_callback_failed")
         await update.effective_message.reply_text(f"❌ {code}：{_safe_error(exc)}")
@@ -369,13 +369,13 @@ async def dynamic_message_gateway(update, context):
             deadline=30,
             idempotency_key=f"telegram:{getattr(update, 'update_id', '')}",
         )
-        await _handle_feature_result(update, context, route, result)
+        await handle_feature_result(update, context, route, result)
     except Exception as exc:
         code = getattr(exc, "code", "feature_message_failed")
         await update.effective_message.reply_text(f"❌ {code}：{_safe_error(exc)}")
 
 
-async def _handle_feature_result(update, context, route, result: dict):
+async def handle_feature_result(update, context, route, result: dict):
     if not await _render_actions(update, context, route, result):
         return
     session = result.get("session") if isinstance(result, dict) else None
