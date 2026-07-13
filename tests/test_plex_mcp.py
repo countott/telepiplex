@@ -42,7 +42,7 @@ class PlexMcpTest(unittest.TestCase):
             "plex_fix_match", "plex_refresh_chinese_metadata",
             "plex_set_textless_poster", "plex_select_original_audio",
             "plex_select_chi_subtitle", "plex_run_management_pipeline",
-            "plex_retry_job",
+            "plex_retry_job", "plex_apply_metadata_batch",
         })
 
     def test_read_tool_calls_shared_service(self):
@@ -77,6 +77,27 @@ class PlexMcpTest(unittest.TestCase):
             {"job_id": 1, "rating_key": "42", "candidate_guid": "tmdb://20"},
         )
         self.service.apply_operation.assert_called_once()
+
+    def test_metadata_batch_prepares_one_grouped_confirmation(self):
+        from telepiplex_plex.mcp_server import create_plex_mcp
+
+        mcp = create_plex_mcp(self.service, {})
+        changes = [{
+            "action": "refresh_chinese_metadata",
+            "payload": {"rating_key": "42"},
+        }]
+        preview = asyncio.run(
+            mcp._tool_manager.call_tool(
+                "plex_apply_metadata_batch",
+                {"changes": changes},
+                convert_result=False,
+            )
+        )
+
+        self.assertEqual(preview["confirmation_token"], "once")
+        self.service.prepare_operation.assert_called_once_with(
+            "metadata_batch", {"changes": changes}
+        )
 
     def test_bearer_auth_rejects_missing_token_before_mcp_dispatch(self):
         from telepiplex_plex.mcp_server import create_plex_mcp_app

@@ -640,6 +640,32 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertEqual(len(jobs), 2)
         self.assertEqual([job["target"]["episode_number"] for job in jobs], [1, 2])
 
+    def test_one_organized_batch_scans_once_then_validates_each_final_path(self):
+        completion = make_unresolved_standalone_series_completion()
+        contract = completion.result.metadata["media_metadata"]
+        contract["items"][0]["final_path"] = "/Series/Test/Season 01/Test S01E01.mkv"
+        contract["items"].append({
+            "item_id": "episode-2", "content_role": "main_episode",
+            "season_number": 1, "episode_number": 2,
+            "final_path": "/Series/Test/Season 01/Test S01E02.mkv",
+        })
+        plex = FakePlex()
+        service = self.make_service(plex=plex)
+        jobs = service.enqueue_organized_event_jobs({
+            "final_path": "/Series/Test",
+            "selected_path": "/Series",
+            "media_metadata": contract,
+        })
+
+        results = service.run_batch([job["id"] for job in jobs])
+
+        self.assertEqual([job["state"] for job in results], ["completed", "completed"])
+        self.assertEqual(plex.calls.count("snapshot_recent"), 1)
+        self.assertEqual(plex.calls.count("scan_library"), 1)
+        self.assertEqual(plex.calls.count("find_series_episode"), 2)
+        scans = [result["step_results"]["scanning"] for result in results]
+        self.assertEqual(scans[0], scans[1])
+
     def test_contract_location_ambiguity_fails_without_confirmation(self):
         plex = FakePlex()
         plex.find_movie = Mock(return_value=None)
@@ -669,6 +695,7 @@ class PlexManagementServiceTest(unittest.TestCase):
             "select_audio", "select_subtitle",
         ])
         self.assertEqual(result["step_results"]["streams"]["subtitle"]["source"], "external")
+        self.assertTrue(result["step_results"]["artwork"]["attempted"])
 
     def test_artwork_failure_does_not_block_stream_selection(self):
         plex = FakePlex()
@@ -879,6 +906,34 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertEqual(applied["status"], "applied")
         with self.assertRaises(ValueError):
             service.apply_operation("fix_match", preview["payload"], preview["confirmation_token"])
+
+    def test_metadata_changes_share_one_confirmation_token(self):
+        plex = FakePlex()
+        service = self.make_service(plex=plex)
+        changes = [
+            {
+                "action": "refresh_chinese_metadata",
+                "payload": {"rating_key": "42"},
+            },
+            {
+                "action": "set_textless_poster",
+                "payload": {"rating_key": "42", "url": "https://image/poster.jpg"},
+            },
+        ]
+
+        preview = service.prepare_operation("metadata_batch", {"changes": changes})
+        applied = service.apply_operation(
+            "metadata_batch", preview["payload"], preview["confirmation_token"]
+        )
+
+        self.assertEqual(applied["status"], "applied")
+        self.assertEqual(len(applied["result"]["results"]), 2)
+        self.assertIn("refresh_zh_cn", plex.calls)
+        self.assertIn("set_poster_url", plex.calls)
+        with self.assertRaises(ValueError):
+            service.prepare_operation("metadata_batch", {"changes": [{
+                "action": "scan_library", "payload": {"library_id": "12"},
+            }]})
 
 
 if __name__ == "__main__":

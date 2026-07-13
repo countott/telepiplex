@@ -168,6 +168,20 @@ def create_plex_mcp(service, config):
         payload = {"job_id": int(job_id)}
         return _prepare_or_apply(service, "plex_retry_job", payload, confirmation_token)
 
+    @mcp.tool(name="plex_apply_metadata_batch", annotations=WRITE)
+    def plex_apply_metadata_batch(
+        changes: list[dict],
+        confirmation_token: str = "",
+    ):
+        """Prepare or confirm one grouped set of high-risk metadata writes."""
+        payload = {"changes": list(changes or [])}
+        return _prepare_or_apply(
+            service,
+            "metadata_batch",
+            payload,
+            confirmation_token,
+        )
+
     return mcp
 
 

@@ -64,13 +64,27 @@ class PlexFeature:
             if not await asyncio.to_thread(self.jobs.claim, job["id"]):
                 states.append((self.jobs.get(job["id"]) or job)["state"])
                 continue
-            try:
-                self.runtime.spawn(self._run_job(job["id"]), task_id=f"plex-job-{job['id']}")
-            except Exception:
-                self.jobs.update(job["id"], state="interrupted", error="failed to start Plex job task")
-                raise
             started.append(job["id"])
             states.append("running")
+        if started:
+            batch_id = str(
+                request.get("event_id")
+                or payload.get("job_id")
+                or started[0]
+            )
+            try:
+                self.runtime.spawn(
+                    self._run_batch(started),
+                    task_id=f"plex-batch-{batch_id}",
+                )
+            except Exception:
+                for job_id in started:
+                    self.jobs.update(
+                        job_id,
+                        state="interrupted",
+                        error="failed to start Plex batch task",
+                    )
+                raise
         return {
             "accepted": True,
             "job_ids": [job["id"] for job in jobs],
@@ -241,14 +255,37 @@ class PlexFeature:
                     error="interrupted before completion",
                 )
 
+    async def _run_batch(self, job_ids):
+        try:
+            service = await self._ensure_service()
+            await asyncio.to_thread(service.run_batch, list(job_ids))
+        finally:
+            for job_id in job_ids:
+                job = self.jobs.get(job_id)
+                if job and job["state"] in {
+                    "running", "scanning", "locating", "matching",
+                    "localizing", "artwork", "streams",
+                }:
+                    self.jobs.update(
+                        job_id,
+                        state="interrupted",
+                        error="interrupted before batch completion",
+                    )
+
     async def _resume_interrupted(self):
         try:
             await self._ensure_service()
         except Exception:
             return
+        claimed = []
         for job_id in self.interrupted_job_ids:
             if await asyncio.to_thread(self.jobs.claim, job_id):
-                self.runtime.spawn(self._run_job(job_id), task_id=f"plex-job-{job_id}")
+                claimed.append(job_id)
+        if claimed:
+            self.runtime.spawn(
+                self._run_batch(claimed),
+                task_id="plex-resume-batch",
+            )
         self.interrupted_job_ids = []
 
     def _notify_sync(self, user_id, message, confirmation=None):

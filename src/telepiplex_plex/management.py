@@ -260,6 +260,80 @@ class PlexManagementService:
         self._notify_once(completed)
         return self.jobs.get(job_id)
 
+    def run_batch(self, job_ids):
+        """Scan once per library, then run each final-path job independently."""
+        ordered_ids = [int(job_id) for job_id in job_ids]
+        groups = {}
+        for job_id in ordered_ids:
+            job = self.jobs.get(job_id)
+            if not job or job["state"] == "completed":
+                continue
+            if self._step_finished(job, "scanning"):
+                continue
+            library_id = str(self._route_library(job))
+            groups.setdefault(library_id, []).append(job)
+
+        for library_id, jobs in groups.items():
+            started = next((
+                (job.get("step_results") or {}).get("scanning")
+                for job in jobs
+                if "before_rating_keys" in (
+                    (job.get("step_results") or {}).get("scanning") or {}
+                )
+            ), None)
+            if started:
+                before = list(started.get("before_rating_keys") or [])
+            else:
+                before = sorted(self.plex.snapshot_recent(library_id))
+            scan_started = {
+                "status": "started",
+                "library_id": library_id,
+                "before_rating_keys": before,
+                "batch_size": len(jobs),
+            }
+            for job in jobs:
+                self.jobs.update(
+                    job["id"],
+                    state="scanning",
+                    step_results=self._merge_step(job, "scanning", scan_started),
+                    error=None,
+                )
+            try:
+                self.plex.scan_library(library_id)
+            except Exception as exc:
+                message = self._safe_error(exc)
+                for job in jobs:
+                    failed = self.jobs.update(
+                        job["id"], state="failed", error=message
+                    )
+                    self._notify_once(failed)
+                continue
+            scan_result = {
+                "status": "success",
+                "library_id": library_id,
+                "before_rating_keys": before,
+                "batch_size": len(jobs),
+            }
+            for job in jobs:
+                current = self.jobs.get(job["id"])
+                self.jobs.update(
+                    job["id"],
+                    step_results=self._merge_step(
+                        current, "scanning", scan_result
+                    ),
+                    error=None,
+                )
+
+        results = []
+        for job_id in ordered_ids:
+            job = self.jobs.get(job_id)
+            if not job or job["state"] == "failed":
+                if job:
+                    results.append(job)
+                continue
+            results.append(self.run_job(job_id))
+        return results
+
     def _media_metadata(self, job):
         metadata = (job.get("payload") or {}).get("metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
@@ -616,6 +690,7 @@ class PlexManagementService:
             return {
                 "status": "unchanged",
                 "action": "official_artwork_preserved",
+                "attempted": False,
             }
         if mapping_kind == "temporary_related_special":
             identity = contract.get("identity") or {}
@@ -624,10 +699,12 @@ class PlexManagementService:
                 return {
                     "status": "unchanged",
                     "message": "No confirmed custom poster",
+                    "attempted": True,
                 }
             self.plex.set_poster_url(job["rating_key"], poster_url)
             return {
                 "status": "success",
+                "attempted": True,
                 "selected": {
                     "url": poster_url,
                     "source": identity.get("poster_source") or "media_metadata",
@@ -641,9 +718,15 @@ class PlexManagementService:
         chosen = plex_rules.choose_textless_poster(tmdb_posters, fanart_posters)
         if chosen:
             self.plex.set_poster_url(job["rating_key"], chosen["url"])
-            return {"status": "warning" if warnings else "success", "selected": chosen, "warnings": warnings}
+            return {
+                "status": "warning" if warnings else "success",
+                "attempted": True,
+                "selected": chosen,
+                "warnings": warnings,
+            }
         return {
             "status": "warning" if warnings else "unchanged",
+            "attempted": True,
             "message": "No automatic textless poster candidate",
             "plex_candidates": self.plex.list_posters(job["rating_key"]),
             "warnings": warnings,
@@ -806,12 +889,15 @@ class PlexManagementService:
             "plex_select_chi_subtitle": "select_chi_subtitle",
             "plex_run_management_pipeline": "run_management_pipeline",
             "plex_retry_job": "retry_job",
+            "plex_apply_metadata_batch": "metadata_batch",
         }
         return aliases.get(str(action), str(action))
 
     def prepare_operation(self, action, payload):
         action = self._normalize_action(action)
         payload = dict(payload or {})
+        if action == "metadata_batch":
+            payload = self._validated_metadata_batch(payload)
         token = self.jobs.issue_confirmation(
             int(payload.get("job_id") or 0),
             action,
@@ -823,6 +909,31 @@ class PlexManagementService:
             "payload": payload,
             "confirmation_token": token,
         }
+
+    def _validated_metadata_batch(self, payload):
+        changes = payload.get("changes")
+        if not isinstance(changes, list) or not changes or len(changes) > 20:
+            raise ValueError("metadata_batch requires 1 to 20 changes")
+        allowed = {
+            "fix_match",
+            "refresh_chinese_metadata",
+            "set_textless_poster",
+        }
+        normalized = []
+        for change in changes:
+            if not isinstance(change, dict):
+                raise ValueError("metadata_batch change must be an object")
+            action = self._normalize_action(change.get("action"))
+            change_payload = change.get("payload")
+            if action not in allowed or not isinstance(change_payload, dict):
+                raise ValueError(
+                    "metadata_batch only accepts match, localization, and poster writes"
+                )
+            normalized.append({
+                "action": action,
+                "payload": dict(change_payload),
+            })
+        return {"changes": normalized}
 
     def apply_operation(self, action, payload, confirmation_token):
         action = self._normalize_action(action)
@@ -837,6 +948,19 @@ class PlexManagementService:
         return {"status": "applied", "action": action, "result": result}
 
     def _execute_operation(self, action, payload):
+        if action == "metadata_batch":
+            validated = self._validated_metadata_batch(payload)
+            return {
+                "results": [
+                    {
+                        "action": change["action"],
+                        "result": self._execute_operation(
+                            change["action"], change["payload"]
+                        ),
+                    }
+                    for change in validated["changes"]
+                ]
+            }
         if action == "scan_library":
             self.plex.scan_library(payload["library_id"])
             return {"library_id": str(payload["library_id"])}

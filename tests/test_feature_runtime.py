@@ -34,6 +34,7 @@ class FakeService:
     def __init__(self, jobs):
         self.jobs = jobs
         self.runs = 0
+        self.batches = []
 
     def enqueue_organized_event(self, payload):
         return self.jobs.create_or_get(
@@ -51,6 +52,10 @@ class FakeService:
     def run_job(self, job_id):
         self.runs += 1
         return self.jobs.update(job_id, state="completed")
+
+    def run_batch(self, job_ids):
+        self.batches.append(list(job_ids))
+        return [self.run_job(job_id) for job_id in job_ids]
 
     def list_jobs(self, limit=5):
         return self.jobs.list(limit)
@@ -94,10 +99,11 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["state"], "running")
         self.assertTrue(second["duplicate"])
         self.assertEqual(len(self.runtime.tasks), 1)
-        await self.runtime.tasks.pop(f"plex-job-{first['job_id']}")
+        await self.runtime.tasks.pop("plex-batch-job-1")
         third = await self.feature.media_organized(request)
         self.assertEqual(third["state"], "completed")
         self.assertEqual(self.service.runs, 1)
+        self.assertEqual(self.service.batches, [[first["job_id"]]])
 
     async def test_in_progress_job_is_marked_interrupted_then_resumed(self):
         job = self.jobs.create_or_get("old", {"final_path": "/Movies/Old"})
@@ -111,7 +117,7 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.jobs.get(job["id"])["state"], "interrupted")
 
         await runtime.tasks.pop("plex-resume")
-        await runtime.tasks.pop(f"plex-job-{job['id']}")
+        await runtime.tasks.pop("plex-resume-batch")
         self.assertEqual(self.jobs.get(job["id"])["state"], "completed")
 
     async def test_enabled_ai_with_missing_credentials_does_not_break_feature_startup(self):
@@ -152,6 +158,12 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
 
 class FeatureSourceContractTest(unittest.TestCase):
+    def test_mcp_uses_auth_token_config_key(self):
+        config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
+
+        self.assertIn("auth_token", config["mcp"])
+        self.assertNotIn("api_key", config["mcp"])
+
     def test_source_has_no_core_telegram_or_init_imports(self):
         forbidden = []
         for path in (ROOT / "src").rglob("*.py"):
