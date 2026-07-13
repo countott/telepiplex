@@ -135,6 +135,38 @@ class ReleaseCatalogGeneratorTest(unittest.TestCase):
                 [*artifacts[:-1], corrupt],
             )
 
+    def test_rejects_reused_version_with_changed_digest(self):
+        artifacts = self._all_artifacts()
+        previous = {
+            "plugins": {
+                "media-search": {
+                    "versions": {
+                        "1.2.3": {"sha256": "0" * 64}
+                    }
+                }
+            }
+        }
+
+        with self.assertRaises(CatalogBuildError):
+            build_catalog(
+                "countott/telepiplex",
+                "platform-v1.0.0",
+                artifacts,
+                previous_catalog=previous,
+            )
+
+        media_path = next(path for path in artifacts if "media-search" in path.name)
+        previous["plugins"]["media-search"]["versions"]["1.2.3"][
+            "sha256"
+        ] = hashlib.sha256(media_path.read_bytes()).hexdigest()
+        catalog = build_catalog(
+            "countott/telepiplex",
+            "platform-v1.0.0",
+            artifacts,
+            previous_catalog=previous,
+        )
+        self.assertIn("media-search", catalog["plugins"])
+
 
 if __name__ == "__main__":
     unittest.main()

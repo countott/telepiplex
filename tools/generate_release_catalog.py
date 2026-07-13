@@ -43,6 +43,8 @@ def build_catalog(
     repository: str,
     tag: str,
     artifact_paths,
+    *,
+    previous_catalog: dict | None = None,
 ) -> dict:
     repository, tag = _validate_release(repository, tag)
     releases = {}
@@ -69,6 +71,18 @@ def build_catalog(
             raise CatalogBuildError(
                 f"artifact filename must match manifest: {path.name} != {asset_name}"
             )
+        previous_versions = (
+            (((previous_catalog or {}).get("plugins") or {}).get(plugin_id) or {})
+            .get("versions") or {}
+        )
+        previous_entry = previous_versions.get(manifest.version)
+        if isinstance(previous_entry, dict):
+            previous_digest = str(previous_entry.get("sha256") or "").lower()
+            if previous_digest and previous_digest != verified.sha256:
+                raise CatalogBuildError(
+                    f"version digest changed without version bump: "
+                    f"{plugin_id}@{manifest.version}"
+                )
         releases[plugin_id] = {
             "versions": {
                 manifest.version: {
@@ -122,9 +136,16 @@ def write_catalog(
     tag: str,
     artifact_paths,
     output: Path,
+    *,
+    previous_catalog: dict | None = None,
 ) -> Path:
     output = Path(output)
-    catalog = build_catalog(repository, tag, artifact_paths)
+    catalog = build_catalog(
+        repository,
+        tag,
+        artifact_paths,
+        previous_catalog=previous_catalog,
+    )
     payload = yaml.safe_dump(
         catalog,
         allow_unicode=True,
@@ -147,14 +168,26 @@ def main(argv=None) -> int:
     parser.add_argument("--repository", required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--previous-catalog", type=Path)
     parser.add_argument("artifacts", nargs="+", type=Path)
     args = parser.parse_args(argv)
     try:
+        previous_catalog = None
+        if args.previous_catalog:
+            try:
+                previous_catalog = yaml.safe_load(
+                    args.previous_catalog.read_text(encoding="utf-8")
+                ) or {}
+            except (OSError, yaml.YAMLError) as exc:
+                raise CatalogBuildError("previous catalog cannot be read") from exc
+            if not isinstance(previous_catalog, dict):
+                raise CatalogBuildError("previous catalog must contain a mapping")
         output = write_catalog(
             args.repository,
             args.tag,
             args.artifacts,
             args.output,
+            previous_catalog=previous_catalog,
         )
     except CatalogBuildError as exc:
         parser.error(str(exc))
