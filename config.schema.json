@@ -18,9 +18,10 @@
     },
     "plex": {
       "type": "object",
+      "title": "Plex",
       "properties": {
         "base_url": {"type": "string"},
-        "token": {"type": "string"},
+        "token": {"type": "string", "writeOnly": true},
         "timeout": {"type": "number", "minimum": 1, "maximum": 300},
         "scan_poll_interval": {"type": "number", "minimum": 0, "maximum": 300},
         "scan_timeout": {"type": "number", "minimum": 1, "maximum": 3600}
@@ -28,14 +29,15 @@
       "required": ["base_url", "token", "timeout", "scan_poll_interval", "scan_timeout"],
       "additionalProperties": false
     },
-    "tmdb": {"$ref": "#/$defs/metadata_provider"},
-    "fanart": {"$ref": "#/$defs/metadata_provider"},
+    "tmdb": {"$ref": "#/$defs/metadata_provider", "title": "TMDB"},
+    "fanart": {"$ref": "#/$defs/metadata_provider", "title": "Fanart.tv"},
     "ai": {
       "type": "object",
+      "title": "AI",
       "properties": {
         "enabled": {"type": "boolean"},
         "api_url": {"type": "string"},
-        "api_key": {"type": "string"},
+        "api_key": {"type": "string", "writeOnly": true},
         "model": {"type": "string"},
         "timeout": {"type": "number", "minimum": 1, "maximum": 300},
         "max_tool_rounds": {"type": "integer", "minimum": 1, "maximum": 10}
@@ -45,11 +47,12 @@
     },
     "mcp": {
       "type": "object",
+      "title": "MCP",
       "properties": {
         "enabled": {"type": "boolean"},
         "host": {"type": "string"},
         "port": {"type": "integer", "minimum": 1, "maximum": 65535},
-        "auth_token": {"type": "string"}
+        "auth_token": {"type": "string", "writeOnly": true}
       },
       "required": ["enabled", "host", "port", "auth_token"],
       "additionalProperties": false
@@ -59,7 +62,7 @@
     "metadata_provider": {
       "type": "object",
       "properties": {
-        "api_key": {"type": "string"},
+        "api_key": {"type": "string", "writeOnly": true},
         "timeout": {"type": "number", "minimum": 1, "maximum": 300}
       },
       "required": ["api_key", "timeout"],
