@@ -113,7 +113,13 @@ class PluginCatalog:
         plugin_id = match.group("plugin")
         version = match.group("version")
         if self.catalog_url:
-            await self.refresh()
+            try:
+                await self.refresh()
+            except CatalogError:
+                # A previously validated catalog is sufficient for an explicit,
+                # digest-pinned update when the remote endpoint is temporarily
+                # unavailable. Discovery still requires a successful refresh.
+                await asyncio.to_thread(self._catalog_data)
         entry = await asyncio.to_thread(self._entry, plugin_id, version)
         expected_sha256 = str(entry.get("sha256") or "").lower()
         if _SHA256_RE.fullmatch(expected_sha256) is None:

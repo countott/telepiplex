@@ -213,6 +213,47 @@ class PluginCatalogTest(unittest.IsolatedAsyncioTestCase):
             await downgraded.refresh()
         self.assertEqual(raised.exception.code, "insecure_redirect")
 
+    async def test_resolve_uses_valid_cache_when_remote_refresh_fails(self):
+        from app.core.plugin_catalog import PluginCatalog
+
+        artifact = b"cached release"
+        digest = hashlib.sha256(artifact).hexdigest()
+        catalog_payload = yaml.safe_dump({
+            "plugins": {
+                "echo": {
+                    "versions": {
+                        "1.1.0": {
+                            "url": "https://example.test/echo-1.1.0.tpx",
+                            "sha256": digest,
+                        }
+                    }
+                }
+            }
+        }).encode()
+        calls = 0
+
+        def opener(request, timeout=None):
+            del timeout
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return io.BytesIO(catalog_payload)
+            if request.full_url.endswith("catalog.yaml"):
+                raise OSError("network down")
+            return io.BytesIO(artifact)
+
+        catalog = PluginCatalog(
+            "https://example.test/catalog.yaml",
+            self.cache,
+            opener=opener,
+        )
+        await catalog.refresh()
+
+        resolved = await catalog.resolve("echo@1.1.0")
+
+        self.assertEqual(resolved.path.read_bytes(), artifact)
+        self.assertEqual(resolved.expected_sha256, digest)
+
     async def test_remote_catalog_size_limit_is_enforced(self):
         from app.core.plugin_catalog import CatalogError, PluginCatalog
 
