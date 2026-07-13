@@ -98,92 +98,77 @@ Telegram 搜索请求
 | renaming | 文件 mapping、最终路径、移动、清理、整理结果 | 重新定义已确认下载计划 |
 | plex-management | 扫描、最终路径定位、Plex 异常处理 | 重做下载计划或文件 mapping |
 
-## 四、待确认的业务决策
+## 四、业务决策执行状态
 
-### TODO-01 普通搜索是否取消 AI 强依赖
+### TODO-01 普通搜索取消 AI 强依赖（已实现）
 
-- 当前：普通电影和普通剧集仍经过两阶段 AI 规划。
-- 推荐：规则和证据源完成明确普通场景，AI 只处理歧义、关联电影、OVA、Special 和无法解析的范围。
-- 待确认：是否正式改为“规则优先、AI 兜底”。
-- 验收：AI 不可用时，明确的普通电影、整季和单集仍能生成可确认计划。
+- Wikipedia 与无需 Key 的豆瓣证据默认启用；TVDB 和 AI 在配置中启用后参与。
+- 普通条目在多源证据能够严格唯一确认时直接生成 canonical contract，不调用 AI。
+- 只有歧义、复杂关系或规则门禁失败时才调用 AI；AI 不可用不阻止高置信普通电影、整季或单集计划。
 
-### TODO-02 AI 的业务权限边界
+### TODO-02 AI 的业务权限边界（已实现）
 
-- 当前：AI 是搜索规划者，也是 renaming 的 mapping 兜底。
-- 推荐：搜索阶段可生成待确认草案；确认后 AI 只能在 canonical contract 目标集合内做映射。
-- 待确认：是否禁止 AI 在确认后新增媒体身份、季集编号或分类。
-- 验收：任何 AI 输出都不能越过已确认 contract。
+- AI 可以参与搜索草案、下载后的文件映射、未匹配视频清理和 Plex 隔离工具调用。
+- 用户确认后，AI 只能在 canonical contract 的身份、分类和季集目标内做映射，不得新增或改写业务目标。
+- direct magnet 先补做 canonical metadata 规划，再进入同一受约束流程。
 
-### TODO-03 open115 是否完全纯化为下载与存储
+### TODO-03 open115 纯化为下载与存储（已实现）
 
-- 当前：open115 仍可能为单文件套顶层目录并重命名顶层目录。
-- 推荐：open115 只返回真实下载根路径和文件树，所有业务命名交给 renaming。
-- 待确认：是否删除 open115 的业务命名行为。
-- 验收：更换 storage.provider 时不需要复制 115 特有命名逻辑。
+- open115 不再为单文件套目录，不再接受或执行业务顶层命名。
+- `download.completed` 返回未经改名的 `download_root`/`final_path`、真实 `resource_name`、完整 `file_tree`，并透传 canonical metadata 和 Prowlarr release 证据。
+- 所有业务命名、视频筛选和清理由 renaming 承担。
 
-### TODO-04 115 授权体验
+### TODO-04 115 双授权体验（已实现）
 
-- 当前：`/auth` 主要检查配置 token；刷新 token 的完整持久化体验仍不完善。
-- 推荐：Telegram QR 授权作为可选入口；token 刷新原子写回 Feature 私有配置且不进入日志。
-- 待确认：是否恢复 QR 授权并实现 token 自动持久化。
-- 验收：Core 或 Feature 重启后不需要重复人工填写仍有效的 token。
+- `/auth` 提供互相独立的“现有 Access/Refresh Token”与“115 扫码授权”入口。
+- 扫码路线使用 PKCE；两条路线、扫码换取 Token 和后续刷新均通过同一原子存储器写回 Feature 私有配置。
+- 私有配置权限为 `0600`；消息、事件、日志和异常不输出 Token。
 
-### TODO-05 普通电影的主视频选择
+### TODO-05 普通电影主视频选择（已实现）
 
-- 当前：普通电影主要选择目录内最大视频，成功后清理源目录。
-- 风险：花絮、错误版本或异常大文件可能被选成主电影。
-- 推荐：已确认计划文件名或唯一候选优先；大小只作为可解释兜底。
-- 待确认：主视频判定是否加入文件名、时长、分辨率和大小阈值。
-- 验收：花絮或错误大文件不会覆盖目标电影。
+- 固定顺序为 contract `source_hint`、唯一视频、Prowlarr 片源文件名唯一匹配、AI 多证据判断、可解释大小比例兜底。
+- 多版本候选时 AI 输入包含 canonical evidence、Prowlarr release、下载根和完整文件树；输出必须精确引用真实文件，并明确其余视频的清理决策。
+- 大小不再作为默认首选依据。
 
-### TODO-06 未匹配的大视频如何处理
+### TODO-06 未匹配大视频（已实现）
 
-- 已确认：小视频和其他非目标类型可以清理。
-- 未确认：mapping 失败但体积较大的视频，是清理、保留原地，还是进入 `/未整理`。
-- 推荐：大视频进入未整理并通知，小视频按阈值清理。
-- 验收：可能属于下载计划的大视频不会静默删除。
+- 明确小样片仍可按大小规则清理。
+- 未匹配的大视频必须由 AI 明确列入 `discard_files`；AI 未确认时整个下载根进入 `/未整理`，不会静默删除。
 
-### TODO-07 删除 renaming 的 legacy 无 contract 路径
+### TODO-07 保留并修正 legacy 无 contract 路径（已实现）
 
-- 当前：没有 canonical contract 时，renaming 仍可能重新查 TVDB 并调用 AI 推断。
-- 推荐：media-search 成为唯一正常入口后，先告警一个版本，再删除 legacy 路径。
-- 待确认：是否允许无 contract 的下载继续进入自动整理。
-- 验收：renaming 只消费 canonical contract，不重复承担搜索职责。
+- 无 contract 路径不删除，供 direct magnet 使用。
+- renaming 先调用 `media.search.resolve_metadata`，由 media-search 统一重新查询 Wikipedia、豆瓣、TVDB，并在严格证据不足时调用 AI。
+- 成功后转换为 canonical contract 再整理；回查失败时保留旧 TVDB+AI 兼容尝试，仍无法确认则进入 `/未整理`，禁止仅凭文件名自动命名电影。
 
-### TODO-08 mapping 失败的落点与恢复方式
+### TODO-08 mapping 失败落点（已实现）
 
-- 当前：完整 mapping 失败可进入 `/未整理`；发生部分移动后停止自动重放。
-- 推荐：未发生移动时整包进入未整理；部分移动后冻结现场并输出恢复清单。
-- 待确认：是否增加显式人工恢复命令。
-- 验收：通知列出正式目录、未处理文件、失败文件、清理结果和人工动作。
+- 目标路径冲突、映射不完整或 AI 无法确认时，必须在第一次目标写操作前终止，并把整个下载根移动到 `/未整理`。
+- 已知业务冲突不再产生部分移动结果。
+- 外部存储在执行中发生不可预测 I/O 中断时仍冻结现场、停止自动重放并通知人工恢复，不能伪装为可安全回滚的业务冲突。
 
-### TODO-09 Plex 扫描粒度
+### TODO-09 Plex 扫描粒度（已实现）
 
-- 当前：电影一个 job，剧集每集一个 job；可能对同一批次重复触发媒体库扫描。
-- 推荐：一个 `media.organized` 批次只扫描一次，再按最终路径逐项验证。
-- 待确认：job 保持逐条但 scan 合并，还是改为完整批次 job。
-- 验收：同一下载批次不会重复扫描相同 Plex Library。
+- job 继续按最终电影或剧集文件逐条持久化。
+- 一个 `media.organized` 批次按 Plex Library 只记录一次扫描前快照并扫描一次，再按各自最终路径逐项定位验证。
+- 已完成的 scanning step 在重试和中断恢复时复用，不强拆 Plex 自身扫描行为。
 
-### TODO-10 Plex 普通媒体自动化边界
+### TODO-10 Plex 普通媒体自动化边界（已实现）
 
-- 当前：普通条目可执行 scan、locate、match、中文刷新、海报和 stream 选择。
-- 推荐：规范命名的普通电影与剧集交给 Plex 自动匹配；Feature 只负责扫描、出现校验、异常修复和临时 S00 patch。
-- 待确认：普通入库是否停止自动 Fix Match、海报替换和音轨/字幕写操作。
-- 验收：规范资源只需扫描即可入库，复杂行为只在异常路径触发。
+- 普通媒体固定执行 `scan -> locate -> match -> zh-CN -> artwork -> streams` 一次。
+- artwork 步骤必须尝试 TMDB/Fanart 无字海报并写入 Plex；无候选或外部服务失败时记录 warning，不伪造替换成功，也不重复覆盖。
+- TVDB 官方 Special 的保留规则继续作为复杂 patch，不改变普通媒体链路。
 
-### TODO-11 Plex MCP 写工具收缩
+### TODO-11 Plex MCP 写确认（已实现）
 
-- 当前：MCP 同时暴露查询、scan、Fix Match、中文刷新、海报、音轨、字幕和 pipeline 操作。
-- 推荐：保留只读查询、scan、必要的 Fix Match 和 job retry；高风险写操作需要一次性人工确认。
-- 待确认：最终保留哪些 MCP 写工具。
-- 验收：AI 不能在没有人工确认时直接执行高风险 Plex 写操作。
+- 保留现有经确认需要的查询、扫描、匹配、海报、音轨、字幕和 job 工具；每个写工具继续需要一次性确认 Token。
+- 新增 `plex_apply_metadata_batch`，只允许把 Fix Match、中文元数据刷新和无字海报设置打包为一次人工确认。
+- 扫描、任务重试、音轨和字幕不能混入元数据批次；非 loopback MCP 必须配置 `mcp.auth_token`。
 
-### TODO-12 统一失败与 dead-letter 告警
+### TODO-12 统一失败与 dead-letter 告警（已确认延期）
 
-- 当前：业务失败主要由各 Feature 通知；Core dead-letter 主要通过 `/plugin doctor` 查看。
-- 推荐：Core 报告事件投递失败，各 Feature 报告业务失败，dead-letter 主动发送 Telegram 告警并提供恢复入口。
-- 待确认：是否建立统一失败任务视图和主动通知。
-- 验收：任何终止自动处理的任务都能被用户主动看到。
+- 当前继续由各 Feature 报告业务失败，Core dead-letter 通过 `/plugin doctor` 查看。
+- 等业务规则稳定后再设计统一失败任务视图、主动 Telegram 告警和恢复入口；本轮不实现。
 
 ## 五、运维与发布 TODO
 
@@ -212,18 +197,14 @@ Telegram 搜索请求
 - 已实现：精确 `name@version` 和本地 `.tpx` 路径继续作为离线与运维入口。
 - 验收完成：普通使用者不需要进入 ttyd、克隆分支、安装构建依赖或手工计算 SHA-256。
 
-## 六、建议评审顺序
+## 六、后续评审顺序
 
-1. TODO-09、TODO-10、TODO-11：先收缩 Plex 普通入库与 MCP 边界。
-2. TODO-05、TODO-06、TODO-08：确定主视频、删除、未整理和恢复策略。
-3. TODO-01、TODO-02、TODO-07：确定规则、AI 和 legacy 的最终边界。
-4. TODO-03、TODO-04：纯化 open115 和授权体验。
-5. TODO-12：补齐统一失败告警。
-6. OPS-TODO-01、OPS-TODO-02：完成面向普通使用者的发布和安装体验。
+1. 以真实下载验证 TODO-03 到 TODO-11 的端到端运行契约。
+2. 业务规则稳定后重新启动 TODO-12 的统一失败与 dead-letter 告警设计。
 
 ## 七、执行规则
 
-- 每个 TODO 必须先由用户明确确认业务结论。
-- 确认后先写设计文档，再写测试，最后实现。
+- 每个新增 TODO 必须先由用户明确确认业务结论。
+- 确认后先写设计文档，再写测试，最后实现；本轮 TODO-01 至 TODO-11 已按该流程完成。
 - P2、P3 不因本清单更新而自动恢复。
 - 不把未确认的推荐方向当成已决定规则。
