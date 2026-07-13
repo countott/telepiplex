@@ -25,6 +25,10 @@ _USAGE = (
     "/plugin doctor"
 )
 _SAFE_ACTIONS = {"send_message", "edit_message"}
+_CORE_UPDATE_CALLBACK_RE = re.compile(
+    r"^core-plugin-update:(?P<action>confirm|decline):"
+    r"(?P<reference>[a-z][a-z0-9-]{0,63}@\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$"
+)
 
 
 def _safe_error(value) -> str:
@@ -82,6 +86,46 @@ async def plugin_command(update, context):
         await message.reply_text(f"❌ {exc.code}：{_safe_error(exc)}")
     except Exception as exc:
         await message.reply_text(f"❌ plugin_operation_failed：{type(exc).__name__}")
+
+
+async def plugin_update_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+    if not init.check_user(update.effective_user.id):
+        await query.edit_message_text("⚠️ 当前账号无权管理 Feature 插件。")
+        return
+
+    match = _CORE_UPDATE_CALLBACK_RE.fullmatch(str(query.data or ""))
+    if match is None:
+        await query.edit_message_text("❌ invalid_update_callback：更新请求无效。")
+        return
+
+    reference = match.group("reference")
+    if match.group("action") == "decline":
+        await query.edit_message_text(f"已暂不更新 Feature：{reference}")
+        return
+
+    manager = context.application.bot_data.get(MANAGER_KEY)
+    if manager is None:
+        await query.edit_message_text("❌ Feature 插件管理器尚未初始化。")
+        return
+
+    try:
+        await query.edit_message_text(f"⏳ Feature 更新处理中：{reference}")
+        result = await manager.update(reference)
+        _clear_plugin_sessions(context.application.bot_data, result.plugin_id)
+        await query.edit_message_text(
+            f"✅ {result.message}\n"
+            f"插件：{result.plugin_id}\n"
+            f"版本：{result.version}\n"
+            f"状态：{result.state}"
+        )
+    except PluginOperationError as exc:
+        await query.edit_message_text(f"❌ {exc.code}：{_safe_error(exc)}")
+    except Exception as exc:
+        await query.edit_message_text(
+            f"❌ plugin_operation_failed：{type(exc).__name__}"
+        )
 
 
 def _format_status(status: dict) -> str:

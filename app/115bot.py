@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 
-from telegram import BotCommand, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     Application,
@@ -30,11 +30,13 @@ from app.core.plugin_catalog import PluginCatalog
 from app.core.plugin_manager import PluginManager
 from app.core.plugin_store import PluginStore
 from app.core.plugin_supervisor import PluginSupervisor
+from app.core.plugin_update_monitor import PluginUpdateMonitor
 from app.handlers.plugin_handler import (
     dynamic_callback_gateway,
     dynamic_command_gateway,
     dynamic_message_gateway,
     plugin_command,
+    plugin_update_callback,
 )
 try:
     from app.utils.message_queue import add_task_to_queue, queue_worker
@@ -62,6 +64,7 @@ SENSITIVE_CONFIG_KEYWORDS = (
     "cookie",
     "authorization",
 )
+PLUGIN_UPDATE_TASK_KEY = "telepiplex_plugin_update_task"
 
 
 def get_version(md_format=False):
@@ -136,8 +139,8 @@ def build_plugin_manager(config=None, core_database=None):
         runtime_root=runtime_root,
         broker=broker,
     )
-    catalog_path = Path(str(plugin_config.get("catalog") or root / "catalog.yaml"))
-    catalog = PluginCatalog(catalog_path, root / ".cache")
+    catalog_source = str(plugin_config.get("catalog") or root / "catalog.yaml")
+    catalog = PluginCatalog(catalog_source, root / ".cache")
     manager = PluginManager(
         store=PluginStore(root),
         supervisor=supervisor,
@@ -197,6 +200,40 @@ async def send_bot_message_safely(bot, *, chat_id, text, **kwargs):
         if init.logger:
             init.logger.warn(f"Telegram 消息发送超时/网络异常，消息可能已成功送达: {e}")
         return False
+
+
+async def send_plugin_update_notification(application, update):
+    allowed_user = (init.bot_config or {}).get("allowed_user")
+    if allowed_user is None or str(allowed_user).strip() == "":
+        if init.logger:
+            init.logger.warn("未配置 allowed_user，跳过 Feature 更新通知。")
+        return False
+
+    confirm_data = f"core-plugin-update:confirm:{update.reference}"
+    decline_data = f"core-plugin-update:decline:{update.reference}"
+    if max(len(confirm_data.encode("utf-8")), len(decline_data.encode("utf-8"))) > 64:
+        if init.logger:
+            init.logger.warn("Feature 更新引用过长，无法生成 Telegram 确认按钮。")
+        return False
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("确认更新", callback_data=confirm_data),
+        InlineKeyboardButton("暂不更新", callback_data=decline_data),
+    ]])
+    commit = str(getattr(update, "source_commit", "") or "")
+    commit_line = f"\n来源提交：{commit[:12]}" if commit else ""
+    return await send_bot_message_safely(
+        application.bot,
+        chat_id=allowed_user,
+        text=(
+            "🆕 发现兼容的 Feature 更新\n\n"
+            f"插件：{update.plugin_id}\n"
+            f"当前版本：{update.current_version}\n"
+            f"目标版本：{update.target_version}"
+            f"{commit_line}\n\n"
+            "仅在点击“确认更新”后执行；Core 不会静默更新。"
+        ),
+        reply_markup=keyboard,
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -326,6 +363,17 @@ async def run_application_polling(application, after_start=None, stop_event=None
         if getattr(application, "running", False):
             await application.stop()
         bot_data = getattr(application, "bot_data", None)
+        update_task = (
+            bot_data.pop(PLUGIN_UPDATE_TASK_KEY, None)
+            if isinstance(bot_data, dict)
+            else None
+        )
+        if update_task is not None:
+            update_task.cancel()
+            try:
+                await update_task
+            except asyncio.CancelledError:
+                pass
         manager = bot_data.get("telepiplex_plugin_manager") if isinstance(bot_data, dict) else None
         if manager is not None:
             await manager.close()
@@ -338,14 +386,29 @@ def configure_application(application, manager):
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reload", reload))
     application.add_handler(CommandHandler("plugin", plugin_command))
+    application.add_handler(CallbackQueryHandler(
+        plugin_update_callback,
+        pattern=r"^core-plugin-update:",
+    ))
     application.add_handler(CallbackQueryHandler(dynamic_callback_gateway))
     application.add_handler(MessageHandler(filters.COMMAND, dynamic_command_gateway))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, dynamic_message_gateway))
 
 
-async def start_core_runtime(manager):
+async def start_core_runtime(application, manager):
     await manager.start()
     queue_core_startup_notice()
+    plugin_config = (init.bot_config or {}).get("plugins") or {}
+    monitor = PluginUpdateMonitor(
+        manager,
+        lambda update: send_plugin_update_notification(application, update),
+        interval=float(plugin_config.get("catalog_refresh_interval") or 21600),
+        logger=init.logger,
+    )
+    application.bot_data[PLUGIN_UPDATE_TASK_KEY] = asyncio.create_task(
+        monitor.run(),
+        name="telepiplex-plugin-update-monitor",
+    )
 
 
 if __name__ == "__main__":
@@ -379,7 +442,7 @@ if __name__ == "__main__":
     try:
         asyncio.run(run_application_polling(
             application,
-            after_start=lambda: start_core_runtime(plugin_manager),
+            after_start=lambda: start_core_runtime(application, plugin_manager),
         ))
     except KeyboardInterrupt:
         init.logger.info("程序已被用户终止（Ctrl+C）。")

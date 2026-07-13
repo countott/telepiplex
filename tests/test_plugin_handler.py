@@ -272,6 +272,69 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         sessions = context.application.bot_data["telepiplex_plugin_sessions"]
         self.assertEqual(list(sessions.values())[0]["plugin_id"], "other")
 
+    async def test_core_update_callback_requires_authorization_and_confirmation(self):
+        from app.handlers.plugin_handler import plugin_update_callback
+
+        update, context, manager = self._request([], user_id=1)
+        update.callback_query.data = "core-plugin-update:confirm:echo@1.1.0"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_update_callback(update, context)
+
+        self.assertEqual(manager.calls, [("update", "echo@1.1.0")])
+        update.callback_query.answer.assert_awaited_once()
+        self.assertIn(
+            "1.0.0",
+            update.callback_query.edit_message_text.await_args_list[-1].args[0],
+        )
+
+        update, context, manager = self._request([], user_id=2)
+        update.callback_query.data = "core-plugin-update:confirm:echo@1.1.0"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=False):
+            await plugin_update_callback(update, context)
+        self.assertEqual(manager.calls, [])
+
+    async def test_core_update_callback_can_decline_without_update(self):
+        from app.handlers.plugin_handler import plugin_update_callback
+
+        update, context, manager = self._request([], user_id=1)
+        update.callback_query.data = "core-plugin-update:decline:echo@1.1.0"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_update_callback(update, context)
+
+        self.assertEqual(manager.calls, [])
+        self.assertIn(
+            "暂不更新",
+            update.callback_query.edit_message_text.await_args.args[0],
+        )
+
+    async def test_core_update_callback_sanitizes_manager_errors(self):
+        from app.core.plugin_manager import PluginOperationError
+        from app.handlers.plugin_handler import plugin_update_callback
+
+        update, context, manager = self._request([], user_id=1)
+        update.callback_query.data = "core-plugin-update:confirm:echo@1.1.0"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        manager.update = AsyncMock(side_effect=PluginOperationError(
+            "update_failed",
+            "token=secret-value",
+        ))
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_update_callback(update, context)
+
+        message = update.callback_query.edit_message_text.await_args_list[-1].args[0]
+        self.assertIn("update_failed", message)
+        self.assertNotIn("secret-value", message)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,7 +4,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,13 +77,25 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
     async def test_shutdown_stops_telegram_intake_before_feature_manager(self):
         bot_module = await asyncio.to_thread(load_bot_module)
         events = []
+
+        async def monitor():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                events.append("monitor.cancel")
+
+        monitor_task = asyncio.create_task(monitor())
+        await asyncio.sleep(0)
         manager = Mock()
         manager.close = AsyncMock(side_effect=lambda: events.append("manager.close"))
         updater = Mock(running=True)
         updater.start_polling = AsyncMock()
         updater.stop = AsyncMock(side_effect=lambda: events.append("updater.stop"))
         application = Mock(running=True)
-        application.bot_data = {"telepiplex_plugin_manager": manager}
+        application.bot_data = {
+            "telepiplex_plugin_manager": manager,
+            "telepiplex_plugin_update_task": monitor_task,
+        }
         application.initialize = AsyncMock()
         application.start = AsyncMock()
         application.stop = AsyncMock(side_effect=lambda: events.append("application.stop"))
@@ -101,9 +114,68 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events, [
             "updater.stop",
             "application.stop",
+            "monitor.cancel",
             "manager.close",
             "application.shutdown",
         ])
+
+    async def test_update_notification_contains_one_click_and_decline_buttons(self):
+        bot_module = await asyncio.to_thread(load_bot_module)
+        application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        update = SimpleNamespace(
+            plugin_id="echo",
+            current_version="1.0.0",
+            target_version="1.1.0",
+            reference="echo@1.1.0",
+            source_commit="b" * 40,
+        )
+
+        with patch.object(bot_module.init, "bot_config", {"allowed_user": 42}):
+            sent = await bot_module.send_plugin_update_notification(
+                application, update
+            )
+
+        self.assertTrue(sent)
+        kwargs = application.bot.send_message.await_args.kwargs
+        self.assertEqual(kwargs["chat_id"], 42)
+        self.assertIn("echo", kwargs["text"])
+        buttons = kwargs["reply_markup"].inline_keyboard
+        self.assertEqual(
+            buttons[0][0].callback_data,
+            "core-plugin-update:confirm:echo@1.1.0",
+        )
+        self.assertEqual(
+            buttons[0][1].callback_data,
+            "core-plugin-update:decline:echo@1.1.0",
+        )
+
+    async def test_start_core_runtime_starts_cancellable_update_monitor(self):
+        bot_module = await asyncio.to_thread(load_bot_module)
+        manager = SimpleNamespace(
+            start=AsyncMock(),
+            available_updates=AsyncMock(return_value=[]),
+        )
+        application = SimpleNamespace(
+            bot=SimpleNamespace(send_message=AsyncMock()),
+            bot_data={},
+        )
+        config = {
+            "allowed_user": 42,
+            "plugins": {"catalog_refresh_interval": 300},
+        }
+
+        with (
+            patch.object(bot_module.init, "bot_config", config),
+            patch.object(bot_module, "queue_core_startup_notice"),
+        ):
+            await bot_module.start_core_runtime(application, manager)
+            task = application.bot_data["telepiplex_plugin_update_task"]
+            await asyncio.sleep(0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        manager.start.assert_awaited_once()
 
 
 if __name__ == "__main__":
