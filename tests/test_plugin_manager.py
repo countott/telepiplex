@@ -458,6 +458,34 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.router.command_route("consume"))
         self.assertTrue(self.store.active("aaa-consumer").enabled)
 
+    async def test_available_updates_compares_only_active_versions(self):
+        await self.manager.install(self._artifact(plugin_id="echo", version="1.0.0"))
+
+        class Resolver:
+            def __init__(self):
+                self.calls = []
+
+            async def available_updates(self, installed, core_api_version):
+                self.calls.append((installed, core_api_version))
+                return [SimpleNamespace(
+                    plugin_id="echo",
+                    current_version="1.0.0",
+                    target_version="1.1.0",
+                )]
+
+        resolver = Resolver()
+        self.manager._artifact_resolver = resolver
+
+        updates = await self.manager.available_updates()
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(resolver.calls, [({"echo": "1.0.0"}, "1.0")])
+
+    async def test_available_updates_is_empty_for_basic_resolver(self):
+        self.manager._artifact_resolver = SimpleNamespace(resolve=None)
+
+        self.assertEqual(await self.manager.available_updates(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

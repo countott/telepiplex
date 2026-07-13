@@ -244,6 +244,23 @@ class PluginManager:
             await self.broker.start()
         return await self.restore_active()
 
+    async def available_updates(self):
+        resolver = self._artifact_resolver
+        discover = getattr(resolver, "available_updates", None)
+        if not callable(discover):
+            return []
+        refresh = getattr(resolver, "refresh", None)
+        if callable(refresh):
+            await refresh()
+        installed = {
+            item.plugin_id: item.version
+            for item in self.store.list_installed()
+            if item.active
+        }
+        if not installed:
+            return []
+        return await discover(installed, self.core_api_version)
+
     def status(self, plugin_id: str) -> dict:
         release = self.store.active(plugin_id)
         if release is None:
