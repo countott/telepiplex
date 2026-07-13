@@ -25,9 +25,12 @@ class PluginUpdateMonitor:
         try:
             updates = await self.manager.available_updates()
         except Exception as exc:
+            error_code = str(
+                getattr(exc, "code", type(exc).__name__)
+            )[:100]
             self._warn(
                 "Feature 更新目录检查失败；本轮已跳过，Core 将继续运行："
-                f"{type(exc).__name__}"
+                f"{error_code}"
             )
             return []
 

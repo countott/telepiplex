@@ -48,7 +48,33 @@ class PluginUpdateMonitorTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
 
+    async def test_catalog_failure_warning_uses_stable_code_without_details(self):
+        from app.core.plugin_catalog import CatalogError
+        from app.core.plugin_update_monitor import PluginUpdateMonitor
+
+        warnings = []
+        manager = SimpleNamespace(
+            available_updates=AsyncMock(
+                side_effect=CatalogError(
+                    "catalog_unavailable",
+                    "token=secret",
+                )
+            )
+        )
+        monitor = PluginUpdateMonitor(
+            manager,
+            AsyncMock(),
+            interval=300,
+            logger=SimpleNamespace(warn=warnings.append),
+        )
+
+        await monitor.run_once()
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("catalog_unavailable", warnings[0])
+        self.assertNotIn("CatalogError", warnings[0])
+        self.assertNotIn("secret", warnings[0])
+
 
 if __name__ == "__main__":
     unittest.main()
-
