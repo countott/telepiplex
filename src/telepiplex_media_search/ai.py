@@ -150,7 +150,7 @@ JSON结构：
 """
 
 SEARCH_HYPOTHESIS_PROMPT = """你是影视搜索检索假设生成器。只返回JSON。
-每次搜索必须执行本步骤。区分用户明确表达与模型推断；保留同名电影/剧集歧义。
+本步骤只处理严格规则和首轮证据未能唯一确认的场景。区分用户明确表达与模型推断；保留同名电影/剧集歧义。
 输出 status、hypotheses、source_queries 和 warnings。source_queries 必须分别包含 wikipedia、douban、tvdb 数组。
 不得输出 Prowlarr query，不得冻结最终目录，不得分配临时 S00E100+。
 JSON结构：
@@ -159,8 +159,8 @@ JSON结构：
 """
 
 MEDIA_METADATA_DRAFT_PROMPT = """你是影视中立元数据规划器。只返回JSON。
-AI是主决策层；Wikipedia、豆瓣和TVDB是可失败的证据提供者。
-每次搜索都必须使用两阶段AI，并读取Wikipedia、豆瓣和TVDB的状态；任一证据源server_down不能阻止第二阶段AI。
+严格规则无法唯一确认时，AI负责完整分析媒体身份、关系和范围；Wikipedia、豆瓣和TVDB是可失败的证据提供者。
+读取Wikipedia、豆瓣和TVDB的状态；任一证据源server_down不能阻止第二阶段AI。
 引用server_down或AI补出的来源条目时，source_entry必须标明availability/verification，并在warnings中明确说明未实时验证。
 只要存在对应剧集版，电影版默认归入目标剧集Season 00；优先TVDB官方Special。
 standalone只允许在不存在剧集关联时使用，target_series必须为空，season_number和episode_number必须为null。
@@ -316,12 +316,17 @@ def _without_prowlarr_query(value):
     return value
 
 
-def infer_search_hypotheses_with_ai(raw_query: str):
+def infer_search_hypotheses_with_ai(context):
     if not check_ai_api_available():
         return None
 
-    prompt = SEARCH_HYPOTHESIS_PROMPT + str(raw_query or "").strip()
-    _log_ai_info(f"AI搜索假设输入 raw={_compact_json_for_log(raw_query)}")
+    prompt_input = (
+        json.dumps(context, ensure_ascii=False, indent=2)
+        if isinstance(context, dict)
+        else str(context or "").strip()
+    )
+    prompt = SEARCH_HYPOTHESIS_PROMPT + prompt_input
+    _log_ai_info(f"AI搜索假设输入 context={_compact_json_for_log(context)}")
     result = chat_completion(prompt, max_tokens=4096)
     _log_ai_info(f"AI搜索假设原始响应 result={_compact_json_for_log(result)}")
     parsed = parse_ai_json_response(result)
@@ -480,4 +485,3 @@ def get_movie_tmdb_name_with_ai(movie_desc):
     except Exception as e:
         runtime_context.logger.error(f"调用AI接口出错: {e}")
         return None
-

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unicodedata
 from collections.abc import Callable
 
@@ -12,6 +13,7 @@ from .ai import (
     infer_media_metadata_draft_with_ai,
     infer_search_hypotheses_with_ai,
 )
+from .deterministic import build_rule_hypotheses, evaluate_deterministic_plan
 from .search_plan import (
     TEMPORARY_MAPPING_KIND,
     TemporarySpecialAllocator,
@@ -246,30 +248,56 @@ def _matching_tvdb_official_candidates(
     ]
 
 
-async def build_confirmable_search_plan(
-    raw_query: str,
+def _merge_evidence_passes(
+    first: list[dict],
+    second: list[dict],
+) -> list[dict]:
+    merged = {}
+    for item in [*(first or []), *(second or [])]:
+        if not isinstance(item, dict):
+            continue
+        provider = _text(item.get("source")).casefold()
+        if not provider:
+            continue
+        target = merged.setdefault(provider, {
+            "source": provider,
+            "status": "not_found",
+            "facts": [],
+            "source_urls": [],
+            "error": "",
+        })
+        status = _text(item.get("status")).casefold() or "invalid"
+        if status == "ok" or target["status"] != "ok":
+            target["status"] = status
+        seen_facts = {
+            json.dumps(fact, ensure_ascii=False, sort_keys=True, default=str)
+            for fact in target["facts"]
+        }
+        for fact in item.get("facts") or []:
+            key = json.dumps(fact, ensure_ascii=False, sort_keys=True, default=str)
+            if key not in seen_facts:
+                target["facts"].append(fact)
+                seen_facts.add(key)
+        for url in item.get("source_urls") or []:
+            if url and url not in target["source_urls"]:
+                target["source_urls"].append(url)
+        error = _text(item.get("error"))
+        if error and error not in target["error"]:
+            target["error"] = "; ".join(
+                value for value in (target["error"], error) if value
+            )
+    return list(merged.values())
+
+
+def _finalize_draft(
+    draft: dict,
+    *,
     plan_id: str,
-    providers: dict[str, Callable],
+    sources: list[dict],
+    decision: dict,
     occupied_loader: Callable[[dict], set[int]],
     allocator: TemporarySpecialAllocator,
 ) -> dict:
-    hypotheses = await asyncio.to_thread(infer_search_hypotheses_with_ai, raw_query)
-    if not isinstance(hypotheses, dict):
-        _log_info(f"ai_stage=hypothesis status=unavailable metadata_id={plan_id}")
-        raise SearchPlanningError("ai_hypothesis_unavailable")
-    _log_info(f"ai_stage=hypothesis status=ok metadata_id={plan_id}")
-    sources = await collect_evidence(hypotheses, providers)
-    context = {
-        "raw_query": raw_query,
-        "plan_id": plan_id,
-        "hypotheses": hypotheses,
-        "sources": sources,
-    }
-    draft = await asyncio.to_thread(infer_media_metadata_draft_with_ai, context)
-    if not isinstance(draft, dict):
-        _log_info(f"ai_stage=media_metadata status=unavailable metadata_id={plan_id}")
-        raise SearchPlanningError("ai_media_metadata_unavailable")
-    _log_info(f"ai_stage=media_metadata status=ok metadata_id={plan_id}")
     draft["plan_id"] = plan_id
     contract = (
         draft.get("media_metadata")
@@ -282,6 +310,7 @@ async def build_confirmable_search_plan(
     provider_statuses, provider_support = _provider_status_and_support(sources)
     evidence["provider_statuses"] = provider_statuses
     evidence["provider_support"] = provider_support
+    evidence["decision"] = decision
     verified_specials = _verified_tvdb_special_candidates(sources)
     evidence.pop("tvdb_official_special", None)
     evidence["verified_tvdb_special_candidates"] = verified_specials
@@ -302,9 +331,81 @@ async def build_confirmable_search_plan(
     except Exception as exc:
         raise SearchPlanningError("temporary_occupancy_unavailable") from exc
     try:
-        plan = finalize_search_plan(draft, allocator, occupied)
+        return finalize_search_plan(draft, allocator, occupied)
     except ValueError as exc:
         raise SearchPlanningError("invalid_media_metadata") from exc
+
+
+async def build_confirmable_search_plan(
+    raw_query: str,
+    plan_id: str,
+    providers: dict[str, Callable],
+    occupied_loader: Callable[[dict], set[int]],
+    allocator: TemporarySpecialAllocator,
+) -> dict:
+    rule_hypotheses = build_rule_hypotheses(raw_query)
+    first_sources = await collect_evidence(rule_hypotheses, providers)
+    deterministic = evaluate_deterministic_plan(
+        plan_id, raw_query, first_sources
+    )
+    if deterministic.plan is not None:
+        plan = _finalize_draft(
+            deterministic.plan,
+            plan_id=plan_id,
+            sources=first_sources,
+            decision=deterministic.decision,
+            occupied_loader=occupied_loader,
+            allocator=allocator,
+        )
+        placement = plan["media_metadata"]["placement"]
+        _log_info(
+            "search_plan status=ready decision=deterministic "
+            f"metadata_id={plan_id} mapping_kind={placement.get('mapping_kind')} "
+            f"query={(plan.get('prowlarr_queries') or [''])[0]}"
+        )
+        return plan
+
+    ai_input = {
+        "raw_query": raw_query,
+        "intent": rule_hypotheses["intent"],
+        "sources": first_sources,
+        "gate_reason_codes": list(deterministic.reason_codes),
+    }
+    hypotheses = await asyncio.to_thread(infer_search_hypotheses_with_ai, ai_input)
+    if not isinstance(hypotheses, dict):
+        _log_info(f"ai_stage=hypothesis status=unavailable metadata_id={plan_id}")
+        raise SearchPlanningError("ai_unavailable_after_gate_failure")
+    _log_info(f"ai_stage=hypothesis status=ok metadata_id={plan_id}")
+    second_sources = await collect_evidence(hypotheses, providers)
+    sources = _merge_evidence_passes(first_sources, second_sources)
+    context = {
+        "raw_query": raw_query,
+        "plan_id": plan_id,
+        "intent": rule_hypotheses["intent"],
+        "gate_reason_codes": list(deterministic.reason_codes),
+        "hypotheses": hypotheses,
+        "sources": sources,
+    }
+    draft = await asyncio.to_thread(infer_media_metadata_draft_with_ai, context)
+    if not isinstance(draft, dict):
+        _log_info(f"ai_stage=media_metadata status=unavailable metadata_id={plan_id}")
+        raise SearchPlanningError("ai_invalid_after_gate_failure")
+    _log_info(f"ai_stage=media_metadata status=ok metadata_id={plan_id}")
+    decision = dict(deterministic.decision)
+    decision.update({
+        "mode": "ai",
+        "ai_required": True,
+        "ai_stage_one_status": "ok",
+        "ai_stage_two_status": "ok",
+    })
+    plan = _finalize_draft(
+        draft,
+        plan_id=plan_id,
+        sources=sources,
+        decision=decision,
+        occupied_loader=occupied_loader,
+        allocator=allocator,
+    )
     placement = plan["media_metadata"]["placement"]
     _log_info(
         "search_plan status=ready "

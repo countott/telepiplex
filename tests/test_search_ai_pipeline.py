@@ -71,10 +71,18 @@ class SearchAiPipelineTest(unittest.TestCase):
                 }
             }]
         }
-        result = infer_search_hypotheses_with_ai("想见你")
+        result = infer_search_hypotheses_with_ai({
+            "raw_query": "想见你",
+            "intent": {"title": "想见你", "scope": "movie_or_series"},
+            "sources": [{"source": "wikipedia", "status": "ok"}],
+            "gate_reason_codes": ["ambiguous_candidates"],
+        })
         self.assertEqual(result["status"], "ok")
         self.assertNotIn("prowlarr_query", result)
         self.assertIn("wikipedia", result["source_queries"])
+        prompt = chat_mock.call_args.args[0]
+        self.assertIn("ambiguous_candidates", prompt)
+        self.assertIn("wikipedia", prompt)
 
     @patch("telepiplex_media_search.ai.check_ai_api_available", return_value=True)
     @patch("telepiplex_media_search.ai.chat_completion")

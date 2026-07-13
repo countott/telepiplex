@@ -7,6 +7,7 @@ from telepiplex_media_search.planner import (
     build_confirmable_search_plan,
 )
 from telepiplex_media_search.search_plan import TemporarySpecialAllocator
+from tests.test_deterministic_planner import douban_movie, wikipedia_movie
 
 
 class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
@@ -113,6 +114,40 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
 
     @patch("telepiplex_media_search.planner.infer_media_metadata_draft_with_ai")
     @patch("telepiplex_media_search.planner.infer_search_hypotheses_with_ai")
+    async def test_unique_rule_plan_skips_both_ai_stages(
+        self, hypothesis_mock, metadata_mock
+    ):
+        providers = {
+            "wikipedia": Mock(return_value=wikipedia_movie()),
+            "douban": Mock(return_value=douban_movie()),
+            "tvdb": Mock(return_value={
+                "source": "tvdb",
+                "status": "disabled",
+                "facts": [],
+                "source_urls": [],
+                "error": "missing key",
+            }),
+        }
+
+        plan = await build_confirmable_search_plan(
+            "盗梦空间 2010",
+            "plan-rule",
+            providers,
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertEqual(
+            plan["media_metadata"]["evidence"]["decision"]["mode"],
+            "deterministic",
+        )
+        hypothesis_mock.assert_not_called()
+        metadata_mock.assert_not_called()
+        for provider in providers.values():
+            provider.assert_called_once()
+
+    @patch("telepiplex_media_search.planner.infer_media_metadata_draft_with_ai")
+    @patch("telepiplex_media_search.planner.infer_search_hypotheses_with_ai")
     async def test_all_providers_run_and_soft_failures_reach_second_ai(
         self, hypothesis_mock, metadata_mock
     ):
@@ -170,7 +205,7 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
             },
         )
         for provider in providers.values():
-            provider.assert_called_once()
+            self.assertEqual(provider.call_count, 2)
         log_text = "\n".join(call.args[0] for call in log_mock.call_args_list)
         self.assertIn("ai_stage=hypothesis status=ok", log_text)
         self.assertIn("source=wikipedia status=server_down", log_text)
@@ -181,10 +216,10 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
         "telepiplex_media_search.planner.infer_search_hypotheses_with_ai",
         return_value=None,
     )
-    async def test_missing_first_ai_raises_before_providers(self, _hypothesis_mock):
+    async def test_missing_first_ai_raises_after_rule_evidence(self, _hypothesis_mock):
         provider = Mock()
         with self.assertRaisesRegex(
-            SearchPlanningError, "ai_hypothesis_unavailable"
+            SearchPlanningError, "ai_unavailable_after_gate_failure"
         ):
             await build_confirmable_search_plan(
                 "想见你",
@@ -193,7 +228,7 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
                 lambda _contract: set(),
                 TemporarySpecialAllocator(),
             )
-        provider.assert_not_called()
+        provider.assert_called_once()
 
     @patch(
         "telepiplex_media_search.planner.infer_media_metadata_draft_with_ai",
@@ -206,7 +241,7 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
         hypothesis_mock.return_value = self._hypotheses()
         providers = self._down_providers()
         with self.assertRaisesRegex(
-            SearchPlanningError, "ai_media_metadata_unavailable"
+            SearchPlanningError, "ai_invalid_after_gate_failure"
         ):
             await build_confirmable_search_plan(
                 "想见你",
@@ -216,7 +251,7 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
                 TemporarySpecialAllocator(),
             )
         for provider in providers.values():
-            provider.assert_called_once()
+            self.assertEqual(provider.call_count, 2)
 
     @patch("telepiplex_media_search.planner.infer_media_metadata_draft_with_ai")
     @patch("telepiplex_media_search.planner.infer_search_hypotheses_with_ai")
