@@ -124,6 +124,12 @@
 - 无法取得可靠的英文或原始 Prowlarr 查询标题。
 - 任何无法逐条解释为唯一普通媒体的场景。
 
+### 6.4 媒体库分类
+
+- 任一可信 provider 明确给出动画、Animation 或 anime 信号时，选择对应的 `animated_movie` 或 `animated_series`。
+- provider 对动画属性存在冲突时，不得确定性放行，转交 AI。
+- 没有动画信号且其他唯一性门槛全部通过时，按普通真人媒体选择对应的 `live_action_movie` 或 `live_action_series`，并在 decision evidence 中记录 `default_live_action_without_animation_signal`。
+
 ## 7. Plan 与证据记录
 
 规则路径和 AI 路径都输出 `media_metadata v1`，不增加新的 schema version。`evidence` 中增加向后兼容的解释字段：
