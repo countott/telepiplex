@@ -153,6 +153,10 @@ class DeploymentContractTest(unittest.TestCase):
             with self.subTest(readme="README.md", advanced_command=command):
                 self.assertIn(command, chinese_advanced)
                 self.assertNotIn(command, chinese[:chinese_advanced_start])
+                self.assertEqual(
+                    chinese.count(command),
+                    chinese_advanced.count(command),
+                )
 
         english = (ROOT / "README_EN.md").read_text(encoding="utf-8")
         for term in (
@@ -181,6 +185,10 @@ class DeploymentContractTest(unittest.TestCase):
             with self.subTest(readme="README_EN.md", advanced_command=command):
                 self.assertIn(command, english_advanced)
                 self.assertNotIn(command, english[:english_advanced_start])
+                self.assertEqual(
+                    english.count(command),
+                    english_advanced.count(command),
+                )
 
         decisions = (
             ROOT / "docs/todos/2026-07-12-business-module-decisions.md"
