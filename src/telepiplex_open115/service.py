@@ -9,6 +9,7 @@ from telepiplex_plugin_sdk import FeatureError
 
 
 _MAGNET = re.compile(r"^magnet:\?xt=urn:btih:(?:[A-Fa-f0-9]{40}|[A-Za-z2-7]{32})(?:&.*)?$")
+SESSION_TTL_SECONDS = 30 * 60
 _STORAGE_METHODS = {
     "get_file_info",
     "get_file_info_by_id",
@@ -26,6 +27,18 @@ _STORAGE_METHODS = {
 }
 
 
+def _single_secret(value: str) -> str:
+    value = str(value or "").strip().strip("`").strip('"').strip("'")
+    if (
+        not value
+        or "\n" in value
+        or "\r" in value
+        or value.lower().startswith("your_")
+    ):
+        raise ValueError("invalid secret")
+    return value
+
+
 class Open115Feature:
     def __init__(self, *, config: dict, core, client, jobs=None, config_store=None):
         self.config = config
@@ -33,6 +46,7 @@ class Open115Feature:
         self.client = client
         self.runtime = None
         self.sessions = {}
+        self.session_expiry_handles = {}
         self.active_job_ids = set()
         self.jobs = jobs
         self.config_store = config_store
@@ -70,6 +84,7 @@ class Open115Feature:
             if not directories:
                 return self._message("⚠️ open115 配置中没有 save_directories。")
             key = self._session_key(request)
+            self._clear_auth_session(key)
             self.sessions[key] = {"link": link, "stage": "path"}
             keyboard = [[{
                 "text": f"📁 {item['name']}",
@@ -84,42 +99,31 @@ class Open115Feature:
                 "session": {"state": "open"},
             }
         if command == "q":
-            self.sessions.pop(self._session_key(request), None)
+            self._clear_auth_session(self._session_key(request))
             return {"actions": [{"kind": "send_message", "text": "已取消。"}], "session": {"state": "close"}}
-        if command == "config":
-            return self._message("115 Feature 配置：/config/plugins/open115/config.yaml")
-        if command == "auth":
-            configured = bool(
-                self.config.get("access_token") and self.config.get("refresh_token")
-            )
-            mode = str(self.config.get("auth_mode") or "direct")
-            status = "已配置" if configured else "未配置"
-            return {
-                "actions": [{
-                    "kind": "send_message",
-                    "text": f"115 授权：{status}（当前模式：{mode}）\n请选择独立授权入口：",
-                    "data": {"keyboard": [[
-                        {
-                            "text": "使用现有 Token",
-                            "callback_data": "open115:auth:direct",
-                        },
-                        {
-                            "text": "115 扫码授权",
-                            "callback_data": "open115:auth:scan",
-                        },
-                    ]]},
-                }],
-                "session": {"state": "close"},
-            }
+        if command in {"config", "auth"}:
+            return self._start_auth_session(request)
         raise FeatureError("not_found", f"unknown open115 command: {command}")
 
     async def callback(self, request: dict) -> dict:
         payload = str(request.get("payload") or "")
-        if payload == "auth:direct":
-            return await self._select_direct_auth()
-        if payload == "auth:scan":
-            return await self._start_scan_auth(request)
         key = self._session_key(request)
+        if payload == "auth:direct":
+            session = self.sessions.get(key)
+            if not session or session.get("stage") != "choose_mode":
+                return self._message_with_session("⚠️ 会话已失效。", "close")
+            self.sessions[key] = {"stage": "access_token"}
+            return self._message_with_session(
+                "请发送 Access token。\n\n发送 /q 可取消。",
+                "open",
+                kind="edit_message",
+            )
+        if payload == "auth:scan":
+            session = self.sessions.get(key)
+            if not session or session.get("stage") != "choose_mode":
+                return self._message_with_session("⚠️ 会话已失效。", "close")
+            self._clear_auth_session(key)
+            return await self._start_scan_auth(request)
         session = self.sessions.get(key)
         if not session or not payload.startswith("path:"):
             return {"actions": [{"kind": "send_message", "text": "⚠️ 会话已失效。"}], "session": {"state": "close"}}
@@ -146,34 +150,122 @@ class Open115Feature:
         }
 
     async def message(self, request: dict) -> dict:
+        key = self._session_key(request)
+        session = self.sessions.get(key)
+        if not session:
+            return self._message_with_session("⚠️ 会话已失效。", "close")
+
+        stage = session.get("stage")
+        if stage == "access_token":
+            try:
+                access_token = _single_secret(request.get("text"))
+            except ValueError:
+                return self._message_with_session(
+                    "⚠️ Access token 无效，请重新发送单行 Token。",
+                    "open",
+                )
+            self.sessions[key] = {
+                "stage": "refresh_token",
+                "access_token": access_token,
+            }
+            self._schedule_sensitive_expiry(key)
+            return self._message_with_session(
+                "已收到 Access token。\n请发送 Refresh token。\n\n发送 /q 可取消。",
+                "open",
+            )
+
+        if stage == "refresh_token":
+            try:
+                refresh_token = _single_secret(request.get("text"))
+            except ValueError:
+                return self._message_with_session(
+                    "⚠️ Refresh token 无效，请重新发送单行 Token。",
+                    "open",
+                )
+            access_token = session["access_token"]
+            try:
+                if self.config_store:
+                    updated = self.config_store.write_tokens(
+                        access_token,
+                        refresh_token,
+                        auth_mode="direct",
+                    )
+                else:
+                    updated = dict(self.config)
+                    updated.update({
+                        "auth_mode": "direct",
+                        "access_token": access_token,
+                        "refresh_token": refresh_token,
+                    })
+                self.client.set_tokens(access_token, refresh_token)
+            except Exception:
+                return self._message_with_session(
+                    "⚠️ 115 Token 写入失败，请重新发送 Refresh token 或使用 /q 取消。",
+                    "open",
+                )
+            self.config.update(updated)
+            self._clear_auth_session(key)
+            return self._message_with_session(
+                "✅ 115 Token 已写入并立即生效。",
+                "close",
+            )
+
+        return self._message_with_session("⚠️ 会话已失效。", "close")
+
+    def _start_auth_session(self, request: dict) -> dict:
+        key = self._session_key(request)
+        self._clear_auth_session(key)
+        self.sessions[key] = {"stage": "choose_mode"}
         return {
-            "actions": [{"kind": "send_message", "text": "⚠️ 会话已失效。"}],
-            "session": {"state": "close"},
+            "actions": [{
+                "kind": "send_message",
+                "text": "请选择 115 授权方式：",
+                "data": {"keyboard": [[
+                    {
+                        "text": "Access / Refresh Token",
+                        "callback_data": "open115:auth:direct",
+                    },
+                    {
+                        "text": "115 扫码授权",
+                        "callback_data": "open115:auth:scan",
+                    },
+                ]]},
+            }],
+            "session": {"state": "open"},
         }
 
-    async def _select_direct_auth(self):
-        config = self.config_store.read() if self.config_store else dict(self.config)
-        access_token = str(config.get("access_token") or "").strip()
-        refresh_token = str(config.get("refresh_token") or "").strip()
-        if not access_token or not refresh_token:
-            return self._message(
-                "⚠️ 现有 Token 路线尚未配置；请先填写 open115 私有 config.yaml。"
-            )
-        if self.config_store:
-            config = self.config_store.write_tokens(
-                access_token,
-                refresh_token,
-                auth_mode="direct",
-            )
-        self.config.update(config)
-        self.client.set_tokens(access_token, refresh_token)
-        return self._message("✅ 已启用现有 Token 授权路线。")
+    def _schedule_sensitive_expiry(self, key):
+        handle = self.session_expiry_handles.pop(key, None)
+        if handle is not None:
+            handle.cancel()
+        expected = self.sessions.get(key)
+        handle = asyncio.get_running_loop().call_later(
+            SESSION_TTL_SECONDS,
+            self._expire_sensitive_session,
+            key,
+            expected,
+        )
+        self.session_expiry_handles[key] = handle
+
+    def _expire_sensitive_session(self, key, expected):
+        if self.sessions.get(key) is expected:
+            self.sessions.pop(key, None)
+        self.session_expiry_handles.pop(key, None)
+
+    def _clear_auth_session(self, key):
+        handle = self.session_expiry_handles.pop(key, None)
+        if handle is not None:
+            handle.cancel()
+        self.sessions.pop(key, None)
 
     async def _start_scan_auth(self, request):
         config = self.config_store.read() if self.config_store else dict(self.config)
         app_id = str(config.get("app_id") or "").strip()
         if not app_id:
-            return self._message("⚠️ 扫码授权需要先在私有配置中填写 app_id。")
+            return self._message_with_session(
+                "⚠️ 扫码授权需要先在私有配置中填写 app_id。",
+                "close",
+            )
         if self.runtime is None:
             raise FeatureError("not_ready", "open115 runtime is not ready")
         try:
@@ -183,7 +275,10 @@ class Open115Feature:
             )
             qr_text = self._render_qr(authorization["qrcode"])
         except Exception as exc:
-            return self._message(f"⚠️ 115 扫码授权启动失败：{type(exc).__name__}")
+            return self._message_with_session(
+                f"⚠️ 115 扫码授权启动失败：{type(exc).__name__}",
+                "close",
+            )
         task_id = f"open115-auth-{authorization['uid']}"
         self.runtime.spawn(
             self._complete_scan_auth(
@@ -369,3 +464,10 @@ class Open115Feature:
     @staticmethod
     def _message(text):
         return {"actions": [{"kind": "send_message", "text": text}]}
+
+    @staticmethod
+    def _message_with_session(text, state, *, kind="send_message"):
+        return {
+            "actions": [{"kind": kind, "text": text}],
+            "session": {"state": state},
+        }

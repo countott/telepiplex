@@ -1,12 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
+  "x-telepiplex-config-command": "config",
   "properties": {
     "base_url": {"type": "string", "pattern": "^https://"},
     "passport_url": {"type": "string", "pattern": "^https://"},
     "auth_mode": {"enum": ["direct", "scan"]},
-    "access_token": {"type": "string"},
-    "refresh_token": {"type": "string"},
+    "access_token": {"type": "string", "writeOnly": true},
+    "refresh_token": {"type": "string", "writeOnly": true},
     "app_id": {"type": "string"},
     "auth_poll_timeout": {"type": "number", "minimum": 30, "maximum": 900},
     "auth_poll_interval": {"type": "number", "minimum": 0.5, "maximum": 30},

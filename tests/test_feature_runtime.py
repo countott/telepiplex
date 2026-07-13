@@ -1,9 +1,11 @@
 import asyncio
 import ast
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import yaml
 
@@ -104,11 +106,14 @@ class FakeConfigStore:
     def __init__(self, config):
         self.config = dict(config)
         self.writes = []
+        self.fail_writes = False
 
     def read(self):
         return dict(self.config)
 
     def write_tokens(self, access_token, refresh_token, *, auth_mode):
+        if self.fail_writes:
+            raise RuntimeError("token=secret-value")
         self.config.update({
             "access_token": access_token,
             "refresh_token": refresh_token,
@@ -134,6 +139,8 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.feature.bind_runtime(self.runtime)
 
     async def asyncTearDown(self):
+        for handle in getattr(self.feature, "session_expiry_handles", {}).values():
+            handle.cancel()
         for task in self.runtime.tasks.values():
             if asyncio.iscoroutine(task):
                 task.close()
@@ -268,27 +275,169 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已加入 115 下载队列", callback["actions"][0]["text"])
         self.assertEqual(len(self.runtime.tasks), 1)
 
-    async def test_auth_offers_independent_direct_and_scan_routes(self):
-        self.feature.config_store = FakeConfigStore({
-            "access_token": "direct-access",
-            "refresh_token": "direct-refresh",
-            "app_id": "app-1",
+    async def test_config_and_auth_offer_token_entry_and_scan_routes(self):
+        for command in ("config", "auth"):
+            response = await self.feature.command({
+                "command": command,
+                "user_id": 1,
+                "chat_id": 10,
+            })
+            self.assertEqual(response["session"]["state"], "open")
+            keyboard = response["actions"][0]["data"]["keyboard"]
+            self.assertEqual(
+                [button["callback_data"] for row in keyboard for button in row],
+                ["open115:auth:direct", "open115:auth:scan"],
+            )
+            self.assertIn("Access / Refresh Token", str(keyboard))
+
+    async def test_direct_token_wizard_writes_only_after_refresh_and_activates_client(self):
+        await self.feature.command({
+            "command": "config", "user_id": 1, "chat_id": 10,
         })
-        response = await self.feature.command({"command": "auth"})
-        keyboard = response["actions"][0]["data"]["keyboard"]
-        self.assertEqual(
-            [button["callback_data"] for row in keyboard for button in row],
-            ["open115:auth:direct", "open115:auth:scan"],
-        )
+        direct = await self.feature.callback({
+            "payload": "auth:direct", "user_id": 1, "chat_id": 10,
+        })
+        self.assertEqual(direct["session"]["state"], "open")
+        self.assertIn("Access token", direct["actions"][0]["text"])
 
-        direct = await self.feature.callback({"payload": "auth:direct"})
-        self.assertIn("现有 Token", direct["actions"][0]["text"])
-        self.assertEqual(self.client.tokens, ("direct-access", "direct-refresh"))
-        self.assertEqual(
-            self.feature.config_store.writes[-1],
-            ("direct-access", "direct-refresh", "direct"),
-        )
+        access = await self.feature.message({
+            "text": "access-new", "user_id": 1, "chat_id": 10,
+        })
+        self.assertEqual(access["session"]["state"], "open")
+        self.assertIn("Refresh token", access["actions"][0]["text"])
+        self.assertEqual(self.feature.config_store.writes, [])
 
+        completed = await self.feature.message({
+            "text": "refresh-new", "user_id": 1, "chat_id": 10,
+        })
+        self.assertEqual(completed["session"]["state"], "close")
+        self.assertEqual(self.feature.config_store.writes, [
+            ("access-new", "refresh-new", "direct"),
+        ])
+        self.assertEqual(self.client.tokens, ("access-new", "refresh-new"))
+        self.assertNotIn("access-new", str(completed))
+        self.assertNotIn("refresh-new", str(completed))
+
+    async def test_direct_token_wizard_rejects_invalid_values_without_writing(self):
+        await self.feature.command({
+            "command": "config", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.callback({
+            "payload": "auth:direct", "user_id": 1, "chat_id": 10,
+        })
+
+        for invalid in ("", "your_access_token", "line-one\nline-two"):
+            response = await self.feature.message({
+                "text": invalid, "user_id": 1, "chat_id": 10,
+            })
+            self.assertEqual(response["session"]["state"], "open")
+            if invalid:
+                self.assertNotIn(invalid, str(response))
+        self.assertEqual(self.feature.config_store.writes, [])
+
+        await self.feature.message({
+            "text": "access-valid", "user_id": 1, "chat_id": 10,
+        })
+        response = await self.feature.message({
+            "text": "refresh-one\nrefresh-two", "user_id": 1, "chat_id": 10,
+        })
+        self.assertEqual(response["session"]["state"], "open")
+        self.assertEqual(self.feature.config_store.writes, [])
+        self.assertNotIn("access-valid", str(response))
+
+    async def test_direct_token_wizard_cancel_discards_pending_access(self):
+        await self.feature.command({
+            "command": "config", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.callback({
+            "payload": "auth:direct", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.message({
+            "text": "access-pending", "user_id": 1, "chat_id": 10,
+        })
+
+        response = await self.feature.command({
+            "command": "q", "user_id": 1, "chat_id": 10,
+        })
+
+        self.assertEqual(response["session"]["state"], "close")
+        self.assertNotIn((10, 1), self.feature.sessions)
+        self.assertEqual(self.feature.config_store.writes, [])
+        self.assertNotIn("access-pending", str(response))
+
+    async def test_direct_token_write_failure_preserves_client_and_secret(self):
+        self.client.tokens = ("old-access", "old-refresh")
+        self.feature.config_store.fail_writes = True
+        await self.feature.command({
+            "command": "config", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.callback({
+            "payload": "auth:direct", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.message({
+            "text": "access-new", "user_id": 1, "chat_id": 10,
+        })
+
+        response = await self.feature.message({
+            "text": "refresh-new", "user_id": 1, "chat_id": 10,
+        })
+
+        self.assertEqual(response["session"]["state"], "open")
+        self.assertEqual(self.client.tokens, ("old-access", "old-refresh"))
+        self.assertEqual(self.feature.config_store.writes, [])
+        self.assertNotIn("access-new", str(response))
+        self.assertNotIn("refresh-new", str(response))
+        self.assertNotIn("secret-value", str(response))
+
+    async def test_pending_access_token_expires_without_writing(self):
+        from telepiplex_open115 import service
+
+        with patch.object(service, "SESSION_TTL_SECONDS", 0):
+            await self.feature.command({
+                "command": "config", "user_id": 1, "chat_id": 10,
+            })
+            await self.feature.callback({
+                "payload": "auth:direct", "user_id": 1, "chat_id": 10,
+            })
+            await self.feature.message({
+                "text": "access-pending", "user_id": 1, "chat_id": 10,
+            })
+            await asyncio.sleep(0.01)
+
+        self.assertNotIn((10, 1), self.feature.sessions)
+        self.assertEqual(self.feature.config_store.writes, [])
+
+    async def test_magnet_session_replaces_and_clears_pending_access_token(self):
+        await self.feature.command({
+            "command": "config", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.callback({
+            "payload": "auth:direct", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.message({
+            "text": "access-pending", "user_id": 1, "chat_id": 10,
+        })
+        self.feature.config["save_directories"] = [
+            {"name": "剧集", "path": "/Series"},
+        ]
+
+        response = await self.feature.command({
+            "command": "magnet",
+            "args": ["magnet:?xt=urn:btih:" + "e" * 40],
+            "user_id": 1,
+            "chat_id": 10,
+        })
+
+        self.assertEqual(response["session"]["state"], "open")
+        self.assertEqual(self.feature.sessions[(10, 1)]["stage"], "path")
+        self.assertNotIn((10, 1), self.feature.session_expiry_handles)
+        self.assertNotIn("access-pending", str(self.feature.sessions))
+
+    async def test_scan_authorization_remains_independent_and_secret_safe(self):
+        self.feature.config_store = FakeConfigStore({"app_id": "app-1"})
+        await self.feature.command({
+            "command": "config", "user_id": 9, "chat_id": 10,
+        })
         scan = await self.feature.callback({
             "payload": "auth:scan", "user_id": 9, "chat_id": 10,
         })
@@ -322,6 +471,16 @@ class FeatureConfigStoreTest(unittest.TestCase):
 
 
 class FeatureSourceContractTest(unittest.TestCase):
+    def test_schema_declares_custom_config_command_registered_by_manifest(self):
+        schema = yaml.safe_load((ROOT / "config.schema.json").read_text(encoding="utf-8"))
+        manifest = yaml.safe_load((ROOT / "manifest.yaml").read_text(encoding="utf-8"))
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+        self.assertEqual(schema["x-telepiplex-config-command"], "config")
+        self.assertIn("config", [item["name"] for item in manifest["commands"]])
+        self.assertEqual(manifest["version"], "1.0.1")
+        self.assertEqual(project["project"]["version"], "1.0.1")
+
     def test_source_has_no_core_telegram_or_init_imports(self):
         forbidden = []
         for path in (ROOT / "src").rglob("*.py"):
