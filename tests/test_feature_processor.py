@@ -70,6 +70,20 @@ class ExtraVideoDeleteFailureStorage(FakeStorage):
         return not path.endswith("sample.mp4")
 
 
+class TargetConflictStorage(FakeStorage):
+    def get_file_info(self, path):
+        if path.endswith("/中文电影 (English Movie)/English Movie.mkv"):
+            return {"file_id": "existing", "file_category": "1"}
+        return super().get_file_info(path)
+
+
+class SeriesTargetConflictStorage(FakeStorage):
+    def get_file_info(self, path):
+        if path.endswith("/English Series Season 01/English Series S01E01.mkv"):
+            return {"file_id": "existing", "file_category": "1"}
+        return super().get_file_info(path)
+
+
 def movie_contract():
     return {
         "schema_version": 1,
@@ -123,6 +137,20 @@ def series_contract():
 
 
 class RenamingProcessorTest(unittest.TestCase):
+    def setUp(self):
+        from telepiplex_renaming.context import runtime_context
+
+        runtime_context.configure({
+            "media": {"unorganized_path": "/Unorganized"},
+            "selection": {
+                "movie_size_fallback_ratio": 1.5,
+                "unmatched_large_ratio": 0.25,
+                "unmatched_large_min_bytes": 300_000_000,
+            },
+            "ai": {},
+            "metadata": {},
+        })
+
     def test_ordinary_movie_keeps_largest_video_and_deletes_everything_else(self):
         storage = FakeStorage([
             {"fn": "Movie.2024.1080p.mkv", "fid": "1", "fc": "1", "fs": 1_000_000},
@@ -160,6 +188,83 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertTrue(result.handled)
         self.assertTrue(result.message.startswith("⚠️"))
         self.assertIn("源目录清理未完成", result.message)
+
+    @patch(
+        "telepiplex_renaming.processor.infer_movie_cleanup_plan_with_ai",
+        create=True,
+    )
+    def test_movie_release_filename_precedes_ai_and_size(self, ai_mock):
+        storage = FakeStorage([
+            {"fn": "Movie.2024.1080p.mkv", "fid": "1", "fc": "1", "fs": 2_000},
+            {"fn": "Movie.2024.720p.mkv", "fid": "2", "fc": "1", "fs": 8_000},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Movies", user_id=1,
+            final_path="/Downloads/Release", resource_name="Movie.2024",
+            metadata=attach_media_metadata({}, movie_contract()),
+            release={"title": "Movie.2024.1080p"}, storage=storage,
+        )
+
+        result = process_generic_media(event)
+
+        self.assertTrue(result.handled)
+        ai_mock.assert_not_called()
+        self.assertEqual(storage.renamed[0][0], "/Downloads/Release/Movie.2024.1080p.mkv")
+
+    @patch(
+        "telepiplex_renaming.processor.infer_movie_cleanup_plan_with_ai",
+        create=True,
+    )
+    def test_ambiguous_large_movie_candidates_are_decided_by_ai(self, ai_mock):
+        from telepiplex_renaming.context import runtime_context
+
+        runtime_context.config["ai"] = {
+            "enable": True,
+            "api_url": "https://ai.example/v1",
+            "api_key": "key",
+            "model": "model",
+        }
+        ai_mock.return_value = {
+            "main_video": "Movie.2024.1080p.mkv",
+            "discard_files": ["Movie.2024.720p.mkv"],
+            "reason": "release and resolution evidence",
+        }
+        storage = FakeStorage([
+            {"fn": "Movie.2024.1080p.mkv", "fid": "1", "fc": "1", "fs": 2_000},
+            {"fn": "Movie.2024.720p.mkv", "fid": "2", "fc": "1", "fs": 1_500},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Movies", user_id=1,
+            final_path="/Downloads/Release", resource_name="Movie.2024",
+            metadata=attach_media_metadata({}, movie_contract()),
+            release={"title": "Movie.2024.MULTI"}, storage=storage,
+        )
+
+        result = process_generic_media(event)
+
+        self.assertTrue(result.handled)
+        ai_mock.assert_called_once()
+        context = ai_mock.call_args.args[0]
+        self.assertEqual(context["release"]["title"], "Movie.2024.MULTI")
+        self.assertEqual(storage.renamed[0][0], "/Downloads/Release/Movie.2024.1080p.mkv")
+
+    def test_movie_target_conflict_moves_whole_release_to_unorganized(self):
+        storage = TargetConflictStorage([
+            {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 2_000},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Movies", user_id=1,
+            final_path="/Downloads/Release", resource_name="Movie.2024",
+            metadata=attach_media_metadata({}, movie_contract()), storage=storage,
+        )
+
+        result = process_generic_media(event)
+
+        self.assertTrue(result.handled)
+        self.assertEqual(result.final_path, "/Unorganized/Release")
+        self.assertEqual(storage.renamed, [])
+        self.assertEqual(storage.moved, [("/Downloads/Release", "/Unorganized")])
+        self.assertIn("冲突", result.message)
 
     @patch("telepiplex_renaming.processor.infer_tvdb_episode_plan_with_ai")
     def test_normal_series_filename_mapping_precedes_ai_and_deletes_extra_video(self, ai_mock):
@@ -230,6 +335,95 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertTrue(result.message.startswith("⚠️"))
         self.assertIn("部分完成（1/2）", result.message)
 
+    @patch("telepiplex_renaming.processor.infer_tvdb_episode_plan_with_ai")
+    def test_unmatched_large_series_video_requires_explicit_ai_discard(self, ai_mock):
+        from telepiplex_renaming.context import runtime_context
+
+        runtime_context.config["selection"].update({
+            "unmatched_large_ratio": 0.25,
+            "unmatched_large_min_bytes": 0,
+        })
+        ai_mock.return_value = {
+            "episode_map": [{
+                "source_file": "English.Series.S01E01.mkv",
+                "season_number": 1,
+                "episode_number": 1,
+            }],
+            "discard_files": ["English.Series.S01E01.720p.mkv"],
+            "warnings": [],
+        }
+        storage = FakeStorage([
+            {"fn": "English.Series.S01E01.mkv", "fid": "1", "fc": "1", "fs": 1000},
+            {"fn": "English.Series.S01E01.720p.mkv", "fid": "2", "fc": "1", "fs": 800},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Series", user_id=1,
+            final_path="/Downloads/Series.Release",
+            resource_name="English.Series.S01E01",
+            naming_metadata={"english_title": "English Series"},
+            metadata=attach_media_metadata({}, series_contract()),
+            release={"title": "English.Series.S01E01.MULTI"},
+            storage=storage,
+        )
+
+        result = process_tvdb_episode(event)
+
+        self.assertTrue(result.message.startswith("✅"))
+        ai_mock.assert_called_once()
+        self.assertIn(
+            "/Downloads/Series.Release/English.Series.S01E01.720p.mkv",
+            storage.deleted,
+        )
+
+    def test_series_target_conflict_moves_whole_release_before_any_rename(self):
+        storage = SeriesTargetConflictStorage([
+            {"fn": "English.Series.S01E01.mkv", "fid": "1", "fc": "1", "fs": 1000},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Series", user_id=1,
+            final_path="/Downloads/Series.Release",
+            resource_name="English.Series.S01E01",
+            naming_metadata={"english_title": "English Series"},
+            metadata=attach_media_metadata({}, series_contract()),
+            storage=storage,
+        )
+
+        result = process_tvdb_episode(event)
+
+        self.assertEqual(result.final_path, "/Unorganized/Series.Release")
+        self.assertEqual(storage.renamed, [])
+        self.assertEqual(
+            storage.moved,
+            [("/Downloads/Series.Release", "/Unorganized")],
+        )
+
+    def test_single_file_download_root_uses_absolute_tree_path_without_false_cleanup_failure(self):
+        storage = FakeStorage([])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Series", user_id=1,
+            final_path="/Downloads/English.Series.S01E01.mkv",
+            download_root="/Downloads/English.Series.S01E01.mkv",
+            resource_name="English.Series.S01E01.mkv",
+            naming_metadata={"english_title": "English Series"},
+            metadata=attach_media_metadata({}, series_contract()),
+            file_tree=[{
+                "name": "English.Series.S01E01.mkv",
+                "relative_path": "English.Series.S01E01.mkv",
+                "path": "/Downloads/English.Series.S01E01.mkv",
+                "is_dir": False,
+                "size": 1000,
+            }],
+            storage=storage,
+        )
+
+        result = process_tvdb_episode(event)
+
+        self.assertTrue(result.message.startswith("✅"))
+        self.assertNotIn(
+            "/Downloads/English.Series.S01E01.mkv",
+            storage.deleted,
+        )
+
 
 class FakeCore:
     def __init__(self, storage=None):
@@ -243,6 +437,18 @@ class FakeCore:
 
     async def call_capability(self, capability, method, payload, **_kwargs):
         self.assert_capability = capability
+        if capability == "media.search":
+            self.metadata_query = payload["query"]
+            return {
+                "media_metadata": movie_contract(),
+                "naming_metadata": {
+                    "source": "media-search",
+                    "media_type": "movie",
+                    "chinese_title": "中文电影",
+                    "english_title": "English Movie",
+                    "year": "2024",
+                },
+            }
         value = getattr(self.storage, method)(*(payload.get("args") or []), **(payload.get("kwargs") or {}))
         return {"value": value}
 
@@ -258,6 +464,39 @@ class FakeCore:
 
 
 class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_magnet_requeries_media_search_with_release_and_file_tree(self):
+        core = FakeCore()
+        feature = RenamingFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            core=core,
+        )
+        result = await feature.download_completed({
+            "event_id": "event-direct",
+            "payload": {
+                "job_id": "job-direct", "selected_path": "/Movies",
+                "user_id": 123,
+                "download_root": "/Downloads/Movie.2024.mkv",
+                "final_path": "/Downloads/Movie.2024.mkv",
+                "resource_name": "Movie.2024.mkv",
+                "release": {"title": "Movie.2024.1080p.WEB-DL"},
+                "file_tree": [{
+                    "name": "Movie.2024.mkv",
+                    "relative_path": "Movie.2024.mkv",
+                    "path": "/Downloads/Movie.2024.mkv",
+                    "is_dir": False,
+                    "size": 1000,
+                }],
+            },
+        })
+
+        self.assertTrue(result["organized"])
+        self.assertIn("Movie.2024.1080p.WEB-DL", core.metadata_query)
+        self.assertIn("Movie.2024.mkv", core.metadata_query)
+        self.assertEqual(
+            core.storage.renamed[0][0],
+            "/Downloads/Movie.2024.mkv",
+        )
+
     async def test_download_event_calls_storage_rpc_and_publishes_media_organized(self):
         core = FakeCore()
         feature = RenamingFeature(

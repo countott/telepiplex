@@ -61,6 +61,31 @@ class RenamingFeature:
                 metadata = attach_media_metadata({}, payload["media_metadata"])
             except ValueError:
                 metadata = {MEDIA_METADATA_KEY: payload["media_metadata"]}
+        naming_metadata = (
+            payload.get("naming_metadata")
+            if isinstance(payload.get("naming_metadata"), dict)
+            else None
+        )
+        if not metadata:
+            try:
+                resolved = await self.core.call_capability(
+                    "media.search",
+                    "resolve_metadata",
+                    {"query": self._metadata_query(payload)},
+                    deadline=float(self.config.get("metadata_timeout") or 120),
+                    idempotency_key=f"{job_id}:metadata",
+                )
+            except Exception:
+                resolved = {}
+            if isinstance(resolved.get("media_metadata"), dict):
+                try:
+                    metadata = attach_media_metadata(
+                        {}, resolved["media_metadata"]
+                    )
+                except ValueError:
+                    metadata = {}
+                if isinstance(resolved.get("naming_metadata"), dict):
+                    naming_metadata = resolved["naming_metadata"]
         loop = asyncio.get_running_loop()
         storage = StorageProxy(
             self.core,
@@ -71,14 +96,23 @@ class RenamingFeature:
             link=str(payload.get("link") or ""),
             selected_path=str(payload.get("selected_path") or ""),
             user_id=user_id,
-            final_path=str(payload.get("final_path") or ""),
+            final_path=str(
+                payload.get("download_root") or payload.get("final_path") or ""
+            ),
             resource_name=str(payload.get("resource_name") or ""),
-            naming_metadata=(
-                payload.get("naming_metadata")
-                if isinstance(payload.get("naming_metadata"), dict)
+            naming_metadata=naming_metadata,
+            metadata=metadata,
+            file_tree=(
+                payload.get("file_tree")
+                if isinstance(payload.get("file_tree"), list)
                 else None
             ),
-            metadata=metadata,
+            release=(
+                payload.get("release")
+                if isinstance(payload.get("release"), dict)
+                else None
+            ),
+            download_root=str(payload.get("download_root") or ""),
             provider=str(payload.get("provider") or "open115"),
             storage=storage,
         )
@@ -161,6 +195,25 @@ class RenamingFeature:
             self.jobs.update(job_id, "completed", outcome)
         return {"accepted": True, "organized": bool(outcome.get("organized")),
                 "final_path": outcome.get("final_path"), "replayed": True}
+
+    @staticmethod
+    def _metadata_query(payload):
+        values = []
+        release = payload.get("release")
+        if isinstance(release, dict):
+            values.append(release.get("title"))
+        values.append(payload.get("resource_name"))
+        for node in payload.get("file_tree") or []:
+            if isinstance(node, dict) and not node.get("is_dir"):
+                values.append(node.get("relative_path") or node.get("name"))
+        cleaned = []
+        seen = set()
+        for value in values:
+            value = " ".join(str(value or "").split())
+            if value and value not in seen:
+                seen.add(value)
+                cleaned.append(value)
+        return " | ".join(cleaned)
 
     def _process(self, event: DownloadCompletedEvent) -> PostDownloadResult:
         result = process_tvdb_episode(event)

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from .context import runtime_context
 from .tvdb import TvdbConfigError, TvdbRequestError, get_tvdb_series_episodes, search_tvdb_series
@@ -14,7 +15,10 @@ from telepiplex_plugin_sdk.media_metadata import (
     extract_confirmed_media_metadata,
 )
 from .models import DownloadCompletedEvent, PostDownloadResult
-from .ai import infer_tvdb_episode_plan_with_ai
+from .ai import (
+    infer_movie_cleanup_plan_with_ai,
+    infer_tvdb_episode_plan_with_ai,
+)
 from .media_naming import (
     build_media_naming_plan,
     infer_english_title_from_release,
@@ -137,6 +141,147 @@ def collect_storage_file_tree(storage, root_path, max_depth=4, limit=1000):
     return tree
 
 
+def _event_file_tree(event: DownloadCompletedEvent):
+    if isinstance(event.file_tree, list) and event.file_tree:
+        return [dict(item) for item in event.file_tree if isinstance(item, dict)]
+    return collect_storage_file_tree(_storage(event), event.final_path)
+
+
+def _source_path(event: DownloadCompletedEvent, node: dict) -> str:
+    absolute = str(node.get("path") or "").strip()
+    if absolute:
+        return absolute
+    relative = str(node.get("relative_path") or node.get("name") or "").strip("/")
+    return f"{str(event.final_path).rstrip('/')}/{relative}"
+
+
+def _selection_key(value):
+    name = Path(str(value or "").replace("\\", "/")).name
+    suffix = Path(name).suffix.lower()
+    stem = name[: -len(suffix)] if suffix in VIDEO_EXTENSIONS else name
+    return re.sub(r"[^0-9a-z\u3400-\u9fff]+", " ", stem.casefold()).strip()
+
+
+def _video_nodes(file_tree):
+    return [
+        item for item in file_tree
+        if not item.get("is_dir")
+        and Path(str(item.get("name") or "")).suffix.lower() in VIDEO_EXTENSIONS
+    ]
+
+
+def _movie_plan_hints(event, media_metadata):
+    strong = []
+    for item in (media_metadata or {}).get("items") or []:
+        if isinstance(item, dict) and item.get("source_hint"):
+            strong.append(item["source_hint"])
+    release = event.release if isinstance(event.release, dict) else {}
+    ordinary = [
+        release.get("title"),
+        (event.naming_metadata or {}).get("release_title"),
+    ]
+    return strong, ordinary
+
+
+def _find_unique_hint(video_nodes, hints):
+    for hint in hints:
+        hint_path = str(hint or "").strip("/")
+        hint_key = _selection_key(hint_path)
+        matches = [
+            node for node in video_nodes
+            if hint_path in {
+                str(node.get("relative_path") or "").strip("/"),
+                str(node.get("name") or ""),
+            }
+            or (hint_key and _selection_key(node.get("name")) == hint_key)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def _lookup_ai_movie_selection(video_nodes, plan):
+    if not isinstance(plan, dict):
+        return None
+    index = {}
+    basename_counts = {}
+    for node in video_nodes:
+        relative = str(node.get("relative_path") or node.get("name") or "").strip("/")
+        index[relative] = node
+        name = str(node.get("name") or "")
+        basename_counts[name] = basename_counts.get(name, 0) + 1
+    for node in video_nodes:
+        name = str(node.get("name") or "")
+        if basename_counts.get(name) == 1:
+            index[name] = node
+    main = index.get(str(plan.get("main_video") or "").strip("/"))
+    if main is None:
+        return None
+    expected_discard = {
+        str(node.get("relative_path") or node.get("name") or "").strip("/")
+        for node in video_nodes if node is not main
+    }
+    actual_discard = set()
+    for value in plan.get("discard_files") or []:
+        node = index.get(str(value or "").strip("/"))
+        if node is not None and node is not main:
+            actual_discard.add(
+                str(node.get("relative_path") or node.get("name") or "").strip("/")
+            )
+    if actual_discard != expected_discard:
+        return None
+    return main
+
+
+def _choose_movie_main_video(event, naming_metadata, file_tree):
+    video_nodes = _video_nodes(file_tree)
+    if not video_nodes:
+        return None, ""
+    media_metadata, _present = _media_metadata_state(event)
+    strong, ordinary = _movie_plan_hints(event, media_metadata)
+    main = _find_unique_hint(video_nodes, strong)
+    if main:
+        return main, "confirmed_source_hint"
+    if len(video_nodes) == 1:
+        return video_nodes[0], "unique_video"
+    main = _find_unique_hint(video_nodes, ordinary)
+    if main:
+        return main, "release_filename"
+
+    context = {
+        "confirmed_media_metadata": media_metadata,
+        "naming_metadata": naming_metadata,
+        "release": event.release or {},
+        "resource_name": event.resource_name,
+        "download_root": event.final_path,
+        "file_tree": file_tree,
+    }
+    ai_plan = (
+        infer_movie_cleanup_plan_with_ai(context)
+        if _has_ai_episode_inference_config()
+        else None
+    )
+    main = _lookup_ai_movie_selection(video_nodes, ai_plan)
+    if main:
+        return main, "ai_evidence"
+
+    ranked = sorted(
+        video_nodes,
+        key=lambda item: int(item.get("size") or 0),
+        reverse=True,
+    )
+    largest = int(ranked[0].get("size") or 0)
+    second = int(ranked[1].get("size") or 0)
+    ratio = float(
+        ((runtime_context.config or {}).get("selection") or {}).get(
+            "movie_size_fallback_ratio", 1.5
+        )
+    )
+    if largest > 0 and (second == 0 or largest / second >= ratio):
+        return ranked[0], f"size_fallback_ratio_{largest / max(second, 1):.2f}"
+    return None, ""
+
+
 def _tvdb_title_from_metadata(metadata):
     metadata = metadata or {}
     title = metadata.get("english_title") or metadata.get("query") or ""
@@ -181,6 +326,8 @@ def _get_tvdb_candidates_and_episodes(metadata):
 def _has_ai_episode_inference_config():
     ai_config = runtime_context.config.get("ai") or {}
     return bool(
+        ai_config.get("enable", True)
+        and
         str(ai_config.get("api_url") or ai_config.get("base_url") or "").strip()
         and str(ai_config.get("api_key") or "").strip()
         and str(ai_config.get("model") or "").strip()
@@ -231,7 +378,7 @@ def _attempt_legacy_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metada
     if not tvdb_candidates or not tvdb_episodes:
         return None
 
-    file_tree = collect_storage_file_tree(storage, event.final_path)
+    file_tree = _event_file_tree(event)
     video_count = len([item for item in file_tree if not item.get("is_dir")])
     if not video_count:
         runtime_context.logger.warn(f"TVDB整理跳过：目录中未找到视频文件 {event.final_path}")
@@ -265,6 +412,9 @@ def _attempt_legacy_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metada
         runtime_context.logger.warn(f"TVDB整理跳过：AI映射未通过交叉校验 path={event.final_path}")
         return None
 
+    _assert_no_target_conflicts(storage, rename_plan)
+
+    root_source_deleted = None
     for operation in rename_plan["operations"]:
         storage.create_dir_recursive(operation["target_dir"])
         current_source_path = operation["source_path"]
@@ -272,10 +422,21 @@ def _attempt_legacy_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metada
             if not storage.rename(operation["source_path"], operation["rename_to"]):
                 raise RuntimeError(f"TVDB整理失败：重命名失败 {operation['source_path']}")
             current_source_path = operation["renamed_source_path"]
-        if not storage.move_file(current_source_path, operation["target_dir"]):
+        outcome = _move_file_with_outcome(
+            storage, current_source_path, operation["target_dir"]
+        )
+        if not outcome.get("copied"):
             raise RuntimeError(f"TVDB整理失败：移动失败 {current_source_path}")
+        if (
+            len(rename_plan["operations"]) == 1
+            and str(operation["source_path"]).rstrip("/")
+            == str(event.final_path).rstrip("/")
+        ):
+            root_source_deleted = bool(outcome.get("source_deleted"))
 
-    if event.final_path != rename_plan["target_root"]:
+    if root_source_deleted is False:
+        rename_plan["cleanup_complete"] = False
+    elif root_source_deleted is None and event.final_path != rename_plan["target_root"]:
         _cleanup_source_directory(storage, event.final_path)
 
     return rename_plan
@@ -405,7 +566,7 @@ def _attempt_confirmed_series_rename(
         return None
 
     storage = _storage(event)
-    file_tree = collect_storage_file_tree(storage, event.final_path)
+    file_tree = _event_file_tree(event)
     if not [item for item in file_tree if not item.get("is_dir")]:
         runtime_context.logger.warn(
             f"确认方案整理跳过：目录中未找到视频文件 {event.final_path}"
@@ -413,6 +574,7 @@ def _attempt_confirmed_series_rename(
         return None
 
     ai_plan = _deterministic_episode_plan(media_metadata, file_tree)
+    ai_was_used = False
     if ai_plan is None and _has_ai_episode_inference_config():
         tvdb_candidates, tvdb_episodes = _get_tvdb_candidates_and_episodes(metadata)
         context = {
@@ -426,6 +588,7 @@ def _attempt_confirmed_series_rename(
             "tvdb_episodes": tvdb_episodes,
         }
         ai_plan = infer_tvdb_episode_plan_with_ai(context)
+        ai_was_used = True
     rename_plan = build_confirmed_rename_plan(
         final_path=event.final_path,
         selected_path=event.selected_path,
@@ -440,9 +603,71 @@ def _attempt_confirmed_series_rename(
         )
         return None
 
+    unmatched_sources = rename_plan.get("unmatched_sources") or []
+    if unmatched_sources:
+        nodes_by_path = {
+            str(node.get("relative_path") or node.get("name") or "").strip("/"): node
+            for node in file_tree if not node.get("is_dir")
+        }
+        mapped_sizes = [
+            int(nodes_by_path.get(operation["source_relative_path"], {}).get("size") or 0)
+            for operation in rename_plan.get("operations") or []
+        ]
+        largest_mapped = max(mapped_sizes or [0])
+        selection = (runtime_context.config or {}).get("selection") or {}
+        relative_threshold = largest_mapped * float(
+            selection.get("unmatched_large_ratio", 0.25)
+        )
+        absolute_threshold = int(
+            selection.get("unmatched_large_min_bytes", 314572800)
+        )
+        large_unmatched = {
+            path for path in unmatched_sources
+            if int(nodes_by_path.get(path, {}).get("size") or 0)
+            >= max(relative_threshold, absolute_threshold)
+        }
+        if large_unmatched and not ai_was_used:
+            tvdb_candidates, tvdb_episodes = _get_tvdb_candidates_and_episodes(metadata)
+            context = {
+                "metadata": metadata,
+                "confirmed_media_metadata": media_metadata,
+                "release": event.release or {},
+                "release_title": metadata.get("release_title") or event.resource_name,
+                "resource_name": event.resource_name,
+                "download_path": event.final_path,
+                "file_tree": file_tree,
+                "tvdb_candidates": tvdb_candidates,
+                "tvdb_episodes": tvdb_episodes,
+            }
+            ai_plan = infer_tvdb_episode_plan_with_ai(context)
+            ai_was_used = True
+            rename_plan = build_confirmed_rename_plan(
+                final_path=event.final_path,
+                selected_path=event.selected_path,
+                metadata=metadata,
+                media_metadata=media_metadata,
+                ai_plan=ai_plan or {},
+                file_tree=file_tree,
+            )
+            if not rename_plan:
+                return None
+            unmatched_sources = rename_plan.get("unmatched_sources") or []
+            large_unmatched = large_unmatched.intersection(unmatched_sources)
+        if large_unmatched:
+            discard = {
+                str(value or "").strip("/")
+                for value in (ai_plan or {}).get("discard_files") or []
+            }
+            if not large_unmatched.issubset(discard):
+                runtime_context.logger.warning(
+                    "确认方案存在未经 AI 明确处理的大视频，整批转入未整理"
+                )
+                return None
+
     _assert_no_target_conflicts(storage, rename_plan)
     operations = rename_plan["operations"]
     completed = 0
+    root_source_deleted = None
     for operation in operations:
         current_source_path = operation["source_path"]
         try:
@@ -457,6 +682,12 @@ def _attempt_confirmed_series_rename(
             )
             if not outcome.get("copied"):
                 raise RuntimeError(f"移动失败 {current_source_path}")
+            if (
+                len(operations) == 1
+                and str(operation["source_path"]).rstrip("/")
+                == str(event.final_path).rstrip("/")
+            ):
+                root_source_deleted = bool(outcome.get("source_deleted"))
         except Exception as exc:
             raise BatchRenameInterrupted(
                 completed=completed,
@@ -480,7 +711,9 @@ def _attempt_confirmed_series_rename(
         ) from exc
     rename_plan["unmatched_target"] = unmatched_dir
     rename_plan["cleanup_complete"] = True
-    if event.final_path != rename_plan["target_root"]:
+    if root_source_deleted is False:
+        rename_plan["cleanup_complete"] = False
+    elif root_source_deleted is None and event.final_path != rename_plan["target_root"]:
         rename_plan["cleanup_complete"] = _cleanup_source_directory(
             storage, event.final_path
         )
@@ -525,10 +758,14 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
     try:
         rename_plan = _attempt_tvdb_ai_episode_rename(event, metadata)
     except ConfirmedPlanConflict as exc:
+        unorganized_target = _move_confirmed_failure_to_unorganized(event)
         return PostDownloadResult(
             True,
-            final_path=event.final_path,
-            message=f"⚠️ {exc}\n文件保持原位，请重新确认下载方案。",
+            final_path=unorganized_target,
+            message=(
+                f"⚠️ {exc}\n映射规则存在冲突，整批已移入未整理。\n"
+                f"保存目录：`{unorganized_target}`"
+            ),
             should_stop=True,
         )
     except BatchRenameInterrupted as exc:
@@ -592,20 +829,17 @@ def _attempt_media_auto_rename(event: DownloadCompletedEvent, naming_metadata):
         return None
 
     storage = _storage(event)
-    file_tree = collect_storage_file_tree(storage, event.final_path)
-    video_nodes = [
-        item for item in file_tree
-        if not item.get("is_dir")
-        and Path(str(item.get("name") or "")).suffix.lower() in VIDEO_EXTENSIONS
-    ]
-    if not video_nodes:
+    file_tree = _event_file_tree(event)
+    main_video, selection_reason = _choose_movie_main_video(
+        event,
+        naming_metadata,
+        file_tree,
+    )
+    if not main_video:
         runtime_context.logger.warn(f"自动整理跳过：目录中未找到视频文件 {event.final_path}")
         return None
-    video_nodes.sort(key=lambda item: int(item.get("size") or 0), reverse=True)
-    main_video = video_nodes[0]
 
     original_file_name = main_video["name"]
-    original_relative_path = main_video["relative_path"]
     release_title = naming_metadata.get("release_title") or event.resource_name
     plan = build_media_naming_plan(naming_metadata, release_title, original_file_name)
     if not plan:
@@ -613,15 +847,15 @@ def _attempt_media_auto_rename(event: DownloadCompletedEvent, naming_metadata):
         return None
 
     target_path = f"{event.selected_path}/{plan.target_relative_dir}"
+    target_file = f"{target_path.rstrip('/')}/{plan.file_name}"
+    if storage.get_file_info(target_file):
+        raise ConfirmedPlanConflict(f"目标文件发生冲突：{target_file}")
     if not storage.create_dir_recursive(target_path):
         raise RuntimeError(f"自动整理失败：无法创建目标目录 {target_path}")
 
-    original_file_path = f"{event.final_path}/{original_relative_path}"
-    source_parent = "/".join(original_relative_path.split("/")[:-1])
-    renamed_file_path = "/".join(
-        item for item in (str(event.final_path).rstrip("/"), source_parent, plan.file_name)
-        if item
-    )
+    original_file_path = _source_path(event, main_video)
+    source_root = str(original_file_path).rsplit("/", 1)[0]
+    renamed_file_path = f"{source_root}/{plan.file_name}"
     if original_file_name != plan.file_name:
         if storage.rename(original_file_path, plan.file_name) is not True:
             raise RuntimeError(f"自动整理失败：重命名失败 {original_file_path}")
@@ -630,10 +864,12 @@ def _attempt_media_auto_rename(event: DownloadCompletedEvent, naming_metadata):
     if not outcome.get("copied"):
         raise RuntimeError(f"自动整理失败：移动失败 {renamed_file_path}")
     cleanup_complete = True
-    if event.final_path != target_path:
+    if str(event.final_path).rstrip("/") == str(original_file_path).rstrip("/"):
+        cleanup_complete = bool(outcome.get("source_deleted"))
+    elif event.final_path != target_path:
         cleanup_complete = _cleanup_source_directory(storage, event.final_path)
 
-    return target_path, plan, cleanup_complete
+    return target_path, plan, cleanup_complete, selection_reason
 
 
 def _standalone_contract_naming_metadata(event: DownloadCompletedEvent):
@@ -654,16 +890,30 @@ def _standalone_contract_naming_metadata(event: DownloadCompletedEvent):
 
 
 def process_generic_media(event: DownloadCompletedEvent) -> PostDownloadResult:
-    filename_metadata = _filename_metadata_from_resource(event.resource_name)
-    naming_auto_metadata = _standalone_contract_naming_metadata(event) or event.naming_metadata or (
-        filename_metadata if not event.metadata and not event.naming_metadata else None
+    naming_auto_metadata = (
+        _standalone_contract_naming_metadata(event)
+        or event.naming_metadata
     )
-    result = _attempt_media_auto_rename(event, naming_auto_metadata)
+    try:
+        result = _attempt_media_auto_rename(event, naming_auto_metadata)
+    except ConfirmedPlanConflict as exc:
+        unorganized_target = _move_confirmed_failure_to_unorganized(event)
+        return PostDownloadResult(
+            True,
+            final_path=unorganized_target,
+            message=(
+                f"⚠️ {exc}\n映射规则存在冲突，整批已移入未整理。\n"
+                f"保存目录：`{unorganized_target}`"
+            ),
+            should_stop=True,
+            metadata=event.metadata,
+        )
     if not result:
         return PostDownloadResult(False, final_path=event.final_path)
-    target_path, plan, cleanup_complete = result
+    target_path, plan, cleanup_complete, selection_reason = result
     message = (
-        f"✅ 自动整理完成：`{plan.file_name}`\n\n保存目录：`{target_path}`"
+        f"✅ 自动整理完成：`{plan.file_name}`\n"
+        f"主视频依据：{selection_reason}\n\n保存目录：`{target_path}`"
         if cleanup_complete
         else (
             "⚠️ 视频已完成整理，但源目录清理未完成，请人工检查。\n\n"

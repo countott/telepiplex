@@ -6,6 +6,7 @@ entry_point: telepiplex_renaming.runtime:main
 provides: []
 requires:
   - storage.provider
+  - media.search
 subscribes:
   - download.completed
 publishes:

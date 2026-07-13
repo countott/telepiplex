@@ -200,9 +200,11 @@ def build_tvdb_rename_plan(
         target_parts = target_relative_path.split("/")
         rename_to = target_parts[-1]
         target_dir = _join_path(target_root, *target_parts[:-1])
-        source_path = _join_path(final_path, source_node["relative_path"])
-        source_parent = "/".join(source_node["relative_path"].split("/")[:-1])
-        renamed_source_path = _join_path(final_path, source_parent, rename_to)
+        source_path = str(source_node.get("path") or "") or _join_path(
+            final_path, source_node["relative_path"]
+        )
+        source_parent = source_path.rsplit("/", 1)[0]
+        renamed_source_path = _join_path(source_parent, rename_to)
         operations.append(
             {
                 "source_relative_path": source_node["relative_path"],
@@ -214,7 +216,12 @@ def build_tvdb_rename_plan(
             }
         )
 
-    if seen_sources != source_video_paths:
+    discard_sources = {
+        _clean_path(value)
+        for value in ai_plan.get("discard_files") or []
+        if _clean_path(value) in source_video_paths
+    }
+    if seen_sources | discard_sources != source_video_paths:
         return None
 
     return {
@@ -222,6 +229,7 @@ def build_tvdb_rename_plan(
         "tvdb_series_id": tvdb_series_id,
         "series_name": sanitize_path_name(ai_plan.get("series_name") or ""),
         "operations": operations,
+        "unmatched_sources": sorted(discard_sources),
         "warnings": [str(item) for item in ai_plan.get("warnings") or [] if str(item).strip()],
     }
 def build_confirmed_rename_plan(
@@ -297,21 +305,28 @@ def build_confirmed_rename_plan(
             continue
         seen_sources.add(source_relative_path)
         seen_targets.add(resolved_path)
-        source_parent = "/".join(source_relative_path.split("/")[:-1])
+        source_path = str(source_node.get("path") or "") or _join_path(
+            final_path, source_relative_path
+        )
+        source_parent = source_path.rsplit("/", 1)[0]
         operations.append({
             "content_role": item.get("content_role") or identity.get("content_kind"),
             "season_number": season,
             "episode_number": episode,
             "source_relative_path": source_relative_path,
-            "source_path": _join_path(final_path, source_relative_path),
+            "source_path": source_path,
             "rename_to": rename_to,
-            "renamed_source_path": _join_path(final_path, source_parent, rename_to),
+            "renamed_source_path": _join_path(source_parent, rename_to),
             "target_dir": target_dir,
             "target_relative_path": target_relative_path,
             "final_path": resolved_path,
         })
 
-    if not operations:
+    mapped_targets = {
+        (operation["season_number"], operation["episode_number"])
+        for operation in operations
+    }
+    if not operations or mapped_targets != allowed_targets:
         return None
     return {
         "target_root": target_root,

@@ -15,6 +15,7 @@ def main(context: RuntimeContext) -> FeatureRuntime:
         "ai": config.get("ai") or {},
         "metadata": config.get("metadata") or {},
         "media": {"unorganized_path": config.get("unorganized_path") or ""},
+        "selection": config.get("selection") or {},
     })
     feature = RenamingFeature(
         config=config, core=context.core,

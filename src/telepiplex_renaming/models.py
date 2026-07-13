@@ -11,6 +11,9 @@ class DownloadCompletedEvent:
     resource_name: str
     naming_metadata: dict | None = None
     metadata: dict | None = None
+    file_tree: list[dict] | None = None
+    release: dict | None = None
+    download_root: str | None = None
     provider: str = "open115"
     storage: Any = None
 
