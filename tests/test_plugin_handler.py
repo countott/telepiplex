@@ -9,6 +9,7 @@ class FakeManager:
         self.calls = []
         self.router = Mock()
         self.candidates = []
+        self.updates = []
 
     async def _operation(self, name, value):
         self.calls.append((name, value))
@@ -48,6 +49,9 @@ class FakeManager:
 
     async def available_plugins(self):
         return list(self.candidates)
+
+    async def available_updates(self):
+        return list(self.updates)
 
 
 class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
@@ -384,6 +388,104 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             buttons[0][0].callback_data,
             "core-plugin-install:confirm:open115@1.0.0",
+        )
+
+    async def test_plugin_overview_lists_update_action_for_installed_feature(self):
+        from app.handlers.plugin_handler import plugin_command
+
+        update, context, manager = self._request([], user_id=1)
+        manager.doctor = Mock(return_value=[{
+            "plugin_id": "open115",
+            "state": "active",
+            "version": "1.0.0",
+        }])
+        manager.updates = [SimpleNamespace(
+            plugin_id="open115",
+            current_version="1.0.0",
+            target_version="1.1.0",
+            reference="open115@1.1.0",
+        )]
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_command(update, context)
+
+        call = update.effective_message.reply_text.await_args
+        message = call.args[0]
+        self.assertIn("可更新", message)
+        self.assertIn("open115 1.0.0 → 1.1.0", message)
+        callbacks = [
+            row[0].callback_data
+            for row in call.kwargs["reply_markup"].inline_keyboard
+        ]
+        self.assertIn(
+            "core-plugin-update:confirm:open115@1.1.0",
+            callbacks,
+        )
+
+    async def test_plugin_overview_keeps_install_buttons_when_update_discovery_fails(self):
+        from app.core.plugin_catalog import CatalogError
+        from app.handlers.plugin_handler import plugin_command
+
+        update, context, manager = self._request([], user_id=1)
+        manager.available_updates = AsyncMock(side_effect=CatalogError(
+            "updates_unavailable",
+            "network token=secret-value",
+        ))
+        manager.candidates = [SimpleNamespace(
+            plugin_id="open115",
+            target_version="1.0.0",
+            reference="open115@1.0.0",
+            ready=True,
+            missing_capabilities=(),
+            dependency_plugins=(),
+        )]
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_command(update, context)
+
+        call = update.effective_message.reply_text.await_args
+        message = call.args[0]
+        callbacks = [
+            row[0].callback_data
+            for row in call.kwargs["reply_markup"].inline_keyboard
+        ]
+        self.assertIn("updates_unavailable", message)
+        self.assertNotIn("secret-value", message)
+        self.assertIn(
+            "core-plugin-install:confirm:open115@1.0.0",
+            callbacks,
+        )
+
+    async def test_plugin_overview_keeps_update_buttons_when_install_discovery_fails(self):
+        from app.core.plugin_catalog import CatalogError
+        from app.handlers.plugin_handler import plugin_command
+
+        update, context, manager = self._request([], user_id=1)
+        manager.available_plugins = AsyncMock(side_effect=CatalogError(
+            "catalog_unavailable",
+            "network api_key=secret-value",
+        ))
+        manager.updates = [SimpleNamespace(
+            plugin_id="open115",
+            current_version="1.0.0",
+            target_version="1.1.0",
+            reference="open115@1.1.0",
+        )]
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_command(update, context)
+
+        call = update.effective_message.reply_text.await_args
+        message = call.args[0]
+        callbacks = [
+            row[0].callback_data
+            for row in call.kwargs["reply_markup"].inline_keyboard
+        ]
+        self.assertIn("catalog_unavailable", message)
+        self.assertNotIn("secret-value", message)
+        self.assertIn(
+            "core-plugin-update:confirm:open115@1.1.0",
+            callbacks,
         )
 
     async def test_plugin_overview_links_installed_features_to_config_ui(self):

@@ -95,12 +95,22 @@ async def plugin_command(update, context):
 async def _show_feature_overview(message, manager):
     statuses = manager.doctor()
     rows = []
-    catalog_error = ""
+    updates = []
+    candidates = []
+    catalog_errors = []
+    if statuses:
+        try:
+            updates = await manager.available_updates()
+        except Exception as exc:
+            catalog_errors.append(str(
+                getattr(exc, "code", "catalog_unavailable")
+            ))
     try:
         candidates = await manager.available_plugins()
     except Exception as exc:
-        candidates = []
-        catalog_error = str(getattr(exc, "code", "catalog_unavailable"))
+        catalog_errors.append(str(
+            getattr(exc, "code", "catalog_unavailable")
+        ))
 
     lines = ["Feature 管理"]
     if statuses:
@@ -117,9 +127,23 @@ async def _show_feature_overview(message, manager):
     else:
         lines.append("\n已安装：无")
 
-    if catalog_error:
-        lines.append(f"\n发布目录暂不可用：{catalog_error}")
-    elif candidates:
+    if updates:
+        lines.append("\n可更新：")
+        for item in updates:
+            lines.append(
+                f"• {item.plugin_id} {item.current_version} → "
+                f"{item.target_version}"
+            )
+            callback_data = (
+                f"core-plugin-update:confirm:{item.reference}"
+            )
+            if len(callback_data.encode("utf-8")) <= 64:
+                rows.append([InlineKeyboardButton(
+                    f"更新 {item.plugin_id} 到 {item.target_version}",
+                    callback_data=callback_data,
+                )])
+
+    if candidates:
         lines.append("\n可安装：")
         for candidate in candidates:
             if candidate.ready:
@@ -144,8 +168,14 @@ async def _show_feature_overview(message, manager):
                     f"• {candidate.plugin_id} {candidate.target_version}"
                     f"（缺少能力：{'、'.join(candidate.missing_capabilities)}）"
                 )
-    else:
+    elif not catalog_errors:
         lines.append("\n当前没有可安装的兼容稳定版本。")
+
+    if catalog_errors:
+        safe_codes = "、".join(dict.fromkeys(
+            _safe_error(code) for code in catalog_errors
+        ))
+        lines.append(f"\n发布目录部分不可用：{safe_codes}")
 
     lines.append(
         "\n手动入口：/plugin install <name@version|artifact.tpx>"
