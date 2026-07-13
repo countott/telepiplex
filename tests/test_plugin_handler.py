@@ -8,6 +8,7 @@ class FakeManager:
     def __init__(self):
         self.calls = []
         self.router = Mock()
+        self.candidates = []
 
     async def _operation(self, name, value):
         self.calls.append((name, value))
@@ -44,6 +45,9 @@ class FakeManager:
     def doctor(self):
         self.calls.append(("doctor", None))
         return [{"plugin_id": "echo", "state": "active", "version": "1.0.0"}]
+
+    async def available_plugins(self):
+        return list(self.candidates)
 
 
 class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
@@ -333,6 +337,116 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         message = update.callback_query.edit_message_text.await_args_list[-1].args[0]
         self.assertIn("update_failed", message)
+        self.assertNotIn("secret-value", message)
+
+    async def test_plugin_overview_lists_ready_and_blocked_candidates(self):
+        from app.handlers.plugin_handler import plugin_command
+
+        update, context, manager = self._request([], user_id=1)
+        manager.doctor = Mock(return_value=[])
+        manager.candidates = [
+            SimpleNamespace(
+                plugin_id="open115",
+                target_version="1.0.0",
+                reference="open115@1.0.0",
+                ready=True,
+                missing_capabilities=(),
+                dependency_plugins=(),
+            ),
+            SimpleNamespace(
+                plugin_id="media-search",
+                target_version="1.0.0",
+                reference="media-search@1.0.0",
+                ready=False,
+                missing_capabilities=("download.provider",),
+                dependency_plugins=("open115",),
+            ),
+            SimpleNamespace(
+                plugin_id="orphan",
+                target_version="1.0.0",
+                reference="orphan@1.0.0",
+                ready=False,
+                missing_capabilities=("missing.provider",),
+                dependency_plugins=(),
+            ),
+        ]
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_command(update, context)
+
+        self.assertEqual(manager.calls, [])
+        call = update.effective_message.reply_text.await_args
+        self.assertIn("open115", call.args[0])
+        self.assertIn("先安装：open115", call.args[0])
+        self.assertIn("缺少能力：missing.provider", call.args[0])
+        buttons = call.kwargs["reply_markup"].inline_keyboard
+        self.assertEqual(len(buttons), 1)
+        self.assertEqual(
+            buttons[0][0].callback_data,
+            "core-plugin-install:confirm:open115@1.0.0",
+        )
+
+    async def test_plugin_overview_keeps_manual_entry_when_catalog_is_unavailable(self):
+        from app.core.plugin_catalog import CatalogError
+        from app.handlers.plugin_handler import plugin_command
+
+        update, context, manager = self._request([], user_id=1)
+        manager.available_plugins = AsyncMock(side_effect=CatalogError(
+            "catalog_unavailable",
+            "network token=secret-value",
+        ))
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_command(update, context)
+
+        message = update.effective_message.reply_text.await_args.args[0]
+        self.assertIn("catalog_unavailable", message)
+        self.assertIn("/plugin install", message)
+        self.assertNotIn("secret-value", message)
+
+    async def test_core_install_callback_requires_authorization_and_click(self):
+        from app.handlers.plugin_handler import plugin_install_callback
+
+        update, context, manager = self._request([], user_id=1)
+        update.callback_query.data = "core-plugin-install:confirm:echo@1.1.0"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_install_callback(update, context)
+
+        self.assertEqual(manager.calls, [("install", "echo@1.1.0")])
+        self.assertIn(
+            "1.0.0",
+            update.callback_query.edit_message_text.await_args_list[-1].args[0],
+        )
+
+        update, context, manager = self._request([], user_id=2)
+        update.callback_query.data = "core-plugin-install:confirm:echo@1.1.0"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=False):
+            await plugin_install_callback(update, context)
+        self.assertEqual(manager.calls, [])
+
+    async def test_core_install_callback_sanitizes_manager_errors(self):
+        from app.core.plugin_manager import PluginOperationError
+        from app.handlers.plugin_handler import plugin_install_callback
+
+        update, context, manager = self._request([], user_id=1)
+        update.callback_query.data = "core-plugin-install:confirm:echo@1.1.0"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        manager.install = AsyncMock(side_effect=PluginOperationError(
+            "install_failed",
+            "api_key=secret-value",
+        ))
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_install_callback(update, context)
+
+        message = update.callback_query.edit_message_text.await_args_list[-1].args[0]
+        self.assertIn("install_failed", message)
         self.assertNotIn("secret-value", message)
 
 

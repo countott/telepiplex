@@ -29,6 +29,10 @@ _CORE_UPDATE_CALLBACK_RE = re.compile(
     r"^core-plugin-update:(?P<action>confirm|decline):"
     r"(?P<reference>[a-z][a-z0-9-]{0,63}@\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$"
 )
+_CORE_INSTALL_CALLBACK_RE = re.compile(
+    r"^core-plugin-install:confirm:"
+    r"(?P<reference>[a-z][a-z0-9-]{0,63}@\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$"
+)
 
 
 def _safe_error(value) -> str:
@@ -46,15 +50,15 @@ async def plugin_command(update, context):
         await message.reply_text("⚠️ 当前账号无权管理 Feature 插件。")
         return
     args = list(context.args or [])
-    if not args:
-        await message.reply_text(_USAGE)
-        return
     manager = context.application.bot_data.get(MANAGER_KEY)
     if manager is None:
         await message.reply_text("❌ Feature 插件管理器尚未初始化。")
         return
-    command = str(args[0]).lower()
     try:
+        if not args:
+            await _show_feature_overview(message, manager)
+            return
+        command = str(args[0]).lower()
         if command in {"install", "update", "enable", "disable", "rollback", "remove"}:
             if len(args) != 2:
                 await message.reply_text(_USAGE)
@@ -86,6 +90,101 @@ async def plugin_command(update, context):
         await message.reply_text(f"❌ {exc.code}：{_safe_error(exc)}")
     except Exception as exc:
         await message.reply_text(f"❌ plugin_operation_failed：{type(exc).__name__}")
+
+
+async def _show_feature_overview(message, manager):
+    statuses = manager.doctor()
+    catalog_error = ""
+    try:
+        candidates = await manager.available_plugins()
+    except Exception as exc:
+        candidates = []
+        catalog_error = str(getattr(exc, "code", "catalog_unavailable"))
+
+    lines = ["Feature 管理"]
+    if statuses:
+        lines.append("\n已安装：")
+        for status in statuses:
+            lines.append(
+                f"• {status.get('plugin_id', 'unknown')} "
+                f"{status.get('version', '-')}（{status.get('state', 'unknown')}）"
+            )
+    else:
+        lines.append("\n已安装：无")
+
+    rows = []
+    if catalog_error:
+        lines.append(f"\n发布目录暂不可用：{catalog_error}")
+    elif candidates:
+        lines.append("\n可安装：")
+        for candidate in candidates:
+            if candidate.ready:
+                lines.append(
+                    f"• {candidate.plugin_id} {candidate.target_version}（可安装）"
+                )
+                callback_data = (
+                    f"core-plugin-install:confirm:{candidate.reference}"
+                )
+                if len(callback_data.encode("utf-8")) <= 64:
+                    rows.append([InlineKeyboardButton(
+                        f"安装 {candidate.plugin_id} {candidate.target_version}",
+                        callback_data=callback_data,
+                    )])
+            elif candidate.dependency_plugins:
+                lines.append(
+                    f"• {candidate.plugin_id} {candidate.target_version}"
+                    f"（先安装：{'、'.join(candidate.dependency_plugins)}）"
+                )
+            else:
+                lines.append(
+                    f"• {candidate.plugin_id} {candidate.target_version}"
+                    f"（缺少能力：{'、'.join(candidate.missing_capabilities)}）"
+                )
+    else:
+        lines.append("\n当前没有可安装的兼容稳定版本。")
+
+    lines.append(
+        "\n手动入口：/plugin install <name@version|artifact.tpx>"
+    )
+    kwargs = {}
+    if rows:
+        kwargs["reply_markup"] = InlineKeyboardMarkup(rows)
+    await message.reply_text("\n".join(lines), **kwargs)
+
+
+async def plugin_install_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+    if not init.check_user(update.effective_user.id):
+        await query.edit_message_text("⚠️ 当前账号无权管理 Feature 插件。")
+        return
+
+    match = _CORE_INSTALL_CALLBACK_RE.fullmatch(str(query.data or ""))
+    if match is None:
+        await query.edit_message_text("❌ invalid_install_callback：安装请求无效。")
+        return
+    manager = context.application.bot_data.get(MANAGER_KEY)
+    if manager is None:
+        await query.edit_message_text("❌ Feature 插件管理器尚未初始化。")
+        return
+
+    reference = match.group("reference")
+    try:
+        await query.edit_message_text(f"⏳ Feature 安装处理中：{reference}")
+        result = await manager.install(reference)
+        await query.edit_message_text(
+            f"✅ {result.message}\n"
+            f"插件：{result.plugin_id}\n"
+            f"版本：{result.version}\n"
+            f"状态：{result.state}\n\n"
+            "发送 /plugin 继续安装其他 Feature。"
+        )
+    except PluginOperationError as exc:
+        await query.edit_message_text(f"❌ {exc.code}：{_safe_error(exc)}")
+    except Exception as exc:
+        await query.edit_message_text(
+            f"❌ plugin_operation_failed：{type(exc).__name__}"
+        )
 
 
 async def plugin_update_callback(update, context):

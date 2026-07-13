@@ -199,6 +199,25 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
 
         manager.start.assert_awaited_once()
 
+    async def test_core_install_callback_is_reserved_before_feature_callbacks(self):
+        bot_module = await asyncio.to_thread(load_bot_module)
+        application = SimpleNamespace(bot_data={}, add_handler=Mock())
+        manager = SimpleNamespace(router=Mock())
+
+        bot_module.configure_application(application, manager)
+
+        callback_patterns = [
+            handler.pattern.pattern if handler.pattern is not None else None
+            for call in application.add_handler.call_args_list
+            for handler in (call.args[0],)
+            if handler.__class__.__name__ == "CallbackQueryHandler"
+        ]
+        self.assertEqual(callback_patterns, [
+            "^core-plugin-install:",
+            "^core-plugin-update:",
+            None,
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -36,6 +36,7 @@ from app.handlers.plugin_handler import (
     dynamic_command_gateway,
     dynamic_message_gateway,
     plugin_command,
+    plugin_install_callback,
     plugin_update_callback,
 )
 try:
@@ -156,7 +157,7 @@ def build_plugin_manager(config=None, core_database=None):
 
 
 def build_core_startup_notice_text():
-    return "✅ Telepiplex Core 启动完成\n\n可使用 /plugin doctor 查看 Feature 状态"
+    return "✅ Telepiplex Core 启动完成\n\n可使用 /plugin 查看并安装 Feature"
 
 
 def queue_core_startup_notice():
@@ -386,6 +387,10 @@ def configure_application(application, manager):
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reload", reload))
     application.add_handler(CommandHandler("plugin", plugin_command))
+    application.add_handler(CallbackQueryHandler(
+        plugin_install_callback,
+        pattern=r"^core-plugin-install:",
+    ))
     application.add_handler(CallbackQueryHandler(
         plugin_update_callback,
         pattern=r"^core-plugin-update:",
