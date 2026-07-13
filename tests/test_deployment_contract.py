@@ -9,6 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DeploymentContractTest(unittest.TestCase):
+    def _advanced_section(self, source, heading):
+        match = re.search(
+            rf"(?ms)^{re.escape(heading)}\s*$\n(?P<body>.*?)(?=^#{{2,3}}\s|\Z)",
+            source,
+        )
+        self.assertIsNotNone(match, heading)
+        return match.group("body"), match.start()
+
     def test_image_contains_only_core_runtime_and_plugin_toolchain(self):
         source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("COPY ./app /app", source)
@@ -122,29 +130,57 @@ class DeploymentContractTest(unittest.TestCase):
         for term in (
             "发送 `/plugin`",
             "安装按钮和更新按钮都绑定该 Feature 的最新稳定兼容版本",
-            "先安装",
-            "旧版默认路径 `/config/plugins/catalog.yaml` 缺失时，Core 会自动回退到官方远程 catalog",
-            "### 高级/离线操作",
-            "/plugin install <name@version|artifact.tpx>",
-            "/plugin update <name@version|artifact.tpx>",
+            "只有依赖满足的 ready 候选才显示安装按钮",
+            "旧版默认 catalog 是 `<plugins.root>/catalog.yaml`",
+            "仅当这个 legacy 文件缺失时，Core 才回退到官方 URL",
+            "已存在的 legacy 文件继续使用本地目录",
+            "其他显式本地路径即使当前文件缺失，也保持本地配置意图",
             "不会自动安装",
         ):
             with self.subTest(readme="README.md", term=term):
                 self.assertIn(term, chinese)
 
+        chinese_advanced, chinese_advanced_start = self._advanced_section(
+            chinese,
+            "### 高级/离线操作",
+        )
+        for command in (
+            "/plugin install <name@version|artifact.tpx>",
+            "/plugin update <name@version|artifact.tpx>",
+            "/plugin install media-search@1.2.0",
+            "/plugin update media-search@1.3.0",
+        ):
+            with self.subTest(readme="README.md", advanced_command=command):
+                self.assertIn(command, chinese_advanced)
+                self.assertNotIn(command, chinese[:chinese_advanced_start])
+
         english = (ROOT / "README_EN.md").read_text(encoding="utf-8")
         for term in (
             "Send `/plugin`",
             "Install and Update buttons target that Feature's newest stable, Core-compatible release",
-            "prerequisite",
-            "when the legacy default path `/config/plugins/catalog.yaml` is missing, Core automatically falls back to the official remote catalog",
-            "### Advanced/offline operations",
-            "/plugin install <name@version|artifact.tpx>",
-            "/plugin update <name@version|artifact.tpx>",
+            "Only dependency-satisfied, ready candidates receive an Install button",
+            "The legacy default catalog is `<plugins.root>/catalog.yaml`",
+            "Core falls back to the official URL only when that legacy file is missing",
+            "An existing legacy file remains local",
+            "every other explicit local path preserves its local configuration intent even when its file is missing",
             "never installs automatically",
         ):
             with self.subTest(readme="README_EN.md", term=term):
                 self.assertIn(term, english)
+
+        english_advanced, english_advanced_start = self._advanced_section(
+            english,
+            "### Advanced/offline operations",
+        )
+        for command in (
+            "/plugin install <name@version|artifact.tpx>",
+            "/plugin update <name@version|artifact.tpx>",
+            "/plugin install media-search@1.2.0",
+            "/plugin update media-search@1.3.0",
+        ):
+            with self.subTest(readme="README_EN.md", advanced_command=command):
+                self.assertIn(command, english_advanced)
+                self.assertNotIn(command, english[:english_advanced_start])
 
         decisions = (
             ROOT / "docs/todos/2026-07-12-business-module-decisions.md"
@@ -153,7 +189,11 @@ class DeploymentContractTest(unittest.TestCase):
         self.assertNotIn("OPS-TODO-02 首次安装体验\n", decisions)
         self.assertIn("安装按钮和更新按钮", decisions)
         self.assertIn(
-            "旧版默认 catalog 路径 `/config/plugins/catalog.yaml` 缺失时自动回退到官方远程 catalog",
+            "旧版默认 catalog `<plugins.root>/catalog.yaml` 缺失时回退到官方远程 catalog",
+            decisions,
+        )
+        self.assertIn(
+            "其他显式本地路径即使当前文件缺失也保持本地配置意图",
             decisions,
         )
 

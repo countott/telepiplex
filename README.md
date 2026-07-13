@@ -33,7 +33,7 @@ plugins:
 
 Feature 分支是开发源代码；发布物是由该分支构建的、版本不可变的 `.tpx`。运行容器不 checkout Git 分支，也不把业务源码复制进 Core 镜像。
 
-`plugins.catalog` 可以是远程 HTTPS 地址或本地文件路径。默认使用聚合发布的远程目录；旧版默认路径 `/config/plugins/catalog.yaml` 缺失时，Core 会自动回退到官方远程 catalog。如需离线或固定版本，可下载目录后改成该本地路径；文件实际存在时仍优先使用本地目录。目录将 `name@version` 映射到带 SHA-256 固定值的本地路径或 HTTPS 发布地址：
+`plugins.catalog` 可以是远程 HTTPS 地址或本地文件路径。默认使用聚合发布的远程目录。旧版默认 catalog 是 `<plugins.root>/catalog.yaml`（按上面的默认配置即 `/config/plugins/catalog.yaml`）；仅当这个 legacy 文件缺失时，Core 才回退到官方 URL `https://github.com/countott/telepiplex/releases/latest/download/catalog.yaml`。已存在的 legacy 文件继续使用本地目录；其他显式本地路径即使当前文件缺失，也保持本地配置意图。如需离线或固定版本，可下载目录后配置对应的本地路径。目录将 `name@version` 映射到带 SHA-256 固定值的本地路径或 HTTPS 发布地址：
 
 ```yaml
 plugins:
@@ -44,7 +44,7 @@ plugins:
         sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
-首次安装或日常管理时，在 Telegram 发送 `/plugin`。Core 会列出已安装 Feature：未安装项直接显示“安装”按钮，已安装项发现新版时直接显示“更新”按钮。安装按钮和更新按钮都绑定该 Feature 的最新稳定兼容版本，点击后才执行对应事务。依赖尚未满足的候选会显示“先安装”哪个 provider 或具体缺少的 capability；只有当前可安装的候选才显示安装按钮。Core 不会自动安装、批量安装或静默更新任何 Feature。
+首次安装或日常管理时，在 Telegram 发送 `/plugin`。Core 会列出已安装 Feature 和 catalog 中尚未安装的候选：只有依赖满足的 ready 候选才显示安装按钮；依赖尚未满足的候选会显示“先安装”哪个 provider 或具体缺少的 capability。已安装项发现新版时显示更新按钮。安装按钮和更新按钮都绑定该 Feature 的最新稳定兼容版本，点击后才执行对应事务。Core 不会自动安装、批量安装或静默更新任何 Feature。
 
 ### 高级/离线操作
 

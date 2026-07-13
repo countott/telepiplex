@@ -31,7 +31,7 @@ plugins:
 
 Feature branches are development source. Runtime releases are immutable `.tpx` artifacts built from those branches. The container never checks out Git branches and Core images never contain business source code.
 
-`plugins.catalog` accepts either a remote HTTPS URL or a local file path. The default points at the aggregate release catalog; when the legacy default path `/config/plugins/catalog.yaml` is missing, Core automatically falls back to the official remote catalog. For offline or pinned operation, download the catalog to that path; an existing local file still takes precedence. The catalog maps `name@version` to a local path or HTTPS release with a pinned SHA-256 digest:
+`plugins.catalog` accepts either a remote HTTPS URL or a local file path. The default points at the aggregate release catalog. The legacy default catalog is `<plugins.root>/catalog.yaml` (`/config/plugins/catalog.yaml` with the default configuration above); Core falls back to the official URL only when that legacy file is missing: `https://github.com/countott/telepiplex/releases/latest/download/catalog.yaml`. An existing legacy file remains local; every other explicit local path preserves its local configuration intent even when its file is missing. For offline or pinned operation, download the catalog and configure its local path. The catalog maps `name@version` to a local path or HTTPS release with a pinned SHA-256 digest:
 
 ```yaml
 plugins:
@@ -42,7 +42,7 @@ plugins:
         sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
-Send `/plugin` in Telegram for first installation or routine management. Uninstalled Features receive an Install button, while installed Features receive an Update button whenever a newer release is available. Install and Update buttons target that Feature's newest stable, Core-compatible release and execute only after the authorized user selects them. A blocked candidate identifies its prerequisite Feature or exact missing capability; only a ready candidate receives an Install button. Core never installs automatically, installs in bulk, or updates silently.
+Send `/plugin` in Telegram for first installation or routine management. Core lists installed Features and uninstalled catalog candidates. Only dependency-satisfied, ready candidates receive an Install button; a blocked candidate instead identifies its prerequisite Feature or exact missing capability. Installed Features receive an Update button whenever a newer release is available. Install and Update buttons target that Feature's newest stable, Core-compatible release and execute only after the authorized user selects them. Core never installs automatically, installs in bulk, or updates silently.
 
 ### Advanced/offline operations
 

@@ -197,7 +197,7 @@ Telegram 搜索请求
 - 已实现：catalog 携带 manifest 派生的 capability 元数据，缺少依赖时先展示 provider 或 capability；满足条件后才出现安装按钮。
 - 已实现：已安装 Feature 存在兼容稳定新版时，同一 `/plugin` 页面显示更新按钮；普通安装和更新均无需发送精确版本命令。
 - 已实现：用户点击安装按钮才执行既有的 SHA-256、manifest、capability、健康检查和原子激活事务，不自动或批量安装。
-- 已实现：旧版默认 catalog 路径 `/config/plugins/catalog.yaml` 缺失时自动回退到官方远程 catalog；真实存在的本地文件与其他显式本地路径继续保留。
+- 已实现：旧版默认 catalog `<plugins.root>/catalog.yaml` 缺失时回退到官方远程 catalog（默认 `plugins.root` 下即 `/config/plugins/catalog.yaml`）；已存在的 legacy 文件继续使用本地目录，其他显式本地路径即使当前文件缺失也保持本地配置意图。
 - 已实现：精确 `name@version` 和本地 `.tpx` 路径继续作为离线与运维入口。
 - 验收完成：普通使用者不需要进入 ttyd、克隆分支、安装构建依赖或手工计算 SHA-256。
 
