@@ -25,6 +25,7 @@
 - Feature 启动、AI、MCP 或业务初始化失败，不得阻止 Core 和其他 Feature 启动。
 - Core 重启后，已启用 Feature 按 capability 依赖顺序恢复。
 - Feature 安装后自动启用；只有被显式 disable 后才需要 `/plugin enable`。
+- `/config` 按各 Feature 的 `config.schema.json` 生成可视化配置入口；AI、TVDB 等业务字段仍写入 Feature 私有配置，敏感值不回显，运行中的 Feature 在写入后原子热重载。
 
 ### 3. 当前分支与发布状态
 
@@ -33,7 +34,7 @@
 - GitHub 聚合发布流水线已经落地到 Core Feature 分支，可由 `platform-v<semver>` tag 自动生成 Core 镜像、四个 Linux `.tpx` 和远程 catalog。
 - Core 已能安全刷新远程 catalog、比较兼容稳定版本，并在 Telegram 一次确认后更新 Feature；不会静默更新。
 - `/plugin` 已提供依赖感知的可安装 Feature 列表和显式安装按钮，普通用户无需进入 ttyd 或自行构建 `.tpx`。
-- 当前尚未创建实际 release tag；本地或 Unraid 手工构建仍作为发布前验证与故障兜底。
+- 首个远端聚合发布 tag 固定为 `platform-v1.0.0`；后续发布使用新的不可变 semver tag，本地或 Unraid 手工构建只作为发布前验证与故障兜底。
 
 ## 二、已经确认的业务规则
 
@@ -103,6 +104,7 @@ Telegram 搜索请求
 ### TODO-01 普通搜索取消 AI 强依赖（已实现）
 
 - Wikipedia 与无需 Key 的豆瓣证据默认启用；TVDB 和 AI 在配置中启用后参与。
+- media-search 与 renaming 的 TVDB/AI API 配置由 Core `/config` 从 Feature schema 动态生成，Core 不保存业务字段副本。
 - 普通条目在多源证据能够严格唯一确认时直接生成 canonical contract，不调用 AI。
 - 只有歧义、复杂关系或规则门禁失败时才调用 AI；AI 不可用不阻止高置信普通电影、整季或单集计划。
 

@@ -218,6 +218,20 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             None,
         ])
 
+        handler_names = [
+            call.args[0].__class__.__name__
+            for call in application.add_handler.call_args_list
+        ]
+        self.assertIn("ConversationHandler", handler_names)
+        self.assertLess(
+            handler_names.index("ConversationHandler"),
+            handler_names.index("MessageHandler"),
+        )
+        self.assertIn(
+            ("config", "配置 Feature"),
+            [(item.command, item.description) for item in bot_module.CORE_BOT_COMMANDS],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

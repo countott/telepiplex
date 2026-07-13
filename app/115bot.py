@@ -39,6 +39,7 @@ from app.handlers.plugin_handler import (
     plugin_install_callback,
     plugin_update_callback,
 )
+from app.handlers.config_handler import register_feature_config_handlers
 try:
     from app.utils.message_queue import add_task_to_queue, queue_worker
 except ImportError:
@@ -54,6 +55,7 @@ CORE_BOT_COMMANDS = [
     BotCommand("start", "获取核心状态"),
     BotCommand("reload", "重载配置"),
     BotCommand("plugin", "安装和管理 Feature"),
+    BotCommand("config", "配置 Feature"),
 ]
 SENSITIVE_CONFIG_KEYWORDS = (
     "token",
@@ -182,6 +184,7 @@ def get_help_info():
 <code>/start</code> - 显示核心运行层状态\n
 <code>/reload</code> - 重载配置\n\n
 <code>/plugin</code> - 安装和管理 Feature\n\n
+<code>/config</code> - 配置已安装 Feature\n\n
 此分支只包含 Telepiplex 核心运行层，不包含 115 投递、媒体搜索或媒体整理业务能力。
 """
 
@@ -395,6 +398,7 @@ def configure_application(application, manager):
         plugin_update_callback,
         pattern=r"^core-plugin-update:",
     ))
+    register_feature_config_handlers(application)
     application.add_handler(CallbackQueryHandler(dynamic_callback_gateway))
     application.add_handler(MessageHandler(filters.COMMAND, dynamic_command_gateway))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, dynamic_message_gateway))

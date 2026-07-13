@@ -63,6 +63,14 @@ plugins:
 
 也可把已存在的绝对 `.tpx` 路径传给 `install` 或 `update`。更新过程先校验和安装新版本，再启动 shadow 子进程、检查健康、排空旧任务并原子切换路由；任何一步失败都保留旧版本。
 
+## Feature 可视化配置
+
+Feature 安装后，在 Telegram 发送 `/config`，或在 `/plugin` 页面点击“配置 Feature”。Core 会从当前 Feature 随包提供的 `config.schema.json` 动态生成配置区块，例如 media-search/renaming 的 TVDB、AI，以及 media-search 的 Prowlarr。
+
+选择区块后按提示发送需要修改的 `key=value` 行即可；未发送字段保持不变。API Key、Token、Subscriber PIN 等敏感字段只显示“已配置/未配置”，不会回显真实值，也不会进入日志。配置会先经过完整 schema 校验，再原子写入 `/config/plugins/<plugin_id>/config.yaml`；运行中的 Feature 会完成 drain、shadow 启动和原子切换，失败时恢复旧配置与旧路由。
+
+数组和自由结构暂不通过 Telegram 表单修改。open115 的扫码授权与 Access/Refresh Token 两条路线仍由它自己的 `/auth` 入口独立管理。
+
 ## GitHub 聚合发布
 
 正式发布使用 `platform-v<semver>` tag，例如：

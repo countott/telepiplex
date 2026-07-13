@@ -10,7 +10,7 @@ class TelepiplexCoreSurfaceTest(unittest.TestCase):
     def test_core_bot_exposes_only_runtime_commands(self):
         source = (ROOT / "app" / "115bot.py").read_text(encoding="utf-8")
         commands = re.findall(r'BotCommand\("([^"]+)"', source)
-        self.assertEqual(commands, ["start", "reload", "plugin"])
+        self.assertEqual(commands, ["start", "reload", "plugin", "config"])
 
         removed_symbols = [
             "register_auth_handlers",

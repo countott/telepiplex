@@ -386,6 +386,21 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             "core-plugin-install:confirm:open115@1.0.0",
         )
 
+    async def test_plugin_overview_links_installed_features_to_config_ui(self):
+        from app.handlers.plugin_handler import plugin_command
+
+        update, context, manager = self._request([], user_id=1)
+        manager.available_plugins = AsyncMock(return_value=[])
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_command(update, context)
+
+        buttons = update.effective_message.reply_text.await_args.kwargs[
+            "reply_markup"
+        ].inline_keyboard
+        self.assertEqual(buttons[0][0].callback_data, "core-config-open")
+        self.assertIn("配置", buttons[0][0].text)
+
     async def test_plugin_overview_keeps_manual_entry_when_catalog_is_unavailable(self):
         from app.core.plugin_catalog import CatalogError
         from app.handlers.plugin_handler import plugin_command

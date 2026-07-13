@@ -126,6 +126,8 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         requires=(),
         commands=("echo",),
         commit="a" * 40,
+        config_schema=None,
+        config_default=None,
     ):
         from app.core.plugin_artifact import build_tpx
 
@@ -161,11 +163,26 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         (source / "plugin.whl").write_bytes(b"plugin")
         (source / "wheelhouse/sdk.whl").write_bytes(b"sdk")
         (source / "config.schema.json").write_text(
-            json.dumps({"type": "object", "additionalProperties": False}),
+            json.dumps(config_schema or {"type": "object", "additionalProperties": False}),
             encoding="utf-8",
         )
-        (source / "config.default.yaml").write_text("{}\n", encoding="utf-8")
+        (source / "config.default.yaml").write_text(
+            yaml.safe_dump(config_default or {}, sort_keys=True),
+            encoding="utf-8",
+        )
         return build_tpx(source, self.root / f"{plugin_id}-{version}.tpx")
+
+    @staticmethod
+    def _editable_config():
+        return (
+            {
+                "type": "object",
+                "properties": {"prefix": {"type": "string"}},
+                "required": ["prefix"],
+                "additionalProperties": False,
+            },
+            {"prefix": "old"},
+        )
 
     async def test_install_activates_only_after_health_and_route_validation(self):
         result = await self.manager.install(self._artifact())
@@ -176,6 +193,81 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.store.active("echo").enabled)
         self.assertEqual(self.router.snapshot.capabilities["demo.echo"].plugin_id, "echo")
         self.assertEqual(self.supervisor.process("echo").release.version, "1.0.0")
+
+    async def test_config_view_and_configure_reload_running_feature_atomically(self):
+        schema, default = self._editable_config()
+        await self.manager.install(self._artifact(
+            config_schema=schema,
+            config_default=default,
+        ))
+        old = self.supervisor.process("echo")
+
+        view = self.manager.config("echo")
+        self.assertEqual(view["config"], {"prefix": "old"})
+        self.assertEqual(view["schema"]["properties"]["prefix"]["type"], "string")
+
+        result = await self.manager.configure("echo", {"prefix": "new"})
+
+        self.assertEqual(result.state, "active")
+        self.assertTrue(result.details["restarted"])
+        self.assertEqual(self.store.read_config(self.store.active("echo")), {"prefix": "new"})
+        self.assertEqual(old.state, "stopped")
+        self.assertIsNot(self.supervisor.process("echo"), old)
+
+    async def test_configure_refuses_busy_feature_without_changing_config(self):
+        from app.core.plugin_manager import PluginOperationError
+
+        schema, default = self._editable_config()
+        await self.manager.install(self._artifact(
+            config_schema=schema,
+            config_default=default,
+        ))
+        old = self.supervisor.process("echo")
+        self.supervisor.busy_versions.add("1.0.0")
+
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.configure("echo", {"prefix": "new"})
+
+        self.assertEqual(raised.exception.code, "drain_timeout")
+        self.assertEqual(self.store.read_config(self.store.active("echo")), {"prefix": "old"})
+        self.assertIs(self.supervisor.process("echo"), old)
+        self.assertIn(("echo", "1.0.0"), self.supervisor.resumed)
+
+    async def test_configure_failed_shadow_restores_old_config_and_route(self):
+        from app.core.plugin_manager import PluginOperationError
+
+        schema, default = self._editable_config()
+        await self.manager.install(self._artifact(
+            config_schema=schema,
+            config_default=default,
+        ))
+        old = self.supervisor.process("echo")
+        self.supervisor.unhealthy_versions.add("1.0.0")
+
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.configure("echo", {"prefix": "new"})
+
+        self.assertEqual(raised.exception.code, "stabilization_failed")
+        self.assertEqual(self.store.read_config(self.store.active("echo")), {"prefix": "old"})
+        self.assertIs(self.supervisor.process("echo"), old)
+        self.assertEqual(old.state, "healthy")
+        self.assertIn(("echo", "1.0.0"), self.supervisor.resumed)
+
+    async def test_configure_rejects_invalid_value_before_draining(self):
+        from app.core.plugin_manager import PluginOperationError
+
+        schema, default = self._editable_config()
+        await self.manager.install(self._artifact(
+            config_schema=schema,
+            config_default=default,
+        ))
+
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.configure("echo", {"prefix": 123})
+
+        self.assertEqual(raised.exception.code, "invalid_config")
+        self.assertEqual(self.supervisor.drained, [])
+        self.assertEqual(self.store.read_config(self.store.active("echo")), {"prefix": "old"})
 
     async def test_install_resolves_name_and_uses_catalog_digest(self):
         from app.core.plugin_catalog import ResolvedArtifact

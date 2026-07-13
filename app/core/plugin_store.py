@@ -99,6 +99,26 @@ def _atomic_json(path: Path, value: dict):
         temporary.unlink(missing_ok=True)
 
 
+def _atomic_yaml(path: Path, value: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    data = yaml.safe_dump(
+        value,
+        allow_unicode=True,
+        sort_keys=True,
+    ).encode("utf-8")
+    try:
+        with temporary.open("wb") as handle:
+            os.chmod(temporary, 0o600)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 class PluginStore:
     def __init__(self, root: Path):
         self.root = Path(root).resolve()
@@ -180,10 +200,7 @@ class PluginStore:
         config_path = plugin_root / "config.yaml"
         if not config_path.exists():
             default = _default_at(target)
-            config_path.write_text(
-                yaml.safe_dump(default, allow_unicode=True, sort_keys=True),
-                encoding="utf-8",
-            )
+            _atomic_yaml(config_path, default)
         (target / ".validated-default.json").unlink(missing_ok=True)
 
         _atomic_json(target / ".artifact.json", {
@@ -327,3 +344,33 @@ class PluginStore:
 
     def validate_config(self, release: ActiveRelease | StagedRelease, value: dict) -> dict:
         return _validate(_schema_at(release.path), value)
+
+    def config_schema(self, release: ActiveRelease | StagedRelease) -> dict:
+        return deepcopy(_schema_at(release.path))
+
+    def read_config(self, release: ActiveRelease | StagedRelease) -> dict:
+        config_path = self._plugin_root(release.plugin_id) / "config.yaml"
+        try:
+            value = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise StoreError(
+                "invalid_config",
+                f"cannot read plugin config: {type(exc).__name__}",
+            ) from None
+        return _validate(_schema_at(release.path), value)
+
+    def write_config(
+        self,
+        release: ActiveRelease | StagedRelease,
+        value: dict,
+    ) -> dict:
+        validated = _validate(_schema_at(release.path), value)
+        config_path = self._plugin_root(release.plugin_id) / "config.yaml"
+        try:
+            _atomic_yaml(config_path, validated)
+        except OSError as exc:
+            raise StoreError(
+                "config_write_failed",
+                f"cannot write plugin config: {type(exc).__name__}",
+            ) from None
+        return deepcopy(validated)

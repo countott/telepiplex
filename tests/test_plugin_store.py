@@ -1,4 +1,5 @@
 import json
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -152,6 +153,35 @@ class PluginStoreTest(unittest.TestCase):
         with self.assertRaises(StoreError) as raised:
             store.validate_config(active, {"prefix": 123})
         self.assertEqual(raised.exception.code, "invalid_config")
+
+    def test_config_api_reads_copies_and_writes_validated_private_yaml(self):
+        from app.core.plugin_store import PluginStore, StoreError
+
+        store = PluginStore(self.plugins_root)
+        active = store.activate(store.stage(self._artifact()))
+
+        schema = store.config_schema(active)
+        schema["properties"]["prefix"]["type"] = "integer"
+        self.assertEqual(
+            store.config_schema(active)["properties"]["prefix"]["type"],
+            "string",
+        )
+
+        current = store.read_config(active)
+        current["prefix"] = "mutated-copy"
+        self.assertEqual(store.read_config(active), {"prefix": "echo"})
+
+        written = store.write_config(active, {"prefix": "updated"})
+        self.assertEqual(written, {"prefix": "updated"})
+        config_path = self.plugins_root / "echo/config.yaml"
+        self.assertEqual(yaml.safe_load(config_path.read_text()), {"prefix": "updated"})
+        self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
+
+        with self.assertRaises(StoreError) as raised:
+            store.write_config(active, {"prefix": 123})
+        self.assertEqual(raised.exception.code, "invalid_config")
+        self.assertEqual(yaml.safe_load(config_path.read_text()), {"prefix": "updated"})
+        self.assertEqual(list(config_path.parent.glob(".config.yaml.*.tmp")), [])
 
     def test_corrupt_active_record_is_quarantined(self):
         from app.core.plugin_store import PluginStore

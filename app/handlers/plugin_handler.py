@@ -94,6 +94,7 @@ async def plugin_command(update, context):
 
 async def _show_feature_overview(message, manager):
     statuses = manager.doctor()
+    rows = []
     catalog_error = ""
     try:
         candidates = await manager.available_plugins()
@@ -109,10 +110,13 @@ async def _show_feature_overview(message, manager):
                 f"• {status.get('plugin_id', 'unknown')} "
                 f"{status.get('version', '-')}（{status.get('state', 'unknown')}）"
             )
+        rows.append([InlineKeyboardButton(
+            "配置 Feature",
+            callback_data="core-config-open",
+        )])
     else:
         lines.append("\n已安装：无")
 
-    rows = []
     if catalog_error:
         lines.append(f"\n发布目录暂不可用：{catalog_error}")
     elif candidates:

@@ -312,6 +312,125 @@ class PluginManager:
             item.plugin_id for item in self.store.list_installed()
         })]
 
+    def config(self, plugin_id: str) -> dict:
+        release = self.store.active(str(plugin_id))
+        if release is None:
+            raise PluginOperationError("not_installed", "Feature is not installed")
+        try:
+            return {
+                "plugin_id": release.plugin_id,
+                "version": release.version,
+                "schema": self.store.config_schema(release),
+                "config": self.store.read_config(release),
+            }
+        except StoreError as exc:
+            raise self._operation_error(exc, "invalid_config") from None
+
+    async def configure(self, plugin_id: str, value: dict) -> PluginOperationResult:
+        async with self._lifecycle_lock:
+            release = self.store.active(str(plugin_id))
+            if release is None:
+                raise PluginOperationError("not_installed", "Feature is not installed")
+            try:
+                validated = self.store.validate_config(release, value)
+                previous = self.store.read_config(release)
+            except StoreError as exc:
+                raise self._operation_error(exc, "invalid_config") from None
+
+            old_process = self.supervisor.process(release.plugin_id)
+            if old_process is None:
+                try:
+                    await asyncio.to_thread(
+                        self.store.write_config,
+                        release,
+                        validated,
+                    )
+                except StoreError as exc:
+                    raise self._operation_error(exc, "config_write_failed") from None
+                return PluginOperationResult(
+                    state="configured",
+                    plugin_id=release.plugin_id,
+                    version=release.version,
+                    message="Feature configuration saved",
+                    details={
+                        "source_commit": release.manifest.source.commit,
+                        "restarted": False,
+                    },
+                )
+
+            new_process = None
+            route_committed = False
+            old_drained = False
+            config_written = False
+            try:
+                drained = await self.supervisor.drain(
+                    old_process,
+                    timeout=self.drain_timeout,
+                )
+                old_drained = True
+                if drained.active_tasks:
+                    await self.supervisor.resume(old_process)
+                    old_drained = False
+                    raise PluginOperationError(
+                        "drain_timeout",
+                        "Feature still has active work; configuration was not changed",
+                        {"active_task_ids": list(drained.interrupted_task_ids)},
+                    )
+
+                await asyncio.to_thread(
+                    self.store.write_config,
+                    release,
+                    validated,
+                )
+                config_written = True
+                new_process = await self.supervisor.start(release, shadow=True)
+                prepared = self.router.prepare_activation(
+                    release.plugin_id,
+                    release.manifest,
+                    self._route_client(new_process),
+                )
+                self.router.commit(prepared)
+                route_committed = True
+                self.supervisor.promote(new_process)
+                await self._verify_stable(new_process)
+                await self.supervisor.stop(old_process)
+                return PluginOperationResult(
+                    state="active",
+                    plugin_id=release.plugin_id,
+                    version=release.version,
+                    message="Feature configuration saved and reloaded",
+                    details={
+                        "source_commit": release.manifest.source.commit,
+                        "restarted": True,
+                    },
+                )
+            except Exception as exc:
+                if new_process is not None:
+                    await self._safe_stop(new_process)
+                if config_written:
+                    try:
+                        await asyncio.to_thread(
+                            self.store.write_config,
+                            release,
+                            previous,
+                        )
+                    except Exception:
+                        pass
+                if route_committed:
+                    self.router.activate(
+                        release.plugin_id,
+                        release.manifest,
+                        self._route_client(old_process),
+                    )
+                if old_drained:
+                    try:
+                        await self.supervisor.resume(old_process)
+                        if route_committed:
+                            self.supervisor.promote(old_process)
+                    except Exception:
+                        pass
+                raise self._operation_error(exc, "config_reload_failed") from None
+
     async def close(self):
         await self.supervisor.close_all()
         if self.broker is not None:
