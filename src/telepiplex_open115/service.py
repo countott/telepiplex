@@ -4,13 +4,11 @@ import asyncio
 import hashlib
 import re
 import uuid
-from pathlib import PurePosixPath
 
 from telepiplex_plugin_sdk import FeatureError
 
 
 _MAGNET = re.compile(r"^magnet:\?xt=urn:btih:(?:[A-Fa-f0-9]{40}|[A-Za-z2-7]{32})(?:&.*)?$")
-_INVALID_NAME = re.compile(r'[\\/*?"<>|]+')
 _STORAGE_METHODS = {
     "get_file_info",
     "get_file_info_by_id",
@@ -24,11 +22,12 @@ _STORAGE_METHODS = {
     "move_file_detailed",
     "is_directory",
     "get_files_from_dir",
+    "get_file_tree",
 }
 
 
 class Open115Feature:
-    def __init__(self, *, config: dict, core, client, jobs=None):
+    def __init__(self, *, config: dict, core, client, jobs=None, config_store=None):
         self.config = config
         self.core = core
         self.client = client
@@ -36,6 +35,7 @@ class Open115Feature:
         self.sessions = {}
         self.active_job_ids = set()
         self.jobs = jobs
+        self.config_store = config_store
 
     def bind_runtime(self, runtime):
         self.runtime = runtime
@@ -89,42 +89,166 @@ class Open115Feature:
         if command == "config":
             return self._message("115 Feature 配置：/config/plugins/open115/config.yaml")
         if command == "auth":
-            configured = bool(self.config.get("access_token") and self.config.get("refresh_token"))
-            return self._message("✅ 115 Token 已配置。" if configured else "⚠️ 请先在 open115/config.yaml 配置 Token。")
+            configured = bool(
+                self.config.get("access_token") and self.config.get("refresh_token")
+            )
+            mode = str(self.config.get("auth_mode") or "direct")
+            status = "已配置" if configured else "未配置"
+            return {
+                "actions": [{
+                    "kind": "send_message",
+                    "text": f"115 授权：{status}（当前模式：{mode}）\n请选择独立授权入口：",
+                    "data": {"keyboard": [[
+                        {
+                            "text": "使用现有 Token",
+                            "callback_data": "open115:auth:direct",
+                        },
+                        {
+                            "text": "115 扫码授权",
+                            "callback_data": "open115:auth:scan",
+                        },
+                    ]]},
+                }],
+                "session": {"state": "close"},
+            }
         raise FeatureError("not_found", f"unknown open115 command: {command}")
 
     async def callback(self, request: dict) -> dict:
+        payload = str(request.get("payload") or "")
+        if payload == "auth:direct":
+            return await self._select_direct_auth()
+        if payload == "auth:scan":
+            return await self._start_scan_auth(request)
         key = self._session_key(request)
         session = self.sessions.get(key)
-        payload = str(request.get("payload") or "")
         if not session or not payload.startswith("path:"):
             return {"actions": [{"kind": "send_message", "text": "⚠️ 会话已失效。"}], "session": {"state": "close"}}
         try:
             directory = (self.config.get("save_directories") or [])[int(payload.split(":", 1)[1])]
         except (IndexError, TypeError, ValueError):
             return {"actions": [{"kind": "send_message", "text": "⚠️ 保存目录不可用。"}], "session": {"state": "close"}}
-        session.update({"selected_path": directory["path"], "stage": "name"})
+        self.sessions.pop(key, None)
+        result = self._start_download({
+            "link": session["link"],
+            "selected_path": directory["path"],
+            "user_id": request.get("user_id"),
+        }, {
+            "idempotency_key": (
+                f"telegram:{request.get('update_id') or uuid.uuid4().hex}"
+            ),
+        })
         return {
-            "actions": [{"kind": "edit_message", "text": "请输入顶层文件夹名；发送 - 保留 115 原名。"}],
-            "session": {"state": "open"},
+            "actions": [{
+                "kind": "edit_message",
+                "text": f"✅ 已加入 115 下载队列：{result['job_id']}",
+            }],
+            "session": {"state": "close"},
         }
 
     async def message(self, request: dict) -> dict:
-        key = self._session_key(request)
-        session = self.sessions.pop(key, None)
-        if not session or session.get("stage") != "name":
-            return {"actions": [{"kind": "send_message", "text": "⚠️ 会话已失效。"}], "session": {"state": "close"}}
-        name = self._sanitize_name(request.get("text"))
-        result = self._start_download({
-            "link": session["link"],
-            "selected_path": session["selected_path"],
-            "user_id": request.get("user_id"),
-            "target_folder_name": name,
-        }, {"idempotency_key": f"telegram:{request.get('update_id') or uuid.uuid4().hex}"})
         return {
-            "actions": [{"kind": "send_message", "text": f"✅ 已加入 115 下载队列：{result['job_id']}"}],
+            "actions": [{"kind": "send_message", "text": "⚠️ 会话已失效。"}],
             "session": {"state": "close"},
         }
+
+    async def _select_direct_auth(self):
+        config = self.config_store.read() if self.config_store else dict(self.config)
+        access_token = str(config.get("access_token") or "").strip()
+        refresh_token = str(config.get("refresh_token") or "").strip()
+        if not access_token or not refresh_token:
+            return self._message(
+                "⚠️ 现有 Token 路线尚未配置；请先填写 open115 私有 config.yaml。"
+            )
+        if self.config_store:
+            config = self.config_store.write_tokens(
+                access_token,
+                refresh_token,
+                auth_mode="direct",
+            )
+        self.config.update(config)
+        self.client.set_tokens(access_token, refresh_token)
+        return self._message("✅ 已启用现有 Token 授权路线。")
+
+    async def _start_scan_auth(self, request):
+        config = self.config_store.read() if self.config_store else dict(self.config)
+        app_id = str(config.get("app_id") or "").strip()
+        if not app_id:
+            return self._message("⚠️ 扫码授权需要先在私有配置中填写 app_id。")
+        if self.runtime is None:
+            raise FeatureError("not_ready", "open115 runtime is not ready")
+        try:
+            authorization = await asyncio.to_thread(
+                self.client.create_device_authorization,
+                app_id,
+            )
+            qr_text = self._render_qr(authorization["qrcode"])
+        except Exception as exc:
+            return self._message(f"⚠️ 115 扫码授权启动失败：{type(exc).__name__}")
+        task_id = f"open115-auth-{authorization['uid']}"
+        self.runtime.spawn(
+            self._complete_scan_auth(
+                authorization,
+                int(request.get("user_id") or 0),
+            ),
+            task_id=task_id,
+        )
+        return {
+            "actions": [{
+                "kind": "edit_message",
+                "text": f"请使用 115 App 扫码并确认：\n<pre>{qr_text}</pre>",
+                "parse_mode": "HTML",
+            }],
+            "session": {"state": "close"},
+        }
+
+    async def _complete_scan_auth(self, authorization, user_id):
+        try:
+            tokens = await asyncio.to_thread(
+                self.client.complete_device_authorization,
+                authorization,
+                timeout=float(self.config.get("auth_poll_timeout") or 300),
+                poll_interval=float(self.config.get("auth_poll_interval") or 2),
+            )
+            if self.config_store:
+                updated = self.config_store.write_tokens(
+                    tokens["access_token"],
+                    tokens["refresh_token"],
+                    auth_mode="scan",
+                )
+                self.config.update(updated)
+            else:
+                self.config.update({
+                    "auth_mode": "scan",
+                    "access_token": tokens["access_token"],
+                    "refresh_token": tokens["refresh_token"],
+                })
+            self.client.set_tokens(tokens["access_token"], tokens["refresh_token"])
+            message = "✅ 115 扫码授权成功，Token 已写回 Feature 私有配置。"
+        except Exception as exc:
+            message = f"⚠️ 115 扫码授权失败：{type(exc).__name__}"
+        if user_id:
+            await self.core.notify_user(user_id, message)
+
+    @staticmethod
+    def _render_qr(value: str) -> str:
+        import qrcode
+
+        matrix = qrcode.QRCode(border=1, box_size=1)
+        matrix.add_data(str(value))
+        matrix.make(fit=True)
+        rows = matrix.get_matrix()
+        if len(rows) % 2:
+            rows.append([False] * len(rows[0]))
+        chars = {
+            (False, False): " ",
+            (True, False): "▀",
+            (False, True): "▄",
+            (True, True): "█",
+        }
+        return "\n".join(
+            "".join(chars[(top, bottom)] for top, bottom in zip(rows[index], rows[index + 1]))
+            for index in range(0, len(rows), 2)
+        )
 
     def _start_download(self, payload: dict, call_context: dict) -> dict:
         if self.runtime is None:
@@ -172,31 +296,24 @@ class Open115Feature:
             info_hash = str(completed.get("info_hash") or "")
             if not resource_name:
                 raise RuntimeError("115 completed task has no resource name")
-            final_leaf = resource_name
-            final_path = f"{selected_path.rstrip('/')}/{final_leaf}"
-            if not await asyncio.to_thread(self.client.is_directory, final_path):
-                final_leaf = PurePosixPath(resource_name).stem
-                folder = f"{selected_path.rstrip('/')}/{final_leaf}"
-                await asyncio.to_thread(self.client.create_dir_recursive, folder)
-                if not await asyncio.to_thread(self.client.move_file, final_path, folder):
-                    raise RuntimeError("cannot move downloaded file into its top-level folder")
-                final_path = folder
-            target_name = self._sanitize_name(payload.get("target_folder_name"))
-            if target_name and target_name != final_leaf:
-                if not await asyncio.to_thread(self.client.rename, final_path, target_name):
-                    raise RuntimeError("download completed but top-level rename failed")
-                final_leaf = target_name
-                final_path = f"{selected_path.rstrip('/')}/{target_name}"
+            final_path = f"{selected_path.rstrip('/')}/{resource_name}"
+            file_tree = await asyncio.to_thread(
+                self.client.get_file_tree,
+                final_path,
+            )
             event_payload = {
                 "job_id": job_id,
                 "provider": "open115",
                 "link": link,
                 "selected_path": selected_path,
                 "user_id": user_id,
-                "resource_name": final_leaf,
+                "resource_name": resource_name,
+                "download_root": final_path,
                 "final_path": final_path,
+                "file_tree": file_tree,
                 "media_metadata": payload.get("media_metadata"),
                 "naming_metadata": payload.get("naming_metadata"),
+                "release": payload.get("release"),
             }
             if self.jobs:
                 self.jobs.update(job_id, "downloaded", result=event_payload)
@@ -244,14 +361,6 @@ class Open115Feature:
                 await self.core.notify_user(user_id, f"✅ 115 下载完成，已交给整理管线。\n保存目录：{payload.get('final_path')}", idempotency_key=f"{job_id}:download-notice")
             except Exception:
                 pass
-
-    @staticmethod
-    def _sanitize_name(value) -> str:
-        value = str(value or "").strip().strip("`").strip('"').strip("'")
-        if value == "-":
-            return ""
-        value = _INVALID_NAME.sub("", value.replace("：", ":"))
-        return " ".join(value.split()).strip().strip(".")
 
     @staticmethod
     def _session_key(request):

@@ -1,21 +1,33 @@
 from __future__ import annotations
 
-import yaml
-
 from telepiplex_plugin_sdk import FeatureRuntime, RuntimeContext
 
 from .client import Open115Client
+from .config_store import FeatureConfigStore
 from .service import Open115Feature
 from .jobs import DownloadJobStore
 
 
 def main(context: RuntimeContext) -> FeatureRuntime:
-    config = yaml.safe_load(context.config_path.read_text(encoding="utf-8")) or {}
+    config_store = FeatureConfigStore(context.config_path)
+    config = config_store.read()
+
+    def persist_refreshed_tokens(access_token, refresh_token):
+        current = config_store.read()
+        mode = str(current.get("auth_mode") or config.get("auth_mode") or "direct")
+        config_store.write_tokens(
+            access_token,
+            refresh_token,
+            auth_mode=mode if mode in {"direct", "scan"} else "direct",
+        )
+
+    client = Open115Client(config, on_tokens_changed=persist_refreshed_tokens)
     feature = Open115Feature(
         config=config,
         core=context.core,
-        client=Open115Client(config),
+        client=client,
         jobs=DownloadJobStore(context.state_path / "downloads.db"),
+        config_store=config_store,
     )
     runtime = FeatureRuntime(
         manifest=context.manifest,

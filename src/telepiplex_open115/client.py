@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-import os
+import base64
+import hashlib
+import secrets
 import threading
 import time
 from pathlib import PurePosixPath
@@ -15,7 +17,7 @@ class Open115Error(RuntimeError):
 class Open115Client:
     TOKEN_EXPIRED_CODES = {40140125, 40140126}
 
-    def __init__(self, config: dict, *, session=None):
+    def __init__(self, config: dict, *, session=None, on_tokens_changed=None):
         self.config = config
         self.base_url = str(config.get("base_url") or "https://proapi.115.com").rstrip("/")
         self.passport_url = str(config.get("passport_url") or "https://passportapi.115.com").rstrip("/")
@@ -24,9 +26,18 @@ class Open115Client:
         self.timeout = max(1, float(config.get("timeout") or 30))
         self.request_interval = max(0, float(config.get("request_interval") or 1))
         self.session = session or requests.Session()
+        self.on_tokens_changed = on_tokens_changed
         self._lock = threading.Lock()
         self._last_request = 0.0
         self._file_cache = {}
+
+    def set_tokens(self, access_token: str, refresh_token: str):
+        access_token = str(access_token or "").strip()
+        refresh_token = str(refresh_token or "").strip()
+        if not access_token or not refresh_token:
+            raise Open115Error("115 access_token and refresh_token are required")
+        self.access_token = access_token
+        self.refresh_token = refresh_token
 
     def _headers(self):
         if not self.access_token:
@@ -81,6 +92,114 @@ class Open115Client:
             raise Open115Error("115 token refresh returned invalid data")
         self.access_token = str(data["access_token"])
         self.refresh_token = str(data.get("refresh_token") or self.refresh_token)
+        if self.on_tokens_changed:
+            self.on_tokens_changed(self.access_token, self.refresh_token)
+
+    @staticmethod
+    def _pkce_pair():
+        verifier = secrets.token_urlsafe(64)
+        digest = hashlib.sha256(verifier.encode("ascii")).digest()
+        challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+        return verifier, challenge
+
+    def create_device_authorization(self, app_id: str):
+        app_id = str(app_id or "").strip()
+        if not app_id:
+            raise Open115Error("115 app_id is not configured")
+        verifier, challenge = self._pkce_pair()
+        try:
+            response = self.session.post(
+                f"{self.passport_url}/open/authDeviceCode",
+                headers={"User-Agent": "Telepiplex-Feature/1.0"},
+                data={
+                    "client_id": app_id,
+                    "code_challenge": challenge,
+                    "code_challenge_method": "sha256",
+                },
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise Open115Error(
+                f"115 device authorization failed: {type(exc).__name__}"
+            ) from exc
+        data = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(data, dict) or not all(
+            data.get(key) for key in ("uid", "time", "sign", "qrcode")
+        ):
+            raise Open115Error("115 device authorization returned invalid data")
+        return {
+            "uid": str(data["uid"]),
+            "time": data["time"],
+            "sign": str(data["sign"]),
+            "qrcode": str(data["qrcode"]),
+            "code_verifier": verifier,
+        }
+
+    def complete_device_authorization(
+        self,
+        authorization: dict,
+        *,
+        timeout: float = 300,
+        poll_interval: float = 2,
+    ):
+        deadline = time.monotonic() + max(float(timeout), 1)
+        params = {
+            "uid": authorization["uid"],
+            "time": authorization["time"],
+            "sign": authorization["sign"],
+        }
+        while time.monotonic() < deadline:
+            try:
+                response = self.session.get(
+                    "https://qrcodeapi.115.com/get/status/",
+                    headers={"User-Agent": "Telepiplex-Feature/1.0"},
+                    params=params,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                result = response.json()
+            except (requests.RequestException, ValueError) as exc:
+                raise Open115Error(
+                    f"115 device authorization polling failed: {type(exc).__name__}"
+                ) from exc
+            data = result.get("data") if isinstance(result, dict) else None
+            status = str(data.get("status")) if isinstance(data, dict) else ""
+            if status == "2":
+                break
+            if status == "0":
+                raise Open115Error("115 device authorization expired")
+            time.sleep(max(float(poll_interval), 0.1))
+        else:
+            raise Open115Error("115 device authorization timed out")
+
+        try:
+            response = self.session.post(
+                f"{self.passport_url}/open/deviceCodeToToken",
+                headers={"User-Agent": "Telepiplex-Feature/1.0"},
+                data={
+                    "uid": authorization["uid"],
+                    "code_verifier": authorization["code_verifier"],
+                },
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise Open115Error(
+                f"115 device token exchange failed: {type(exc).__name__}"
+            ) from exc
+        data = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(data, dict) or not data.get("access_token") or not data.get("refresh_token"):
+            raise Open115Error("115 device token exchange returned invalid data")
+        self.set_tokens(data["access_token"], data["refresh_token"])
+        if self.on_tokens_changed:
+            self.on_tokens_changed(self.access_token, self.refresh_token)
+        return {
+            "access_token": self.access_token,
+            "refresh_token": self.refresh_token,
+        }
 
     @staticmethod
     def _successful(result):
@@ -268,6 +387,97 @@ class Open115Client:
             return []
         data = self.get_file_list({"cid": info["file_id"], "type": file_type, "limit": 1000})
         return [item.get("fn") for item in (data or []) if item.get("fn")]
+
+    @staticmethod
+    def _list_items(value):
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            nested = value.get("list")
+            if isinstance(nested, list):
+                return nested
+            data = value.get("data")
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict) and isinstance(data.get("list"), list):
+                return data["list"]
+        return []
+
+    @staticmethod
+    def _item_name(item):
+        return str(
+            item.get("fn") or item.get("n") or item.get("file_name")
+            or item.get("name") or ""
+        ).strip()
+
+    @staticmethod
+    def _item_id(item):
+        return str(
+            item.get("fid") or item.get("cid") or item.get("file_id")
+            or item.get("id") or ""
+        ).strip()
+
+    @staticmethod
+    def _item_is_dir(item):
+        if "is_dir" in item:
+            return bool(item.get("is_dir"))
+        if "file_category" in item:
+            return str(item.get("file_category")) == "0"
+        if "fc" in item:
+            return str(item.get("fc")) != "1"
+        return False
+
+    def get_file_tree(self, root_path: str, *, max_depth=8, limit=1000):
+        root_path = self._normalize(root_path)
+        root = self.get_file_info(root_path)
+        if not root:
+            raise Open115Error("115 download root is unavailable")
+        root_name = PurePosixPath(root_path).name
+        if not self._item_is_dir(root):
+            return [{
+                "name": root_name,
+                "relative_path": root_name,
+                "path": root_path,
+                "is_dir": False,
+                "file_id": self._item_id(root),
+                "size": root.get("fs") or root.get("size") or root.get("size_byte") or 0,
+            }]
+
+        root_id = self._item_id(root)
+        if not root_id:
+            raise Open115Error("115 download root has no file_id")
+        tree = []
+
+        def walk(parent_id, prefix="", depth=0):
+            if depth > int(max_depth) or len(tree) >= int(limit):
+                return
+            response = self.get_file_list({
+                "cid": parent_id,
+                "limit": int(limit),
+                "show_dir": 1,
+            })
+            for item in self._list_items(response):
+                if not isinstance(item, dict) or len(tree) >= int(limit):
+                    continue
+                name = self._item_name(item)
+                if not name:
+                    continue
+                relative = f"{prefix}/{name}".strip("/")
+                is_dir = self._item_is_dir(item)
+                node = {
+                    "name": name,
+                    "relative_path": relative,
+                    "path": f"{root_path.rstrip('/')}/{relative}",
+                    "is_dir": is_dir,
+                    "file_id": self._item_id(item),
+                    "size": item.get("fs") or item.get("size") or item.get("size_byte") or 0,
+                }
+                tree.append(node)
+                if is_dir and node["file_id"]:
+                    walk(node["file_id"], relative, depth + 1)
+
+        walk(root_id)
+        return tree
 
     @staticmethod
     def _normalize(path: str):

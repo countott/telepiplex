@@ -1,8 +1,11 @@
 base_url: https://proapi.115.com
 passport_url: https://passportapi.115.com
+auth_mode: direct
 access_token: ""
 refresh_token: ""
 app_id: ""
+auth_poll_timeout: 300
+auth_poll_interval: 2
 timeout: 30
 download_timeout: 1800
 poll_interval: 10

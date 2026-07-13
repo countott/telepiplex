@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,7 +39,9 @@ class FakeRuntime:
 class FakeClient:
     def __init__(self):
         self.renamed = []
+        self.moved = []
         self.deleted_tasks = []
+        self.tokens = ("", "")
 
     def add_offline_task(self, link, selected_path):
         return True
@@ -56,6 +60,7 @@ class FakeClient:
         return {"file_id": "dir-1"}
 
     def move_file(self, source, target):
+        self.moved.append((source, target))
         return True
 
     def rename(self, source, leaf):
@@ -69,6 +74,49 @@ class FakeClient:
     def get_file_info(self, path):
         return {"path": path, "file_id": "1"}
 
+    def get_file_tree(self, path):
+        return [{
+            "name": "Show.S01E01.mkv",
+            "relative_path": "Show.S01E01.mkv",
+            "path": path,
+            "is_dir": False,
+            "file_id": "1",
+            "size": 1024,
+        }]
+
+    def set_tokens(self, access_token, refresh_token):
+        self.tokens = (access_token, refresh_token)
+
+    def create_device_authorization(self, app_id):
+        return {
+            "uid": "device-1",
+            "qrcode": "https://115.com/scan/device-1",
+            "code_verifier": "verifier",
+            "time": 1,
+            "sign": "sign",
+        }
+
+    def complete_device_authorization(self, authorization, **kwargs):
+        return {"access_token": "scan-access", "refresh_token": "scan-refresh"}
+
+
+class FakeConfigStore:
+    def __init__(self, config):
+        self.config = dict(config)
+        self.writes = []
+
+    def read(self):
+        return dict(self.config)
+
+    def write_tokens(self, access_token, refresh_token, *, auth_mode):
+        self.config.update({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "auth_mode": auth_mode,
+        })
+        self.writes.append((access_token, refresh_token, auth_mode))
+        return dict(self.config)
+
 
 class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -81,6 +129,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
             config={"download_timeout": 30, "poll_interval": 0.01},
             core=self.core,
             client=self.client,
+            config_store=FakeConfigStore({}),
         )
         self.feature.bind_runtime(self.runtime)
 
@@ -98,6 +147,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
                 "user_id": 123,
                 "target_folder_name": "中文名 (English)",
                 "media_metadata": {"schema_version": 1, "metadata_id": "m1"},
+                "release": {"title": "Show.S01E01.1080p", "indexer": "Prowlarr"},
             },
             "context": {"idempotency_key": "plan-1"},
         })
@@ -108,9 +158,15 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         event_type, payload, kwargs = self.core.events[0]
         self.assertEqual(event_type, "download.completed")
         self.assertEqual(payload["job_id"], "plan-1")
-        self.assertEqual(payload["final_path"], "/Downloads/中文名 (English)")
+        self.assertEqual(payload["download_root"], "/Downloads/Show.S01E01.mkv")
+        self.assertEqual(payload["final_path"], payload["download_root"])
+        self.assertEqual(payload["resource_name"], "Show.S01E01.mkv")
+        self.assertEqual(payload["file_tree"][0]["path"], payload["download_root"])
+        self.assertEqual(payload["release"]["title"], "Show.S01E01.1080p")
         self.assertEqual(payload["media_metadata"]["metadata_id"], "m1")
         self.assertEqual(kwargs["idempotency_key"], "plan-1:completed")
+        self.assertEqual(self.client.renamed, [])
+        self.assertEqual(self.client.moved, [])
         self.assertEqual(self.client.deleted_tasks, [("hash-1", 0)])
 
     async def test_storage_capability_is_an_explicit_whitelist(self):
@@ -206,15 +262,63 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
             "payload": "path:0",
             "user_id": 1,
             "chat_id": 10,
+            "update_id": 22,
         })
-        self.assertEqual(callback["session"]["state"], "open")
-        followup = await self.feature.message({
-            "text": "-",
-            "user_id": 1,
-            "chat_id": 10,
-        })
-        self.assertEqual(followup["session"]["state"], "close")
+        self.assertEqual(callback["session"]["state"], "close")
+        self.assertIn("已加入 115 下载队列", callback["actions"][0]["text"])
         self.assertEqual(len(self.runtime.tasks), 1)
+
+    async def test_auth_offers_independent_direct_and_scan_routes(self):
+        self.feature.config_store = FakeConfigStore({
+            "access_token": "direct-access",
+            "refresh_token": "direct-refresh",
+            "app_id": "app-1",
+        })
+        response = await self.feature.command({"command": "auth"})
+        keyboard = response["actions"][0]["data"]["keyboard"]
+        self.assertEqual(
+            [button["callback_data"] for row in keyboard for button in row],
+            ["open115:auth:direct", "open115:auth:scan"],
+        )
+
+        direct = await self.feature.callback({"payload": "auth:direct"})
+        self.assertIn("现有 Token", direct["actions"][0]["text"])
+        self.assertEqual(self.client.tokens, ("direct-access", "direct-refresh"))
+        self.assertEqual(
+            self.feature.config_store.writes[-1],
+            ("direct-access", "direct-refresh", "direct"),
+        )
+
+        scan = await self.feature.callback({
+            "payload": "auth:scan", "user_id": 9, "chat_id": 10,
+        })
+        self.assertEqual(scan["actions"][0]["parse_mode"], "HTML")
+        self.assertIn("<pre>", scan["actions"][0]["text"])
+        auth_task_id = next(key for key in self.runtime.tasks if key.startswith("open115-auth-"))
+        await self.runtime.tasks.pop(auth_task_id)
+        self.assertEqual(
+            self.feature.config_store.writes[-1],
+            ("scan-access", "scan-refresh", "scan"),
+        )
+        self.assertNotIn("scan-access", str(self.core.notifications))
+
+
+class FeatureConfigStoreTest(unittest.TestCase):
+    def test_token_writeback_preserves_config_and_uses_private_permissions(self):
+        from telepiplex_open115.config_store import FeatureConfigStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.yaml"
+            path.write_text("app_id: app-1\nsave_directories: []\n", encoding="utf-8")
+            store = FeatureConfigStore(path)
+            updated = store.write_tokens("access", "refresh", auth_mode="scan")
+
+            on_disk = yaml.safe_load(path.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk["app_id"], "app-1")
+            self.assertEqual(on_disk["access_token"], "access")
+            self.assertEqual(on_disk["refresh_token"], "refresh")
+            self.assertEqual(updated["auth_mode"], "scan")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
 
 class FeatureSourceContractTest(unittest.TestCase):
