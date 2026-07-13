@@ -61,6 +61,41 @@ class MediaSearchFeature:
         self.plans = {}
         self.awaiting_queries = set()
 
+    async def metadata_capability(self, request: dict) -> dict:
+        if str(request.get("method") or "") != "resolve_metadata":
+            raise FeatureError(
+                "method_not_allowed",
+                "media.search method is not allowed",
+            )
+        payload = request.get("payload") or {}
+        raw_query = " ".join(str(payload.get("query") or "").split())
+        if not raw_query:
+            raise FeatureError("invalid_query", "metadata query is required")
+        plan_id = f"resolve-{uuid.uuid4().hex[:16]}"
+        try:
+            plan = await self.plan_builder(raw_query, plan_id)
+            contract = confirm_media_metadata(plan)
+        except SearchPlanningError as exc:
+            raise FeatureError(
+                "metadata_unresolved",
+                f"metadata resolution failed: {getattr(exc, 'code', str(exc))}",
+            ) from exc
+        identity = contract.get("identity") or {}
+        return {
+            "media_metadata": contract,
+            "naming_metadata": {
+                "source": "media-search",
+                "media_type": (
+                    (contract.get("placement") or {}).get("library_type") or ""
+                ),
+                "chinese_title": identity.get("chinese_title") or "",
+                "english_title": identity.get("english_title") or "",
+                "year": identity.get("year") or "",
+            },
+            "source_queries": deepcopy(plan.get("source_queries") or {}),
+            "evidence": deepcopy(contract.get("evidence") or {}),
+        }
+
     async def command(self, request: dict) -> dict:
         command = str(request.get("command") or "")
         if command not in {"search", "s"}:

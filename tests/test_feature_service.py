@@ -234,6 +234,21 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已提交", result["actions"][0]["text"])
         self.assertTrue(kwargs["idempotency_key"].startswith(plan_id))
 
+    async def test_metadata_capability_requeries_sources_without_downloading(self):
+        resolved = await self.feature.metadata_capability({
+            "method": "resolve_metadata",
+            "payload": {"query": "English.Title.2024.1080p.WEB-DL"},
+            "context": {"idempotency_key": "rename-job-1"},
+        })
+
+        self.assertTrue(resolved["media_metadata"]["confirmed"])
+        self.assertEqual(
+            resolved["media_metadata"]["identity"]["english_title"],
+            "English Title",
+        )
+        self.assertEqual(resolved["naming_metadata"]["source"], "media-search")
+        self.assertEqual(self.core.calls, [])
+
 
 class FeatureSourceContractTest(unittest.TestCase):
     def test_default_config_enables_free_and_configured_sources(self):
