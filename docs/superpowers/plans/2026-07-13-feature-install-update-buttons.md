@@ -213,3 +213,52 @@ Expected: all tests pass, compilation is silent, pip reports no broken requireme
 git add app tests README.md README_EN.md docs
 git commit -m "feat(core): add Feature install and update buttons"
 ```
+
+---
+
+### Task 5: Reuse immutable artifacts for unchanged Features
+
+**Files:**
+- Modify: `tools/generate_release_catalog.py`
+- Modify: `.github/workflows/release.yml`
+- Modify: `tests/test_release_catalog_generator.py`
+- Modify: `tests/test_release_workflow.py`
+- Modify: `docs/todos/2026-07-12-business-module-decisions.md`
+
+**Interfaces:**
+- Produces: `reuse_unchanged_artifacts(artifact_paths, previous_catalog, previous_assets) -> list[Path]`.
+- Extends CLI: `--previous-assets <directory>` is valid only with `--previous-catalog`.
+
+- [ ] **Step 1: Write failing artifact-reuse and workflow tests**
+
+Build valid previous/current artifacts with the same plugin/version/source commit but different payload bytes. Assert the helper replaces the current bytes with the previous artifact only after verifying its catalog digest. Add cases for changed source commit, missing previous asset, corrupt asset, and catalog digest mismatch.
+
+Require the workflow to download both `catalog.yaml` and `*.tpx` from the previous successful Release and pass both previous arguments to the generator.
+
+- [ ] **Step 2: Run tests and verify RED**
+
+```bash
+PYTHONPATH=app:sdk/src "$PY" -m unittest \
+  tests.test_release_catalog_generator tests.test_release_workflow
+```
+
+Expected: imports/assertions fail because the helper, CLI option, and workflow download do not exist.
+
+- [ ] **Step 3: Implement strict reuse**
+
+For an unchanged `source.commit`, require the prior asset named
+`<plugin_id>-<version>.tpx`, verify it with `verify_tpx`, compare its SHA-256 to the previous catalog, and compare plugin/version/branch/commit to both the current artifact and previous catalog. Atomically replace only the ephemeral current artifact and return its path in the reused list.
+
+Do not reuse when the source commit changed. Let the existing catalog digest gate reject a reused version whose source changed without a version bump.
+
+- [ ] **Step 4: Wire previous assets into release.yml**
+
+After downloading the previous catalog, download `*.tpx` into the same `previous/` directory. When the catalog exists, invoke the generator with:
+
+```bash
+--previous-catalog previous/catalog.yaml --previous-assets previous
+```
+
+- [ ] **Step 5: Verify and publish a new immutable platform tag**
+
+Run the targeted tests, full unittest/pytest/compileall/pip-check/diff-check matrix, push the branch, then publish `platform-v1.0.3`. Do not delete or reuse failed `platform-v1.0.2`.

@@ -102,3 +102,27 @@ Core 启动装配层集中解析来源：
 - 不修改 `open115` 名称、manifest、artifact 或业务功能。
 - 不自动安装或批量更新 Feature。
 - 不改变现有 `.tpx` 校验与回滚事务。
+
+## 发布补充：复用未变 Feature 的不可变产物
+
+### 失败根因
+
+`platform-v1.0.2` 的 Core 镜像和四个 Feature 构建成功，但 catalog 生成失败。对同一
+`feature/115` commit 连续构建两次得到不同 `.tpx` SHA-256，证明 wheel/zip 构建时间戳
+使产物不是字节级可复现。catalog 正确地拒绝了“同一 Feature version 对应不同 digest”。
+
+### 采用方案
+
+发布 job 继续构建每个 Feature，以验证当前分支可构建并读取当前 manifest。随后下载
+上一成功 Release 的 catalog 和 `.tpx`：
+
+1. 当前 artifact 的 `plugin_id`、`version` 和 `source.commit` 均与上一 catalog 相同时，
+   校验上一 `.tpx` 的 digest、manifest identity、branch 和 commit，再用上一 Release 的
+   原始字节替换本轮临时构建物。
+2. version 相同但 `source.commit` 不同时不复用，后续 catalog 门禁继续以
+   `version digest changed without version bump` 拒绝发布。
+3. catalog 声称存在可复用版本但上一资产缺失、损坏或 digest 不符时立即失败。
+4. 第一次发布或新 Feature version 没有上一条目时使用本轮新构建物。
+
+这样不会放宽不可变版本规则，也不要求没有业务改动的 Feature 为每次 Core 发布虚增
+版本；新 Release 可以再次附带与上一版完全相同、可校验的 Feature 资产。
