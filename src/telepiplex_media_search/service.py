@@ -75,26 +75,28 @@ class MediaSearchFeature:
         try:
             plan = await self.plan_builder(raw_query, plan_id)
             contract = confirm_media_metadata(plan)
+            identity = contract.get("identity") or {}
+            return {
+                "media_metadata": contract,
+                "naming_metadata": {
+                    "source": "media-search",
+                    "media_type": (
+                        (contract.get("placement") or {}).get("library_type") or ""
+                    ),
+                    "chinese_title": identity.get("chinese_title") or "",
+                    "english_title": identity.get("english_title") or "",
+                    "year": identity.get("year") or "",
+                },
+                "source_queries": deepcopy(plan.get("source_queries") or {}),
+                "evidence": deepcopy(contract.get("evidence") or {}),
+            }
         except SearchPlanningError as exc:
             raise FeatureError(
                 "metadata_unresolved",
                 f"metadata resolution failed: {getattr(exc, 'code', str(exc))}",
             ) from exc
-        identity = contract.get("identity") or {}
-        return {
-            "media_metadata": contract,
-            "naming_metadata": {
-                "source": "media-search",
-                "media_type": (
-                    (contract.get("placement") or {}).get("library_type") or ""
-                ),
-                "chinese_title": identity.get("chinese_title") or "",
-                "english_title": identity.get("english_title") or "",
-                "year": identity.get("year") or "",
-            },
-            "source_queries": deepcopy(plan.get("source_queries") or {}),
-            "evidence": deepcopy(contract.get("evidence") or {}),
-        }
+        finally:
+            self.allocator.release(plan_id)
 
     async def command(self, request: dict) -> dict:
         command = str(request.get("command") or "")

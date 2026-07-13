@@ -1,6 +1,7 @@
 import ast
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 import yaml
 
@@ -235,6 +236,7 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(kwargs["idempotency_key"].startswith(plan_id))
 
     async def test_metadata_capability_requeries_sources_without_downloading(self):
+        self.feature.allocator = Mock()
         resolved = await self.feature.metadata_capability({
             "method": "resolve_metadata",
             "payload": {"query": "English.Title.2024.1080p.WEB-DL"},
@@ -248,6 +250,8 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resolved["naming_metadata"]["source"], "media-search")
         self.assertEqual(self.core.calls, [])
+        released_plan_id = self.feature.allocator.release.call_args.args[0]
+        self.assertTrue(released_plan_id.startswith("resolve-"))
 
 
 class FeatureSourceContractTest(unittest.TestCase):
