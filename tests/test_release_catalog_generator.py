@@ -1,4 +1,6 @@
+import contextlib
 import hashlib
+import io
 import json
 import tempfile
 import unittest
@@ -6,8 +8,14 @@ from pathlib import Path
 
 import yaml
 
-from app.core.plugin_artifact import build_tpx
-from tools.generate_release_catalog import CatalogBuildError, build_catalog, write_catalog
+from app.core.plugin_artifact import build_tpx, verify_tpx
+from tools.generate_release_catalog import (
+    CatalogBuildError,
+    build_catalog,
+    main,
+    reuse_unchanged_artifacts,
+    write_catalog,
+)
 
 
 PLUGINS = {
@@ -35,8 +43,12 @@ class ReleaseCatalogGeneratorTest(unittest.TestCase):
         suffix="",
         provides=(),
         requires=(),
+        commit=None,
+        payload=b"plugin",
+        output_dir=None,
     ):
-        source = self.root / f"source-{plugin_id}{suffix}"
+        output_dir = Path(output_dir or self.root)
+        source = output_dir / f"source-{plugin_id}{suffix}"
         (source / "wheelhouse").mkdir(parents=True)
         manifest = {
             "plugin_id": plugin_id,
@@ -58,13 +70,15 @@ class ReleaseCatalogGeneratorTest(unittest.TestCase):
             "source": {
                 "repository": "origin",
                 "branch": branch,
-                "commit": (plugin_id[0] if plugin_id[0] in "abcdef" else "a") * 40,
+                "commit": commit or (
+                    (plugin_id[0] if plugin_id[0] in "abcdef" else "a") * 40
+                ),
             },
         }
         (source / "manifest.yaml").write_text(
             yaml.safe_dump(manifest, sort_keys=True), encoding="utf-8"
         )
-        (source / "plugin.whl").write_bytes(b"plugin")
+        (source / "plugin.whl").write_bytes(payload)
         (source / "wheelhouse" / "sdk.whl").write_bytes(b"sdk")
         (source / "config.schema.json").write_text(
             json.dumps({"type": "object"}), encoding="utf-8"
@@ -72,28 +86,58 @@ class ReleaseCatalogGeneratorTest(unittest.TestCase):
         (source / "config.default.yaml").write_text("{}\n", encoding="utf-8")
         return build_tpx(
             source,
-            self.root / f"{plugin_id}-{version}{suffix}.tpx",
+            output_dir / f"{plugin_id}-{version}{suffix}.tpx",
         )
 
-    def _all_artifacts(self):
+    def _all_artifacts(self, *, output_dir=None, payload=b"plugin"):
         return [
             self._artifact(
                 "open115",
                 PLUGINS["open115"],
                 provides=(("download.provider", True), ("storage.provider", True)),
+                output_dir=output_dir,
+                payload=payload,
             ),
             self._artifact(
                 "media-search",
                 PLUGINS["media-search"],
                 requires=("download.provider",),
+                output_dir=output_dir,
+                payload=payload,
             ),
             self._artifact(
                 "renaming",
                 PLUGINS["renaming"],
                 requires=("storage.provider",),
+                output_dir=output_dir,
+                payload=payload,
             ),
-            self._artifact("plex-management", PLUGINS["plex-management"]),
+            self._artifact(
+                "plex-management",
+                PLUGINS["plex-management"],
+                output_dir=output_dir,
+                payload=payload,
+            ),
         ]
+
+    def _previous_catalog(self, artifact):
+        verified = verify_tpx(artifact)
+        manifest = verified.manifest
+        return {
+            "plugins": {
+                manifest.plugin_id: {
+                    "versions": {
+                        manifest.version: {
+                            "sha256": verified.sha256,
+                            "source": {
+                                "branch": manifest.source.branch,
+                                "commit": manifest.source.commit,
+                            },
+                        }
+                    }
+                }
+            }
+        }
 
     def test_builds_manifest_derived_digest_pinned_catalog(self):
         artifacts = self._all_artifacts()
@@ -201,6 +245,274 @@ class ReleaseCatalogGeneratorTest(unittest.TestCase):
             previous_catalog=previous,
         )
         self.assertIn("media-search", catalog["plugins"])
+
+    def test_reuses_verified_previous_artifact_for_unchanged_source_commit(self):
+        previous_assets = self.root / "previous"
+        current_assets = self.root / "current"
+        previous = self._artifact(
+            "media-search",
+            PLUGINS["media-search"],
+            payload=b"previous payload",
+            output_dir=previous_assets,
+        )
+        current = self._artifact(
+            "media-search",
+            PLUGINS["media-search"],
+            payload=b"ephemeral current payload",
+            output_dir=current_assets,
+        )
+        current_before = current.read_bytes()
+        self.assertNotEqual(previous.read_bytes(), current_before)
+
+        reused = reuse_unchanged_artifacts(
+            [current],
+            self._previous_catalog(previous),
+            previous_assets,
+        )
+
+        self.assertEqual(reused, [current])
+        self.assertEqual(current.read_bytes(), previous.read_bytes())
+        self.assertNotEqual(current.read_bytes(), current_before)
+
+    def test_changed_source_commit_is_not_reused_and_digest_gate_still_rejects(self):
+        previous_assets = self.root / "previous"
+        current_assets = self.root / "current"
+        previous = self._artifact(
+            "media-search",
+            PLUGINS["media-search"],
+            commit="a" * 40,
+            payload=b"previous payload",
+            output_dir=previous_assets,
+        )
+        current = self._artifact(
+            "media-search",
+            PLUGINS["media-search"],
+            commit="b" * 40,
+            payload=b"current payload",
+            output_dir=current_assets,
+        )
+        current_before = current.read_bytes()
+        previous_catalog = self._previous_catalog(previous)
+
+        reused = reuse_unchanged_artifacts(
+            [current],
+            previous_catalog,
+            previous_assets,
+        )
+
+        self.assertEqual(reused, [])
+        self.assertEqual(current.read_bytes(), current_before)
+        with self.assertRaisesRegex(
+            CatalogBuildError,
+            "version digest changed without version bump",
+        ):
+            build_catalog(
+                "countott/telepiplex",
+                "platform-v1.0.3",
+                [
+                    self._artifact("open115", PLUGINS["open115"]),
+                    current,
+                    self._artifact("renaming", PLUGINS["renaming"]),
+                    self._artifact("plex-management", PLUGINS["plex-management"]),
+                ],
+                previous_catalog=previous_catalog,
+            )
+
+    def test_reuse_requires_previous_asset_for_unchanged_source_commit(self):
+        previous_assets = self.root / "previous"
+        previous_assets.mkdir()
+        current = self._artifact("media-search", PLUGINS["media-search"])
+        previous_catalog = self._previous_catalog(current)
+
+        with self.assertRaisesRegex(CatalogBuildError, "previous artifact is missing"):
+            reuse_unchanged_artifacts(
+                [current],
+                previous_catalog,
+                previous_assets,
+            )
+
+    def test_reuse_rejects_corrupt_previous_asset(self):
+        previous_assets = self.root / "previous"
+        previous = self._artifact(
+            "media-search",
+            PLUGINS["media-search"],
+            output_dir=previous_assets,
+        )
+        previous_catalog = self._previous_catalog(previous)
+        previous.write_bytes(b"not a tpx")
+        current = self._artifact(
+            "media-search",
+            PLUGINS["media-search"],
+            payload=b"current",
+            output_dir=self.root / "current",
+        )
+
+        with self.assertRaisesRegex(CatalogBuildError, "invalid previous artifact"):
+            reuse_unchanged_artifacts(
+                [current],
+                previous_catalog,
+                previous_assets,
+            )
+
+    def test_reuse_rejects_previous_catalog_digest_mismatch(self):
+        previous_assets = self.root / "previous"
+        previous = self._artifact(
+            "media-search",
+            PLUGINS["media-search"],
+            output_dir=previous_assets,
+        )
+        previous_catalog = self._previous_catalog(previous)
+        previous_catalog["plugins"]["media-search"]["versions"]["1.2.3"][
+            "sha256"
+        ] = "0" * 64
+        current = self._artifact(
+            "media-search",
+            PLUGINS["media-search"],
+            payload=b"current",
+            output_dir=self.root / "current",
+        )
+
+        with self.assertRaisesRegex(CatalogBuildError, "invalid previous artifact"):
+            reuse_unchanged_artifacts(
+                [current],
+                previous_catalog,
+                previous_assets,
+            )
+
+    def test_reuse_rejects_missing_previous_catalog_digest(self):
+        previous_assets = self.root / "previous"
+        previous = self._artifact(
+            "media-search",
+            PLUGINS["media-search"],
+            output_dir=previous_assets,
+        )
+        previous_catalog = self._previous_catalog(previous)
+        del previous_catalog["plugins"]["media-search"]["versions"]["1.2.3"][
+            "sha256"
+        ]
+        current = self._artifact(
+            "media-search",
+            PLUGINS["media-search"],
+            payload=b"current",
+            output_dir=self.root / "current",
+        )
+
+        with self.assertRaisesRegex(CatalogBuildError, "invalid previous artifact"):
+            reuse_unchanged_artifacts(
+                [current],
+                previous_catalog,
+                previous_assets,
+            )
+
+    def test_reuse_rejects_previous_asset_identity_mismatch(self):
+        current = self._artifact(
+            "media-search",
+            PLUGINS["media-search"],
+            payload=b"current",
+            output_dir=self.root / "current",
+        )
+        cases = (
+            ("plugin", "open115", PLUGINS["open115"], "1.2.3", "a" * 40),
+            ("version", "media-search", PLUGINS["media-search"], "9.9.9", "a" * 40),
+            ("branch", "media-search", "feature/renaming", "1.2.3", "a" * 40),
+            ("commit", "media-search", PLUGINS["media-search"], "1.2.3", "b" * 40),
+        )
+        for label, plugin_id, branch, version, commit in cases:
+            with self.subTest(label=label):
+                previous_assets = self.root / f"previous-{label}"
+                wrong_asset = self._artifact(
+                    plugin_id,
+                    branch,
+                    version=version,
+                    commit=commit,
+                    payload=b"previous",
+                    output_dir=previous_assets,
+                )
+                expected_path = previous_assets / "media-search-1.2.3.tpx"
+                if wrong_asset != expected_path:
+                    wrong_asset.replace(expected_path)
+                previous_catalog = self._previous_catalog(current)
+                previous_catalog["plugins"]["media-search"]["versions"]["1.2.3"][
+                    "sha256"
+                ] = hashlib.sha256(expected_path.read_bytes()).hexdigest()
+
+                with self.assertRaisesRegex(
+                    CatalogBuildError,
+                    "previous artifact identity mismatch",
+                ):
+                    reuse_unchanged_artifacts(
+                        [current],
+                        previous_catalog,
+                        previous_assets,
+                    )
+
+    def test_previous_assets_cli_option_requires_previous_catalog(self):
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error), self.assertRaises(SystemExit) as raised:
+            main(
+                [
+                    "--repository",
+                    "countott/telepiplex",
+                    "--tag",
+                    "platform-v1.0.3",
+                    "--output",
+                    str(self.root / "catalog.yaml"),
+                    "--previous-assets",
+                    str(self.root / "previous"),
+                    str(self.root / "missing.tpx"),
+                ]
+            )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn(
+            "--previous-assets is valid only with --previous-catalog",
+            error.getvalue(),
+        )
+
+    def test_cli_reuses_previous_assets_when_both_previous_inputs_are_given(self):
+        previous_assets = self.root / "previous"
+        current_assets = self.root / "current"
+        previous = self._all_artifacts(
+            output_dir=previous_assets,
+            payload=b"previous payload",
+        )
+        current = self._all_artifacts(
+            output_dir=current_assets,
+            payload=b"ephemeral current payload",
+        )
+        previous_catalog = build_catalog(
+            "countott/telepiplex",
+            "platform-v1.0.2",
+            previous,
+        )
+        previous_catalog_path = previous_assets / "catalog.yaml"
+        previous_catalog_path.write_text(
+            yaml.safe_dump(previous_catalog, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        result = main(
+            [
+                "--repository",
+                "countott/telepiplex",
+                "--tag",
+                "platform-v1.0.3",
+                "--output",
+                str(self.root / "release" / "catalog.yaml"),
+                "--previous-catalog",
+                str(previous_catalog_path),
+                "--previous-assets",
+                str(previous_assets),
+                *(str(path) for path in current),
+            ]
+        )
+
+        self.assertEqual(result, 0)
+        for current_path in current:
+            self.assertEqual(
+                current_path.read_bytes(),
+                (previous_assets / current_path.name).read_bytes(),
+            )
 
 
 if __name__ == "__main__":

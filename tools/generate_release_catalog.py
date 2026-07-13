@@ -133,6 +133,79 @@ def _atomic_write(path: Path, data: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def reuse_unchanged_artifacts(
+    artifact_paths,
+    previous_catalog: dict,
+    previous_assets: Path,
+) -> list[Path]:
+    previous_assets = Path(previous_assets)
+    reused = []
+    for raw_path in artifact_paths or []:
+        current_path = Path(raw_path)
+        try:
+            current = verify_tpx(current_path)
+        except (ArtifactError, OSError) as exc:
+            raise CatalogBuildError(
+                f"invalid current Feature artifact: {current_path.name}"
+            ) from exc
+
+        manifest = current.manifest
+        previous_entry = (
+            (((previous_catalog or {}).get("plugins") or {}).get(manifest.plugin_id) or {})
+            .get("versions", {})
+            .get(manifest.version)
+        )
+        if not isinstance(previous_entry, dict):
+            continue
+        previous_source = previous_entry.get("source")
+        if not isinstance(previous_source, dict):
+            continue
+        previous_commit = str(previous_source.get("commit") or "")
+        if previous_commit != manifest.source.commit:
+            continue
+
+        asset_name = f"{manifest.plugin_id}-{manifest.version}.tpx"
+        previous_path = previous_assets / asset_name
+        if not previous_path.is_file():
+            raise CatalogBuildError(f"previous artifact is missing: {asset_name}")
+        expected_digest = str(previous_entry.get("sha256") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+            raise CatalogBuildError(f"invalid previous artifact: {asset_name}")
+        try:
+            previous = verify_tpx(previous_path, expected_sha256=expected_digest)
+        except (ArtifactError, OSError) as exc:
+            raise CatalogBuildError(
+                f"invalid previous artifact: {asset_name}"
+            ) from exc
+
+        current_identity = (
+            manifest.plugin_id,
+            manifest.version,
+            manifest.source.branch,
+            manifest.source.commit,
+        )
+        previous_identity = (
+            previous.manifest.plugin_id,
+            previous.manifest.version,
+            previous.manifest.source.branch,
+            previous.manifest.source.commit,
+        )
+        catalog_identity = (
+            manifest.plugin_id,
+            manifest.version,
+            str(previous_source.get("branch") or ""),
+            previous_commit,
+        )
+        if previous_identity != current_identity or previous_identity != catalog_identity:
+            raise CatalogBuildError(
+                f"previous artifact identity mismatch: {asset_name}"
+            )
+
+        _atomic_write(current_path, previous_path.read_bytes())
+        reused.append(current_path)
+    return reused
+
+
 def write_catalog(
     repository: str,
     tag: str,
@@ -171,8 +244,11 @@ def main(argv=None) -> int:
     parser.add_argument("--tag", required=True)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--previous-catalog", type=Path)
+    parser.add_argument("--previous-assets", type=Path)
     parser.add_argument("artifacts", nargs="+", type=Path)
     args = parser.parse_args(argv)
+    if args.previous_assets and not args.previous_catalog:
+        parser.error("--previous-assets is valid only with --previous-catalog")
     try:
         previous_catalog = None
         if args.previous_catalog:
@@ -184,6 +260,12 @@ def main(argv=None) -> int:
                 raise CatalogBuildError("previous catalog cannot be read") from exc
             if not isinstance(previous_catalog, dict):
                 raise CatalogBuildError("previous catalog must contain a mapping")
+        if args.previous_assets:
+            reuse_unchanged_artifacts(
+                args.artifacts,
+                previous_catalog,
+                args.previous_assets,
+            )
         output = write_catalog(
             args.repository,
             args.tag,

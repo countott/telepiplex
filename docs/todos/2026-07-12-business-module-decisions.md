@@ -180,6 +180,7 @@ Telegram 搜索请求
 - 已实现：GitHub Actions 自动测试 Core、构建并推送 GHCR `linux/amd64` Core 镜像。
 - 已实现：从四个独立 Feature branch 构建 Linux `.tpx`，发布 SHA-256 固定的 `catalog.yaml` 和不可变 GitHub Release。
 - 已实现：同一 Feature version 对应不同 digest 时拒绝发布，防止覆盖 `name@version`。
+- 已实现：Feature source commit 未变化时，先按上一版 catalog 校验 digest、plugin/version/branch/commit，再复用上一版不可变 `.tpx`；source commit 变化时不复用，仍由同版本 digest 门禁拒绝未升版改动。
 - Core 更新：由 Unraid 拉取新镜像并允许重启一次。
 - Feature 更新：Core 内完成下载、校验、shadow 启动、drain、原子切换和失败回滚，不重启 Core。
 

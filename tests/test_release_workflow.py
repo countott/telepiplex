@@ -76,6 +76,28 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("generate_release_catalog.py", source)
         self.assertFalse(OLD_WORKFLOW.exists(), "unsafe legacy workflow still exists")
 
+    def test_publish_reuses_verified_assets_from_previous_release(self):
+        workflow = self._workflow()
+        steps = workflow["jobs"]["publish-release"]["steps"]
+        fetch_previous = next(
+            step["run"]
+            for step in steps
+            if step["name"] == "Fetch previous published catalog when available"
+        )
+        generate_catalog = next(
+            step["run"]
+            for step in steps
+            if step["name"] == "Generate and verify pinned catalog"
+        )
+
+        self.assertIn("--pattern catalog.yaml --dir previous", fetch_previous)
+        self.assertIn("--pattern '*.tpx' --dir previous", fetch_previous)
+        self.assertIn(
+            "PREVIOUS_ARGS=(--previous-catalog previous/catalog.yaml "
+            "--previous-assets previous)",
+            generate_catalog,
+        )
+
     def test_test_and_feature_jobs_install_local_wheel_build_backends(self):
         workflow = self._workflow()
         jobs = workflow["jobs"]

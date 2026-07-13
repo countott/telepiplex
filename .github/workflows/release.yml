@@ -229,7 +229,9 @@ jobs:
           mkdir -p previous
           PREVIOUS_TAG=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')
           if [[ -n "$PREVIOUS_TAG" && "$PREVIOUS_TAG" != "$RELEASE_TAG" ]]; then
-            if ! gh release download "$PREVIOUS_TAG" --repo "$GITHUB_REPOSITORY" --pattern catalog.yaml --dir previous; then
+            if gh release download "$PREVIOUS_TAG" --repo "$GITHUB_REPOSITORY" --pattern catalog.yaml --dir previous; then
+              gh release download "$PREVIOUS_TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.tpx' --dir previous
+            else
               echo "Previous release has no catalog.yaml; treating this as the first catalog release."
             fi
           fi
@@ -241,7 +243,7 @@ jobs:
           mkdir -p release
           PREVIOUS_ARGS=()
           if [[ -f previous/catalog.yaml ]]; then
-            PREVIOUS_ARGS=(--previous-catalog previous/catalog.yaml)
+            PREVIOUS_ARGS=(--previous-catalog previous/catalog.yaml --previous-assets previous)
           fi
           python tools/generate_release_catalog.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --output release/catalog.yaml "${PREVIOUS_ARGS[@]}" dist/*.tpx
           cd release
