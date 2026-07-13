@@ -8,7 +8,8 @@ allowed_user: 123456789
 # Feature 插件宿主。业务配置分别位于 /config/plugins/<plugin_id>/config.yaml。
 plugins:
   root: /config/plugins
-  catalog: /config/plugins/catalog.yaml
+  catalog: https://github.com/countott/telepiplex/releases/latest/download/catalog.yaml
+  catalog_refresh_interval: 21600
   install_timeout: 300
   startup_timeout: 30
   drain_timeout: 120

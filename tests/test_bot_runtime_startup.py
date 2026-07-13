@@ -74,6 +74,28 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             await manager.start()
             self.assertTrue(manager.broker.socket_path.exists())
 
+    async def test_build_plugin_manager_preserves_remote_catalog_url(self):
+        bot_module = await asyncio.to_thread(load_bot_module)
+        remote = (
+            "https://github.com/countott/telepiplex/releases/latest/"
+            "download/catalog.yaml"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manager = bot_module.build_plugin_manager({
+                "plugins": {
+                    "root": str(root / "plugins"),
+                    "catalog": remote,
+                }
+            }, core_database=root / "core.db")
+            self.addAsyncCleanup(manager.close)
+
+            self.assertEqual(manager._artifact_resolver.catalog_url, remote)
+            self.assertEqual(
+                manager._artifact_resolver.catalog_path,
+                root / "plugins" / ".cache/catalog.yaml",
+            )
+
     async def test_shutdown_stops_telegram_intake_before_feature_manager(self):
         bot_module = await asyncio.to_thread(load_bot_module)
         events = []

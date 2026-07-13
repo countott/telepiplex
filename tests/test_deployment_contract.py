@@ -88,9 +88,34 @@ class DeploymentContractTest(unittest.TestCase):
             ROOT / "docs/todos/2026-07-12-business-module-decisions.md"
         ).read_text(encoding="utf-8")
         self.assertIn("OPS-TODO-01A GitHub 聚合发布（已实现）", decisions)
-        self.assertIn("OPS-TODO-01B 远程更新发现（待实现）", decisions)
+        self.assertIn("OPS-TODO-01B 远程更新发现（已实现）", decisions)
         self.assertIn("GitHub 聚合发布流水线已经落地", decisions)
         self.assertNotIn("GitHub 自动发布 Core 镜像、Feature `.tpx` 和远程 catalog 尚未落地", decisions)
+
+    def test_documentation_describes_remote_update_discovery(self):
+        remote_catalog = (
+            "https://github.com/countott/telepiplex/releases/latest/"
+            "download/catalog.yaml"
+        )
+        chinese = (ROOT / "README.md").read_text(encoding="utf-8")
+        for term in (
+            remote_catalog,
+            "catalog_refresh_interval: 21600",
+            "确认更新",
+            "/config/plugins/catalog.yaml",
+            "不会静默更新",
+        ):
+            self.assertIn(term, chinese, term)
+
+        english = (ROOT / "README_EN.md").read_text(encoding="utf-8")
+        for term in (
+            remote_catalog,
+            "catalog_refresh_interval: 21600",
+            "Confirm update",
+            "/config/plugins/catalog.yaml",
+            "never updates silently",
+        ):
+            self.assertIn(term, english, term)
 
 
 if __name__ == "__main__":

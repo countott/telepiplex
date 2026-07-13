@@ -34,7 +34,11 @@ class ConfigTemplateContractTest(unittest.TestCase):
             {"log_level", "bot_token", "allowed_user", "plugins"},
         )
         self.assertEqual(parsed["plugins"]["root"], "/config/plugins")
-        self.assertEqual(parsed["plugins"]["catalog"], "/config/plugins/catalog.yaml")
+        self.assertEqual(
+            parsed["plugins"]["catalog"],
+            "https://github.com/countott/telepiplex/releases/latest/download/catalog.yaml",
+        )
+        self.assertEqual(parsed["plugins"]["catalog_refresh_interval"], 21600)
         for term in BUSINESS_TERMS:
             self.assertNotIn(term, parsed)
 

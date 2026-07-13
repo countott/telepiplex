@@ -18,7 +18,8 @@ bot_token: "your_bot_token"
 allowed_user: 123456789
 plugins:
   root: /config/plugins
-  catalog: /config/plugins/catalog.yaml
+  catalog: https://github.com/countott/telepiplex/releases/latest/download/catalog.yaml
+  catalog_refresh_interval: 21600
   install_timeout: 300
   startup_timeout: 30
   drain_timeout: 120
@@ -30,7 +31,7 @@ plugins:
 
 Feature branches are development source. Runtime releases are immutable `.tpx` artifacts built from those branches. The container never checks out Git branches and Core images never contain business source code.
 
-`/config/plugins/catalog.yaml` maps `name@version` to a local path or HTTPS release with a pinned SHA-256 digest:
+`plugins.catalog` accepts either a remote HTTPS URL or a local file path. The default points at the aggregate release catalog; for offline or pinned operation, download it and set the value to `/config/plugins/catalog.yaml`. The catalog maps `name@version` to a local path or HTTPS release with a pinned SHA-256 digest:
 
 ```yaml
 plugins:
@@ -67,7 +68,11 @@ git push origin platform-v1.0.0
 
 GitHub Actions builds and pushes the `linux/amd64` Core image `ghcr.io/<owner>/telepiplex-core:1.0.0`. The same release builds Linux `.tpx` assets for `open115`, `media-search`, `renaming`, and `plex-management` from their independent Feature branches. It also publishes `catalog.yaml` and `catalog.yaml.sha256`; every HTTPS asset is pinned to its real SHA-256, Feature branch, and commit.
 
-The version in each Feature `manifest.yaml` is an immutable `name@version` identity. A code change requires a version bump, and the workflow rejects a reused version with different bytes. Until OPS-TODO-01B adds remote discovery and Telegram confirmation, place the released `catalog.yaml` at `/config/plugins/catalog.yaml`; Core never updates silently.
+The version in each Feature `manifest.yaml` is an immutable `name@version` identity. A code change requires a version bump, and the workflow rejects a reused version with different bytes.
+
+Core refreshes the remote catalog once at startup and then checks the current release of each installed Feature for its newest stable, Core-compatible release every `catalog_refresh_interval: 21600` seconds (six hours). Refreshes require HTTPS, enforce size and schema limits, and replace the cache atomically. Network or catalog failures skip only that check and retain the last valid catalog; Core and other Features continue running.
+
+When an update is available, Core sends one Telegram notification to `allowed_user` with the current version, target version, source commit, and “Confirm update” / “Not now” buttons. The existing verification, shadow startup, drain, atomic switch, and rollback transaction runs only after an authorized user selects “Confirm update”; Core never updates silently. Offline deployments can save the released catalog as `/config/plugins/catalog.yaml` and point the configuration back to that local path.
 
 ## Development and verification
 

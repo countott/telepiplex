@@ -31,6 +31,7 @@
 - Core 与四个 Feature 源码分支已经独立推送到远端。
 - `main` 暂不作为日常开发或部署入口。
 - GitHub 聚合发布流水线已经落地到 Core Feature 分支，可由 `platform-v<semver>` tag 自动生成 Core 镜像、四个 Linux `.tpx` 和远程 catalog。
+- Core 已能安全刷新远程 catalog、比较兼容稳定版本，并在 Telegram 一次确认后更新 Feature；不会静默更新。
 - 当前尚未创建实际 release tag；本地或 Unraid 手工构建仍作为发布前验证与故障兜底。
 
 ## 二、已经确认的业务规则
@@ -194,10 +195,12 @@ Telegram 搜索请求
 - Core 更新：由 Unraid 拉取新镜像并允许重启一次。
 - Feature 更新：Core 内完成下载、校验、shadow 启动、drain、原子切换和失败回滚，不重启 Core。
 
-### OPS-TODO-01B 远程更新发现（待实现）
+### OPS-TODO-01B 远程更新发现（已实现）
 
-- 待实现：Core 安全刷新远程 catalog 并比较已安装 Feature 版本。
-- 待实现：发现兼容更新后 Telegram 通知，用户一次确认后执行更新；默认不静默升级。
+- 已实现：Core 启动时及默认每 6 小时安全刷新远程 catalog，以原子缓存保留上一次有效目录，并比较已安装 Feature 当前版本对应的最新稳定兼容版本。
+- 已实现：目录或网络失败只跳过本轮检查，不影响 Core 与其他 Feature。
+- 已实现：发现更新后只通知 `allowed_user`；用户点击一次“确认更新”才执行既有更新事务，也可选择“暂不更新”。
+- 已实现：默认不静默升级；本地 `/config/plugins/catalog.yaml` 仍作为离线和固定版本入口。
 
 ### OPS-TODO-02 首次安装体验
 
