@@ -56,6 +56,40 @@ class DeploymentContractTest(unittest.TestCase):
         self.assertIn(f"-t {image}", source)
         self.assertIn(f"docker image inspect {image}", source)
 
+    def test_documentation_describes_aggregate_release_contract(self):
+        required = (
+            "ghcr.io/<owner>/telepiplex-core",
+            "platform-v1.0.0",
+            "catalog.yaml",
+            "open115",
+            "media-search",
+            "renaming",
+            "plex-management",
+            "不会静默更新",
+        )
+        chinese = (ROOT / "README.md").read_text(encoding="utf-8")
+        for term in required:
+            self.assertIn(term, chinese, term)
+
+        english = (ROOT / "README_EN.md").read_text(encoding="utf-8")
+        for term in (
+            "ghcr.io/<owner>/telepiplex-core",
+            "platform-v1.0.0",
+            "catalog.yaml",
+            "open115",
+            "media-search",
+            "renaming",
+            "plex-management",
+            "never updates silently",
+        ):
+            self.assertIn(term, english, term)
+
+        decisions = (
+            ROOT / "docs/todos/2026-07-12-business-module-decisions.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("OPS-TODO-01A GitHub 聚合发布（已实现）", decisions)
+        self.assertIn("OPS-TODO-01B 远程更新发现（待实现）", decisions)
+
 
 if __name__ == "__main__":
     unittest.main()

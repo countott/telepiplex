@@ -185,13 +185,19 @@ Telegram 搜索请求
 
 ## 五、运维与发布 TODO
 
-### OPS-TODO-01 GitHub 自动发布
+### OPS-TODO-01A GitHub 聚合发布（已实现）
 
-- 当前：Core 镜像和四个 `.tpx` 需要在 Unraid/Linux 手工构建。
-- 推荐：GitHub Actions 自动构建 `linux/amd64` Core 镜像与 Feature `.tpx`，发布 SHA-256 固定的 catalog。
-- 推荐交互：Feature 发现新版本后 Telegram 通知，用户一键确认更新；默认不静默升级。
+- 已实现：`platform-v<semver>` tag 或显式手动触发聚合发布。
+- 已实现：GitHub Actions 自动测试 Core、构建并推送 GHCR `linux/amd64` Core 镜像。
+- 已实现：从四个独立 Feature branch 构建 Linux `.tpx`，发布 SHA-256 固定的 `catalog.yaml` 和不可变 GitHub Release。
+- 已实现：同一 Feature version 对应不同 digest 时拒绝发布，防止覆盖 `name@version`。
 - Core 更新：由 Unraid 拉取新镜像并允许重启一次。
 - Feature 更新：Core 内完成下载、校验、shadow 启动、drain、原子切换和失败回滚，不重启 Core。
+
+### OPS-TODO-01B 远程更新发现（待实现）
+
+- 待实现：Core 安全刷新远程 catalog 并比较已安装 Feature 版本。
+- 待实现：发现兼容更新后 Telegram 通知，用户一次确认后执行更新；默认不静默升级。
 
 ### OPS-TODO-02 首次安装体验
 

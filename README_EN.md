@@ -56,6 +56,19 @@ Commands:
 
 An existing absolute `.tpx` path is also accepted by `install` and `update`. Core verifies and installs the new release, starts a shadow process, checks health, drains active work, and switches routes atomically. A failure at any stage keeps the old release active.
 
+## Aggregate GitHub releases
+
+Production releases use a `platform-v<semver>` tag:
+
+```bash
+git tag platform-v1.0.0
+git push origin platform-v1.0.0
+```
+
+GitHub Actions builds and pushes the `linux/amd64` Core image `ghcr.io/<owner>/telepiplex-core:1.0.0`. The same release builds Linux `.tpx` assets for `open115`, `media-search`, `renaming`, and `plex-management` from their independent Feature branches. It also publishes `catalog.yaml` and `catalog.yaml.sha256`; every HTTPS asset is pinned to its real SHA-256, Feature branch, and commit.
+
+The version in each Feature `manifest.yaml` is an immutable `name@version` identity. A code change requires a version bump, and the workflow rejects a reused version with different bytes. Until OPS-TODO-01B adds remote discovery and Telegram confirmation, place the released `catalog.yaml` at `/config/plugins/catalog.yaml`; Core never updates silently.
+
 ## Development and verification
 
 Core, the SDK, and `.tpx` build tools stay in the same repository. Feature branches depend only on the Core API/SDK contract and never import another Feature.
