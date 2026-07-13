@@ -26,6 +26,18 @@ from .search_plan import TemporarySpecialAllocator, confirm_media_metadata
 
 _LATIN = re.compile(r"[A-Za-z]")
 
+_PLANNING_ERROR_MESSAGES = {
+    "ambiguous_candidates": "存在多个候选，请补充年份或电影/剧集类型。",
+    "evidence_conflict": "不同来源的年份或媒体类型冲突，请补充更明确的信息。",
+    "insufficient_independent_support": "独立证据来源不足，无法安全生成计划。",
+    "missing_bilingual_identity": "缺少可验证的中英文媒体身份。",
+    "tvdb_identity_required": "剧集缺少唯一 TVDB 身份，无法安全生成计划。",
+    "tvdb_scope_not_verified": "TVDB 无法验证请求的季或集。",
+    "complex_identity_requires_ai": "该条目包含复杂媒体关系，需要 AI 判断。",
+    "ai_unavailable_after_gate_failure": "规则证据不足，且 AI 当前不可用；请补充年份、媒体类型或稍后重试。",
+    "ai_invalid_after_gate_failure": "规则证据不足，且 AI 未能生成有效计划；请补充信息后重试。",
+}
+
 
 class MediaSearchFeature:
     def __init__(
@@ -96,7 +108,11 @@ class MediaSearchFeature:
         try:
             plan = await self.plan_builder(raw_query, plan_id)
         except SearchPlanningError as exc:
-            return self._closed(f"❌ 无法生成媒体元数据：{exc}")
+            message = _PLANNING_ERROR_MESSAGES.get(
+                getattr(exc, "code", str(exc)),
+                "媒体证据无法形成有效计划，请补充信息后重试。",
+            )
+            return self._closed(f"❌ 无法生成媒体元数据：{message}")
         except Exception as exc:
             return self._closed(f"❌ 媒体规划失败：{type(exc).__name__}")
         route = resolve_category_route(
@@ -280,6 +296,10 @@ class MediaSearchFeature:
         year = " ".join(str(identity.get("year") or "").split())
         placement = contract.get("placement") or {}
         if placement.get("library_type") == "series":
+            decision = ((contract.get("evidence") or {}).get("decision") or {})
+            scope = str(decision.get("scope") or "")
+            if scope == "whole_series" and english and _LATIN.search(english):
+                return " ".join(item for item in (english, year) if item)
             season = placement.get("season_number")
             episode = placement.get("episode_number")
             if season is None:
@@ -288,7 +308,7 @@ class MediaSearchFeature:
                 episode = first.get("episode_number")
             if english and _LATIN.search(english) and season is not None:
                 marker = f"S{int(season):02d}"
-                if episode is not None:
+                if scope != "season" and episode is not None:
                     width = 2 if int(episode) < 100 else 3
                     marker += f"E{int(episode):0{width}d}"
                 return f"{english} {marker}"

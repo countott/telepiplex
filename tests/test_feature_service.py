@@ -2,6 +2,8 @@ import ast
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -94,6 +96,7 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         })
         callback_data = command["actions"][0]["data"]["keyboard"][0][0]["callback_data"]
         plan_id = callback_data.rsplit(":", 1)[-1]
+        self.assertEqual(self.search_queries, [])
 
         confirmed = await self.feature.callback({
             "namespace": "media-search",
@@ -104,6 +107,25 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.search_queries, [("English Title 2024", "movie")])
         self.assertIn("找到 1 个", confirmed["actions"][0]["text"])
+
+    async def test_planning_failure_uses_safe_specific_reason(self):
+        from telepiplex_media_search.planner import SearchPlanningError
+
+        async def blocked(_raw_query, _plan_id):
+            raise SearchPlanningError("ai_unavailable_after_gate_failure")
+
+        self.feature.plan_builder = blocked
+        result = await self.feature.command({
+            "command": "search",
+            "args": ["同名条目"],
+            "user_id": 1,
+            "chat_id": 10,
+        })
+
+        self.assertIn("规则证据不足", result["actions"][0]["text"])
+        self.assertIn("AI 当前不可用", result["actions"][0]["text"])
+        self.assertEqual(self.feature.plans, {})
+        self.assertEqual(self.search_queries, [])
 
     async def test_series_query_keeps_confirmed_episode_scope(self):
         plan = search_plan()
@@ -139,6 +161,32 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "English Title S01E02",
         )
 
+    async def test_rule_series_queries_preserve_requested_scope(self):
+        cases = {
+            "whole_series": "English Title 2024",
+            "season": "English Title S02",
+            "episode": "English Title S02E05",
+        }
+        for scope, expected in cases.items():
+            with self.subTest(scope=scope):
+                plan = search_plan()
+                contract = plan["media_metadata"]
+                contract["identity"]["content_kind"] = "series"
+                contract["placement"].update({
+                    "library_type": "series",
+                    "category_kind": "live_action_series",
+                })
+                contract["evidence"] = {"decision": {"scope": scope}}
+                contract["items"] = [{
+                    "season_number": 2,
+                    "episode_number": 5,
+                }]
+
+                self.assertEqual(
+                    self.feature._english_prowlarr_query(plan, contract),
+                    expected,
+                )
+
     async def test_selected_release_calls_download_provider_with_canonical_contract(self):
         command = await self.feature.command({
             "command": "search",
@@ -166,6 +214,13 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
 
 class FeatureSourceContractTest(unittest.TestCase):
+    def test_default_config_enables_free_and_configured_sources(self):
+        config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
+
+        self.assertTrue(config["metadata"]["wikipedia"]["enable"])
+        self.assertTrue(config["metadata"]["tvdb"]["enable"])
+        self.assertTrue(config["ai"]["enable"])
+
     def test_source_has_no_core_telegram_or_init_imports(self):
         forbidden = []
         for path in (ROOT / "src").rglob("*.py"):

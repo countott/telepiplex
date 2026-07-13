@@ -33,7 +33,7 @@ metadata:
     languages: [zh, en]
     timeout: 10
   tvdb:
-    enable: false
+    enable: true
     api_key: ""
     base_url: https://api4.thetvdb.com/v4
     subscriber_pin: ""
