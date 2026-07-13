@@ -17,9 +17,77 @@
         "additionalProperties": false
       }
     },
-    "search": {"type": "object"},
-    "metadata": {"type": "object"},
-    "ai": {"type": "object"}
+    "search": {
+      "type": "object",
+      "title": "搜索",
+      "properties": {
+        "enable": {"type": "boolean", "title": "启用搜索"},
+        "prowlarr": {
+          "type": "object",
+          "title": "Prowlarr",
+          "properties": {
+            "base_url": {"type": "string", "title": "服务地址"},
+            "api_key": {"type": "string", "title": "API Key", "writeOnly": true},
+            "timeout": {"type": "number", "minimum": 1, "maximum": 600, "title": "搜索超时（秒）"},
+            "status_timeout": {"type": "number", "minimum": 1, "maximum": 300, "title": "状态超时（秒）"},
+            "indexer_ids": {"type": "string", "title": "Indexer IDs"},
+            "categories": {
+              "type": "object",
+              "title": "搜索分类",
+              "properties": {
+                "movie": {"type": "integer", "minimum": 0, "title": "电影分类"},
+                "tv": {"type": "integer", "minimum": 0, "title": "剧集分类"}
+              },
+              "additionalProperties": true
+            },
+            "result_limit": {"type": "integer", "minimum": 1, "maximum": 100, "title": "结果数量"}
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "metadata": {
+      "type": "object",
+      "title": "元数据",
+      "properties": {
+        "wikipedia": {
+          "type": "object",
+          "title": "Wikipedia",
+          "properties": {
+            "enable": {"type": "boolean", "title": "启用"},
+            "languages": {"type": "array", "items": {"type": "string"}},
+            "timeout": {"type": "number", "minimum": 1, "maximum": 300, "title": "超时（秒）"}
+          },
+          "additionalProperties": true
+        },
+        "tvdb": {
+          "type": "object",
+          "title": "TVDB",
+          "properties": {
+            "enable": {"type": "boolean", "title": "启用"},
+            "api_key": {"type": "string", "title": "API Key", "writeOnly": true},
+            "base_url": {"type": "string", "title": "API 地址"},
+            "subscriber_pin": {"type": "string", "title": "Subscriber PIN", "writeOnly": true},
+            "timeout": {"type": "number", "minimum": 1, "maximum": 300, "title": "超时（秒）"}
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "ai": {
+      "type": "object",
+      "title": "AI",
+      "properties": {
+        "enable": {"type": "boolean", "title": "启用"},
+        "api_url": {"type": "string", "title": "API 地址"},
+        "api_key": {"type": "string", "title": "API Key", "writeOnly": true},
+        "model": {"type": "string", "title": "模型"},
+        "timeout": {"type": "number", "minimum": 1, "maximum": 600, "title": "超时（秒）"}
+      },
+      "additionalProperties": true
+    }
   },
   "required": ["category_folder", "search", "metadata", "ai"],
   "additionalProperties": false
