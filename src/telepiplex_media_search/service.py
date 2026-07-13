@@ -9,6 +9,7 @@ from copy import deepcopy
 from telepiplex_plugin_sdk import FeatureError
 from telepiplex_plugin_sdk.media_metadata import resolve_category_route
 
+from .adapters.douban import lookup_douban_evidence
 from .adapters.prowlarr import resolve_prowlarr_download_url, search_prowlarr
 from .adapters.tvdb import (
     TvdbConfigError,
@@ -207,10 +208,7 @@ class MediaSearchFeature:
     async def _build_plan(self, raw_query: str, plan_id: str):
         providers = {
             "wikipedia": self._wikipedia_provider,
-            "douban": lambda _hypotheses: {
-                "source": "douban", "status": "disabled", "facts": [],
-                "source_urls": [], "error": "not configured",
-            },
+            "douban": self._douban_provider,
             "tvdb": self._tvdb_provider,
         }
         return await build_confirmable_search_plan(
@@ -231,6 +229,11 @@ class MediaSearchFeature:
             languages=tuple(config.get("languages") or ["zh", "en"]),
             timeout=float(config.get("timeout") or 10),
         )
+
+    @staticmethod
+    def _douban_provider(hypotheses: dict):
+        queries = ((hypotheses.get("source_queries") or {}).get("douban") or [])
+        return lookup_douban_evidence(queries, timeout=10.0)
 
     def _tvdb_provider(self, hypotheses: dict):
         facts = []

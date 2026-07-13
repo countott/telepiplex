@@ -2,12 +2,32 @@
 
 from __future__ import annotations
 
+import re
 from urllib.parse import quote
 
 import requests
 
 
 USER_AGENT = "Telepiplex/1.0 (media metadata lookup)"
+
+
+def _classification(title: str, extract: str) -> tuple[str, str]:
+    text = f"{title} {extract}"
+    year_match = re.search(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)", text)
+    lowered = text.casefold()
+    lowered_title = title.casefold()
+    series_signals = ("television series", "tv series", "電視劇", "电视剧", "劇集", "剧集")
+    movie_signals = (" film", "movie", "電影", "电影", "影片")
+    media_type = ""
+    if any(item in lowered_title for item in movie_signals):
+        media_type = "movie"
+    elif any(item in lowered_title for item in series_signals):
+        media_type = "series"
+    elif any(item in lowered for item in series_signals):
+        media_type = "series"
+    elif any(item in lowered for item in movie_signals):
+        media_type = "movie"
+    return (year_match.group(1) if year_match else "", media_type)
 
 
 def _empty(status: str, error: str = "") -> dict:
@@ -78,6 +98,7 @@ def lookup_wikipedia_evidence(
                         f"https://{language}.wikipedia.org/wiki/"
                         f"{quote(title.replace(' ', '_'))}"
                     )
+                year, media_type = _classification(title, extract)
                 facts.append(
                     {
                         "language": language,
@@ -88,13 +109,14 @@ def lookup_wikipedia_evidence(
                         "wikibase_item": str(
                             (page.get("pageprops") or {}).get("wikibase_item") or ""
                         ),
+                        "year": year,
+                        "media_type": media_type,
+                        "chinese_title": title if language.startswith("zh") else "",
+                        "english_title": title if language.startswith("en") else "",
                     }
                 )
                 if page_url not in urls:
                     urls.append(page_url)
-        if facts:
-            break
-
     if facts:
         return {
             "source": "wikipedia",

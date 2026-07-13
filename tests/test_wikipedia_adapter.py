@@ -7,9 +7,9 @@ from telepiplex_media_search.adapters.wikipedia import lookup_wikipedia_evidence
 class WikipediaAdapterTest(unittest.TestCase):
     @patch("telepiplex_media_search.adapters.wikipedia.requests.get")
     def test_returns_extract_and_findable_page_url(self, get_mock):
-        response = Mock()
-        response.raise_for_status.return_value = None
-        response.json.return_value = {
+        zh_response = Mock()
+        zh_response.raise_for_status.return_value = None
+        zh_response.json.return_value = {
             "query": {
                 "pages": {
                     "1": {
@@ -21,16 +21,36 @@ class WikipediaAdapterTest(unittest.TestCase):
                 }
             }
         }
-        get_mock.return_value = response
+        en_response = Mock()
+        en_response.raise_for_status.return_value = None
+        en_response.json.return_value = {
+            "query": {
+                "pages": [{
+                    "title": "Someday or One Day",
+                    "extract": "Someday or One Day is a 2022 Taiwanese film.",
+                    "pageprops": {"wikibase_item": "Q115000000"},
+                    "fullurl": "https://en.wikipedia.org/wiki/Someday_or_One_Day",
+                }]
+            }
+        }
+        get_mock.side_effect = [zh_response, en_response]
 
-        result = lookup_wikipedia_evidence(["想见你 电影 2022"], languages=("zh",))
+        result = lookup_wikipedia_evidence(
+            ["想见你 电影 2022"], languages=("zh", "en")
+        )
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["facts"][0]["wikibase_item"], "Q115000000")
         self.assertIn("續篇電影", result["facts"][0]["extract"])
+        self.assertEqual(result["facts"][0]["year"], "2022")
+        self.assertEqual(result["facts"][0]["media_type"], "movie")
+        self.assertEqual(result["facts"][1]["language"], "en")
         self.assertEqual(
             result["source_urls"],
-            ["https://zh.wikipedia.org/wiki/想見你_(電影)"],
+            [
+                "https://zh.wikipedia.org/wiki/想見你_(電影)",
+                "https://en.wikipedia.org/wiki/Someday_or_One_Day",
+            ],
         )
 
     @patch("telepiplex_media_search.adapters.wikipedia.requests.get", side_effect=OSError("dns failed"))
