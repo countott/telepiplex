@@ -89,6 +89,7 @@ def _candidate(
     genres: list[str] | None = None,
     episodes: list[dict] | None = None,
     cover_url: str = "",
+    complex_signals: list[str] | None = None,
 ) -> dict:
     clean_titles = []
     for title in titles:
@@ -106,6 +107,7 @@ def _candidate(
         "genres": [_text(item) for item in (genres or []) if _text(item)],
         "episodes": list(episodes or []),
         "cover_url": _text(cover_url),
+        "complex_signals": set(complex_signals or []),
     }
 
 
@@ -121,6 +123,7 @@ def _wikipedia_candidates(source: dict) -> list[dict]:
             "types": set(),
             "urls": [],
             "genres": [],
+            "complex_signals": set(),
         })
         for field in ("title", "chinese_title", "english_title"):
             value = _text(fact.get(field))
@@ -133,6 +136,8 @@ def _wikipedia_candidates(source: dict) -> list[dict]:
         if _text(fact.get("url")):
             item["urls"].append(_text(fact["url"]))
         extract = _text(fact.get("extract"))
+        if COMPLEX_PATTERN.search(f"{fact.get('title') or ''} {extract}"):
+            item["complex_signals"].add("wikipedia_relation")
         if any(signal in extract.casefold() for signal in ANIMATION_SIGNALS):
             item["genres"].append("animation")
     result = []
@@ -145,6 +150,7 @@ def _wikipedia_candidates(source: dict) -> list[dict]:
             external_ids={"wikipedia": key} if not key.startswith("fact:") else {},
             source_urls=item["urls"],
             genres=item["genres"],
+            complex_signals=sorted(item["complex_signals"]),
         ))
         result[-1]["years"] = item["years"]
         result[-1]["media_types"] = item["types"]
@@ -235,7 +241,13 @@ def _source_candidates(sources: list[dict]) -> list[dict]:
 
 
 def _merge_cluster(target: dict, source: dict) -> None:
-    for key in ("providers", "normalized_titles", "years", "media_types"):
+    for key in (
+        "providers",
+        "normalized_titles",
+        "years",
+        "media_types",
+        "complex_signals",
+    ):
         target[key].update(source[key])
     for key in ("titles", "source_urls", "genres", "episodes"):
         for item in source[key]:
@@ -343,6 +355,8 @@ def evaluate_deterministic_plan(
 
     selected = matches[0]
     providers = selected["providers"]
+    if selected["complex_signals"]:
+        return _blocked(intent, ["complex_identity_requires_ai"], providers)
     if len(selected["years"]) > 1 or len(selected["media_types"]) > 1:
         return _blocked(intent, ["evidence_conflict"], providers)
     year = next(iter(selected["years"]), "")
@@ -411,7 +425,18 @@ def evaluate_deterministic_plan(
             f"E{int(intent['episode_number']):02d}"
         )
     source_url = next(iter(selected["source_urls"]), "")
-    source_provider = "douban" if "douban" in providers else sorted(providers)[0]
+    source_provider = next(
+        (
+            provider
+            for provider, host in (
+                ("wikipedia", "wikipedia.org"),
+                ("douban", "douban.com"),
+                ("tvdb", "thetvdb.com"),
+            )
+            if host in source_url
+        ),
+        sorted(providers)[0],
+    )
     contract = {
         "schema_version": 1,
         "metadata_id": plan_id,

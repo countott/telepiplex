@@ -149,6 +149,8 @@ class DeterministicPlannerTest(unittest.TestCase):
         self.assertEqual(contract["identity"]["english_title"], "Inception")
         self.assertEqual(contract["identity"]["chinese_title"], "盗梦空间")
         self.assertEqual(contract["placement"]["category_kind"], "live_action_movie")
+        source_entry = contract["source_entry"]
+        self.assertIn(source_entry["provider"], source_entry["url"])
         finalized = finalize_search_plan(
             result.plan, TemporarySpecialAllocator(), set()
         )
@@ -206,6 +208,19 @@ class DeterministicPlannerTest(unittest.TestCase):
             "plan-special",
             "盗梦空间 Special 2010",
             [wikipedia_movie(), douban_movie()],
+        )
+
+        self.assertIsNone(result.plan)
+        self.assertIn("complex_identity_requires_ai", result.reason_codes)
+
+    def test_provider_relation_signal_requires_ai(self):
+        wikipedia = wikipedia_movie()
+        wikipedia["facts"][0]["extract"] = "这是同名电视剧的续集电影。"
+
+        result = evaluate_deterministic_plan(
+            "plan-provider-special",
+            "盗梦空间 2010",
+            [wikipedia, douban_movie()],
         )
 
         self.assertIsNone(result.plan)
