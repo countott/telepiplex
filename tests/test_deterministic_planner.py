@@ -133,6 +133,13 @@ class RuleHypothesesTest(unittest.TestCase):
         self.assertEqual(result["intent"]["episode_number"], 2)
         self.assertEqual(result["source_queries"]["douban"], ["黑暗荣耀 2022"])
 
+    def test_whole_series_words_are_removed_from_provider_query(self):
+        result = build_rule_hypotheses("黑暗荣耀 全季 2022")
+
+        self.assertEqual(result["intent"]["scope"], "whole_series")
+        self.assertEqual(result["intent"]["title"], "黑暗荣耀")
+        self.assertEqual(result["source_queries"]["tvdb"], ["黑暗荣耀 2022"])
+
 
 class DeterministicPlannerTest(unittest.TestCase):
     def test_two_sources_create_movie_plan(self):
@@ -193,11 +200,40 @@ class DeterministicPlannerTest(unittest.TestCase):
         self.assertIsNone(result.plan)
         self.assertIn("evidence_conflict", result.reason_codes)
 
+    def test_missing_year_is_not_deterministic(self):
+        result = evaluate_deterministic_plan(
+            "plan-no-year",
+            "盗梦空间",
+            [wikipedia_movie(year=""), douban_movie(year="")],
+        )
+
+        self.assertIsNone(result.plan)
+        self.assertIn("missing_year", result.reason_codes)
+
     def test_missing_tvdb_episode_is_not_deterministic(self):
         result = evaluate_deterministic_plan(
             "plan-missing",
             "黑暗荣耀 S01E09 2022",
             [douban_series(), tvdb_series()],
+        )
+
+        self.assertIsNone(result.plan)
+        self.assertIn("tvdb_scope_not_verified", result.reason_codes)
+
+    def test_unreleased_tvdb_episode_is_not_deterministic(self):
+        result = evaluate_deterministic_plan(
+            "plan-future",
+            "黑暗荣耀 S01E02 2022",
+            [
+                douban_series(),
+                tvdb_series(episodes=[{
+                    "tvdb_episode_id": "future-2",
+                    "name": "Future Episode",
+                    "season_number": 1,
+                    "episode_number": 2,
+                    "aired": "2099-01-01",
+                }]),
+            ],
         )
 
         self.assertIsNone(result.plan)

@@ -112,7 +112,10 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         from telepiplex_media_search.planner import SearchPlanningError
 
         async def blocked(_raw_query, _plan_id):
-            raise SearchPlanningError("ai_unavailable_after_gate_failure")
+            raise SearchPlanningError(
+                "ai_unavailable_after_gate_failure",
+                ["ambiguous_candidates"],
+            )
 
         self.feature.plan_builder = blocked
         result = await self.feature.command({
@@ -122,7 +125,7 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "chat_id": 10,
         })
 
-        self.assertIn("规则证据不足", result["actions"][0]["text"])
+        self.assertIn("多个候选", result["actions"][0]["text"])
         self.assertIn("AI 当前不可用", result["actions"][0]["text"])
         self.assertEqual(self.feature.plans, {})
         self.assertEqual(self.search_queries, [])
@@ -186,6 +189,25 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                     self.feature._english_prowlarr_query(plan, contract),
                     expected,
                 )
+
+    async def test_ai_whole_series_uses_clean_ai_query_when_scope_is_unknown(self):
+        plan = search_plan()
+        contract = plan["media_metadata"]
+        contract["identity"]["content_kind"] = "series"
+        contract["placement"].update({
+            "library_type": "series",
+            "category_kind": "live_action_series",
+        })
+        contract["evidence"] = {
+            "decision": {"mode": "ai", "scope": "movie_or_series"}
+        }
+        contract["items"] = [{"season_number": 1, "episode_number": 1}]
+        plan["prowlarr_queries"] = ["The Glory 2022"]
+
+        self.assertEqual(
+            self.feature._english_prowlarr_query(plan, contract),
+            "The Glory 2022",
+        )
 
     async def test_selected_release_calls_download_provider_with_canonical_contract(self):
         command = await self.feature.command({

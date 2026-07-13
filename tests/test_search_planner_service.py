@@ -220,7 +220,7 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
         provider = Mock()
         with self.assertRaisesRegex(
             SearchPlanningError, "ai_unavailable_after_gate_failure"
-        ):
+        ) as caught:
             await build_confirmable_search_plan(
                 "想见你",
                 "plan-a",
@@ -228,6 +228,10 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
                 lambda _contract: set(),
                 TemporarySpecialAllocator(),
             )
+        self.assertIn(
+            "insufficient_independent_support",
+            caught.exception.reason_codes,
+        )
         provider.assert_called_once()
 
     @patch(

@@ -377,7 +377,10 @@ async def build_confirmable_search_plan(
     hypotheses = await asyncio.to_thread(infer_search_hypotheses_with_ai, ai_input)
     if not isinstance(hypotheses, dict):
         _log_info(f"ai_stage=hypothesis status=unavailable metadata_id={plan_id}")
-        raise SearchPlanningError("ai_unavailable_after_gate_failure")
+        raise SearchPlanningError(
+            "ai_unavailable_after_gate_failure",
+            deterministic.reason_codes,
+        )
     _log_info(f"ai_stage=hypothesis status=ok metadata_id={plan_id}")
     second_sources = await collect_evidence(hypotheses, providers)
     sources = _merge_evidence_passes(first_sources, second_sources)
@@ -392,7 +395,10 @@ async def build_confirmable_search_plan(
     draft = await asyncio.to_thread(infer_media_metadata_draft_with_ai, context)
     if not isinstance(draft, dict):
         _log_info(f"ai_stage=media_metadata status=unavailable metadata_id={plan_id}")
-        raise SearchPlanningError("ai_invalid_after_gate_failure")
+        raise SearchPlanningError(
+            "ai_invalid_after_gate_failure",
+            deterministic.reason_codes,
+        )
     _log_info(f"ai_stage=media_metadata status=ok metadata_id={plan_id}")
     decision = dict(deterministic.decision)
     decision.update({

@@ -31,6 +31,7 @@ _PLANNING_ERROR_MESSAGES = {
     "evidence_conflict": "不同来源的年份或媒体类型冲突，请补充更明确的信息。",
     "insufficient_independent_support": "独立证据来源不足，无法安全生成计划。",
     "missing_bilingual_identity": "缺少可验证的中英文媒体身份。",
+    "missing_year": "缺少可交叉验证的发行年份。",
     "tvdb_identity_required": "剧集缺少唯一 TVDB 身份，无法安全生成计划。",
     "tvdb_scope_not_verified": "TVDB 无法验证请求的季或集。",
     "complex_identity_requires_ai": "该条目包含复杂媒体关系，需要 AI 判断。",
@@ -108,10 +109,17 @@ class MediaSearchFeature:
         try:
             plan = await self.plan_builder(raw_query, plan_id)
         except SearchPlanningError as exc:
+            code = getattr(exc, "code", str(exc))
             message = _PLANNING_ERROR_MESSAGES.get(
-                getattr(exc, "code", str(exc)),
+                code,
                 "媒体证据无法形成有效计划，请补充信息后重试。",
             )
+            if code.startswith("ai_") and getattr(exc, "reason_codes", ()):
+                gate_message = _PLANNING_ERROR_MESSAGES.get(
+                    exc.reason_codes[0],
+                    "严格规则无法唯一确认该条目。",
+                )
+                message = f"{gate_message.rstrip('。')}；{message}"
             return self._closed(f"❌ 无法生成媒体元数据：{message}")
         except Exception as exc:
             return self._closed(f"❌ 媒体规划失败：{type(exc).__name__}")
@@ -300,6 +308,13 @@ class MediaSearchFeature:
             scope = str(decision.get("scope") or "")
             if scope == "whole_series" and english and _LATIN.search(english):
                 return " ".join(item for item in (english, year) if item)
+            if decision.get("mode") == "ai" and scope not in {
+                "whole_series", "season", "episode"
+            }:
+                for query in plan.get("prowlarr_queries") or []:
+                    query = " ".join(str(query).split())
+                    if _LATIN.search(query) and not re.search(r"[\u3400-\u9fff]", query):
+                        return query
             season = placement.get("season_number")
             episode = placement.get("episode_number")
             if season is None:

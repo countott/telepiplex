@@ -6,7 +6,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-from .search_resolution import parse_search_intent
+from .search_resolution import is_unreleased_episode, parse_search_intent
 
 
 COMPLEX_PATTERN = re.compile(
@@ -47,6 +47,8 @@ def _clean_intent(raw_query: str) -> dict:
     year = _text(intent.get("year"))
     if year:
         title = re.sub(rf"(?<!\d){re.escape(year)}(?!\d)", " ", title)
+    if intent.get("scope") == "whole_series":
+        title = re.sub(r"全集|全季|整季|整剧|整劇", " ", title)
     intent["title"] = _text(title)
     return intent
 
@@ -305,6 +307,8 @@ def _series_items(scope: str, intent: dict, episodes: list[dict]) -> list[dict]:
         key = _episode_key(episode)
         if not key or key[0] < 0 or key[1] < 1:
             continue
+        if is_unreleased_episode(episode):
+            continue
         if scope == "season" and key[0] != int(intent["season_number"]):
             continue
         if scope == "episode" and key != (
@@ -365,6 +369,8 @@ def evaluate_deterministic_plan(
         return _blocked(intent, ["evidence_conflict"], providers)
     if media_type not in {"movie", "series"}:
         return _blocked(intent, ["evidence_conflict"], providers)
+    if not year:
+        return _blocked(intent, ["missing_year"], providers)
 
     if media_type == "movie" and len(providers) < 2:
         return _blocked(intent, ["insufficient_independent_support"], providers)
