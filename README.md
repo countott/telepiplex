@@ -44,6 +44,10 @@ plugins:
         sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
+首次安装时，在 Telegram 发送 `/plugin`。Core 会列出已安装 Feature，并为每个未安装 Feature 自动选择 catalog 中最新稳定兼容版本。依赖尚未满足的候选会显示“先安装”哪个 provider 或具体缺少的 capability；只有当前可安装的候选才显示安装按钮。点击安装按钮是显式授权点，Core 不会自动安装或批量安装任何 Feature。
+
+目录不可用、需要固定版本或使用离线包时，仍可使用 `/plugin install <name@version|artifact.tpx>` 手动入口。
+
 管理命令：
 
 ```text
@@ -68,7 +72,7 @@ git tag platform-v1.0.0
 git push origin platform-v1.0.0
 ```
 
-GitHub Actions 会构建并推送 `linux/amd64` Core 镜像 `ghcr.io/<owner>/telepiplex-core:1.0.0`，同时从四个独立分支生成 `open115`、`media-search`、`renaming` 和 `plex-management` 的 Linux `.tpx`。同一个 GitHub Release 还包含 `catalog.yaml` 与 `catalog.yaml.sha256`；catalog 中每个 HTTPS 资产都固定到实际 SHA-256、Feature branch 和 commit。
+GitHub Actions 会构建并推送 `linux/amd64` Core 镜像 `ghcr.io/<owner>/telepiplex-core:1.0.0`，同时从四个独立分支生成 `open115`、`media-search`、`renaming` 和 `plex-management` 的 Linux `.tpx`。同一个 GitHub Release 还包含 `catalog.yaml` 与 `catalog.yaml.sha256`；catalog 中每个 HTTPS 资产都固定到实际 SHA-256、Feature branch 和 commit，并携带从已验证 manifest 提取的 `provides` / `requires` capability 元数据。
 
 Feature 的 `manifest.yaml` version 是不可变的 `name@version` 身份。代码发生变化时必须先提升 version；发布流水线会拒绝同一 version 对应不同 digest。
 

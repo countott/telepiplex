@@ -32,6 +32,7 @@
 - `main` 暂不作为日常开发或部署入口。
 - GitHub 聚合发布流水线已经落地到 Core Feature 分支，可由 `platform-v<semver>` tag 自动生成 Core 镜像、四个 Linux `.tpx` 和远程 catalog。
 - Core 已能安全刷新远程 catalog、比较兼容稳定版本，并在 Telegram 一次确认后更新 Feature；不会静默更新。
+- `/plugin` 已提供依赖感知的可安装 Feature 列表和显式安装按钮，普通用户无需进入 ttyd 或自行构建 `.tpx`。
 - 当前尚未创建实际 release tag；本地或 Unraid 手工构建仍作为发布前验证与故障兜底。
 
 ## 二、已经确认的业务规则
@@ -202,11 +203,14 @@ Telegram 搜索请求
 - 已实现：发现更新后只通知 `allowed_user`；用户点击一次“确认更新”才执行既有更新事务，也可选择“暂不更新”。
 - 已实现：默认不静默升级；本地 `/config/plugins/catalog.yaml` 仍作为离线和固定版本入口。
 
-### OPS-TODO-02 首次安装体验
+### OPS-TODO-02 首次安装体验（已实现）
 
-- 当前：需要提供 `.tpx` 绝对路径或精确的 `name@version`。
-- 推荐：增加可用 Feature 列表和安装按钮，默认选择 catalog 中兼容 Core API 的最新稳定版本。
-- 验收：普通使用者不需要进入 ttyd、克隆分支、安装构建依赖或手工计算 SHA-256。
+- 已实现：发送 `/plugin` 可查看已安装状态和 catalog 中尚未安装的 Feature。
+- 已实现：每个 Feature 默认选择兼容当前 Core API 的最新稳定版本；预发布、不兼容和无效发布不会进入列表。
+- 已实现：catalog 携带 manifest 派生的 capability 元数据，缺少依赖时先展示 provider 或 capability；满足条件后才出现安装按钮。
+- 已实现：用户点击安装按钮才执行既有的 SHA-256、manifest、capability、健康检查和原子激活事务，不自动或批量安装。
+- 已实现：精确 `name@version` 和本地 `.tpx` 路径继续作为离线与运维入口。
+- 验收完成：普通使用者不需要进入 ttyd、克隆分支、安装构建依赖或手工计算 SHA-256。
 
 ## 六、建议评审顺序
 

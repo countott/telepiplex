@@ -42,6 +42,10 @@ plugins:
         sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
+Send `/plugin` in Telegram for first installation. Core lists installed Features and selects the newest stable, Core-compatible release for every uninstalled Feature. A blocked candidate identifies its prerequisite Feature or exact missing capability; only a ready candidate receives an Install button. Selecting an Install button is the explicit authorization point, and Core never installs automatically or in bulk.
+
+If the catalog is unavailable, a pinned version is required, or an offline package is being used, the manual `/plugin install <name@version|artifact.tpx>` entry remains available.
+
 Commands:
 
 ```text
@@ -66,7 +70,7 @@ git tag platform-v1.0.0
 git push origin platform-v1.0.0
 ```
 
-GitHub Actions builds and pushes the `linux/amd64` Core image `ghcr.io/<owner>/telepiplex-core:1.0.0`. The same release builds Linux `.tpx` assets for `open115`, `media-search`, `renaming`, and `plex-management` from their independent Feature branches. It also publishes `catalog.yaml` and `catalog.yaml.sha256`; every HTTPS asset is pinned to its real SHA-256, Feature branch, and commit.
+GitHub Actions builds and pushes the `linux/amd64` Core image `ghcr.io/<owner>/telepiplex-core:1.0.0`. The same release builds Linux `.tpx` assets for `open115`, `media-search`, `renaming`, and `plex-management` from their independent Feature branches. It also publishes `catalog.yaml` and `catalog.yaml.sha256`; every HTTPS asset is pinned to its real SHA-256, Feature branch, and commit, with `provides` / `requires` capability metadata derived from the verified manifest.
 
 The version in each Feature `manifest.yaml` is an immutable `name@version` identity. A code change requires a version bump, and the workflow rejects a reused version with different bytes.
 

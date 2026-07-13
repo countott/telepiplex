@@ -117,6 +117,35 @@ class DeploymentContractTest(unittest.TestCase):
         ):
             self.assertIn(term, english, term)
 
+    def test_documentation_describes_first_install_feature_catalog(self):
+        chinese = (ROOT / "README.md").read_text(encoding="utf-8")
+        for term in (
+            "发送 `/plugin`",
+            "最新稳定兼容版本",
+            "先安装",
+            "安装按钮",
+            "/plugin install <name@version|artifact.tpx>",
+            "不会自动安装",
+        ):
+            self.assertIn(term, chinese, term)
+
+        english = (ROOT / "README_EN.md").read_text(encoding="utf-8")
+        for term in (
+            "Send `/plugin`",
+            "newest stable, Core-compatible release",
+            "Install button",
+            "prerequisite",
+            "/plugin install <name@version|artifact.tpx>",
+            "never installs automatically",
+        ):
+            self.assertIn(term, english, term)
+
+        decisions = (
+            ROOT / "docs/todos/2026-07-12-business-module-decisions.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("OPS-TODO-02 首次安装体验（已实现）", decisions)
+        self.assertNotIn("OPS-TODO-02 首次安装体验\n", decisions)
+
 
 if __name__ == "__main__":
     unittest.main()
