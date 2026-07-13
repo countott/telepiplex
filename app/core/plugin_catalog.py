@@ -19,6 +19,7 @@ _REFERENCE_RE = re.compile(r"^(?P<plugin>[a-z][a-z0-9-]{0,63})@(?P<version>\d+\.
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PLUGIN_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+_CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
 
 
 class CatalogError(RuntimeError):
@@ -42,6 +43,8 @@ class CatalogRelease:
     sha256: str
     source_branch: str
     source_commit: str
+    provides: tuple[str, ...]
+    requires: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,23 @@ class CatalogUpdate:
     reference: str
     source_commit: str
     sha256: str
+
+
+@dataclass(frozen=True)
+class CatalogInstallCandidate:
+    plugin_id: str
+    target_version: str
+    reference: str
+    source_commit: str
+    sha256: str
+    provides: tuple[str, ...]
+    requires: tuple[str, ...]
+    missing_capabilities: tuple[str, ...]
+    dependency_plugins: tuple[str, ...]
+
+    @property
+    def ready(self) -> bool:
+        return not self.missing_capabilities
 
 
 class PluginCatalog:
@@ -194,6 +214,70 @@ class PluginCatalog:
             ))
         return updates
 
+    async def available_plugins(
+        self,
+        installed_plugin_ids: set[str],
+        core_api_version: str,
+        *,
+        available_capabilities: set[str] | tuple[str, ...] = (),
+    ) -> list[CatalogInstallCandidate]:
+        data = await asyncio.to_thread(self._catalog_data)
+        installed = {str(item) for item in (installed_plugin_ids or set())}
+        selected: dict[str, CatalogRelease] = {}
+        plugin_ids = sorted(
+            key
+            for key in (data.get("plugins") or {})
+            if isinstance(key, str) and _PLUGIN_RE.fullmatch(key)
+        )
+        for plugin_id in plugin_ids:
+            if plugin_id in installed:
+                continue
+            compatible = []
+            for release in self._releases(data, plugin_id):
+                try:
+                    if Version(str(core_api_version)) not in SpecifierSet(release.core_api):
+                        continue
+                    version = Version(release.version)
+                except (InvalidSpecifier, InvalidVersion):
+                    continue
+                if not version.is_prerelease:
+                    compatible.append((version, release))
+            if compatible:
+                _, selected[plugin_id] = max(compatible, key=lambda item: item[0])
+
+        providers: dict[str, set[str]] = {}
+        for plugin_id, release in selected.items():
+            for capability in release.provides:
+                providers.setdefault(capability, set()).add(plugin_id)
+
+        available = {str(item) for item in (available_capabilities or set())}
+        candidates = []
+        for plugin_id, release in selected.items():
+            effective_available = available | set(release.provides)
+            missing = tuple(sorted(
+                capability
+                for capability in release.requires
+                if capability not in effective_available
+            ))
+            dependencies = tuple(sorted({
+                provider
+                for capability in missing
+                for provider in providers.get(capability, set())
+                if provider != plugin_id
+            }))
+            candidates.append(CatalogInstallCandidate(
+                plugin_id=plugin_id,
+                target_version=release.version,
+                reference=f"{plugin_id}@{release.version}",
+                source_commit=release.source_commit,
+                sha256=release.sha256,
+                provides=release.provides,
+                requires=release.requires,
+                missing_capabilities=missing,
+                dependency_plugins=dependencies,
+            ))
+        return sorted(candidates, key=lambda item: (not item.ready, item.plugin_id))
+
     def _catalog_data(self) -> dict:
         if not self.catalog_path.is_file():
             raise CatalogError("catalog_unavailable", "Feature catalog is not configured")
@@ -285,6 +369,12 @@ class PluginCatalog:
             source = entry.get("source") or {}
             branch = str(source.get("branch") or "") if isinstance(source, dict) else ""
             commit = str(source.get("commit") or "").lower() if isinstance(source, dict) else ""
+            raw_provides = entry.get("provides", [])
+            raw_requires = entry.get("requires", [])
+            if not isinstance(raw_provides, list) or not isinstance(raw_requires, list):
+                continue
+            provides = tuple(str(item) for item in raw_provides)
+            requires = tuple(str(item) for item in raw_requires)
             try:
                 parsed_version = Version(str(version))
                 SpecifierSet(core_api)
@@ -299,6 +389,10 @@ class PluginCatalog:
                 or _SHA256_RE.fullmatch(digest) is None
                 or not branch
                 or _COMMIT_RE.fullmatch(commit) is None
+                or any(_CAPABILITY_RE.fullmatch(item) is None for item in provides)
+                or any(_CAPABILITY_RE.fullmatch(item) is None for item in requires)
+                or len(set(provides)) != len(provides)
+                or len(set(requires)) != len(requires)
             ):
                 continue
             releases.append(CatalogRelease(
@@ -309,6 +403,8 @@ class PluginCatalog:
                 sha256=digest,
                 source_branch=branch,
                 source_commit=commit,
+                provides=provides,
+                requires=requires,
             ))
         return releases
 

@@ -486,6 +486,75 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await self.manager.available_updates(), [])
 
+    async def test_available_plugins_uses_installed_ids_and_live_capabilities(self):
+        await self.manager.install(self._artifact(plugin_id="echo", version="1.0.0"))
+
+        class Resolver:
+            def __init__(self):
+                self.calls = []
+                self.refreshed = 0
+
+            async def refresh(self):
+                self.refreshed += 1
+
+            async def available_plugins(
+                self,
+                installed,
+                core_api_version,
+                *,
+                available_capabilities,
+            ):
+                self.calls.append((
+                    installed,
+                    core_api_version,
+                    available_capabilities,
+                ))
+                return [SimpleNamespace(plugin_id="new-feature", ready=True)]
+
+        resolver = Resolver()
+        self.manager._artifact_resolver = resolver
+
+        candidates = await self.manager.available_plugins()
+
+        self.assertEqual([item.plugin_id for item in candidates], ["new-feature"])
+        self.assertEqual(resolver.refreshed, 1)
+        self.assertEqual(resolver.calls, [(
+            {"echo"},
+            "1.0",
+            {"demo.echo"},
+        )])
+
+    async def test_available_plugins_uses_cache_after_remote_refresh_failure(self):
+        from app.core.plugin_catalog import CatalogError
+
+        class CachedResolver:
+            async def refresh(self):
+                raise CatalogError("catalog_download_failed", "network down")
+
+            async def available_plugins(
+                self,
+                installed,
+                core_api_version,
+                *,
+                available_capabilities,
+            ):
+                return [SimpleNamespace(
+                    plugin_id="cached",
+                    reference="cached@1.0.0",
+                    ready=True,
+                )]
+
+        self.manager._artifact_resolver = CachedResolver()
+
+        candidates = await self.manager.available_plugins()
+
+        self.assertEqual(candidates[0].reference, "cached@1.0.0")
+
+    async def test_available_plugins_is_empty_for_basic_resolver(self):
+        self.manager._artifact_resolver = SimpleNamespace(resolve=None)
+
+        self.assertEqual(await self.manager.available_plugins(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

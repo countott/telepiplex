@@ -261,6 +261,30 @@ class PluginManager:
             return []
         return await discover(installed, self.core_api_version)
 
+    async def available_plugins(self):
+        resolver = self._artifact_resolver
+        discover = getattr(resolver, "available_plugins", None)
+        if not callable(discover):
+            return []
+        refresh = getattr(resolver, "refresh", None)
+        if callable(refresh):
+            try:
+                await refresh()
+            except CatalogError:
+                # Discovery may still use the last atomically validated cache.
+                pass
+        installed = {
+            item.plugin_id
+            for item in self.store.list_installed()
+            if item.active
+        }
+        available_capabilities = set(self.router.snapshot.capabilities)
+        return await discover(
+            installed,
+            self.core_api_version,
+            available_capabilities=available_capabilities,
+        )
+
     def status(self, plugin_id: str) -> dict:
         release = self.store.active(plugin_id)
         if release is None:

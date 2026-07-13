@@ -268,6 +268,74 @@ class PluginCatalogTest(unittest.IsolatedAsyncioTestCase):
             await catalog.refresh()
         self.assertEqual(raised.exception.code, "catalog_too_large")
 
+    async def test_available_plugins_selects_latest_and_explains_dependencies(self):
+        from app.core.plugin_catalog import PluginCatalog
+
+        def release(version, *, core_api=">=1.0,<2.0", provides=(), requires=()):
+            return {
+                "url": f"https://example.test/{version}.tpx",
+                "sha256": version[0] * 64,
+                "core_api": core_api,
+                "provides": list(provides),
+                "requires": list(requires),
+                "source": {
+                    "branch": "feature/test",
+                    "commit": version[0] * 40,
+                },
+            }
+
+        self.catalog_path.write_text(yaml.safe_dump({
+            "plugins": {
+                "installed": {"versions": {"1.0.0": release("1.0.0")}},
+                "provider": {"versions": {
+                    "1.0.0": release("1.0.0", provides=("storage.provider",)),
+                    "1.2.0": release("2.0.0", provides=("storage.provider",)),
+                    "1.3.0-rc1": release("3.0.0", provides=("storage.provider",)),
+                    "2.0.0": release(
+                        "4.0.0",
+                        core_api=">=2.0,<3.0",
+                        provides=("storage.provider",),
+                    ),
+                }},
+                "consumer": {"versions": {"1.0.0": release(
+                    "5.0.0",
+                    requires=("storage.provider",),
+                )}},
+                "orphan": {"versions": {"1.0.0": release(
+                    "6.0.0",
+                    requires=("missing.provider",),
+                )}},
+            }
+        }), encoding="utf-8")
+
+        catalog = PluginCatalog(self.catalog_path, self.cache)
+        candidates = await catalog.available_plugins(
+            {"installed"},
+            "1.0",
+            available_capabilities=(),
+        )
+
+        by_id = {item.plugin_id: item for item in candidates}
+        self.assertEqual(set(by_id), {"provider", "consumer", "orphan"})
+        self.assertEqual(by_id["provider"].target_version, "1.2.0")
+        self.assertTrue(by_id["provider"].ready)
+        self.assertEqual(
+            by_id["consumer"].missing_capabilities,
+            ("storage.provider",),
+        )
+        self.assertEqual(by_id["consumer"].dependency_plugins, ("provider",))
+        self.assertFalse(by_id["consumer"].ready)
+        self.assertEqual(by_id["orphan"].dependency_plugins, ())
+
+        ready = await catalog.available_plugins(
+            {"installed"},
+            "1.0",
+            available_capabilities={"storage.provider"},
+        )
+        self.assertTrue(
+            next(item for item in ready if item.plugin_id == "consumer").ready
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
