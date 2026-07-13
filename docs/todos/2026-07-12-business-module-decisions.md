@@ -34,7 +34,7 @@
 - GitHub 聚合发布流水线已经落地到 Core Feature 分支，可由 `platform-v<semver>` tag 自动生成 Core 镜像、四个 Linux `.tpx` 和远程 catalog。
 - Core 已能安全刷新远程 catalog、比较兼容稳定版本，并在 Telegram 一次确认后更新 Feature；不会静默更新。
 - `/plugin` 已提供依赖感知的可安装 Feature 列表和显式安装按钮，普通用户无需进入 ttyd 或自行构建 `.tpx`。
-- 首个远端聚合发布 tag 固定为 `platform-v1.0.0`；后续发布使用新的不可变 semver tag，本地或 Unraid 手工构建只作为发布前验证与故障兜底。
+- `platform-v1.0.0` 保留为首轮 CI 依赖缺失的失败记录；修复后的首个完整聚合发布使用 `platform-v1.0.1`，后续发布继续使用新的不可变 semver tag。本地或 Unraid 手工构建只作为发布前验证与故障兜底。
 
 ## 二、已经确认的业务规则
 

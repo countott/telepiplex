@@ -94,5 +94,5 @@
 - [ ] **Step 2: Build and verify all four `.tpx` artifacts** using Core's release tooling.
 - [ ] **Step 3: Commit each changed module independently** with module-scoped messages.
 - [ ] **Step 4: Push** `feature/115`, `feature/media-search`, `feature/renaming`, `feature/plex-management`, and `feature/telepiplex-core`.
-- [ ] **Step 5: Create and push** immutable tag `platform-v1.0.0` from the verified Core commit.
+- [ ] **Step 5: Create and push** immutable tag `platform-v1.0.1` from the verified Core commit; `platform-v1.0.0` remains the immutable failed CI-dependency attempt.
 - [ ] **Step 6: Monitor the GitHub Actions run** through completion and verify the GitHub Release, catalog, artifacts, and Core image metadata.

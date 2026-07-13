@@ -76,6 +76,24 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("generate_release_catalog.py", source)
         self.assertFalse(OLD_WORKFLOW.exists(), "unsafe legacy workflow still exists")
 
+    def test_test_and_feature_jobs_install_local_wheel_build_backends(self):
+        workflow = self._workflow()
+        jobs = workflow["jobs"]
+
+        core_install = next(
+            step["run"]
+            for step in jobs["validate-core"]["steps"]
+            if step["name"] == "Install Core test dependencies"
+        )
+        feature_install = next(
+            step["run"]
+            for step in jobs["build-features"]["steps"]
+            if step["name"] == "Install Feature build dependencies"
+        )
+        for package in ("setuptools", "wheel"):
+            self.assertIn(package, core_install)
+            self.assertIn(package, feature_install)
+
 
 if __name__ == "__main__":
     unittest.main()
