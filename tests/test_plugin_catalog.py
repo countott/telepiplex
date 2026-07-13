@@ -122,6 +122,111 @@ class PluginCatalogTest(unittest.IsolatedAsyncioTestCase):
             ).resolve("echo@1.0.0")
         self.assertEqual(raised.exception.code, "insecure_redirect")
 
+    async def test_remote_catalog_refreshes_atomically_and_discovers_update(self):
+        from app.core.plugin_catalog import PluginCatalog
+
+        payload = yaml.safe_dump({
+            "plugins": {
+                "echo": {
+                    "versions": {
+                        "1.0.0": {
+                            "url": "https://example.test/echo-1.0.0.tpx",
+                            "sha256": "a" * 64,
+                            "core_api": ">=1.0,<2.0",
+                            "source": {"branch": "feature/echo", "commit": "a" * 40},
+                        },
+                        "1.2.0": {
+                            "url": "https://example.test/echo-1.2.0.tpx",
+                            "sha256": "b" * 64,
+                            "core_api": ">=1.0,<2.0",
+                            "source": {"branch": "feature/echo", "commit": "b" * 40},
+                        },
+                        "2.0.0": {
+                            "url": "https://example.test/echo-2.0.0.tpx",
+                            "sha256": "c" * 64,
+                            "core_api": ">=2.0,<3.0",
+                            "source": {"branch": "feature/echo", "commit": "c" * 40},
+                        },
+                    }
+                }
+            }
+        }).encode()
+
+        class Response(io.BytesIO):
+            def geturl(self):
+                return "https://cdn.example.test/catalog.yaml"
+
+        catalog = PluginCatalog(
+            "https://example.test/catalog.yaml",
+            self.cache,
+            opener=lambda *_args, **_kwargs: Response(payload),
+        )
+
+        await catalog.refresh()
+        updates = await catalog.available_updates({"echo": "1.0.0"}, "1.0")
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0].plugin_id, "echo")
+        self.assertEqual(updates[0].current_version, "1.0.0")
+        self.assertEqual(updates[0].target_version, "1.2.0")
+        self.assertEqual(updates[0].source_commit, "b" * 40)
+        self.assertTrue((self.cache / "catalog.yaml").is_file())
+
+    async def test_failed_remote_refresh_preserves_last_valid_cache(self):
+        from app.core.plugin_catalog import CatalogError, PluginCatalog
+
+        valid = yaml.safe_dump({"plugins": {}}).encode()
+
+        class Response(io.BytesIO):
+            def __init__(self, payload, final_url="https://example.test/catalog.yaml"):
+                super().__init__(payload)
+                self.final_url = final_url
+
+            def geturl(self):
+                return self.final_url
+
+        responses = iter([
+            Response(valid),
+            Response(b"plugins: [broken"),
+        ])
+        catalog = PluginCatalog(
+            "https://example.test/catalog.yaml",
+            self.cache,
+            opener=lambda *_args, **_kwargs: next(responses),
+        )
+        await catalog.refresh()
+        cached = (self.cache / "catalog.yaml").read_bytes()
+
+        with self.assertRaises(CatalogError):
+            await catalog.refresh()
+
+        self.assertEqual((self.cache / "catalog.yaml").read_bytes(), cached)
+
+        downgraded = PluginCatalog(
+            "https://example.test/catalog.yaml",
+            self.cache,
+            opener=lambda *_args, **_kwargs: Response(
+                valid, "http://example.test/catalog.yaml"
+            ),
+        )
+        with self.assertRaises(CatalogError) as raised:
+            await downgraded.refresh()
+        self.assertEqual(raised.exception.code, "insecure_redirect")
+
+    async def test_remote_catalog_size_limit_is_enforced(self):
+        from app.core.plugin_catalog import CatalogError, PluginCatalog
+
+        catalog = PluginCatalog(
+            "https://example.test/catalog.yaml",
+            self.cache,
+            opener=lambda *_args, **_kwargs: io.BytesIO(b"plugins: {}\n"),
+            max_catalog_bytes=4,
+        )
+
+        with self.assertRaises(CatalogError) as raised:
+            await catalog.refresh()
+        self.assertEqual(raised.exception.code, "catalog_too_large")
+
 
 if __name__ == "__main__":
     unittest.main()
