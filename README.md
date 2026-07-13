@@ -33,7 +33,7 @@ plugins:
 
 Feature 分支是开发源代码；发布物是由该分支构建的、版本不可变的 `.tpx`。运行容器不 checkout Git 分支，也不把业务源码复制进 Core 镜像。
 
-`plugins.catalog` 可以是远程 HTTPS 地址或本地文件路径。默认使用聚合发布的远程目录；如需离线或固定版本，可下载目录后改成 `/config/plugins/catalog.yaml`。目录将 `name@version` 映射到带 SHA-256 固定值的本地路径或 HTTPS 发布地址：
+`plugins.catalog` 可以是远程 HTTPS 地址或本地文件路径。默认使用聚合发布的远程目录；旧版默认路径 `/config/plugins/catalog.yaml` 缺失时，Core 会自动回退到官方远程 catalog。如需离线或固定版本，可下载目录后改成该本地路径；文件实际存在时仍优先使用本地目录。目录将 `name@version` 映射到带 SHA-256 固定值的本地路径或 HTTPS 发布地址：
 
 ```yaml
 plugins:
@@ -44,9 +44,11 @@ plugins:
         sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
-首次安装时，在 Telegram 发送 `/plugin`。Core 会列出已安装 Feature，并为每个未安装 Feature 自动选择 catalog 中最新稳定兼容版本。依赖尚未满足的候选会显示“先安装”哪个 provider 或具体缺少的 capability；只有当前可安装的候选才显示安装按钮。点击安装按钮是显式授权点，Core 不会自动安装或批量安装任何 Feature。
+首次安装或日常管理时，在 Telegram 发送 `/plugin`。Core 会列出已安装 Feature：未安装项直接显示“安装”按钮，已安装项发现新版时直接显示“更新”按钮。安装按钮和更新按钮都绑定该 Feature 的最新稳定兼容版本，点击后才执行对应事务。依赖尚未满足的候选会显示“先安装”哪个 provider 或具体缺少的 capability；只有当前可安装的候选才显示安装按钮。Core 不会自动安装、批量安装或静默更新任何 Feature。
 
-目录不可用、需要固定版本或使用离线包时，仍可使用 `/plugin install <name@version|artifact.tpx>` 手动入口。
+### 高级/离线操作
+
+普通用户只需发送 `/plugin` 并点击按钮。目录不可用、需要固定版本或使用离线包时，仍可使用 `/plugin install <name@version|artifact.tpx>` 和 `/plugin update <name@version|artifact.tpx>` 精确引用入口。
 
 管理命令：
 

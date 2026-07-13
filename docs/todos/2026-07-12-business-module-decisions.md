@@ -33,7 +33,7 @@
 - `main` 暂不作为日常开发或部署入口。
 - GitHub 聚合发布流水线已经落地到 Core Feature 分支，可由 `platform-v<semver>` tag 自动生成 Core 镜像、四个 Linux `.tpx` 和远程 catalog。
 - Core 已能安全刷新远程 catalog、比较兼容稳定版本，并在 Telegram 一次确认后更新 Feature；不会静默更新。
-- `/plugin` 已提供依赖感知的可安装 Feature 列表和显式安装按钮，普通用户无需进入 ttyd 或自行构建 `.tpx`。
+- `/plugin` 已提供依赖感知的 Feature 列表、安装按钮和更新按钮，普通用户无需进入 ttyd 或自行构建 `.tpx`。
 - `platform-v1.0.0` 保留为首轮 CI 依赖缺失的失败记录；修复后的首个完整聚合发布使用 `platform-v1.0.1`，后续发布继续使用新的不可变 semver tag。本地或 Unraid 手工构建只作为发布前验证与故障兜底。
 
 ## 二、已经确认的业务规则
@@ -195,7 +195,9 @@ Telegram 搜索请求
 - 已实现：发送 `/plugin` 可查看已安装状态和 catalog 中尚未安装的 Feature。
 - 已实现：每个 Feature 默认选择兼容当前 Core API 的最新稳定版本；预发布、不兼容和无效发布不会进入列表。
 - 已实现：catalog 携带 manifest 派生的 capability 元数据，缺少依赖时先展示 provider 或 capability；满足条件后才出现安装按钮。
+- 已实现：已安装 Feature 存在兼容稳定新版时，同一 `/plugin` 页面显示更新按钮；普通安装和更新均无需发送精确版本命令。
 - 已实现：用户点击安装按钮才执行既有的 SHA-256、manifest、capability、健康检查和原子激活事务，不自动或批量安装。
+- 已实现：旧版默认 catalog 路径 `/config/plugins/catalog.yaml` 缺失时自动回退到官方远程 catalog；真实存在的本地文件与其他显式本地路径继续保留。
 - 已实现：精确 `name@version` 和本地 `.tpx` 路径继续作为离线与运维入口。
 - 验收完成：普通使用者不需要进入 ttyd、克隆分支、安装构建依赖或手工计算 SHA-256。
 

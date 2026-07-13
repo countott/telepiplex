@@ -31,7 +31,7 @@ plugins:
 
 Feature branches are development source. Runtime releases are immutable `.tpx` artifacts built from those branches. The container never checks out Git branches and Core images never contain business source code.
 
-`plugins.catalog` accepts either a remote HTTPS URL or a local file path. The default points at the aggregate release catalog; for offline or pinned operation, download it and set the value to `/config/plugins/catalog.yaml`. The catalog maps `name@version` to a local path or HTTPS release with a pinned SHA-256 digest:
+`plugins.catalog` accepts either a remote HTTPS URL or a local file path. The default points at the aggregate release catalog; when the legacy default path `/config/plugins/catalog.yaml` is missing, Core automatically falls back to the official remote catalog. For offline or pinned operation, download the catalog to that path; an existing local file still takes precedence. The catalog maps `name@version` to a local path or HTTPS release with a pinned SHA-256 digest:
 
 ```yaml
 plugins:
@@ -42,9 +42,11 @@ plugins:
         sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
-Send `/plugin` in Telegram for first installation. Core lists installed Features and selects the newest stable, Core-compatible release for every uninstalled Feature. A blocked candidate identifies its prerequisite Feature or exact missing capability; only a ready candidate receives an Install button. Selecting an Install button is the explicit authorization point, and Core never installs automatically or in bulk.
+Send `/plugin` in Telegram for first installation or routine management. Uninstalled Features receive an Install button, while installed Features receive an Update button whenever a newer release is available. Install and Update buttons target that Feature's newest stable, Core-compatible release and execute only after the authorized user selects them. A blocked candidate identifies its prerequisite Feature or exact missing capability; only a ready candidate receives an Install button. Core never installs automatically, installs in bulk, or updates silently.
 
-If the catalog is unavailable, a pinned version is required, or an offline package is being used, the manual `/plugin install <name@version|artifact.tpx>` entry remains available.
+### Advanced/offline operations
+
+Normal operation requires only `/plugin` and a button click. If the catalog is unavailable, a pinned version is required, or an offline package is being used, `/plugin install <name@version|artifact.tpx>` and `/plugin update <name@version|artifact.tpx>` remain available as exact-reference fallbacks.
 
 Commands:
 
