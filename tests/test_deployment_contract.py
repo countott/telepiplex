@@ -89,6 +89,8 @@ class DeploymentContractTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("OPS-TODO-01A GitHub 聚合发布（已实现）", decisions)
         self.assertIn("OPS-TODO-01B 远程更新发现（待实现）", decisions)
+        self.assertIn("GitHub 聚合发布流水线已经落地", decisions)
+        self.assertNotIn("GitHub 自动发布 Core 镜像、Feature `.tpx` 和远程 catalog 尚未落地", decisions)
 
 
 if __name__ == "__main__":

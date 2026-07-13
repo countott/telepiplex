@@ -30,8 +30,8 @@
 
 - Core 与四个 Feature 源码分支已经独立推送到远端。
 - `main` 暂不作为日常开发或部署入口。
-- 当前 Core 镜像和 `.tpx` 仍需手工在 Linux/Unraid 构建。
-- GitHub 自动发布 Core 镜像、Feature `.tpx` 和远程 catalog 尚未落地。
+- GitHub 聚合发布流水线已经落地到 Core Feature 分支，可由 `platform-v<semver>` tag 自动生成 Core 镜像、四个 Linux `.tpx` 和远程 catalog。
+- 当前尚未创建实际 release tag；本地或 Unraid 手工构建仍作为发布前验证与故障兜底。
 
 ## 二、已经确认的业务规则
 
