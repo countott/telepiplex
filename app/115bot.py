@@ -68,6 +68,9 @@ SENSITIVE_CONFIG_KEYWORDS = (
     "authorization",
 )
 PLUGIN_UPDATE_TASK_KEY = "telepiplex_plugin_update_task"
+DEFAULT_PLUGIN_CATALOG_URL = (
+    "https://github.com/countott/telepiplex/releases/latest/download/catalog.yaml"
+)
 
 
 def get_version(md_format=False):
@@ -109,6 +112,17 @@ def log_config_snapshot(prefix: str):
     init.logger.info(json.dumps(sanitize_config_for_log(init.bot_config), ensure_ascii=False))
 
 
+def resolve_plugin_catalog_source(plugin_config: dict, root: Path) -> str:
+    configured = str((plugin_config or {}).get("catalog") or "").strip()
+    legacy = Path(root) / "catalog.yaml"
+    if not configured:
+        return DEFAULT_PLUGIN_CATALOG_URL
+    source = Path(configured).expanduser()
+    if source.resolve(strict=False) == legacy.expanduser().resolve(strict=False):
+        return configured if source.is_file() else DEFAULT_PLUGIN_CATALOG_URL
+    return configured
+
+
 def build_plugin_manager(config=None, core_database=None):
     config = config or {}
     plugin_config = config.get("plugins") or {}
@@ -142,7 +156,7 @@ def build_plugin_manager(config=None, core_database=None):
         runtime_root=runtime_root,
         broker=broker,
     )
-    catalog_source = str(plugin_config.get("catalog") or root / "catalog.yaml")
+    catalog_source = resolve_plugin_catalog_source(plugin_config, root)
     catalog = PluginCatalog(catalog_source, root / ".cache")
     manager = PluginManager(
         store=PluginStore(root),

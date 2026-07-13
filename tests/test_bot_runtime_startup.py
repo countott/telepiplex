@@ -24,6 +24,44 @@ def load_bot_module():
 
 
 class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_legacy_catalog_uses_official_release_catalog(self):
+        bot_module = await asyncio.to_thread(load_bot_module)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            plugins_root = root / "plugins"
+
+            source = bot_module.resolve_plugin_catalog_source({}, plugins_root)
+            self.assertEqual(source, bot_module.DEFAULT_PLUGIN_CATALOG_URL)
+
+            legacy = plugins_root / "catalog.yaml"
+            source = bot_module.resolve_plugin_catalog_source(
+                {"catalog": str(legacy)},
+                plugins_root,
+            )
+            self.assertEqual(source, bot_module.DEFAULT_PLUGIN_CATALOG_URL)
+
+    async def test_existing_or_custom_local_catalog_is_preserved(self):
+        bot_module = await asyncio.to_thread(load_bot_module)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            plugins_root = root / "plugins"
+            plugins_root.mkdir()
+            legacy = plugins_root / "catalog.yaml"
+            legacy.touch()
+
+            source = bot_module.resolve_plugin_catalog_source(
+                {"catalog": str(legacy)},
+                plugins_root,
+            )
+            self.assertEqual(source, str(legacy))
+
+            custom = root / "custom" / "catalog.yaml"
+            source = bot_module.resolve_plugin_catalog_source(
+                {"catalog": str(custom)},
+                plugins_root,
+            )
+            self.assertEqual(source, str(custom))
+
     async def test_async_after_start_is_awaited_before_polling_wait(self):
         bot_module = await asyncio.to_thread(load_bot_module)
         application = Mock()
