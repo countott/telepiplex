@@ -26,7 +26,16 @@ class ReleaseCatalogGeneratorTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def _artifact(self, plugin_id, branch, *, version="1.2.3", suffix=""):
+    def _artifact(
+        self,
+        plugin_id,
+        branch,
+        *,
+        version="1.2.3",
+        suffix="",
+        provides=(),
+        requires=(),
+    ):
         source = self.root / f"source-{plugin_id}{suffix}"
         (source / "wheelhouse").mkdir(parents=True)
         manifest = {
@@ -35,8 +44,11 @@ class ReleaseCatalogGeneratorTest(unittest.TestCase):
             "version": version,
             "core_api": ">=1.0,<2.0",
             "entry_point": f"telepiplex_{plugin_id.replace('-', '_')}.runtime:main",
-            "provides": [],
-            "requires": [],
+            "provides": [
+                {"name": name, "exclusive": exclusive}
+                for name, exclusive in provides
+            ],
+            "requires": list(requires),
             "subscribes": [],
             "publishes": [],
             "commands": [],
@@ -65,8 +77,22 @@ class ReleaseCatalogGeneratorTest(unittest.TestCase):
 
     def _all_artifacts(self):
         return [
-            self._artifact(plugin_id, branch)
-            for plugin_id, branch in PLUGINS.items()
+            self._artifact(
+                "open115",
+                PLUGINS["open115"],
+                provides=(("download.provider", True), ("storage.provider", True)),
+            ),
+            self._artifact(
+                "media-search",
+                PLUGINS["media-search"],
+                requires=("download.provider",),
+            ),
+            self._artifact(
+                "renaming",
+                PLUGINS["renaming"],
+                requires=("storage.provider",),
+            ),
+            self._artifact("plex-management", PLUGINS["plex-management"]),
         ]
 
     def test_builds_manifest_derived_digest_pinned_catalog(self):
@@ -89,8 +115,17 @@ class ReleaseCatalogGeneratorTest(unittest.TestCase):
             "platform-v1.0.0/media-search-1.2.3.tpx",
         )
         self.assertEqual(entry["core_api"], ">=1.0,<2.0")
+        self.assertEqual(entry["provides"], [])
+        self.assertEqual(entry["requires"], ["download.provider"])
         self.assertEqual(entry["source"]["branch"], "feature/media-search")
         self.assertEqual(len(entry["source"]["commit"]), 40)
+
+        open115 = catalog["plugins"]["open115"]["versions"]["1.2.3"]
+        self.assertEqual(
+            open115["provides"],
+            ["download.provider", "storage.provider"],
+        )
+        self.assertEqual(open115["requires"], [])
 
     def test_output_is_deterministic_and_writes_catalog_digest(self):
         artifacts = list(reversed(self._all_artifacts()))

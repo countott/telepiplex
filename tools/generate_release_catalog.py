@@ -92,6 +92,8 @@ def build_catalog(
                     ),
                     "sha256": verified.sha256,
                     "core_api": manifest.core_api,
+                    "provides": sorted(item.name for item in manifest.provides),
+                    "requires": sorted(manifest.requires),
                     "source": {
                         "branch": manifest.source.branch,
                         "commit": manifest.source.commit,
