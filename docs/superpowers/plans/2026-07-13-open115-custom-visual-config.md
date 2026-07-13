@@ -197,6 +197,8 @@ git commit -m "feat(core): delegate custom Feature configuration"
 **Files:**
 - Modify: `config.schema.json`
 - Modify: `manifest.yaml`
+- Modify: `pyproject.toml`
+- Modify: `README.md`
 - Modify: `src/telepiplex_open115/service.py`
 - Modify: `tests/test_feature_runtime.py`
 
@@ -263,6 +265,8 @@ manifest = yaml.safe_load((ROOT / "manifest.yaml").read_text())
 self.assertIn("config", [item["name"] for item in manifest["commands"]])
 ```
 
+Also parse `pyproject.toml` with `tomllib` and assert both its project version and the manifest version are `1.0.1`; immutable `.tpx` artifacts require a new semantic version for this fix to be installable.
+
 - [ ] **Step 2: Run the open115 red tests**
 
 Run:
@@ -286,6 +290,7 @@ Add the annotation beside the root schema type:
 ```
 
 Update the manifest description to `配置 115 授权` while retaining the existing `config` command declaration.
+Set `manifest.yaml` and `pyproject.toml` to version `1.0.1`, and update the README build output example to `dist/open115-1.0.1.tpx`.
 
 - [ ] **Step 4: Implement the Feature-owned session state machine**
 
@@ -345,7 +350,7 @@ Expected: all tests PASS and compilation exits 0.
 Commit:
 
 ```bash
-git add config.schema.json manifest.yaml src/telepiplex_open115/service.py tests/test_feature_runtime.py
+git add config.schema.json manifest.yaml pyproject.toml README.md src/telepiplex_open115/service.py tests/test_feature_runtime.py
 git commit -m "fix(open115): restore visual token configuration"
 ```
 
