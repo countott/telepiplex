@@ -4,24 +4,18 @@ on:
   push:
     tags:
       - core-v*
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: Immutable Core tag such as core-v1.0.6
-        required: true
-        type: string
 
 permissions:
   contents: read
   packages: write
 
 concurrency:
-  group: core-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  group: core-release-${{ github.ref_name }}
   cancel-in-progress: false
 
 env:
   CORE_IMAGE: ghcr.io/${{ github.repository_owner }}/telepiplex-core
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  RELEASE_TAG: ${{ github.ref_name }}
 
 jobs:
   validate-core:
@@ -84,8 +78,19 @@ jobs:
         run: |
           VERSION="${RELEASE_TAG#core-v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          if docker buildx imagetools inspect "$CORE_IMAGE:$VERSION" >/dev/null 2>&1; then
+          set +e
+          INSPECT_OUTPUT=$(docker buildx imagetools inspect "$CORE_IMAGE:$VERSION" 2>&1)
+          INSPECT_STATUS=$?
+          set -e
+          if [[ "$INSPECT_STATUS" -eq 0 ]]; then
             echo "Core image tag already exists: $CORE_IMAGE:$VERSION" >&2
+            exit 1
+          fi
+          if grep -Eiq 'manifest[ _-]*(unknown|not[ _-]*found)|MANIFEST_UNKNOWN' <<< "$INSPECT_OUTPUT"; then
+            echo "Confirmed unused Core image tag: $CORE_IMAGE:$VERSION"
+          else
+            echo "Unable to prove Core image tag is unused; refusing publication." >&2
+            printf '%s\n' "$INSPECT_OUTPUT" >&2
             exit 1
           fi
 

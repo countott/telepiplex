@@ -44,16 +44,20 @@ Feature release tags point to that Core commit and use one of these forms:
 - `renaming-v<semver>`
 - `plex-management-v<semver>`
 
-The workflow maps the tag to the fixed Feature source branch, checks out that
-branch, and requires its manifest version to equal the tag version. It builds
-exactly one `.tpx` and verifies the embedded plugin ID, version, source branch,
-source commit, and SHA-256.
+The workflow maps the tag to the fixed Feature source branch. A read-only build
+job checks out that branch without persisted Git credentials and requires its
+manifest version to equal the tag version. It builds exactly one `.tpx` and
+verifies the embedded plugin ID, version, source branch, source commit, and
+SHA-256. The write-scoped publication job consumes only the verified workflow
+artifact and never executes the Feature build backend.
 
-If the current catalog already contains the same plugin version and source
-commit, the workflow downloads and verifies the prior immutable artifact and
-reuses its exact bytes. This bootstraps the four existing `1.0.1` Feature
-releases from `platform-v1.0.5` without generating a second digest for an
-existing identity.
+If the Feature Release already exists, the read-only job downloads its exact
+`.tpx`, verifies the embedded source commit, and reuses those bytes without
+resolving the moving Feature branch head. During initial migration, the first
+run instead finds the same plugin version and source commit in the aggregate
+catalog, downloads and verifies that prior immutable artifact, and reuses its
+exact bytes. This bootstraps the four existing `1.0.1` Feature releases from
+`platform-v1.0.5` without generating a second digest for an existing identity.
 
 Each Feature GitHub Release contains:
 
@@ -82,12 +86,20 @@ catalog branch. The updater:
 4. points the released entry to its immutable Feature Release asset;
 5. writes deterministic YAML and `catalog.yaml.sha256` atomically.
 
-Catalog publishing is serialized with `cancel-in-progress: false`, preventing
-two simultaneous Feature releases from overwriting one another. The workflow
-creates the GitHub Release before moving the catalog branch, so catalog readers
-never receive a URL to an unpublished asset. A catalog push failure leaves the
-new Release available for a safe retry and does not corrupt the previous
-catalog.
+Catalog publishing uses an optimistic merge/retry loop. Every attempt fetches
+the fresh catalog head, merges only the current Feature entry while preserving
+all unrelated entries, and performs a non-force push. A non-fast-forward push
+is retried from the new head; authentication, network, and unknown probe or push
+failures stop closed. This allows independent Feature tags to run concurrently
+without a misleading workflow-level queue and without dropping catalog
+entries.
+
+The workflow creates the GitHub Release before moving the catalog branch, so
+catalog readers never receive a URL to an unpublished asset. After a successful
+catalog push it replaces the current Feature Release catalog assets with the
+confirmed branch snapshot and also converges the latest Feature Release assets
+for `releases/latest` compatibility. A catalog push failure leaves the new
+Release available for a safe retry and does not corrupt the previous catalog.
 
 ## Telegram update flow
 
@@ -127,7 +139,8 @@ do not change during migration, Telegram does not report false updates.
 
 Automated tests cover tag parsing, tag-to-branch mapping, manifest-version
 matching, immutable identity rejection, preservation of unrelated catalog
-entries, deterministic checksum output, Core-only workflow behavior, Feature
-workflow serialization, catalog compatibility assets, and both default catalog
-URLs. Publication verification checks all four GitHub Releases, catalog branch
-contents, SHA-256 values, source commits, and unchanged Core `latest` identity.
+entries, deterministic checksum output, Core-only workflow behavior,
+read/write job isolation, failure-closed probes, optimistic non-fast-forward
+retry, catalog compatibility assets, and both default catalog URLs. Publication
+verification checks all four GitHub Releases, catalog branch contents, SHA-256
+values, source commits, and unchanged Core `latest` identity.

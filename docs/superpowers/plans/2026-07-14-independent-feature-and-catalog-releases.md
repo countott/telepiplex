@@ -4,7 +4,7 @@
 
 **Goal:** Publish Core images, individual Feature artifacts, and the current Feature catalog through independent release channels.
 
-**Architecture:** `core-v*` tags update only GHCR Core images. A Feature tag builds or reuses one immutable `.tpx`, creates one Feature Release, then merges that release into the serialized `catalog` branch while preserving all unrelated catalog entries. Every Feature Release also carries the complete catalog snapshot so older `releases/latest` clients remain compatible.
+**Architecture:** `core-v*` tags update only GHCR Core images. A Feature tag builds or reuses one immutable `.tpx` in a read-only job, creates one Feature Release in a write-scoped job, then uses an optimistic fetch/merge/non-fast-forward retry loop to update the `catalog` branch while preserving all unrelated catalog entries. Every Feature Release also carries the complete catalog snapshot so older `releases/latest` clients remain compatible.
 
 **Tech Stack:** Python 3.12, PyYAML, Telepiplex `.tpx` verification, GitHub Actions, GitHub CLI on runners, Git/GHCR.
 
@@ -12,7 +12,7 @@
 
 - Existing `platform-v1.0.5`, its GitHub Release, and its Core image remain immutable.
 - A Feature version cannot change artifact digest, source branch, or source commit.
-- `catalog` publishing is serialized and never exposes an unpublished artifact URL.
+- `catalog` publishing uses optimistic non-fast-forward retry and never exposes an unpublished artifact URL.
 - Existing Core installations using `releases/latest/download/catalog.yaml` continue working.
 - The preferred new catalog URL is `https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml`.
 - The migration publishes all four current Feature versions as `1.0.1` without producing Telegram update notifications.
@@ -89,7 +89,7 @@ git commit -m "feat(core): merge independent Feature releases into catalog"
 
 **Interfaces:**
 - Consumes: `core-v<semver>` and the four `<plugin-id>-v<semver>` tag families.
-- Produces: a Core-only GHCR workflow and a serialized one-Feature Release/catalog workflow.
+- Produces: a Core-only GHCR workflow and a split read-only-build/write-scoped one-Feature Release/catalog workflow with optimistic publication.
 
 - [ ] **Step 1: Replace aggregate expectations with failing workflow-contract tests**
 
@@ -98,9 +98,11 @@ Tests require:
 ```python
 assert core_triggers["push"]["tags"] == ["core-v*"]
 assert "build-features" not in core_jobs
-assert feature_workflow["concurrency"]["cancel-in-progress"] is False
+assert "concurrency" not in feature_workflow
+assert build_job["permissions"]["contents"] == "read"
+assert publish_job["permissions"]["contents"] == "write"
 assert "catalog.yaml" in feature_release_step
-assert "git push origin HEAD:catalog" in catalog_publish_step
+assert "git push --porcelain origin HEAD:catalog" in catalog_publish_step
 ```
 
 - [ ] **Step 2: Run tests and verify RED**
@@ -114,11 +116,15 @@ Expected: old `platform-v*` aggregate workflow violates the new contracts.
 The workflow validates `core-v<semver>`, runs Core tests/compile, refuses an
 existing immutable image version, and pushes only `<version>` plus `latest`.
 
-- [ ] **Step 4: Add serialized Feature release workflow**
+- [ ] **Step 4: Add split Feature release workflow with optimistic catalog retry**
 
-The workflow maps the tag to a fixed source branch, checks manifest identity,
-builds one artifact, reuses a previous identical artifact when present, writes
-the merged catalog, creates the Feature Release, then pushes the catalog branch.
+The read-only job maps the tag to a fixed source branch, checks manifest
+identity, and either builds one artifact or reuses the exact verified artifact
+from an existing Release. The write-scoped job creates the Feature Release,
+then repeatedly fetches the fresh catalog head, merges the Feature, and retries
+only non-fast-forward push rejection. Operational probe and push failures stop
+closed. After a successful push, catalog assets are synchronized back to the
+current and latest Feature Releases for old-client compatibility.
 
 - [ ] **Step 5: Run workflow and deployment contract tests**
 

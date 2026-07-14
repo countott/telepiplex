@@ -1,3 +1,7 @@
+import os
+import subprocess
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -7,6 +11,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 CORE_WORKFLOW = ROOT / ".github/workflows/release.yml"
 FEATURE_WORKFLOW = ROOT / ".github/workflows/release-feature.yml"
+DESIGN = ROOT / "docs/superpowers/specs/2026-07-14-independent-feature-and-catalog-releases-design.md"
+PLAN = ROOT / "docs/superpowers/plans/2026-07-14-independent-feature-and-catalog-releases.md"
 OLD_WORKFLOW = ROOT / ".github/workflows/docker-build.yml"
 
 
@@ -26,15 +32,38 @@ class ReleaseWorkflowTest(unittest.TestCase):
             if step.get("name") == name
         )
 
-    def test_core_release_is_core_tag_or_manual_only(self):
+    def _run_script(self, source, *, env=None, commands=None):
+        temporary = tempfile.TemporaryDirectory()
+        root = Path(temporary.name)
+        fakebin = root / "bin"
+        fakebin.mkdir()
+        for name, body in (commands or {}).items():
+            command = fakebin / name
+            command.write_text(
+                "#!/usr/bin/env bash\n" + textwrap.dedent(body),
+                encoding="utf-8",
+            )
+            command.chmod(0o755)
+        run_env = os.environ.copy()
+        run_env.update(env or {})
+        run_env["PATH"] = f"{fakebin}:{run_env['PATH']}"
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", source],
+            cwd=root,
+            env=run_env,
+            capture_output=True,
+            text=True,
+        )
+        return temporary, root, result
+
+    def test_core_release_accepts_only_core_tags(self):
         workflow = self._workflow(CORE_WORKFLOW)
         triggers = workflow["on"]
 
-        self.assertEqual(set(triggers), {"push", "workflow_dispatch"})
+        self.assertEqual(set(triggers), {"push"})
         self.assertEqual(triggers["push"]["tags"], ["core-v*"])
         self.assertNotIn("branches", triggers["push"])
-        self.assertNotIn("pull_request", triggers)
-        self.assertIn("release_tag", triggers["workflow_dispatch"]["inputs"])
+        self.assertNotIn("workflow_dispatch", triggers)
         self.assertIn("concurrency", workflow)
 
     def test_core_release_tests_and_pushes_only_version_and_latest(self):
@@ -58,12 +87,6 @@ class ReleaseWorkflowTest(unittest.TestCase):
 
         build = jobs["build-core-image"]
         self.assertEqual(build["needs"], "validate-core")
-        refuse = self._step(
-            workflow, "build-core-image", "Refuse an existing immutable image tag"
-        )["run"]
-        self.assertIn('VERSION="${RELEASE_TAG#core-v}"', refuse)
-        self.assertIn("docker buildx imagetools inspect", refuse)
-
         publish = self._step(
             workflow, "build-core-image", "Build and push Core image"
         )["with"]
@@ -79,10 +102,48 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertNotIn("gh release create", source)
         self.assertNotIn(".tpx", source)
 
-    def test_feature_release_accepts_fixed_tag_families_and_is_serialized(self):
+    def test_core_manifest_probe_fails_closed(self):
+        workflow = self._workflow(CORE_WORKFLOW)
+        probe = self._step(
+            workflow, "build-core-image", "Refuse an existing immutable image tag"
+        )["run"]
+        docker = """
+            printf '%s\\n' "$FAKE_DOCKER_OUTPUT" >&2
+            exit "$FAKE_DOCKER_STATUS"
+        """
+        base_env = {
+            "RELEASE_TAG": "core-v1.2.3",
+            "CORE_IMAGE": "ghcr.io/example/telepiplex-core",
+        }
+
+        for label, status, output, succeeds in (
+            ("missing", "1", "manifest unknown", True),
+            ("missing-code", "1", "MANIFEST_UNKNOWN", True),
+            ("exists", "0", "exists", False),
+            ("auth", "1", "unauthorized: authentication required", False),
+            ("network", "1", "dial tcp: network is unreachable", False),
+            ("unknown", "42", "unexpected inspect failure", False),
+        ):
+            with self.subTest(label=label):
+                with tempfile.NamedTemporaryFile() as output_file:
+                    env = {
+                        **base_env,
+                        "GITHUB_OUTPUT": output_file.name,
+                        "FAKE_DOCKER_STATUS": status,
+                        "FAKE_DOCKER_OUTPUT": output,
+                    }
+                    temporary, _, result = self._run_script(
+                        probe, env=env, commands={"docker": docker}
+                    )
+                    self.addCleanup(temporary.cleanup)
+                    self.assertEqual(result.returncode == 0, succeeds, result.stderr)
+
+    def test_feature_release_is_tag_only_and_splits_read_from_write(self):
         workflow = self._workflow(FEATURE_WORKFLOW)
         triggers = workflow["on"]
+        jobs = workflow["jobs"]
 
+        self.assertEqual(set(triggers), {"push"})
         self.assertEqual(
             triggers["push"]["tags"],
             [
@@ -92,99 +153,234 @@ class ReleaseWorkflowTest(unittest.TestCase):
                 "plex-management-v*",
             ],
         )
-        self.assertIn("release_tag", triggers["workflow_dispatch"]["inputs"])
-        self.assertEqual(workflow["concurrency"]["group"], "feature-catalog-release")
-        self.assertIs(workflow["concurrency"]["cancel-in-progress"], False)
-        self.assertEqual(workflow["permissions"]["contents"], "write")
+        self.assertNotIn("workflow_dispatch", triggers)
+        self.assertNotIn("concurrency", workflow)
+        self.assertEqual(set(jobs), {"build-feature", "publish-feature"})
+        self.assertEqual(workflow["permissions"]["contents"], "read")
+        self.assertEqual(jobs["build-feature"]["permissions"]["contents"], "read")
+        self.assertEqual(jobs["publish-feature"]["permissions"]["contents"], "write")
+        self.assertEqual(jobs["publish-feature"]["needs"], "build-feature")
 
-    def test_feature_release_maps_tag_to_branch_and_verifies_identity(self):
+        build_source = "\n".join(
+            step.get("run", "") for step in jobs["build-feature"]["steps"]
+        )
+        publish_source = "\n".join(
+            step.get("run", "") for step in jobs["publish-feature"]["steps"]
+        )
+        self.assertIn("tools/build_feature.py", build_source)
+        self.assertNotIn("tools/build_feature.py", publish_source)
+        self.assertNotIn("feature-src", publish_source)
+
+        for name in (
+            "Checkout Core release infrastructure",
+            "Checkout fixed Feature branch",
+        ):
+            checkout = self._step(workflow, "build-feature", name)
+            self.assertIs(checkout["with"]["persist-credentials"], False)
+        feature_checkout = self._step(
+            workflow, "build-feature", "Checkout fixed Feature branch"
+        )
+        self.assertEqual(feature_checkout["if"], "steps.release.outputs.exists == 'false'")
+
+    def test_feature_release_probe_distinguishes_404_from_failures(self):
         workflow = self._workflow(FEATURE_WORKFLOW)
-        resolve = self._step(
-            workflow, "publish-feature", "Resolve immutable Feature identity"
+        probe = self._step(
+            workflow, "build-feature", "Probe immutable Feature Release"
         )["run"]
-        checkout = self._step(
-            workflow, "publish-feature", "Checkout fixed Feature branch"
-        )["with"]
+        curl = """
+            output=''
+            while (($#)); do
+              if [[ "$1" == '--output' ]]; then output="$2"; shift 2; else shift; fi
+            done
+            [[ -z "$output" ]] || printf '{}\\n' > "$output"
+            printf '%s' "$FAKE_HTTP_CODE"
+            exit "$FAKE_CURL_STATUS"
+        """
+        base_env = {
+            "GITHUB_API_URL": "https://api.github.test",
+            "GITHUB_REPOSITORY": "example/repo",
+            "RELEASE_TAG": "media-search-v1.2.3",
+            "GH_TOKEN": "token",
+        }
+
+        for label, code, curl_status, succeeds, expected in (
+            ("exists", "200", "0", True, "exists=true"),
+            ("missing", "404", "0", True, "exists=false"),
+            ("auth", "401", "0", False, ""),
+            ("server", "503", "0", False, ""),
+            ("network", "000", "7", False, ""),
+        ):
+            with self.subTest(label=label):
+                with tempfile.NamedTemporaryFile() as output_file:
+                    env = {
+                        **base_env,
+                        "GITHUB_OUTPUT": output_file.name,
+                        "FAKE_HTTP_CODE": code,
+                        "FAKE_CURL_STATUS": curl_status,
+                    }
+                    temporary, _, result = self._run_script(
+                        probe, env=env, commands={"curl": curl}
+                    )
+                    self.addCleanup(temporary.cleanup)
+                    self.assertEqual(result.returncode == 0, succeeds, result.stderr)
+                    if expected:
+                        self.assertIn(expected, Path(output_file.name).read_text())
+
+    def test_existing_release_reuses_exact_asset_and_embedded_commit(self):
+        workflow = self._workflow(FEATURE_WORKFLOW)
+        download = self._step(
+            workflow, "build-feature", "Download existing Feature artifact"
+        )
         verify = self._step(
-            workflow, "publish-feature", "Build or reuse verified Feature artifact"
+            workflow, "build-feature", "Verify immutable Feature artifact"
         )["run"]
+        build = self._step(
+            workflow, "build-feature", "Build new Feature artifact"
+        )
 
-        self.assertIn("parse_feature_tag", resolve)
-        self.assertIn("FEATURE_BRANCHES", resolve)
-        self.assertEqual(checkout["ref"], "${{ steps.feature.outputs.branch }}")
-        self.assertIn("manifest.yaml", verify)
-        self.assertIn("PLUGIN_ID", verify)
-        self.assertIn("VERSION", verify)
-        self.assertIn("FEATURE_BRANCH", verify)
-        self.assertIn("FEATURE_COMMIT", verify)
+        self.assertEqual(download["if"], "steps.release.outputs.exists == 'true'")
+        self.assertIn("release.json", download["run"])
+        self.assertIn("browser_download_url", download["run"])
+        self.assertIn("ASSET_NAME", download["run"])
+        self.assertIn("steps.release.outputs.exists == 'false'", build["if"])
         self.assertIn("verify_tpx", verify)
+        self.assertIn("manifest.source.commit", verify)
+        self.assertIn("source_commit=", verify)
+        self.assertNotIn("git -C feature-src rev-parse", download["run"] + verify)
 
-    def test_feature_release_bootstraps_catalog_and_reuses_previous_asset_bytes(self):
+    def test_first_release_reuses_matching_previous_catalog_asset(self):
+        workflow = self._workflow(FEATURE_WORKFLOW)
+        reuse = self._step(
+            workflow, "build-feature", "Reuse matching catalog artifact"
+        )
+        build = self._step(
+            workflow, "build-feature", "Build new Feature artifact"
+        )
+
+        self.assertEqual(reuse["if"], "steps.release.outputs.exists == 'false'")
+        self.assertIn("releases/latest/download/catalog.yaml", reuse["run"])
+        self.assertIn("refs/heads/catalog", reuse["run"])
+        self.assertIn("entry[\"url\"]", reuse["run"])
+        self.assertIn("entry[\"sha256\"]", reuse["run"])
+        self.assertIn("FEATURE_COMMIT", reuse["run"])
+        self.assertIn("verify_tpx", reuse["run"])
+        self.assertEqual(
+            build["if"],
+            "steps.release.outputs.exists == 'false' && steps.prior.outputs.found != 'true'",
+        )
+
+    def test_catalog_discovery_bootstraps_only_on_status_two(self):
         workflow = self._workflow(FEATURE_WORKFLOW)
         bootstrap = self._step(
-            workflow, "publish-feature", "Load previous catalog snapshot"
+            workflow, "publish-feature", "Load bootstrap catalog snapshot"
         )["run"]
-        build_or_reuse = self._step(
-            workflow, "publish-feature", "Build or reuse verified Feature artifact"
-        )["run"]
+        git = """
+            if [[ "$1" == 'ls-remote' ]]; then exit "$FAKE_LS_REMOTE_STATUS"; fi
+            exit 99
+        """
+        curl = """
+            printf 'called\\n' >> "$FAKE_CURL_LOG"
+            output=''
+            while (($#)); do
+              if [[ "$1" == '--output' ]]; then output="$2"; shift 2; else shift; fi
+            done
+            [[ -z "$output" ]] || : > "$output"
+            printf '404'
+        """
 
-        self.assertIn("refs/heads/catalog", bootstrap)
-        self.assertIn("releases/latest/download/catalog.yaml", bootstrap)
-        self.assertIn("previous/catalog.yaml", bootstrap)
-        self.assertIn("previous catalog is empty", bootstrap)
+        for status, succeeds, curl_called in (("2", True, True), ("128", False, False)):
+            with self.subTest(ls_remote_status=status):
+                temporary = tempfile.TemporaryDirectory()
+                root = Path(temporary.name)
+                curl_log = root / "curl.log"
+                result_temp, _, result = self._run_script(
+                    bootstrap,
+                    env={
+                        "FAKE_LS_REMOTE_STATUS": status,
+                        "FAKE_CURL_LOG": str(curl_log),
+                        "GITHUB_REPOSITORY": "example/repo",
+                        "GH_TOKEN": "token",
+                    },
+                    commands={"git": git, "curl": curl},
+                )
+                self.addCleanup(temporary.cleanup)
+                self.addCleanup(result_temp.cleanup)
+                self.assertEqual(result.returncode == 0, succeeds, result.stderr)
+                self.assertEqual(curl_log.exists(), curl_called)
 
-        self.assertIn("previous/catalog.yaml", build_or_reuse)
-        self.assertIn('["url"]', build_or_reuse)
-        self.assertIn("curl", build_or_reuse)
-        self.assertIn("EXPECTED_SHA256", build_or_reuse)
-        self.assertIn("sha256", build_or_reuse)
-        self.assertIn("tools/build_feature.py", build_or_reuse)
-        self.assertIn("verify_tpx", build_or_reuse)
+        self.assertIn("LS_REMOTE_STATUS", bootstrap)
+        self.assertIn("2)", bootstrap)
+        self.assertIn("Catalog branch probe failed", bootstrap)
 
-    def test_feature_release_carries_complete_catalog_then_publishes_branch(self):
+    def test_publication_uses_optimistic_merge_retry_without_dropped_entries(self):
         workflow = self._workflow(FEATURE_WORKFLOW)
         steps = workflow["jobs"]["publish-feature"]["steps"]
         names = [step.get("name") for step in steps]
-        generate = self._step(
-            workflow, "publish-feature", "Write merged catalog snapshot"
+        ensure_release = self._step(
+            workflow, "publish-feature", "Ensure immutable Feature Release"
         )["run"]
-        feature_release_step = self._step(
-            workflow, "publish-feature", "Create immutable Feature Release"
-        )["run"]
-        catalog_publish_step = self._step(
-            workflow, "publish-feature", "Publish catalog branch"
-        )["run"]
-        catalog_prepare_step = self._step(
-            workflow, "publish-feature", "Prepare catalog branch commit"
+        publish = self._step(
+            workflow, "publish-feature", "Merge and publish catalog with optimistic retry"
         )["run"]
 
-        self.assertIn("write_feature_catalog", generate)
-        self.assertIn("catalog.yaml.sha256", generate)
-        self.assertIn("*.tpx", feature_release_step)
-        self.assertIn("catalog.yaml", feature_release_step)
-        self.assertIn("catalog.yaml.sha256", feature_release_step)
-        self.assertIn("gh release view", feature_release_step)
-        self.assertIn("cmp", feature_release_step)
-        self.assertIn("git -C catalog-publish add --all", catalog_prepare_step)
-        self.assertIn("git push origin HEAD:catalog", catalog_publish_step)
+        self.assertIn("gh release create", ensure_release)
+        self.assertIn("catalog.yaml", ensure_release)
+        self.assertIn("catalog.yaml.sha256", ensure_release)
+        self.assertIn("for ATTEMPT in 1 2 3 4 5", publish)
+        self.assertIn("git ls-remote", publish)
+        self.assertIn("LS_REMOTE_STATUS", publish)
+        self.assertIn("git fetch --force", publish)
+        self.assertIn("write_feature_catalog", publish)
+        self.assertIn("git push --porcelain origin HEAD:catalog", publish)
+        self.assertIn("[rejected]", publish)
+        self.assertIn("continue", publish)
+        self.assertIn("Catalog push failed operationally", publish)
         self.assertLess(
-            names.index("Create immutable Feature Release"),
-            names.index("Publish catalog branch"),
+            names.index("Ensure immutable Feature Release"),
+            names.index("Merge and publish catalog with optimistic retry"),
         )
         self.assertFalse(OLD_WORKFLOW.exists(), "unsafe legacy workflow still exists")
 
-    def test_workflows_install_local_wheel_build_backends(self):
+    def test_latest_release_compatibility_assets_converge_after_catalog_push(self):
+        workflow = self._workflow(FEATURE_WORKFLOW)
+        sync = self._step(
+            workflow, "publish-feature", "Synchronize Release catalog assets"
+        )["run"]
+
+        self.assertIn("gh release upload", sync)
+        self.assertIn("--clobber", sync)
+        self.assertIn("catalog.yaml", sync)
+        self.assertIn("catalog.yaml.sha256", sync)
+        self.assertIn("LATEST_TAG", sync)
+        self.assertIn("releases/latest", sync)
+        self.assertIn("for SYNC_ATTEMPT in 1 2 3 4 5", sync)
+        self.assertIn("cmp", sync)
+
+    def test_docs_specify_optimistic_catalog_publication(self):
+        for path in (DESIGN, PLAN):
+            source = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.name):
+                self.assertIn("optimistic", source.lower())
+                self.assertIn("non-fast-forward", source.lower())
+                self.assertNotIn("cancel-in-progress: false", source)
+                self.assertNotIn("serialized one-Feature", source)
+
+    def test_workflows_install_local_wheel_build_backends_only_in_read_job(self):
         core = self._workflow(CORE_WORKFLOW)
         feature = self._workflow(FEATURE_WORKFLOW)
         core_install = self._step(
             core, "validate-core", "Install Core test dependencies"
         )["run"]
         feature_install = self._step(
-            feature, "publish-feature", "Install Feature release dependencies"
+            feature, "build-feature", "Install Feature build dependencies"
         )["run"]
         for package in ("setuptools", "wheel"):
             self.assertIn(package, core_install)
             self.assertIn(package, feature_install)
+        publish_install = self._step(
+            feature, "publish-feature", "Install catalog dependencies"
+        )["run"]
+        self.assertNotIn(" build ", f" {publish_install} ")
 
 
 if __name__ == "__main__":
