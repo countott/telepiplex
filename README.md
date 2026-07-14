@@ -8,6 +8,13 @@
 
 Wikipedia 和豆瓣默认可直接取证。TVDB 与 AI 默认启用，但仍分别需要填写 TVDB API Key，以及 AI API URL、Key 和模型；凭证缺失时会如实降级为不可用状态。
 
+Prowlarr 结果会在本地二次打分后再展示。公开配置入口是 `search.scoring`：
+- `prefer_resolution`、`prefer_source`、`prefer_codec`、`prefer_audio`、`reject_keywords` 定义默认关键词组
+- `keyword_scores` 用于标题关键词加权
+- `indexer_scores` 用于按 indexer 名称加权
+
+如果不填 `search.scoring`，Feature 会回退到内置默认权重。
+
 ```bash
-python /opt/telepiplex/tools/build_feature.py . dist/media-search-1.0.1.tpx
+python /opt/telepiplex/tools/build_feature.py . dist/media-search-1.0.2.tpx
 ```

@@ -38,6 +38,29 @@ class ConfigSchemaContractTest(unittest.TestCase):
         self.assertTrue(tvdb["properties"]["subscriber_pin"]["writeOnly"])
         self.assertTrue(ai["properties"]["api_key"]["writeOnly"])
 
+    def test_search_scoring_is_part_of_public_config_contract(self):
+        schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))
+        default = yaml.safe_load((ROOT / "config.default.yaml").read_text(encoding="utf-8"))
+
+        search = schema["properties"]["search"]
+        scoring = search["properties"]["scoring"]
+        self.assertEqual(scoring["title"], "评分")
+        self.assertEqual(
+            set(scoring["properties"]),
+            {
+                "prefer_resolution",
+                "prefer_source",
+                "prefer_codec",
+                "prefer_audio",
+                "reject_keywords",
+                "keyword_scores",
+                "indexer_scores",
+            },
+        )
+        self.assertIn("scoring", default["search"])
+        self.assertIn("keyword_scores", default["search"]["scoring"])
+        self.assertIn("indexer_scores", default["search"]["scoring"])
+
     def test_default_config_validates_against_schema(self):
         schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))
         default = yaml.safe_load((ROOT / "config.default.yaml").read_text(encoding="utf-8"))

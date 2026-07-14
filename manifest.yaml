@@ -1,6 +1,6 @@
 plugin_id: media-search
 name: Media Search
-version: 1.0.1
+version: 1.0.2
 core_api: ">=1.0,<2.0"
 entry_point: telepiplex_media_search.runtime:main
 provides:

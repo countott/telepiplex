@@ -44,6 +44,48 @@
             "result_limit": {"type": "integer", "minimum": 1, "maximum": 100, "title": "结果数量"}
           },
           "additionalProperties": true
+        },
+        "scoring": {
+          "type": "object",
+          "title": "评分",
+          "properties": {
+            "prefer_resolution": {
+              "type": "array",
+              "title": "优先分辨率",
+              "items": {"type": "string"}
+            },
+            "prefer_source": {
+              "type": "array",
+              "title": "优先片源",
+              "items": {"type": "string"}
+            },
+            "prefer_codec": {
+              "type": "array",
+              "title": "优先编码",
+              "items": {"type": "string"}
+            },
+            "prefer_audio": {
+              "type": "array",
+              "title": "优先音频",
+              "items": {"type": "string"}
+            },
+            "reject_keywords": {
+              "type": "array",
+              "title": "排斥关键词",
+              "items": {"type": "string"}
+            },
+            "keyword_scores": {
+              "type": "object",
+              "title": "关键词权重",
+              "additionalProperties": {"type": "integer"}
+            },
+            "indexer_scores": {
+              "type": "object",
+              "title": "Indexer 权重",
+              "additionalProperties": {"type": "integer"}
+            }
+          },
+          "additionalProperties": true
         }
       },
       "additionalProperties": true
