@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 
 class RenamingConfigWizardTest(unittest.IsolatedAsyncioTestCase):
@@ -134,6 +135,32 @@ class RenamingConfigWizardTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("config_patch", pending)
                 result = await self._confirm()
                 self.assertEqual(result["config_patch"], expected)
+
+    async def test_expired_confirmation_cannot_submit_patch(self):
+        with patch(
+            "telepiplex_renaming.config_wizard.time.monotonic",
+            return_value=100,
+        ):
+            await self._start()
+            await self.feature.callback({
+                **self.owner,
+                "namespace": "renaming",
+                "payload": "config:ai",
+            })
+            await self.feature.callback({
+                **self.owner,
+                "namespace": "renaming",
+                "payload": "config:boolean:off",
+            })
+
+        with patch(
+            "telepiplex_renaming.config_wizard.time.monotonic",
+            return_value=2000,
+        ):
+            expired = await self._confirm()
+
+        self.assertNotIn("config_patch", expired)
+        self.assertEqual(expired["session"]["state"], "close")
 
 
 if __name__ == "__main__":
