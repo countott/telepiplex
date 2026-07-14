@@ -16,7 +16,11 @@ def main(context: RuntimeContext) -> FeatureRuntime:
         manifest=context.manifest,
         token=context.token,
         capabilities={"media.search": feature.metadata_capability},
-        commands={"search": feature.command, "s": feature.command},
+        commands={
+            "search": feature.command,
+            "s": feature.command,
+            "media_search_config": feature.command,
+        },
         callbacks={"media-search": feature.callback},
         messages=feature.message,
     )

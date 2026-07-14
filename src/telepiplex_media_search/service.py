@@ -19,6 +19,7 @@ from .adapters.tvdb import (
     search_tvdb_series,
 )
 from .adapters.wikipedia import lookup_wikipedia_evidence
+from .config_wizard import MediaSearchConfigWizard
 from .planner import SearchPlanningError, build_confirmable_search_plan
 from .release_score import rank_releases
 from .search_plan import TemporarySpecialAllocator, confirm_media_metadata
@@ -60,6 +61,7 @@ class MediaSearchFeature:
         self.release_resolver = release_resolver or resolve_prowlarr_download_url
         self.plans = {}
         self.awaiting_queries = set()
+        self.config_wizard = MediaSearchConfigWizard(config)
 
     async def metadata_capability(self, request: dict) -> dict:
         if str(request.get("method") or "") != "resolve_metadata":
@@ -100,8 +102,12 @@ class MediaSearchFeature:
 
     async def command(self, request: dict) -> dict:
         command = str(request.get("command") or "")
+        if command == "media_search_config":
+            self.awaiting_queries.discard(self._owner_key(request))
+            return self.config_wizard.start(request)
         if command not in {"search", "s"}:
             raise FeatureError("not_found", f"unknown media-search command: {command}")
+        self.config_wizard.clear(request)
         raw_query = " ".join(str(item) for item in request.get("args") or []).strip()
         if not raw_query:
             self.awaiting_queries.add(self._owner_key(request))
@@ -112,6 +118,8 @@ class MediaSearchFeature:
         return await self._prepare_plan(raw_query, request)
 
     async def message(self, request: dict) -> dict:
+        if self.config_wizard.has_session(request):
+            return self.config_wizard.message(request)
         key = self._owner_key(request)
         if key not in self.awaiting_queries:
             return {
@@ -123,6 +131,8 @@ class MediaSearchFeature:
 
     async def callback(self, request: dict) -> dict:
         payload = str(request.get("payload") or "")
+        if payload.startswith("config:"):
+            return self.config_wizard.callback(request)
         parts = payload.split(":")
         if len(parts) < 2:
             raise FeatureError("invalid_callback", "media-search callback is invalid")

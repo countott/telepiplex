@@ -1,6 +1,6 @@
 plugin_id: media-search
 name: Media Search
-version: 1.0.0
+version: 1.0.1
 core_api: ">=1.0,<2.0"
 entry_point: telepiplex_media_search.runtime:main
 provides:
@@ -15,6 +15,8 @@ commands:
     description: 搜索片源
   - name: s
     description: 搜索片源
+  - name: media_search_config
+    description: 配置媒体搜索
 callbacks:
   - media-search
 config_schema_version: 1
