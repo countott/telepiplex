@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -31,6 +32,22 @@ class ReleaseWorkflowTest(unittest.TestCase):
             for step in workflow["jobs"][job]["steps"]
             if step.get("name") == name
         )
+
+    def _python_blocks(self, source):
+        blocks = []
+        lines = source.splitlines()
+        cursor = 0
+        while cursor < len(lines):
+            if "<<'PY'" not in lines[cursor]:
+                cursor += 1
+                continue
+            end = cursor + 1
+            while end < len(lines) and lines[end].strip() != "PY":
+                end += 1
+            self.assertLess(end, len(lines), "unterminated Python heredoc")
+            blocks.append("\n".join(lines[cursor + 1 : end]) + "\n")
+            cursor = end + 1
+        return blocks
 
     def _run_script(self, source, *, env=None, commands=None):
         temporary = tempfile.TemporaryDirectory()
@@ -268,6 +285,84 @@ class ReleaseWorkflowTest(unittest.TestCase):
             build["if"],
             "steps.release.outputs.exists == 'false' && steps.prior.outputs.found != 'true'",
         )
+
+    def test_prior_catalog_asset_url_is_exact_and_never_receives_token(self):
+        workflow = self._workflow(FEATURE_WORKFLOW)
+        reuse = self._step(
+            workflow, "build-feature", "Reuse matching catalog artifact"
+        )["run"]
+        validator = next(
+            block
+            for block in self._python_blocks(reuse)
+            if "previous Feature asset URL" in block
+        )
+        download = reuse.split(
+            "if [[ -f prior-catalog/reuse.yaml ]]", 1
+        )[1].split('python - "dist/$ASSET_NAME"', 1)[0]
+
+        self.assertIn("urlsplit", validator)
+        for rejected_field in ("username", "password", "query", "fragment"):
+            self.assertIn(rejected_field, validator)
+        self.assertIn("GITHUB_REPOSITORY", validator)
+        self.assertIn("ASSET_NAME", validator)
+        self.assertNotIn("Authorization:", download)
+        self.assertNotIn("GH_TOKEN", download)
+
+        expected = (
+            "https://github.com/countott/telepiplex/releases/download/"
+            "platform-v1.0.5/media-search-1.2.3.tpx"
+        )
+        urls = {
+            "valid": (expected, True),
+            "off-origin": (expected.replace("github.com", "evil.example"), False),
+            "userinfo": (expected.replace("github.com", "attacker@github.com"), False),
+            "query": (expected + "?token=steal", False),
+            "fragment": (expected + "#steal", False),
+            "wrong-path": (expected.replace("media-search-1.2.3.tpx", "other.tpx"), False),
+        }
+        for label, (url, succeeds) in urls.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                (root / "prior-catalog").mkdir()
+                catalog = {
+                    "schema_version": 1,
+                    "plugins": {
+                        "media-search": {
+                            "versions": {
+                                "1.2.3": {
+                                    "url": url,
+                                    "sha256": "a" * 64,
+                                    "source": {
+                                        "branch": "feature/media-search",
+                                        "commit": "b" * 40,
+                                    },
+                                }
+                            }
+                        }
+                    },
+                }
+                (root / "prior-catalog/catalog.yaml").write_text(
+                    yaml.safe_dump(catalog), encoding="utf-8"
+                )
+                env = os.environ.copy()
+                env.update(
+                    {
+                        "PLUGIN_ID": "media-search",
+                        "VERSION": "1.2.3",
+                        "FEATURE_BRANCH": "feature/media-search",
+                        "FEATURE_COMMIT": "b" * 40,
+                        "GITHUB_REPOSITORY": "countott/telepiplex",
+                        "ASSET_NAME": "media-search-1.2.3.tpx",
+                    }
+                )
+                result = subprocess.run(
+                    [sys.executable, "-c", validator],
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode == 0, succeeds, result.stderr)
 
     def test_catalog_discovery_bootstraps_only_on_status_two(self):
         workflow = self._workflow(FEATURE_WORKFLOW)

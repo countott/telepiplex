@@ -156,6 +156,7 @@ jobs:
           import os
           import pathlib
           import re
+          from urllib.parse import urlsplit
           import yaml
 
           catalog = yaml.safe_load(pathlib.Path("prior-catalog/catalog.yaml").read_text())
@@ -171,8 +172,29 @@ jobs:
                   raise SystemExit("previous Feature source commit differs without a version bump")
               url = entry["url"]
               sha256 = str(entry["sha256"]).lower()
-              if not str(url).startswith("https://"):
-                  raise SystemExit("previous Feature asset URL must use HTTPS")
+              parsed = urlsplit(str(url))
+              repository = os.environ["GITHUB_REPOSITORY"]
+              asset_name = os.environ["ASSET_NAME"]
+              if (
+                  parsed.scheme != "https"
+                  or parsed.hostname != "github.com"
+                  or parsed.username is not None
+                  or parsed.password is not None
+                  or parsed.port is not None
+                  or parsed.query
+                  or parsed.fragment
+              ):
+                  raise SystemExit("previous Feature asset URL must use the public GitHub Release origin")
+              prefix = f"/{repository}/releases/download/"
+              if not parsed.path.startswith(prefix):
+                  raise SystemExit("previous Feature asset URL repository path mismatch")
+              release_path = parsed.path[len(prefix):].split("/")
+              if (
+                  len(release_path) != 2
+                  or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", release_path[0])
+                  or release_path[1] != asset_name
+              ):
+                  raise SystemExit("previous Feature asset URL release path mismatch")
               if not re.fullmatch(r"[0-9a-f]{64}", sha256):
                   raise SystemExit("previous Feature asset digest is invalid")
               pathlib.Path("prior-catalog/reuse.yaml").write_text(
@@ -186,7 +208,6 @@ jobs:
             EXPECTED_SHA256=$(python -c 'import yaml; print(yaml.safe_load(open("prior-catalog/reuse.yaml"))["sha256"])')
             export EXPECTED_SHA256
             curl --fail --location --show-error --proto '=https' --tlsv1.2 \
-              --header "Authorization: Bearer $GH_TOKEN" \
               --output "dist/$ASSET_NAME" \
               "$REUSE_URL"
             python - "dist/$ASSET_NAME" <<'PY'
