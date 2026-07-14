@@ -1,6 +1,6 @@
 plugin_id: renaming
 name: Media Renaming
-version: 1.0.0
+version: 1.0.1
 core_api: ">=1.0,<2.0"
 entry_point: telepiplex_renaming.runtime:main
 provides: []
@@ -11,8 +11,11 @@ subscribes:
   - download.completed
 publishes:
   - media.organized
-commands: []
-callbacks: []
+commands:
+  - name: renaming_config
+    description: 配置媒体整理
+callbacks:
+  - renaming
 config_schema_version: 1
 state_schema_version: 1
 source:

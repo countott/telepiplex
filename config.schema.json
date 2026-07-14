@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
+  "x-telepiplex-config-command": "renaming_config",
   "properties": {
     "unorganized_path": {"type": "string", "pattern": "^/"},
     "storage_timeout": {"type": "number", "minimum": 1, "maximum": 600},

@@ -25,4 +25,7 @@ def main(context: RuntimeContext) -> FeatureRuntime:
         manifest=context.manifest,
         token=context.token,
         events={"download.completed": feature.download_completed},
+        commands={"renaming_config": feature.command},
+        callbacks={"renaming": feature.callback},
+        messages=feature.message,
     )

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 
+from telepiplex_plugin_sdk import FeatureError
 from telepiplex_plugin_sdk.media_metadata import (
     MEDIA_METADATA_KEY,
     attach_media_metadata,
     extract_confirmed_media_metadata,
 )
 
+from .config_wizard import RenamingConfigWizard
 from .models import DownloadCompletedEvent, PostDownloadResult
 from .processor import process_generic_media, process_tvdb_episode
 
@@ -50,6 +52,23 @@ class RenamingFeature:
         self.config = config
         self.core = core
         self.jobs = jobs
+        self.config_wizard = RenamingConfigWizard(config)
+
+    async def command(self, request: dict) -> dict:
+        if str(request.get("command") or "") != "renaming_config":
+            raise FeatureError("not_found", "unknown renaming command")
+        return self.config_wizard.start(request)
+
+    async def callback(self, request: dict) -> dict:
+        return self.config_wizard.callback(request)
+
+    async def message(self, request: dict) -> dict:
+        if self.config_wizard.has_session(request):
+            return self.config_wizard.message(request)
+        return {
+            "actions": [{"kind": "send_message", "text": "⚠️ renaming 配置会话已失效。"}],
+            "session": {"state": "close"},
+        }
 
     async def download_completed(self, request: dict) -> dict:
         payload = request.get("payload") or {}
