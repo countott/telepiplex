@@ -91,7 +91,9 @@ git tag renaming-v1.0.1
 git tag plex-management-v1.0.1
 ```
 
-每个 Feature tag 只构建或复用该 Feature 的一个不可变 `.tpx`，创建自己的 GitHub Release，并以乐观合并方式更新 `catalog` 分支。这个分支保存完整的 `catalog.yaml` 和 `catalog.yaml.sha256`；catalog 中每个 HTTPS 资产都固定到实际 SHA-256、Feature branch 和 commit，并携带从已验证 manifest 提取的 `provides` / `requires` capability 元数据。每个 Feature Release 也同步一份完整 catalog，所以旧客户端的 `releases/latest/download/catalog.yaml` 地址继续可用。历史 `platform-v1.0.5` 聚合发布保持不变，但不再用于新版本。
+每个 Feature tag 只构建或复用该 Feature 的一个不可变 `.tpx`，创建自己的 GitHub Release，并以乐观合并方式更新 `catalog` 分支。Feature Release 固定使用 `--latest=false`，不会取得仓库的 **Latest** 标签；Latest 只保留给显式标记的稳定 `platform-v<semver>` Release。这个分支保存完整的 `catalog.yaml` 和 `catalog.yaml.sha256`；catalog 中每个 HTTPS 资产都固定到实际 SHA-256、Feature branch 和 commit，并携带从已验证 manifest 提取的 `provides` / `requires` capability 元数据。
+
+每个 Feature Release 都附带完整 catalog 快照；同时，Feature 发布会把最新的 `catalog.yaml` 和 `catalog.yaml.sha256` 同步到当前 Latest Platform Release，使旧客户端的 `releases/latest/download/catalog.yaml` 地址继续可用。Platform 的 Core 版本、镜像身份和 `.tpx` 资产保持不变，只有这两个 catalog 兼容资产滚动更新。当前 Latest 为 `platform-v1.0.5`；发布下一版 Platform 时必须显式将新的 `platform-v<semver>` Release 设为 Latest。
 
 Feature 的 `manifest.yaml` 中 Feature version 是不可变的 `name@version` 身份。代码、构建字节、来源分支或来源提交发生变化时必须先提升 version；发布流水线会拒绝同一 version 对应不同 digest 或来源。把现有四个 Feature 的相同 1.0.1 字节从历史聚合 Release 迁移到各自 Release 时，安装版本仍是 1.0.1；Core 按语义版本比较，因此不会产生 Telegram 更新通知。
 
