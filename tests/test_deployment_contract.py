@@ -64,30 +64,40 @@ class DeploymentContractTest(unittest.TestCase):
         self.assertIn(f"-t {image}", source)
         self.assertIn(f"docker image inspect {image}", source)
 
-    def test_documentation_describes_aggregate_release_contract(self):
-        required = (
+    def test_documentation_describes_independent_release_contract(self):
+        chinese_required = (
             "ghcr.io/<owner>/telepiplex-core",
-            "platform-v1.0.0",
+            "core-v1.0.6",
+            "open115-v1.0.1",
+            "media-search-v1.0.1",
+            "renaming-v1.0.1",
+            "plex-management-v1.0.1",
+            "`catalog` 分支",
             "catalog.yaml",
-            "open115",
-            "media-search",
-            "renaming",
-            "plex-management",
+            "releases/latest/download/catalog.yaml",
+            "Feature version",
+            "1.0.1",
+            "不会产生 Telegram 更新通知",
             "不会静默更新",
         )
         chinese = (ROOT / "README.md").read_text(encoding="utf-8")
-        for term in required:
+        for term in chinese_required:
             self.assertIn(term, chinese, term)
 
         english = (ROOT / "README_EN.md").read_text(encoding="utf-8")
         for term in (
             "ghcr.io/<owner>/telepiplex-core",
-            "platform-v1.0.0",
+            "core-v1.0.6",
+            "open115-v1.0.1",
+            "media-search-v1.0.1",
+            "renaming-v1.0.1",
+            "plex-management-v1.0.1",
+            "`catalog` branch",
             "catalog.yaml",
-            "open115",
-            "media-search",
-            "renaming",
-            "plex-management",
+            "releases/latest/download/catalog.yaml",
+            "Feature version",
+            "1.0.1",
+            "does not produce a Telegram update notification",
             "never updates silently",
         ):
             self.assertIn(term, english, term)
@@ -101,13 +111,18 @@ class DeploymentContractTest(unittest.TestCase):
         self.assertNotIn("GitHub 自动发布 Core 镜像、Feature `.tpx` 和远程 catalog 尚未落地", decisions)
 
     def test_documentation_describes_remote_update_discovery(self):
-        remote_catalog = (
-            "https://github.com/countott/telepiplex/releases/latest/"
-            "download/catalog.yaml"
+        preferred_catalog = (
+            "https://raw.githubusercontent.com/countott/telepiplex/"
+            "catalog/catalog.yaml"
+        )
+        compatibility_catalog = (
+            "https://github.com/countott/telepiplex/releases/latest/download/"
+            "catalog.yaml"
         )
         chinese = (ROOT / "README.md").read_text(encoding="utf-8")
         for term in (
-            remote_catalog,
+            preferred_catalog,
+            compatibility_catalog,
             "catalog_refresh_interval: 21600",
             "确认更新",
             "/config/plugins/catalog.yaml",
@@ -117,7 +132,8 @@ class DeploymentContractTest(unittest.TestCase):
 
         english = (ROOT / "README_EN.md").read_text(encoding="utf-8")
         for term in (
-            remote_catalog,
+            preferred_catalog,
+            compatibility_catalog,
             "catalog_refresh_interval: 21600",
             "Confirm update",
             "/config/plugins/catalog.yaml",

@@ -36,7 +36,7 @@ class ConfigTemplateContractTest(unittest.TestCase):
         self.assertEqual(parsed["plugins"]["root"], "/config/plugins")
         self.assertEqual(
             parsed["plugins"]["catalog"],
-            "https://github.com/countott/telepiplex/releases/latest/download/catalog.yaml",
+            "https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml",
         )
         self.assertEqual(parsed["plugins"]["catalog_refresh_interval"], 21600)
         self.assertIn(

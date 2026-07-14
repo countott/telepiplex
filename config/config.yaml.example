@@ -8,7 +8,7 @@ allowed_user: 123456789
 # Feature 完整模板位于 /config/plugins/<plugin_id>/config.yaml.example，实际值写入同目录 config.yaml。
 plugins:
   root: /config/plugins
-  catalog: https://github.com/countott/telepiplex/releases/latest/download/catalog.yaml
+  catalog: https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml
   catalog_refresh_interval: 21600
   install_timeout: 300
   startup_timeout: 30

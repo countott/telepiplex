@@ -70,7 +70,7 @@ SENSITIVE_CONFIG_KEYWORDS = (
 )
 PLUGIN_UPDATE_TASK_KEY = "telepiplex_plugin_update_task"
 DEFAULT_PLUGIN_CATALOG_URL = (
-    "https://github.com/countott/telepiplex/releases/latest/download/catalog.yaml"
+    "https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml"
 )
 
 

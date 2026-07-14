@@ -24,8 +24,12 @@ def load_bot_module():
 
 
 class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
-    async def test_missing_legacy_catalog_uses_official_release_catalog(self):
+    async def test_missing_legacy_catalog_uses_official_catalog_branch(self):
         bot_module = await asyncio.to_thread(load_bot_module)
+        self.assertEqual(
+            bot_module.DEFAULT_PLUGIN_CATALOG_URL,
+            "https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml",
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             plugins_root = root / "plugins"

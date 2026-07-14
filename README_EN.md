@@ -18,7 +18,7 @@ bot_token: "your_bot_token"
 allowed_user: 123456789
 plugins:
   root: /config/plugins
-  catalog: https://github.com/countott/telepiplex/releases/latest/download/catalog.yaml
+  catalog: https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml
   catalog_refresh_interval: 21600
   install_timeout: 300
   startup_timeout: 30
@@ -31,7 +31,7 @@ plugins:
 
 Feature branches are development source. Runtime releases are immutable `.tpx` artifacts built from those branches. The container never checks out Git branches and Core images never contain business source code.
 
-`plugins.catalog` accepts either a remote HTTPS URL or a local file path. The default points at the aggregate release catalog. The legacy default catalog is `<plugins.root>/catalog.yaml` (`/config/plugins/catalog.yaml` with the default configuration above); Core falls back to the official URL only when that legacy file is missing: `https://github.com/countott/telepiplex/releases/latest/download/catalog.yaml`. An existing legacy file remains local; every other explicit local path preserves its local configuration intent even when its file is missing. For offline or pinned operation, download the catalog and configure its local path. The catalog maps `name@version` to a local path or HTTPS release with a pinned SHA-256 digest:
+`plugins.catalog` accepts either a remote HTTPS URL or a local file path. New installations read `https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml` from the `catalog` branch by default. The legacy default catalog is `<plugins.root>/catalog.yaml` (`/config/plugins/catalog.yaml` with the default configuration above); Core falls back to the official URL only when that legacy file is missing. An existing legacy file remains local; every other explicit local path preserves its local configuration intent even when its file is missing. The former Core endpoint, `https://github.com/countott/telepiplex/releases/latest/download/catalog.yaml`, remains compatible because every Feature Release carries the complete catalog snapshot and checksum current at publication time. For offline or pinned operation, download the catalog and configure its local path. The catalog maps `name@version` to a local path or HTTPS release with a pinned SHA-256 digest:
 
 ```yaml
 plugins:
@@ -63,18 +63,27 @@ Commands:
 
 An existing absolute `.tpx` path is also accepted by `install` and `update`. Core verifies and installs the new release, starts a shadow process, checks health, drains active work, and switches routes atomically. A failure at any stage keeps the old release active.
 
-## Aggregate GitHub releases
+## Independent GitHub release channels
 
-Production releases use a `platform-v<semver>` tag:
+Core, Features, and the catalog publish independently. Only a `core-v<semver>` tag builds Core; for example, the next Core release is:
 
 ```bash
-git tag platform-v1.0.0
-git push origin platform-v1.0.0
+git tag core-v1.0.6
+git push origin core-v1.0.6
 ```
 
-GitHub Actions builds and pushes the `linux/amd64` Core image `ghcr.io/<owner>/telepiplex-core:1.0.0`. The same release builds Linux `.tpx` assets for `open115`, `media-search`, `renaming`, and `plex-management` from their independent Feature branches. It also publishes `catalog.yaml` and `catalog.yaml.sha256`; every HTTPS asset is pinned to its real SHA-256, Feature branch, and commit, with `provides` / `requires` capability metadata derived from the verified manifest.
+That workflow pushes only the `linux/amd64` Core image `ghcr.io/<owner>/telepiplex-core:1.0.6` and `latest`; it neither publishes nor changes a Feature. Each of the four Features has its own tag family, with the current releases represented by:
 
-The version in each Feature `manifest.yaml` is an immutable `name@version` identity. A code change requires a version bump, and the workflow rejects a reused version with different bytes.
+```bash
+git tag open115-v1.0.1
+git tag media-search-v1.0.1
+git tag renaming-v1.0.1
+git tag plex-management-v1.0.1
+```
+
+Each Feature tag builds or reuses exactly one immutable `.tpx`, creates that Feature's GitHub Release, and optimistically merges the result into the `catalog` branch. That branch holds the complete `catalog.yaml` and `catalog.yaml.sha256`; every HTTPS asset is pinned to its real SHA-256, Feature branch, and commit, with `provides` / `requires` capability metadata derived from the verified manifest. Each Feature Release also receives a complete catalog snapshot, keeping `releases/latest/download/catalog.yaml` compatible for older clients. The historical aggregate `platform-v1.0.5` release remains immutable but is not used for new versions.
+
+The Feature version in each `manifest.yaml` is an immutable `name@version` identity. Any change to code, artifact bytes, source branch, or source commit requires a version bump; the workflow rejects a reused version with a different digest or source. Migrating the existing four Features' identical 1.0.1 bytes from the historical aggregate Release to their individual Releases leaves the installed version at 1.0.1. Core compares semantic versions, so this migration does not produce a Telegram update notification.
 
 Core refreshes the remote catalog once at startup and then checks the current release of each installed Feature for its newest stable, Core-compatible release every `catalog_refresh_interval: 21600` seconds (six hours). Refreshes require HTTPS, enforce size and schema limits, and replace the cache atomically. Network or catalog failures skip only that check and retain the last valid catalog; Core and other Features continue running.
 
