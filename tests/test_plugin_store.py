@@ -16,7 +16,7 @@ class PluginStoreTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def _artifact(self, version="1.0.0", commit="a" * 40):
+    def _artifact(self, version="1.0.0", commit="a" * 40, default_prefix="echo"):
         from app.core.plugin_artifact import build_tpx, verify_tpx
 
         source = self.root / f"source-{version}"
@@ -50,7 +50,9 @@ class PluginStoreTest(unittest.TestCase):
             "required": ["prefix"],
             "additionalProperties": False,
         }), encoding="utf-8")
-        (source / "config.default.yaml").write_text("prefix: echo\n", encoding="utf-8")
+        (source / "config.default.yaml").write_text(
+            f"prefix: {default_prefix}\n", encoding="utf-8"
+        )
         output = build_tpx(source, self.root / f"echo-{version}.tpx")
         return verify_tpx(output)
 
@@ -95,6 +97,31 @@ class PluginStoreTest(unittest.TestCase):
             [item.version for item in store.list_installed()],
             ["1.0.0", "1.1.0"],
         )
+
+    def test_commit_refreshes_example_without_overwriting_live_config(self):
+        from app.core.plugin_store import PluginStore
+
+        store = PluginStore(self.plugins_root)
+        store.activate(store.stage(self._artifact(default_prefix="first")))
+        live_path = self.plugins_root / "echo/config.yaml"
+        example_path = self.plugins_root / "echo/config.yaml.example"
+
+        self.assertEqual(yaml.safe_load(live_path.read_text()), {"prefix": "first"})
+        self.assertEqual(yaml.safe_load(example_path.read_text()), {"prefix": "first"})
+        self.assertEqual(stat.S_IMODE(live_path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(example_path.stat().st_mode), 0o644)
+
+        store.write_config(store.active("echo"), {"prefix": "user-value"})
+        store.commit(
+            store.stage(
+                self._artifact("1.1.0", "b" * 40, default_prefix="second")
+            )
+        )
+
+        self.assertEqual(yaml.safe_load(live_path.read_text()), {"prefix": "user-value"})
+        self.assertEqual(yaml.safe_load(example_path.read_text()), {"prefix": "second"})
+        self.assertEqual(stat.S_IMODE(live_path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(example_path.stat().st_mode), 0o644)
 
     def test_commit_release_does_not_activate_until_explicit_route_transaction(self):
         from app.core.plugin_store import PluginStore

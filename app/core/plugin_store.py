@@ -99,7 +99,7 @@ def _atomic_json(path: Path, value: dict):
         temporary.unlink(missing_ok=True)
 
 
-def _atomic_yaml(path: Path, value: dict):
+def _atomic_yaml(path: Path, value: dict, *, mode: int = 0o600):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     data = yaml.safe_dump(
@@ -109,12 +109,12 @@ def _atomic_yaml(path: Path, value: dict):
     ).encode("utf-8")
     try:
         with temporary.open("wb") as handle:
-            os.chmod(temporary, 0o600)
+            os.chmod(temporary, mode)
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        os.chmod(path, 0o600)
+        os.chmod(path, mode)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -198,8 +198,9 @@ class PluginStore:
         plugin_root.joinpath("state").mkdir(parents=True, exist_ok=True)
 
         config_path = plugin_root / "config.yaml"
+        default = _default_at(target)
+        _atomic_yaml(plugin_root / "config.yaml.example", default, mode=0o644)
         if not config_path.exists():
-            default = _default_at(target)
             _atomic_yaml(config_path, default)
         (target / ".validated-default.json").unlink(missing_ok=True)
 

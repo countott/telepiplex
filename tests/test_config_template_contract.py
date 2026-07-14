@@ -39,6 +39,10 @@ class ConfigTemplateContractTest(unittest.TestCase):
             "https://github.com/countott/telepiplex/releases/latest/download/catalog.yaml",
         )
         self.assertEqual(parsed["plugins"]["catalog_refresh_interval"], 21600)
+        self.assertIn(
+            "/config/plugins/<plugin_id>/config.yaml.example",
+            runtime_source,
+        )
         for term in BUSINESS_TERMS:
             self.assertNotIn(term, parsed)
 
