@@ -137,6 +137,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         for label, status, output, succeeds in (
             ("missing", "1", "manifest unknown", True),
             ("missing-code", "1", "MANIFEST_UNKNOWN", True),
+            ("missing-ghcr", "1", "ERROR: ghcr.io/example/telepiplex-core:1.2.3: not found", True),
             ("exists", "0", "exists", False),
             ("auth", "1", "unauthorized: authentication required", False),
             ("network", "1", "dial tcp: network is unreachable", False),

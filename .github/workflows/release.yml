@@ -86,7 +86,8 @@ jobs:
             echo "Core image tag already exists: $CORE_IMAGE:$VERSION" >&2
             exit 1
           fi
-          if grep -Eiq 'manifest[ _-]*(unknown|not[ _-]*found)|MANIFEST_UNKNOWN' <<< "$INSPECT_OUTPUT"; then
+          if grep -Eiq 'manifest[ _-]*(unknown|not[ _-]*found)|MANIFEST_UNKNOWN' <<< "$INSPECT_OUTPUT" \
+            || grep -Eiq '^ERROR: .+: not found$' <<< "$INSPECT_OUTPUT"; then
             echo "Confirmed unused Core image tag: $CORE_IMAGE:$VERSION"
           else
             echo "Unable to prove Core image tag is unused; refusing publication." >&2
