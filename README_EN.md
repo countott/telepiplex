@@ -75,10 +75,10 @@ git push origin core-v1.0.6
 That workflow pushes only the `linux/amd64` Core image `ghcr.io/<owner>/telepiplex-core:1.0.6` and `latest`; it neither publishes nor changes a Feature. Each of the four Features has its own tag family, with the current releases represented by:
 
 ```bash
-git tag open115-v1.0.1
-git tag media-search-v1.0.1
-git tag renaming-v1.0.1
-git tag plex-management-v1.0.1
+git tag open115-v1.0.2
+git tag media-search-v1.0.2
+git tag renaming-v1.0.2
+git tag plex-management-v1.0.2
 ```
 
 Each Feature tag builds or reuses exactly one immutable `.tpx`, creates that Feature's GitHub Release, and optimistically merges the result into the `catalog` branch. Feature Releases are created with `--latest=false`, so they never take the repository's **Latest** label; Latest is reserved for an explicitly selected stable `platform-v<semver>` Release. The branch holds the complete `catalog.yaml` and `catalog.yaml.sha256`; every HTTPS asset is pinned to its real SHA-256, Feature branch, and commit, with `provides` / `requires` capability metadata derived from the verified manifest.
