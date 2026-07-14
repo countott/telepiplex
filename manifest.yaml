@@ -30,5 +30,5 @@ config_schema_version: 1
 state_schema_version: 1
 source:
   repository: origin
-  branch: feature/115
+  branch: feature/open115
   commit: "0000000000000000000000000000000000000000"

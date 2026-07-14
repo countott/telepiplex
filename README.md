@@ -1,6 +1,6 @@
 # open115 Feature
 
-`feature/115` 是纯 Feature 源码分支，提供 `download.provider` 与 `storage.provider`。它由 Telepiplex Core 构建为不可变 `.tpx`，安装后在 Core 容器内以独立 venv/子进程运行。
+`feature/open115` 是纯 Feature 源码分支，提供 `download.provider` 与 `storage.provider`。它由 Telepiplex Core 构建为不可变 `.tpx`，安装后在 Core 容器内以独立 venv/子进程运行。
 
 配置位于 `/config/plugins/open115/config.yaml`。Core `/config` 选择 open115 或直接发送 `/auth`，都可分步录入 Access/Refresh Token，或选择 115 扫码授权；两条路线及自动刷新都只原子写回该 Feature 私有配置，Token 不进入消息与日志。
 
