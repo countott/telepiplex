@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -209,7 +210,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
             while (($#)); do
               if [[ "$1" == '--output' ]]; then output="$2"; shift 2; else shift; fi
             done
-            [[ -z "$output" ]] || printf '{}\\n' > "$output"
+            [[ -z "$output" ]] || printf '%s\\n' "$FAKE_RELEASE_JSON" > "$output"
             printf '%s' "$FAKE_HTTP_CODE"
             exit "$FAKE_CURL_STATUS"
         """
@@ -218,6 +219,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
             "GITHUB_REPOSITORY": "example/repo",
             "RELEASE_TAG": "media-search-v1.2.3",
             "GH_TOKEN": "token",
+            "FAKE_RELEASE_JSON": '{"draft": false, "prerelease": false}',
         }
 
         for label, code, curl_status, succeeds, expected in (
@@ -236,12 +238,96 @@ class ReleaseWorkflowTest(unittest.TestCase):
                         "FAKE_CURL_STATUS": curl_status,
                     }
                     temporary, _, result = self._run_script(
-                        probe, env=env, commands={"curl": curl}
+                        probe,
+                        env=env,
+                        commands={
+                            "curl": curl,
+                            "python": f'exec "{sys.executable}" "$@"\n',
+                        },
                     )
                     self.addCleanup(temporary.cleanup)
                     self.assertEqual(result.returncode == 0, succeeds, result.stderr)
                     if expected:
                         self.assertIn(expected, Path(output_file.name).read_text())
+
+    def test_existing_release_must_be_public_in_build_and_publish_probes(self):
+        workflow = self._workflow(FEATURE_WORKFLOW)
+        probes = {
+            "build": self._step(
+                workflow, "build-feature", "Probe immutable Feature Release"
+            )["run"],
+            "publish": self._step(
+                workflow, "publish-feature", "Ensure immutable Feature Release"
+            )["run"],
+        }
+        curl = """
+            output=''
+            while (($#)); do
+              if [[ "$1" == '--output' ]]; then output="$2"; shift 2; else shift; fi
+            done
+            if [[ "$output" == *release.json ]]; then
+              printf '%s\\n' "$FAKE_RELEASE_JSON" > "$output"
+              printf '200'
+            elif [[ -n "$output" ]]; then
+              printf 'artifact-bytes' > "$output"
+            fi
+        """
+        python = f'exec "{sys.executable}" "$@"\n'
+        asset = "media-search-1.2.3.tpx"
+        base_env = {
+            "GITHUB_API_URL": "https://api.github.test",
+            "GITHUB_REPOSITORY": "countott/telepiplex",
+            "GITHUB_SHA": "a" * 40,
+            "RELEASE_TAG": "media-search-v1.2.3",
+            "ASSET_NAME": asset,
+            "GH_TOKEN": "token",
+        }
+        metadata = {
+            "public": (False, False, True),
+            "draft": (True, False, False),
+            "prerelease": (False, True, False),
+        }
+
+        for probe_name, source in probes.items():
+            for label, (draft, prerelease, succeeds) in metadata.items():
+                with self.subTest(probe=probe_name, release=label):
+                    release = {
+                        "draft": draft,
+                        "prerelease": prerelease,
+                        "assets": [
+                            {
+                                "name": asset,
+                                "browser_download_url": (
+                                    "https://github.com/countott/telepiplex/"
+                                    f"releases/download/media-search-v1.2.3/{asset}"
+                                ),
+                            }
+                        ],
+                    }
+                    with tempfile.NamedTemporaryFile() as output_file:
+                        script = source
+                        if probe_name == "publish":
+                            script = (
+                                f"mkdir -p dist\nprintf 'artifact-bytes' > dist/{asset}\n"
+                                + source
+                            )
+                        temporary, _, result = self._run_script(
+                            script,
+                            env={
+                                **base_env,
+                                "GITHUB_OUTPUT": output_file.name,
+                                "FAKE_RELEASE_JSON": json.dumps(release),
+                            },
+                            commands={"curl": curl, "python": python},
+                        )
+                        self.addCleanup(temporary.cleanup)
+                        self.assertEqual(
+                            result.returncode == 0,
+                            succeeds,
+                            result.stderr,
+                        )
+            self.assertIn("draft", source, probe_name)
+            self.assertIn("prerelease", source, probe_name)
 
     def test_existing_release_reuses_exact_asset_and_embedded_commit(self):
         workflow = self._workflow(FEATURE_WORKFLOW)

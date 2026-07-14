@@ -77,6 +77,14 @@ jobs:
             "$RELEASE_API")
           case "$HTTP_CODE" in
             200)
+              python - <<'PY'
+          import json
+          import pathlib
+
+          release = json.loads(pathlib.Path("release-metadata/release.json").read_text())
+          if release.get("draft") is not False or release.get("prerelease") is not False:
+              raise SystemExit("existing Feature Release is not publicly published")
+          PY
               echo "exists=true" >> "$GITHUB_OUTPUT"
               ;;
             404)
@@ -455,6 +463,8 @@ jobs:
           import sys
 
           release = json.loads(pathlib.Path("release-check/release.json").read_text())
+          if release.get("draft") is not False or release.get("prerelease") is not False:
+              raise SystemExit("existing Feature Release is not publicly published")
           expected = sys.argv[1]
           assets = [asset for asset in release.get("assets", []) if str(asset.get("name", "")).endswith(".tpx")]
           if [asset.get("name") for asset in assets] != [expected]:
