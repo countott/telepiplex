@@ -19,7 +19,7 @@ from tools.generate_release_catalog import (
 
 
 PLUGINS = {
-    "open115": "feature/115",
+    "open115": "feature/open115",
     "media-search": "feature/media-search",
     "renaming": "feature/renaming",
     "plex-management": "feature/plex-management",
@@ -193,7 +193,7 @@ class ReleaseCatalogGeneratorTest(unittest.TestCase):
             ("missing", artifacts[:-1]),
             (
                 "duplicate",
-                [*artifacts, self._artifact("open115", "feature/115", suffix="-copy")],
+                [*artifacts, self._artifact("open115", "feature/open115", suffix="-copy")],
             ),
         ]
         for label, paths in cases:

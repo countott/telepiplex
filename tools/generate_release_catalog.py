@@ -16,7 +16,7 @@ from app.core.plugin_artifact import ArtifactError, verify_tpx
 
 
 _REQUIRED_PLUGINS = {
-    "open115": "feature/115",
+    "open115": "feature/open115",
     "media-search": "feature/media-search",
     "renaming": "feature/renaming",
     "plex-management": "feature/plex-management",

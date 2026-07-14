@@ -17,7 +17,7 @@ from app.core.plugin_contract import ContractError
 
 
 FEATURE_BRANCHES = {
-    "open115": "feature/115",
+    "open115": "feature/open115",
     "media-search": "feature/media-search",
     "renaming": "feature/renaming",
     "plex-management": "feature/plex-management",

@@ -166,7 +166,7 @@ class FeatureCatalogUpdaterTest(unittest.TestCase):
 
     def test_rejects_tag_manifest_and_branch_identity_mismatches(self):
         cases = (
-            ("plugin", self._artifact(plugin_id="open115", branch="feature/115")),
+            ("plugin", self._artifact(plugin_id="open115", branch="feature/open115")),
             ("version", self._artifact(version="1.2.4")),
             ("branch", self._artifact(branch="feature/renaming")),
         )
