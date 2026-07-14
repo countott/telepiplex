@@ -72,6 +72,14 @@ class MediaSearchConfigWizard:
         if action == "cancel":
             self.sessions.pop(key, None)
             return self._message("已取消 media-search 配置。", "close", edit=True)
+        if session.get("stage") == "confirm" and action == "confirm":
+            patch = deepcopy(session["patch"])
+            self.sessions.pop(key, None)
+            return {
+                "actions": [],
+                "session": {"state": "close"},
+                "config_patch": patch,
+            }
         if session.get("stage") == "choose" and action == "prowlarr":
             self.sessions[key] = {"stage": "prowlarr_url", "values": {}}
             return self._message(
@@ -191,11 +199,17 @@ class MediaSearchConfigWizard:
         return _text(raw)
 
     def _finish(self, key, patch: dict) -> dict:
-        self.sessions.pop(key, None)
+        self.sessions[key] = {"stage": "confirm", "patch": deepcopy(patch)}
         return {
-            "actions": [],
-            "session": {"state": "close"},
-            "config_patch": patch,
+            "actions": [{
+                "kind": "send_message",
+                "text": "配置已收集，敏感值不会回显。确认保存并重新加载 Feature？",
+                "data": {"keyboard": [[
+                    {"text": "确认保存", "callback_data": "media-search:config:confirm"},
+                    {"text": "取消", "callback_data": "media-search:config:cancel"},
+                ]]},
+            }],
+            "session": {"state": "open"},
         }
 
     @staticmethod

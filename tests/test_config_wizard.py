@@ -42,6 +42,13 @@ class MediaSearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
             "args": [],
         })
 
+    async def _confirm(self):
+        return await self.feature.callback({
+            **self.owner,
+            "namespace": "media-search",
+            "payload": "config:confirm",
+        })
+
     async def test_entry_only_exposes_public_sections(self):
         result = await self._start()
 
@@ -68,10 +75,13 @@ class MediaSearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Prowlarr 地址", selected["actions"][0]["text"])
 
         await self.feature.message({**self.owner, "text": "http://prowlarr:9696"})
-        result = await self.feature.message({
+        pending = await self.feature.message({
             **self.owner,
             "text": "new-prowlarr-key",
         })
+        self.assertNotIn("config_patch", pending)
+        self.assertEqual(pending["session"]["state"], "open")
+        result = await self._confirm()
 
         self.assertEqual(result["session"]["state"], "close")
         self.assertEqual(result["actions"], [])
@@ -98,7 +108,8 @@ class MediaSearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
             "payload": "config:boolean:on",
         })
         await self.feature.message({**self.owner, "text": "-"})
-        result = await self.feature.message({**self.owner, "text": "new-pin"})
+        await self.feature.message({**self.owner, "text": "new-pin"})
+        result = await self._confirm()
 
         self.assertEqual(result["config_patch"], {
             "metadata": {
@@ -126,7 +137,8 @@ class MediaSearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
             **self.owner, "text": "https://ai.example/v1"
         })
         await self.feature.message({**self.owner, "text": "new-ai-key"})
-        result = await self.feature.message({**self.owner, "text": "gpt-example"})
+        await self.feature.message({**self.owner, "text": "gpt-example"})
+        result = await self._confirm()
 
         self.assertEqual(result["config_patch"], {
             "ai": {
@@ -144,14 +156,36 @@ class MediaSearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
             "namespace": "media-search",
             "payload": "config:ai",
         })
-        result = await self.feature.callback({
+        pending = await self.feature.callback({
             **self.owner,
             "namespace": "media-search",
             "payload": "config:boolean:off",
         })
+        self.assertNotIn("config_patch", pending)
+        result = await self._confirm()
 
         self.assertEqual(result["config_patch"], {"ai": {"enable": False}})
         self.assertEqual(result["session"]["state"], "close")
+
+    async def test_cancel_at_confirmation_does_not_submit_patch(self):
+        await self._start()
+        await self.feature.callback({
+            **self.owner,
+            "namespace": "media-search",
+            "payload": "config:prowlarr",
+        })
+        await self.feature.message({**self.owner, "text": "http://prowlarr:9696"})
+        pending = await self.feature.message({**self.owner, "text": "new-secret"})
+        self.assertNotIn("new-secret", repr(pending))
+
+        cancelled = await self.feature.callback({
+            **self.owner,
+            "namespace": "media-search",
+            "payload": "config:cancel",
+        })
+
+        self.assertNotIn("config_patch", cancelled)
+        self.assertEqual(cancelled["session"]["state"], "close")
 
 
 if __name__ == "__main__":
