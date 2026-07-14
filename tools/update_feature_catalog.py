@@ -13,6 +13,7 @@ from pathlib import Path
 import yaml
 
 from app.core.plugin_artifact import ArtifactError, verify_tpx
+from app.core.plugin_contract import ContractError
 
 
 FEATURE_BRANCHES = {
@@ -102,7 +103,7 @@ def merge_feature_release(
         )
     try:
         verified = verify_tpx(artifact_path)
-    except (ArtifactError, OSError) as exc:
+    except (ArtifactError, ContractError, OSError) as exc:
         raise CatalogUpdateError(f"invalid Feature artifact: {artifact_path.name}") from exc
 
     manifest = verified.manifest
@@ -137,9 +138,12 @@ def merge_feature_release(
         raise CatalogUpdateError(f"invalid previous versions entry: {plugin_id}")
 
     entry = _release_entry(verified, repository, str(tag))
-    previous_entry = versions.get(version)
-    if previous_entry is not None:
-        _validate_previous_identity(previous_entry, entry, f"{plugin_id}@{version}")
+    if version in versions:
+        _validate_previous_identity(
+            versions[version],
+            entry,
+            f"{plugin_id}@{version}",
+        )
     versions[version] = entry
     merged["release"] = str(tag)
     return merged

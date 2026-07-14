@@ -3,6 +3,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 import yaml
@@ -64,6 +65,32 @@ class FeatureCatalogUpdaterTest(unittest.TestCase):
         )
         (source / "config.default.yaml").write_text("{}\n", encoding="utf-8")
         return build_tpx(source, self.root / f"{plugin_id}-{version}.tpx")
+
+    def _with_invalid_manifest(self, artifact):
+        with zipfile.ZipFile(artifact) as bundle:
+            infos = bundle.infolist()
+            contents = {info.filename: bundle.read(info.filename) for info in infos}
+        manifest = yaml.safe_load(contents["manifest.yaml"])
+        manifest["version"] = "not-semver"
+        contents["manifest.yaml"] = yaml.safe_dump(
+            manifest,
+            sort_keys=True,
+        ).encode("utf-8")
+        contents["checksums.sha256"] = (
+            "\n".join(
+                f"{hashlib.sha256(contents[name]).hexdigest()}  {name}"
+                for name in sorted(contents)
+                if name != "checksums.sha256"
+            )
+            + "\n"
+        ).encode("utf-8")
+
+        rewritten = artifact.with_name(f".{artifact.name}.invalid")
+        with zipfile.ZipFile(rewritten, "w") as bundle:
+            for info in infos:
+                bundle.writestr(info, contents[info.filename])
+        rewritten.replace(artifact)
+        return artifact
 
     def _previous_catalog(self):
         return {
@@ -180,6 +207,24 @@ class FeatureCatalogUpdaterTest(unittest.TestCase):
                         "media-search-v1.2.3",
                     )
 
+    def test_rejects_present_null_previous_version_entry(self):
+        artifact = self._artifact()
+        previous = merge_feature_release(
+            None,
+            artifact,
+            "countott/telepiplex",
+            "media-search-v1.2.3",
+        )
+        previous["plugins"]["media-search"]["versions"]["1.2.3"] = None
+
+        with self.assertRaises(CatalogUpdateError):
+            merge_feature_release(
+                previous,
+                artifact,
+                "countott/telepiplex",
+                "media-search-v1.2.3",
+            )
+
     def test_rejects_invalid_repository_and_artifact_filename(self):
         artifact = self._artifact()
         with self.assertRaises(CatalogUpdateError):
@@ -191,6 +236,17 @@ class FeatureCatalogUpdaterTest(unittest.TestCase):
             merge_feature_release(
                 None,
                 renamed,
+                "countott/telepiplex",
+                "media-search-v1.2.3",
+            )
+
+    def test_normalizes_invalid_manifest_contract_error(self):
+        artifact = self._with_invalid_manifest(self._artifact())
+
+        with self.assertRaises(CatalogUpdateError):
+            merge_feature_release(
+                None,
+                artifact,
                 "countott/telepiplex",
                 "media-search-v1.2.3",
             )
