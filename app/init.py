@@ -25,6 +25,10 @@ debug_mode = False
 logger: Optional[Logger] = None
 bot_config = {}
 
+
+class ConfigLoadError(RuntimeError):
+    pass
+
 CONFIG_FILE = "/config/config.yaml"
 CONFIG_FILE_EXAMPLE = "/config/config.yaml.example"
 APP = "/app"
@@ -57,7 +61,7 @@ def create_logger():
     logger.info("Logger init success!")
 
 
-def load_yaml_config():
+def load_yaml_config(*, raise_on_error=False):
     global bot_config
     yaml_path = CONFIG_FILE
     example_config_path = f"{APP}/config.yaml.example"
@@ -69,19 +73,26 @@ def load_yaml_config():
     try:
         if os.path.exists(yaml_path):
             with open(yaml_path, "r", encoding="utf-8") as f:
-                bot_config = yaml.safe_load(f) or {}
+                loaded = yaml.safe_load(f) or {}
         elif os.path.exists(example_config_path):
             os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
             shutil.copy2(example_config_path, yaml_path)
             print(f"已复制示例配置文件到 {yaml_path}")
             with open(yaml_path, "r", encoding="utf-8") as f:
-                bot_config = yaml.safe_load(f) or {}
+                loaded = yaml.safe_load(f) or {}
         else:
-            print("Config example file not found!")
-            bot_config = {}
-    except Exception:
+            raise ConfigLoadError("Config example file not found")
+        if not isinstance(loaded, dict):
+            raise ConfigLoadError("Core config must be a mapping")
+    except Exception as exc:
         print(f"配置文件[{yaml_path}]格式有误，请检查!")
-        bot_config = {}
+        if raise_on_error:
+            if isinstance(exc, ConfigLoadError):
+                raise
+            raise ConfigLoadError(type(exc).__name__) from None
+        return bot_config
+    bot_config = loaded
+    return bot_config
 
 def get_bot_token():
     global bot_config

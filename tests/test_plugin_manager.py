@@ -214,6 +214,45 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(old.state, "stopped")
         self.assertIsNot(self.supervisor.process("echo"), old)
 
+    async def test_reload_config_reads_manual_yaml_and_restarts_running_feature(self):
+        schema, default = self._editable_config()
+        await self.manager.install(self._artifact(
+            config_schema=schema,
+            config_default=default,
+        ))
+        old = self.supervisor.process("echo")
+        config_path = self.root / "plugins/echo/config.yaml"
+        config_path.write_text("prefix: manually-edited\n", encoding="utf-8")
+
+        result = await self.manager.reload_config("echo")
+
+        self.assertEqual(result.state, "active")
+        self.assertTrue(result.details["restarted"])
+        self.assertEqual(
+            self.store.read_config(self.store.active("echo")),
+            {"prefix": "manually-edited"},
+        )
+        self.assertEqual(old.state, "stopped")
+
+    async def test_reload_config_rejects_invalid_manual_yaml_without_stopping_feature(self):
+        from app.core.plugin_manager import PluginOperationError
+
+        schema, default = self._editable_config()
+        await self.manager.install(self._artifact(
+            config_schema=schema,
+            config_default=default,
+        ))
+        old = self.supervisor.process("echo")
+        config_path = self.root / "plugins/echo/config.yaml"
+        config_path.write_text("prefix: [\n", encoding="utf-8")
+
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.reload_config("echo")
+
+        self.assertEqual(raised.exception.code, "invalid_config")
+        self.assertIs(self.supervisor.process("echo"), old)
+        self.assertEqual(old.state, "healthy")
+
     async def test_config_state_reports_custom_command_and_invalid_live_config(self):
         schema, default = self._editable_config()
         schema["x-telepiplex-config-command"] = "configure_echo"

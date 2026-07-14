@@ -93,6 +93,7 @@ class CategoryRouteStartupTest(unittest.TestCase):
 
             old_config = init.bot_config
             self.addCleanup(setattr, init, "bot_config", old_config)
+            init.bot_config = {"allowed_user": 42}
             with patch.multiple(
                 init,
                 APP=str(app_dir),
@@ -122,6 +123,7 @@ class CategoryRouteStartupTest(unittest.TestCase):
 
             old_config = init.bot_config
             self.addCleanup(setattr, init, "bot_config", old_config)
+            init.bot_config = {"allowed_user": 42}
             with patch.multiple(
                 init,
                 APP=str(app_dir),
@@ -130,7 +132,7 @@ class CategoryRouteStartupTest(unittest.TestCase):
             ), patch("builtins.print") as print_mock:
                 init.load_yaml_config()
 
-            self.assertEqual(init.bot_config, {})
+            self.assertEqual(init.bot_config, {"allowed_user": 42})
             self.assertTrue(any(
                 "格式有误" in str(call.args[0])
                 for call in print_mock.call_args_list

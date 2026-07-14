@@ -237,6 +237,151 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
 
         manager.start.assert_awaited_once()
 
+    async def test_hot_runtime_config_updates_safe_fields_and_reports_restart_fields(self):
+        bot_module = await asyncio.to_thread(load_bot_module)
+        dispatcher = SimpleNamespace(
+            retry_interval=1,
+            delivery_deadline=30,
+            max_attempts=5,
+        )
+        manager = SimpleNamespace(
+            install_timeout=300,
+            drain_timeout=120,
+            stabilize_seconds=10,
+            supervisor=SimpleNamespace(startup_timeout=30, restart_limit=3),
+            broker=SimpleNamespace(dispatcher=dispatcher),
+        )
+        old = {
+            "bot_token": "old",
+            "allowed_user": 1,
+            "plugins": {"root": "/old", "catalog": "old-catalog"},
+        }
+        new = {
+            "bot_token": "new",
+            "allowed_user": 2,
+            "plugins": {
+                "root": "/new",
+                "catalog": "new-catalog",
+                "install_timeout": 11,
+                "startup_timeout": 12,
+                "drain_timeout": 13,
+                "stabilize_seconds": 0,
+                "restart_limit": 4,
+                "event_retry_interval": 2,
+                "event_delivery_timeout": 99,
+                "event_max_attempts": 7,
+            },
+        }
+
+        restart_fields = bot_module.apply_hot_runtime_config(manager, old, new)
+
+        self.assertEqual(manager.install_timeout, 11)
+        self.assertEqual(manager.drain_timeout, 13)
+        self.assertEqual(manager.stabilize_seconds, 0)
+        self.assertEqual(manager.supervisor.startup_timeout, 12)
+        self.assertEqual(manager.supervisor.restart_limit, 4)
+        self.assertEqual(dispatcher.retry_interval, 2)
+        self.assertEqual(dispatcher.delivery_deadline, 99)
+        self.assertEqual(dispatcher.max_attempts, 7)
+        self.assertEqual(
+            restart_fields,
+            ["bot_token", "plugins.root", "plugins.catalog"],
+        )
+
+    async def test_reload_reports_each_feature_and_continues_after_failure(self):
+        bot_module = await asyncio.to_thread(load_bot_module)
+        from app.core.plugin_manager import PluginOperationError
+
+        releases = {
+            "good": SimpleNamespace(enabled=True),
+            "bad": SimpleNamespace(enabled=True),
+            "off": SimpleNamespace(enabled=False),
+        }
+        store = SimpleNamespace(
+            list_installed=Mock(return_value=[
+                SimpleNamespace(plugin_id="good", active=True),
+                SimpleNamespace(plugin_id="bad", active=True),
+                SimpleNamespace(plugin_id="off", active=True),
+            ]),
+            active=Mock(side_effect=lambda plugin_id: releases[plugin_id]),
+        )
+        async def reload_feature(plugin_id):
+            if plugin_id == "bad":
+                raise PluginOperationError("invalid_config", "schema mismatch")
+            return SimpleNamespace(state="active")
+
+        manager = SimpleNamespace(
+            store=store,
+            reload_config=AsyncMock(side_effect=reload_feature),
+        )
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=42),
+            effective_chat=SimpleNamespace(id=42),
+        )
+        bot = SimpleNamespace(send_message=AsyncMock())
+        context = SimpleNamespace(
+            bot=bot,
+            application=SimpleNamespace(
+                bot_data={"telepiplex_plugin_manager": manager}
+            ),
+        )
+        old_config = {"allowed_user": 42, "bot_token": "same"}
+        new_config = {"allowed_user": 42, "bot_token": "changed"}
+
+        def load_config(*, raise_on_error=False):
+            bot_module.init.bot_config = new_config
+            return new_config
+
+        with (
+            patch.object(bot_module.init, "bot_config", old_config),
+            patch.object(bot_module.init, "check_user", return_value=True),
+            patch.object(bot_module.init, "load_yaml_config", side_effect=load_config),
+            patch.object(
+                bot_module,
+                "apply_hot_runtime_config",
+                return_value=["bot_token"],
+            ),
+        ):
+            await bot_module.reload(update, context)
+
+        self.assertEqual(
+            [call.args[0] for call in manager.reload_config.await_args_list],
+            ["bad", "good"],
+        )
+        text = bot.send_message.await_args.kwargs["text"]
+        self.assertIn("✅ good", text)
+        self.assertIn("❌ bad：invalid_config", text)
+        self.assertIn("bot_token", text)
+
+    async def test_reload_rejects_invalid_core_yaml_without_touching_features(self):
+        bot_module = await asyncio.to_thread(load_bot_module)
+        manager = SimpleNamespace(reload_config=AsyncMock())
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=42),
+            effective_chat=SimpleNamespace(id=42),
+        )
+        bot = SimpleNamespace(send_message=AsyncMock())
+        context = SimpleNamespace(
+            bot=bot,
+            application=SimpleNamespace(
+                bot_data={"telepiplex_plugin_manager": manager}
+            ),
+        )
+
+        with (
+            patch.object(bot_module.init, "bot_config", {"allowed_user": 42}),
+            patch.object(bot_module.init, "check_user", return_value=True),
+            patch.object(
+                bot_module.init,
+                "load_yaml_config",
+                side_effect=ValueError("bad yaml"),
+            ),
+        ):
+            await bot_module.reload(update, context)
+
+        manager.reload_config.assert_not_awaited()
+        self.assertIn("Core 配置读取失败", bot.send_message.await_args.kwargs["text"])
+
     async def test_core_install_callback_is_reserved_before_feature_callbacks(self):
         bot_module = await asyncio.to_thread(load_bot_module)
         application = SimpleNamespace(bot_data={}, add_handler=Mock())

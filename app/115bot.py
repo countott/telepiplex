@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
+import copy
 import inspect
 import json
 import os
@@ -108,6 +109,8 @@ def sanitize_config_for_log(value):
 
 
 def log_config_snapshot(prefix: str):
+    if init.logger is None:
+        return
     init.logger.info(prefix)
     init.logger.info(json.dumps(sanitize_config_for_log(init.bot_config), ensure_ascii=False))
 
@@ -264,6 +267,89 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def apply_hot_runtime_config(manager, previous: dict, current: dict) -> list[str]:
+    """Apply settings safe to mutate in-process and name those needing restart."""
+    plugin_config = (current or {}).get("plugins") or {}
+    if not isinstance(plugin_config, dict):
+        raise ValueError("plugins must be a mapping")
+
+    def value(key, default):
+        configured = plugin_config.get(key, default)
+        return default if configured is None else configured
+
+    install_timeout = float(value("install_timeout", 300))
+    drain_timeout = float(value("drain_timeout", 120))
+    stabilize_seconds = max(0, float(value("stabilize_seconds", 10)))
+    startup_timeout = float(value("startup_timeout", 30))
+    restart_limit = max(0, int(value("restart_limit", 3)))
+    event_retry_interval = max(0.01, float(value("event_retry_interval", 1)))
+    event_delivery_timeout = max(
+        0.1, float(value("event_delivery_timeout", 1800))
+    )
+    event_max_attempts = max(1, int(value("event_max_attempts", 5)))
+
+    manager.install_timeout = install_timeout
+    manager.drain_timeout = drain_timeout
+    manager.stabilize_seconds = stabilize_seconds
+    manager.supervisor.startup_timeout = startup_timeout
+    manager.supervisor.restart_limit = restart_limit
+    dispatcher = getattr(getattr(manager, "broker", None), "dispatcher", None)
+    if dispatcher is not None:
+        dispatcher.retry_interval = event_retry_interval
+        dispatcher.delivery_deadline = event_delivery_timeout
+        dispatcher.max_attempts = event_max_attempts
+
+    import logging
+
+    level_name = str((current or {}).get("log_level") or "info").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    if init.logger is not None:
+        init.logger.logger.setLevel(level)
+        for handler in init.logger.logger.handlers:
+            handler.setLevel(level)
+
+    restart_paths = (
+        ("bot_token", lambda config: (config or {}).get("bot_token")),
+        (
+            "plugins.root",
+            lambda config: ((config or {}).get("plugins") or {}).get("root"),
+        ),
+        (
+            "plugins.runtime_root",
+            lambda config: ((config or {}).get("plugins") or {}).get("runtime_root"),
+        ),
+        (
+            "plugins.catalog",
+            lambda config: ((config or {}).get("plugins") or {}).get("catalog"),
+        ),
+        (
+            "plugins.catalog_refresh_interval",
+            lambda config: ((config or {}).get("plugins") or {}).get(
+                "catalog_refresh_interval"
+            ),
+        ),
+    )
+    return [
+        name
+        for name, read in restart_paths
+        if read(previous) != read(current)
+    ]
+
+
+def _enabled_feature_ids(manager) -> list[str]:
+    plugin_ids = {
+        item.plugin_id
+        for item in manager.store.list_installed()
+        if item.active
+    }
+    enabled = []
+    for plugin_id in plugin_ids:
+        release = manager.store.active(plugin_id)
+        if release is not None and release.enabled:
+            enabled.append(plugin_id)
+    return sorted(enabled)
+
+
 async def reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not init.check_user(update.effective_user.id):
         await send_bot_message_safely(
@@ -273,13 +359,70 @@ async def reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="html",
         )
         return
-    init.load_yaml_config()
+    previous = copy.deepcopy(init.bot_config or {})
+    try:
+        init.load_yaml_config(raise_on_error=True)
+    except Exception as exc:
+        if init.logger:
+            init.logger.error(f"Core 配置读取失败: {type(exc).__name__}")
+        await send_bot_message_safely(
+            context.bot,
+            chat_id=update.effective_chat.id,
+            text="❌ Core 配置读取失败；继续使用重载前配置，Feature 未重载。",
+        )
+        return
+
+    bot_data = getattr(context.application, "bot_data", {})
+    manager = bot_data.get("telepiplex_plugin_manager")
+    if manager is None:
+        await send_bot_message_safely(
+            context.bot,
+            chat_id=update.effective_chat.id,
+            text="❌ Core 配置已读取，但 Feature 管理器不可用；请重启 Core。",
+        )
+        return
+
+    try:
+        restart_fields = apply_hot_runtime_config(
+            manager, previous, init.bot_config
+        )
+    except (TypeError, ValueError) as exc:
+        init.bot_config = previous
+        if init.logger:
+            init.logger.error(f"Core 配置值无效: {type(exc).__name__}")
+        await send_bot_message_safely(
+            context.bot,
+            chat_id=update.effective_chat.id,
+            text="❌ Core 配置值无效；继续使用重载前配置，Feature 未重载。",
+        )
+        return
+    feature_lines = []
+    for plugin_id in _enabled_feature_ids(manager):
+        try:
+            await manager.reload_config(plugin_id)
+        except Exception as exc:
+            code = str(getattr(exc, "code", type(exc).__name__))
+            message = str(getattr(exc, "message", ""))
+            suffix = f"（{message}）" if message else ""
+            feature_lines.append(f"❌ {plugin_id}：{code}{suffix}")
+            if init.logger:
+                init.logger.error(f"Feature 配置重载失败 [{plugin_id}]: {code}")
+        else:
+            feature_lines.append(f"✅ {plugin_id}")
+
     log_config_snapshot("配置已重新加载:")
+    lines = ["✅ Core 配置已重新读取并应用可热更新项。", "", "Feature 重载结果："]
+    lines.extend(feature_lines or ["- 无已启用 Feature"])
+    if restart_fields:
+        lines.extend([
+            "",
+            "⚠️ 以下 Core 配置需重启后生效：",
+            ", ".join(restart_fields),
+        ])
     await send_bot_message_safely(
         context.bot,
         chat_id=update.effective_chat.id,
-        text="✅ 配置已重新加载。",
-        parse_mode="html",
+        text="\n".join(lines),
     )
 
 

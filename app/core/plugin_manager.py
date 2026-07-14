@@ -561,6 +561,11 @@ class PluginManager:
                         pass
                 raise self._operation_error(exc, "config_reload_failed") from None
 
+    async def reload_config(self, plugin_id: str) -> PluginOperationResult:
+        """Validate the current YAML on disk and restart its active Feature."""
+        view = self.config(plugin_id)
+        return await self.configure(plugin_id, view["config"])
+
     async def close(self):
         await self.supervisor.close_all()
         if self.broker is not None:
