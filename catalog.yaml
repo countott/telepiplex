@@ -1,0 +1,54 @@
+plugins:
+  media-search:
+    versions:
+      1.0.1:
+        core_api: '>=1.0,<2.0'
+        provides:
+        - media.search
+        requires:
+        - download.provider
+        sha256: 42f14d774781dbd6ee2453752f57a699c5d1082b2aba41cd331d7eb6a6005f32
+        source:
+          branch: feature/media-search
+          commit: 067b9d6651d1c9e6fc35562c6e9ec1f644a354fa
+        url: https://github.com/countott/telepiplex/releases/download/platform-v1.0.5/media-search-1.0.1.tpx
+  open115:
+    versions:
+      1.0.1:
+        core_api: '>=1.0,<2.0'
+        provides:
+        - download.provider
+        - storage.provider
+        requires: []
+        sha256: b39dab208a62c3f93ce4863604eb2e536dbd54ce2560563d8a61e4ab962ca119
+        source:
+          branch: feature/115
+          commit: e6d56293571b0f150ac51297acb5aa4c0004a6a7
+        url: https://github.com/countott/telepiplex/releases/download/open115-v1.0.1/open115-1.0.1.tpx
+  plex-management:
+    versions:
+      1.0.1:
+        core_api: '>=1.0,<2.0'
+        provides:
+        - plex.management
+        requires: []
+        sha256: 3f48c6d5c2efaebb7cb14a275eb5e808937fe80a0fcb4962f216773701929d0e
+        source:
+          branch: feature/plex-management
+          commit: 7cf9224e0b952a3d4524d87dd698d88907b3eec6
+        url: https://github.com/countott/telepiplex/releases/download/platform-v1.0.5/plex-management-1.0.1.tpx
+  renaming:
+    versions:
+      1.0.1:
+        core_api: '>=1.0,<2.0'
+        provides: []
+        requires:
+        - media.search
+        - storage.provider
+        sha256: b2e6e519db7c5296a02291249e8c55694cac9376d6d59e0e299297df12af8a80
+        source:
+          branch: feature/renaming
+          commit: f73614cdcb2661f56ebb2926c7f5f14ee87899f8
+        url: https://github.com/countott/telepiplex/releases/download/platform-v1.0.5/renaming-1.0.1.tpx
+release: open115-v1.0.1
+schema_version: 1
