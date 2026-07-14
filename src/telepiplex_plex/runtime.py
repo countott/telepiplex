@@ -19,8 +19,9 @@ def main(context: RuntimeContext) -> FeatureRuntime:
         token=context.token,
         capabilities={"plex.management": feature.management_capability},
         events={"media.organized": feature.media_organized},
-        commands={"plex": feature.command},
+        commands={"plex": feature.command, "plex_config": feature.command},
         callbacks={"plex": feature.callback},
+        messages=feature.message,
     )
     feature.bind_runtime(runtime)
     return runtime

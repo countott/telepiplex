@@ -10,6 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSchemaContractTest(unittest.TestCase):
+    def test_schema_declares_independent_plex_config_wizard(self):
+        schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(schema["x-telepiplex-config-command"], "plex_config")
+
     def test_ai_is_visual_form_section_with_write_only_key(self):
         schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))
 

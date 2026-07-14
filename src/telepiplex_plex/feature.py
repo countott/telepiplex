@@ -7,6 +7,7 @@ from .adapters.fanart import FanartAdapter
 from .adapters.plex import PlexAdapter
 from .adapters.tmdb import TmdbAdapter
 from .ai import PlexAIOrchestrator
+from .config_wizard import PlexConfigWizard
 from .jobs import PlexJobRepository
 from .management import PlexManagementService
 
@@ -37,6 +38,7 @@ class PlexFeature:
         self._service_lock = asyncio.Lock()
         self.pending_writes = {}
         self.interrupted_job_ids = self.jobs.mark_incomplete_interrupted()
+        self.config_wizard = PlexConfigWizard(config)
 
     def bind_runtime(self, runtime):
         self.runtime = runtime
@@ -94,6 +96,10 @@ class PlexFeature:
         }
 
     async def command(self, request: dict) -> dict:
+        command = str(request.get("command") or "")
+        if command == "plex_config":
+            return self.config_wizard.start(request)
+        self.config_wizard.clear(request)
         try:
             service = await self._ensure_service()
         except Exception:
@@ -132,8 +138,10 @@ class PlexFeature:
         return {"actions": [action]}
 
     async def callback(self, request: dict) -> dict:
-        service = await self._ensure_service()
         payload = str(request.get("payload") or "")
+        if payload.startswith("config:"):
+            return self.config_wizard.callback(request)
+        service = await self._ensure_service()
         if payload.startswith("write:"):
             token = payload.split(":", 1)[1]
             pending = self.pending_writes.pop(token, None)
@@ -167,6 +175,11 @@ class PlexFeature:
             result = await asyncio.to_thread(service.confirm_match, int(job_id), selection)
             return self._message(PlexManagementService.format_job_summary(result))
         return self._message("⚠️ Plex callback 无效。")
+
+    async def message(self, request: dict) -> dict:
+        if self.config_wizard.has_session(request):
+            return self.config_wizard.message(request)
+        return self._message("⚠️ Plex 配置会话已失效。")
 
     async def management_capability(self, request: dict) -> dict:
         """Expose stable read-only job inspection to other Features."""
