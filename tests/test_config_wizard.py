@@ -40,6 +40,13 @@ class PlexConfigWizardTest(unittest.IsolatedAsyncioTestCase):
             "args": [],
         })
 
+    async def _confirm(self):
+        return await self.feature.callback({
+            **self.owner,
+            "namespace": "plex",
+            "payload": "config:confirm",
+        })
+
     async def test_entry_works_without_initializing_plex_service_and_hides_internals(self):
         result = await self._start()
 
@@ -67,9 +74,11 @@ class PlexConfigWizardTest(unittest.IsolatedAsyncioTestCase):
         await self.feature.message({
             **self.owner, "text": "http://plex:32400"
         })
-        result = await self.feature.message({
+        pending = await self.feature.message({
             **self.owner, "text": "new-plex-token"
         })
+        self.assertNotIn("config_patch", pending)
+        result = await self._confirm()
 
         self.assertEqual(result["config_patch"], {
             "plex": {
@@ -91,7 +100,8 @@ class PlexConfigWizardTest(unittest.IsolatedAsyncioTestCase):
                     "namespace": "plex",
                     "payload": f"config:{section}",
                 })
-                result = await self.feature.message({**self.owner, "text": "-"})
+                await self.feature.message({**self.owner, "text": "-"})
+                result = await self._confirm()
                 self.assertEqual(result["config_patch"], {
                     section: {"api_key": expected},
                 })
@@ -110,7 +120,8 @@ class PlexConfigWizardTest(unittest.IsolatedAsyncioTestCase):
             **self.owner, "text": "https://ai.example/v1"
         })
         await self.feature.message({**self.owner, "text": "new-ai-key"})
-        result = await self.feature.message({**self.owner, "text": "new-model"})
+        await self.feature.message({**self.owner, "text": "new-model"})
+        result = await self._confirm()
 
         self.assertEqual(result["config_patch"], {
             "ai": {
@@ -126,11 +137,13 @@ class PlexConfigWizardTest(unittest.IsolatedAsyncioTestCase):
         await self.feature.callback({
             **self.owner, "namespace": "plex", "payload": "config:ai"
         })
-        result = await self.feature.callback({
+        pending = await self.feature.callback({
             **self.owner,
             "namespace": "plex",
             "payload": "config:boolean:off",
         })
+        self.assertNotIn("config_patch", pending)
+        result = await self._confirm()
 
         self.assertEqual(result["config_patch"], {"ai": {"enabled": False}})
 
