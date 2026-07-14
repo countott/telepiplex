@@ -505,6 +505,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         )["run"]
 
         self.assertIn("gh release create", ensure_release)
+        self.assertIn("--latest=false", ensure_release)
         self.assertIn("catalog.yaml", ensure_release)
         self.assertIn("catalog.yaml.sha256", ensure_release)
         self.assertIn("for ATTEMPT in 1 2 3 4 5", publish)
@@ -534,8 +535,35 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("catalog.yaml.sha256", sync)
         self.assertIn("LATEST_TAG", sync)
         self.assertIn("releases/latest", sync)
+        self.assertIn("platform-v", sync)
+        self.assertNotIn("parse_feature_tag", sync)
         self.assertIn("for SYNC_ATTEMPT in 1 2 3 4 5", sync)
         self.assertIn("cmp", sync)
+
+        validator = next(
+            block
+            for block in self._python_blocks(sync)
+            if "compatibility/latest.json" in block
+        )
+        for tag, succeeds in (
+            ("platform-v1.0.5", True),
+            ("open115-v1.0.1", False),
+            ("platform-latest", False),
+        ):
+            with self.subTest(latest_tag=tag), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                (root / "compatibility").mkdir()
+                (root / "compatibility/latest.json").write_text(
+                    json.dumps({"tag_name": tag}), encoding="utf-8"
+                )
+                result = subprocess.run(
+                    [sys.executable, "-c", validator],
+                    cwd=root,
+                    env={**os.environ, "PYTHONPATH": str(ROOT)},
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode == 0, succeeds, result.stderr)
 
     def test_docs_specify_optimistic_catalog_publication(self):
         for path in (DESIGN, PLAN):

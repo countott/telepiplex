@@ -481,6 +481,7 @@ jobs:
             404)
               gh release create "$RELEASE_TAG" "dist/$ASSET_NAME" release/catalog.yaml release/catalog.yaml.sha256 \
                 --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$RELEASE_TAG" \
+                --latest=false \
                 --notes "Immutable Telepiplex Feature release for $RELEASE_TAG."
               ;;
             *)
@@ -606,10 +607,11 @@ jobs:
             LATEST_TAG=$(python - <<'PY'
           import json
           import pathlib
-          from tools.update_feature_catalog import parse_feature_tag
+          import re
 
           tag = json.loads(pathlib.Path("compatibility/latest.json").read_text()).get("tag_name")
-          parse_feature_tag(tag)
+          if not re.fullmatch(r"platform-v[0-9]+\.[0-9]+\.[0-9]+", str(tag)):
+              raise SystemExit("Latest Release must be a stable Platform release")
           print(tag)
           PY
             )
