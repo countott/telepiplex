@@ -90,6 +90,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         update.effective_chat.id = 10
         update.effective_message.text = "/plugin " + " ".join(args)
         update.effective_message.reply_text = AsyncMock()
+        update.callback_query = None
         manager = FakeManager()
         context = Mock()
         context.args = args
@@ -128,6 +129,48 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已写入并重新加载", message)
         self.assertNotIn("kept-secret", message)
 
+    async def test_feature_config_patch_from_callback_updates_original_message(self):
+        from app.handlers.plugin_handler import handle_feature_result
+
+        update, context, manager = self._request([], user_id=1)
+        update.callback_query = Mock()
+        update.callback_query.edit_message_text = AsyncMock()
+        context.application.bot_data["telepiplex_plugin_sessions"] = {
+            (10, 1): {"plugin_id": "media-search", "expires_at": 9999999999},
+        }
+        route = SimpleNamespace(
+            plugin_id="media-search",
+            manifest=SimpleNamespace(callbacks=("media-search",)),
+        )
+        result = {
+            "actions": [],
+            "session": {"state": "close"},
+            "config_patch": {"ai": {"model": "new-model"}},
+        }
+
+        await handle_feature_result(update, context, route, result)
+
+        self.assertEqual(manager.configurations, [(
+            "media-search",
+            {
+                "ai": {"api_key": "kept-secret", "model": "new-model"},
+                "search": {"prowlarr": {"base_url": "http://old"}},
+            },
+        )])
+        messages = [
+            call.args[0]
+            for call in update.callback_query.edit_message_text.await_args_list
+        ]
+        self.assertEqual(
+            messages,
+            [
+                "⏳ 正在保存并重新加载 media-search 配置...",
+                "✅ media-search 配置已写入并重新加载。",
+            ],
+        )
+        update.effective_message.reply_text.assert_not_awaited()
+        self.assertNotIn("telepiplex_plugin_sessions", context.application.bot_data)
+
     async def test_invalid_feature_config_patch_is_rejected_without_write(self):
         from app.handlers.plugin_handler import handle_feature_result
 
@@ -147,6 +190,30 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             "invalid_config_patch",
             update.effective_message.reply_text.await_args.args[0],
         )
+
+    async def test_invalid_feature_config_patch_from_callback_updates_original_message(self):
+        from app.handlers.plugin_handler import handle_feature_result
+
+        update, context, manager = self._request([], user_id=1)
+        update.callback_query = Mock()
+        update.callback_query.edit_message_text = AsyncMock()
+        route = SimpleNamespace(
+            plugin_id="media-search",
+            manifest=SimpleNamespace(callbacks=("media-search",)),
+        )
+
+        await handle_feature_result(
+            update, context, route,
+            {"actions": [], "config_patch": ["not-a-mapping"]},
+        )
+
+        self.assertEqual(manager.configurations, [])
+        update.callback_query.edit_message_text.assert_awaited_once()
+        self.assertIn(
+            "invalid_config_patch",
+            update.callback_query.edit_message_text.await_args.args[0],
+        )
+        update.effective_message.reply_text.assert_not_awaited()
 
     async def test_lifecycle_subcommands_dispatch_exact_arguments(self):
         from app.handlers.plugin_handler import plugin_command
@@ -318,6 +385,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         update.effective_user.id = 1
         update.effective_chat.id = 10
         update.effective_message.reply_text = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
         update.callback_query.data = "echo:next"
         update.callback_query.answer = AsyncMock()
         context = Mock()
@@ -328,7 +396,44 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         update.callback_query.answer.assert_awaited_once()
         client.request.assert_awaited_once()
-        self.assertIn("无效响应", update.effective_message.reply_text.await_args.args[0])
+        self.assertIn(
+            "无效响应",
+            update.callback_query.edit_message_text.await_args.args[0],
+        )
+        update.effective_message.reply_text.assert_not_awaited()
+
+    async def test_feature_callback_acknowledges_with_progress_feedback(self):
+        from app.handlers.plugin_handler import dynamic_callback_gateway
+
+        client = AsyncMock()
+        client.request.return_value = {
+            "actions": [{"kind": "edit_message", "text": "已完成"}]
+        }
+        route = SimpleNamespace(
+            plugin_id="media-search",
+            client=client,
+            manifest=SimpleNamespace(callbacks=("media-search",)),
+        )
+        router = Mock()
+        router.callback_route.return_value = route
+        update = Mock()
+        update.update_id = 100
+        update.effective_user.id = 1
+        update.effective_chat.id = 10
+        update.effective_message.reply_text = AsyncMock()
+        update.effective_message.edit_text = AsyncMock()
+        update.callback_query.data = "media-search:confirm:plan-a"
+        update.callback_query.answer = AsyncMock()
+        context = Mock()
+        context.application.bot_data = {"telepiplex_plugin_router": router}
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await dynamic_callback_gateway(update, context)
+
+        update.callback_query.answer.assert_awaited_once_with(
+            text="处理中...",
+        )
+        update.effective_message.edit_text.assert_awaited_once()
 
     async def test_manager_error_is_sanitized_and_does_not_escape_handler(self):
         from app.core.plugin_manager import PluginOperationError
@@ -385,6 +490,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         from app.handlers.plugin_handler import plugin_update_callback
 
         update, context, manager = self._request([], user_id=1)
+        update.callback_query = Mock()
         update.callback_query.data = "core-plugin-update:confirm:echo@1.1.0"
         update.callback_query.answer = AsyncMock()
         update.callback_query.edit_message_text = AsyncMock()
@@ -400,6 +506,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         update, context, manager = self._request([], user_id=2)
+        update.callback_query = Mock()
         update.callback_query.data = "core-plugin-update:confirm:echo@1.1.0"
         update.callback_query.answer = AsyncMock()
         update.callback_query.edit_message_text = AsyncMock()
@@ -411,6 +518,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         from app.handlers.plugin_handler import plugin_update_callback
 
         update, context, manager = self._request([], user_id=1)
+        update.callback_query = Mock()
         update.callback_query.data = "core-plugin-update:decline:echo@1.1.0"
         update.callback_query.answer = AsyncMock()
         update.callback_query.edit_message_text = AsyncMock()
@@ -428,6 +536,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         from app.handlers.plugin_handler import plugin_update_callback
 
         update, context, manager = self._request([], user_id=1)
+        update.callback_query = Mock()
         update.callback_query.data = "core-plugin-update:confirm:open115@1.0.1"
         update.callback_query.answer = AsyncMock()
         update.callback_query.edit_message_text = AsyncMock()
@@ -457,6 +566,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         from app.handlers.plugin_handler import plugin_update_callback
 
         update, context, manager = self._request([], user_id=1)
+        update.callback_query = Mock()
         update.callback_query.data = "core-plugin-update:confirm:echo@1.1.0"
         update.callback_query.answer = AsyncMock()
         update.callback_query.edit_message_text = AsyncMock()
@@ -654,6 +764,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         from app.handlers.plugin_handler import plugin_install_callback
 
         update, context, manager = self._request([], user_id=1)
+        update.callback_query = Mock()
         update.callback_query.data = "core-plugin-install:confirm:echo@1.1.0"
         update.callback_query.answer = AsyncMock()
         update.callback_query.edit_message_text = AsyncMock()
@@ -675,6 +786,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         update, context, manager = self._request([], user_id=2)
+        update.callback_query = Mock()
         update.callback_query.data = "core-plugin-install:confirm:echo@1.1.0"
         update.callback_query.answer = AsyncMock()
         update.callback_query.edit_message_text = AsyncMock()
@@ -687,6 +799,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         from app.handlers.plugin_handler import plugin_install_callback
 
         update, context, manager = self._request([], user_id=1)
+        update.callback_query = Mock()
         update.callback_query.data = "core-plugin-install:confirm:echo@1.1.0"
         update.callback_query.answer = AsyncMock()
         update.callback_query.edit_message_text = AsyncMock()

@@ -4,11 +4,17 @@ import asyncio
 import hmac
 import inspect
 import json
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from .logging_utils import (
+    log_dispatch_error,
+    log_dispatch_finish,
+    log_dispatch_start,
+)
 from .types import FeatureError
 
 
@@ -44,6 +50,7 @@ class FeatureRuntime:
         self._server = None
         self._socket_path = None
         self._shutdown = asyncio.Event()
+        self.logger = logging.getLogger("telepiplex.runtime")
 
     @property
     def active_tasks(self) -> int:
@@ -199,46 +206,71 @@ class FeatureRuntime:
                 self.capabilities,
                 str(params.get("capability") or ""),
                 params,
+                method,
             )
         if method == "event.deliver":
             return await self._business_call(
                 self.events,
                 str(params.get("event_type") or ""),
                 params,
+                method,
             )
         if method == "command.dispatch":
             return await self._business_call(
                 self.commands,
                 str(params.get("command") or ""),
                 params,
+                method,
             )
         if method == "callback.dispatch":
             return await self._business_call(
                 self.callbacks,
                 str(params.get("namespace") or ""),
                 params,
+                method,
             )
         if method == "message.dispatch" and self.messages is not None:
             return await self._business_call(
                 {"message": self.messages},
                 "message",
                 params,
+                method,
             )
         if method == "config.validate" and self.config_validator is not None:
-            return await self._invoke(self.config_validator, params)
+            return await self._business_call(
+                {"config.validate": self.config_validator},
+                "config.validate",
+                params,
+                method,
+            )
         raise FeatureError("not_found", f"unknown RPC method: {method}")
 
-    async def _business_call(self, handlers: dict, key: str, params: dict) -> dict:
+    async def _business_call(
+        self,
+        handlers: dict,
+        key: str,
+        params: dict,
+        method: str,
+    ) -> dict:
         if self.state == "draining":
             raise FeatureError("busy", "Feature is draining")
         handler = handlers.get(key)
         if handler is None:
             raise FeatureError("not_found", f"handler is not registered: {key}")
+        log_dispatch_start(method, key, params)
         self._active_requests += 1
         try:
-            return await self._invoke(handler, params)
+            result = await self._invoke(handler, params)
+        except FeatureError as exc:
+            log_dispatch_error(method, key, exc.code, exc.message)
+            raise
+        except Exception as exc:
+            log_dispatch_error(method, key, type(exc).__name__, exc)
+            raise
         finally:
             self._active_requests -= 1
+        log_dispatch_finish(method, key, result)
+        return result
 
     @staticmethod
     async def _invoke(handler: Handler, params: dict) -> dict:

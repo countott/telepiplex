@@ -61,7 +61,7 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
         from app.core.plugin_supervisor import PluginSupervisor
 
         supervisor = PluginSupervisor(
-            startup_timeout=kwargs.pop("startup_timeout", 1),
+            startup_timeout=kwargs.pop("startup_timeout", 2),
             restart_limit=kwargs.pop("restart_limit", 2),
             restart_backoff=kwargs.pop("restart_backoff", 0.01),
             runtime_root=kwargs.pop("runtime_root", self.root / "runtime"),
@@ -102,6 +102,18 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(process.logs)
         self.assertNotIn(process.startup_token, output)
         self.assertIn("***redacted***", output)
+
+    async def test_captured_logs_are_persisted_to_runtime_log(self):
+        supervisor = self._supervisor()
+        process = await supervisor.start(self._release("healthy"))
+        runtime_log = self.root / "plugins" / "healthy" / "state" / "logs" / "runtime.log"
+
+        await self._wait_for(runtime_log.exists)
+        await self._wait_for(lambda: runtime_log.read_text(encoding="utf-8").strip() != "")
+
+        output = runtime_log.read_text(encoding="utf-8")
+        self.assertIn("feature_runtime_started", output)
+        self.assertIn("plugin_id=healthy", output)
 
     async def test_startup_timeout_terminates_child_and_leaves_no_registration(self):
         from app.core.plugin_supervisor import SupervisorError

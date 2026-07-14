@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import re
 import secrets
@@ -12,6 +13,8 @@ from pathlib import Path
 from app.core.plugin_contract import ContractError
 from app.core.plugin_rpc import RpcClient
 from app.core.plugin_store import ActiveRelease
+from app.utils.log_sanitizer import sanitize_log_text
+from app.utils.logger import configure_named_file_logger, feature_runtime_log_path
 
 
 class SupervisorError(RuntimeError):
@@ -85,6 +88,7 @@ class PluginSupervisor:
         max_log_lines: int = 200,
         runtime_root: Path = Path("/tmp/telepiplex"),
         broker=None,
+        log_level: str = "info",
     ):
         self.startup_timeout = float(startup_timeout)
         self.restart_limit = max(0, int(restart_limit))
@@ -93,6 +97,7 @@ class PluginSupervisor:
         self.runtime_root = Path(runtime_root).resolve()
         self.runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.broker = broker
+        self.log_level = str(log_level or "info")
         self._active: dict[str, PluginProcess] = {}
         self._instances: dict[str, PluginProcess] = {}
 
@@ -124,6 +129,14 @@ class PluginSupervisor:
             raise SupervisorError("startup_failed", self._safe_error(exc)) from None
         if not shadow:
             self._active[release.plugin_id] = process
+        self._log_feature_event(
+            process,
+            "feature_runtime_started",
+            instance_id=process.instance_id,
+            shadow=process.shadow,
+            version=process.release.version,
+            runtime_log=self._runtime_log_path(process),
+        )
         process.monitor_task = asyncio.create_task(self._monitor(process, process.child))
         return process
 
@@ -177,6 +190,8 @@ class PluginSupervisor:
                 if self.broker is not None
                 else self.runtime_root / "core.sock"
             ),
+            "TPX_LOG_LEVEL": self.log_level,
+            "TPX_RUNTIME_LOG_PATH": str(self._runtime_log_path(process)),
         })
         process.child = await asyncio.create_subprocess_exec(
             *process.argv,
@@ -226,16 +241,20 @@ class PluginSupervisor:
             line = await stream.readline()
             if not line:
                 return
-            text = line.decode("utf-8", errors="replace").rstrip()
-            text = text.replace(process.startup_token, "***redacted***")
-            text = re.sub(
-                r"(?i)(token|secret|password|api[_-]?key)\s*[=:]\s*\S+",
-                r"\1=***redacted***",
-                text,
+            text = sanitize_log_text(
+                line.decode("utf-8", errors="replace").rstrip().replace(
+                    process.startup_token,
+                    "***redacted***",
+                )
             )
             process.logs.append(f"{label}: {text}")
             if len(process.logs) > self.max_log_lines:
                 del process.logs[:-self.max_log_lines]
+            feature_logger = self._feature_logger(process)
+            if label == "stderr":
+                feature_logger.warning("[%s] %s", label, text)
+            else:
+                feature_logger.info("[%s] %s", label, text)
 
     async def _monitor(self, process: PluginProcess, child):
         return_code = await child.wait()
@@ -244,22 +263,52 @@ class PluginSupervisor:
             return
         process.last_error = f"Feature exited unexpectedly with code {return_code}"
         process.state = "failed"
+        self._log_feature_event(
+            process,
+            "feature_runtime_exited",
+            level=logging.ERROR,
+            return_code=return_code,
+        )
         self._revoke_token(process)
         await self._restart(process)
 
     async def _restart(self, process: PluginProcess):
         while not process.desired_stop and process.restart_count < self.restart_limit:
             process.restart_count += 1
+            self._log_feature_event(
+                process,
+                "feature_runtime_restart_scheduled",
+                restart_count=process.restart_count,
+            )
             await asyncio.sleep(self.restart_backoff * (2 ** (process.restart_count - 1)))
             try:
                 await self._launch_once(process)
             except Exception as exc:
                 process.last_error = self._safe_error(exc)
+                self._log_feature_event(
+                    process,
+                    "feature_runtime_restart_failed",
+                    level=logging.ERROR,
+                    restart_count=process.restart_count,
+                    error=process.last_error,
+                )
                 await self._terminate_child(process)
                 continue
+            self._log_feature_event(
+                process,
+                "feature_runtime_restarted",
+                restart_count=process.restart_count,
+            )
             process.monitor_task = asyncio.create_task(self._monitor(process, process.child))
             return
         process.state = "quarantined"
+        self._log_feature_event(
+            process,
+            "feature_runtime_quarantined",
+            level=logging.ERROR,
+            restart_count=process.restart_count,
+            error=process.last_error,
+        )
 
     async def health(self, target: str | PluginProcess) -> PluginHealth:
         process = self._resolve(target)
@@ -365,6 +414,11 @@ class PluginSupervisor:
         process.socket_path.unlink(missing_ok=True)
         self._revoke_token(process)
         process.state = "stopped"
+        self._log_feature_event(
+            process,
+            "feature_runtime_stopped",
+            instance_id=process.instance_id,
+        )
         if self._active.get(process.plugin_id) is process:
             self._active.pop(process.plugin_id, None)
         self._instances.pop(process.instance_id, None)
@@ -389,6 +443,38 @@ class PluginSupervisor:
     def _revoke_token(self, process: PluginProcess):
         if self.broker is not None and process.startup_token:
             self.broker.unregister(process.startup_token)
+
+    @staticmethod
+    def _plugin_root(process: PluginProcess) -> Path:
+        return process.release.path.parent.parent
+
+    def _runtime_log_path(self, process: PluginProcess) -> Path:
+        return feature_runtime_log_path(self._plugin_root(process))
+
+    def _feature_logger(self, process: PluginProcess) -> logging.Logger:
+        return configure_named_file_logger(
+            f"telepiplex.feature.{process.plugin_id}",
+            log_path=self._runtime_log_path(process),
+            level=self.log_level,
+            propagate=True,
+        )
+
+    def _log_feature_event(
+        self,
+        process: PluginProcess,
+        event: str,
+        *,
+        level: int = logging.INFO,
+        **fields,
+    ):
+        logger = self._feature_logger(process)
+        items = [
+            f"plugin_id={sanitize_log_text(process.plugin_id)}",
+            f"event={sanitize_log_text(event)}",
+        ]
+        for key, value in fields.items():
+            items.append(f"{key}={sanitize_log_text(value)}")
+        logger.log(level, " ".join(items))
 
     async def close_all(self):
         for process in list(self._instances.values()):

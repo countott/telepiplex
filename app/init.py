@@ -18,7 +18,7 @@ def _ensure_module_paths():
 
 _ensure_module_paths()
 
-from app.utils.logger import Logger
+from app.utils.logger import Logger, core_log_path
 
 
 debug_mode = False
@@ -57,8 +57,12 @@ def create_logger():
         "critical": logging.CRITICAL,
     }
     log_level = str(bot_config.get("log_level", "info")).lower()
-    logger = Logger(level=level_map.get(log_level, logging.INFO), debug_model=debug_mode)
-    logger.info("Logger init success!")
+    logger = Logger(
+        level=level_map.get(log_level, logging.INFO),
+        debug_model=debug_mode,
+        log_path=core_log_path(CONFIG),
+    )
+    logger.info(f"Logger init success! core_log={core_log_path(CONFIG)}")
 
 
 def load_yaml_config(*, raise_on_error=False):

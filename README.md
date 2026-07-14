@@ -29,6 +29,26 @@ plugins:
   restart_limit: 3
 ```
 
+## 日志
+
+`docker logs -f telepiplex` 现在会持续看到 Core 与各 Feature 子进程转发过来的 runtime 日志；敏感字段（Token、API Key、磁力链接、URL 等）会在写入前脱敏。
+
+持久化日志路径：
+
+- Core：`/config/logs/telepiplex-core.log`
+- 每个 Feature：`/config/plugins/<plugin_id>/state/logs/runtime.log`
+
+常用排查命令：
+
+```bash
+docker logs -f telepiplex
+docker exec telepiplex tail -f /config/logs/telepiplex-core.log
+docker exec telepiplex tail -f /config/plugins/open115/state/logs/runtime.log
+docker exec telepiplex tail -f /config/plugins/media-search/state/logs/runtime.log
+docker exec telepiplex tail -f /config/plugins/renaming/state/logs/runtime.log
+docker exec telepiplex tail -f /config/plugins/plex-management/state/logs/runtime.log
+```
+
 ## Feature 安装与升级
 
 Feature 分支是开发源代码；发布物是由该分支构建的、版本不可变的 `.tpx`。运行容器不 checkout Git 分支，也不把业务源码复制进 Core 镜像。
@@ -85,10 +105,10 @@ git push origin core-v1.0.6
 该流水线只推送 `linux/amd64` Core 镜像 `ghcr.io/<owner>/telepiplex-core:1.0.6` 和 `latest`，不会发布或改动 Feature。四种 Feature 各自使用独立 tag，当前发布示例为：
 
 ```bash
-git tag open115-v1.0.1
-git tag media-search-v1.0.1
-git tag renaming-v1.0.1
-git tag plex-management-v1.0.1
+git tag open115-v1.0.2
+git tag media-search-v1.0.2
+git tag renaming-v1.0.2
+git tag plex-management-v1.0.2
 ```
 
 每个 Feature tag 只构建或复用该 Feature 的一个不可变 `.tpx`，创建自己的 GitHub Release，并以乐观合并方式更新 `catalog` 分支。Feature Release 固定使用 `--latest=false`，不会取得仓库的 **Latest** 标签；Latest 只保留给显式标记的稳定 `platform-v<semver>` Release。这个分支保存完整的 `catalog.yaml` 和 `catalog.yaml.sha256`；catalog 中每个 HTTPS 资产都固定到实际 SHA-256、Feature branch 和 commit，并携带从已验证 manifest 提取的 `provides` / `requires` capability 元数据。

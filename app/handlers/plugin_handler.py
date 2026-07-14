@@ -344,7 +344,7 @@ async def dynamic_command_gateway(update, context):
 
 async def dynamic_callback_gateway(update, context):
     query = update.callback_query
-    await query.answer()
+    await query.answer(text="处理中...")
     if not init.check_user(update.effective_user.id):
         return
     data = str(query.data or "")
@@ -371,7 +371,11 @@ async def dynamic_callback_gateway(update, context):
         await handle_feature_result(update, context, route, result)
     except Exception as exc:
         code = getattr(exc, "code", "feature_callback_failed")
-        await update.effective_message.reply_text(f"❌ {code}：{_safe_error(exc)}")
+        await _feature_feedback(
+            update,
+            f"❌ {code}：{_safe_error(exc)}",
+            prefer_edit=True,
+        )
 
 
 async def dynamic_message_gateway(update, context):
@@ -423,7 +427,11 @@ async def handle_feature_result(update, context, route, result: dict):
     if session is None:
         return
     if not isinstance(session, dict) or session.get("state") not in {"open", "close"}:
-        await update.effective_message.reply_text("❌ Feature 返回了无效会话状态。")
+        await _feature_feedback(
+            update,
+            "❌ Feature 返回了无效会话状态。",
+            prefer_edit=bool(getattr(update, "callback_query", None)),
+        )
         return
     key = _session_key(update)
     if session["state"] == "open":
@@ -448,49 +456,77 @@ def merge_nested_patch(current: dict, patch: dict) -> dict:
 
 async def _apply_feature_config_patch(update, context, route, result: dict):
     patch = result.get("config_patch")
+    prefer_edit = bool(getattr(update, "callback_query", None))
     if not isinstance(patch, dict) or not patch:
-        await update.effective_message.reply_text(
-            "❌ invalid_config_patch：Feature 配置补丁无效。"
+        await _feature_feedback(
+            update,
+            "❌ invalid_config_patch：Feature 配置补丁无效。",
+            prefer_edit=prefer_edit,
         )
         return
     manager = context.application.bot_data.get(MANAGER_KEY)
     if manager is None:
-        await update.effective_message.reply_text(
-            "❌ config_manager_unavailable：Feature 插件管理器尚未初始化。"
+        await _feature_feedback(
+            update,
+            "❌ config_manager_unavailable：Feature 插件管理器尚未初始化。",
+            prefer_edit=prefer_edit,
         )
         return
+    await _feature_feedback(
+        update,
+        f"⏳ 正在保存并重新加载 {route.plugin_id} 配置...",
+        prefer_edit=prefer_edit,
+    )
     try:
         view = manager.config(route.plugin_id)
         configured = merge_nested_patch(view.get("config") or {}, patch)
         outcome = await manager.configure(route.plugin_id, configured)
     except PluginOperationError as exc:
-        await update.effective_message.reply_text(
-            f"❌ {exc.code}：配置未写入或重新加载失败。"
+        await _feature_feedback(
+            update,
+            f"❌ {exc.code}：配置未写入或重新加载失败。",
+            prefer_edit=prefer_edit,
         )
         return
     except Exception as exc:
-        await update.effective_message.reply_text(
-            f"❌ config_failed：{type(exc).__name__}"
+        await _feature_feedback(
+            update,
+            f"❌ config_failed：{type(exc).__name__}",
+            prefer_edit=prefer_edit,
         )
         return
     _drop_session(context.application.bot_data, _session_key(update))
-    await update.effective_message.reply_text(
-        f"✅ {outcome.plugin_id} 配置已写入并重新加载。"
+    await _feature_feedback(
+        update,
+        f"✅ {outcome.plugin_id} 配置已写入并重新加载。",
+        prefer_edit=prefer_edit,
     )
 
 
 async def _render_actions(update, context, route, result: dict) -> bool:
     actions = result.get("actions") if isinstance(result, dict) else None
     if not isinstance(actions, list) or len(actions) > 20:
-        await update.effective_message.reply_text("❌ Feature 返回了无效响应。")
+        await _feature_feedback(
+            update,
+            "❌ Feature 返回了无效响应。",
+            prefer_edit=bool(getattr(update, "callback_query", None)),
+        )
         return False
     for action in actions:
         if not isinstance(action, dict) or action.get("kind") not in _SAFE_ACTIONS:
-            await update.effective_message.reply_text("❌ Feature 返回了无效响应。")
+            await _feature_feedback(
+                update,
+                "❌ Feature 返回了无效响应。",
+                prefer_edit=bool(getattr(update, "callback_query", None)),
+            )
             return False
         text = str(action.get("text") or "")
         if not text:
-            await update.effective_message.reply_text("❌ Feature 返回了无效响应。")
+            await _feature_feedback(
+                update,
+                "❌ Feature 返回了无效响应。",
+                prefer_edit=bool(getattr(update, "callback_query", None)),
+            )
             return False
         if len(text) > 4096:
             text = text[:4075].rstrip() + "\n…内容已截断"
@@ -500,7 +536,11 @@ async def _render_actions(update, context, route, result: dict) -> bool:
         kwargs = {"parse_mode": parse_mode} if parse_mode else {}
         reply_markup = _keyboard_markup(route, action.get("data"))
         if reply_markup is False:
-            await update.effective_message.reply_text("❌ Feature 返回了无效响应。")
+            await _feature_feedback(
+                update,
+                "❌ Feature 返回了无效响应。",
+                prefer_edit=bool(getattr(update, "callback_query", None)),
+            )
             return False
         if reply_markup is not None:
             kwargs["reply_markup"] = reply_markup
@@ -541,6 +581,14 @@ def _keyboard_markup(route, data):
             buttons.append(InlineKeyboardButton(text, callback_data=callback_data))
         rows.append(buttons)
     return InlineKeyboardMarkup(rows)
+
+
+async def _feature_feedback(update, text: str, *, prefer_edit: bool = False):
+    query = getattr(update, "callback_query", None)
+    if prefer_edit and query is not None and hasattr(query, "edit_message_text"):
+        await query.edit_message_text(text)
+        return
+    await update.effective_message.reply_text(text)
 
 
 def _session_key(update):

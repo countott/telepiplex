@@ -210,6 +210,35 @@ class PluginRuntimeEndToEndTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.router.snapshot.plugin_ids, ())
         self.assertEqual(os.getpid(), core_pid)
 
+    async def test_feature_runtime_logs_dispatches_with_redaction(self):
+        artifact = await self._artifact("1.0.0", "c" * 40)
+
+        await self.manager.install(artifact)
+        route = self.router.command_route("echo")
+        await route.client.request(
+            "command.dispatch",
+            {"command": "echo", "args": ["access_token=secret-token-value"]},
+            deadline=3,
+        )
+
+        runtime_log = self.root / "plugins" / "echo" / "state" / "logs" / "runtime.log"
+        async with asyncio.timeout(5):
+            while not runtime_log.exists():
+                await asyncio.sleep(0.02)
+        async with asyncio.timeout(5):
+            while True:
+                text = runtime_log.read_text(encoding="utf-8")
+                if "feature_dispatch_start" in text:
+                    break
+                await asyncio.sleep(0.02)
+
+        text = runtime_log.read_text(encoding="utf-8")
+        self.assertIn("feature_dispatch_start", text)
+        self.assertIn("feature_dispatch_finish", text)
+        self.assertIn("command.dispatch", text)
+        self.assertIn("***redacted***", text)
+        self.assertNotIn("secret-token-value", text)
+
 
 if __name__ == "__main__":
     unittest.main()

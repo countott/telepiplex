@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from .core_client import CoreClient
+from .logging_utils import configure_feature_logging
 from .runtime import FeatureRuntime
 from .types import RuntimeContext
 
@@ -35,6 +36,7 @@ def _context_from_environment() -> tuple[str, RuntimeContext]:
 
 async def run():
     entry_point, context = _context_from_environment()
+    configure_feature_logging(context)
     module_name, function_name = entry_point.split(":", 1)
     factory = getattr(importlib.import_module(module_name), function_name)
     runtime = factory(context)

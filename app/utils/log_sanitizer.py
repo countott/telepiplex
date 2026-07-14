@@ -63,6 +63,13 @@ def _redact_text(value: str) -> str:
     return text
 
 
+def sanitize_log_text(value: str, max_chars=DEFAULT_LOG_VALUE_LIMIT) -> str:
+    text = _redact_text(str(value))
+    if len(text) > max_chars:
+        return text[:max_chars] + "...[truncated]"
+    return text
+
+
 def _sanitize(value, depth=0):
     if depth > 8:
         return "[truncated]"
@@ -82,9 +89,9 @@ def _sanitize(value, depth=0):
             try:
                 parsed = json.loads(stripped)
             except (TypeError, ValueError):
-                return _redact_text(value)
+                return sanitize_log_text(value)
             return _sanitize(parsed, depth + 1)
-        return _redact_text(value)
+        return sanitize_log_text(value)
     return value
 
 

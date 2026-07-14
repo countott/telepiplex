@@ -41,6 +41,7 @@ from app.handlers.plugin_handler import (
     plugin_update_callback,
 )
 from app.handlers.config_handler import register_feature_config_handlers
+from app.utils.logger import core_log_path
 try:
     from app.utils.message_queue import add_task_to_queue, queue_worker
 except ImportError:
@@ -87,6 +88,11 @@ def log_runtime_features():
         "Telepiplex runtime features: telepiplex_core=enabled, "
         "basic_telegram_runtime=enabled, message_queue=enabled, "
         f"plugin_host=enabled, revision={revision}"
+    )
+    init.logger.info(
+        "Telepiplex runtime logs: "
+        f"core_log={core_log_path(init.CONFIG)}, "
+        "feature_log_template=/config/plugins/<plugin_id>/state/logs/runtime.log"
     )
 
 
@@ -158,6 +164,7 @@ def build_plugin_manager(config=None, core_database=None):
         restart_limit=int(plugin_config.get("restart_limit") or 3),
         runtime_root=runtime_root,
         broker=broker,
+        log_level=str((config or {}).get("log_level") or "info"),
     )
     catalog_source = resolve_plugin_catalog_source(plugin_config, root)
     catalog = PluginCatalog(catalog_source, root / ".cache")
@@ -343,6 +350,7 @@ def apply_hot_runtime_config(manager, previous: dict, current: dict) -> list[str
         init.logger.logger.setLevel(level)
         for handler in init.logger.logger.handlers:
             handler.setLevel(level)
+    manager.supervisor.log_level = level_name.lower()
 
     restart_paths = (
         ("bot_token", ("bot_token",)),
