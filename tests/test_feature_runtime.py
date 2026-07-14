@@ -176,6 +176,28 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.moved, [])
         self.assertEqual(self.client.deleted_tasks, [("hash-1", 0)])
 
+    async def test_download_flow_emits_sanitized_runtime_logs(self):
+        magnet = "magnet:?xt=urn:btih:" + "f" * 40
+
+        with self.assertLogs("telepiplex.open115", level="INFO") as captured:
+            result = await self.feature.download_capability({
+                "method": "submit",
+                "payload": {
+                    "link": magnet,
+                    "selected_path": "/Downloads",
+                    "user_id": 123,
+                },
+                "context": {"idempotency_key": "log-job-1"},
+            })
+            self.assertEqual(result["job_id"], "log-job-1")
+            await self.runtime.tasks.pop("log-job-1")
+
+        output = "\n".join(captured.output)
+        self.assertIn("open115_download_started", output)
+        self.assertIn("open115_download_completed", output)
+        self.assertIn("selected_path=/Downloads", output)
+        self.assertNotIn(magnet, output)
+
     async def test_storage_capability_is_an_explicit_whitelist(self):
         result = await self.feature.storage_capability({
             "method": "get_file_info",
@@ -478,8 +500,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
         self.assertEqual(schema["x-telepiplex-config-command"], "config")
         self.assertIn("config", [item["name"] for item in manifest["commands"]])
-        self.assertEqual(manifest["version"], "1.0.1")
-        self.assertEqual(project["project"]["version"], "1.0.1")
+        self.assertEqual(manifest["version"], "1.0.2")
+        self.assertEqual(project["project"]["version"], "1.0.2")
 
     def test_source_has_no_core_telegram_or_init_imports(self):
         forbidden = []

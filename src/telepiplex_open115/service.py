@@ -7,6 +7,8 @@ import uuid
 
 from telepiplex_plugin_sdk import FeatureError
 
+from .context import logger
+
 
 _MAGNET = re.compile(r"^magnet:\?xt=urn:btih:(?:[A-Fa-f0-9]{40}|[A-Za-z2-7]{32})(?:&.*)?$")
 SESSION_TTL_SECONDS = 30 * 60
@@ -25,6 +27,13 @@ _STORAGE_METHODS = {
     "get_files_from_dir",
     "get_file_tree",
 }
+
+
+def _link_fingerprint(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
 
 def _single_secret(value: str) -> str:
@@ -199,12 +208,14 @@ class Open115Feature:
                     })
                 self.client.set_tokens(access_token, refresh_token)
             except Exception:
+                logger.error("open115_direct_auth_write_failed")
                 return self._message_with_session(
                     "⚠️ 115 Token 写入失败，请重新发送 Refresh token 或使用 /q 取消。",
                     "open",
                 )
             self.config.update(updated)
             self._clear_auth_session(key)
+            logger.info("open115_direct_auth_updated auth_mode=direct")
             return self._message_with_session(
                 "✅ 115 Token 已写入并立即生效。",
                 "close",
@@ -275,10 +286,19 @@ class Open115Feature:
             )
             qr_text = self._render_qr(authorization["qrcode"])
         except Exception as exc:
+            logger.error(
+                "open115_scan_auth_start_failed "
+                f"error={type(exc).__name__}"
+            )
             return self._message_with_session(
                 f"⚠️ 115 扫码授权启动失败：{type(exc).__name__}",
                 "close",
             )
+        logger.info(
+            "open115_scan_auth_started "
+            f"user_id={int(request.get('user_id') or 0)} "
+            f"auth_uid={authorization['uid']}"
+        )
         task_id = f"open115-auth-{authorization['uid']}"
         self.runtime.spawn(
             self._complete_scan_auth(
@@ -318,8 +338,17 @@ class Open115Feature:
                     "refresh_token": tokens["refresh_token"],
                 })
             self.client.set_tokens(tokens["access_token"], tokens["refresh_token"])
+            logger.info(
+                "open115_scan_auth_completed "
+                f"user_id={user_id} auth_uid={authorization['uid']}"
+            )
             message = "✅ 115 扫码授权成功，Token 已写回 Feature 私有配置。"
         except Exception as exc:
+            logger.error(
+                "open115_scan_auth_failed "
+                f"user_id={user_id} auth_uid={authorization.get('uid') or ''} "
+                f"error={type(exc).__name__}"
+            )
             message = f"⚠️ 115 扫码授权失败：{type(exc).__name__}"
         if user_id:
             await self.core.notify_user(user_id, message)
@@ -356,12 +385,28 @@ class Open115Feature:
             f"{link}\0{selected_path}".encode("utf-8")
         ).hexdigest()
         if job_id in self.active_job_ids:
+            logger.info(
+                "open115_download_duplicate "
+                f"job_id={job_id} selected_path={selected_path}"
+            )
             return {"accepted": True, "job_id": job_id, "duplicate": True}
         if self.jobs:
             job = self.jobs.create_or_get(job_id, payload | {"link": link, "selected_path": selected_path})
             if job["state"] in {"completed", "failed", "downloaded", "running", "interrupted"}:
+                logger.info(
+                    "open115_download_duplicate "
+                    f"job_id={job_id} selected_path={selected_path} "
+                    f"state={job['state']}"
+                )
                 return {"accepted": True, "job_id": job_id, "duplicate": True, "state": job["state"]}
         self.active_job_ids.add(job_id)
+        logger.info(
+            "open115_download_started "
+            f"job_id={job_id} "
+            f"selected_path={selected_path} "
+            f"user_id={int(payload.get('user_id') or 0)} "
+            f"link_sha1={_link_fingerprint(link)}"
+        )
         try:
             if self.jobs:
                 self.jobs.update(job_id, "running")
@@ -412,12 +457,25 @@ class Open115Feature:
             }
             if self.jobs:
                 self.jobs.update(job_id, "downloaded", result=event_payload)
+            logger.info(
+                "open115_download_completed "
+                f"job_id={job_id} "
+                f"final_path={final_path} "
+                f"resource_name={resource_name}"
+            )
             await self._publish_downloaded({"job_id": job_id, "state": "downloaded", "result": event_payload})
         except Exception as exc:
             if self.jobs and (self.jobs.get(job_id) or {}).get("state") == "downloaded":
                 return
             if self.jobs:
                 self.jobs.update(job_id, "failed", error=type(exc).__name__)
+            logger.error(
+                "open115_download_failed "
+                f"job_id={job_id} "
+                f"selected_path={selected_path} "
+                f"error={type(exc).__name__} "
+                f"link_sha1={_link_fingerprint(link)}"
+            )
             failure = {
                 "job_id": job_id,
                 "provider": "open115",
@@ -448,6 +506,10 @@ class Open115Feature:
         payload = job.get("result") or {}
         job_id = str(job["job_id"])
         await self.core.publish_event("download.completed", payload, idempotency_key=f"{job_id}:completed")
+        logger.info(
+            "open115_download_published "
+            f"job_id={job_id} final_path={payload.get('final_path') or ''}"
+        )
         if self.jobs:
             self.jobs.update(job_id, "completed", result=payload)
         user_id = int(payload.get("user_id") or 0)
