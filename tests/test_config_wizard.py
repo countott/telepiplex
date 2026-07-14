@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 class PlexConfigWizardTest(unittest.IsolatedAsyncioTestCase):
@@ -146,6 +147,26 @@ class PlexConfigWizardTest(unittest.IsolatedAsyncioTestCase):
         result = await self._confirm()
 
         self.assertEqual(result["config_patch"], {"ai": {"enabled": False}})
+
+    async def test_expired_confirmation_cannot_submit_patch(self):
+        with patch(
+            "telepiplex_plex.config_wizard.time.monotonic",
+            return_value=100,
+        ):
+            await self._start()
+            await self.feature.callback({
+                **self.owner, "namespace": "plex", "payload": "config:tmdb"
+            })
+            await self.feature.message({**self.owner, "text": "new-key"})
+
+        with patch(
+            "telepiplex_plex.config_wizard.time.monotonic",
+            return_value=2000,
+        ):
+            expired = await self._confirm()
+
+        self.assertNotIn("config_patch", expired)
+        self.assertEqual(expired["session"]["state"], "close")
 
 
 if __name__ == "__main__":
