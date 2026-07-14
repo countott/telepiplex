@@ -1,6 +1,6 @@
 plugin_id: renaming
 name: Media Renaming
-version: 1.0.1
+version: 1.0.2
 core_api: ">=1.0,<2.0"
 entry_point: telepiplex_renaming.runtime:main
 provides: []
