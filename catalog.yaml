@@ -48,6 +48,16 @@ plugins:
           branch: feature/plex-management
           commit: 7cf9224e0b952a3d4524d87dd698d88907b3eec6
         url: https://github.com/countott/telepiplex/releases/download/plex-management-v1.0.1/plex-management-1.0.1.tpx
+      1.0.2:
+        core_api: '>=1.0,<2.0'
+        provides:
+        - plex.management
+        requires: []
+        sha256: d94e5259df456bb6d04c4906e6c001bc1e93df71aaed48eebd9d1a95f55af14e
+        source:
+          branch: feature/plex-management
+          commit: 8b4a7eede3d0751f3ad0447b65a4bb857b8b22a2
+        url: https://github.com/countott/telepiplex/releases/download/plex-management-v1.0.2/plex-management-1.0.2.tpx
   renaming:
     versions:
       1.0.1:
@@ -72,5 +82,5 @@ plugins:
           branch: feature/renaming
           commit: de7e6ae80bda47dfd8ea7e947274505cf4500927
         url: https://github.com/countott/telepiplex/releases/download/renaming-v1.0.2/renaming-1.0.2.tpx
-release: renaming-v1.0.2
+release: plex-management-v1.0.2
 schema_version: 1
