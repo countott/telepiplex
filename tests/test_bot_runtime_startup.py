@@ -287,6 +287,20 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             restart_fields,
             ["bot_token", "plugins.root", "plugins.catalog"],
         )
+        self.assertEqual(
+            bot_module.hot_runtime_changed_fields(old, new),
+            [
+                "allowed_user",
+                "plugins.install_timeout",
+                "plugins.startup_timeout",
+                "plugins.drain_timeout",
+                "plugins.stabilize_seconds",
+                "plugins.restart_limit",
+                "plugins.event_retry_interval",
+                "plugins.event_delivery_timeout",
+                "plugins.event_max_attempts",
+            ],
+        )
 
     async def test_reload_reports_each_feature_and_continues_after_failure(self):
         bot_module = await asyncio.to_thread(load_bot_module)
@@ -307,7 +321,9 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
         )
         async def reload_feature(plugin_id):
             if plugin_id == "bad":
-                raise PluginOperationError("invalid_config", "schema mismatch")
+                raise PluginOperationError(
+                    "invalid_config", "api_key=top-secret-value"
+                )
             return SimpleNamespace(state="active")
 
         manager = SimpleNamespace(
@@ -349,8 +365,11 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             ["bad", "good"],
         )
         text = bot.send_message.await_args.kwargs["text"]
+        self.assertIn("配置重载部分失败", text)
+        self.assertIn("Core 已应用：无变更", text)
         self.assertIn("✅ good", text)
         self.assertIn("❌ bad：invalid_config", text)
+        self.assertNotIn("top-secret-value", text)
         self.assertIn("bot_token", text)
 
     async def test_reload_rejects_invalid_core_yaml_without_touching_features(self):

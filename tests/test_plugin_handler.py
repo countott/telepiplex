@@ -23,7 +23,7 @@ class FakeManager:
         self.calls.append((name, value))
         return SimpleNamespace(
             state="active",
-            plugin_id=str(value),
+            plugin_id=str(value).split("@", 1)[0],
             version="1.0.0",
             message=f"{name} complete",
             details={},
@@ -72,6 +72,14 @@ class FakeManager:
             message="Feature configuration saved and reloaded",
             details={"restarted": True},
         )
+
+    def config_state(self, plugin_id):
+        return {
+            "plugin_id": plugin_id,
+            "state": "configurable",
+            "configurable": True,
+            "command": "configure_echo",
+        }
 
 
 class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
@@ -351,6 +359,27 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         sessions = context.application.bot_data["telepiplex_plugin_sessions"]
         self.assertEqual(list(sessions.values())[0]["plugin_id"], "other")
+
+    async def test_manual_update_clears_stale_core_config_state(self):
+        from app.handlers.plugin_handler import plugin_command
+
+        update, context, manager = self._request(["update", "echo@2.0.0"])
+        context.user_data.update({
+            "core_config_plugins": ["echo"],
+            "core_config_plugin": "echo",
+        })
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_command(update, context)
+
+        self.assertEqual(context.user_data, {})
+        markup = update.effective_message.reply_text.await_args_list[-1].kwargs[
+            "reply_markup"
+        ]
+        self.assertEqual(
+            markup.inline_keyboard[0][0].callback_data,
+            "core-config-direct:echo",
+        )
 
     async def test_core_update_callback_requires_authorization_and_confirmation(self):
         from app.handlers.plugin_handler import plugin_update_callback
@@ -636,6 +665,13 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "1.0.0",
             update.callback_query.edit_message_text.await_args_list[-1].args[0],
+        )
+        markup = update.callback_query.edit_message_text.await_args_list[-1].kwargs[
+            "reply_markup"
+        ]
+        self.assertEqual(
+            markup.inline_keyboard[0][0].callback_data,
+            "core-config-direct:echo",
         )
 
         update, context, manager = self._request([], user_id=2)

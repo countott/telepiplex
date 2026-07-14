@@ -4,6 +4,7 @@ import asyncio
 import re
 import shutil
 import sys
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -66,6 +67,9 @@ class PluginManager:
         self._venv_installer = venv_installer or self._install_private_venv
         self._artifact_resolver = artifact_resolver
         self._lifecycle_lock = asyncio.Lock()
+        # Last config known to back the running process. This intentionally
+        # differs from config.yaml while an operator is testing a manual edit.
+        self._active_configs: dict[str, dict] = {}
 
     async def install(self, reference: str | Path, expected_sha256: str = "") -> PluginOperationResult:
         async with self._lifecycle_lock:
@@ -157,6 +161,11 @@ class PluginManager:
                 await self._verify_stable(process)
                 self.journal.set_subscriptions(plugin_id, release.manifest.subscribes)
                 self.assert_active_consistency(enabled)
+                await asyncio.to_thread(
+                    self.store.write_config_example,
+                    enabled,
+                )
+                self._remember_active_config(enabled)
                 return self._result("active", enabled, "Feature enabled")
             except Exception as exc:
                 self.router.deactivate(plugin_id)
@@ -192,6 +201,7 @@ class PluginManager:
             if process is not None:
                 await self.supervisor.stop(process)
             await asyncio.to_thread(self.store.remove_plugin, plugin_id)
+            self._active_configs.pop(plugin_id, None)
             return PluginOperationResult(
                 state="removed",
                 plugin_id=plugin_id,
@@ -350,6 +360,17 @@ class PluginManager:
                 "error_code": "invalid_schema",
             }
         command = str(schema.get("x-telepiplex-config-command") or "").strip()
+        try:
+            self.store.read_config(release)
+        except StoreError:
+            return {
+                "plugin_id": plugin_id,
+                "version": release.version,
+                "state": "invalid_config",
+                "configurable": False,
+                "command": command,
+                "error_code": "invalid_config",
+            }
         route = self.router.plugin_route(plugin_id)
         if route is None:
             status = self.router.plugin_status(plugin_id)
@@ -383,17 +404,6 @@ class PluginManager:
                 "configurable": False,
                 "command": command,
                 "error_code": "invalid_config_command",
-            }
-        try:
-            self.store.read_config(release)
-        except StoreError:
-            return {
-                "plugin_id": plugin_id,
-                "version": release.version,
-                "state": "invalid_config",
-                "configurable": False,
-                "command": command,
-                "error_code": "invalid_config",
             }
         return {
             "plugin_id": plugin_id,
@@ -462,11 +472,16 @@ class PluginManager:
                 raise PluginOperationError("not_installed", "Feature is not installed")
             try:
                 validated = self.store.validate_config(release, value)
-                previous = self.store.read_config(release)
+                disk_config = self.store.read_config(release)
             except StoreError as exc:
                 raise self._operation_error(exc, "invalid_config") from None
 
             old_process = self.supervisor.process(release.plugin_id)
+            previous = deepcopy(
+                self._active_configs.get(release.plugin_id, disk_config)
+                if old_process is not None
+                else disk_config
+            )
             if old_process is None:
                 try:
                     await asyncio.to_thread(
@@ -476,6 +491,7 @@ class PluginManager:
                     )
                 except StoreError as exc:
                     raise self._operation_error(exc, "config_write_failed") from None
+                self._active_configs[release.plugin_id] = deepcopy(validated)
                 return PluginOperationResult(
                     state="configured",
                     plugin_id=release.plugin_id,
@@ -524,6 +540,7 @@ class PluginManager:
                 await self._verify_stable(new_process)
                 self.assert_active_consistency(release)
                 await self.supervisor.stop(old_process)
+                self._active_configs[release.plugin_id] = deepcopy(validated)
                 return PluginOperationResult(
                     state="active",
                     plugin_id=release.plugin_id,
@@ -642,6 +659,11 @@ class PluginManager:
             await self._verify_stable(new_process)
             self.journal.set_subscriptions(release.plugin_id, release.manifest.subscribes)
             self.assert_active_consistency(active)
+            await asyncio.to_thread(
+                self.store.write_config_example,
+                active,
+            )
+            self._remember_active_config(active)
             if old_process is not None:
                 await self.supervisor.stop(old_process)
             return active
@@ -665,11 +687,23 @@ class PluginManager:
                     self.supervisor.promote(old_process)
                     if old_drained:
                         await self.supervisor.resume(old_process)
+                try:
+                    await asyncio.to_thread(
+                        self.store.write_config_example,
+                        old_release,
+                    )
+                except Exception:
+                    pass
             else:
                 self.store.clear_active(release.plugin_id)
             if new_process is not None:
                 await self._safe_stop(new_process)
             raise self._operation_error(exc, "activation_failed") from None
+
+    def _remember_active_config(self, release: ActiveRelease):
+        self._active_configs[release.plugin_id] = deepcopy(
+            self.store.read_config(release)
+        )
 
     async def _verify_stable(self, process: PluginProcess):
         if self.stabilize_seconds:

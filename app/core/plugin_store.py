@@ -80,8 +80,13 @@ def _validate(schema: dict, value: dict) -> dict:
     try:
         Draft202012Validator.check_schema(schema)
         Draft202012Validator(schema).validate(value)
-    except (SchemaError, ValidationError) as exc:
-        raise StoreError("invalid_config", exc.message) from None
+    except (SchemaError, ValidationError):
+        # jsonschema messages may echo the rejected instance. Config values can
+        # contain credentials, so only expose a stable, non-sensitive error.
+        raise StoreError(
+            "invalid_config",
+            "plugin config does not match schema",
+        ) from None
     return deepcopy(value)
 
 
@@ -198,8 +203,14 @@ class PluginStore:
         plugin_root.joinpath("state").mkdir(parents=True, exist_ok=True)
 
         config_path = plugin_root / "config.yaml"
-        default = _default_at(target)
-        _atomic_yaml(plugin_root / "config.yaml.example", default, mode=0o644)
+        default = self.write_config_example(ActiveRelease(
+            plugin_id=staged.plugin_id,
+            version=staged.version,
+            path=target,
+            manifest=staged.manifest,
+            artifact_sha256=staged.artifact_sha256,
+            enabled=False,
+        ))
         if not config_path.exists():
             _atomic_yaml(config_path, default)
         (target / ".validated-default.json").unlink(missing_ok=True)
@@ -215,6 +226,18 @@ class PluginStore:
             artifact_sha256=staged.artifact_sha256,
             enabled=False,
         )
+
+    def write_config_example(
+        self,
+        release: ActiveRelease | StagedRelease,
+    ) -> dict:
+        default = _validate(_schema_at(release.path), _default_at(release.path))
+        _atomic_yaml(
+            self._plugin_root(release.plugin_id) / "config.yaml.example",
+            default,
+            mode=0o644,
+        )
+        return deepcopy(default)
 
     def set_active(
         self,

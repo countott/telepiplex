@@ -253,6 +253,26 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.supervisor.process("echo"), old)
         self.assertEqual(old.state, "healthy")
 
+    async def test_reload_config_restores_last_running_config_when_shadow_is_unhealthy(self):
+        from app.core.plugin_manager import PluginOperationError
+
+        schema, default = self._editable_config()
+        await self.manager.install(self._artifact(
+            config_schema=schema,
+            config_default=default,
+        ))
+        old = self.supervisor.process("echo")
+        config_path = self.root / "plugins/echo/config.yaml"
+        config_path.write_text("prefix: manually-edited\n", encoding="utf-8")
+        self.supervisor.unhealthy_versions.add("1.0.0")
+
+        with self.assertRaises(PluginOperationError):
+            await self.manager.reload_config("echo")
+
+        self.assertEqual(yaml.safe_load(config_path.read_text()), {"prefix": "old"})
+        self.assertIs(self.supervisor.process("echo"), old)
+        self.assertEqual(old.state, "healthy")
+
     async def test_config_state_reports_custom_command_and_invalid_live_config(self):
         schema, default = self._editable_config()
         schema["x-telepiplex-config-command"] = "configure_echo"
@@ -273,6 +293,23 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(broken["configurable"])
         self.assertEqual(broken["state"], "invalid_config")
         self.assertEqual(broken["error_code"], "invalid_config")
+
+    async def test_config_state_reports_invalid_config_even_when_route_is_unavailable(self):
+        schema, default = self._editable_config()
+        schema["x-telepiplex-config-command"] = "configure_echo"
+        await self.manager.install(self._artifact(
+            commands=("echo", "configure_echo"),
+            config_schema=schema,
+            config_default=default,
+        ))
+        self.router.deactivate("echo")
+        config_path = self.root / "plugins/echo/config.yaml"
+        config_path.write_text("unknown: true\n", encoding="utf-8")
+
+        state = self.manager.config_state("echo")
+
+        self.assertEqual(state["state"], "invalid_config")
+        self.assertEqual(state["error_code"], "invalid_config")
 
     async def test_configure_refuses_busy_feature_without_changing_config(self):
         from app.core.plugin_manager import PluginOperationError
@@ -503,12 +540,19 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
     async def test_failed_stabilization_restores_old_routes_process_and_record(self):
         from app.core.plugin_manager import PluginOperationError
 
-        await self.manager.install(self._artifact("echo", "1.0.0"))
+        schema, _default = self._editable_config()
+        await self.manager.install(self._artifact(
+            "echo", "1.0.0", config_schema=schema,
+            config_default={"prefix": "v1"},
+        ))
         old = self.supervisor.process("echo")
         self.supervisor.unhealthy_versions.add("2.0.0")
 
         with self.assertRaises(PluginOperationError) as raised:
-            await self.manager.update(self._artifact("echo", "2.0.0", commit="b" * 40))
+            await self.manager.update(self._artifact(
+                "echo", "2.0.0", commit="b" * 40,
+                config_schema=schema, config_default={"prefix": "v2"},
+            ))
 
         self.assertEqual(raised.exception.code, "stabilization_failed")
         self.assertEqual(self.store.active("echo").version, "1.0.0")
@@ -517,6 +561,8 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("echo", "1.0.0"), self.supervisor.resumed)
         new = next(item for item in self.supervisor.instances if item.release.version == "2.0.0")
         self.assertEqual(new.state, "stopped")
+        example = self.root / "plugins/echo/config.yaml.example"
+        self.assertEqual(yaml.safe_load(example.read_text()), {"prefix": "v1"})
 
     async def test_update_refuses_to_stop_non_idempotent_work_that_did_not_drain(self):
         from app.core.plugin_manager import PluginOperationError

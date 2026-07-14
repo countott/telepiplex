@@ -181,6 +181,24 @@ class PluginStoreTest(unittest.TestCase):
             store.validate_config(active, {"prefix": 123})
         self.assertEqual(raised.exception.code, "invalid_config")
 
+    def test_schema_validation_error_does_not_include_secret_value(self):
+        from app.core.plugin_store import PluginStore, StoreError
+
+        artifact = self._artifact()
+        store = PluginStore(self.plugins_root)
+        active = store.activate(store.stage(artifact))
+        schema = store.config_schema(active)
+        schema["properties"]["prefix"]["pattern"] = "^allowed$"
+        (active.path / "config.schema.json").write_text(
+            json.dumps(schema), encoding="utf-8"
+        )
+
+        with self.assertRaises(StoreError) as raised:
+            store.validate_config(active, {"prefix": "top-secret-value"})
+
+        self.assertEqual(raised.exception.code, "invalid_config")
+        self.assertNotIn("top-secret-value", str(raised.exception))
+
     def test_config_api_reads_copies_and_writes_validated_private_yaml(self):
         from app.core.plugin_store import PluginStore, StoreError
 

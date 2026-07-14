@@ -36,6 +36,21 @@ _CORE_INSTALL_CALLBACK_RE = re.compile(
 )
 
 
+def _config_markup(manager, plugin_id: str):
+    try:
+        state = manager.config_state(plugin_id)
+    except Exception:
+        return None
+    if not state.get("configurable"):
+        return None
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            f"配置 {plugin_id}",
+            callback_data=f"core-config-direct:{plugin_id}",
+        )
+    ]])
+
+
 def _safe_error(value) -> str:
     text = re.sub(
         r"(?i)(token|secret|password|api[_-]?key)\s*[=:]\s*\S+",
@@ -67,13 +82,22 @@ async def plugin_command(update, context):
             value = str(args[1])
             await message.reply_text(f"⏳ Feature {command} 处理中：{args[1]}")
             result = await getattr(manager, command)(value)
-            if command in {"update", "disable", "rollback", "remove"}:
+            if command in {
+                "install", "update", "enable", "disable", "rollback", "remove"
+            }:
                 _clear_plugin_sessions(context.application.bot_data, result.plugin_id)
+                _clear_config_user_data(context.user_data)
+            kwargs = {}
+            if command in {"install", "update", "enable", "rollback"}:
+                markup = _config_markup(manager, result.plugin_id)
+                if markup is not None:
+                    kwargs["reply_markup"] = markup
             await message.reply_text(
                 f"✅ {result.message}\n"
                 f"插件：{result.plugin_id}\n"
                 f"版本：{result.version}\n"
-                f"状态：{result.state}"
+                f"状态：{result.state}",
+                **kwargs,
             )
             return
         if command == "status" and len(args) == 2:
@@ -207,12 +231,19 @@ async def plugin_install_callback(update, context):
     try:
         await query.edit_message_text(f"⏳ Feature 安装处理中：{reference}")
         result = await manager.install(reference)
+        _clear_plugin_sessions(context.application.bot_data, result.plugin_id)
+        _clear_config_user_data(context.user_data)
+        kwargs = {}
+        markup = _config_markup(manager, result.plugin_id)
+        if markup is not None:
+            kwargs["reply_markup"] = markup
         await query.edit_message_text(
             f"✅ {result.message}\n"
             f"插件：{result.plugin_id}\n"
             f"版本：{result.version}\n"
             f"状态：{result.state}\n\n"
-            "发送 /plugin 继续安装其他 Feature。"
+            "发送 /plugin 继续安装其他 Feature。",
+            **kwargs,
         )
     except PluginOperationError as exc:
         await query.edit_message_text(f"❌ {exc.code}：{_safe_error(exc)}")
@@ -249,17 +280,16 @@ async def plugin_update_callback(update, context):
         result = await manager.update(reference)
         _clear_plugin_sessions(context.application.bot_data, result.plugin_id)
         _clear_config_user_data(context.user_data)
+        kwargs = {}
+        markup = _config_markup(manager, result.plugin_id)
+        if markup is not None:
+            kwargs["reply_markup"] = markup
         await query.edit_message_text(
             f"✅ {result.message}\n"
             f"插件：{result.plugin_id}\n"
             f"版本：{result.version}\n"
             f"状态：{result.state}",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    f"配置 {result.plugin_id}",
-                    callback_data=f"core-config-direct:{result.plugin_id}",
-                )
-            ]]),
+            **kwargs,
         )
     except PluginOperationError as exc:
         await query.edit_message_text(f"❌ {exc.code}：{_safe_error(exc)}")

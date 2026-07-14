@@ -267,6 +267,42 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _config_value(config: dict, path: tuple[str, ...], default=None):
+    value = config or {}
+    for key in path:
+        if not isinstance(value, dict):
+            return default
+        value = value.get(key, default)
+    return default if value is None else value
+
+
+HOT_RUNTIME_FIELDS = (
+    ("allowed_user", ("allowed_user",), None),
+    ("log_level", ("log_level",), "info"),
+    ("plugins.install_timeout", ("plugins", "install_timeout"), 300),
+    ("plugins.startup_timeout", ("plugins", "startup_timeout"), 30),
+    ("plugins.drain_timeout", ("plugins", "drain_timeout"), 120),
+    ("plugins.stabilize_seconds", ("plugins", "stabilize_seconds"), 10),
+    ("plugins.restart_limit", ("plugins", "restart_limit"), 3),
+    ("plugins.event_retry_interval", ("plugins", "event_retry_interval"), 1),
+    (
+        "plugins.event_delivery_timeout",
+        ("plugins", "event_delivery_timeout"),
+        1800,
+    ),
+    ("plugins.event_max_attempts", ("plugins", "event_max_attempts"), 5),
+)
+
+
+def hot_runtime_changed_fields(previous: dict, current: dict) -> list[str]:
+    return [
+        name
+        for name, path, default in HOT_RUNTIME_FIELDS
+        if _config_value(previous, path, default)
+        != _config_value(current, path, default)
+    ]
+
+
 def apply_hot_runtime_config(manager, previous: dict, current: dict) -> list[str]:
     """Apply settings safe to mutate in-process and name those needing restart."""
     plugin_config = (current or {}).get("plugins") or {}
@@ -309,30 +345,19 @@ def apply_hot_runtime_config(manager, previous: dict, current: dict) -> list[str
             handler.setLevel(level)
 
     restart_paths = (
-        ("bot_token", lambda config: (config or {}).get("bot_token")),
-        (
-            "plugins.root",
-            lambda config: ((config or {}).get("plugins") or {}).get("root"),
-        ),
-        (
-            "plugins.runtime_root",
-            lambda config: ((config or {}).get("plugins") or {}).get("runtime_root"),
-        ),
-        (
-            "plugins.catalog",
-            lambda config: ((config or {}).get("plugins") or {}).get("catalog"),
-        ),
+        ("bot_token", ("bot_token",)),
+        ("plugins.root", ("plugins", "root")),
+        ("plugins.runtime_root", ("plugins", "runtime_root")),
+        ("plugins.catalog", ("plugins", "catalog")),
         (
             "plugins.catalog_refresh_interval",
-            lambda config: ((config or {}).get("plugins") or {}).get(
-                "catalog_refresh_interval"
-            ),
+            ("plugins", "catalog_refresh_interval"),
         ),
     )
     return [
         name
-        for name, read in restart_paths
-        if read(previous) != read(current)
+        for name, path in restart_paths
+        if _config_value(previous, path) != _config_value(current, path)
     ]
 
 
@@ -396,22 +421,29 @@ async def reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text="❌ Core 配置值无效；继续使用重载前配置，Feature 未重载。",
         )
         return
+    hot_fields = hot_runtime_changed_fields(previous, init.bot_config)
     feature_lines = []
+    feature_failed = False
     for plugin_id in _enabled_feature_ids(manager):
         try:
             await manager.reload_config(plugin_id)
         except Exception as exc:
             code = str(getattr(exc, "code", type(exc).__name__))
-            message = str(getattr(exc, "message", ""))
-            suffix = f"（{message}）" if message else ""
-            feature_lines.append(f"❌ {plugin_id}：{code}{suffix}")
+            feature_lines.append(f"❌ {plugin_id}：{code}")
+            feature_failed = True
             if init.logger:
                 init.logger.error(f"Feature 配置重载失败 [{plugin_id}]: {code}")
         else:
             feature_lines.append(f"✅ {plugin_id}")
 
     log_config_snapshot("配置已重新加载:")
-    lines = ["✅ Core 配置已重新读取并应用可热更新项。", "", "Feature 重载结果："]
+    lines = [
+        "⚠️ 配置重载部分失败。" if feature_failed else "✅ 配置重载完成。",
+        "",
+        "Core 已应用：" + ("、".join(hot_fields) if hot_fields else "无变更"),
+        "",
+        "Feature 重载结果：",
+    ]
     lines.extend(feature_lines or ["- 无已启用 Feature"])
     if restart_fields:
         lines.extend([
