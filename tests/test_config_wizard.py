@@ -38,6 +38,13 @@ class RenamingConfigWizardTest(unittest.IsolatedAsyncioTestCase):
             "args": [],
         })
 
+    async def _confirm(self):
+        return await self.feature.callback({
+            **self.owner,
+            "namespace": "renaming",
+            "payload": "config:confirm",
+        })
+
     async def test_entry_exposes_only_tvdb_and_ai(self):
         result = await self._start()
 
@@ -66,7 +73,8 @@ class RenamingConfigWizardTest(unittest.IsolatedAsyncioTestCase):
             "payload": "config:boolean:on",
         })
         await self.feature.message({**self.owner, "text": "new-tvdb-key"})
-        result = await self.feature.message({**self.owner, "text": "-"})
+        await self.feature.message({**self.owner, "text": "-"})
+        result = await self._confirm()
 
         self.assertEqual(result["config_patch"], {
             "metadata": {
@@ -94,7 +102,8 @@ class RenamingConfigWizardTest(unittest.IsolatedAsyncioTestCase):
             **self.owner, "text": "https://ai.example/v1"
         })
         await self.feature.message({**self.owner, "text": "-"})
-        result = await self.feature.message({**self.owner, "text": "new-model"})
+        await self.feature.message({**self.owner, "text": "new-model"})
+        result = await self._confirm()
 
         self.assertEqual(result["config_patch"], {
             "ai": {
@@ -117,11 +126,13 @@ class RenamingConfigWizardTest(unittest.IsolatedAsyncioTestCase):
                     "namespace": "renaming",
                     "payload": f"config:{section}",
                 })
-                result = await self.feature.callback({
+                pending = await self.feature.callback({
                     **self.owner,
                     "namespace": "renaming",
                     "payload": "config:boolean:off",
                 })
+                self.assertNotIn("config_patch", pending)
+                result = await self._confirm()
                 self.assertEqual(result["config_patch"], expected)
 
 
