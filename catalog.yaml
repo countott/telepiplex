@@ -11,7 +11,7 @@ plugins:
         source:
           branch: feature/media-search
           commit: 067b9d6651d1c9e6fc35562c6e9ec1f644a354fa
-        url: https://github.com/countott/telepiplex/releases/download/platform-v1.0.5/media-search-1.0.1.tpx
+        url: https://github.com/countott/telepiplex/releases/download/media-search-v1.0.1/media-search-1.0.1.tpx
   open115:
     versions:
       1.0.1:
@@ -50,5 +50,5 @@ plugins:
           branch: feature/renaming
           commit: f73614cdcb2661f56ebb2926c7f5f14ee87899f8
         url: https://github.com/countott/telepiplex/releases/download/platform-v1.0.5/renaming-1.0.1.tpx
-release: open115-v1.0.1
+release: media-search-v1.0.1
 schema_version: 1
