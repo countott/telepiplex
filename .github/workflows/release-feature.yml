@@ -1,0 +1,279 @@
+name: Publish one Telepiplex Feature
+
+on:
+  push:
+    tags:
+      - open115-v*
+      - media-search-v*
+      - renaming-v*
+      - plex-management-v*
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Immutable Feature tag such as media-search-v1.0.2
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: feature-catalog-release
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
+jobs:
+  publish-feature:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Core release infrastructure
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install Feature release dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt build setuptools wheel
+
+      - name: Resolve immutable Feature identity
+        id: feature
+        env:
+          PYTHONPATH: .:sdk/src
+        run: |
+          python - "$RELEASE_TAG" >> "$GITHUB_OUTPUT" <<'PY'
+          import sys
+          from tools.update_feature_catalog import FEATURE_BRANCHES, parse_feature_tag
+
+          plugin_id, version = parse_feature_tag(sys.argv[1])
+          print(f"plugin_id={plugin_id}")
+          print(f"version={version}")
+          print(f"branch={FEATURE_BRANCHES[plugin_id]}")
+          print(f"asset={plugin_id}-{version}.tpx")
+          PY
+
+      - name: Checkout fixed Feature branch
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ steps.feature.outputs.branch }}
+          path: feature-src
+          fetch-depth: 0
+
+      - name: Load previous catalog snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rm -rf previous
+          mkdir -p previous
+          if git ls-remote --exit-code --heads origin refs/heads/catalog >/dev/null 2>&1; then
+            git fetch --no-tags origin refs/heads/catalog
+            git show FETCH_HEAD:catalog.yaml > previous/catalog.yaml
+          else
+            CATALOG_URL="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/catalog.yaml"
+            HTTP_CODE=$(curl --location --silent --show-error --output previous/catalog.yaml.tmp --write-out '%{http_code}' "$CATALOG_URL")
+            case "$HTTP_CODE" in
+              200)
+                mv previous/catalog.yaml.tmp previous/catalog.yaml
+                ;;
+              404)
+                rm -f previous/catalog.yaml.tmp
+                echo "No catalog branch or compatible Release catalog exists; previous catalog is empty."
+                ;;
+              *)
+                rm -f previous/catalog.yaml.tmp
+                echo "Unable to load the previous catalog: HTTP $HTTP_CODE" >&2
+                exit 1
+                ;;
+            esac
+          fi
+          if [[ -f previous/catalog.yaml ]]; then
+            python - <<'PY'
+          import pathlib
+          import yaml
+
+          catalog = yaml.safe_load(pathlib.Path("previous/catalog.yaml").read_text())
+          if not isinstance(catalog, dict) or catalog.get("schema_version", 1) != 1:
+              raise SystemExit("previous catalog has an unsupported structure")
+          if not isinstance(catalog.get("plugins"), dict):
+              raise SystemExit("previous catalog plugins must be a mapping")
+          PY
+          fi
+
+      - name: Build or reuse verified Feature artifact
+        id: artifact
+        env:
+          PLUGIN_ID: ${{ steps.feature.outputs.plugin_id }}
+          VERSION: ${{ steps.feature.outputs.version }}
+          FEATURE_BRANCH: ${{ steps.feature.outputs.branch }}
+          ASSET_NAME: ${{ steps.feature.outputs.asset }}
+          PYTHONPATH: .:sdk/src
+        run: |
+          git -C feature-src checkout -B "$FEATURE_BRANCH" "origin/$FEATURE_BRANCH"
+          FEATURE_COMMIT=$(git -C feature-src rev-parse HEAD)
+          export FEATURE_COMMIT
+          mkdir -p dist
+          ASSET_PATH="dist/$ASSET_NAME"
+          export ASSET_PATH
+
+          python - <<'PY'
+          import os
+          import pathlib
+          import yaml
+
+          manifest = yaml.safe_load(pathlib.Path("feature-src/manifest.yaml").read_text())
+          expected = {
+              "plugin_id": os.environ["PLUGIN_ID"],
+              "version": os.environ["VERSION"],
+          }
+          for field, value in expected.items():
+              if manifest.get(field) != value:
+                  raise SystemExit(f"Feature manifest {field} does not match release tag")
+          source = manifest.get("source") or {}
+          if source.get("branch") != os.environ["FEATURE_BRANCH"]:
+              raise SystemExit("Feature manifest source branch does not match release tag")
+          PY
+
+          rm -f previous/reuse.yaml
+          if [[ -f previous/catalog.yaml ]]; then
+            python - <<'PY'
+          import os
+          import pathlib
+          import re
+          import yaml
+
+          catalog = yaml.safe_load(pathlib.Path("previous/catalog.yaml").read_text())
+          versions = catalog.get("plugins", {}).get(os.environ["PLUGIN_ID"], {}).get("versions", {})
+          entry = versions.get(os.environ["VERSION"])
+          if entry is not None:
+              if not isinstance(entry, dict):
+                  raise SystemExit("previous Feature version entry is invalid")
+              source = entry.get("source") or {}
+              if source.get("branch") != os.environ["FEATURE_BRANCH"]:
+                  raise SystemExit("previous Feature source branch differs without a version bump")
+              if source.get("commit") != os.environ["FEATURE_COMMIT"]:
+                  raise SystemExit("previous Feature source commit differs without a version bump")
+              url = entry["url"]
+              sha256 = str(entry.get("sha256") or "").lower()
+              if not str(url).startswith("https://"):
+                  raise SystemExit("previous Feature asset URL must use HTTPS")
+              if not re.fullmatch(r"[0-9a-f]{64}", sha256):
+                  raise SystemExit("previous Feature asset digest is invalid")
+              pathlib.Path("previous/reuse.yaml").write_text(
+                  yaml.safe_dump({"url": url, "sha256": sha256}, sort_keys=True)
+              )
+          PY
+          fi
+
+          if [[ -f previous/reuse.yaml ]]; then
+            REUSE_URL=$(python -c 'import yaml; print(yaml.safe_load(open("previous/reuse.yaml"))["url"])')
+            EXPECTED_SHA256=$(python -c 'import yaml; print(yaml.safe_load(open("previous/reuse.yaml"))["sha256"])')
+            export EXPECTED_SHA256
+            curl --fail --location --show-error --proto '=https' --tlsv1.2 --output "$ASSET_PATH" "$REUSE_URL"
+          else
+            EXPECTED_SHA256=""
+            export EXPECTED_SHA256
+            python tools/build_feature.py feature-src "$ASSET_PATH"
+          fi
+
+          python - <<'PY'
+          import os
+          from app.core.plugin_artifact import verify_tpx
+
+          artifact = verify_tpx(os.environ["ASSET_PATH"])
+          manifest = artifact.manifest
+          expected = {
+              "plugin id": (manifest.plugin_id, os.environ["PLUGIN_ID"]),
+              "version": (manifest.version, os.environ["VERSION"]),
+              "source branch": (manifest.source.branch, os.environ["FEATURE_BRANCH"]),
+              "source commit": (manifest.source.commit, os.environ["FEATURE_COMMIT"]),
+          }
+          for label, (actual, wanted) in expected.items():
+              if actual != wanted:
+                  raise SystemExit(f"verified artifact {label} mismatch")
+          expected_sha256 = os.environ.get("EXPECTED_SHA256")
+          if expected_sha256 and artifact.sha256 != expected_sha256:
+              raise SystemExit("reused artifact sha256 does not match previous catalog")
+          print(artifact.sha256)
+          PY
+          echo "asset=$ASSET_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Write merged catalog snapshot
+        env:
+          ASSET_PATH: ${{ steps.artifact.outputs.asset }}
+          PYTHONPATH: .:sdk/src
+        run: |
+          mkdir -p release
+          python - "$ASSET_PATH" "$GITHUB_REPOSITORY" "$RELEASE_TAG" <<'PY'
+          import pathlib
+          import sys
+          import yaml
+          from tools.update_feature_catalog import write_feature_catalog
+
+          previous_path = pathlib.Path("previous/catalog.yaml")
+          previous = yaml.safe_load(previous_path.read_text()) if previous_path.is_file() else None
+          write_feature_catalog(previous, sys.argv[1], sys.argv[2], sys.argv[3], "release/catalog.yaml")
+          PY
+          cd release
+          sha256sum -c catalog.yaml.sha256
+
+      - name: Prepare catalog branch commit
+        run: |
+          rm -rf catalog-publish
+          if git ls-remote --exit-code --heads origin refs/heads/catalog >/dev/null 2>&1; then
+            git fetch --no-tags origin refs/heads/catalog:refs/remotes/origin/catalog
+            git worktree add --detach catalog-publish refs/remotes/origin/catalog
+            git -C catalog-publish checkout -B catalog refs/remotes/origin/catalog
+          else
+            git worktree add --detach catalog-publish "$GITHUB_SHA"
+            git -C catalog-publish checkout --orphan catalog
+          fi
+          find catalog-publish -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp release/catalog.yaml release/catalog.yaml.sha256 catalog-publish/
+          cat > catalog-publish/README.md <<'EOF'
+          # Telepiplex Feature catalog
+
+          This branch is maintained by the serialized Feature release workflow.
+          `catalog.yaml` points only to immutable published Feature Release assets.
+          EOF
+          git -C catalog-publish config user.name github-actions[bot]
+          git -C catalog-publish config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C catalog-publish add --all
+          if ! git -C catalog-publish diff --cached --quiet; then
+            git -C catalog-publish commit -m "catalog: publish $RELEASE_TAG"
+          fi
+
+      - name: Create immutable Feature Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET_PATH: ${{ steps.artifact.outputs.asset }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            rm -rf published
+            mkdir published
+            EXPECTED_ASSETS=$(printf '%s\n' "$(basename "$ASSET_PATH")" catalog.yaml catalog.yaml.sha256 | sort)
+            ACTUAL_ASSETS=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)
+            if [[ "$ACTUAL_ASSETS" != "$EXPECTED_ASSETS" ]]; then
+              echo "Existing Feature Release assets differ: $RELEASE_TAG" >&2
+              exit 1
+            fi
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir published
+            cmp "$ASSET_PATH" "published/$(basename "$ASSET_PATH")"
+            cmp release/catalog.yaml published/catalog.yaml
+            cmp release/catalog.yaml.sha256 published/catalog.yaml.sha256
+          else
+            gh release create "$RELEASE_TAG" dist/*.tpx release/catalog.yaml release/catalog.yaml.sha256 --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes "Immutable Telepiplex Feature release for $RELEASE_TAG."
+          fi
+
+      - name: Publish catalog branch
+        run: |
+          cd catalog-publish
+          git push origin HEAD:catalog

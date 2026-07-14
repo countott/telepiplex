@@ -1,22 +1,22 @@
-name: Publish Telepiplex platform release
+name: Publish Telepiplex Core image
 
 on:
   push:
     tags:
-      - platform-v*
+      - core-v*
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Immutable release tag such as platform-v1.0.0
+        description: Immutable Core tag such as core-v1.0.6
         required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
   packages: write
 
 concurrency:
-  group: platform-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  group: core-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -43,16 +43,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest setuptools wheel
 
-      - name: Validate immutable release tag
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Validate immutable Core tag
         run: |
-          if [[ ! "$RELEASE_TAG" =~ ^platform-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "Invalid release tag: $RELEASE_TAG" >&2
-            exit 1
-          fi
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release already exists: $RELEASE_TAG" >&2
+          if [[ ! "$RELEASE_TAG" =~ ^core-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Invalid Core release tag: $RELEASE_TAG" >&2
             exit 1
           fi
 
@@ -65,84 +59,6 @@ jobs:
         env:
           PYTHONPATH: .:sdk/src
         run: python -m compileall -q app sdk tools tests
-
-  build-features:
-    needs: validate-core
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - plugin: open115
-            ref: feature/115
-          - plugin: media-search
-            ref: feature/media-search
-          - plugin: renaming
-            ref: feature/renaming
-          - plugin: plex-management
-            ref: feature/plex-management
-    steps:
-      - name: Checkout Core build toolchain
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Checkout Feature branch
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository }}
-          ref: ${{ matrix.ref }}
-          path: feature-src
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-          cache: pip
-
-      - name: Install Feature build dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt build setuptools wheel
-
-      - name: Read Feature version
-        id: feature
-        env:
-          PLUGIN_ID: ${{ matrix.plugin }}
-        run: |
-          VERSION=$(python -c 'import pathlib,yaml; print(yaml.safe_load(pathlib.Path("feature-src/manifest.yaml").read_text())["version"])')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "asset=dist/$PLUGIN_ID-$VERSION.tpx" >> "$GITHUB_OUTPUT"
-
-      - name: Build verified Linux Feature artifact
-        env:
-          PLUGIN_ID: ${{ matrix.plugin }}
-          FEATURE_REF: ${{ matrix.ref }}
-          OUTPUT: ${{ steps.feature.outputs.asset }}
-          PYTHONPATH: .:sdk/src
-        run: |
-          mkdir -p dist
-          git -C feature-src checkout -B "$FEATURE_REF" "origin/$FEATURE_REF"
-          python tools/build_feature.py feature-src "$OUTPUT"
-          python - "$OUTPUT" "$PLUGIN_ID" "$FEATURE_REF" <<'PY'
-          import sys
-          from app.core.plugin_artifact import verify_tpx
-          artifact = verify_tpx(sys.argv[1])
-          if artifact.manifest.plugin_id != sys.argv[2]:
-              raise SystemExit("plugin id mismatch")
-          if artifact.manifest.source.branch != sys.argv[3]:
-              raise SystemExit("source branch mismatch")
-          print(artifact.sha256)
-          PY
-
-      - name: Upload Feature artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: feature-${{ matrix.plugin }}
-          path: ${{ steps.feature.outputs.asset }}
-          if-no-files-found: error
-          retention-days: 7
 
   build-core-image:
     needs: validate-core
@@ -166,7 +82,7 @@ jobs:
       - name: Refuse an existing immutable image tag
         id: version
         run: |
-          VERSION="${RELEASE_TAG#platform-v}"
+          VERSION="${RELEASE_TAG#core-v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           if docker buildx imagetools inspect "$CORE_IMAGE:$VERSION" >/dev/null 2>&1; then
             echo "Core image tag already exists: $CORE_IMAGE:$VERSION" >&2
@@ -191,91 +107,3 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: true
           sbom: true
-
-  publish-release:
-    needs:
-      - validate-core
-      - build-features
-      - build-core-image
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Core release source
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-          cache: pip
-
-      - name: Install catalog dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-
-      - name: Download Feature artifacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: feature-*
-          path: dist
-          merge-multiple: true
-
-      - name: Fetch previous published catalog when available
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p previous
-          PREVIOUS_TAG=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')
-          if [[ -n "$PREVIOUS_TAG" && "$PREVIOUS_TAG" != "$RELEASE_TAG" ]]; then
-            if gh release download "$PREVIOUS_TAG" --repo "$GITHUB_REPOSITORY" --pattern catalog.yaml --dir previous; then
-              gh release download "$PREVIOUS_TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.tpx' --dir previous
-            else
-              echo "Previous release has no catalog.yaml; treating this as the first catalog release."
-            fi
-          fi
-
-      - name: Generate and verify pinned catalog
-        env:
-          PYTHONPATH: .:sdk/src
-        run: |
-          mkdir -p release
-          PREVIOUS_ARGS=()
-          if [[ -f previous/catalog.yaml ]]; then
-            PREVIOUS_ARGS=(--previous-catalog previous/catalog.yaml --previous-assets previous)
-          fi
-          python tools/generate_release_catalog.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --output release/catalog.yaml "${PREVIOUS_ARGS[@]}" dist/*.tpx
-          cd release
-          sha256sum -c catalog.yaml.sha256
-
-      - name: Write release notes
-        run: |
-          VERSION="${RELEASE_TAG#platform-v}"
-          python - "$CORE_IMAGE" "$VERSION" "$GITHUB_SHA" <<'PY' > release-notes.md
-          import pathlib
-          import sys
-          import yaml
-          catalog = yaml.safe_load(pathlib.Path("release/catalog.yaml").read_text())
-          print("# Telepiplex platform release")
-          print()
-          print(f"- Core image: {sys.argv[1]}:{sys.argv[2]}")
-          print(f"- Core commit: {sys.argv[3]}")
-          print("- Platform: linux/amd64")
-          print()
-          print("## Features")
-          for plugin_id, plugin in catalog["plugins"].items():
-              version, entry = next(iter(plugin["versions"].items()))
-              source = entry["source"]
-              print(f"- {plugin_id}@{version}: {source['branch']} {source['commit']} sha256:{entry['sha256']}")
-          PY
-
-      - name: Create immutable GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release already exists: $RELEASE_TAG" >&2
-            exit 1
-          fi
-          gh release create "$RELEASE_TAG" dist/*.tpx release/catalog.yaml release/catalog.yaml.sha256 --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes-file release-notes.md
