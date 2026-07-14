@@ -55,7 +55,9 @@ Core 枚举所有已安装 Feature，并为每项形成明确状态：
 
 ## Feature 独立配置向导
 
-每个向导都采用按钮选择区块、分步录入、确认后原子写入、写入后立即更新自身运行态的流程。取消、超时、输入不完整或写入失败均不修改配置。敏感值只显示“已配置/未配置”，不回显内容，不写入日志。
+每个向导都采用按钮选择区块、分步录入、确认后提交配置补丁的流程。取消、超时、输入不完整或写入失败均不修改配置。敏感值只显示“已配置/未配置”，不回显内容，不写入日志。
+
+除 open115 的授权流程外，Feature 不直接写文件或替换自己的运行中服务对象。向导完成后返回仅针对自身配置的不透明嵌套补丁；Core 将补丁合并到该 Feature 当前配置，执行 schema 校验，再通过 `PluginManager.configure()` 原子写入并以 shadow process 重载。Core 只处理结构，不解释字段语义。这样运行中任务仍由旧进程安全完成或排空，新配置只在新进程验证健康后接管 route。
 
 ### open115
 
@@ -63,7 +65,7 @@ Core 枚举所有已安装 Feature，并为每项形成明确状态：
 
 - Access Token → Refresh Token 两步录入。
 - 115 扫码授权。
-- 写入 `open115/config.yaml` 后立即更新客户端 Token。
+- 写入 `open115/config.yaml` 后立即更新客户端 Token。扫码授权需要在后台完成写回，因此继续使用 Feature 自身的私有原子写入器，不走通用补丁返回。
 
 ### media-search
 
@@ -124,7 +126,7 @@ Wikipedia、timeout、status timeout、Indexer IDs、分类编号、结果数量
 
 - Core 与 Feature 错误均使用稳定错误码，敏感值统一清洗。
 - 更新和重载采用新进程验证通过后再切 route 的事务顺序。
-- 向导写入采用临时文件、`fsync` 和原子替换，配置权限为 `0600`。
+- Core 的配置补丁写入以及 open115 的授权写回均采用临时文件、`fsync` 和原子替换，配置权限为 `0600`。
 - 热重载失败不会停止仍可工作的旧进程。
 - 配置发现失败不会改变 Feature 的启用状态。
 
@@ -135,7 +137,7 @@ Wikipedia、timeout、status timeout、Indexer IDs、分类编号、结果数量
 1. open115 从旧版更新到新版后，不重启 Core 即可在 `/config` 中进入 Token/扫码向导。
 2. 更新成功返回前，store、supervisor、router、manifest 和 schema 处于同一 release。
 3. 非法 media-search 配置仍出现在列表并显示 `invalid_config`。
-4. 四个 Feature 的向导只显示本设计列出的字段。
+4. 四个 Feature 的向导只显示本设计列出的字段，且非 open115 向导只返回自身的不透明补丁，由 Core 事务式应用。
 5. 向导取消、超时、部分输入和写入失败不改配置且不泄露敏感值。
 6. 手工修改有效 Feature YAML 后执行 `/reload`，新进程读取新值；失败 Feature 保留旧 route，并在摘要中报告。
 7. Core YAML 解析失败不清空当前运行配置。
