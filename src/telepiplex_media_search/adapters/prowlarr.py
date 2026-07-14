@@ -36,9 +36,6 @@ MAGNET_IN_TEXT_PATTERN = re.compile(
 
 def _get_prowlarr_config():
     search_config = runtime_context.config.get("search") or {}
-    if not search_config.get("enable", False):
-        raise ProwlarrConfigError("搜索功能未开启")
-
     prowlarr_config = search_config.get("prowlarr") or {}
     base_url = str(prowlarr_config.get("base_url") or "").strip()
     api_key = str(prowlarr_config.get("api_key") or "").strip()

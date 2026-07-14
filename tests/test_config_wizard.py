@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 
 class MediaSearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
@@ -186,6 +187,31 @@ class MediaSearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("config_patch", cancelled)
         self.assertEqual(cancelled["session"]["state"], "close")
+
+    async def test_expired_confirmation_cannot_submit_patch(self):
+        with patch(
+            "telepiplex_media_search.config_wizard.time.monotonic",
+            return_value=100,
+        ):
+            await self._start()
+            await self.feature.callback({
+                **self.owner,
+                "namespace": "media-search",
+                "payload": "config:prowlarr",
+            })
+            await self.feature.message({
+                **self.owner, "text": "http://prowlarr:9696"
+            })
+            await self.feature.message({**self.owner, "text": "new-secret"})
+
+        with patch(
+            "telepiplex_media_search.config_wizard.time.monotonic",
+            return_value=2000,
+        ):
+            expired = await self._confirm()
+
+        self.assertNotIn("config_patch", expired)
+        self.assertEqual(expired["session"]["state"], "close")
 
 
 if __name__ == "__main__":

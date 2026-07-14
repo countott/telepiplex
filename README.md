@@ -9,5 +9,5 @@
 Wikipedia 和豆瓣默认可直接取证。TVDB 与 AI 默认启用，但仍分别需要填写 TVDB API Key，以及 AI API URL、Key 和模型；凭证缺失时会如实降级为不可用状态。
 
 ```bash
-python /opt/telepiplex/tools/build_feature.py . dist/media-search-1.0.0.tpx
+python /opt/telepiplex/tools/build_feature.py . dist/media-search-1.0.1.tpx
 ```

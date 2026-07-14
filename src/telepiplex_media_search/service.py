@@ -103,7 +103,13 @@ class MediaSearchFeature:
     async def command(self, request: dict) -> dict:
         command = str(request.get("command") or "")
         if command == "media_search_config":
-            self.awaiting_queries.discard(self._owner_key(request))
+            owner = self._owner_key(request)
+            if owner in self.awaiting_queries or any(
+                item.get("owner") == owner for item in self.plans.values()
+            ):
+                return self._closed(
+                    "⚠️ 请先完成或取消当前搜索，再打开 media-search 配置。"
+                )
             return self.config_wizard.start(request)
         if command not in {"search", "s"}:
             raise FeatureError("not_found", f"unknown media-search command: {command}")

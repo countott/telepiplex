@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import time
 from urllib.parse import urlparse
 
+
+SESSION_TTL_SECONDS = 30 * 60
 
 def _owner(request: dict) -> tuple[int, int]:
     return int(request.get("chat_id") or 0), int(request.get("user_id") or 0)
@@ -29,14 +32,29 @@ class MediaSearchConfigWizard:
         self.sessions: dict[tuple[int, int], dict] = {}
 
     def has_session(self, request: dict) -> bool:
-        return _owner(request) in self.sessions
+        return self._get_session(_owner(request)) is not None
 
     def clear(self, request: dict):
         self.sessions.pop(_owner(request), None)
 
+    def _replace_session(self, key, value: dict):
+        self.sessions[key] = {
+            **value,
+            "expires_at": time.monotonic() + SESSION_TTL_SECONDS,
+        }
+
+    def _get_session(self, key):
+        session = self.sessions.get(key)
+        if not session:
+            return None
+        if float(session.get("expires_at") or 0) <= time.monotonic():
+            self.sessions.pop(key, None)
+            return None
+        return session
+
     def start(self, request: dict) -> dict:
         key = _owner(request)
-        self.sessions[key] = {"stage": "choose"}
+        self._replace_session(key, {"stage": "choose"})
         search = (self.config.get("search") or {}).get("prowlarr") or {}
         tvdb = (self.config.get("metadata") or {}).get("tvdb") or {}
         ai = self.config.get("ai") or {}
@@ -64,7 +82,7 @@ class MediaSearchConfigWizard:
 
     def callback(self, request: dict) -> dict:
         key = _owner(request)
-        session = self.sessions.get(key)
+        session = self._get_session(key)
         payload = str(request.get("payload") or "")
         if not session or not payload.startswith("config:"):
             return self._message("⚠️ 配置会话已失效，请重新打开 /config。", "close")
@@ -81,18 +99,18 @@ class MediaSearchConfigWizard:
                 "config_patch": patch,
             }
         if session.get("stage") == "choose" and action == "prowlarr":
-            self.sessions[key] = {"stage": "prowlarr_url", "values": {}}
+            self._replace_session(key, {"stage": "prowlarr_url", "values": {}})
             return self._message(
                 "请发送 Prowlarr 地址，例如 http://prowlarr:9696。",
                 "open",
                 edit=True,
             )
         if session.get("stage") == "choose" and action in {"tvdb", "ai"}:
-            self.sessions[key] = {
+            self._replace_session(key, {
                 "stage": "boolean",
                 "section": action,
                 "values": {},
-            }
+            })
             return {
                 "actions": [{
                     "kind": "edit_message",
@@ -128,7 +146,7 @@ class MediaSearchConfigWizard:
 
     def message(self, request: dict) -> dict:
         key = _owner(request)
-        session = self.sessions.get(key)
+        session = self._get_session(key)
         if not session:
             return self._message("⚠️ 配置会话已失效，请重新打开 /config。", "close")
         raw = str(request.get("text") or "").strip()
@@ -199,7 +217,9 @@ class MediaSearchConfigWizard:
         return _text(raw)
 
     def _finish(self, key, patch: dict) -> dict:
-        self.sessions[key] = {"stage": "confirm", "patch": deepcopy(patch)}
+        self._replace_session(
+            key, {"stage": "confirm", "patch": deepcopy(patch)}
+        )
         return {
             "actions": [{
                 "kind": "send_message",

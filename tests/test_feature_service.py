@@ -131,6 +131,23 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.feature.plans, {})
         self.assertEqual(self.search_queries, [])
 
+    async def test_config_wizard_refuses_to_replace_active_search_session(self):
+        owner = (10, 1)
+        self.feature.awaiting_queries.add(owner)
+
+        result = await self.feature.command({
+            "command": "media_search_config",
+            "args": [],
+            "user_id": owner[1],
+            "chat_id": owner[0],
+        })
+
+        self.assertIn("先完成或取消", result["actions"][0]["text"])
+        self.assertIn(owner, self.feature.awaiting_queries)
+        self.assertFalse(self.feature.config_wizard.has_session({
+            "chat_id": owner[0], "user_id": owner[1],
+        }))
+
     async def test_series_query_keeps_confirmed_episode_scope(self):
         plan = search_plan()
         contract = plan["media_metadata"]
@@ -261,6 +278,29 @@ class FeatureSourceContractTest(unittest.TestCase):
         self.assertTrue(config["metadata"]["wikipedia"]["enable"])
         self.assertTrue(config["metadata"]["tvdb"]["enable"])
         self.assertTrue(config["ai"]["enable"])
+
+    def test_prowlarr_is_not_disabled_by_legacy_hidden_search_flag(self):
+        from telepiplex_media_search.adapters.prowlarr import _get_prowlarr_config
+        from telepiplex_media_search.context import runtime_context
+
+        runtime_context.configure({
+            "search": {
+                "enable": False,
+                "prowlarr": {
+                    "base_url": "http://prowlarr:9696",
+                    "api_key": "configured",
+                },
+            },
+        })
+
+        _config, base_url, api_key = _get_prowlarr_config()
+        self.assertEqual(base_url, "http://prowlarr:9696")
+        self.assertEqual(api_key, "configured")
+
+    def test_readme_build_example_uses_current_version(self):
+        source = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("dist/media-search-1.0.1.tpx", source)
+        self.assertNotIn("dist/media-search-1.0.0.tpx", source)
 
     def test_source_has_no_core_telegram_or_init_imports(self):
         forbidden = []
