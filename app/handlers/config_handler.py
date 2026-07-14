@@ -2,247 +2,21 @@ from __future__ import annotations
 
 import re
 import warnings
-from copy import deepcopy
-from dataclasses import dataclass
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    CallbackQueryHandler,
-    CommandHandler,
-    ConversationHandler,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import CallbackQueryHandler, CommandHandler, ConversationHandler
 from telegram.warnings import PTBUserWarning
 
 import init
-from app.core.plugin_manager import PluginOperationError
 from app.handlers.plugin_handler import ROUTER_KEY, handle_feature_result
 
 
-CONFIG_SELECT_PLUGIN, CONFIG_SELECT_SECTION, CONFIG_INPUT = range(80, 83)
+CONFIG_SELECT_PLUGIN = 80
 MANAGER_KEY = "telepiplex_plugin_manager"
-_SESSION_KEYS = (
-    "core_config_plugins",
-    "core_config_plugin",
-    "core_config_sections",
-    "core_config_path",
+_SESSION_KEYS = ("core_config_plugins",)
+_DIRECT_CALLBACK_RE = re.compile(
+    r"^core-config-direct:(?P<plugin_id>[a-z][a-z0-9-]{0,63})$"
 )
-_SCALAR_TYPES = {"boolean", "integer", "number", "string"}
-_CUSTOM_CONFIG_COMMAND = "x-telepiplex-config-command"
-_SECRET_NAME_RE = re.compile(
-    r"(?i)(?:^|_)(?:token|secret|password|api_?key|authorization)(?:$|_)"
-)
-
-
-class ConfigInputError(ValueError):
-    pass
-
-
-@dataclass(frozen=True)
-class ConfigField:
-    name: str
-    title: str
-    schema: dict
-    value: object
-    secret: bool
-
-
-@dataclass(frozen=True)
-class ConfigSection:
-    path: tuple[str, ...]
-    title: str
-    fields: tuple[ConfigField, ...]
-
-
-def custom_config_command(schema: dict, route) -> str | None:
-    command = str((schema or {}).get(_CUSTOM_CONFIG_COMMAND) or "").strip()
-    if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", command):
-        return None
-    declared = {
-        str(getattr(item, "name", ""))
-        for item in getattr(getattr(route, "manifest", None), "commands", ())
-    }
-    return command if command in declared else None
-
-
-def _resolve_schema(root: dict, schema: dict) -> dict:
-    resolved = dict(schema or {})
-    seen = set()
-    while isinstance(resolved.get("$ref"), str):
-        reference = resolved["$ref"]
-        if not reference.startswith("#/") or reference in seen:
-            break
-        seen.add(reference)
-        target = root
-        try:
-            for raw in reference[2:].split("/"):
-                key = raw.replace("~1", "/").replace("~0", "~")
-                target = target[key]
-        except (KeyError, TypeError):
-            break
-        if not isinstance(target, dict):
-            break
-        siblings = {key: value for key, value in resolved.items() if key != "$ref"}
-        resolved = {**target, **siblings}
-    return resolved
-
-
-def _mapping_at(value: dict, path: tuple[str, ...]) -> dict:
-    current = value
-    for key in path:
-        if not isinstance(current, dict):
-            return {}
-        current = current.get(key)
-    return current if isinstance(current, dict) else {}
-
-
-def discover_config_sections(schema: dict, current: dict) -> list[ConfigSection]:
-    root = schema if isinstance(schema, dict) else {}
-    source = current if isinstance(current, dict) else {}
-    sections: list[ConfigSection] = []
-
-    def walk(node: dict, path: tuple[str, ...]):
-        resolved = _resolve_schema(root, node)
-        properties = resolved.get("properties")
-        if not isinstance(properties, dict):
-            return
-        current_section = _mapping_at(source, path)
-        fields = []
-        nested = []
-        for name, raw_child in properties.items():
-            if not isinstance(name, str) or not isinstance(raw_child, dict):
-                continue
-            child = _resolve_schema(root, raw_child)
-            field_type = child.get("type")
-            if field_type in _SCALAR_TYPES:
-                fields.append(ConfigField(
-                    name=name,
-                    title=str(child.get("title") or name),
-                    schema=deepcopy(child),
-                    value=deepcopy(current_section.get(name)),
-                    secret=bool(
-                        child.get("writeOnly") is True
-                        or child.get("format") == "password"
-                        or _SECRET_NAME_RE.search(name)
-                    ),
-                ))
-            elif field_type == "object" or isinstance(child.get("properties"), dict):
-                nested.append((name, child))
-
-        if path and fields:
-            sections.append(ConfigSection(
-                path=path,
-                title=str(resolved.get("title") or ".".join(path)),
-                fields=tuple(fields),
-            ))
-        for name, child in nested:
-            walk(child, (*path, name))
-
-    walk(root, ())
-    return sections
-
-
-def _display_value(value: object) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if value is None:
-        return ""
-    return str(value).replace("\n", " ")[:300]
-
-
-def format_section_prompt(plugin_id: str, section: ConfigSection) -> str:
-    current_lines = []
-    examples = []
-    for field in section.fields:
-        if field.secret:
-            status = "已配置" if str(field.value or "").strip() else "未配置"
-            current_lines.append(f"{field.name}=<{status}>")
-            examples.append(f"{field.name}=<不会回显的敏感值>")
-        else:
-            current_lines.append(f"{field.name}={_display_value(field.value)}")
-            examples.append(f"{field.name}={_display_value(field.value)}")
-    return (
-        f"配置 Feature：{plugin_id}\n"
-        f"区块：{section.title}（{'.'.join(section.path)}）\n\n"
-        "当前配置：\n"
-        + "\n".join(current_lines)
-        + "\n\n请按 key=value 逐行发送需要修改的字段；未发送字段保持不变。"
-        "\n字符串字段可用 key= 清空。\n\n"
-        "示例：\n"
-        + "\n".join(examples)
-        + "\n\n发送 /q 取消。"
-    )
-
-
-def _coerce_value(raw: str, field: ConfigField):
-    field_type = field.schema.get("type")
-    value = str(raw).strip().strip('"').strip("'")
-    try:
-        if field_type == "boolean":
-            normalized = value.lower()
-            if normalized in {"true", "1", "yes", "on", "是"}:
-                coerced = True
-            elif normalized in {"false", "0", "no", "off", "否"}:
-                coerced = False
-            else:
-                raise ValueError
-        elif field_type == "integer":
-            if not re.fullmatch(r"[+-]?\d+", value):
-                raise ValueError
-            coerced = int(value)
-        elif field_type == "number":
-            coerced = float(value)
-        else:
-            coerced = value
-    except ValueError:
-        raise ConfigInputError(
-            f"字段 {field.name} 需要 {field_type} 类型"
-        ) from None
-    enum = field.schema.get("enum")
-    if isinstance(enum, list) and coerced not in enum:
-        raise ConfigInputError(
-            f"字段 {field.name} 只能是：{', '.join(str(item) for item in enum)}"
-        )
-    return coerced
-
-
-def parse_config_patch(text: str, section: ConfigSection) -> dict:
-    fields = {field.name: field for field in section.fields}
-    patch = {}
-    for raw_line in str(text or "").replace("`", "").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        separator = "=" if "=" in line else ":" if ":" in line else ""
-        if not separator:
-            raise ConfigInputError(f"无法识别配置行：{line[:80]}")
-        raw_name, raw_value = line.split(separator, 1)
-        name = re.sub(r"[\s-]+", "_", raw_name.strip().lower())
-        field = fields.get(name)
-        if field is None:
-            raise ConfigInputError(f"未知字段：{name}")
-        patch[name] = _coerce_value(raw_value, field)
-    if not patch:
-        raise ConfigInputError("没有收到可写入的配置字段")
-    return patch
-
-
-def merge_config_patch(
-    current: dict,
-    path: tuple[str, ...],
-    patch: dict,
-) -> dict:
-    result = deepcopy(current if isinstance(current, dict) else {})
-    target = result
-    for key in path:
-        child = target.get(key)
-        if not isinstance(child, dict):
-            child = {}
-            target[key] = child
-        target = child
-    target.update(deepcopy(patch))
-    return result
 
 
 def _safe_error(value) -> str:
@@ -253,9 +27,27 @@ def _safe_error(value) -> str:
     )[:1000]
 
 
-def _clear_session(user_data: dict):
+def clear_config_session(user_data: dict):
     for key in _SESSION_KEYS:
         user_data.pop(key, None)
+
+
+def _state_label(state: dict) -> str:
+    name = str(state.get("state") or "")
+    if name == "configurable":
+        return "可配置"
+    if name == "invalid_config":
+        return "invalid_config"
+    if name == "invalid_schema":
+        return "invalid_schema"
+    if name == "invalid_declaration":
+        return "配置入口声明无效"
+    if name == "not_configurable":
+        return "未提供独立配置向导"
+    if name == "route_unavailable":
+        missing = "、".join(state.get("missing_capabilities") or [])
+        return f"route_unavailable：{missing}" if missing else "route_unavailable"
+    return str(state.get("error_code") or name or "unknown")
 
 
 async def _show_config_menu(update, context, *, edit: bool):
@@ -268,42 +60,44 @@ async def _show_config_menu(update, context, *, edit: bool):
             await update.effective_message.reply_text(text)
         return ConversationHandler.END
 
-    router = context.application.bot_data.get(ROUTER_KEY)
     plugin_ids = []
+    lines = []
     for status in manager.doctor():
         plugin_id = str(status.get("plugin_id") or "")
         if not plugin_id:
             continue
         try:
-            view = manager.config(plugin_id)
-            route = router.plugin_route(plugin_id) if router is not None else None
-            if (
-                discover_config_sections(view.get("schema"), view.get("config"))
-                or custom_config_command(view.get("schema"), route)
-            ):
-                plugin_ids.append(plugin_id)
-        except Exception:
-            continue
-    _clear_session(context.user_data)
-    context.user_data["core_config_plugins"] = plugin_ids
+            state = manager.config_state(plugin_id)
+        except Exception as exc:
+            state = {
+                "plugin_id": plugin_id,
+                "version": status.get("version") or "",
+                "state": "config_state_failed",
+                "configurable": False,
+                "error_code": getattr(exc, "code", "config_state_failed"),
+            }
+        version = str(state.get("version") or status.get("version") or "-")
+        lines.append(f"• {plugin_id} {version}（{_state_label(state)}）")
+        if state.get("configurable"):
+            plugin_ids.append(plugin_id)
 
-    if plugin_ids:
-        text = (
-            "请选择要配置的 Feature。敏感字段只显示是否已配置，不会回显真实值。"
-            "\n\n" + "\n".join(f"• {plugin_id}" for plugin_id in plugin_ids)
-        )
-        rows = [
-            [InlineKeyboardButton(
-                plugin_id,
-                callback_data=f"core-config-plugin:{index}",
-            )]
-            for index, plugin_id in enumerate(plugin_ids)
-        ]
-        rows.append([InlineKeyboardButton("取消", callback_data="core-config-cancel")])
-        markup = InlineKeyboardMarkup(rows)
+    clear_config_session(context.user_data)
+    context.user_data["core_config_plugins"] = plugin_ids
+    if lines:
+        text = "Feature 配置状态：\n\n" + "\n".join(lines)
     else:
-        text = "当前没有已安装且包含可视化标量配置的 Feature。"
-        markup = None
+        text = "当前没有已安装的 Feature。"
+
+    rows = [
+        [InlineKeyboardButton(
+            f"配置 {plugin_id}",
+            callback_data=f"core-config-plugin:{index}",
+        )]
+        for index, plugin_id in enumerate(plugin_ids)
+    ]
+    if rows:
+        rows.append([InlineKeyboardButton("取消", callback_data="core-config-cancel")])
+    markup = InlineKeyboardMarkup(rows) if rows else None
     kwargs = {"reply_markup": markup} if markup is not None else {}
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, **kwargs)
@@ -328,14 +122,43 @@ async def config_open_callback(update, context):
     return await _show_config_menu(update, context, edit=True)
 
 
-def _callback_index(data: str, prefix: str) -> int:
+def _callback_index(data: str) -> int:
     try:
-        index = int(str(data or "").removeprefix(prefix))
+        index = int(str(data or "").removeprefix("core-config-plugin:"))
     except ValueError:
-        raise ConfigInputError("配置会话索引无效") from None
-    if index < 0:
-        raise ConfigInputError("配置会话索引无效")
+        return -1
     return index
+
+
+async def _dispatch_config(plugin_id: str, update, context):
+    manager = context.application.bot_data.get(MANAGER_KEY)
+    router = context.application.bot_data.get(ROUTER_KEY)
+    try:
+        state = manager.config_state(plugin_id)
+        route = router.plugin_route(plugin_id) if router is not None else None
+        command = str(state.get("command") or "")
+        if not state.get("configurable") or route is None or not command:
+            raise RuntimeError(state.get("error_code") or "config_unavailable")
+        result = await route.client.request(
+            "command.dispatch",
+            {
+                "command": command,
+                "args": [],
+                "text": "/config",
+                "user_id": update.effective_user.id,
+                "chat_id": update.effective_chat.id,
+                "update_id": getattr(update, "update_id", None),
+            },
+            deadline=30,
+            idempotency_key=f"telegram:{getattr(update, 'update_id', '')}:config",
+        )
+        await handle_feature_result(update, context, route, result)
+    except Exception:
+        await update.callback_query.edit_message_text(
+            "❌ custom_config_failed：Feature 独立配置向导暂时不可用。"
+        )
+    clear_config_session(context.user_data)
+    return ConversationHandler.END
 
 
 async def select_config_plugin(update, context):
@@ -344,142 +167,29 @@ async def select_config_plugin(update, context):
     if not init.check_user(update.effective_user.id):
         await query.edit_message_text("⚠️ 当前账号无权配置 Feature。")
         return ConversationHandler.END
-    try:
-        index = _callback_index(query.data, "core-config-plugin:")
-        plugin_id = context.user_data["core_config_plugins"][index]
-        manager = context.application.bot_data[MANAGER_KEY]
-        view = manager.config(plugin_id)
-        router = context.application.bot_data.get(ROUTER_KEY)
-        route = router.plugin_route(plugin_id) if router is not None else None
-        command = custom_config_command(view.get("schema"), route)
-        sections = discover_config_sections(view["schema"], view["config"])
-        if not command and not sections:
-            raise ConfigInputError("该 Feature 没有可视化配置区块")
-    except (ConfigInputError, KeyError, IndexError, TypeError) as exc:
-        await query.edit_message_text(f"❌ 配置会话已失效：{_safe_error(exc)}")
+    index = _callback_index(query.data)
+    plugin_ids = context.user_data.get("core_config_plugins") or []
+    if index < 0 or index >= len(plugin_ids):
+        await query.edit_message_text("❌ 配置会话已失效，请重新发送 /config。")
         return ConversationHandler.END
-
-    if command:
-        try:
-            result = await route.client.request(
-                "command.dispatch",
-                {
-                    "command": command,
-                    "args": [],
-                    "text": "/config",
-                    "user_id": update.effective_user.id,
-                    "chat_id": update.effective_chat.id,
-                    "update_id": getattr(update, "update_id", None),
-                },
-                deadline=30,
-                idempotency_key=(
-                    f"telegram:{getattr(update, 'update_id', '')}:config"
-                ),
-            )
-            await handle_feature_result(update, context, route, result)
-        except Exception:
-            await query.edit_message_text(
-                "❌ custom_config_failed：Feature 自定义配置入口暂时不可用。"
-            )
-        _clear_session(context.user_data)
-        return ConversationHandler.END
-
-    context.user_data["core_config_plugin"] = plugin_id
-    context.user_data["core_config_sections"] = [section.path for section in sections]
-    rows = [
-        [InlineKeyboardButton(
-            section.title,
-            callback_data=f"core-config-section:{index}",
-        )]
-        for index, section in enumerate(sections)
-    ]
-    rows.extend([
-        [InlineKeyboardButton("返回", callback_data="core-config-back")],
-        [InlineKeyboardButton("取消", callback_data="core-config-cancel")],
-    ])
-    await query.edit_message_text(
-        f"请选择 {plugin_id} 的配置区块。",
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
-    return CONFIG_SELECT_SECTION
+    return await _dispatch_config(plugin_ids[index], update, context)
 
 
-async def select_config_section(update, context):
+async def direct_config_callback(update, context):
     query = update.callback_query
     await query.answer()
     if not init.check_user(update.effective_user.id):
         await query.edit_message_text("⚠️ 当前账号无权配置 Feature。")
         return ConversationHandler.END
-    try:
-        index = _callback_index(query.data, "core-config-section:")
-        plugin_id = context.user_data["core_config_plugin"]
-        expected_path = tuple(context.user_data["core_config_sections"][index])
-        manager = context.application.bot_data[MANAGER_KEY]
-        view = manager.config(plugin_id)
-        section = next(
-            item for item in discover_config_sections(view["schema"], view["config"])
-            if item.path == expected_path
-        )
-    except (ConfigInputError, KeyError, IndexError, StopIteration, TypeError) as exc:
-        await query.edit_message_text(f"❌ 配置会话已失效：{_safe_error(exc)}")
+    match = _DIRECT_CALLBACK_RE.fullmatch(str(query.data or ""))
+    if match is None:
+        await query.edit_message_text("❌ 配置入口无效。")
         return ConversationHandler.END
-    context.user_data["core_config_path"] = section.path
-    await query.edit_message_text(format_section_prompt(plugin_id, section))
-    return CONFIG_INPUT
-
-
-async def receive_config_input(update, context):
-    if not init.check_user(update.effective_user.id):
-        await update.effective_message.reply_text("⚠️ 当前账号无权配置 Feature。")
-        return ConversationHandler.END
-    try:
-        plugin_id = context.user_data["core_config_plugin"]
-        path = tuple(context.user_data["core_config_path"])
-        manager = context.application.bot_data[MANAGER_KEY]
-        view = manager.config(plugin_id)
-        section = next(
-            item for item in discover_config_sections(view["schema"], view["config"])
-            if item.path == path
-        )
-        patch = parse_config_patch(update.effective_message.text or "", section)
-        configured = merge_config_patch(view["config"], path, patch)
-        result = await manager.configure(plugin_id, configured)
-    except ConfigInputError as exc:
-        await update.effective_message.reply_text(f"❌ 输入无效：{_safe_error(exc)}")
-        return CONFIG_INPUT
-    except PluginOperationError as exc:
-        await update.effective_message.reply_text(
-            f"❌ {exc.code}：配置未写入或重新加载失败；未回显错误详情以保护敏感值。"
-        )
-        return CONFIG_INPUT
-    except (KeyError, StopIteration, TypeError):
-        await update.effective_message.reply_text(
-            "❌ 配置会话已失效，请重新发送 /config。"
-        )
-        return ConversationHandler.END
-    except Exception as exc:
-        await update.effective_message.reply_text(
-            f"❌ config_failed：{type(exc).__name__}"
-        )
-        return CONFIG_INPUT
-
-    _clear_session(context.user_data)
-    if result.details.get("restarted"):
-        text = f"✅ {plugin_id} 配置已写入并重新加载。"
-    else:
-        text = f"✅ {plugin_id} 配置已写入；Feature 下次启动时生效。"
-    await update.effective_message.reply_text(text)
-    return ConversationHandler.END
-
-
-async def config_back_callback(update, context):
-    query = update.callback_query
-    await query.answer()
-    return await _show_config_menu(update, context, edit=True)
+    return await _dispatch_config(match.group("plugin_id"), update, context)
 
 
 async def quit_config_conversation(update, context):
-    _clear_session(context.user_data)
+    clear_config_session(context.user_data)
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text("已取消 Feature 配置。")
@@ -494,9 +204,10 @@ def register_feature_config_handlers(application):
         handler = ConversationHandler(
             entry_points=[
                 CommandHandler("config", config_command),
+                CallbackQueryHandler(config_open_callback, pattern=r"^core-config-open$"),
                 CallbackQueryHandler(
-                    config_open_callback,
-                    pattern=r"^core-config-open$",
+                    direct_config_callback,
+                    pattern=r"^core-config-direct:[a-z][a-z0-9-]{0,63}$",
                 ),
             ],
             states={
@@ -509,26 +220,6 @@ def register_feature_config_handlers(application):
                         quit_config_conversation,
                         pattern=r"^core-config-cancel$",
                     ),
-                ],
-                CONFIG_SELECT_SECTION: [
-                    CallbackQueryHandler(
-                        select_config_section,
-                        pattern=r"^core-config-section:\d+$",
-                    ),
-                    CallbackQueryHandler(
-                        config_back_callback,
-                        pattern=r"^core-config-back$",
-                    ),
-                    CallbackQueryHandler(
-                        quit_config_conversation,
-                        pattern=r"^core-config-cancel$",
-                    ),
-                ],
-                CONFIG_INPUT: [
-                    MessageHandler(
-                        filters.TEXT & ~filters.COMMAND,
-                        receive_config_input,
-                    )
                 ],
             },
             fallbacks=[CommandHandler("q", quit_config_conversation)],

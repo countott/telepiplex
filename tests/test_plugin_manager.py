@@ -214,6 +214,27 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(old.state, "stopped")
         self.assertIsNot(self.supervisor.process("echo"), old)
 
+    async def test_config_state_reports_custom_command_and_invalid_live_config(self):
+        schema, default = self._editable_config()
+        schema["x-telepiplex-config-command"] = "configure_echo"
+        await self.manager.install(self._artifact(
+            commands=("echo", "configure_echo"),
+            config_schema=schema,
+            config_default=default,
+        ))
+
+        state = self.manager.config_state("echo")
+        self.assertTrue(state["configurable"])
+        self.assertEqual(state["command"], "configure_echo")
+        self.assertEqual(state["state"], "configurable")
+
+        config_path = self.root / "plugins/echo/config.yaml"
+        config_path.write_text("unknown: true\n", encoding="utf-8")
+        broken = self.manager.config_state("echo")
+        self.assertFalse(broken["configurable"])
+        self.assertEqual(broken["state"], "invalid_config")
+        self.assertEqual(broken["error_code"], "invalid_config")
+
     async def test_configure_refuses_busy_feature_without_changing_config(self):
         from app.core.plugin_manager import PluginOperationError
 
@@ -390,6 +411,21 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rolled_back.version, "1.0.0")
         self.assertEqual(self.store.active("echo").previous_version, "2.0.0")
         self.assertEqual(self.router.snapshot.capabilities["demo.echo"].client.version, "1.0.0")
+
+    async def test_active_consistency_checks_store_process_route_manifest_and_schema(self):
+        await self.manager.install(self._artifact("echo", "1.0.0", commit="a" * 40))
+        updated = await self.manager.update(
+            self._artifact("echo", "2.0.0", commit="b" * 40)
+        )
+
+        active = self.store.active(updated.plugin_id)
+        self.manager.assert_active_consistency(active)
+
+        self.router.deactivate("echo")
+        from app.core.plugin_manager import PluginOperationError
+        with self.assertRaises(PluginOperationError) as raised:
+            self.manager.assert_active_consistency(active)
+        self.assertEqual(raised.exception.code, "activation_inconsistent")
 
     async def test_update_rejects_provider_capability_loss_that_blocks_consumer(self):
         from app.core.plugin_manager import PluginOperationError

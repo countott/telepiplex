@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import re
 import time
 
@@ -247,11 +248,18 @@ async def plugin_update_callback(update, context):
         await query.edit_message_text(f"⏳ Feature 更新处理中：{reference}")
         result = await manager.update(reference)
         _clear_plugin_sessions(context.application.bot_data, result.plugin_id)
+        _clear_config_user_data(context.user_data)
         await query.edit_message_text(
             f"✅ {result.message}\n"
             f"插件：{result.plugin_id}\n"
             f"版本：{result.version}\n"
-            f"状态：{result.state}"
+            f"状态：{result.state}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    f"配置 {result.plugin_id}",
+                    callback_data=f"core-config-direct:{result.plugin_id}",
+                )
+            ]]),
         )
     except PluginOperationError as exc:
         await query.edit_message_text(f"❌ {exc.code}：{_safe_error(exc)}")
@@ -376,6 +384,9 @@ async def dynamic_message_gateway(update, context):
 
 
 async def handle_feature_result(update, context, route, result: dict):
+    if isinstance(result, dict) and "config_patch" in result:
+        await _apply_feature_config_patch(update, context, route, result)
+        return
     if not await _render_actions(update, context, route, result):
         return
     session = result.get("session") if isinstance(result, dict) else None
@@ -393,6 +404,49 @@ async def handle_feature_result(update, context, route, result: dict):
         }
     else:
         _drop_session(context.application.bot_data, key)
+
+
+def merge_nested_patch(current: dict, patch: dict) -> dict:
+    result = deepcopy(current if isinstance(current, dict) else {})
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = merge_nested_patch(result[key], value)
+        else:
+            result[key] = deepcopy(value)
+    return result
+
+
+async def _apply_feature_config_patch(update, context, route, result: dict):
+    patch = result.get("config_patch")
+    if not isinstance(patch, dict) or not patch:
+        await update.effective_message.reply_text(
+            "❌ invalid_config_patch：Feature 配置补丁无效。"
+        )
+        return
+    manager = context.application.bot_data.get(MANAGER_KEY)
+    if manager is None:
+        await update.effective_message.reply_text(
+            "❌ config_manager_unavailable：Feature 插件管理器尚未初始化。"
+        )
+        return
+    try:
+        view = manager.config(route.plugin_id)
+        configured = merge_nested_patch(view.get("config") or {}, patch)
+        outcome = await manager.configure(route.plugin_id, configured)
+    except PluginOperationError as exc:
+        await update.effective_message.reply_text(
+            f"❌ {exc.code}：配置未写入或重新加载失败。"
+        )
+        return
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"❌ config_failed：{type(exc).__name__}"
+        )
+        return
+    _drop_session(context.application.bot_data, _session_key(update))
+    await update.effective_message.reply_text(
+        f"✅ {outcome.plugin_id} 配置已写入并重新加载。"
+    )
 
 
 async def _render_actions(update, context, route, result: dict) -> bool:
@@ -481,3 +535,9 @@ def _clear_plugin_sessions(bot_data: dict, plugin_id: str):
             sessions.pop(key, None)
     if not sessions:
         bot_data.pop(SESSION_KEY, None)
+
+
+def _clear_config_user_data(user_data: dict):
+    for key in list(user_data):
+        if str(key).startswith("core_config_"):
+            user_data.pop(key, None)

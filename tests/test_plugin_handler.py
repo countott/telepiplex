@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -10,6 +11,13 @@ class FakeManager:
         self.router = Mock()
         self.candidates = []
         self.updates = []
+        self.configurations = []
+        self.configs = {
+            "media-search": {
+                "ai": {"api_key": "kept-secret", "model": "old-model"},
+                "search": {"prowlarr": {"base_url": "http://old"}},
+            }
+        }
 
     async def _operation(self, name, value):
         self.calls.append((name, value))
@@ -53,6 +61,18 @@ class FakeManager:
     async def available_updates(self):
         return list(self.updates)
 
+    def config(self, plugin_id):
+        return {"plugin_id": plugin_id, "config": deepcopy(self.configs[plugin_id])}
+
+    async def configure(self, plugin_id, value):
+        self.configurations.append((plugin_id, deepcopy(value)))
+        self.configs[plugin_id] = deepcopy(value)
+        return SimpleNamespace(
+            state="active", plugin_id=plugin_id, version="1.0.1",
+            message="Feature configuration saved and reloaded",
+            details={"restarted": True},
+        )
+
 
 class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
     def _request(self, args, user_id=1):
@@ -65,8 +85,60 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         manager = FakeManager()
         context = Mock()
         context.args = args
+        context.user_data = {}
         context.application.bot_data = {"telepiplex_plugin_manager": manager}
         return update, context, manager
+
+    async def test_feature_config_patch_is_merged_and_reloaded_by_core(self):
+        from app.handlers.plugin_handler import handle_feature_result
+
+        update, context, manager = self._request([], user_id=1)
+        context.application.bot_data["telepiplex_plugin_sessions"] = {
+            (10, 1): {"plugin_id": "media-search", "expires_at": 9999999999},
+        }
+        route = SimpleNamespace(
+            plugin_id="media-search",
+            manifest=SimpleNamespace(callbacks=("media-search",)),
+        )
+        result = {
+            "actions": [],
+            "session": {"state": "close"},
+            "config_patch": {"ai": {"model": "new-model"}},
+        }
+
+        await handle_feature_result(update, context, route, result)
+
+        self.assertEqual(manager.configurations, [(
+            "media-search",
+            {
+                "ai": {"api_key": "kept-secret", "model": "new-model"},
+                "search": {"prowlarr": {"base_url": "http://old"}},
+            },
+        )])
+        self.assertNotIn("telepiplex_plugin_sessions", context.application.bot_data)
+        message = update.effective_message.reply_text.await_args.args[0]
+        self.assertIn("已写入并重新加载", message)
+        self.assertNotIn("kept-secret", message)
+
+    async def test_invalid_feature_config_patch_is_rejected_without_write(self):
+        from app.handlers.plugin_handler import handle_feature_result
+
+        update, context, manager = self._request([], user_id=1)
+        route = SimpleNamespace(
+            plugin_id="media-search",
+            manifest=SimpleNamespace(callbacks=("media-search",)),
+        )
+
+        await handle_feature_result(
+            update, context, route,
+            {"actions": [], "config_patch": ["not-a-mapping"]},
+        )
+
+        self.assertEqual(manager.configurations, [])
+        self.assertIn(
+            "invalid_config_patch",
+            update.effective_message.reply_text.await_args.args[0],
+        )
 
     async def test_lifecycle_subcommands_dispatch_exact_arguments(self):
         from app.handlers.plugin_handler import plugin_command
@@ -321,6 +393,34 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "暂不更新",
             update.callback_query.edit_message_text.await_args.args[0],
+        )
+
+    async def test_update_success_clears_stale_config_state_and_links_current_wizard(self):
+        from app.handlers.plugin_handler import plugin_update_callback
+
+        update, context, manager = self._request([], user_id=1)
+        update.callback_query.data = "core-plugin-update:confirm:open115@1.0.1"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        context.user_data.update({
+            "core_config_plugins": ["open115"],
+            "core_config_plugin": "open115",
+        })
+        manager.update = AsyncMock(return_value=SimpleNamespace(
+            state="active", plugin_id="open115", version="1.0.1",
+            message="Feature updated", details={},
+        ))
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_update_callback(update, context)
+
+        self.assertEqual(context.user_data, {})
+        markup = update.callback_query.edit_message_text.await_args_list[-1].kwargs[
+            "reply_markup"
+        ]
+        self.assertEqual(
+            markup.inline_keyboard[0][0].callback_data,
+            "core-config-direct:open115",
         )
 
     async def test_core_update_callback_sanitizes_manager_errors(self):

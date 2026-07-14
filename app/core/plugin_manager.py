@@ -156,6 +156,7 @@ class PluginManager:
                 self.supervisor.promote(process)
                 await self._verify_stable(process)
                 self.journal.set_subscriptions(plugin_id, release.manifest.subscribes)
+                self.assert_active_consistency(enabled)
                 return self._result("active", enabled, "Feature enabled")
             except Exception as exc:
                 self.router.deactivate(plugin_id)
@@ -326,6 +327,134 @@ class PluginManager:
         except StoreError as exc:
             raise self._operation_error(exc, "invalid_config") from None
 
+    def config_state(self, plugin_id: str) -> dict:
+        plugin_id = str(plugin_id)
+        release = self.store.active(plugin_id)
+        if release is None:
+            return {
+                "plugin_id": plugin_id,
+                "state": "not_installed",
+                "configurable": False,
+                "command": "",
+                "error_code": "not_installed",
+            }
+        try:
+            schema = self.store.config_schema(release)
+        except StoreError:
+            return {
+                "plugin_id": plugin_id,
+                "version": release.version,
+                "state": "invalid_schema",
+                "configurable": False,
+                "command": "",
+                "error_code": "invalid_schema",
+            }
+        command = str(schema.get("x-telepiplex-config-command") or "").strip()
+        route = self.router.plugin_route(plugin_id)
+        if route is None:
+            status = self.router.plugin_status(plugin_id)
+            return {
+                "plugin_id": plugin_id,
+                "version": release.version,
+                "state": "route_unavailable",
+                "configurable": False,
+                "command": command,
+                "error_code": (
+                    "missing_capability"
+                    if status.get("missing_capabilities")
+                    else "route_unavailable"
+                ),
+                "missing_capabilities": list(
+                    status.get("missing_capabilities") or []
+                ),
+            }
+        declared = {
+            str(getattr(item, "name", ""))
+            for item in getattr(route.manifest, "commands", ())
+        }
+        if command and (
+            not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", command)
+            or command not in declared
+        ):
+            return {
+                "plugin_id": plugin_id,
+                "version": release.version,
+                "state": "invalid_declaration",
+                "configurable": False,
+                "command": command,
+                "error_code": "invalid_config_command",
+            }
+        try:
+            self.store.read_config(release)
+        except StoreError:
+            return {
+                "plugin_id": plugin_id,
+                "version": release.version,
+                "state": "invalid_config",
+                "configurable": False,
+                "command": command,
+                "error_code": "invalid_config",
+            }
+        return {
+            "plugin_id": plugin_id,
+            "version": release.version,
+            "state": "configurable" if command else "not_configurable",
+            "configurable": bool(command),
+            "command": command,
+            "error_code": "" if command else "not_configurable",
+        }
+
+    def assert_active_consistency(self, release: ActiveRelease):
+        active = self.store.active(release.plugin_id)
+        process = self.supervisor.process(release.plugin_id)
+        route = self.router.plugin_route(release.plugin_id)
+        expected = (
+            release.version,
+            release.manifest.source.commit,
+        )
+        actual_active = (
+            getattr(active, "version", ""),
+            getattr(getattr(active, "manifest", None), "source", None).commit
+            if active is not None else "",
+        )
+        actual_process = (
+            getattr(getattr(process, "release", None), "version", ""),
+            getattr(
+                getattr(getattr(process, "release", None), "manifest", None),
+                "source",
+                None,
+            ).commit if process is not None else "",
+        )
+        actual_route = (
+            getattr(getattr(route, "manifest", None), "version", ""),
+            getattr(getattr(getattr(route, "manifest", None), "source", None), "commit", ""),
+        )
+        route_process = getattr(getattr(route, "client", None), "process", None)
+        client_version = getattr(getattr(route, "client", None), "version", "")
+        route_client_matches = (
+            route_process is process
+            if route_process is not None
+            else client_version in {"", release.version}
+        )
+        try:
+            self.store.config_schema(release)
+        except StoreError as exc:
+            raise PluginOperationError(
+                "activation_inconsistent",
+                "active Feature schema is unreadable",
+            ) from exc
+        if (
+            actual_active != expected
+            or actual_process != expected
+            or actual_route != expected
+            or not route_client_matches
+            or getattr(process, "state", "") != "healthy"
+        ):
+            raise PluginOperationError(
+                "activation_inconsistent",
+                "Feature store, process, route, manifest, or schema is inconsistent",
+            )
+
     async def configure(self, plugin_id: str, value: dict) -> PluginOperationResult:
         async with self._lifecycle_lock:
             release = self.store.active(str(plugin_id))
@@ -393,6 +522,7 @@ class PluginManager:
                 route_committed = True
                 self.supervisor.promote(new_process)
                 await self._verify_stable(new_process)
+                self.assert_active_consistency(release)
                 await self.supervisor.stop(old_process)
                 return PluginOperationResult(
                     state="active",
@@ -506,6 +636,7 @@ class PluginManager:
             self.supervisor.promote(new_process)
             await self._verify_stable(new_process)
             self.journal.set_subscriptions(release.plugin_id, release.manifest.subscribes)
+            self.assert_active_consistency(active)
             if old_process is not None:
                 await self.supervisor.stop(old_process)
             return active

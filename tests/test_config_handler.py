@@ -1,5 +1,5 @@
-import unittest
 import sys
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -10,138 +10,47 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
 
-def sample_schema():
+def custom_schema(command="config"):
     return {
         "type": "object",
-        "properties": {
-            "metadata": {
-                "type": "object",
-                "properties": {
-                    "tvdb": {
-                        "type": "object",
-                        "title": "TVDB",
-                        "properties": {
-                            "enable": {"type": "boolean", "title": "启用"},
-                            "api_key": {
-                                "type": "string",
-                                "title": "API Key",
-                                "writeOnly": True,
-                            },
-                            "timeout": {"type": "number", "minimum": 1},
-                        },
-                    }
-                },
-            },
-            "ai": {"$ref": "#/$defs/ai"},
-        },
-        "$defs": {
-            "ai": {
-                "type": "object",
-                "title": "AI",
-                "properties": {
-                    "api_url": {"type": "string"},
-                    "api_key": {"type": "string", "writeOnly": True},
-                    "model": {"type": "string"},
-                },
-            }
-        },
-    }
-
-
-def sample_config():
-    return {
-        "metadata": {
-            "tvdb": {"enable": True, "api_key": "tvdb-secret", "timeout": 15},
-        },
-        "ai": {
-            "api_url": "https://api.example.com",
-            "api_key": "ai-secret",
-            "model": "example-model",
-        },
+        "x-telepiplex-config-command": command,
+        "properties": {"access_token": {"type": "string", "writeOnly": True}},
     }
 
 
 class FakeManager:
     def __init__(self):
         self.views = {
-            "media-search": {
-                "plugin_id": "media-search",
-                "version": "1.0.0",
-                "schema": sample_schema(),
-                "config": sample_config(),
+            "open115": {
+                "plugin_id": "open115",
+                "version": "1.0.1",
+                "schema": custom_schema(),
+                "config": {"access_token": "secret-value"},
             }
         }
-        self.configure = AsyncMock(return_value=SimpleNamespace(
-            state="active",
-            plugin_id="media-search",
-            version="1.0.0",
-            message="Feature configuration saved and reloaded",
-            details={"restarted": True},
-        ))
+        self.statuses = [
+            {"plugin_id": "open115", "version": "1.0.1", "state": "active"},
+        ]
 
     def doctor(self):
-        return [{"plugin_id": "media-search", "version": "1.0.0", "state": "healthy"}]
+        return list(self.statuses)
 
     def config(self, plugin_id):
         return self.views[plugin_id]
 
-
-class ConfigPureFunctionTest(unittest.TestCase):
-    def test_discovers_nested_and_local_ref_sections(self):
-        from app.handlers.config_handler import discover_config_sections
-
-        sections = discover_config_sections(sample_schema(), sample_config())
-
-        self.assertEqual([section.path for section in sections], [
-            ("metadata", "tvdb"),
-            ("ai",),
-        ])
-        self.assertEqual([section.title for section in sections], ["TVDB", "AI"])
-        tvdb = sections[0]
-        self.assertTrue(next(field for field in tvdb.fields if field.name == "api_key").secret)
-
-    def test_prompt_masks_secret_but_shows_non_secret_current_values(self):
-        from app.handlers.config_handler import (
-            discover_config_sections,
-            format_section_prompt,
+    def config_state(self, plugin_id):
+        view = self.config(plugin_id)
+        command = str(
+            (view.get("schema") or {}).get("x-telepiplex-config-command") or ""
         )
-
-        tvdb = discover_config_sections(sample_schema(), sample_config())[0]
-        prompt = format_section_prompt("media-search", tvdb)
-
-        self.assertIn("api_key=<已配置>", prompt)
-        self.assertNotIn("tvdb-secret", prompt)
-        self.assertIn("timeout=15", prompt)
-
-    def test_parse_patch_coerces_types_and_rejects_unknown_fields(self):
-        from app.handlers.config_handler import (
-            ConfigInputError,
-            discover_config_sections,
-            parse_config_patch,
-        )
-
-        tvdb = discover_config_sections(sample_schema(), sample_config())[0]
-        self.assertEqual(
-            parse_config_patch("enable=false\napi_key=new-key\ntimeout=12.5", tvdb),
-            {"enable": False, "api_key": "new-key", "timeout": 12.5},
-        )
-        with self.assertRaises(ConfigInputError):
-            parse_config_patch("unknown=value", tvdb)
-        with self.assertRaises(ConfigInputError):
-            parse_config_patch("enable=maybe", tvdb)
-
-    def test_merge_patch_preserves_unselected_config(self):
-        from app.handlers.config_handler import merge_config_patch
-
-        merged = merge_config_patch(
-            sample_config(),
-            ("metadata", "tvdb"),
-            {"api_key": "new-key"},
-        )
-
-        self.assertEqual(merged["metadata"]["tvdb"]["api_key"], "new-key")
-        self.assertEqual(merged["metadata"]["tvdb"]["timeout"], 15)
-        self.assertEqual(merged["ai"]["api_key"], "ai-secret")
+        return {
+            "plugin_id": plugin_id,
+            "version": view.get("version") or "",
+            "state": "configurable" if command else "not_configurable",
+            "configurable": bool(command),
+            "command": command,
+            "error_code": "" if command else "not_configurable",
+        }
 
 
 class ConfigHandlerTest(unittest.IsolatedAsyncioTestCase):
@@ -166,24 +75,8 @@ class ConfigHandlerTest(unittest.IsolatedAsyncioTestCase):
         }
         return update, context, manager
 
-    async def test_custom_config_feature_is_listed_and_handed_to_feature_session(self):
-        from app.handlers.config_handler import config_command, select_config_plugin
-
-        update, context, manager = self.request(text="/config")
-        manager.views["open115"] = {
-            "plugin_id": "open115",
-            "version": "1.0.0",
-            "schema": {
-                "type": "object",
-                "x-telepiplex-config-command": "config",
-                "properties": {"access_token": {"type": "string"}},
-            },
-            "config": {"access_token": "secret-value"},
-        }
-        manager.doctor = Mock(return_value=[
-            {"plugin_id": "media-search", "state": "healthy"},
-            {"plugin_id": "open115", "state": "healthy"},
-        ])
+    @staticmethod
+    def custom_route(command="config"):
         client = AsyncMock()
         client.request.return_value = {
             "actions": [{
@@ -196,18 +89,23 @@ class ConfigHandlerTest(unittest.IsolatedAsyncioTestCase):
             }],
             "session": {"state": "open"},
         }
-        route = SimpleNamespace(
+        return SimpleNamespace(
             plugin_id="open115",
             client=client,
             manifest=SimpleNamespace(
-                commands=(SimpleNamespace(name="config"),),
+                commands=(SimpleNamespace(name=command),),
                 callbacks=("open115",),
             ),
         )
-        router = context.application.bot_data["telepiplex_plugin_router"]
-        router.plugin_route.side_effect = (
-            lambda plugin_id: route if plugin_id == "open115" else None
-        )
+
+    async def test_custom_config_feature_is_listed_and_handed_to_current_route(self):
+        from app.handlers.config_handler import config_command, select_config_plugin
+
+        update, context, _manager = self.request(text="/config")
+        route = self.custom_route()
+        context.application.bot_data[
+            "telepiplex_plugin_router"
+        ].plugin_route.return_value = route
 
         with patch("app.handlers.config_handler.init.check_user", return_value=True):
             await config_command(update, context)
@@ -216,92 +114,151 @@ class ConfigHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("open115", menu)
         self.assertNotIn("secret-value", menu)
 
-        index = context.user_data["core_config_plugins"].index("open115")
-        update.callback_query.data = f"core-config-plugin:{index}"
+        update.callback_query.data = "core-config-plugin:0"
         with patch("app.handlers.config_handler.init.check_user", return_value=True):
             state = await select_config_plugin(update, context)
 
         self.assertEqual(state, -1)
-        request = client.request.await_args.args
+        request = route.client.request.await_args.args
         self.assertEqual(request[0], "command.dispatch")
         self.assertEqual(request[1]["command"], "config")
         self.assertEqual(
-            context.application.bot_data["telepiplex_plugin_sessions"][(10, 1)]["plugin_id"],
+            context.application.bot_data[
+                "telepiplex_plugin_sessions"
+            ][(10, 1)]["plugin_id"],
             "open115",
         )
-        self.assertEqual(
-            update.effective_message.reply_text.await_args.args[0],
-            "请选择授权方式",
-        )
 
-    async def test_invalid_custom_config_declaration_is_not_listed(self):
+    async def test_invalid_config_feature_remains_visible_with_stable_error_code(self):
+        from app.core.plugin_manager import PluginOperationError
         from app.handlers.config_handler import config_command
 
         update, context, manager = self.request(text="/config")
-        manager.views = {
-            "open115": {
-                "plugin_id": "open115",
-                "version": "1.0.0",
-                "schema": {
-                    "type": "object",
-                    "x-telepiplex-config-command": "config",
-                    "properties": {"access_token": {"type": "string"}},
-                },
-                "config": {"access_token": "secret-value"},
-            }
-        }
-        manager.doctor = Mock(return_value=[
-            {"plugin_id": "open115", "state": "healthy"},
-        ])
-        route = SimpleNamespace(
-            plugin_id="open115",
-            client=AsyncMock(),
-            manifest=SimpleNamespace(
-                commands=(SimpleNamespace(name="auth"),),
-                callbacks=("open115",),
-            ),
+        manager.statuses.insert(0, {
+            "plugin_id": "media-search",
+            "version": "1.0.1",
+            "state": "active",
+        })
+        original_config_state = manager.config_state
+
+        def config_state(plugin_id):
+            if plugin_id == "media-search":
+                return {
+                    "plugin_id": plugin_id,
+                    "version": "1.0.1",
+                    "state": "invalid_config",
+                    "configurable": False,
+                    "command": "media_search_config",
+                    "error_code": "invalid_config",
+                }
+            return original_config_state(plugin_id)
+
+        manager.config_state = config_state
+        route = self.custom_route()
+        context.application.bot_data[
+            "telepiplex_plugin_router"
+        ].plugin_route.side_effect = (
+            lambda plugin_id: route if plugin_id == "open115" else None
         )
-        context.application.bot_data["telepiplex_plugin_router"].plugin_route.return_value = route
+
+        with patch("app.handlers.config_handler.init.check_user", return_value=True):
+            await config_command(update, context)
+
+        menu = update.effective_message.reply_text.await_args.args[0]
+        self.assertIn("media-search", menu)
+        self.assertIn("invalid_config", menu)
+        self.assertNotIn("secret-value", menu)
+        self.assertEqual(context.user_data["core_config_plugins"], ["open115"])
+
+    async def test_nested_scalars_without_custom_command_are_not_given_a_button(self):
+        from app.handlers.config_handler import config_command
+
+        update, context, manager = self.request(text="/config")
+        manager.views["media-search"] = {
+            "plugin_id": "media-search",
+            "version": "1.0.1",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "ai": {
+                        "type": "object",
+                        "properties": {"timeout": {"type": "number"}},
+                    }
+                },
+            },
+            "config": {"ai": {"timeout": 60}},
+        }
+        manager.statuses.append({
+            "plugin_id": "media-search", "version": "1.0.1", "state": "active",
+        })
+        context.application.bot_data[
+            "telepiplex_plugin_router"
+        ].plugin_route.return_value = self.custom_route()
+
+        with patch("app.handlers.config_handler.init.check_user", return_value=True):
+            await config_command(update, context)
+
+        menu = update.effective_message.reply_text.await_args.args[0]
+        self.assertIn("media-search", menu)
+        self.assertIn("未提供独立配置向导", menu)
+        self.assertEqual(context.user_data["core_config_plugins"], ["open115"])
+
+    async def test_invalid_custom_declaration_is_reported_not_dispatched(self):
+        from app.handlers.config_handler import config_command
+
+        update, context, _manager = self.request(text="/config")
+        route = self.custom_route(command="auth")
+        context.application.bot_data[
+            "telepiplex_plugin_router"
+        ].plugin_route.return_value = route
+        original_config_state = _manager.config_state
+
+        def invalid_state(plugin_id):
+            state = original_config_state(plugin_id)
+            state.update({
+                "state": "invalid_declaration",
+                "configurable": False,
+                "error_code": "invalid_config_command",
+            })
+            return state
+
+        _manager.config_state = invalid_state
 
         with patch("app.handlers.config_handler.init.check_user", return_value=True):
             state = await config_command(update, context)
 
         self.assertEqual(state, -1)
         message = update.effective_message.reply_text.await_args.args[0]
-        self.assertIn("没有已安装", message)
-        self.assertNotIn("secret-value", message)
+        self.assertIn("open115", message)
+        self.assertIn("配置入口声明无效", message)
         route.client.request.assert_not_awaited()
+
+    async def test_direct_config_callback_reloads_current_schema_and_route(self):
+        from app.handlers.config_handler import direct_config_callback
+
+        update, context, _manager = self.request(
+            callback_data="core-config-direct:open115"
+        )
+        route = self.custom_route()
+        context.application.bot_data[
+            "telepiplex_plugin_router"
+        ].plugin_route.return_value = route
+
+        with patch("app.handlers.config_handler.init.check_user", return_value=True):
+            state = await direct_config_callback(update, context)
+
+        self.assertEqual(state, -1)
+        self.assertEqual(route.client.request.await_args.args[1]["command"], "config")
 
     async def test_custom_config_dispatch_error_is_sanitized(self):
         from app.handlers.config_handler import config_command, select_config_plugin
 
-        update, context, manager = self.request(text="/config")
-        manager.views = {
-            "open115": {
-                "plugin_id": "open115",
-                "version": "1.0.0",
-                "schema": {
-                    "type": "object",
-                    "x-telepiplex-config-command": "config",
-                    "properties": {},
-                },
-                "config": {},
-            }
-        }
-        manager.doctor = Mock(return_value=[
-            {"plugin_id": "open115", "state": "healthy"},
-        ])
-        client = AsyncMock()
-        client.request.side_effect = RuntimeError("token=secret-value")
-        route = SimpleNamespace(
-            plugin_id="open115",
-            client=client,
-            manifest=SimpleNamespace(
-                commands=(SimpleNamespace(name="config"),),
-                callbacks=("open115",),
-            ),
-        )
-        context.application.bot_data["telepiplex_plugin_router"].plugin_route.return_value = route
+        update, context, _manager = self.request(text="/config")
+        route = self.custom_route()
+        route.client.request.side_effect = RuntimeError("token=secret-value")
+        context.application.bot_data[
+            "telepiplex_plugin_router"
+        ].plugin_route.return_value = route
 
         with patch("app.handlers.config_handler.init.check_user", return_value=True):
             await config_command(update, context)
@@ -312,78 +269,6 @@ class ConfigHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state, -1)
         message = update.callback_query.edit_message_text.await_args.args[0]
         self.assertIn("custom_config_failed", message)
-        self.assertNotIn("secret-value", message)
-
-    async def test_command_lists_configurable_features_without_secret_values(self):
-        from app.handlers.config_handler import CONFIG_SELECT_PLUGIN, config_command
-
-        update, context, _manager = self.request(text="/config")
-        with patch("app.handlers.config_handler.init.check_user", return_value=True):
-            state = await config_command(update, context)
-
-        self.assertEqual(state, CONFIG_SELECT_PLUGIN)
-        sent = update.effective_message.reply_text.await_args
-        self.assertIn("media-search", sent.args[0])
-        self.assertNotIn("secret", sent.args[0])
-        self.assertEqual(
-            sent.kwargs["reply_markup"].inline_keyboard[0][0].callback_data,
-            "core-config-plugin:0",
-        )
-
-    async def test_select_section_masks_secret_and_save_reloads_feature(self):
-        from app.handlers.config_handler import (
-            CONFIG_INPUT,
-            CONFIG_SELECT_SECTION,
-            receive_config_input,
-            select_config_plugin,
-            select_config_section,
-        )
-
-        update, context, manager = self.request(callback_data="core-config-plugin:0")
-        context.user_data["core_config_plugins"] = ["media-search"]
-        with patch("app.handlers.config_handler.init.check_user", return_value=True):
-            state = await select_config_plugin(update, context)
-        self.assertEqual(state, CONFIG_SELECT_SECTION)
-
-        update.callback_query.data = "core-config-section:0"
-        with patch("app.handlers.config_handler.init.check_user", return_value=True):
-            state = await select_config_section(update, context)
-        self.assertEqual(state, CONFIG_INPUT)
-        prompt = update.callback_query.edit_message_text.await_args.args[0]
-        self.assertIn("api_key=<已配置>", prompt)
-        self.assertNotIn("tvdb-secret", prompt)
-
-        update.effective_message.text = "api_key=new-key"
-        with patch("app.handlers.config_handler.init.check_user", return_value=True):
-            state = await receive_config_input(update, context)
-        self.assertEqual(state, -1)
-        configured = manager.configure.await_args.args
-        self.assertEqual(configured[0], "media-search")
-        self.assertEqual(configured[1]["metadata"]["tvdb"]["api_key"], "new-key")
-        self.assertEqual(configured[1]["ai"]["api_key"], "ai-secret")
-        message = update.effective_message.reply_text.await_args.args[0]
-        self.assertIn("已写入并重新加载", message)
-        self.assertNotIn("new-key", message)
-
-    async def test_save_error_is_sanitized(self):
-        from app.core.plugin_manager import PluginOperationError
-        from app.handlers.config_handler import receive_config_input
-
-        update, context, manager = self.request(text="api_key=new-key")
-        context.user_data.update({
-            "core_config_plugin": "media-search",
-            "core_config_path": ("metadata", "tvdb"),
-        })
-        manager.configure.side_effect = PluginOperationError(
-            "config_reload_failed",
-            "value 'secret-value' is too short",
-        )
-        with patch("app.handlers.config_handler.init.check_user", return_value=True):
-            state = await receive_config_input(update, context)
-
-        self.assertNotEqual(state, -1)
-        message = update.effective_message.reply_text.await_args.args[0]
-        self.assertIn("config_reload_failed", message)
         self.assertNotIn("secret-value", message)
 
     async def test_unauthorized_command_does_not_read_manager(self):
