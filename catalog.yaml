@@ -47,6 +47,17 @@ plugins:
           branch: feature/open115
           commit: d8d61051e9429484134c62aa3f2a4ab4cd72b7fe
         url: https://github.com/countott/telepiplex/releases/download/open115-v1.0.2/open115-1.0.2.tpx
+      1.0.3:
+        core_api: '>=1.0,<2.0'
+        provides:
+        - download.provider
+        - storage.provider
+        requires: []
+        sha256: d3cffee4fdcb6f8681670e23b5369b16c76501da3e24b786fc0cb26fc5e7aa18
+        source:
+          branch: feature/open115
+          commit: 4048111f26b77faa4c48e30eeab6c9d4bf35aea2
+        url: https://github.com/countott/telepiplex/releases/download/open115-v1.0.3/open115-1.0.3.tpx
   plex-management:
     versions:
       1.0.1:
@@ -93,5 +104,5 @@ plugins:
           branch: feature/renaming
           commit: de7e6ae80bda47dfd8ea7e947274505cf4500927
         url: https://github.com/countott/telepiplex/releases/download/renaming-v1.0.2/renaming-1.0.2.tpx
-release: open115-v1.0.2
+release: open115-v1.0.3
 schema_version: 1
