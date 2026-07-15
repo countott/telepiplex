@@ -670,7 +670,9 @@ class RenamingFeature:
         if forward_task is not None and not forward_task.done():
             try:
                 await asyncio.shield(forward_task)
-            except (asyncio.CancelledError, OperationCancelled, Exception):
+            except asyncio.CancelledError:
+                raise
+            except (OperationCancelled, Exception):
                 pass
         try:
             outcome = await journal.rollback(

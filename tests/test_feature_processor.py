@@ -605,6 +605,59 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(rollback_started.is_set())
         self.assertEqual(feature.operations["op-forward-stop"]["state"], "rolled_back")
 
+    async def test_runtime_shutdown_does_not_start_pending_compensation(self):
+        forward_release = asyncio.Event()
+
+        class Journal:
+            can_rollback = True
+            inverses = []
+            calls = 0
+
+            async def rollback(self, _core, *, deadline):
+                self.calls += 1
+                return {"state": "rolled_back", "restored": [], "remaining": []}
+
+        async def forward():
+            await forward_release.wait()
+
+        core = FakeCore()
+        runtime = FakeRuntime()
+        feature = RenamingFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            core=core,
+        )
+        feature.bind_runtime(runtime)
+        journal = Journal()
+        forward_task = asyncio.create_task(forward())
+        feature.operations["op-shutdown"] = {
+            "operation_id": "op-shutdown",
+            "chat_id": 10,
+            "user_id": 123,
+            "state": "running",
+            "stage": "renaming",
+            "status_text": "正在重命名",
+            "control": "rollback",
+            "revision": 3,
+            "details": {},
+            "journal": journal,
+            "task": forward_task,
+            "cancel_event": SimpleNamespace(set=lambda: None),
+        }
+
+        await feature.operation_control({
+            "operation_id": "op-shutdown",
+            "action": "rollback",
+            "revision": 3,
+        })
+        rollback_task = runtime.tasks.pop("renaming-rollback-op-shutdown")
+        rollback_task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await rollback_task
+
+        self.assertEqual(journal.calls, 0)
+        forward_release.set()
+        await forward_task
+
     async def test_download_event_accepts_handoff_and_runs_in_background(self):
         core = FakeCore()
         runtime = FakeRuntime()
