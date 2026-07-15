@@ -27,6 +27,12 @@ _PLEX_STAGE_TEXT = {
 }
 
 
+def _ambiguous_core_report_error(exc: Exception) -> bool:
+    return not isinstance(exc, FeatureError) or exc.code in {
+        "core_unavailable", "deadline_exceeded", "invalid_response",
+    }
+
+
 class PlexFeature:
     def __init__(
         self,
@@ -62,12 +68,36 @@ class PlexFeature:
         self.runtime = runtime
         self.loop = asyncio.get_running_loop()
         if self.interrupted_job_ids:
+            # Establish terminal coordinated ownership synchronously before the
+            # route can receive a replayed Core event.  Reporting the snapshot
+            # may wait for Core, but local replay suppression must not.
+            for job_id in self.interrupted_job_ids:
+                job = self.jobs.get(job_id)
+                payload = (job or {}).get("payload") or {}
+                if payload.get("operation_id"):
+                    self._restore_interrupted_operation(job)
             runtime.spawn(self._resume_interrupted(), task_id="plex-resume")
 
     async def media_organized(self, request: dict) -> dict:
         payload = request.get("payload") or {}
         operation = await self._accept_event_operation(payload)
         operation_id = operation["operation_id"] if operation else ""
+        if operation and operation.get("state") == "interrupted":
+            job_ids = sorted(
+                job_id for job_id, owner in self.job_operation_ids.items()
+                if owner == operation_id
+            )
+            return {
+                "accepted": True,
+                "job_ids": job_ids,
+                "job_id": job_ids[0] if job_ids else 0,
+                "state": "interrupted",
+                "duplicate": True,
+                "operation_id": operation_id,
+                "operation": self._operation_view(
+                    self.operations[operation_id]
+                ),
+            }
         try:
             service = await self._ensure_service()
             jobs = await asyncio.to_thread(
@@ -104,6 +134,20 @@ class PlexFeature:
                     self.operations[operation_id]
                 )
             return result
+        if operation and operation.get("state") in {
+            "completed", "cancelled", "failed", "interrupted"
+        }:
+            return {
+                "accepted": True,
+                "job_ids": [job["id"] for job in jobs],
+                "job_id": jobs[0]["id"],
+                "state": operation["state"],
+                "duplicate": True,
+                "operation_id": operation_id,
+                "operation": self._operation_view(
+                    self.operations[operation_id]
+                ),
+            }
         started = []
         states = []
         for job in jobs:
@@ -581,6 +625,8 @@ class PlexFeature:
                 raise FeatureError(
                     "operation_conflict", "Plex operation owner changed"
                 )
+            if existing.get("ownership_pending"):
+                await self._confirm_event_ownership(existing)
             return self._operation_view(existing)
         try:
             revision = max(0, int(payload.get("operation_revision") or 0))
@@ -601,14 +647,47 @@ class PlexFeature:
         }
         self.operations[operation_id] = operation
         self.owner_operations[(chat_id, user_id)] = operation_id
-        return await self._report_operation(
-            operation_id,
-            state="running",
-            stage="scan_preparing",
-            status_text=_PLEX_STAGE_TEXT["scan_preparing"],
-            control="cancel",
-            details={"completed_effects": []},
+        try:
+            return await self._report_operation(
+                operation_id,
+                state="running",
+                stage="scan_preparing",
+                status_text=_PLEX_STAGE_TEXT["scan_preparing"],
+                control="cancel",
+                details={"completed_effects": []},
+            )
+        except Exception as exc:
+            if _ambiguous_core_report_error(exc):
+                operation["ownership_pending"] = True
+                operation["ownership_report"] = self._operation_view(operation)
+            raise
+
+    async def _confirm_event_ownership(self, operation):
+        report = dict(
+            operation.get("ownership_report")
+            or self._operation_view(operation)
         )
+        try:
+            response = await self.core.report_operation(report)
+        except Exception as exc:
+            if _ambiguous_core_report_error(exc):
+                raise
+            operation.update({
+                "state": "interrupted",
+                "status_text": "Core 已结束协调任务，未开始 Plex 操作。",
+                "control": "",
+            })
+            operation["ownership_pending"] = False
+            operation.pop("ownership_report", None)
+            return
+        if not isinstance(response, dict) or response.get("accepted") is not True:
+            operation.update({
+                "state": "interrupted",
+                "status_text": "Core 已结束协调任务，未开始 Plex 操作。",
+                "control": "",
+            })
+        operation["ownership_pending"] = False
+        operation.pop("ownership_report", None)
 
     def _stage_sync(self, operation_id, stage, job):
         if not operation_id or self.loop is None:
@@ -889,7 +968,18 @@ class PlexFeature:
 
     async def _report_operation(self, operation_id, **changes):
         view = self._advance_operation(operation_id, **changes)
-        await self.core.report_operation(view)
+        response = await self.core.report_operation(view)
+        if not isinstance(response, dict) or response.get("accepted") is not True:
+            operation = self.operations[operation_id]
+            operation.update({
+                "state": "interrupted",
+                "status_text": "Core 未接受当前 Feature 的任务所有权。",
+                "control": "",
+            })
+            raise FeatureError(
+                "operation_rejected",
+                "Core rejected plex-management operation ownership",
+            )
         return view
 
     async def _report_if_active(self, operation_id, **changes):
@@ -919,19 +1009,30 @@ class PlexFeature:
         return int(request.get("chat_id") or 0), int(request.get("user_id") or 0)
 
     async def _resume_interrupted(self):
-        try:
-            await self._ensure_service()
-        except Exception:
-            return
-        claimed = []
+        legacy_job_ids = []
         for job_id in self.interrupted_job_ids:
             job = self.jobs.get(job_id)
             payload = (job or {}).get("payload") or {}
             operation_id = str(payload.get("operation_id") or "")
             if operation_id:
-                operation = self._restore_interrupted_operation(job)
+                existing = self.operations.get(operation_id)
+                operation = (
+                    self._operation_view(existing)
+                    if existing is not None
+                    else self._restore_interrupted_operation(job)
+                )
                 await self.core.report_operation(operation)
                 continue
+            legacy_job_ids.append(job_id)
+        if not legacy_job_ids:
+            self.interrupted_job_ids = []
+            return
+        try:
+            await self._ensure_service()
+        except Exception:
+            return
+        claimed = []
+        for job_id in legacy_job_ids:
             if await asyncio.to_thread(self.jobs.claim, job_id):
                 claimed.append(job_id)
         if claimed:

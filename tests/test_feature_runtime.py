@@ -146,6 +146,42 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         }.issubset(stages))
         self.assertEqual(self.feature.core.reports[-1]["state"], "completed")
 
+    async def test_rejected_operation_claim_never_enqueues_or_scans(self):
+        class RejectedCore(FakeCore):
+            async def report_operation(self, operation):
+                self.reports.append(operation)
+                return {
+                    "accepted": False,
+                    "state": "cancelled",
+                    "revision": operation["revision"],
+                }
+
+        feature = PlexFeature(
+            config={}, core=RejectedCore(),
+            state_path=self.root / "state-rejected",
+            repository=self.jobs, service_factory=lambda: self.service,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+        request = {"event_id": "rejected-event", "payload": {
+            "job_id": "rejected-event",
+            "final_path": "/Movies/Movie",
+            "resource_name": "Movie",
+            "user_id": 123,
+            "chat_id": 10,
+            "operation_id": "op-rejected",
+            "operation_revision": 5,
+        }}
+
+        with self.assertRaisesRegex(Exception, "rejected"):
+            await feature.media_organized(request)
+        replay = await feature.media_organized(request)
+
+        self.assertTrue(replay["duplicate"])
+        self.assertEqual(replay["state"], "interrupted")
+        self.assertEqual(self.jobs.list(), [])
+        self.assertEqual(self.service.batches, [])
+
     async def test_lost_response_retry_keeps_claimed_operation_running(self):
         request = {"event_id": "event-lost-response", "payload": {
             "job_id": "job-lost-response",
@@ -303,6 +339,72 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.jobs.get(job["id"])["state"], "interrupted")
         self.assertEqual(core.reports[-1]["state"], "interrupted")
         self.assertIn("进程停止", core.reports[-1]["status_text"])
+
+    async def test_coordinated_interruption_reports_before_service_initializes(self):
+        job = self.jobs.create_or_get("coordinated-broken-service", {
+            "final_path": "/Movies/Old",
+            "user_id": 123,
+            "chat_id": 10,
+            "operation_id": "op-broken-service",
+            "operation_revision": 4,
+        })
+        self.jobs.update(job["id"], state="scanning")
+        core = FakeCore()
+        feature = PlexFeature(
+            config={},
+            core=core,
+            state_path=self.root / "state-broken-service",
+            repository=self.jobs,
+            service_factory=lambda: (_ for _ in ()).throw(
+                RuntimeError("service unavailable")
+            ),
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+
+        await runtime.tasks.pop("plex-resume")
+
+        self.assertEqual(core.reports[-1]["state"], "interrupted")
+        self.assertEqual(core.reports[-1]["operation_id"], "op-broken-service")
+        self.assertEqual(self.jobs.get(job["id"])["state"], "interrupted")
+
+    async def test_pending_event_replay_cannot_restart_interrupted_operation(self):
+        payload = {
+            "job_id": "same-event",
+            "final_path": "/Movies/Old",
+            "resource_name": "Old",
+            "user_id": 123,
+            "chat_id": 10,
+            "operation_id": "op-replay-interrupted",
+            "operation_revision": 8,
+        }
+        job = self.service.enqueue_organized_event_jobs(payload)[0]
+        self.jobs.update(job["id"], state="scanning")
+        core = FakeCore()
+        feature = PlexFeature(
+            config={}, core=core, state_path=self.root / "state-replay",
+            repository=self.jobs, service_factory=lambda: self.service,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+        self.assertEqual(
+            feature.operations["op-replay-interrupted"]["state"],
+            "interrupted",
+        )
+
+        replay = await feature.media_organized({
+            "event_id": "same-event",
+            "payload": payload,
+        })
+
+        self.assertTrue(replay["accepted"])
+        self.assertTrue(replay["duplicate"])
+        self.assertEqual(replay["state"], "interrupted")
+        self.assertEqual(replay["operation"]["state"], "interrupted")
+        self.assertNotIn("plex-batch-same-event", runtime.tasks)
+        self.assertEqual(self.jobs.get(job["id"])["state"], "interrupted")
+        self.assertEqual(self.service.batches, [])
+        await runtime.tasks.pop("plex-resume")
 
     async def test_enabled_ai_with_missing_credentials_does_not_break_feature_startup(self):
         from telepiplex_plex.runtime import main
