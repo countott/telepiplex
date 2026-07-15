@@ -22,7 +22,7 @@ def _context_from_environment() -> tuple[str, RuntimeContext]:
         manifest={
             "plugin_id": plugin_id,
             "version": version,
-            "core_api": ">=1.0,<2.0",
+            "core_api": ">=1.1,<2.0",
         },
         token=token,
         socket_path=Path(os.environ["TPX_SOCKET_PATH"]),

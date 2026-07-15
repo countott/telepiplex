@@ -34,6 +34,7 @@ class CoreBroker:
         *,
         dispatcher=None,
         notification_sink=None,
+        operation_sink=None,
         max_frame_bytes: int = 1024 * 1024,
         max_deadline: float = 300,
     ):
@@ -42,6 +43,7 @@ class CoreBroker:
         self.socket_path = Path(socket_path)
         self.dispatcher = dispatcher
         self.notification_sink = notification_sink
+        self.operation_sink = operation_sink
         self.max_frame_bytes = int(max_frame_bytes)
         self.max_deadline = max(1, float(max_deadline))
         self._identities: dict[str, BrokerIdentity] = {}
@@ -202,4 +204,17 @@ class CoreBroker:
             if inspect.isawaitable(accepted):
                 accepted = await accepted
             return {"accepted": accepted is not False}
+        if method == "operation.report":
+            if self.operation_sink is None:
+                raise BrokerError(
+                    "operation_unavailable", "Core operation coordinator is unavailable"
+                )
+            result = self.operation_sink(identity.plugin_id, dict(params))
+            if inspect.isawaitable(result):
+                result = await result
+            if not isinstance(result, dict):
+                raise BrokerError(
+                    "internal_error", "Core operation sink must return an object"
+                )
+            return result
         raise BrokerError("not_found", f"unknown Core RPC method: {method}")

@@ -19,7 +19,14 @@ class FeatureSdkRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.temp.cleanup()
 
-    async def _start(self, capability, *, messages=None):
+    async def _start(
+        self,
+        capability,
+        *,
+        messages=None,
+        operation_control=None,
+        operation_snapshot=None,
+    ):
         from telepiplex_plugin_sdk.runtime import FeatureRuntime
 
         runtime = FeatureRuntime(
@@ -27,6 +34,8 @@ class FeatureSdkRuntimeTest(unittest.IsolatedAsyncioTestCase):
             token="token",
             capabilities={"demo.echo": capability},
             messages=messages,
+            operation_control=operation_control,
+            operation_snapshot=operation_snapshot,
         )
         task = asyncio.create_task(runtime.serve(self.socket_path))
         for _ in range(100):
@@ -152,6 +161,50 @@ class FeatureSdkRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(0.01)
         self.assertEqual(runtime.active_tasks, 0)
+
+    async def test_operation_control_dispatches_to_registered_handler(self):
+        from app.core.plugin_rpc import RpcClient
+
+        seen = []
+
+        async def echo(request):
+            return request["payload"]
+
+        async def control(request):
+            seen.append(request)
+            return {
+                "operation_id": request["operation_id"],
+                "state": "cancelling",
+                "revision": 2,
+            }
+
+        await self._start(echo, operation_control=control)
+        result = await RpcClient(self.socket_path, "token").request(
+            "operation.control",
+            {"operation_id": "op-1", "action": "cancel", "revision": 1},
+            deadline=1,
+        )
+
+        self.assertEqual(result["state"], "cancelling")
+        self.assertEqual(seen[0]["action"], "cancel")
+
+    async def test_operation_snapshot_dispatches_to_registered_handler(self):
+        from app.core.plugin_rpc import RpcClient
+
+        async def echo(request):
+            return request["payload"]
+
+        async def snapshot(request):
+            return {"operations": [{"operation_id": request["operation_id"]}]}
+
+        await self._start(echo, operation_snapshot=snapshot)
+        result = await RpcClient(self.socket_path, "token").request(
+            "operation.snapshot",
+            {"operation_id": "op-1"},
+            deadline=1,
+        )
+
+        self.assertEqual(result["operations"], [{"operation_id": "op-1"}])
 
 
 if __name__ == "__main__":

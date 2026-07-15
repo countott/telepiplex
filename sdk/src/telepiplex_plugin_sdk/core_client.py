@@ -65,6 +65,20 @@ class CoreClient:
             idempotency_key=idempotency_key,
         )
 
+    async def report_operation(
+        self,
+        report: dict,
+        *,
+        deadline: float = 10,
+    ) -> dict:
+        if not isinstance(report, dict):
+            raise FeatureError("invalid_request", "operation report must be an object")
+        return await self._request(
+            "operation.report",
+            dict(report),
+            deadline=deadline,
+        )
+
     async def _request(
         self,
         method: str,

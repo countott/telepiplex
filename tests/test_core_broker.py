@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 
 class ProviderClient:
@@ -46,11 +47,13 @@ class CoreBrokerTest(unittest.IsolatedAsyncioTestCase):
         self.router = CapabilityRouter()
         self.journal = EventJournal(root / "core.db")
         self.notifications = []
+        self.operation_sink = AsyncMock(return_value={"accepted": True, "revision": 1})
         self.broker = CoreBroker(
             self.router,
             self.journal,
             root / "core.sock",
             notification_sink=lambda user_id, text: self.notifications.append((user_id, text)),
+            operation_sink=self.operation_sink,
         )
         await self.broker.start()
 
@@ -129,6 +132,27 @@ class CoreBrokerTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(FeatureError) as raised:
             await client.notify_user(123, "x" * 5000, deadline=1)
         self.assertEqual(raised.exception.code, "invalid_notification")
+
+    async def test_operation_report_uses_authenticated_feature_identity(self):
+        from telepiplex_plugin_sdk import CoreClient
+
+        self.broker.register("echo", "echo-token", manifest("echo"))
+        result = await CoreClient(
+            self.broker.socket_path, "echo-token"
+        ).report_operation({
+            "operation_id": "op-1",
+            "chat_id": 10,
+            "user_id": 1,
+            "state": "running",
+            "stage": "planning",
+            "status_text": "规划中",
+            "control": "cancel",
+            "revision": 1,
+        })
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(self.operation_sink.await_args.args[0], "echo")
+        self.assertEqual(self.operation_sink.await_args.args[1]["operation_id"], "op-1")
 
 
 if __name__ == "__main__":

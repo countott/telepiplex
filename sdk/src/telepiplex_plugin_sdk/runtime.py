@@ -33,6 +33,8 @@ class FeatureRuntime:
         callbacks: dict[str, Handler] | None = None,
         messages: Handler | None = None,
         config_validator: Handler | None = None,
+        operation_control: Handler | None = None,
+        operation_snapshot: Handler | None = None,
         max_frame_bytes: int = 1024 * 1024,
     ):
         self.manifest = dict(manifest)
@@ -43,6 +45,8 @@ class FeatureRuntime:
         self.callbacks = dict(callbacks or {})
         self.messages = messages
         self.config_validator = config_validator
+        self.operation_control = operation_control
+        self.operation_snapshot = operation_snapshot
         self.max_frame_bytes = int(max_frame_bytes)
         self.state = "starting"
         self._active_requests = 0
@@ -240,6 +244,20 @@ class FeatureRuntime:
             return await self._business_call(
                 {"config.validate": self.config_validator},
                 "config.validate",
+                params,
+                method,
+            )
+        if method == "operation.control" and self.operation_control is not None:
+            return await self._business_call(
+                {"operation.control": self.operation_control},
+                "operation.control",
+                params,
+                method,
+            )
+        if method == "operation.snapshot" and self.operation_snapshot is not None:
+            return await self._business_call(
+                {"operation.snapshot": self.operation_snapshot},
+                "operation.snapshot",
                 params,
                 method,
             )
