@@ -497,11 +497,13 @@ class FeatureSourceContractTest(unittest.TestCase):
         schema = yaml.safe_load((ROOT / "config.schema.json").read_text(encoding="utf-8"))
         manifest = yaml.safe_load((ROOT / "manifest.yaml").read_text(encoding="utf-8"))
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertEqual(schema["x-telepiplex-config-command"], "config")
         self.assertIn("config", [item["name"] for item in manifest["commands"]])
-        self.assertEqual(manifest["version"], "1.0.2")
-        self.assertEqual(project["project"]["version"], "1.0.2")
+        self.assertEqual(manifest["version"], "1.0.3")
+        self.assertEqual(project["project"]["version"], "1.0.3")
+        self.assertIn("dist/open115-1.0.3.tpx", readme)
 
     def test_source_has_no_core_telegram_or_init_imports(self):
         forbidden = []
