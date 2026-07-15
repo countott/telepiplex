@@ -185,6 +185,42 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         context.application.bot.send_message.assert_awaited_once()
         self.assertEqual(self.coordinator.get("op-1").message_id, 34)
 
+    async def test_status_renderer_accepts_only_current_feature_keyboard(self):
+        from app.handlers.interaction_handler import render_operation
+
+        record = self.coordinator.report("media-search", self.report(
+            state="awaiting_input",
+            stage="release_selection",
+            status_text="请选择资源",
+            control="exit",
+            details={"keyboard": [[
+                {"text": "资源 1", "callback_data": "media-search:release:1"},
+                {"text": "越权", "callback_data": "open115:path:1"},
+            ]]},
+        ))
+        router = Mock()
+        router.plugin_route.return_value = SimpleNamespace(
+            plugin_id="media-search",
+            manifest=SimpleNamespace(callbacks=("media-search",)),
+        )
+        context = self.context(router=router)
+
+        await render_operation(context.application, router, record)
+
+        markup = context.application.bot.send_message.await_args.kwargs["reply_markup"]
+        buttons = [
+            button
+            for row in markup.inline_keyboard
+            for button in row
+        ]
+        self.assertEqual(
+            [(button.text, button.callback_data) for button in buttons],
+            [
+                ("资源 1", "media-search:release:1"),
+                ("退出", "core-operation:exit:op-1"),
+            ],
+        )
+
     async def test_startup_recovery_confirms_each_operation_and_interrupts_missing_one(self):
         from app.handlers.interaction_handler import recover_active_operations
 

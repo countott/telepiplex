@@ -316,6 +316,8 @@ class InteractionCoordinator:
             )
         if current.plugin_id == values["plugin_id"]:
             if current.state == "handed_off" and values["revision"] > current.revision:
+                if values["state"] in TERMINAL_STATES:
+                    return
                 raise InteractionError(
                     "handoff_pending", "only the declared Feature may accept this handoff"
                 )

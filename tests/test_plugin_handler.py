@@ -131,6 +131,41 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已写入并重新加载", message)
         self.assertNotIn("kept-secret", message)
 
+    async def test_successful_feature_config_patch_completes_operation(self):
+        from app.core.interaction_coordinator import InteractionCoordinator
+        from app.handlers.plugin_handler import handle_feature_result
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "core.db")
+            self.addCleanup(coordinator.close)
+            update, context, _manager = self._request([], user_id=1)
+            context.application.bot_data["telepiplex_interaction_coordinator"] = coordinator
+            route = SimpleNamespace(
+                plugin_id="media-search",
+                manifest=SimpleNamespace(callbacks=("media-search",)),
+            )
+
+            await handle_feature_result(update, context, route, {
+                "actions": [],
+                "session": {"state": "close"},
+                "config_patch": {"ai": {"model": "new-model"}},
+                "operation": {
+                    "operation_id": "op-config",
+                    "chat_id": 10,
+                    "user_id": 1,
+                    "state": "running",
+                    "stage": "config_apply",
+                    "status_text": "正在保存配置",
+                    "control": "cancel",
+                    "revision": 4,
+                },
+            })
+
+            record = coordinator.get("op-config")
+            self.assertEqual(record.state, "completed")
+            self.assertEqual(record.stage, "config_apply")
+            self.assertIsNone(coordinator.active(10, 1))
+
     async def test_feature_result_persists_operation_and_injects_missing_exit(self):
         from app.core.interaction_coordinator import InteractionCoordinator
         from app.handlers.plugin_handler import handle_feature_result

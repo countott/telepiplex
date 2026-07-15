@@ -8,6 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import init
 
 from app.core.plugin_manager import PluginOperationError
+from app.core.interaction_coordinator import TERMINAL_STATES
 from app.core.command_catalog import sync_bot_commands
 from app.handlers.interaction_handler import (
     COORDINATOR_KEY,
@@ -545,6 +546,11 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
     patch = result.get("config_patch")
     prefer_edit = bool(getattr(update, "callback_query", None))
     if not isinstance(patch, dict) or not patch:
+        _finish_feature_config_operation(
+            context, route, result,
+            state="failed",
+            status_text="Feature 配置补丁无效，配置未写入。",
+        )
         await _feature_feedback(
             update,
             "❌ invalid_config_patch：Feature 配置补丁无效。",
@@ -553,6 +559,11 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
         return
     manager = context.application.bot_data.get(MANAGER_KEY)
     if manager is None:
+        _finish_feature_config_operation(
+            context, route, result,
+            state="failed",
+            status_text="Feature 配置管理器不可用，配置未写入。",
+        )
         await _feature_feedback(
             update,
             "❌ config_manager_unavailable：Feature 插件管理器尚未初始化。",
@@ -569,6 +580,11 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
         configured = merge_nested_patch(view.get("config") or {}, patch)
         outcome = await manager.configure(route.plugin_id, configured)
     except PluginOperationError as exc:
+        _finish_feature_config_operation(
+            context, route, result,
+            state="failed",
+            status_text=f"Feature 配置失败：{exc.code}。",
+        )
         await _feature_feedback(
             update,
             f"❌ {exc.code}：配置未写入或重新加载失败。",
@@ -576,6 +592,11 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
         )
         return
     except Exception as exc:
+        _finish_feature_config_operation(
+            context, route, result,
+            state="failed",
+            status_text=f"Feature 配置失败：{type(exc).__name__}。",
+        )
         await _feature_feedback(
             update,
             f"❌ config_failed：{type(exc).__name__}",
@@ -583,11 +604,44 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
         )
         return
     _drop_session(context.application.bot_data, _session_key(update))
+    _finish_feature_config_operation(
+        context, route, result,
+        state="completed",
+        status_text=f"{outcome.plugin_id} 配置已写入并重新加载。",
+    )
     await _feature_feedback(
         update,
         f"✅ {outcome.plugin_id} 配置已写入并重新加载。",
         prefer_edit=prefer_edit,
     )
+
+
+def _finish_feature_config_operation(
+    context, route, result: dict, *, state: str, status_text: str
+):
+    coordinator = context.application.bot_data.get(COORDINATOR_KEY)
+    operation = result.get("operation") if isinstance(result, dict) else None
+    if coordinator is None or not isinstance(operation, dict):
+        return None
+    operation_id = str(operation.get("operation_id") or "")
+    record = coordinator.get(operation_id) if operation_id else None
+    if (
+        record is None
+        or record.plugin_id != route.plugin_id
+        or record.state in TERMINAL_STATES
+    ):
+        return record
+    return coordinator.report(route.plugin_id, {
+        "operation_id": record.operation_id,
+        "chat_id": record.chat_id,
+        "user_id": record.user_id,
+        "state": state,
+        "stage": record.stage,
+        "status_text": status_text,
+        "control": "",
+        "revision": record.revision + 1,
+        "details": dict(record.details),
+    })
 
 
 async def _render_actions(

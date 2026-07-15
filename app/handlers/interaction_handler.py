@@ -212,18 +212,56 @@ def _normalize_control_result(record: OperationRecord, result: dict) -> dict:
     return normalized
 
 
-def operation_markup(record: OperationRecord):
-    if record.state in TERMINAL_STATES or not record.control:
-        return None
-    label = _CONTROL_LABELS.get(record.control)
-    if label is None:
-        return None
-    callback_data = f"{CONTROL_CALLBACK_PREFIX}{record.control}:{record.operation_id}"
-    if len(callback_data.encode("utf-8")) > 64:
-        return None
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(label, callback_data=callback_data)
-    ]])
+def operation_markup(record: OperationRecord, router=None):
+    rows = _feature_status_rows(record, router)
+    explicit_control = any(
+        button.text in set(_CONTROL_LABELS.values()) | {"取消"}
+        for row in rows
+        for button in row
+    )
+    if (
+        record.state not in TERMINAL_STATES
+        and record.control
+        and not explicit_control
+    ):
+        label = _CONTROL_LABELS.get(record.control)
+        callback_data = (
+            f"{CONTROL_CALLBACK_PREFIX}{record.control}:{record.operation_id}"
+        )
+        if label is not None and len(callback_data.encode("utf-8")) <= 64:
+            rows.append([InlineKeyboardButton(label, callback_data=callback_data)])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def _feature_status_rows(record: OperationRecord, router):
+    keyboard = record.details.get("keyboard")
+    if not isinstance(keyboard, list) or router is None:
+        return []
+    route = router.plugin_route(record.plugin_id)
+    if route is None or route.plugin_id != record.plugin_id:
+        return []
+    namespaces = set(getattr(route.manifest, "callbacks", ()))
+    rows = []
+    for raw_row in keyboard[:10]:
+        if not isinstance(raw_row, list):
+            continue
+        buttons = []
+        for raw_button in raw_row[:8]:
+            if not isinstance(raw_button, dict):
+                continue
+            text = str(raw_button.get("text") or "").strip()
+            callback_data = str(raw_button.get("callback_data") or "")
+            namespace, separator, _payload = callback_data.partition(":")
+            if (
+                text
+                and separator
+                and namespace in namespaces
+                and len(callback_data.encode("utf-8")) <= 64
+            ):
+                buttons.append(InlineKeyboardButton(text, callback_data=callback_data))
+        if buttons:
+            rows.append(buttons)
+    return rows
 
 
 async def render_operation(application, _router, record: OperationRecord):
@@ -237,7 +275,7 @@ async def render_operation(application, _router, record: OperationRecord):
     text = record.status_text or (
         f"任务状态：{record.state}\n阶段：{record.stage or '-'}"
     )
-    markup = operation_markup(record)
+    markup = operation_markup(record, _router)
     if record.message_id is not None:
         try:
             await application.bot.edit_message_text(
