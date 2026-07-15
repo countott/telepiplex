@@ -130,7 +130,9 @@ class FakeConfigStore:
     def __init__(self, config):
         self.config = dict(config)
         self.writes = []
+        self.directory_writes = []
         self.fail_writes = False
+        self.fail_directory_writes = False
 
     def read(self):
         return dict(self.config)
@@ -151,6 +153,16 @@ class FakeConfigStore:
             "auth_mode": auth_mode,
         })
         self.writes.append((access_token, refresh_token, auth_mode))
+        return dict(self.config)
+
+    def write_save_directories(self, directories):
+        from telepiplex_open115.directories import normalize_save_directories
+
+        if self.fail_directory_writes:
+            raise RuntimeError("config=secret-value")
+        normalized = normalize_save_directories(directories)
+        self.config["save_directories"] = normalized
+        self.directory_writes.append(normalized)
         return dict(self.config)
 
 
@@ -175,6 +187,14 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         for task in self.runtime.tasks.values():
             if asyncio.iscoroutine(task):
                 task.close()
+
+    async def _open_directory_config(self):
+        await self.feature.command({
+            "command": "config", "user_id": 1, "chat_id": 10,
+        })
+        return await self.feature.callback({
+            "payload": "config:directories", "user_id": 1, "chat_id": 10,
+        })
 
     async def test_submit_returns_job_and_background_publishes_completion(self):
         result = await self.feature.download_capability({
@@ -765,24 +785,247 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(callback["operation"]["state"], "running")
         self.assertEqual(len(self.runtime.tasks), 1)
 
-    async def test_config_and_auth_offer_token_entry_and_scan_routes(self):
-        for command in ("config", "auth"):
-            response = await self.feature.command({
-                "command": command,
-                "user_id": 1,
-                "chat_id": 10,
-            })
-            self.assertEqual(response["session"]["state"], "open")
-            keyboard = response["actions"][0]["data"]["keyboard"]
-            self.assertEqual(
-                [button["callback_data"] for row in keyboard for button in row],
-                ["open115:auth:direct", "open115:auth:scan", "open115:exit"],
-            )
-            self.assertIn("Access / Refresh Token", str(keyboard))
+    async def test_config_opens_home_while_auth_opens_authorization_directly(self):
+        config = await self.feature.command({
+            "command": "config", "user_id": 1, "chat_id": 10,
+        })
+        config_buttons = [
+            button["callback_data"]
+            for row in config["actions"][0]["data"]["keyboard"]
+            for button in row
+        ]
+        self.assertEqual(config_buttons, [
+            "open115:config:auth",
+            "open115:config:directories",
+            "open115:exit",
+        ])
+        self.assertIn("保存目录：0 个", config["actions"][0]["text"])
+
+        from_config = await self.feature.callback({
+            "payload": "config:auth", "user_id": 1, "chat_id": 10,
+        })
+        self.assertIn(
+            "open115:auth:direct",
+            str(from_config["actions"][0]["data"]["keyboard"]),
+        )
+
+        auth = await self.feature.command({
+            "command": "auth", "user_id": 1, "chat_id": 10,
+        })
+        auth_buttons = [
+            button["callback_data"]
+            for row in auth["actions"][0]["data"]["keyboard"]
+            for button in row
+        ]
+        self.assertEqual(auth_buttons, [
+            "open115:auth:direct", "open115:auth:scan", "open115:exit",
+        ])
+
+    async def test_directory_list_is_paginated_with_bounded_keyboard(self):
+        directories = [
+            {"name": f"目录{index}", "path": f"/Path{index}"}
+            for index in range(7)
+        ]
+        self.feature.config["save_directories"] = directories
+        self.feature.config_store.config["save_directories"] = directories
+
+        response = await self._open_directory_config()
+
+        keyboard = response["actions"][0]["data"]["keyboard"]
+        self.assertLessEqual(len(keyboard), 10)
+        self.assertIn("open115:config:page:1", str(keyboard))
+        self.assertIn("目录4", str(keyboard))
+        self.assertNotIn("目录5", str(keyboard))
+
+        next_page = await self.feature.callback({
+            "payload": "config:page:1", "user_id": 1, "chat_id": 10,
+        })
+        next_keyboard = next_page["actions"][0]["data"]["keyboard"]
+        self.assertLessEqual(len(next_keyboard), 10)
+        self.assertIn("open115:config:page:0", str(next_keyboard))
+        self.assertIn("目录5", str(next_keyboard))
+        self.assertIn("目录6", str(next_keyboard))
+
+    async def test_directory_working_copy_add_edit_delete_and_save(self):
+        original = [
+            {"name": "剧集", "path": "/Series"},
+            {"name": "删除项", "path": "/Delete"},
+        ]
+        self.feature.config["save_directories"] = original
+        self.feature.config_store.config["save_directories"] = original
+        await self._open_directory_config()
+
+        await self.feature.callback({
+            "payload": "config:add", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.message({
+            "text": "电影", "user_id": 1, "chat_id": 10,
+        })
+        added = await self.feature.message({
+            "text": "/Movies", "user_id": 1, "chat_id": 10,
+        })
+        self.assertIn("电影", str(added["actions"][0]["data"]["keyboard"]))
+
+        await self.feature.callback({
+            "payload": "config:item:0", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.callback({
+            "payload": "config:edit:name", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.message({
+            "text": "电视剧", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.callback({
+            "payload": "config:item:0", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.callback({
+            "payload": "config:edit:path", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.message({
+            "text": "/TV", "user_id": 1, "chat_id": 10,
+        })
+
+        await self.feature.callback({
+            "payload": "config:item:1", "user_id": 1, "chat_id": 10,
+        })
+        confirm = await self.feature.callback({
+            "payload": "config:delete", "user_id": 1, "chat_id": 10,
+        })
+        self.assertIn("确认删除", confirm["actions"][0]["text"])
+        self.assertEqual(len(
+            self.feature.sessions[(10, 1)]["working_directories"]
+        ), 3)
+        await self.feature.callback({
+            "payload": "config:delete:confirm", "user_id": 1, "chat_id": 10,
+        })
+
+        saved = await self.feature.callback({
+            "payload": "config:save", "user_id": 1, "chat_id": 10,
+        })
+        expected = [
+            {"name": "电视剧", "path": "/TV"},
+            {"name": "电影", "path": "/Movies"},
+        ]
+        self.assertEqual(saved["session"]["state"], "close")
+        self.assertEqual(self.feature.config_store.directory_writes, [expected])
+        self.assertEqual(self.feature.config["save_directories"], expected)
+        self.assertEqual(saved["operation"]["state"], "completed")
+
+        magnet = await self.feature.command({
+            "command": "magnet",
+            "args": ["magnet:?xt=urn:btih:" + "4" * 40],
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        magnet_keyboard = magnet["actions"][0]["data"]["keyboard"]
+        self.assertIn("电视剧", str(magnet_keyboard))
+        self.assertIn("电影", str(magnet_keyboard))
+
+    async def test_directory_input_rejects_invalid_and_duplicate_values(self):
+        original = [{"name": "剧集", "path": "/Series"}]
+        self.feature.config["save_directories"] = original
+        self.feature.config_store.config["save_directories"] = original
+        await self._open_directory_config()
+        await self.feature.callback({
+            "payload": "config:add", "user_id": 1, "chat_id": 10,
+        })
+
+        invalid_name = await self.feature.message({
+            "text": "line-one\nline-two", "user_id": 1, "chat_id": 10,
+        })
+        self.assertIn("名称", invalid_name["actions"][0]["text"])
+        await self.feature.message({
+            "text": "电影", "user_id": 1, "chat_id": 10,
+        })
+        relative = await self.feature.message({
+            "text": "Movies", "user_id": 1, "chat_id": 10,
+        })
+        duplicate_path = await self.feature.message({
+            "text": "/Series", "user_id": 1, "chat_id": 10,
+        })
+        self.assertIn("绝对路径", relative["actions"][0]["text"])
+        self.assertIn("重复", duplicate_path["actions"][0]["text"])
+        await self.feature.message({
+            "text": "/Movies", "user_id": 1, "chat_id": 10,
+        })
+
+        await self.feature.callback({
+            "payload": "config:add", "user_id": 1, "chat_id": 10,
+        })
+        duplicate_name = await self.feature.message({
+            "text": "电影", "user_id": 1, "chat_id": 10,
+        })
+        self.assertIn("重复", duplicate_name["actions"][0]["text"])
+        self.assertEqual(self.feature.config_store.directory_writes, [])
+
+    async def test_directory_exit_and_q_discard_working_copy(self):
+        for use_q in (False, True):
+            with self.subTest(use_q=use_q):
+                await self._open_directory_config()
+                await self.feature.callback({
+                    "payload": "config:add", "user_id": 1, "chat_id": 10,
+                })
+                await self.feature.message({
+                    "text": "电影", "user_id": 1, "chat_id": 10,
+                })
+                await self.feature.message({
+                    "text": "/Movies", "user_id": 1, "chat_id": 10,
+                })
+                if use_q:
+                    response = await self.feature.command({
+                        "command": "q", "user_id": 1, "chat_id": 10,
+                    })
+                else:
+                    response = await self.feature.callback({
+                        "payload": "exit", "user_id": 1, "chat_id": 10,
+                    })
+                self.assertEqual(response["session"]["state"], "close")
+                self.assertEqual(self.feature.config_store.directory_writes, [])
+
+    async def test_directory_session_timeout_discards_working_copy(self):
+        from telepiplex_open115 import service
+
+        with patch.object(service, "SESSION_TTL_SECONDS", 0):
+            await self._open_directory_config()
+            await asyncio.sleep(0.01)
+
+        self.assertNotIn((10, 1), self.feature.sessions)
+        self.assertEqual(self.feature.config_store.directory_writes, [])
+        self.assertEqual(self.core.reports[-1]["state"], "cancelled")
+        self.assertIn("目录配置", self.core.reports[-1]["status_text"])
+
+    async def test_directory_save_failure_retains_old_config_and_working_copy(self):
+        original = [{"name": "剧集", "path": "/Series"}]
+        self.feature.config["save_directories"] = original
+        self.feature.config_store.config["save_directories"] = original
+        self.feature.config_store.fail_directory_writes = True
+        await self._open_directory_config()
+        await self.feature.callback({
+            "payload": "config:add", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.message({
+            "text": "电影", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.message({
+            "text": "/Movies", "user_id": 1, "chat_id": 10,
+        })
+
+        response = await self.feature.callback({
+            "payload": "config:save", "user_id": 1, "chat_id": 10,
+        })
+
+        self.assertEqual(response["session"]["state"], "open")
+        self.assertEqual(response["operation"]["state"], "awaiting_input")
+        self.assertEqual(self.feature.config["save_directories"], original)
+        self.assertEqual(self.feature.sessions[(10, 1)]["stage"], "directory_list")
+        self.assertEqual(len(
+            self.feature.sessions[(10, 1)]["working_directories"]
+        ), 2)
+        self.assertNotIn("secret-value", str(response))
 
     async def test_direct_token_wizard_writes_only_after_refresh_and_activates_client(self):
         await self.feature.command({
-            "command": "config", "user_id": 1, "chat_id": 10,
+            "command": "auth", "user_id": 1, "chat_id": 10,
         })
         direct = await self.feature.callback({
             "payload": "auth:direct", "user_id": 1, "chat_id": 10,
@@ -810,7 +1053,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_direct_token_wizard_rejects_invalid_values_without_writing(self):
         await self.feature.command({
-            "command": "config", "user_id": 1, "chat_id": 10,
+            "command": "auth", "user_id": 1, "chat_id": 10,
         })
         await self.feature.callback({
             "payload": "auth:direct", "user_id": 1, "chat_id": 10,
@@ -891,7 +1134,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_direct_token_wizard_cancel_discards_pending_access(self):
         await self.feature.command({
-            "command": "config", "user_id": 1, "chat_id": 10,
+            "command": "auth", "user_id": 1, "chat_id": 10,
         })
         await self.feature.callback({
             "payload": "auth:direct", "user_id": 1, "chat_id": 10,
@@ -913,7 +1156,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.client.tokens = ("old-access", "old-refresh")
         self.feature.config_store.fail_writes = True
         await self.feature.command({
-            "command": "config", "user_id": 1, "chat_id": 10,
+            "command": "auth", "user_id": 1, "chat_id": 10,
         })
         await self.feature.callback({
             "payload": "auth:direct", "user_id": 1, "chat_id": 10,
@@ -949,7 +1192,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.feature.config.update(old)
         self.client.tokens = ("old-access", "old-refresh")
         await self.feature.command({
-            "command": "config", "user_id": 1, "chat_id": 10,
+            "command": "auth", "user_id": 1, "chat_id": 10,
         })
         await self.feature.callback({
             "payload": "auth:direct", "user_id": 1, "chat_id": 10,
@@ -978,7 +1221,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.feature.config.update(old)
         self.client.tokens = ("old-access", "old-refresh")
         await self.feature.command({
-            "command": "config", "user_id": 1, "chat_id": 10,
+            "command": "auth", "user_id": 1, "chat_id": 10,
         })
         await self.feature.callback({
             "payload": "auth:direct", "user_id": 1, "chat_id": 10,
@@ -1028,7 +1271,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(service, "SESSION_TTL_SECONDS", 0):
             await self.feature.command({
-                "command": "config", "user_id": 1, "chat_id": 10,
+                "command": "auth", "user_id": 1, "chat_id": 10,
             })
             await self.feature.callback({
                 "payload": "auth:direct", "user_id": 1, "chat_id": 10,
@@ -1043,7 +1286,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_magnet_session_replaces_and_clears_pending_access_token(self):
         await self.feature.command({
-            "command": "config", "user_id": 1, "chat_id": 10,
+            "command": "auth", "user_id": 1, "chat_id": 10,
         })
         await self.feature.callback({
             "payload": "auth:direct", "user_id": 1, "chat_id": 10,
@@ -1070,7 +1313,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
     async def test_scan_authorization_remains_independent_and_secret_safe(self):
         self.feature.config_store = FakeConfigStore({"app_id": "app-1"})
         await self.feature.command({
-            "command": "config", "user_id": 9, "chat_id": 10,
+            "command": "auth", "user_id": 9, "chat_id": 10,
         })
         scan = await self.feature.callback({
             "payload": "auth:scan", "user_id": 9, "chat_id": 10,

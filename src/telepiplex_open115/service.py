@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import hashlib
 import re
 import threading
@@ -9,10 +10,12 @@ import uuid
 from telepiplex_plugin_sdk import FeatureError
 
 from .context import logger
+from .directories import normalize_save_directories
 
 
 _MAGNET = re.compile(r"^magnet:\?xt=urn:btih:(?:[A-Fa-f0-9]{40}|[A-Za-z2-7]{32})(?:&.*)?$")
 SESSION_TTL_SECONDS = 30 * 60
+DIRECTORY_PAGE_SIZE = 5
 OPERATION_TERMINAL_STATES = {
     "completed", "cancelled", "failed", "rolled_back",
     "partially_rolled_back", "interrupted",
@@ -156,7 +159,9 @@ class Open115Feature:
             if operation is not None:
                 result["operation"] = operation
             return result
-        if command in {"config", "auth"}:
+        if command == "config":
+            return self._start_config_session(request)
+        if command == "auth":
             return self._start_auth_session(request)
         raise FeatureError("not_found", f"unknown open115 command: {command}")
 
@@ -169,6 +174,8 @@ class Open115Feature:
             if operation is not None:
                 result["operation"] = operation
             return result
+        if payload.startswith("config:"):
+            return await self._config_callback(request, payload, key)
         if payload == "auth:direct":
             session = self.sessions.get(key)
             if not session or session.get("stage") != "choose_mode":
@@ -233,6 +240,8 @@ class Open115Feature:
             return self._message_with_session("⚠️ 会话已失效。", "close")
 
         stage = session.get("stage")
+        if stage.startswith("directory_"):
+            return self._directory_message(request, key, session)
         if stage == "access_token":
             try:
                 access_token = _single_secret(request.get("text"))
@@ -384,22 +393,461 @@ class Open115Feature:
 
         return self._message_with_session("⚠️ 会话已失效。", "close")
 
-    def _start_auth_session(self, request: dict) -> dict:
+    def _start_config_session(self, request: dict) -> dict:
         key = self._session_key(request)
         self._clear_auth_session(key)
+        current = (
+            self.config_store.read()
+            if self.config_store else dict(self.config)
+        )
+        configured = bool(
+            current.get("access_token") and current.get("refresh_token")
+        )
+        directory_count = len(current.get("save_directories") or [])
         operation = self._new_operation(
             request,
-            stage="authorization_mode",
-            status_text="等待选择 115 授权方式。",
+            stage="config_home",
+            status_text="等待选择 open115 配置项。",
             control="exit",
         )
+        self.sessions[key] = {
+            "stage": "config_home",
+            "operation_id": operation["operation_id"],
+        }
+        self._schedule_sensitive_expiry(key)
+        return {
+            "actions": [{
+                "kind": "send_message",
+                "text": (
+                    "open115 配置\n\n"
+                    f"授权：{'已配置' if configured else '未配置'}\n"
+                    f"保存目录：{directory_count} 个\n\n"
+                    "请选择要修改的配置。"
+                ),
+                "data": {"keyboard": [
+                    [{
+                        "text": "授权配置",
+                        "callback_data": "open115:config:auth",
+                    }],
+                    [{
+                        "text": "保存目录",
+                        "callback_data": "open115:config:directories",
+                    }],
+                    self._exit_row(),
+                ]},
+            }],
+            "session": {"state": "open"},
+            "operation": operation,
+        }
+
+    async def _config_callback(self, request, payload, key):
+        session = self.sessions.get(key)
+        if not session:
+            return self._message_with_session("⚠️ 配置会话已失效。", "close")
+        stage = session.get("stage")
+        if payload == "config:auth" and stage == "config_home":
+            return self._start_auth_session(
+                request,
+                operation_id=session["operation_id"],
+                kind="edit_message",
+            )
+        if payload == "config:directories" and stage == "config_home":
+            current = (
+                self.config_store.read()
+                if self.config_store else dict(self.config)
+            )
+            session.update({
+                "stage": "directory_list",
+                "working_directories": normalize_save_directories(
+                    current.get("save_directories") or []
+                ),
+                "page": 0,
+            })
+            self._schedule_sensitive_expiry(key)
+            operation = self._advance_operation(
+                session["operation_id"],
+                state="awaiting_input",
+                stage="directory_list",
+                status_text="正在管理 115 保存目录。",
+                control="exit",
+            )
+            return self._directory_list_message(
+                key, kind="edit_message", operation=operation
+            )
+        if payload == "config:back" and str(stage).startswith("directory_"):
+            return self._return_to_directory_list(
+                key, "已返回保存目录列表。", kind="edit_message"
+            )
+        if (
+            payload.startswith("config:page:")
+            and stage == "directory_list"
+        ):
+            try:
+                session["page"] = int(payload.rsplit(":", 1)[1])
+            except ValueError:
+                return self._directory_prompt(
+                    key, "⚠️ 保存目录页码无效。", stage="directory_list"
+                )
+            self._schedule_sensitive_expiry(key)
+            return self._directory_list_message(key, kind="edit_message")
+        if payload == "config:add" and stage == "directory_list":
+            return self._directory_prompt(
+                key,
+                "请发送保存目录的显示名称。",
+                stage="directory_add_name",
+                status_text="等待输入保存目录名称。",
+                kind="edit_message",
+            )
+        if payload.startswith("config:item:") and stage == "directory_list":
+            try:
+                index = int(payload.rsplit(":", 1)[1])
+                directory = session["working_directories"][index]
+            except (IndexError, TypeError, ValueError):
+                return self._directory_list_message(
+                    key,
+                    kind="edit_message",
+                    text_prefix="⚠️ 保存目录条目不可用。",
+                )
+            session.update({"stage": "directory_item", "selected_index": index})
+            self._schedule_sensitive_expiry(key)
+            operation = self._advance_operation(
+                session["operation_id"],
+                state="awaiting_input",
+                stage="directory_item",
+                status_text="等待选择保存目录编辑操作。",
+                control="exit",
+            )
+            return {
+                "actions": [{
+                    "kind": "edit_message",
+                    "text": (
+                        f"目录名称：{directory['name']}\n"
+                        f"115 路径：{directory['path']}\n\n"
+                        "请选择操作。"
+                    ),
+                    "data": {"keyboard": [
+                        [{
+                            "text": "编辑名称",
+                            "callback_data": "open115:config:edit:name",
+                        }],
+                        [{
+                            "text": "编辑路径",
+                            "callback_data": "open115:config:edit:path",
+                        }],
+                        [{
+                            "text": "删除目录",
+                            "callback_data": "open115:config:delete",
+                        }],
+                        [{
+                            "text": "返回目录列表",
+                            "callback_data": "open115:config:back",
+                        }],
+                        self._exit_row(),
+                    ]},
+                }],
+                "session": {"state": "open"},
+                "operation": operation,
+            }
+        if payload == "config:edit:name" and stage == "directory_item":
+            return self._directory_prompt(
+                key,
+                "请发送新的目录名称。",
+                stage="directory_edit_name",
+                status_text="等待输入新的保存目录名称。",
+                kind="edit_message",
+            )
+        if payload == "config:edit:path" and stage == "directory_item":
+            return self._directory_prompt(
+                key,
+                "请发送新的 115 绝对路径，例如 /Series。",
+                stage="directory_edit_path",
+                status_text="等待输入新的 115 保存路径。",
+                kind="edit_message",
+            )
+        if payload == "config:delete" and stage == "directory_item":
+            index = session["selected_index"]
+            directory = session["working_directories"][index]
+            session["stage"] = "directory_delete_confirm"
+            self._schedule_sensitive_expiry(key)
+            operation = self._advance_operation(
+                session["operation_id"],
+                state="awaiting_input",
+                stage="directory_delete_confirm",
+                status_text="等待确认删除保存目录。",
+                control="exit",
+            )
+            return {
+                "actions": [{
+                    "kind": "edit_message",
+                    "text": (
+                        f"确认删除目录“{directory['name']}”"
+                        f"（{directory['path']}）？"
+                    ),
+                    "data": {"keyboard": [
+                        [{
+                            "text": "确认删除",
+                            "callback_data": "open115:config:delete:confirm",
+                        }],
+                        [{
+                            "text": "返回目录列表",
+                            "callback_data": "open115:config:back",
+                        }],
+                        self._exit_row(),
+                    ]},
+                }],
+                "session": {"state": "open"},
+                "operation": operation,
+            }
+        if (
+            payload == "config:delete:confirm"
+            and stage == "directory_delete_confirm"
+        ):
+            index = session["selected_index"]
+            try:
+                session["working_directories"].pop(index)
+            except IndexError:
+                return self._return_to_directory_list(
+                    key,
+                    "⚠️ 保存目录条目已不存在。",
+                    kind="edit_message",
+                )
+            return self._return_to_directory_list(
+                key, "目录删除已暂存。", kind="edit_message"
+            )
+        if payload == "config:save" and stage == "directory_list":
+            return await self._save_directory_config(key)
+        return self._directory_prompt(
+            key,
+            "⚠️ 配置操作与当前步骤不匹配。",
+            stage=str(stage or "directory_list"),
+        )
+
+    def _directory_message(self, request, key, session):
+        stage = session.get("stage")
+        try:
+            if stage == "directory_add_name":
+                session["pending_name"] = self._directory_name(
+                    request.get("text"), session["working_directories"]
+                )
+                return self._directory_prompt(
+                    key,
+                    "请发送 115 绝对路径，例如 /Series。",
+                    stage="directory_add_path",
+                    status_text="等待输入 115 保存路径。",
+                )
+            if stage == "directory_add_path":
+                path = self._directory_path(
+                    request.get("text"), session["working_directories"]
+                )
+                candidate = deepcopy(session["working_directories"])
+                candidate.append({
+                    "name": session["pending_name"],
+                    "path": path,
+                })
+                session["working_directories"] = normalize_save_directories(
+                    candidate
+                )
+                return self._return_to_directory_list(
+                    key, "目录新增已暂存。"
+                )
+            if stage in {"directory_edit_name", "directory_edit_path"}:
+                index = int(session["selected_index"])
+                candidate = deepcopy(session["working_directories"])
+                if stage == "directory_edit_name":
+                    candidate[index]["name"] = self._directory_name(
+                        request.get("text"), candidate, exclude_index=index
+                    )
+                else:
+                    candidate[index]["path"] = self._directory_path(
+                        request.get("text"), candidate, exclude_index=index
+                    )
+                session["working_directories"] = normalize_save_directories(
+                    candidate
+                )
+                return self._return_to_directory_list(
+                    key, "目录修改已暂存。"
+                )
+        except (IndexError, TypeError, ValueError) as exc:
+            return self._directory_prompt(
+                key,
+                f"⚠️ {exc}",
+                stage=str(stage),
+                status_text="保存目录输入无效，等待重新输入。",
+            )
+        return self._message_with_session("⚠️ 配置会话已失效。", "close")
+
+    @staticmethod
+    def _directory_name(value, directories, *, exclude_index=None):
+        name = str(value or "").strip()
+        if not name or "\n" in name or "\r" in name:
+            raise ValueError("目录名称必须是非空单行文本。")
+        if any(
+            index != exclude_index and item.get("name") == name
+            for index, item in enumerate(directories)
+        ):
+            raise ValueError("目录名称重复，请重新输入。")
+        return name
+
+    @staticmethod
+    def _directory_path(value, directories, *, exclude_index=None):
+        path = str(value or "").strip()
+        if not path or "\n" in path or "\r" in path:
+            raise ValueError("目录路径必须是非空单行文本。")
+        if not path.startswith("/"):
+            raise ValueError("目录路径必须是以 / 开头的 115 绝对路径。")
+        if any(
+            index != exclude_index and item.get("path") == path
+            for index, item in enumerate(directories)
+        ):
+            raise ValueError("目录路径重复，请重新输入。")
+        return path
+
+    def _directory_prompt(
+        self,
+        key,
+        text,
+        *,
+        stage,
+        status_text=None,
+        kind="send_message",
+    ):
+        session = self.sessions.get(key)
+        if not session:
+            return self._message_with_session("⚠️ 配置会话已失效。", "close")
+        session["stage"] = stage
+        self._schedule_sensitive_expiry(key)
+        operation = self._advance_operation(
+            session["operation_id"],
+            state="awaiting_input",
+            stage=stage,
+            status_text=status_text or text,
+            control="exit",
+        )
+        return {
+            "actions": [{
+                "kind": kind,
+                "text": text,
+                "data": {"keyboard": [
+                    [{
+                        "text": "返回目录列表",
+                        "callback_data": "open115:config:back",
+                    }],
+                    self._exit_row(),
+                ]},
+            }],
+            "session": {"state": "open"},
+            "operation": operation,
+        }
+
+    def _return_to_directory_list(self, key, status_text, *, kind="send_message"):
+        session = self.sessions[key]
+        session["stage"] = "directory_list"
+        session.pop("pending_name", None)
+        session.pop("selected_index", None)
+        self._schedule_sensitive_expiry(key)
+        operation = self._advance_operation(
+            session["operation_id"],
+            state="awaiting_input",
+            stage="directory_list",
+            status_text=status_text,
+            control="exit",
+        )
+        return self._directory_list_message(
+            key,
+            kind=kind,
+            operation=operation,
+            text_prefix=status_text,
+        )
+
+    async def _save_directory_config(self, key):
+        session = self.sessions[key]
+        operation_id = session["operation_id"]
+        working_directories = normalize_save_directories(
+            session["working_directories"]
+        )
+        await self._report_operation(
+            operation_id,
+            state="running",
+            stage="config_persistence",
+            status_text="正在保存 115 目录配置。",
+            control="",
+        )
+        try:
+            if self.config_store:
+                updated = await asyncio.to_thread(
+                    self.config_store.write_save_directories,
+                    working_directories,
+                )
+            else:
+                updated = dict(self.config)
+                updated["save_directories"] = working_directories
+        except Exception as exc:
+            logger.error(
+                "open115_directory_config_write_failed "
+                f"error={type(exc).__name__}"
+            )
+            session["stage"] = "directory_list"
+            self._schedule_sensitive_expiry(key)
+            operation = await self._report_operation(
+                operation_id,
+                state="awaiting_input",
+                stage="directory_list",
+                status_text="目录配置保存失败，工作副本已保留。",
+                control="exit",
+            )
+            return self._directory_list_message(
+                key,
+                operation=operation,
+                text_prefix="⚠️ 目录配置保存失败，请重试或退出。",
+            )
+        self.config.clear()
+        self.config.update(updated)
+        self._clear_auth_session(key)
+        operation = await self._report_operation(
+            operation_id,
+            state="completed",
+            stage="completed",
+            status_text="115 保存目录已写入并立即生效。",
+            control="",
+        )
+        result = self._message_with_session(
+            "✅ 115 保存目录已写入并立即生效。", "close"
+        )
+        result["operation"] = operation
+        return result
+
+    def _start_auth_session(
+        self,
+        request: dict,
+        *,
+        operation_id=None,
+        kind="send_message",
+    ) -> dict:
+        key = self._session_key(request)
+        if operation_id is None:
+            self._clear_auth_session(key)
+            operation = self._new_operation(
+                request,
+                stage="authorization_mode",
+                status_text="等待选择 115 授权方式。",
+                control="exit",
+            )
+        else:
+            self._clear_auth_session(key)
+            operation = self._advance_operation(
+                operation_id,
+                state="awaiting_input",
+                stage="authorization_mode",
+                status_text="等待选择 115 授权方式。",
+                control="exit",
+            )
         self.sessions[key] = {
             "stage": "choose_mode",
             "operation_id": operation["operation_id"],
         }
         return {
             "actions": [{
-                "kind": "send_message",
+                "kind": kind,
                 "text": "请选择 115 授权方式：",
                 "data": {"keyboard": [[
                     {
@@ -411,6 +859,68 @@ class Open115Feature:
                         "callback_data": "open115:auth:scan",
                     },
                 ], self._exit_row()]},
+            }],
+            "session": {"state": "open"},
+            "operation": operation,
+        }
+
+    def _directory_list_message(
+        self,
+        key,
+        *,
+        kind="send_message",
+        operation=None,
+        text_prefix="",
+    ):
+        session = self.sessions[key]
+        directories = session["working_directories"]
+        page_count = max(
+            1, (len(directories) + DIRECTORY_PAGE_SIZE - 1) // DIRECTORY_PAGE_SIZE
+        )
+        page = max(0, min(int(session.get("page") or 0), page_count - 1))
+        session["page"] = page
+        start = page * DIRECTORY_PAGE_SIZE
+        keyboard = [[{
+            "text": f"📁 {item['name']}",
+            "callback_data": f"open115:config:item:{index}",
+        }] for index, item in enumerate(
+            directories[start:start + DIRECTORY_PAGE_SIZE], start=start
+        )]
+        if page_count > 1:
+            navigation = []
+            if page > 0:
+                navigation.append({
+                    "text": "上一页",
+                    "callback_data": f"open115:config:page:{page - 1}",
+                })
+            if page + 1 < page_count:
+                navigation.append({
+                    "text": "下一页",
+                    "callback_data": f"open115:config:page:{page + 1}",
+                })
+            keyboard.append(navigation)
+        keyboard.extend([
+            [{"text": "新增目录", "callback_data": "open115:config:add"}],
+            [{
+                "text": "保存并完成",
+                "callback_data": "open115:config:save",
+            }],
+            self._exit_row(),
+        ])
+        if operation is None:
+            operation = self._operation_view(
+                self.operations[session["operation_id"]]
+            )
+        return {
+            "actions": [{
+                "kind": kind,
+                "text": (
+                    (f"{text_prefix}\n\n" if text_prefix else "") +
+                    f"115 保存目录（{len(directories)} 个）\n"
+                    f"第 {page + 1}/{page_count} 页\n\n"
+                    "逐条新增、编辑或删除，最后统一保存。"
+                ),
+                "data": {"keyboard": keyboard},
             }],
             "session": {"state": "open"},
             "operation": operation,
@@ -434,11 +944,17 @@ class Open115Feature:
             self.sessions.pop(key, None)
             operation_id = expected.get("operation_id") if expected else None
             if operation_id in self.operations:
+                stage = str(expected.get("stage") or "")
+                status_text = (
+                    "目录配置已超时并退出。"
+                    if stage.startswith("directory_") or stage == "config_home"
+                    else "授权输入已超时并退出。"
+                )
                 operation = self._advance_operation(
                     operation_id,
                     state="cancelled",
                     stage="session_expired",
-                    status_text="授权输入已超时并退出。",
+                    status_text=status_text,
                     control="",
                 )
                 try:
