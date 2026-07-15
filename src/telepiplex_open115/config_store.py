@@ -19,6 +19,26 @@ class FeatureConfigStore:
         with self._lock:
             return self._read_unlocked()
 
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "exists": self.path.exists(),
+                "config": self._read_unlocked(),
+            }
+
+    def restore(self, snapshot: dict) -> dict:
+        if not isinstance(snapshot, dict) or not isinstance(
+            snapshot.get("config"), dict
+        ):
+            raise ValueError("invalid open115 config snapshot")
+        with self._lock:
+            config = dict(snapshot["config"])
+            if snapshot.get("exists"):
+                self._write_unlocked(config)
+            else:
+                self.path.unlink(missing_ok=True)
+            return config
+
     def _read_unlocked(self) -> dict:
         if not self.path.exists():
             return {}

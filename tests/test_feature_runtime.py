@@ -55,9 +55,11 @@ class FakeClient:
         self.moved = []
         self.deleted_tasks = []
         self.deleted_files = []
+        self.added = []
         self.tokens = ("", "")
 
     def add_offline_task(self, link, selected_path):
+        self.added.append((link, selected_path))
         return True
 
     def wait_for_download(self, link, **kwargs):
@@ -131,6 +133,13 @@ class FakeConfigStore:
         self.fail_writes = False
 
     def read(self):
+        return dict(self.config)
+
+    def snapshot(self):
+        return {"exists": True, "config": dict(self.config)}
+
+    def restore(self, snapshot):
+        self.config = dict(snapshot["config"])
         return dict(self.config)
 
     def write_tokens(self, access_token, refresh_token, *, auth_mode):
@@ -469,11 +478,197 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
 
         await feature.download_capability(request)
         await runtime.tasks.pop("durable-1")
+        report_count = len(self.core.reports)
         duplicate = await feature.download_capability(request)
 
         self.assertTrue(duplicate["duplicate"])
         self.assertEqual(duplicate["state"], "completed")
         self.assertEqual(runtime.tasks, {})
+        self.assertEqual(len(self.core.reports), report_count)
+
+    async def test_concurrent_same_job_starts_once_with_one_operation_identity(self):
+        from telepiplex_open115.jobs import DownloadJobStore
+        from telepiplex_open115.service import Open115Feature
+
+        path = Path(self._testMethodName + ".db")
+        self.addCleanup(path.unlink, missing_ok=True)
+        jobs = DownloadJobStore(path)
+        feature = Open115Feature(
+            config={"download_timeout": 30, "poll_interval": 0.01},
+            core=self.core, client=self.client, jobs=jobs,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+        original_report = feature._report_operation
+        report_started = asyncio.Event()
+        release_report = asyncio.Event()
+
+        async def blocking_report(*args, **kwargs):
+            report_started.set()
+            await release_report.wait()
+            return await original_report(*args, **kwargs)
+
+        feature._report_operation = blocking_report
+        request = {"method": "submit", "payload": {
+            "link": "magnet:?xt=urn:btih:" + "8" * 40,
+            "selected_path": "/Downloads",
+            "chat_id": 10,
+            "user_id": 1,
+        }, "context": {"idempotency_key": "concurrent-one"}}
+        first_task = asyncio.create_task(feature.download_capability(request))
+        await report_started.wait()
+        duplicate = await feature.download_capability(request)
+        release_report.set()
+        first = await first_task
+
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(first["operation_id"], duplicate["operation_id"])
+        self.assertEqual(list(runtime.tasks), ["concurrent-one"])
+        await runtime.tasks.pop("concurrent-one")
+        self.assertEqual(len(self.client.added), 1)
+
+    async def test_lost_running_report_response_still_starts_executor_once(self):
+        from telepiplex_open115.jobs import DownloadJobStore
+        from telepiplex_open115.service import Open115Feature
+
+        path = Path(self._testMethodName + ".db")
+        self.addCleanup(path.unlink, missing_ok=True)
+        jobs = DownloadJobStore(path)
+        feature = Open115Feature(
+            config={"download_timeout": 30, "poll_interval": 0.01},
+            core=self.core, client=self.client, jobs=jobs,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+        original_core_report = self.core.report_operation
+        core_report_attempts = 0
+
+        async def unavailable_once_then_accept(report, **kwargs):
+            nonlocal core_report_attempts
+            core_report_attempts += 1
+            if core_report_attempts == 1:
+                raise RuntimeError("Core still unavailable")
+            return await original_core_report(report, **kwargs)
+
+        self.core.report_operation = unavailable_once_then_accept
+        original_report = feature._report_operation
+        lost = False
+
+        async def lose_first_response(*args, **kwargs):
+            nonlocal lost
+            if not lost:
+                lost = True
+                raise RuntimeError("Core response lost")
+            return await original_report(*args, **kwargs)
+
+        feature._report_operation = lose_first_response
+        request = {"method": "submit", "payload": {
+            "link": "magnet:?xt=urn:btih:" + "7" * 40,
+            "selected_path": "/Downloads",
+            "operation_id": "op-lost-running-response",
+            "operation_revision": 5,
+            "chat_id": 10,
+            "user_id": 1,
+        }, "context": {"idempotency_key": "lost-running-response"}}
+
+        accepted = await feature.download_capability(request)
+        duplicate = await feature.download_capability(request)
+
+        self.assertTrue(accepted["accepted"])
+        self.assertTrue(accepted["report_pending"])
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(list(runtime.tasks), ["lost-running-response"])
+        self.assertEqual(jobs.get("lost-running-response")["state"], "running")
+        await runtime.tasks.pop("lost-running-response")
+        self.assertEqual(len(self.client.added), 1)
+        self.assertEqual(jobs.get("lost-running-response")["state"], "completed")
+
+    async def test_unconfirmed_pending_ownership_never_submits_offline_task(self):
+        from telepiplex_open115.jobs import DownloadJobStore
+        from telepiplex_open115.service import Open115Feature
+
+        class RejectedCore(FakeCore):
+            async def report_operation(self, report, **kwargs):
+                self.reports.append(dict(report))
+                return {
+                    "accepted": False,
+                    "state": "cancelled",
+                    "revision": report["revision"],
+                }
+
+        path = Path(self._testMethodName + ".db")
+        self.addCleanup(path.unlink, missing_ok=True)
+        core = RejectedCore()
+        jobs = DownloadJobStore(path)
+        feature = Open115Feature(
+            config={"download_timeout": 30, "poll_interval": 0.01},
+            core=core, client=self.client, jobs=jobs,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+        original_report = feature._report_operation
+        first = True
+
+        async def unavailable_once(*args, **kwargs):
+            nonlocal first
+            if first:
+                first = False
+                raise RuntimeError("Core unavailable before ownership claim")
+            return await original_report(*args, **kwargs)
+
+        feature._report_operation = unavailable_once
+        accepted = await feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "6" * 40,
+                "selected_path": "/Downloads",
+                "operation_id": "op-unconfirmed-owner",
+                "operation_revision": 5,
+                "chat_id": 10,
+                "user_id": 1,
+            },
+            "context": {"idempotency_key": "unconfirmed-owner"},
+        })
+
+        self.assertTrue(accepted["report_pending"])
+        with self.assertRaises(Exception):
+            await runtime.tasks.pop("unconfirmed-owner")
+        self.assertEqual(self.client.added, [])
+        self.assertEqual(jobs.get("unconfirmed-owner")["state"], "failed")
+
+    async def test_cancelled_persisted_job_never_restarts_or_reports_running(self):
+        from telepiplex_open115.jobs import DownloadJobStore
+        from telepiplex_open115.service import Open115Feature
+
+        path = Path(self._testMethodName + ".db")
+        self.addCleanup(path.unlink, missing_ok=True)
+        jobs = DownloadJobStore(path)
+        payload = {
+            "link": "magnet:?xt=urn:btih:" + "9" * 40,
+            "selected_path": "/Downloads",
+            "operation_id": "op-durable-cancelled",
+            "chat_id": 10,
+            "user_id": 1,
+        }
+        jobs.create_or_get("durable-cancelled", payload)
+        jobs.update("durable-cancelled", "cancelled", error="cancelled")
+        feature = Open115Feature(
+            config={"download_timeout": 30, "poll_interval": 0.01},
+            core=self.core, client=self.client, jobs=jobs,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+
+        duplicate = await feature.download_capability({
+            "method": "submit",
+            "payload": payload,
+            "context": {"idempotency_key": "durable-cancelled"},
+        })
+
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(duplicate["state"], "cancelled")
+        self.assertEqual(runtime.tasks, {})
+        self.assertEqual(self.core.reports, [])
 
     async def test_completion_publish_failure_is_not_mislabeled_as_download_failure(self):
         from telepiplex_open115.jobs import DownloadJobStore
@@ -738,6 +933,96 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("refresh-new", str(response))
         self.assertNotIn("secret-value", str(response))
 
+    async def test_partial_token_write_failure_restores_exact_snapshot(self):
+        class PartialWriteStore(FakeConfigStore):
+            def write_tokens(self, *args, **kwargs):
+                super().write_tokens(*args, **kwargs)
+                raise OSError("chmod failed after replace")
+
+        old = {
+            "auth_mode": "direct",
+            "access_token": "old-access",
+            "refresh_token": "old-refresh",
+            "custom": "preserved",
+        }
+        self.feature.config_store = PartialWriteStore(old)
+        self.feature.config.update(old)
+        self.client.tokens = ("old-access", "old-refresh")
+        await self.feature.command({
+            "command": "config", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.callback({
+            "payload": "auth:direct", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.message({
+            "text": "access-new", "user_id": 1, "chat_id": 10,
+        })
+
+        response = await self.feature.message({
+            "text": "refresh-new", "user_id": 1, "chat_id": 10,
+        })
+
+        self.assertEqual(response["session"]["state"], "open")
+        self.assertEqual(self.feature.config_store.config, old)
+        self.assertEqual(self.client.tokens, ("old-access", "old-refresh"))
+        self.assertEqual(response["operation"]["state"], "awaiting_input")
+        self.assertIn("原配置已恢复", response["operation"]["status_text"])
+
+    async def test_rollback_after_token_write_before_terminal_commit_restores(self):
+        old = {
+            "auth_mode": "direct",
+            "access_token": "old-access",
+            "refresh_token": "old-refresh",
+        }
+        self.feature.config_store = FakeConfigStore(old)
+        self.feature.config.update(old)
+        self.client.tokens = ("old-access", "old-refresh")
+        await self.feature.command({
+            "command": "config", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.callback({
+            "payload": "auth:direct", "user_id": 1, "chat_id": 10,
+        })
+        await self.feature.message({
+            "text": "access-new", "user_id": 1, "chat_id": 10,
+        })
+        original_persist = self.feature._persist_tokens
+        persisted = asyncio.Event()
+        release = asyncio.Event()
+
+        async def pause_after_persist(*args, **kwargs):
+            result = await original_persist(*args, **kwargs)
+            persisted.set()
+            await release.wait()
+            return result
+
+        self.feature._persist_tokens = pause_after_persist
+        completing = asyncio.create_task(self.feature.message({
+            "text": "refresh-new", "user_id": 1, "chat_id": 10,
+        }))
+        await persisted.wait()
+        operation_id = next(iter(self.feature.operations))
+
+        accepted = await self.feature.operation_control({
+            "operation_id": operation_id,
+            "action": "rollback",
+            "revision": self.feature.operations[operation_id]["revision"],
+        })
+        release.set()
+        response = await completing
+
+        self.assertEqual(accepted["operation"]["state"], "rolling_back")
+        self.assertEqual(response["operation"]["state"], "rolled_back")
+        self.assertEqual(self.feature.config_store.config, old)
+        self.assertEqual(self.client.tokens, ("old-access", "old-refresh"))
+
+        retried = await self.feature.operation_control({
+            "operation_id": operation_id,
+            "action": "rollback",
+            "revision": response["operation"]["revision"],
+        })
+        self.assertEqual(retried["operation"]["state"], "rolled_back")
+
     async def test_pending_access_token_expires_without_writing(self):
         from telepiplex_open115 import service
 
@@ -823,6 +1108,61 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(accepted["operation"]["state"], "cancelling")
         self.assertEqual(self.feature.config_store.writes, [])
         self.assertEqual(self.core.reports[-1]["state"], "cancelled")
+
+    async def test_scan_token_persistence_cancel_restores_exact_snapshot(self):
+        class BlockingConfigStore(FakeConfigStore):
+            def __init__(self, config):
+                super().__init__(config)
+                self.written = threading.Event()
+                self.release = threading.Event()
+
+            def write_tokens(self, *args, **kwargs):
+                result = super().write_tokens(*args, **kwargs)
+                self.written.set()
+                self.release.wait(1)
+                return result
+
+        old = {
+            "app_id": "app-1",
+            "auth_mode": "direct",
+            "access_token": "old-access",
+            "refresh_token": "old-refresh",
+            "custom": "preserved",
+        }
+        store = BlockingConfigStore(old)
+        self.feature.config_store = store
+        self.feature.config.update(old)
+        self.client.tokens = ("old-access", "old-refresh")
+        await self.feature.command({
+            "command": "auth", "user_id": 9, "chat_id": 10,
+        })
+        scan = await self.feature.callback({
+            "payload": "auth:scan", "user_id": 9, "chat_id": 10,
+        })
+        operation_id = scan["operation"]["operation_id"]
+        task_id = next(
+            key for key in self.runtime.tasks if key.startswith("open115-auth-")
+        )
+        task = asyncio.create_task(self.runtime.tasks.pop(task_id))
+        self.assertTrue(await asyncio.to_thread(store.written.wait, 1))
+
+        accepted = await self.feature.operation_control({
+            "operation_id": operation_id,
+            "action": "rollback",
+            "revision": self.feature.operations[operation_id]["revision"],
+        })
+        store.release.set()
+        await task
+
+        self.assertEqual(accepted["operation"]["state"], "rolling_back")
+        self.assertEqual(store.config, old)
+        self.assertEqual(self.feature.config, {
+            "download_timeout": 30,
+            "poll_interval": 0.01,
+            **old,
+        })
+        self.assertEqual(self.client.tokens, ("old-access", "old-refresh"))
+        self.assertEqual(self.core.reports[-1]["state"], "rolled_back")
 
     async def test_operation_snapshot_returns_current_non_terminal_tasks(self):
         response = await self.feature.command({

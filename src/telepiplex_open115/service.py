@@ -13,6 +13,10 @@ from .context import logger
 
 _MAGNET = re.compile(r"^magnet:\?xt=urn:btih:(?:[A-Fa-f0-9]{40}|[A-Za-z2-7]{32})(?:&.*)?$")
 SESSION_TTL_SECONDS = 30 * 60
+OPERATION_TERMINAL_STATES = {
+    "completed", "cancelled", "failed", "rolled_back",
+    "partially_rolled_back", "interrupted",
+}
 _STORAGE_METHODS = {
     "get_file_info",
     "get_file_info_by_id",
@@ -47,6 +51,24 @@ def _single_secret(value: str) -> str:
     ):
         raise ValueError("invalid secret")
     return value
+
+
+def _ambiguous_core_report_error(exc: Exception) -> bool:
+    return not isinstance(exc, FeatureError) or exc.code in {
+        "core_unavailable", "deadline_exceeded", "invalid_response",
+    }
+
+
+class TokenPersistenceCancelled(RuntimeError):
+    def __init__(self, rollback_verified: bool):
+        super().__init__("token persistence cancelled")
+        self.rollback_verified = rollback_verified
+
+
+class TokenPersistenceFailed(RuntimeError):
+    def __init__(self, rollback_verified: bool):
+        super().__init__("token persistence failed")
+        self.rollback_verified = rollback_verified
 
 
 class Open115Feature:
@@ -263,28 +285,80 @@ class Open115Feature:
                     operation=operation,
                 )
             access_token = session["access_token"]
+            operation_state = self.operations[session["operation_id"]]
+            operation_state.update({
+                "kind": "direct_auth",
+                "cancel_event": threading.Event(),
+                "token_decision_lock": asyncio.Lock(),
+            })
             await self._report_operation(
                 session["operation_id"],
                 state="running",
                 stage="token_persistence",
                 status_text="正在验证并写入 115 Token。",
-                control="cancel",
+                control="rollback",
             )
             try:
-                if self.config_store:
-                    updated = self.config_store.write_tokens(
-                        access_token,
-                        refresh_token,
-                        auth_mode="direct",
+                updated = await self._persist_tokens(
+                    session["operation_id"], access_token, refresh_token,
+                    auth_mode="direct",
+                )
+                operation = await self._commit_token_persistence(
+                    session["operation_id"],
+                    status_text="115 Token 已写入并立即生效。",
+                )
+            except TokenPersistenceCancelled as exc:
+                self._clear_auth_session(key)
+                operation = await self._report_operation(
+                    session["operation_id"],
+                    state=(
+                        "rolled_back" if exc.rollback_verified
+                        else "partially_rolled_back"
+                    ),
+                    stage="token_persistence",
+                    status_text=(
+                        "Token 写入已取消，原私有配置和运行中 Token 已恢复。"
+                        if exc.rollback_verified else
+                        "Token 写入已停止，但原配置恢复未能完整验证，请人工检查。"
+                    ),
+                    control="",
+                )
+                result = self._message_with_session(
+                    operation["status_text"], "close"
+                )
+                result["operation"] = operation
+                return result
+            except TokenPersistenceFailed as exc:
+                logger.error("open115_direct_auth_write_failed")
+                if not exc.rollback_verified:
+                    self._clear_auth_session(key)
+                    operation = await self._report_operation(
+                        session["operation_id"],
+                        state="partially_rolled_back",
+                        stage="token_persistence",
+                        status_text=(
+                            "Token 写入失败，原配置恢复未能完整验证，请人工检查。"
+                        ),
+                        control="",
                     )
-                else:
-                    updated = dict(self.config)
-                    updated.update({
-                        "auth_mode": "direct",
-                        "access_token": access_token,
-                        "refresh_token": refresh_token,
-                    })
-                self.client.set_tokens(access_token, refresh_token)
+                    result = self._message_with_session(
+                        operation["status_text"], "close"
+                    )
+                    result["operation"] = operation
+                    return result
+                operation = await self._report_operation(
+                    session["operation_id"],
+                    state="awaiting_input",
+                    stage="refresh_token",
+                    status_text="Token 写入失败，原配置已恢复，等待重新输入。",
+                    control="exit",
+                )
+                return self._interaction_message(
+                    key,
+                    "⚠️ 115 Token 写入失败，原配置已恢复；"
+                    "请重新发送 Refresh token 或使用 /q 取消。",
+                    operation=operation,
+                )
             except Exception:
                 logger.error("open115_direct_auth_write_failed")
                 operation = await self._report_operation(
@@ -302,13 +376,6 @@ class Open115Feature:
             self.config.update(updated)
             self._clear_auth_session(key)
             logger.info("open115_direct_auth_updated auth_mode=direct")
-            operation = self._advance_operation(
-                session["operation_id"],
-                state="completed",
-                stage="completed",
-                status_text="115 Token 已写入并立即生效。",
-                control="",
-            )
             result = self._message_with_session(
                 "✅ 115 Token 已写入并立即生效。", "close"
             )
@@ -445,6 +512,7 @@ class Open115Feature:
         operation_state.update({
             "kind": "scan_auth",
             "cancel_event": threading.Event(),
+            "token_decision_lock": asyncio.Lock(),
             "task_id": task_id,
         })
         operation = self._advance_operation(
@@ -490,36 +558,64 @@ class Open115Feature:
                 state="running",
                 stage="token_persistence",
                 status_text="扫码已确认，正在写入 115 Token。",
-                control="cancel",
+                control="rollback",
             )
-            if self.config_store:
-                updated = self.config_store.write_tokens(
-                    tokens["access_token"],
-                    tokens["refresh_token"],
-                    auth_mode="scan",
-                )
-                self.config.update(updated)
-            else:
-                self.config.update({
-                    "auth_mode": "scan",
-                    "access_token": tokens["access_token"],
-                    "refresh_token": tokens["refresh_token"],
-                })
-            self.client.set_tokens(tokens["access_token"], tokens["refresh_token"])
+            await self._persist_tokens(
+                operation_id,
+                tokens["access_token"],
+                tokens["refresh_token"],
+                auth_mode="scan",
+            )
+            completed = await self._commit_token_persistence(
+                operation_id,
+                status_text="115 扫码授权成功，Token 已写入。",
+            )
             logger.info(
                 "open115_scan_auth_completed "
                 f"user_id={user_id} auth_uid={authorization['uid']}"
             )
             message = "✅ 115 扫码授权成功，Token 已写回 Feature 私有配置。"
-            await self._report_operation(
-                operation_id,
-                state="completed",
-                stage="completed",
-                status_text="115 扫码授权成功，Token 已写入。",
-                control="",
-            )
+            if completed["chat_id"] and completed["user_id"]:
+                await self.core.report_operation(completed)
         except Exception as exc:
-            if cancel_event.is_set():
+            if isinstance(exc, TokenPersistenceCancelled):
+                logger.info(
+                    "open115_scan_auth_token_rollback "
+                    f"user_id={user_id} auth_uid={authorization.get('uid') or ''}"
+                )
+                message = (
+                    "已取消 Token 写入，原配置已恢复。"
+                    if exc.rollback_verified else
+                    "Token 写入已停止，但原配置恢复未能完整验证。"
+                )
+                await self._report_operation(
+                    operation_id,
+                    state=(
+                        "rolled_back" if exc.rollback_verified
+                        else "partially_rolled_back"
+                    ),
+                    stage="token_persistence",
+                    status_text=message,
+                    control="",
+                )
+            elif isinstance(exc, TokenPersistenceFailed):
+                message = (
+                    "115 Token 写入失败，原配置已恢复。"
+                    if exc.rollback_verified else
+                    "115 Token 写入失败，原配置恢复未能完整验证。"
+                )
+                await self._report_operation(
+                    operation_id,
+                    state=(
+                        "failed" if exc.rollback_verified
+                        else "partially_rolled_back"
+                    ),
+                    stage="token_persistence",
+                    status_text=message,
+                    control="",
+                    details={"manual_check_required": not exc.rollback_verified},
+                )
+            elif cancel_event.is_set():
                 logger.info(
                     "open115_scan_auth_cancelled "
                     f"user_id={user_id} auth_uid={authorization.get('uid') or ''}"
@@ -580,7 +676,44 @@ class Open115Feature:
         job_id = str(call_context.get("idempotency_key") or "").strip() or hashlib.sha256(
             f"{link}\0{selected_path}".encode("utf-8")
         ).hexdigest()
-        operation_id = str(payload.get("operation_id") or uuid.uuid4().hex)
+        requested_operation_id = str(payload.get("operation_id") or "")
+        operation_id = requested_operation_id
+        if self.jobs:
+            persisted = self.jobs.get(job_id)
+            if persisted is not None:
+                stored = (
+                    persisted.get("result")
+                    if (persisted.get("result") or {}).get("operation_id")
+                    else persisted.get("payload")
+                ) or {}
+                stored_operation_id = str(stored.get("operation_id") or "")
+                if (
+                    requested_operation_id
+                    and stored_operation_id
+                    and requested_operation_id != stored_operation_id
+                ):
+                    raise FeatureError(
+                        "idempotency_conflict",
+                        "persisted open115 download belongs to another operation",
+                    )
+                operation_id = stored_operation_id or requested_operation_id
+            operation_id = operation_id or uuid.uuid4().hex
+            if persisted is None:
+                durable_payload = payload | {
+                    "link": link,
+                    "selected_path": selected_path,
+                    "operation_id": operation_id,
+                }
+                persisted = self.jobs.create_or_get(job_id, durable_payload)
+            if persisted["state"] in {
+                "cancelled", "completed", "failed", "downloaded",
+                "running", "interrupted",
+            }:
+                return self._persisted_download_duplicate(
+                    persisted, requested_operation_id
+                )
+        else:
+            operation_id = operation_id or uuid.uuid4().hex
         if job_id in self.active_job_ids:
             operation = next((
                 candidate
@@ -592,6 +725,8 @@ class Open115Feature:
                     "operation_unavailable",
                     "active open115 download has no operation owner",
                 )
+            if not requested_operation_id:
+                operation_id = operation["operation_id"]
             if operation["operation_id"] != operation_id:
                 raise FeatureError(
                     "idempotency_conflict",
@@ -632,30 +767,31 @@ class Open115Feature:
             "offline_task_record": "unknown",
             "cancel_cleanup_done": asyncio.Event(),
         })
-        operation_view = await self._report_operation(
-            operation_id,
-            state="running",
-            stage="preparing_submission",
-            status_text="正在准备提交 115 离线下载任务。",
-            control="cancel",
-        )
-        if self.jobs:
-            job = self.jobs.create_or_get(job_id, payload | {"link": link, "selected_path": selected_path})
-            if job["state"] in {"completed", "failed", "downloaded", "running", "interrupted"}:
-                logger.info(
-                    "open115_download_duplicate "
-                    f"job_id={job_id} selected_path={selected_path} "
-                    f"state={job['state']}"
-                )
-                return {
-                    "accepted": True,
-                    "job_id": job_id,
-                    "duplicate": True,
-                    "state": job["state"],
-                    "operation_id": operation_id,
-                    "operation": operation_view,
-                }
         self.active_job_ids.add(job_id)
+        report_error = None
+        try:
+            operation_view = await self._report_operation(
+                operation_id,
+                state="running",
+                stage="preparing_submission",
+                status_text="正在准备提交 115 离线下载任务。",
+                control="cancel",
+            )
+        except Exception as exc:
+            if not _ambiguous_core_report_error(exc):
+                self.active_job_ids.discard(job_id)
+                self._advance_operation(
+                    operation_id,
+                    state="failed",
+                    stage="preparing_submission",
+                    status_text="Core 未接受 115 下载任务所有权。",
+                    control="",
+                )
+                raise
+            report_error = exc
+            operation_view = self._operation_view(operation)
+            operation["ownership_pending"] = True
+            operation["ownership_report"] = dict(operation_view)
         logger.info(
             "open115_download_started "
             f"job_id={job_id} "
@@ -673,13 +809,50 @@ class Open115Feature:
             }), task_id=job_id)
         except Exception:
             self.active_job_ids.discard(job_id)
+            if self.jobs:
+                self.jobs.update(
+                    job_id, "interrupted", error="executor start failed"
+                )
             raise
-        return {
+        result = {
             "accepted": True,
             "job_id": job_id,
             "operation_id": operation_id,
             "operation": operation_view,
         }
+        if report_error is not None:
+            result["report_pending"] = True
+        return result
+
+    def _persisted_download_duplicate(self, job: dict, requested_operation_id: str):
+        result = job.get("result") or {}
+        stored = result if result.get("operation_id") else (job.get("payload") or {})
+        stored_operation_id = str(stored.get("operation_id") or "")
+        if (
+            stored_operation_id
+            and requested_operation_id
+            and stored_operation_id != requested_operation_id
+        ):
+            raise FeatureError(
+                "idempotency_conflict",
+                "persisted open115 download belongs to another operation",
+            )
+        operation_id = stored_operation_id or requested_operation_id
+        operation = self.operations.get(operation_id)
+        logger.info(
+            "open115_download_duplicate "
+            f"job_id={job['job_id']} state={job['state']}"
+        )
+        response = {
+            "accepted": True,
+            "job_id": str(job["job_id"]),
+            "duplicate": True,
+            "state": str(job["state"]),
+            "operation_id": operation_id,
+        }
+        if operation is not None:
+            response["operation"] = self._operation_view(operation)
+        return response
 
     async def _download_job(self, job_id: str, payload: dict):
         link = payload["link"]
@@ -690,6 +863,8 @@ class Open115Feature:
         cancel_event = operation["cancel_event"]
         info_hash = ""
         try:
+            self._raise_if_cancelled(operation)
+            await self._confirm_download_ownership(operation)
             self._raise_if_cancelled(operation)
             await asyncio.to_thread(self.client.add_offline_task, link, selected_path)
             self._raise_if_cancelled(operation)
@@ -824,6 +999,38 @@ class Open115Feature:
                 await self._cancel_offline_record_once(operation)
             self.active_job_ids.discard(job_id)
 
+    async def _confirm_download_ownership(self, operation):
+        if not operation.get("ownership_pending"):
+            return
+        report = dict(
+            operation.get("ownership_report")
+            or self._operation_view(operation)
+        )
+        retries = max(1, int(
+            self.config.get("operation_confirmation_retries") or 3
+        ))
+        response = None
+        for attempt in range(retries):
+            self._raise_if_cancelled(operation)
+            try:
+                response = await self.core.report_operation(report)
+                break
+            except Exception as exc:
+                if not _ambiguous_core_report_error(exc):
+                    raise
+                if attempt + 1 >= retries:
+                    raise
+                await asyncio.sleep(float(
+                    self.config.get("operation_confirmation_interval") or 0.1
+                ))
+        if not isinstance(response, dict) or response.get("accepted") is not True:
+            raise FeatureError(
+                "ownership_rejected",
+                "Core did not confirm open115 download ownership",
+            )
+        operation["ownership_pending"] = False
+        operation.pop("ownership_report", None)
+
     async def _publish_downloaded(self, job):
         payload = job.get("result") or {}
         job_id = str(job["job_id"])
@@ -865,7 +1072,7 @@ class Open115Feature:
         operation = self.operations.get(operation_id)
         if operation is None:
             raise FeatureError("not_found", "open115 operation was not found")
-        if operation.get("state") in {"completed", "cancelled", "failed"}:
+        if operation.get("state") in OPERATION_TERMINAL_STATES:
             return {"actions": [], "operation": self._operation_view(operation)}
         try:
             requested_revision = int(request.get("revision") or 0)
@@ -886,6 +1093,31 @@ class Open115Feature:
                 control="",
             )
             return {"actions": [], "operation": terminal}
+        if (
+            action == "rollback"
+            and operation.get("kind") in {"direct_auth", "scan_auth"}
+            and operation.get("stage") == "token_persistence"
+        ):
+            decision_lock = operation.setdefault(
+                "token_decision_lock", asyncio.Lock()
+            )
+            async with decision_lock:
+                if operation.get("state") in OPERATION_TERMINAL_STATES:
+                    return {
+                        "actions": [],
+                        "operation": self._operation_view(operation),
+                    }
+                cancel_event = operation.get("cancel_event")
+                if cancel_event is not None:
+                    cancel_event.set()
+                rolling = self._advance_operation(
+                    operation_id,
+                    state="rolling_back",
+                    stage="token_persistence",
+                    status_text="正在停止 Token 写入并恢复原配置。",
+                    control="",
+                )
+            return {"actions": [], "operation": rolling}
         if action != "cancel":
             raise FeatureError("invalid_control", "open115 operation control is invalid")
 
@@ -936,13 +1168,123 @@ class Open115Feature:
             return {"actions": [], "operation": terminal}
         return {"actions": [], "operation": cancelling}
 
+    def _token_snapshot(self) -> dict:
+        if self.config_store and hasattr(self.config_store, "snapshot"):
+            store_snapshot = self.config_store.snapshot()
+        elif self.config_store:
+            store_snapshot = {
+                "exists": True,
+                "config": self.config_store.read(),
+            }
+        else:
+            store_snapshot = None
+        if hasattr(self.client, "access_token"):
+            client_tokens = (
+                str(getattr(self.client, "access_token", "") or ""),
+                str(getattr(self.client, "refresh_token", "") or ""),
+            )
+        else:
+            client_tokens = tuple(getattr(self.client, "tokens", ("", "")))
+        return {
+            "store": store_snapshot,
+            "config": dict(self.config),
+            "client_tokens": client_tokens,
+        }
+
+    async def _restore_token_snapshot(self, snapshot: dict):
+        store_snapshot = snapshot.get("store")
+        if self.config_store and store_snapshot is not None:
+            if hasattr(self.config_store, "restore"):
+                await asyncio.to_thread(
+                    self.config_store.restore, store_snapshot
+                )
+            else:
+                old = store_snapshot.get("config") or {}
+                await asyncio.to_thread(
+                    self.config_store.write_tokens,
+                    old.get("access_token"), old.get("refresh_token"),
+                    auth_mode=old.get("auth_mode") or "direct",
+                )
+        self.config.clear()
+        self.config.update(snapshot.get("config") or {})
+        access_token, refresh_token = snapshot.get("client_tokens") or ("", "")
+        if access_token and refresh_token:
+            self.client.set_tokens(access_token, refresh_token)
+        elif hasattr(self.client, "access_token"):
+            self.client.access_token = access_token
+            self.client.refresh_token = refresh_token
+        else:
+            self.client.tokens = (access_token, refresh_token)
+
+    async def _persist_tokens(
+        self, operation_id, access_token, refresh_token, *, auth_mode
+    ):
+        operation = self.operations[operation_id]
+        cancel_event = operation["cancel_event"]
+        snapshot = self._token_snapshot()
+        operation["token_snapshot"] = snapshot
+        try:
+            self._raise_if_cancelled(operation)
+            if self.config_store:
+                updated = await asyncio.to_thread(
+                    self.config_store.write_tokens,
+                    access_token,
+                    refresh_token,
+                    auth_mode=auth_mode,
+                )
+            else:
+                updated = dict(self.config)
+                updated.update({
+                    "auth_mode": auth_mode,
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                })
+            self._raise_if_cancelled(operation)
+            self.config.clear()
+            self.config.update(updated)
+            self.client.set_tokens(access_token, refresh_token)
+            self._raise_if_cancelled(operation)
+            return updated
+        except Exception as exc:
+            try:
+                await self._restore_token_snapshot(snapshot)
+            except Exception:
+                if cancel_event.is_set():
+                    raise TokenPersistenceCancelled(False) from None
+                raise TokenPersistenceFailed(False) from None
+            if cancel_event.is_set():
+                raise TokenPersistenceCancelled(True) from exc
+            raise TokenPersistenceFailed(True) from exc
+
+    async def _commit_token_persistence(self, operation_id, *, status_text):
+        operation = self.operations[operation_id]
+        decision_lock = operation.setdefault(
+            "token_decision_lock", asyncio.Lock()
+        )
+        async with decision_lock:
+            cancel_event = operation["cancel_event"]
+            if cancel_event.is_set():
+                try:
+                    await self._restore_token_snapshot(
+                        operation["token_snapshot"]
+                    )
+                except Exception:
+                    raise TokenPersistenceCancelled(False) from None
+                raise TokenPersistenceCancelled(True)
+            return self._advance_operation(
+                operation_id,
+                state="completed",
+                stage="completed",
+                status_text=status_text,
+                control="",
+            )
+
     async def operation_snapshot(self, request: dict) -> dict:
         requested = str(request.get("operation_id") or "")
-        terminal = {"completed", "cancelled", "failed"}
         operations = [
             self._operation_view(operation)
             for operation_id, operation in self.operations.items()
-            if operation.get("state") not in terminal
+            if operation.get("state") not in OPERATION_TERMINAL_STATES
             and (not requested or requested == operation_id)
         ]
         return {"operations": operations}
@@ -1077,7 +1419,19 @@ class Open115Feature:
     async def _report_operation(self, operation_id, **changes):
         operation = self._advance_operation(operation_id, **changes)
         if operation["chat_id"] and operation["user_id"]:
-            await self.core.report_operation(operation)
+            response = await self.core.report_operation(operation)
+            if not isinstance(response, dict) or response.get("accepted") is not True:
+                current = self.operations[operation_id]
+                current.update({
+                    "state": "interrupted",
+                    "status_text": "Core 未接受当前 Feature 的任务所有权。",
+                    "control": "",
+                    "next_plugin_id": "",
+                })
+                raise FeatureError(
+                    "operation_rejected",
+                    "Core rejected open115 operation ownership",
+                )
         return operation
 
     @staticmethod
