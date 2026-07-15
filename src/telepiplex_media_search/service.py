@@ -27,6 +27,12 @@ from .search_plan import TemporarySpecialAllocator, confirm_media_metadata
 
 _LATIN = re.compile(r"[A-Za-z]")
 
+
+def _ambiguous_core_report_error(exc: Exception) -> bool:
+    return not isinstance(exc, FeatureError) or exc.code in {
+        "core_unavailable", "deadline_exceeded", "invalid_response",
+    }
+
 _PLANNING_ERROR_MESSAGES = {
     "ambiguous_candidates": "存在多个候选，请补充年份或电影/剧集类型。",
     "evidence_conflict": "不同来源的年份或媒体类型冲突，请补充更明确的信息。",
@@ -531,14 +537,36 @@ class MediaSearchFeature:
             return {"actions": [{"kind": "send_message", "text": "❌ 片源没有可用 magnet 链接。"}]}
         contract = deepcopy(stored["confirmed_contract"])
         identity = contract["identity"]
-        handoff = await self._report_operation(
-            operation_id,
-            state="handed_off",
-            stage="submitting_download",
-            status_text="片源已解析，正在交给 115 下载任务。",
-            control="cancel",
-            next_plugin_id="open115",
-        )
+        operation = self.operations[operation_id]
+        handoff = operation.get("handoff_operation")
+        if not isinstance(handoff, dict):
+            handoff = self._advance_operation(
+                operation_id,
+                state="handed_off",
+                stage="submitting_download",
+                status_text="片源已解析，正在交给 115 下载任务。",
+                control="cancel",
+                next_plugin_id="open115",
+            )
+            operation["handoff_operation"] = deepcopy(handoff)
+        try:
+            response = await self.core.report_operation(handoff)
+        except Exception as exc:
+            if _ambiguous_core_report_error(exc):
+                operation["handoff_pending"] = True
+            raise
+        if not isinstance(response, dict) or response.get("accepted") is not True:
+            operation.update({
+                "state": "interrupted",
+                "status_text": "Core 已结束协调任务，未提交 115 下载。",
+                "control": "",
+                "next_plugin_id": "",
+            })
+            raise FeatureError(
+                "operation_rejected",
+                "Core rejected media-search handoff ownership",
+            )
+        operation["handoff_pending"] = False
         try:
             result = await self.core.call_capability(
                 "download.provider",
@@ -854,7 +882,19 @@ class MediaSearchFeature:
     async def _report_operation(self, operation_id, **changes):
         view = self._advance_operation(operation_id, **changes)
         if view["chat_id"] and view["user_id"]:
-            await self.core.report_operation(view)
+            response = await self.core.report_operation(view)
+            if not isinstance(response, dict) or response.get("accepted") is not True:
+                operation = self.operations[operation_id]
+                operation.update({
+                    "state": "interrupted",
+                    "status_text": "Core 未接受当前 Feature 的任务所有权。",
+                    "control": "",
+                    "next_plugin_id": "",
+                })
+                raise FeatureError(
+                    "operation_rejected",
+                    "Core rejected media-search operation ownership",
+                )
         return view
 
     @staticmethod

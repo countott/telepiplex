@@ -51,6 +51,11 @@ class FakeCore:
 
     async def report_operation(self, operation):
         self.reports.append(operation)
+        return {
+            "accepted": True,
+            "state": operation["state"],
+            "revision": operation["revision"],
+        }
 
 
 class FakeRuntime:
@@ -296,6 +301,78 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["operation_revision"], self.core.reports[-1]["revision"])
         self.assertEqual(self.core.reports[-1]["state"], "handed_off")
         self.assertTrue(kwargs["idempotency_key"].startswith(plan_id))
+
+    async def test_rejected_handoff_never_calls_download_provider(self):
+        original_report = self.core.report_operation
+
+        async def reject_handoff(operation):
+            if operation["state"] == "handed_off":
+                return {
+                    "accepted": False,
+                    "state": "cancelled",
+                    "revision": operation["revision"] + 1,
+                }
+            return await original_report(operation)
+
+        self.core.report_operation = reject_handoff
+        plan_id = await self._prepare_search()
+        await self.feature.callback({
+            "namespace": "media-search", "payload": f"confirm:{plan_id}",
+            "user_id": 1, "chat_id": 10,
+        })
+        await self.runtime.run("media-search-releases-")
+        submission = await self.feature.callback({
+            "namespace": "media-search", "payload": f"release:{plan_id}:0",
+            "user_id": 1, "chat_id": 10,
+        })
+        await self.runtime.run("media-search-submit-")
+
+        self.assertEqual(self.core.calls, [])
+        self.assertEqual(
+            self.feature.operations[
+                submission["operation"]["operation_id"]
+            ]["state"],
+            "failed",
+        )
+
+    async def test_lost_handoff_response_reuses_exact_revision(self):
+        plan_id = await self._prepare_search()
+        await self.feature.callback({
+            "namespace": "media-search", "payload": f"confirm:{plan_id}",
+            "user_id": 1, "chat_id": 10,
+        })
+        await self.runtime.run("media-search-releases-")
+        stored = self.feature.plans[plan_id]
+        operation_id = stored["operation_id"]
+        original_report = self.core.report_operation
+        handoff_revisions = []
+        lost = False
+
+        async def accept_then_lose(operation):
+            nonlocal lost
+            response = await original_report(operation)
+            if operation["state"] == "handed_off":
+                handoff_revisions.append(operation["revision"])
+                if not lost:
+                    lost = True
+                    raise RuntimeError("handoff response lost")
+            return response
+
+        self.core.report_operation = accept_then_lose
+
+        with self.assertRaises(RuntimeError):
+            await self.feature._submit_release(
+                plan_id, stored, "0", operation_id
+            )
+        result = await self.feature._submit_release(
+            plan_id, stored, "0", operation_id
+        )
+
+        self.assertEqual(handoff_revisions, [
+            handoff_revisions[0], handoff_revisions[0]
+        ])
+        self.assertEqual(len(self.core.calls), 1)
+        self.assertIn("已提交", result["actions"][0]["text"])
 
     async def test_empty_query_has_explicit_exit_and_awaiting_operation(self):
         result = await self.feature.command({
