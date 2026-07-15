@@ -1,4 +1,3 @@
-import re
 import unittest
 from pathlib import Path
 
@@ -7,10 +6,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class TelepiplexCoreSurfaceTest(unittest.TestCase):
-    def test_core_bot_exposes_only_runtime_commands(self):
+    def test_core_bot_delegates_command_menu_to_dynamic_catalog(self):
         source = (ROOT / "app" / "115bot.py").read_text(encoding="utf-8")
-        commands = re.findall(r'BotCommand\("([^"]+)"', source)
-        self.assertEqual(commands, ["start", "reload", "plugin", "config"])
+        self.assertIn("from app.core.command_catalog import (", source)
+        self.assertIn("return build_bot_commands(router)", source)
+        self.assertIn("await sync_bot_commands(application, router)", source)
+        self.assertNotIn('BotCommand("', source)
 
         removed_symbols = [
             "register_auth_handlers",

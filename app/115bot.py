@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     Application,
