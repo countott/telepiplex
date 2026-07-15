@@ -58,7 +58,7 @@ class MediaSearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
         buttons = result["actions"][0]["data"]["keyboard"]
         self.assertEqual(
             [button[0]["text"] for button in buttons],
-            ["Prowlarr", "TVDB", "AI", "取消"],
+            ["Prowlarr", "TVDB", "AI", "退出"],
         )
         for internal in ("timeout", "分类", "阈值", "MCP", "Indexer"):
             self.assertNotIn(internal, text)
@@ -212,6 +212,33 @@ class MediaSearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("config_patch", expired)
         self.assertEqual(expired["session"]["state"], "close")
+
+    async def test_every_open_configuration_step_has_one_exit(self):
+        def exits(result):
+            return [
+                button
+                for action in result.get("actions", [])
+                for row in (action.get("data") or {}).get("keyboard", [])
+                for button in row
+                if button.get("text") == "退出"
+            ]
+
+        result = await self._start()
+        self.assertEqual(len(exits(result)), 1)
+        result = await self.feature.callback({
+            **self.owner,
+            "namespace": "media-search",
+            "payload": "config:prowlarr",
+        })
+        self.assertEqual(len(exits(result)), 1)
+        result = await self.feature.message({**self.owner, "text": "bad-url"})
+        self.assertEqual(len(exits(result)), 1)
+        result = await self.feature.message({
+            **self.owner, "text": "http://prowlarr:9696"
+        })
+        self.assertEqual(len(exits(result)), 1)
+        result = await self.feature.message({**self.owner, "text": "new-key"})
+        self.assertEqual(len(exits(result)), 1)
 
 
 if __name__ == "__main__":

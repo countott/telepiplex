@@ -12,7 +12,7 @@ def main(context: RuntimeContext) -> FeatureRuntime:
     config = yaml.safe_load(context.config_path.read_text(encoding="utf-8")) or {}
     runtime_context.configure(config)
     feature = MediaSearchFeature(config=config, core=context.core)
-    return FeatureRuntime(
+    runtime = FeatureRuntime(
         manifest=context.manifest,
         token=context.token,
         capabilities={"media.search": feature.metadata_capability},
@@ -23,4 +23,8 @@ def main(context: RuntimeContext) -> FeatureRuntime:
         },
         callbacks={"media-search": feature.callback},
         messages=feature.message,
+        operation_control=feature.operation_control,
+        operation_snapshot=feature.operation_snapshot,
     )
+    feature.bind_runtime(runtime)
+    return runtime

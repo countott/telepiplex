@@ -62,6 +62,12 @@ class MediaSearchFeature:
         self.plans = {}
         self.awaiting_queries = set()
         self.config_wizard = MediaSearchConfigWizard(config)
+        self.runtime = None
+        self.operations = {}
+        self.owner_operations = {}
+
+    def bind_runtime(self, runtime):
+        self.runtime = runtime
 
     async def metadata_capability(self, request: dict) -> dict:
         if str(request.get("method") or "") != "resolve_metadata":
@@ -110,22 +116,51 @@ class MediaSearchFeature:
                 return self._closed(
                     "⚠️ 请先完成或取消当前搜索，再打开 media-search 配置。"
                 )
-            return self.config_wizard.start(request)
+            result = self.config_wizard.start(request)
+            operation = self._new_operation(
+                request,
+                state="awaiting_input",
+                stage="config_section",
+                status_text="等待选择 media-search 配置项。",
+                control="exit",
+                kind="config",
+            )
+            result["operation"] = operation
+            return result
         if command not in {"search", "s"}:
             raise FeatureError("not_found", f"unknown media-search command: {command}")
         self.config_wizard.clear(request)
         raw_query = " ".join(str(item) for item in request.get("args") or []).strip()
         if not raw_query:
-            self.awaiting_queries.add(self._owner_key(request))
+            owner = self._owner_key(request)
+            self.awaiting_queries.add(owner)
+            operation = self._new_operation(
+                request,
+                state="awaiting_input",
+                stage="query_input",
+                status_text="等待输入片名或影视条目链接。",
+                control="exit",
+                kind="search",
+            )
             return {
-                "actions": [{"kind": "send_message", "text": "请输入片名或影视条目链接。"}],
+                "actions": [{
+                    "kind": "send_message",
+                    "text": "请输入片名或影视条目链接。",
+                    "data": {"keyboard": [[{
+                        "text": "退出",
+                        "callback_data": "media-search:exit",
+                    }]]},
+                }],
                 "session": {"state": "open"},
+                "operation": operation,
             }
-        return await self._prepare_plan(raw_query, request)
+        return self._start_plan_task(raw_query, request)
 
     async def message(self, request: dict) -> dict:
         if self.config_wizard.has_session(request):
-            return self.config_wizard.message(request)
+            return self._decorate_config_result(
+                request, self.config_wizard.message(request)
+            )
         key = self._owner_key(request)
         if key not in self.awaiting_queries:
             return {
@@ -133,12 +168,18 @@ class MediaSearchFeature:
                 "session": {"state": "close"},
             }
         self.awaiting_queries.discard(key)
-        return await self._prepare_plan(str(request.get("text") or "").strip(), request)
+        return self._start_plan_task(
+            str(request.get("text") or "").strip(), request, reuse_owner=True
+        )
 
     async def callback(self, request: dict) -> dict:
         payload = str(request.get("payload") or "")
         if payload.startswith("config:"):
-            return self.config_wizard.callback(request)
+            return self._decorate_config_result(
+                request, self.config_wizard.callback(request)
+            )
+        if payload == "exit":
+            return self._exit_owner_operation(request)
         parts = payload.split(":")
         if len(parts) < 2:
             raise FeatureError("invalid_callback", "media-search callback is invalid")
@@ -147,18 +188,247 @@ class MediaSearchFeature:
         if not stored or stored["owner"] != self._owner_key(request):
             return self._closed("⚠️ 搜索任务已过期，请重新搜索。")
         if action == "cancel":
+            operation_id = stored.get("operation_id")
             self._release_plan(plan_id)
-            return self._closed("已取消本次搜索。")
+            result = self._closed("已退出本次搜索。")
+            if operation_id:
+                result["operation"] = self._advance_operation(
+                    operation_id,
+                    state="cancelled",
+                    stage="cancelled",
+                    status_text="已退出本次搜索。",
+                    control="",
+                )
+            return result
         if action == "confirm":
-            return await self._confirm_and_search(plan_id, stored)
+            return self._start_release_search_task(plan_id, stored)
         if action == "release" and len(parts) == 3:
-            return await self._submit_release(plan_id, stored, parts[2])
+            return self._start_submission_task(plan_id, stored, parts[2])
         raise FeatureError("invalid_callback", "media-search callback action is invalid")
 
-    async def _prepare_plan(self, raw_query: str, request: dict) -> dict:
+    def _start_plan_task(
+        self, raw_query: str, request: dict, *, reuse_owner: bool = False
+    ) -> dict:
+        if self.runtime is None:
+            raise FeatureError("not_ready", "media-search runtime is not ready")
+        owner = self._owner_key(request)
+        operation = self._operation_for_owner(owner) if reuse_owner else None
+        if operation is None:
+            operation_view = self._new_operation(
+                request,
+                state="running",
+                stage="planning",
+                status_text="正在规划媒体证据。",
+                control="cancel",
+                kind="search",
+            )
+            operation = self.operations[operation_view["operation_id"]]
+        else:
+            operation_view = self._advance_operation(
+                operation["operation_id"],
+                state="running",
+                stage="planning",
+                status_text="正在规划媒体证据。",
+                control="cancel",
+            )
+        plan_id = uuid.uuid4().hex[:10]
+        task_id = f"media-search-plan-{operation['operation_id']}"
+        task = self.runtime.spawn(
+            self._prepare_plan_task(
+                raw_query,
+                dict(request),
+                plan_id,
+                operation["operation_id"],
+            ),
+            task_id=task_id,
+        )
+        operation.update({"task": task, "task_id": task_id, "plan_id": plan_id})
+        return {
+            "actions": [{
+                "kind": "send_message",
+                "text": "⏳ 正在规划媒体证据...",
+            }],
+            "session": {"state": "close"},
+            "operation": operation_view,
+        }
+
+    async def _prepare_plan_task(
+        self, raw_query, request, plan_id, operation_id
+    ):
+        try:
+            result = await self._prepare_plan(
+                raw_query,
+                request,
+                plan_id=plan_id,
+                operation_id=operation_id,
+            )
+            action = (result.get("actions") or [{}])[0]
+            if plan_id in self.plans:
+                await self._report_operation(
+                    operation_id,
+                    state="awaiting_input",
+                    stage="plan_confirmation",
+                    status_text=str(action.get("text") or "媒体方案已生成。"),
+                    control="exit",
+                    details=deepcopy(action.get("data") or {}),
+                )
+            else:
+                await self._report_operation(
+                    operation_id,
+                    state="failed",
+                    stage="planning",
+                    status_text=str(action.get("text") or "媒体规划失败。"),
+                    control="",
+                )
+        except asyncio.CancelledError:
+            self._release_plan(plan_id)
+            await self._report_operation(
+                operation_id,
+                state="cancelled",
+                stage="planning",
+                status_text="媒体规划已取消。",
+                control="",
+            )
+        except Exception as exc:
+            self._release_plan(plan_id)
+            await self._report_operation(
+                operation_id,
+                state="failed",
+                stage="planning",
+                status_text=f"媒体规划失败：{type(exc).__name__}",
+                control="",
+            )
+
+    def _start_release_search_task(self, plan_id: str, stored: dict) -> dict:
+        operation_id = stored["operation_id"]
+        operation_view = self._advance_operation(
+            operation_id,
+            state="running",
+            stage="prowlarr_search",
+            status_text="正在搜索并排序 Prowlarr 片源。",
+            control="cancel",
+        )
+        task_id = f"media-search-releases-{operation_id}"
+        task = self.runtime.spawn(
+            self._release_search_task(plan_id, stored, operation_id),
+            task_id=task_id,
+        )
+        self.operations[operation_id].update({"task": task, "task_id": task_id})
+        return {
+            "actions": [{
+                "kind": "edit_message",
+                "text": "⏳ 正在搜索并排序 Prowlarr 片源...",
+            }],
+            "operation": operation_view,
+        }
+
+    async def _release_search_task(self, plan_id, stored, operation_id):
+        try:
+            result = await self._confirm_and_search(plan_id, stored)
+            action = (result.get("actions") or [{}])[0]
+            if plan_id in self.plans and stored.get("results"):
+                await self._report_operation(
+                    operation_id,
+                    state="awaiting_input",
+                    stage="release_selection",
+                    status_text=str(action.get("text") or "请选择片源。"),
+                    control="exit",
+                    details=deepcopy(action.get("data") or {}),
+                )
+            else:
+                await self._report_operation(
+                    operation_id,
+                    state="failed",
+                    stage="prowlarr_search",
+                    status_text=str(action.get("text") or "Prowlarr 搜索失败。"),
+                    control="",
+                )
+        except asyncio.CancelledError:
+            self._release_plan(plan_id)
+            await self._report_operation(
+                operation_id,
+                state="cancelled",
+                stage="prowlarr_search",
+                status_text="Prowlarr 搜索已取消。",
+                control="",
+            )
+        except Exception as exc:
+            self._release_plan(plan_id)
+            await self._report_operation(
+                operation_id,
+                state="failed",
+                stage="prowlarr_search",
+                status_text=f"Prowlarr 搜索失败：{type(exc).__name__}",
+                control="",
+            )
+
+    def _start_submission_task(self, plan_id, stored, raw_index):
+        operation_id = stored["operation_id"]
+        operation_view = self._advance_operation(
+            operation_id,
+            state="running",
+            stage="resolving_release",
+            status_text="正在解析片源下载链接。",
+            control="cancel",
+        )
+        task_id = f"media-search-submit-{operation_id}"
+        task = self.runtime.spawn(
+            self._submission_task(plan_id, stored, raw_index, operation_id),
+            task_id=task_id,
+        )
+        self.operations[operation_id].update({"task": task, "task_id": task_id})
+        return {
+            "actions": [{
+                "kind": "edit_message",
+                "text": "⏳ 正在解析片源并提交下载...",
+            }],
+            "operation": operation_view,
+        }
+
+    async def _submission_task(self, plan_id, stored, raw_index, operation_id):
+        try:
+            result = await self._submit_release(
+                plan_id, stored, raw_index, operation_id
+            )
+            if self.operations[operation_id]["state"] != "handed_off":
+                action = (result.get("actions") or [{}])[0]
+                await self._report_operation(
+                    operation_id,
+                    state="failed",
+                    stage="resolving_release",
+                    status_text=str(action.get("text") or "片源提交失败。"),
+                    control="",
+                )
+        except asyncio.CancelledError:
+            self._release_plan(plan_id)
+            await self._report_operation(
+                operation_id,
+                state="cancelled",
+                stage="resolving_release",
+                status_text="片源提交已取消。",
+                control="",
+            )
+        except Exception as exc:
+            self._release_plan(plan_id)
+            if self.operations[operation_id]["state"] != "failed":
+                await self._report_operation(
+                    operation_id,
+                    state="failed",
+                    stage="resolving_release",
+                    status_text=f"片源提交失败：{type(exc).__name__}",
+                    control="",
+                )
+
+    async def _prepare_plan(
+        self,
+        raw_query: str,
+        request: dict,
+        *,
+        plan_id: str,
+        operation_id: str,
+    ) -> dict:
         if not raw_query:
             return self._closed("⚠️ 搜索内容不能为空。")
-        plan_id = uuid.uuid4().hex[:10]
         try:
             plan = await self.plan_builder(raw_query, plan_id)
         except SearchPlanningError as exc:
@@ -189,6 +459,7 @@ class MediaSearchFeature:
             "plan": plan,
             "selected_path": route["path"],
             "results": [],
+            "operation_id": operation_id,
         }
         contract = plan["media_metadata"]
         identity = contract["identity"]
@@ -201,7 +472,7 @@ class MediaSearchFeature:
                 "text": f"媒体方案：{title} ({identity.get('year') or '年份未知'})\n映射：{marker}\n确认后搜索片源。",
                 "data": {"keyboard": [[
                     {"text": "确认并搜索", "callback_data": f"media-search:confirm:{plan_id}"},
-                    {"text": "取消", "callback_data": f"media-search:cancel:{plan_id}"},
+                    {"text": "退出", "callback_data": f"media-search:cancel:{plan_id}"},
                 ]]},
             }],
             "session": {"state": "close"},
@@ -228,6 +499,10 @@ class MediaSearchFeature:
             "text": self._release_label(item, index),
             "callback_data": f"media-search:release:{plan_id}:{index}",
         }] for index, item in enumerate(results)]
+        keyboard.append([{
+            "text": "退出",
+            "callback_data": f"media-search:cancel:{plan_id}",
+        }])
         return {
             "actions": [{
                 "kind": "edit_message",
@@ -236,7 +511,13 @@ class MediaSearchFeature:
             }]
         }
 
-    async def _submit_release(self, plan_id: str, stored: dict, raw_index: str) -> dict:
+    async def _submit_release(
+        self,
+        plan_id: str,
+        stored: dict,
+        raw_index: str,
+        operation_id: str,
+    ) -> dict:
         try:
             index = int(raw_index)
             item = stored["results"][index]
@@ -250,30 +531,51 @@ class MediaSearchFeature:
             return {"actions": [{"kind": "send_message", "text": "❌ 片源没有可用 magnet 链接。"}]}
         contract = deepcopy(stored["confirmed_contract"])
         identity = contract["identity"]
-        result = await self.core.call_capability(
-            "download.provider",
-            "submit",
-            {
-                "link": link,
-                "selected_path": stored["selected_path"],
-                "user_id": stored["owner"][1],
-                "media_metadata": contract,
-                "naming_metadata": {
-                    "source": "confirmed",
-                    "media_type": contract["placement"]["library_type"],
-                    "chinese_title": identity.get("chinese_title") or "",
-                    "english_title": identity.get("english_title") or "",
-                    "year": identity.get("year") or "",
-                },
-                "release": {
-                    "title": item.get("title") or "",
-                    "indexer": item.get("indexer") or "",
-                    "size": item.get("size") or 0,
-                },
-            },
-            deadline=30,
-            idempotency_key=f"{plan_id}:release:{index}",
+        handoff = await self._report_operation(
+            operation_id,
+            state="handed_off",
+            stage="submitting_download",
+            status_text="片源已解析，正在交给 115 下载任务。",
+            control="cancel",
+            next_plugin_id="open115",
         )
+        try:
+            result = await self.core.call_capability(
+                "download.provider",
+                "submit",
+                {
+                    "link": link,
+                    "selected_path": stored["selected_path"],
+                    "chat_id": stored["owner"][0],
+                    "user_id": stored["owner"][1],
+                    "operation_id": operation_id,
+                    "operation_revision": handoff["revision"],
+                    "media_metadata": contract,
+                    "naming_metadata": {
+                        "source": "confirmed",
+                        "media_type": contract["placement"]["library_type"],
+                        "chinese_title": identity.get("chinese_title") or "",
+                        "english_title": identity.get("english_title") or "",
+                        "year": identity.get("year") or "",
+                    },
+                    "release": {
+                        "title": item.get("title") or "",
+                        "indexer": item.get("indexer") or "",
+                        "size": item.get("size") or 0,
+                    },
+                },
+                deadline=30,
+                idempotency_key=f"{plan_id}:release:{index}",
+            )
+        except Exception as exc:
+            await self._report_operation(
+                operation_id,
+                state="failed",
+                stage="submitting_download",
+                status_text=f"下载任务提交失败：{type(exc).__name__}",
+                control="",
+            )
+            raise
         self._release_plan(plan_id)
         return {
             "actions": [{
@@ -391,6 +693,186 @@ class MediaSearchFeature:
     def _release_plan(self, plan_id: str):
         self.plans.pop(plan_id, None)
         self.allocator.release(plan_id)
+
+    async def operation_control(self, request: dict) -> dict:
+        operation_id = str(request.get("operation_id") or "")
+        operation = self.operations.get(operation_id)
+        if operation is None:
+            raise FeatureError("not_found", "media-search operation was not found")
+        if operation.get("state") in {"completed", "cancelled", "failed"}:
+            return {"actions": [], "operation": self._operation_view(operation)}
+        try:
+            operation["revision"] = max(
+                int(operation.get("revision") or 0),
+                int(request.get("revision") or 0),
+            )
+        except (TypeError, ValueError):
+            pass
+        action = str(request.get("action") or "")
+        if action not in {"exit", "cancel"}:
+            raise FeatureError("invalid_control", "media-search control is invalid")
+        owner = (operation["chat_id"], operation["user_id"])
+        self.awaiting_queries.discard(owner)
+        self.config_wizard.clear({"chat_id": owner[0], "user_id": owner[1]})
+        plan_id = str(operation.get("plan_id") or "")
+        if plan_id:
+            self._release_plan(plan_id)
+        task = operation.get("task")
+        if task is not None and hasattr(task, "cancel") and not task.done():
+            task.cancel()
+        if operation.get("state") == "awaiting_input" or task is None:
+            terminal = self._advance_operation(
+                operation_id,
+                state="cancelled",
+                stage=operation.get("stage") or "cancelled",
+                status_text="已退出 media-search 任务。",
+                control="",
+            )
+            return {"actions": [], "operation": terminal}
+        cancelling = self._advance_operation(
+            operation_id,
+            state="cancelling",
+            stage=operation.get("stage") or "cancelling",
+            status_text="取消请求已接受，正在停止当前本地任务。",
+            control="cancel",
+        )
+        return {"actions": [], "operation": cancelling}
+
+    async def operation_snapshot(self, request: dict) -> dict:
+        requested = str(request.get("operation_id") or "")
+        terminal = {"completed", "cancelled", "failed", "handed_off"}
+        return {"operations": [
+            self._operation_view(operation)
+            for operation_id, operation in self.operations.items()
+            if operation.get("state") not in terminal
+            and (not requested or operation_id == requested)
+        ]}
+
+    def _decorate_config_result(self, request, result):
+        owner = self._owner_key(request)
+        operation = self._operation_for_owner(owner)
+        if operation is None:
+            return result
+        session = result.get("session") if isinstance(result, dict) else None
+        if "config_patch" in result:
+            view = self._advance_operation(
+                operation["operation_id"],
+                state="running",
+                stage="config_apply",
+                status_text="正在保存并重新加载 media-search 配置。",
+                control="cancel",
+            )
+        elif isinstance(session, dict) and session.get("state") == "open":
+            wizard_session = self.config_wizard.sessions.get(owner) or {}
+            view = self._advance_operation(
+                operation["operation_id"],
+                state="awaiting_input",
+                stage=f"config_{wizard_session.get('stage') or 'input'}",
+                status_text="等待 media-search 配置输入。",
+                control="exit",
+            )
+        else:
+            view = self._advance_operation(
+                operation["operation_id"],
+                state="cancelled",
+                stage="config_cancelled",
+                status_text="已退出 media-search 配置。",
+                control="",
+            )
+        result["operation"] = view
+        return result
+
+    def _exit_owner_operation(self, request):
+        owner = self._owner_key(request)
+        operation = self._operation_for_owner(owner)
+        if operation is None:
+            return self._closed("⚠️ 搜索会话已失效。")
+        self.awaiting_queries.discard(owner)
+        plan_id = str(operation.get("plan_id") or "")
+        if plan_id:
+            self._release_plan(plan_id)
+        view = self._advance_operation(
+            operation["operation_id"],
+            state="cancelled",
+            stage=operation.get("stage") or "cancelled",
+            status_text="已退出 media-search 任务。",
+            control="",
+        )
+        result = self._closed("已退出 media-search 任务。")
+        result["operation"] = view
+        return result
+
+    def _new_operation(
+        self, request, *, state, stage, status_text, control, kind
+    ):
+        operation_id = uuid.uuid4().hex
+        owner = self._owner_key(request)
+        operation = {
+            "operation_id": operation_id,
+            "chat_id": owner[0],
+            "user_id": owner[1],
+            "state": state,
+            "stage": stage,
+            "status_text": status_text,
+            "control": control,
+            "revision": 1,
+            "details": {},
+            "kind": kind,
+        }
+        self.operations[operation_id] = operation
+        self.owner_operations[owner] = operation_id
+        return self._operation_view(operation)
+
+    def _operation_for_owner(self, owner):
+        operation_id = self.owner_operations.get(owner)
+        return self.operations.get(operation_id) if operation_id else None
+
+    def _advance_operation(
+        self,
+        operation_id,
+        *,
+        state,
+        stage,
+        status_text,
+        control,
+        details=None,
+        next_plugin_id="",
+    ):
+        operation = self.operations[operation_id]
+        operation.update({
+            "state": state,
+            "stage": stage,
+            "status_text": status_text,
+            "control": control,
+            "revision": int(operation.get("revision") or 0) + 1,
+            "next_plugin_id": next_plugin_id if state == "handed_off" else "",
+        })
+        if details is not None:
+            operation["details"] = deepcopy(details)
+        return self._operation_view(operation)
+
+    async def _report_operation(self, operation_id, **changes):
+        view = self._advance_operation(operation_id, **changes)
+        if view["chat_id"] and view["user_id"]:
+            await self.core.report_operation(view)
+        return view
+
+    @staticmethod
+    def _operation_view(operation):
+        view = {
+            "operation_id": str(operation["operation_id"]),
+            "chat_id": int(operation.get("chat_id") or 0),
+            "user_id": int(operation.get("user_id") or 0),
+            "state": str(operation.get("state") or ""),
+            "stage": str(operation.get("stage") or ""),
+            "status_text": str(operation.get("status_text") or ""),
+            "control": str(operation.get("control") or ""),
+            "revision": int(operation.get("revision") or 0),
+            "details": deepcopy(operation.get("details") or {}),
+        }
+        if operation.get("next_plugin_id"):
+            view["next_plugin_id"] = str(operation["next_plugin_id"])
+        return view
 
     @staticmethod
     def _release_label(item: dict, index: int) -> str:

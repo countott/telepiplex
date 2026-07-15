@@ -74,7 +74,7 @@ class MediaSearchConfigWizard:
                     [{"text": "Prowlarr", "callback_data": "media-search:config:prowlarr"}],
                     [{"text": "TVDB", "callback_data": "media-search:config:tvdb"}],
                     [{"text": "AI", "callback_data": "media-search:config:ai"}],
-                    [{"text": "取消", "callback_data": "media-search:config:cancel"}],
+                    [{"text": "退出", "callback_data": "media-search:config:cancel"}],
                 ]},
             }],
             "session": {"state": "open"},
@@ -118,7 +118,7 @@ class MediaSearchConfigWizard:
                     "data": {"keyboard": [[
                         {"text": "启用", "callback_data": "media-search:config:boolean:on"},
                         {"text": "停用", "callback_data": "media-search:config:boolean:off"},
-                    ]]},
+                    ], [{"text": "退出", "callback_data": "media-search:config:cancel"}]]},
                 }],
                 "session": {"state": "open"},
             }
@@ -226,7 +226,7 @@ class MediaSearchConfigWizard:
                 "text": "配置已收集，敏感值不会回显。确认保存并重新加载 Feature？",
                 "data": {"keyboard": [[
                     {"text": "确认保存", "callback_data": "media-search:config:confirm"},
-                    {"text": "取消", "callback_data": "media-search:config:cancel"},
+                    {"text": "退出", "callback_data": "media-search:config:cancel"},
                 ]]},
             }],
             "session": {"state": "open"},
@@ -234,10 +234,16 @@ class MediaSearchConfigWizard:
 
     @staticmethod
     def _message(text: str, state: str, *, edit=False) -> dict:
+        action = {
+            "kind": "edit_message" if edit else "send_message",
+            "text": text,
+        }
+        if state == "open":
+            action["data"] = {"keyboard": [[{
+                "text": "退出",
+                "callback_data": "media-search:config:cancel",
+            }]]}
         return {
-            "actions": [{
-                "kind": "edit_message" if edit else "send_message",
-                "text": text,
-            }],
+            "actions": [action],
             "session": {"state": state},
         }
