@@ -657,16 +657,17 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
         )
     except PluginOperationError as exc:
         cancelled = cancel_event.is_set() or exc.code == "config_cancelled"
+        rollback_verified = exc.code == "config_cancelled"
         _finish_feature_config_operation(
             context, route, result,
             state=(
                 "rolled_back"
-                if cancelled and exc.code != "config_rollback_failed"
+                if rollback_verified
                 else "partially_rolled_back" if cancelled else "failed"
             ),
             status_text=(
                 "配置切换已取消，原配置和原 Feature 路由已恢复。"
-                if cancelled and exc.code != "config_rollback_failed"
+                if rollback_verified
                 else "配置回滚未能完整验证，请人工检查当前配置和路由。"
                 if cancelled
                 else f"Feature 配置失败：{exc.code}。"
@@ -676,7 +677,7 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
             update,
             (
                 "✅ 已取消配置切换并恢复原配置。"
-                if cancelled and exc.code != "config_rollback_failed"
+                if rollback_verified
                 else f"❌ {exc.code}：配置未写入或重新加载失败。"
             ),
             prefer_edit=prefer_edit,

@@ -655,11 +655,13 @@ class PluginManager:
                             self.supervisor.promote(old_process)
                     except Exception as resume_exc:
                         recovery_errors.append(type(resume_exc).__name__)
-                if (
+                cancelled = (
                     isinstance(exc, PluginOperationError)
                     and exc.code == "config_cancelled"
-                    and recovery_errors
-                ):
+                ) or (
+                    should_cancel is not None and should_cancel()
+                )
+                if cancelled and recovery_errors:
                     raise PluginOperationError(
                         "config_rollback_failed",
                         "Feature configuration rollback could not be verified",

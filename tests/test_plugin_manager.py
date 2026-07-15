@@ -402,6 +402,45 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(old.state, "healthy")
         self.assertIn(("echo", "1.0.0"), self.supervisor.resumed)
 
+    async def test_cancel_racing_reload_error_reports_unverified_rollback(self):
+        from app.core.plugin_manager import PluginOperationError
+
+        schema, default = self._editable_config()
+        await self.manager.install(self._artifact(
+            config_schema=schema,
+            config_default=default,
+        ))
+        cancelled = False
+        original_write = self.store.write_config
+        writes = 0
+
+        def failing_restore(release, value):
+            nonlocal writes
+            writes += 1
+            if writes == 2:
+                raise OSError("restore failed")
+            return original_write(release, value)
+
+        async def failing_start(_release, *, shadow=False):
+            nonlocal cancelled
+            cancelled = True
+            raise RuntimeError("shadow start failed")
+
+        self.store.write_config = failing_restore
+        self.supervisor.start = failing_start
+
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.configure(
+                "echo",
+                {"prefix": "new"},
+                should_cancel=lambda: cancelled,
+            )
+
+        self.assertEqual(raised.exception.code, "config_rollback_failed")
+        self.assertEqual(
+            raised.exception.details["recovery_errors"], ["OSError"]
+        )
+
     async def test_configure_rejects_invalid_value_before_draining(self):
         from app.core.plugin_manager import PluginOperationError
 

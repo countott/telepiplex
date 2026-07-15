@@ -3,6 +3,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,12 +33,17 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
             retry_interval=0.01,
             operation_coordinator=self.coordinator,
         )
+        self.operation_sink = OperationReportSink(self.coordinator)
+        self.ownership = []
+        self.operation_sink.attach(
+            lambda record: self.ownership.append(record.plugin_id)
+        )
         self.broker = CoreBroker(
             self.router,
             self.journal,
             self.root / "runtime/core.sock",
             dispatcher=self.dispatcher,
-            operation_sink=OperationReportSink(self.coordinator),
+            operation_sink=self.operation_sink,
         )
         self.runtimes = []
         self.runtime_tasks = []
@@ -59,6 +66,8 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
         callbacks=(),
         subscribes=(),
         publishes=(),
+        provides=(),
+        requires=(),
     ):
         from app.core.plugin_manifest import PluginManifest
 
@@ -70,8 +79,11 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
             "entry_point": (
                 f"telepiplex_{plugin_id.replace('-', '_')}.runtime:main"
             ),
-            "provides": [],
-            "requires": [],
+            "provides": [
+                {"name": name, "exclusive": True}
+                for name in provides
+            ],
+            "requires": list(requires),
             "subscribes": list(subscribes),
             "publishes": list(publishes),
             "commands": [
@@ -114,7 +126,9 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
         )
         return client
 
-    async def test_search_confirmation_rename_and_plex_enqueue_use_real_rpc_events(self):
+    async def test_full_pipeline_handoff_control_and_menu_use_real_rpc_events(self):
+        from app.core.command_catalog import build_bot_commands, sync_bot_commands
+        from app.handlers.interaction_handler import operation_control_callback
         from telepiplex_plugin_sdk.core_client import CoreClient
 
         operation_id = "op-real-pipeline"
@@ -122,20 +136,35 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
             "media-search",
             commands=("search",),
             callbacks=("media-search",),
+            requires=("download.provider",),
+        )
+        open_manifest = self._manifest(
+            "open115",
+            commands=("magnet",),
+            provides=("download.provider",),
             publishes=("download.completed",),
         )
         renaming_manifest = self._manifest(
             "renaming",
+            commands=("renaming_config",),
             subscribes=("download.completed",),
             publishes=("media.organized",),
         )
         plex_manifest = self._manifest(
             "plex-management",
+            commands=("plex",),
             subscribes=("media.organized",),
         )
         media_core = CoreClient(self.broker.socket_path, "media-token")
+        open_core = CoreClient(self.broker.socket_path, "open-token")
         renaming_core = CoreClient(self.broker.socket_path, "renaming-token")
         plex_core = CoreClient(self.broker.socket_path, "plex-token")
+        controls = {
+            "media-search": [],
+            "open115": [],
+            "renaming": [],
+            "plex-management": [],
+        }
 
         async def search_command(_request):
             return {"actions": [], "operation": {
@@ -155,15 +184,16 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
                 "chat_id": 10,
                 "user_id": 1,
                 "state": "handed_off",
-                "stage": "handoff_renaming",
-                "status_text": "搜索已确认，交给 renaming。",
+                "stage": "handoff_open115",
+                "status_text": "搜索已确认，交给 open115。",
                 "control": "cancel",
                 "revision": 2,
-                "next_plugin_id": "renaming",
+                "next_plugin_id": "open115",
             }
             await media_core.report_operation(handoff)
-            await media_core.publish_event(
-                "download.completed",
+            await media_core.call_capability(
+                "download.provider",
+                "submit",
                 {
                     "operation_id": operation_id,
                     "operation_revision": 2,
@@ -171,9 +201,45 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
                     "user_id": 1,
                     "final_path": "/Downloads/Movie",
                 },
-                idempotency_key="real-download-completed",
+                idempotency_key="real-download-submit",
             )
             return {"actions": [], "operation": handoff}
+
+        async def open_download(request):
+            payload = request["payload"]
+            await open_core.report_operation({
+                "operation_id": payload["operation_id"],
+                "chat_id": payload["chat_id"],
+                "user_id": payload["user_id"],
+                "state": "running",
+                "stage": "downloading",
+                "status_text": "115 正在下载。",
+                "control": "cancel",
+                "revision": payload["operation_revision"] + 1,
+            })
+            handoff_revision = payload["operation_revision"] + 2
+            handoff = {
+                "operation_id": payload["operation_id"],
+                "chat_id": payload["chat_id"],
+                "user_id": payload["user_id"],
+                "state": "handed_off",
+                "stage": "handoff_renaming",
+                "status_text": "115 下载完成，交给 renaming。",
+                "control": "cancel",
+                "revision": handoff_revision,
+                "next_plugin_id": "renaming",
+            }
+            await open_core.report_operation(handoff)
+            await open_core.publish_event(
+                "download.completed",
+                {
+                    **payload,
+                    "operation_revision": handoff_revision,
+                    "final_path": "/Downloads/Movie",
+                },
+                idempotency_key="real-download-completed",
+            )
+            return {"accepted": True, "operation": handoff}
 
         async def rename_event(request):
             payload = request["payload"]
@@ -212,7 +278,7 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
 
         async def plex_event(request):
             payload = request["payload"]
-            await plex_core.report_operation({
+            running = {
                 "operation_id": payload["operation_id"],
                 "chat_id": payload["chat_id"],
                 "user_id": payload["user_id"],
@@ -221,35 +287,68 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
                 "status_text": "Plex 已入队。",
                 "control": "cancel",
                 "revision": payload["operation_revision"] + 1,
-            })
-            await plex_core.report_operation({
-                "operation_id": payload["operation_id"],
-                "chat_id": payload["chat_id"],
-                "user_id": payload["user_id"],
-                "state": "completed",
-                "stage": "completed",
-                "status_text": "Plex 管理完成。",
-                "control": "",
-                "revision": payload["operation_revision"] + 2,
-            })
+            }
+            await plex_core.report_operation(running)
             return {"accepted": True}
 
-        media_client = await self._start_runtime(
-            media_manifest,
-            "media-token",
-            commands={"search": search_command},
-            callbacks={"media-search": confirm_callback},
+        async def passive_control(plugin_id, request):
+            controls[plugin_id].append(dict(request))
+            raise AssertionError(f"control reached stale owner {plugin_id}")
+
+        async def plex_control(request):
+            controls["plex-management"].append(dict(request))
+            record = self.coordinator.get(operation_id)
+            terminal = {
+                "operation_id": operation_id,
+                "chat_id": 10,
+                "user_id": 1,
+                "state": "cancelled",
+                "stage": record.stage,
+                "status_text": "Plex 任务已取消。",
+                "control": "",
+                "revision": record.revision + 1,
+            }
+            await plex_core.report_operation(terminal)
+            return {"actions": [], "operation": terminal}
+
+        await self._start_runtime(
+            open_manifest,
+            "open-token",
+            capabilities={"download.provider": open_download},
+            operation_control=lambda request: passive_control("open115", request),
         )
         await self._start_runtime(
             renaming_manifest,
             "renaming-token",
             events={"download.completed": rename_event},
+            operation_control=lambda request: passive_control("renaming", request),
         )
         await self._start_runtime(
             plex_manifest,
             "plex-token",
             events={"media.organized": plex_event},
+            operation_control=plex_control,
         )
+        media_client = await self._start_runtime(
+            media_manifest,
+            "media-token",
+            commands={"search": search_command},
+            callbacks={"media-search": confirm_callback},
+            operation_control=lambda request: passive_control("media-search", request),
+        )
+
+        command_names = [item.command for item in build_bot_commands(self.router)]
+        for command in ("search", "magnet", "renaming_config", "plex"):
+            self.assertIn(command, command_names)
+        menu_bot = SimpleNamespace(set_my_commands=AsyncMock())
+        self.assertTrue(await sync_bot_commands(
+            SimpleNamespace(bot=menu_bot), self.router
+        ))
+        synced = [
+            item.command
+            for item in menu_bot.set_my_commands.await_args.args[0]
+        ]
+        self.assertEqual(synced, command_names)
 
         opened = await media_client.request(
             "command.dispatch",
@@ -264,12 +363,55 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
         )
 
         async with asyncio.timeout(3):
-            while self.coordinator.get(operation_id).state != "completed":
+            while self.coordinator.get(operation_id).plugin_id != "plex-management":
                 await asyncio.sleep(0.01)
 
         record = self.coordinator.get(operation_id)
         self.assertEqual(record.plugin_id, "plex-management")
-        self.assertEqual(record.stage, "completed")
+        self.assertEqual(record.stage, "scanning")
+        self.assertIsNotNone(self.coordinator.active(10, 1))
+        async with asyncio.timeout(1):
+            while not self.ownership or self.ownership[-1] != "plex-management":
+                await asyncio.sleep(0.01)
+        owners = []
+        for plugin_id in self.ownership:
+            if not owners or owners[-1] != plugin_id:
+                owners.append(plugin_id)
+        self.assertEqual(
+            owners,
+            ["media-search", "open115", "renaming", "plex-management"],
+        )
+
+        bot = SimpleNamespace(
+            send_message=AsyncMock(
+                return_value=SimpleNamespace(message_id=90)
+            ),
+            edit_message_text=AsyncMock(),
+        )
+        application = SimpleNamespace(bot=bot, bot_data={
+            "telepiplex_interaction_coordinator": self.coordinator,
+            "telepiplex_plugin_router": self.router,
+        })
+        query = SimpleNamespace(
+            data=f"core-operation:cancel:{operation_id}",
+            answer=AsyncMock(),
+            message=SimpleNamespace(message_id=90),
+        )
+        update = SimpleNamespace(
+            effective_chat=SimpleNamespace(id=10),
+            effective_user=SimpleNamespace(id=1),
+            effective_message=SimpleNamespace(text=None),
+            callback_query=query,
+        )
+        await operation_control_callback(
+            update, SimpleNamespace(application=application, bot=bot)
+        )
+
+        self.assertEqual(len(controls["plex-management"]), 1)
+        self.assertEqual(controls["media-search"], [])
+        self.assertEqual(controls["open115"], [])
+        self.assertEqual(controls["renaming"], [])
+        self.assertEqual(self.coordinator.get(operation_id).state, "cancelled")
         self.assertIsNone(self.coordinator.active(10, 1))
         self.assertEqual(self.journal.pending("renaming"), [])
         self.assertEqual(self.journal.pending("plex-management"), [])

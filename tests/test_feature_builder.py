@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import zipfile
+import os
 from pathlib import Path
 
 
@@ -13,6 +14,26 @@ def _write_wheel(path: Path, metadata: str):
 
 
 class FeatureBuilderTest(unittest.TestCase):
+    def test_coordinated_feature_1_1_artifact_set_when_supplied(self):
+        from app.core.plugin_artifact import verify_tpx
+
+        raw = os.environ.get("TELEPIPLEX_OPERATION_ARTIFACTS", "")
+        if not raw:
+            self.skipTest(
+                "set TELEPIPLEX_OPERATION_ARTIFACTS for the release matrix"
+            )
+        artifacts = [Path(value) for value in raw.split(os.pathsep) if value]
+        self.assertEqual(len(artifacts), 4)
+        verified = [verify_tpx(path) for path in artifacts]
+        self.assertEqual(
+            {item.manifest.plugin_id for item in verified},
+            {"media-search", "open115", "renaming", "plex-management"},
+        )
+        for artifact in verified:
+            with self.subTest(plugin_id=artifact.manifest.plugin_id):
+                self.assertEqual(artifact.manifest.version, "1.1.0")
+                self.assertTrue(artifact.manifest.supports_core("1.1"))
+
     def test_builds_installable_echo_tpx_from_source_branch(self):
         from app.core.plugin_artifact import verify_tpx
         from tools.build_feature import build_feature_artifact

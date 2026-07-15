@@ -246,11 +246,24 @@ class InteractionCoordinator:
         )
 
     def interrupt_unconfirmed(
-        self, confirmed_operation_ids: set[str]
+        self,
+        confirmed_operation_ids: set[str],
+        expected: dict[str, tuple[str, int]] | None = None,
     ) -> list[OperationRecord]:
         confirmed = {str(value) for value in confirmed_operation_ids}
+        baseline = {
+            str(operation_id): (str(owner), int(revision))
+            for operation_id, (owner, revision) in (expected or {}).items()
+        }
         return self._interrupt_matching(
-            lambda record: record.operation_id not in confirmed
+            lambda record: (
+                record.operation_id not in confirmed
+                and (
+                    expected is None
+                    or baseline.get(record.operation_id)
+                    == (record.plugin_id, record.revision)
+                )
+            )
         )
 
     def _interrupt_matching(self, predicate) -> list[OperationRecord]:

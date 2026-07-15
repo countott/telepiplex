@@ -394,6 +394,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
                     callback_query=SimpleNamespace(
                         data=data,
                         answer=AsyncMock(),
+                        message=SimpleNamespace(message_id=55),
                     ),
                 )
 

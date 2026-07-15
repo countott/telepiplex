@@ -66,8 +66,19 @@ class OperationReportSink:
             submitted_revision = int(report.get("revision"))
         except (TypeError, ValueError):
             submitted_revision = 0
+        accepted = (
+            submitted_revision == record.revision
+            and str(plugin_id) == record.plugin_id
+            and int(report.get("chat_id") or 0) == record.chat_id
+            and int(report.get("user_id") or 0) == record.user_id
+            and str(report.get("state") or "") == record.state
+            and str(report.get("stage") or "") == record.stage
+            and str(report.get("control") or "") == record.control
+            and str(report.get("next_plugin_id") or "")
+            == record.next_plugin_id
+        )
         return {
-            "accepted": submitted_revision == record.revision,
+            "accepted": accepted,
             "operation_id": record.operation_id,
             "state": record.state,
             "revision": record.revision,
@@ -114,7 +125,14 @@ async def operation_gate(update, context):
                 for row in _feature_status_rows(record, router)
                 for button in row
             }
-            if data in allowed:
+            callback_message_id = getattr(
+                getattr(query, "message", None), "message_id", None
+            )
+            if (
+                data in allowed
+                and record.message_id is not None
+                and callback_message_id == record.message_id
+            ):
                 return
         await query.answer("当前任务执行中")
         raise ApplicationHandlerStop
@@ -180,24 +198,104 @@ async def operation_control_callback(update, context):
         await query.answer("正在回滚配置...")
         await render_operation(context.application, None, rolling)
         return
+    await query.answer("处理中...")
+    # Answering a Telegram callback yields control.  A Feature handoff may be
+    # accepted while that happens, so route the request from a fresh ownership
+    # snapshot instead of the record used to validate the button.
+    current = coordinator.get(record.operation_id)
+    if current is None:
+        return
+    if current.state in TERMINAL_STATES or current.state in _CONTROL_IN_PROGRESS_STATES:
+        await render_operation(context.application, None, current)
+        return
+    if current.control != action:
+        await render_operation(context.application, None, current)
+        return
+    record = current
     router = context.application.bot_data.get(ROUTER_KEY)
     route = router.plugin_route(record.plugin_id) if router is not None else None
     if route is None:
-        await query.answer("任务执行器不可用")
         return
 
-    await query.answer("处理中...")
     try:
-        result = await route.client.request(
-            "operation.control",
-            {
-                "operation_id": record.operation_id,
-                "action": action,
-                "revision": record.revision,
-            },
-            deadline=30,
-            idempotency_key=f"operation-control:{record.operation_id}:{action}",
-        )
+        result = None
+        deadline_at = asyncio.get_running_loop().time() + 30
+        seen_snapshots = set()
+        seen_owners = set()
+        while len(seen_snapshots) < 8 and len(seen_owners) < 4:
+            dispatched = record
+            dispatched_key = (dispatched.plugin_id, dispatched.revision)
+            seen_snapshots.add(dispatched_key)
+            seen_owners.add(dispatched.plugin_id)
+            remaining = deadline_at - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError("operation control deadline exceeded")
+            try:
+                result = await route.client.request(
+                    "operation.control",
+                    {
+                        "operation_id": dispatched.operation_id,
+                        "action": action,
+                        "revision": dispatched.revision,
+                    },
+                    deadline=remaining,
+                    idempotency_key=(
+                        f"operation-control:{dispatched.operation_id}:{action}"
+                    ),
+                )
+            except Exception:
+                latest = coordinator.get(dispatched.operation_id)
+                next_route = (
+                    router.plugin_route(latest.plugin_id)
+                    if latest is not None and router is not None else None
+                )
+                if (
+                    latest is not None
+                    and (
+                        latest.plugin_id != dispatched.plugin_id
+                        or latest.revision != dispatched.revision
+                    )
+                    and latest.state not in TERMINAL_STATES
+                    and latest.state not in _CONTROL_IN_PROGRESS_STATES
+                    and latest.control == action
+                    and next_route is not None
+                    and (latest.plugin_id, latest.revision) not in seen_snapshots
+                    and (
+                        latest.plugin_id in seen_owners
+                        or len(seen_owners) < 4
+                    )
+                ):
+                    record = latest
+                    route = next_route
+                    continue
+                raise
+            latest = coordinator.get(dispatched.operation_id)
+            ownership_changed = latest is not None and (
+                latest.plugin_id != dispatched.plugin_id
+                or latest.revision != dispatched.revision
+            )
+            if not (
+                ownership_changed
+                and latest.state not in TERMINAL_STATES
+                and latest.state not in _CONTROL_IN_PROGRESS_STATES
+                and latest.control == action
+                and (latest.plugin_id, latest.revision) not in seen_snapshots
+                and (
+                    latest.plugin_id in seen_owners
+                    or len(seen_owners) < 4
+                )
+            ):
+                record = dispatched
+                break
+            next_route = (
+                router.plugin_route(latest.plugin_id)
+                if router is not None else None
+            )
+            if next_route is None:
+                record = dispatched
+                break
+            record = latest
+            route = next_route
         normalized = _normalize_control_result(record, result)
         from app.handlers.plugin_handler import handle_feature_result
 
@@ -344,7 +442,12 @@ async def recover_active_operations(application, router, coordinator):
     confirmed: set[str] = set()
     deferred: set[str] = set()
     rendered: list[OperationRecord] = []
-    for record in coordinator.active_records():
+    baseline_records = coordinator.active_records()
+    baseline = {
+        record.operation_id: (record.plugin_id, record.revision)
+        for record in baseline_records
+    }
+    for record in baseline_records:
         route = router.plugin_route(record.plugin_id) if router is not None else None
         if route is None:
             continue
@@ -377,7 +480,18 @@ async def recover_active_operations(application, router, coordinator):
                 "Feature 任务恢复确认失败："
                 f"operation_id={record.operation_id}, error={type(exc).__name__}",
             )
-    interrupted = coordinator.interrupt_unconfirmed(confirmed | deferred)
+    for operation_id, expected in baseline.items():
+        current = coordinator.get(operation_id)
+        if (
+            current is not None
+            and current.state not in TERMINAL_STATES
+            and (current.plugin_id, current.revision) != expected
+        ):
+            deferred.add(operation_id)
+    interrupted = coordinator.interrupt_unconfirmed(
+        confirmed | deferred,
+        expected=baseline,
+    )
     deferred_records = [
         coordinator.get(operation_id) for operation_id in sorted(deferred)
     ]
@@ -400,12 +514,51 @@ async def reconcile_deferred_operations(
     coordinator,
     *,
     retry_interval=5,
+    max_attempts=3,
 ):
     """Keep a persisted gate closed until its Feature snapshot is authoritative."""
+    failures: dict[tuple[str, str, int], int] = {}
     while True:
         result = await recover_active_operations(application, router, coordinator)
         if not result["deferred"]:
             return result
+        current_keys = set()
+        exhausted = {}
+        live_deferred = []
+        for operation_id in result["deferred"]:
+            record = coordinator.get(operation_id)
+            if record is None or record.state in TERMINAL_STATES:
+                continue
+            live_deferred.append(operation_id)
+            key = (record.operation_id, record.plugin_id, record.revision)
+            current_keys.add(key)
+            failures[key] = failures.get(key, 0) + 1
+            if failures[key] >= max(1, int(max_attempts)):
+                exhausted[record.operation_id] = (
+                    record.plugin_id, record.revision
+                )
+        result["deferred"] = live_deferred
+        if not live_deferred:
+            return result
+        failures = {
+            key: count for key, count in failures.items()
+            if key in current_keys
+        }
+        if exhausted:
+            interrupted = coordinator.interrupt_unconfirmed(
+                set(), expected=exhausted
+            )
+            for record in interrupted:
+                await render_operation(application, router, record)
+            result["interrupted"] = [
+                *result["interrupted"], *interrupted
+            ]
+            result["deferred"] = [
+                operation_id for operation_id in result["deferred"]
+                if operation_id not in exhausted
+            ]
+            if not result["deferred"]:
+                return result
         await asyncio.sleep(max(0.01, float(retry_interval)))
 
 
