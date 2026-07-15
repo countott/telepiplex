@@ -575,7 +575,7 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
 class FeatureSourceContractTest(unittest.TestCase):
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("dist/renaming-1.0.2.tpx", source)
+        self.assertIn("dist/renaming-1.0.3.tpx", source)
         self.assertNotIn("dist/renaming-1.0.0.tpx", source)
 
     def test_source_has_no_core_telegram_or_init_imports(self):
