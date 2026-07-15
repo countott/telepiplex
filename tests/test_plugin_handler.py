@@ -66,7 +66,7 @@ class FakeManager:
     def config(self, plugin_id):
         return {"plugin_id": plugin_id, "config": deepcopy(self.configs[plugin_id])}
 
-    async def configure(self, plugin_id, value):
+    async def configure(self, plugin_id, value, should_cancel=None):
         self.configurations.append((plugin_id, deepcopy(value)))
         self.configs[plugin_id] = deepcopy(value)
         return SimpleNamespace(
@@ -166,6 +166,93 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(record.stage, "config_apply")
             self.assertIsNone(coordinator.active(10, 1))
 
+    async def test_config_apply_rollback_is_owned_by_core_task(self):
+        from app.core.interaction_coordinator import InteractionCoordinator
+        from app.core.plugin_manager import PluginOperationError
+        from app.handlers.interaction_handler import operation_control_callback
+        from app.handlers.plugin_handler import handle_feature_result
+
+        class BlockingManager(FakeManager):
+            def __init__(self):
+                super().__init__()
+                self.started = asyncio.Event()
+
+            async def configure(self, plugin_id, value, should_cancel=None):
+                self.configurations.append((plugin_id, deepcopy(value)))
+                self.started.set()
+                while should_cancel is not None and not should_cancel():
+                    await asyncio.sleep(0)
+                raise PluginOperationError(
+                    "config_cancelled", "configuration cancelled"
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "core.db")
+            self.addCleanup(coordinator.close)
+            update, context, _unused = self._request([], user_id=1)
+            manager = BlockingManager()
+            route = SimpleNamespace(
+                plugin_id="media-search",
+                manifest=SimpleNamespace(callbacks=("media-search",)),
+                client=SimpleNamespace(request=AsyncMock()),
+            )
+            router = Mock()
+            router.plugin_route.return_value = route
+            context.application.bot = SimpleNamespace(
+                send_message=AsyncMock(
+                    return_value=SimpleNamespace(message_id=80)
+                ),
+                edit_message_text=AsyncMock(),
+            )
+            context.application.bot_data.update({
+                "telepiplex_plugin_manager": manager,
+                "telepiplex_plugin_router": router,
+                "telepiplex_interaction_coordinator": coordinator,
+            })
+            applying = asyncio.create_task(handle_feature_result(
+                update,
+                context,
+                route,
+                {
+                    "actions": [],
+                    "session": {"state": "close"},
+                    "config_patch": {"ai": {"model": "new-model"}},
+                    "operation": {
+                        "operation_id": "op-config-rollback",
+                        "chat_id": 10,
+                        "user_id": 1,
+                        "state": "running",
+                        "stage": "config_apply",
+                        "status_text": "正在保存配置",
+                        "control": "cancel",
+                        "revision": 4,
+                    },
+                },
+            ))
+            await manager.started.wait()
+            record = coordinator.get("op-config-rollback")
+            self.assertEqual(record.control, "rollback")
+
+            query = SimpleNamespace(
+                data="core-operation:rollback:op-config-rollback",
+                answer=AsyncMock(),
+            )
+            control_update = SimpleNamespace(
+                effective_chat=SimpleNamespace(id=10),
+                effective_user=SimpleNamespace(id=1),
+                callback_query=query,
+            )
+            await operation_control_callback(control_update, context)
+            await applying
+
+            self.assertEqual(
+                coordinator.get("op-config-rollback").state,
+                "rolled_back",
+            )
+            self.assertIsNone(coordinator.active(10, 1))
+            route.client.request.assert_not_awaited()
+            query.answer.assert_awaited_once_with("正在回滚配置...")
+
     async def test_feature_result_persists_operation_and_injects_missing_exit(self):
         from app.core.interaction_coordinator import InteractionCoordinator
         from app.handlers.plugin_handler import handle_feature_result
@@ -248,6 +335,81 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertIsNone(coordinator.active(10, 1))
             self.assertEqual(coordinator.get("op-1").state, "cancelled")
+
+    async def test_feature_result_persists_only_current_prompt_callbacks(self):
+        from app.core.interaction_coordinator import InteractionCoordinator
+        from app.handlers.interaction_handler import operation_gate
+        from app.handlers.plugin_handler import handle_feature_result
+        from telegram.ext import ApplicationHandlerStop
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "core.db")
+            self.addCleanup(coordinator.close)
+            update, context, _manager = self._request([], user_id=1)
+            update.effective_message.reply_text.return_value = SimpleNamespace(
+                message_id=55
+            )
+            context.application.bot = SimpleNamespace(
+                send_message=AsyncMock(), edit_message_text=AsyncMock()
+            )
+            route = SimpleNamespace(
+                plugin_id="media-search",
+                manifest=SimpleNamespace(callbacks=("media-search",)),
+            )
+            router = Mock()
+            router.plugin_route.return_value = route
+            context.application.bot_data.update({
+                "telepiplex_interaction_coordinator": coordinator,
+                "telepiplex_plugin_router": router,
+            })
+
+            await handle_feature_result(update, context, route, {
+                "actions": [{
+                    "kind": "send_message",
+                    "text": "请选择",
+                    "data": {"keyboard": [[{
+                        "text": "当前选项",
+                        "callback_data": "media-search:release:current",
+                    }]]},
+                }],
+                "session": {"state": "open"},
+                "operation": {
+                    "operation_id": "op-current-prompt",
+                    "chat_id": 10,
+                    "user_id": 1,
+                    "state": "awaiting_input",
+                    "stage": "release_selection",
+                    "status_text": "请选择",
+                    "control": "exit",
+                    "revision": 1,
+                    "details": {},
+                },
+            })
+
+            def callback_request(data):
+                return SimpleNamespace(
+                    effective_chat=SimpleNamespace(id=10),
+                    effective_user=SimpleNamespace(id=1),
+                    effective_message=SimpleNamespace(text=None),
+                    callback_query=SimpleNamespace(
+                        data=data,
+                        answer=AsyncMock(),
+                    ),
+                )
+
+            current = callback_request("media-search:release:current")
+            await operation_gate(current, context)
+            stale = callback_request("media-search:release:stale")
+            with self.assertRaises(ApplicationHandlerStop):
+                await operation_gate(stale, context)
+
+            self.assertEqual(
+                coordinator.get("op-current-prompt").details["keyboard"][0][0][
+                    "callback_data"
+                ],
+                "media-search:release:current",
+            )
+            stale.callback_query.answer.assert_awaited_once_with("当前任务执行中")
 
     async def test_feature_config_patch_from_callback_updates_original_message(self):
         from app.handlers.plugin_handler import handle_feature_result

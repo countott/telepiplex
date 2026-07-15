@@ -145,6 +145,9 @@ class InteractionCoordinator:
                 else:
                     current = self._from_row(row)
                     self._validate_existing_owner(current, values)
+                    if current.state in TERMINAL_STATES:
+                        self._connection.execute("COMMIT")
+                        return current
                     if values["revision"] <= current.revision:
                         self._connection.execute("COMMIT")
                         return current
@@ -316,7 +319,9 @@ class InteractionCoordinator:
             )
         if current.plugin_id == values["plugin_id"]:
             if current.state == "handed_off" and values["revision"] > current.revision:
-                if values["state"] in TERMINAL_STATES:
+                if values["state"] in TERMINAL_STATES | {
+                    "cancelling", "rolling_back"
+                }:
                     return
                 raise InteractionError(
                     "handoff_pending", "only the declared Feature may accept this handoff"

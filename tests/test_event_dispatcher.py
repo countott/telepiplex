@@ -134,6 +134,65 @@ class EventDispatcherTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await dispatcher.deliver_once(), 1)
             self.assertEqual(journal.pending("renaming"), [])
 
+    async def test_terminal_operation_acks_pending_handoff_without_delivery(self):
+        from app.core.capability_router import CapabilityRouter
+        from app.core.event_dispatcher import EventDispatcher
+        from app.core.event_journal import EventJournal
+        from app.core.interaction_coordinator import InteractionCoordinator
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = Path(tmpdir) / "core.db"
+            journal = EventJournal(database)
+            coordinator = InteractionCoordinator(database)
+            self.addCleanup(journal.close)
+            self.addCleanup(coordinator.close)
+            router = CapabilityRouter()
+            client = SubscriberClient()
+            client.fail = False
+            subscriber = manifest("renaming", subscribes=("download.completed",))
+            router.activate("renaming", subscriber, client)
+            journal.set_subscriptions("renaming", subscriber.subscribes)
+            report = {
+                "operation_id": "op-cancelled-handoff",
+                "chat_id": 10,
+                "user_id": 1,
+                "state": "running",
+                "stage": "downloading",
+                "status_text": "下载中",
+                "control": "cancel",
+                "revision": 1,
+            }
+            coordinator.report("open115", report)
+            coordinator.report("open115", {
+                **report,
+                "state": "handed_off",
+                "stage": "handoff_renaming",
+                "next_plugin_id": "renaming",
+                "revision": 2,
+            })
+            journal.publish(
+                "download.completed",
+                {"operation_id": "op-cancelled-handoff"},
+                "cancelled-handoff",
+            )
+            coordinator.report("open115", {
+                **report,
+                "state": "cancelled",
+                "stage": "handoff_renaming",
+                "control": "",
+                "revision": 3,
+            })
+            dispatcher = EventDispatcher(
+                router,
+                journal,
+                operation_coordinator=coordinator,
+            )
+
+            self.assertEqual(await dispatcher.deliver_once(), 1)
+            self.assertEqual(journal.pending("renaming"), [])
+            self.assertEqual(client.calls, [])
+            self.assertEqual(journal.dead_letters("renaming"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

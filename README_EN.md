@@ -27,6 +27,18 @@ plugins:
   restart_limit: 3
 ```
 
+## Core API 1.1 and Telegram interactions
+
+Core API 1.1 remains startup-compatible with API 1.0 Features and adds persisted operation status, explicit exit/cancel/rollback controls, cross-Feature handoff, and process-restart recovery for 1.1 Features. Both `/start` and Telegram's native command menu are generated from the manifests of currently enabled, routable Features. Disabled, dependency-blocked, and Core-reserved commands are not advertised as executable.
+
+Each user may own only one active interaction at a time. While input is requested, Core accepts only ordinary text or callback IDs shown by the current status message. While work is running, cancelling, or rolling back, unrelated commands and stale buttons are blocked. Controls mean:
+
+- **Exit** ends a pre-execution interaction without business changes.
+- **Cancel task** stops later polling and pipeline stages and reports the actual stop point; already-completed remote effects are not described as rolled back when no exact inverse exists.
+- **Cancel and roll back** appears only while every completed change has a stable identity and verified inverse. Conflicts or restore failures produce an explicit partial-rollback result with remaining objects.
+
+Core owns configuration writes and Feature route switching as one coordinated task. Cancellation restores the previous configuration and route when verification succeeds and otherwise reports manual checks. Cancelling a 115 download never deletes downloaded content; an offline-task record is removed only when an exact InfoHash is known, using the mode that preserves source files.
+
 ## Feature installation and updates
 
 Feature branches are development source. Runtime releases are immutable `.tpx` artifacts built from those branches. The container never checks out Git branches and Core images never contain business source code.
@@ -68,18 +80,20 @@ An existing absolute `.tpx` path is also accepted by `install` and `update`. Cor
 Core, Features, and the catalog publish independently. Only a `core-v<semver>` tag builds Core; for example, the next Core release is:
 
 ```bash
-git tag core-v1.0.7
-git push origin core-v1.0.7
+git tag core-v1.1.0
+git push origin core-v1.1.0
 ```
 
-That workflow first pushes the `linux/amd64` Core image `ghcr.io/<owner>/telepiplex-core:1.0.7` and `latest`, then creates the `core-v1.0.7` same-tag GitHub Release explicitly marked **Latest**. A Core Release has no Feature, catalog, or other assets and does not change a Feature. Each of the four Features has its own tag family, with the current releases represented by:
+That workflow first pushes the `linux/amd64` Core image `ghcr.io/<owner>/telepiplex-core:1.1.0` and `latest`, then creates the `core-v1.1.0` same-tag GitHub Release explicitly marked **Latest**. A Core Release has no Feature, catalog, or other assets and does not change a Feature. Each of the four Features has its own tag family, with the current releases represented by:
 
 ```bash
-git tag open115-v1.0.2
-git tag media-search-v1.0.2
-git tag renaming-v1.0.2
-git tag plex-management-v1.0.2
+git tag open115-v1.1.0
+git tag media-search-v1.1.0
+git tag renaming-v1.1.0
+git tag plex-management-v1.1.0
 ```
+
+The release order is fixed: publish and restart Core 1.1 first, then publish/update the 1.1 Features one at a time, and only then move the catalog to those artifacts. Do not offer a Feature declaring `core_api: ">=1.1,<2.0"` to an environment still running Core 1.0. Existing 1.0 Features may continue on Core 1.1, but full coordinated-operation behavior requires the 1.1 Feature releases.
 
 Each Feature tag builds or reuses exactly one immutable `.tpx`, creates that Feature's GitHub Release, and optimistically merges the result into the `catalog` branch. Feature Releases are created with `--latest=false`, so they never take the repository's **Latest** label; Latest always belongs to the most recently successful `core-v<semver>` Release. The branch holds the complete `catalog.yaml` and `catalog.yaml.sha256`; every HTTPS asset is pinned to its real SHA-256, Feature branch, and commit, with `provides` / `requires` capability metadata derived from the verified manifest.
 

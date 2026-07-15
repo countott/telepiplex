@@ -350,6 +350,38 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.supervisor.process("echo"), old)
         self.assertIn(("echo", "1.0.0"), self.supervisor.resumed)
 
+    async def test_configure_cancellation_after_drain_restores_old_route(self):
+        from app.core.plugin_manager import PluginOperationError
+
+        schema, default = self._editable_config()
+        await self.manager.install(self._artifact(
+            config_schema=schema,
+            config_default=default,
+        ))
+        old = self.supervisor.process("echo")
+        checks = 0
+
+        def should_cancel():
+            nonlocal checks
+            checks += 1
+            return checks >= 2
+
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.configure(
+                "echo",
+                {"prefix": "new"},
+                should_cancel=should_cancel,
+            )
+
+        self.assertEqual(raised.exception.code, "config_cancelled")
+        self.assertEqual(
+            self.store.read_config(self.store.active("echo")),
+            {"prefix": "old"},
+        )
+        self.assertIs(self.supervisor.process("echo"), old)
+        self.assertEqual(old.state, "healthy")
+        self.assertIn(("echo", "1.0.0"), self.supervisor.resumed)
+
     async def test_configure_failed_shadow_restores_old_config_and_route(self):
         from app.core.plugin_manager import PluginOperationError
 

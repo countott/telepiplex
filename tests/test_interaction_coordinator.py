@@ -170,6 +170,49 @@ class InteractionCoordinatorTest(unittest.TestCase):
         self.assertEqual(failed.state, "failed")
         self.assertIsNone(self.coordinator.active(10, 1))
 
+    def test_source_may_enter_cancelling_during_provisional_handoff(self):
+        self.coordinator.report("media-search", self.report())
+        self.coordinator.report(
+            "media-search",
+            self.report(
+                state="handed_off",
+                next_plugin_id="open115",
+                revision=2,
+            ),
+        )
+
+        cancelling = self.coordinator.report(
+            "media-search",
+            self.report(
+                state="cancelling",
+                stage="submitting_download",
+                revision=3,
+            ),
+        )
+
+        self.assertEqual(cancelling.state, "cancelling")
+        self.assertEqual(cancelling.next_plugin_id, "")
+        self.assertEqual(self.coordinator.active(10, 1), cancelling)
+
+    def test_terminal_state_ignores_late_higher_revision_from_same_feature(self):
+        self.coordinator.report("media-search", self.report())
+        terminal = self.coordinator.report(
+            "media-search",
+            self.report(state="cancelled", control="", revision=2),
+        )
+
+        late = self.coordinator.report(
+            "media-search",
+            self.report(
+                state="running",
+                stage="late-result",
+                revision=99,
+            ),
+        )
+
+        self.assertEqual(late, terminal)
+        self.assertIsNone(self.coordinator.active(10, 1))
+
     def test_late_revision_cannot_overwrite_cancelled_state(self):
         self.coordinator.report("media-search", self.report())
         current = self.coordinator.report(

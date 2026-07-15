@@ -505,8 +505,21 @@ class PluginManager:
                 "Feature store, process, route, manifest, or schema is inconsistent",
             )
 
-    async def configure(self, plugin_id: str, value: dict) -> PluginOperationResult:
+    async def configure(
+        self,
+        plugin_id: str,
+        value: dict,
+        *,
+        should_cancel=None,
+    ) -> PluginOperationResult:
         async with self._lifecycle_lock:
+            def raise_if_cancelled():
+                if should_cancel is not None and should_cancel():
+                    raise PluginOperationError(
+                        "config_cancelled",
+                        "Feature configuration change was cancelled",
+                    )
+
             release = self.store.active(str(plugin_id))
             if release is None:
                 raise PluginOperationError("not_installed", "Feature is not installed")
@@ -524,11 +537,27 @@ class PluginManager:
             )
             if old_process is None:
                 try:
+                    raise_if_cancelled()
                     await asyncio.to_thread(
                         self.store.write_config,
                         release,
                         validated,
                     )
+                    raise_if_cancelled()
+                except PluginOperationError as exc:
+                    if exc.code == "config_cancelled":
+                        try:
+                            await asyncio.to_thread(
+                                self.store.write_config,
+                                release,
+                                previous,
+                            )
+                        except Exception as restore_exc:
+                            raise PluginOperationError(
+                                "config_rollback_failed",
+                                type(restore_exc).__name__,
+                            ) from None
+                    raise
                 except StoreError as exc:
                     raise self._operation_error(exc, "config_write_failed") from None
                 self._active_configs[release.plugin_id] = deepcopy(validated)
@@ -548,6 +577,7 @@ class PluginManager:
             old_drained = False
             config_written = False
             try:
+                raise_if_cancelled()
                 drained = await self.supervisor.drain(
                     old_process,
                     timeout=self.drain_timeout,
@@ -562,13 +592,16 @@ class PluginManager:
                         {"active_task_ids": list(drained.interrupted_task_ids)},
                     )
 
+                raise_if_cancelled()
                 await asyncio.to_thread(
                     self.store.write_config,
                     release,
                     validated,
                 )
                 config_written = True
+                raise_if_cancelled()
                 new_process = await self.supervisor.start(release, shadow=True)
+                raise_if_cancelled()
                 prepared = self.router.prepare_activation(
                     release.plugin_id,
                     release.manifest,
@@ -576,9 +609,11 @@ class PluginManager:
                 )
                 self.router.commit(prepared)
                 route_committed = True
+                raise_if_cancelled()
                 self.supervisor.promote(new_process)
                 await self._verify_stable(new_process)
                 self.assert_active_consistency(release)
+                raise_if_cancelled()
                 await self.supervisor.stop(old_process)
                 self._active_configs[release.plugin_id] = deepcopy(validated)
                 return PluginOperationResult(
@@ -592,6 +627,7 @@ class PluginManager:
                     },
                 )
             except Exception as exc:
+                recovery_errors = []
                 if new_process is not None:
                     await self._safe_stop(new_process)
                 if config_written:
@@ -601,21 +637,34 @@ class PluginManager:
                             release,
                             previous,
                         )
-                    except Exception:
-                        pass
+                    except Exception as restore_exc:
+                        recovery_errors.append(type(restore_exc).__name__)
                 if route_committed:
-                    self.router.activate(
-                        release.plugin_id,
-                        release.manifest,
-                        self._route_client(old_process),
-                    )
+                    try:
+                        self.router.activate(
+                            release.plugin_id,
+                            release.manifest,
+                            self._route_client(old_process),
+                        )
+                    except Exception as route_exc:
+                        recovery_errors.append(type(route_exc).__name__)
                 if old_drained:
                     try:
                         await self.supervisor.resume(old_process)
                         if route_committed:
                             self.supervisor.promote(old_process)
-                    except Exception:
-                        pass
+                    except Exception as resume_exc:
+                        recovery_errors.append(type(resume_exc).__name__)
+                if (
+                    isinstance(exc, PluginOperationError)
+                    and exc.code == "config_cancelled"
+                    and recovery_errors
+                ):
+                    raise PluginOperationError(
+                        "config_rollback_failed",
+                        "Feature configuration rollback could not be verified",
+                        {"recovery_errors": recovery_errors},
+                    ) from None
                 raise self._operation_error(exc, "config_reload_failed") from None
 
     async def reload_config(self, plugin_id: str) -> PluginOperationResult:

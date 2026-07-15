@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
+import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationHandlerStop
@@ -16,6 +17,8 @@ from app.core.interaction_coordinator import TERMINAL_STATES, OperationRecord
 
 COORDINATOR_KEY = "telepiplex_interaction_coordinator"
 ROUTER_KEY = "telepiplex_plugin_router"
+OPERATION_RECOVERY_TASK_KEY = "telepiplex_operation_recovery_task"
+CONFIG_OPERATION_TASKS_KEY = "telepiplex_config_operation_tasks"
 CONTROL_CALLBACK_PREFIX = "core-operation:"
 CONTROL_CALLBACK_PATTERN = r"^core-operation:"
 _CONTROL_RE = re.compile(
@@ -44,6 +47,7 @@ class OperationReportSink:
         self.coordinator = coordinator
         self._listener = None
         self._tasks: set[asyncio.Task] = set()
+        self._locks: dict[str, asyncio.Lock] = {}
 
     def attach(self, listener):
         self._listener = listener
@@ -71,9 +75,11 @@ class OperationReportSink:
 
     async def _notify(self, record: OperationRecord):
         try:
-            result = self._listener(record)
-            if inspect.isawaitable(result):
-                await result
+            lock = self._locks.setdefault(record.operation_id, asyncio.Lock())
+            async with lock:
+                result = self._listener(record)
+                if inspect.isawaitable(result):
+                    await result
         except Exception as exc:
             _log(
                 "error",
@@ -102,14 +108,13 @@ async def operation_gate(update, context):
         if control is not None and control.group("operation_id") == record.operation_id:
             return
         if record.state == "awaiting_input":
-            namespace, separator, _payload = data.partition(":")
             router = bot_data.get(ROUTER_KEY)
-            route = (
-                router.callback_route(namespace)
-                if separator and router is not None
-                else None
-            )
-            if route is not None and route.plugin_id == record.plugin_id:
+            allowed = {
+                str(button.callback_data)
+                for row in _feature_status_rows(record, router)
+                for button in row
+            }
+            if data in allowed:
                 return
         await query.answer("当前任务执行中")
         raise ApplicationHandlerStop
@@ -150,6 +155,30 @@ async def operation_control_callback(update, context):
     if action != record.control:
         await query.answer("任务状态已更新")
         await render_operation(context.application, None, record)
+        return
+    config_tasks = context.application.bot_data.get(CONFIG_OPERATION_TASKS_KEY)
+    config_task = (
+        config_tasks.get(record.operation_id)
+        if isinstance(config_tasks, dict)
+        else None
+    )
+    if action == "rollback" and isinstance(config_task, dict):
+        config_task["cancel_event"].set()
+        rolling = coordinator.report(record.plugin_id, {
+            "operation_id": record.operation_id,
+            "chat_id": record.chat_id,
+            "user_id": record.user_id,
+            "state": "rolling_back",
+            "stage": "config_apply",
+            "status_text": (
+                "回滚请求已接受；正在停止配置切换并恢复原配置。"
+            ),
+            "control": "",
+            "revision": record.revision + 1,
+            "details": dict(record.details),
+        })
+        await query.answer("正在回滚配置...")
+        await render_operation(context.application, None, rolling)
         return
     router = context.application.bot_data.get(ROUTER_KEY)
     route = router.plugin_route(record.plugin_id) if router is not None else None
@@ -313,6 +342,7 @@ async def render_operation(application, _router, record: OperationRecord):
 
 async def recover_active_operations(application, router, coordinator):
     confirmed: set[str] = set()
+    deferred: set[str] = set()
     rendered: list[OperationRecord] = []
     for record in coordinator.active_records():
         route = router.plugin_route(record.plugin_id) if router is not None else None
@@ -332,16 +362,51 @@ async def recover_active_operations(application, router, coordinator):
             rendered.append(current)
             if current.state not in TERMINAL_STATES:
                 confirmed.add(current.operation_id)
+                if current.state == "awaiting_input":
+                    sessions = application.bot_data.setdefault(
+                        "telepiplex_plugin_sessions", {}
+                    )
+                    sessions[(current.chat_id, current.user_id)] = {
+                        "plugin_id": current.plugin_id,
+                        "expires_at": time.time() + 30 * 60,
+                    }
         except Exception as exc:
+            deferred.add(record.operation_id)
             _log(
                 "warn",
                 "Feature 任务恢复确认失败："
                 f"operation_id={record.operation_id}, error={type(exc).__name__}",
             )
-    interrupted = coordinator.interrupt_unconfirmed(confirmed)
-    for record in [*rendered, *interrupted]:
+    interrupted = coordinator.interrupt_unconfirmed(confirmed | deferred)
+    deferred_records = [
+        coordinator.get(operation_id) for operation_id in sorted(deferred)
+    ]
+    for record in [
+        *rendered,
+        *(item for item in deferred_records if item is not None),
+        *interrupted,
+    ]:
         await render_operation(application, router, record)
-    return {"confirmed": sorted(confirmed), "interrupted": interrupted}
+    return {
+        "confirmed": sorted(confirmed),
+        "deferred": sorted(deferred),
+        "interrupted": interrupted,
+    }
+
+
+async def reconcile_deferred_operations(
+    application,
+    router,
+    coordinator,
+    *,
+    retry_interval=5,
+):
+    """Keep a persisted gate closed until its Feature snapshot is authoritative."""
+    while True:
+        result = await recover_active_operations(application, router, coordinator)
+        if not result["deferred"]:
+            return result
+        await asyncio.sleep(max(0.01, float(retry_interval)))
 
 
 def _snapshot_report(snapshot: dict, operation_id: str):

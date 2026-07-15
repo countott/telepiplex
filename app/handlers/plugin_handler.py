@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import re
+import threading
 import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -11,6 +12,7 @@ from app.core.plugin_manager import PluginOperationError
 from app.core.interaction_coordinator import TERMINAL_STATES
 from app.core.command_catalog import sync_bot_commands
 from app.handlers.interaction_handler import (
+    CONFIG_OPERATION_TASKS_KEY,
     COORDINATOR_KEY,
     operation_markup,
     render_operation,
@@ -466,7 +468,10 @@ async def handle_feature_result(update, context, route, result: dict):
             )
             return
         try:
-            operation_record = coordinator.report(route.plugin_id, operation)
+            operation_record = coordinator.report(
+                route.plugin_id,
+                _with_rendered_keyboard(route, result, operation),
+            )
         except Exception as exc:
             await _feature_feedback(
                 update,
@@ -492,7 +497,7 @@ async def handle_feature_result(update, context, route, result: dict):
         )
     session = result.get("session") if isinstance(result, dict) else None
     if session is None:
-        if operation_record is not None and operation_record.message_id is None:
+        if operation_record is not None and message_id is None:
             await render_operation(context.application, None, operation_record)
         return
     if not isinstance(session, dict) or session.get("state") not in {"open", "close"}:
@@ -528,8 +533,28 @@ async def handle_feature_result(update, context, route, result: dict):
                 "revision": active.revision + 1,
                 "details": dict(active.details),
             })
-    if operation_record is not None and operation_record.message_id is None:
+    if operation_record is not None and message_id is None:
         await render_operation(context.application, None, operation_record)
+
+
+def _with_rendered_keyboard(route, result: dict, operation: dict) -> dict:
+    normalized = deepcopy(operation)
+    actions = result.get("actions") if isinstance(result, dict) else None
+    if not isinstance(actions, list):
+        return normalized
+    for action in reversed(actions):
+        if not isinstance(action, dict):
+            continue
+        data = action.get("data")
+        if not isinstance(data, dict) or "keyboard" not in data:
+            continue
+        if _keyboard_markup(route, data) is False:
+            return normalized
+        details = dict(normalized.get("details") or {})
+        details["keyboard"] = deepcopy(data["keyboard"])
+        normalized["details"] = details
+        return normalized
+    return normalized
 
 
 def merge_nested_patch(current: dict, patch: dict) -> dict:
@@ -570,24 +595,90 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
             prefer_edit=prefer_edit,
         )
         return
+    try:
+        previous = manager.config(route.plugin_id).get("config") or {}
+        configured = merge_nested_patch(previous, patch)
+    except Exception as exc:
+        _finish_feature_config_operation(
+            context, route, result,
+            state="failed",
+            status_text=f"读取旧配置失败：{type(exc).__name__}。",
+        )
+        await _feature_feedback(
+            update,
+            f"❌ config_read_failed：{type(exc).__name__}",
+            prefer_edit=prefer_edit,
+        )
+        return
+    coordinator = context.application.bot_data.get(COORDINATOR_KEY)
+    operation = result.get("operation") if isinstance(result, dict) else None
+    operation_id = str(
+        operation.get("operation_id")
+        if isinstance(operation, dict)
+        else ""
+    )
+    cancel_event = threading.Event()
+    if coordinator is not None and operation_id:
+        record = coordinator.get(operation_id)
+        if record is not None and record.state not in TERMINAL_STATES:
+            coordinator.report(route.plugin_id, {
+                "operation_id": record.operation_id,
+                "chat_id": record.chat_id,
+                "user_id": record.user_id,
+                "state": "running",
+                "stage": "config_apply",
+                "status_text": (
+                    f"正在保存并重新加载 {route.plugin_id} 配置。"
+                ),
+                "control": "rollback",
+                "revision": record.revision + 1,
+                "details": {
+                    **dict(record.details),
+                    "rollback_scope": "feature_config_and_route",
+                },
+            })
+            tasks = context.application.bot_data.setdefault(
+                CONFIG_OPERATION_TASKS_KEY, {}
+            )
+            tasks[operation_id] = {
+                "cancel_event": cancel_event,
+                "plugin_id": route.plugin_id,
+            }
     await _feature_feedback(
         update,
         f"⏳ 正在保存并重新加载 {route.plugin_id} 配置...",
         prefer_edit=prefer_edit,
     )
     try:
-        view = manager.config(route.plugin_id)
-        configured = merge_nested_patch(view.get("config") or {}, patch)
-        outcome = await manager.configure(route.plugin_id, configured)
+        outcome = await manager.configure(
+            route.plugin_id,
+            configured,
+            should_cancel=cancel_event.is_set if operation_id else None,
+        )
     except PluginOperationError as exc:
+        cancelled = cancel_event.is_set() or exc.code == "config_cancelled"
         _finish_feature_config_operation(
             context, route, result,
-            state="failed",
-            status_text=f"Feature 配置失败：{exc.code}。",
+            state=(
+                "rolled_back"
+                if cancelled and exc.code != "config_rollback_failed"
+                else "partially_rolled_back" if cancelled else "failed"
+            ),
+            status_text=(
+                "配置切换已取消，原配置和原 Feature 路由已恢复。"
+                if cancelled and exc.code != "config_rollback_failed"
+                else "配置回滚未能完整验证，请人工检查当前配置和路由。"
+                if cancelled
+                else f"Feature 配置失败：{exc.code}。"
+            ),
         )
         await _feature_feedback(
             update,
-            f"❌ {exc.code}：配置未写入或重新加载失败。",
+            (
+                "✅ 已取消配置切换并恢复原配置。"
+                if cancelled and exc.code != "config_rollback_failed"
+                else f"❌ {exc.code}：配置未写入或重新加载失败。"
+            ),
             prefer_edit=prefer_edit,
         )
         return
@@ -600,6 +691,43 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
         await _feature_feedback(
             update,
             f"❌ config_failed：{type(exc).__name__}",
+            prefer_edit=prefer_edit,
+        )
+        return
+    finally:
+        tasks = context.application.bot_data.get(CONFIG_OPERATION_TASKS_KEY)
+        if isinstance(tasks, dict):
+            tasks.pop(operation_id, None)
+            if not tasks:
+                context.application.bot_data.pop(
+                    CONFIG_OPERATION_TASKS_KEY, None
+                )
+    if cancel_event.is_set():
+        try:
+            await manager.configure(route.plugin_id, previous)
+        except Exception as exc:
+            _finish_feature_config_operation(
+                context, route, result,
+                state="partially_rolled_back",
+                status_text=(
+                    "配置切换已完成，但自动恢复原配置失败："
+                    f"{type(exc).__name__}。"
+                ),
+            )
+            await _feature_feedback(
+                update,
+                "❌ config_rollback_failed：请人工检查当前配置和路由。",
+                prefer_edit=prefer_edit,
+            )
+            return
+        _finish_feature_config_operation(
+            context, route, result,
+            state="rolled_back",
+            status_text="配置切换已取消，原配置和原 Feature 路由已恢复。",
+        )
+        await _feature_feedback(
+            update,
+            "✅ 已取消配置切换并恢复原配置。",
             prefer_edit=prefer_edit,
         )
         return

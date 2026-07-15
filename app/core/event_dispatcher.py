@@ -4,6 +4,7 @@ import asyncio
 
 from app.core.capability_router import CapabilityRouter
 from app.core.event_journal import EventJournal
+from app.core.interaction_coordinator import TERMINAL_STATES
 from app.core.plugin_contract import ContractError
 
 
@@ -23,6 +24,7 @@ class EventDispatcher:
         delivery_deadline: float = 30,
         batch_size: int = 100,
         max_attempts: int = 5,
+        operation_coordinator=None,
     ):
         self.router = router
         self.journal = journal
@@ -30,6 +32,7 @@ class EventDispatcher:
         self.delivery_deadline = max(0.1, float(delivery_deadline))
         self.batch_size = max(1, int(batch_size))
         self.max_attempts = max(1, int(max_attempts))
+        self.operation_coordinator = operation_coordinator
         self._wake = asyncio.Event()
         self._closed = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -65,6 +68,10 @@ class EventDispatcher:
             if route is None:
                 continue
             for event in self.journal.pending(plugin_id, self.batch_size):
+                if self._operation_is_terminal(event.payload):
+                    if self.journal.ack(event.event_id, plugin_id):
+                        delivered += 1
+                    continue
                 try:
                     await route.client.request(
                         "event.deliver",
@@ -85,3 +92,11 @@ class EventDispatcher:
                 if self.journal.ack(event.event_id, plugin_id):
                     delivered += 1
         return delivered
+
+    def _operation_is_terminal(self, payload: dict) -> bool:
+        coordinator = self.operation_coordinator
+        operation_id = str((payload or {}).get("operation_id") or "")
+        if coordinator is None or not operation_id:
+            return False
+        record = coordinator.get(operation_id)
+        return bool(record is not None and record.state in TERMINAL_STATES)

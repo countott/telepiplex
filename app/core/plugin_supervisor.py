@@ -89,6 +89,7 @@ class PluginSupervisor:
         runtime_root: Path = Path("/tmp/telepiplex"),
         broker=None,
         log_level: str = "info",
+        restart_listener=None,
     ):
         self.startup_timeout = float(startup_timeout)
         self.restart_limit = max(0, int(restart_limit))
@@ -98,6 +99,7 @@ class PluginSupervisor:
         self.runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.broker = broker
         self.log_level = str(log_level or "info")
+        self.restart_listener = restart_listener
         self._active: dict[str, PluginProcess] = {}
         self._instances: dict[str, PluginProcess] = {}
 
@@ -300,6 +302,19 @@ class PluginSupervisor:
                 restart_count=process.restart_count,
             )
             process.monitor_task = asyncio.create_task(self._monitor(process, process.child))
+            if self.restart_listener is not None:
+                try:
+                    result = self.restart_listener(process)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception as exc:
+                    self._log_feature_event(
+                        process,
+                        "feature_runtime_restart_reconcile_failed",
+                        level=logging.ERROR,
+                        restart_count=process.restart_count,
+                        error=self._safe_error(exc),
+                    )
             return
         process.state = "quarantined"
         self._log_feature_event(

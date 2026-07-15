@@ -50,9 +50,11 @@ from app.handlers.plugin_handler import (
 from app.handlers.interaction_handler import (
     COORDINATOR_KEY,
     CONTROL_CALLBACK_PATTERN,
+    OPERATION_RECOVERY_TASK_KEY,
     OperationReportSink,
     operation_control_callback,
     operation_gate,
+    reconcile_deferred_operations,
     recover_active_operations,
     render_operation,
 )
@@ -162,6 +164,7 @@ def build_plugin_manager(config=None, core_database=None):
             plugin_config.get("event_delivery_timeout") or 1800
         ),
         max_attempts=int(plugin_config.get("event_max_attempts") or 5),
+        operation_coordinator=coordinator,
     )
     broker = CoreBroker(
         router,
@@ -574,15 +577,20 @@ async def run_application_polling(application, after_start=None, stop_event=None
         if getattr(application, "running", False):
             await application.stop()
         bot_data = getattr(application, "bot_data", None)
-        update_task = (
-            bot_data.pop(PLUGIN_UPDATE_TASK_KEY, None)
+        background_tasks = (
+            [
+                bot_data.pop(PLUGIN_UPDATE_TASK_KEY, None),
+                bot_data.pop(OPERATION_RECOVERY_TASK_KEY, None),
+            ]
             if isinstance(bot_data, dict)
-            else None
+            else []
         )
-        if update_task is not None:
-            update_task.cancel()
+        for task in background_tasks:
+            if task is None:
+                continue
+            task.cancel()
             try:
-                await update_task
+                await task
             except asyncio.CancelledError:
                 pass
         manager = bot_data.get("telepiplex_plugin_manager") if isinstance(bot_data, dict) else None
@@ -602,6 +610,20 @@ def configure_application(application, manager):
             operation_sink.attach(
                 lambda record: render_operation(application, manager.router, record)
             )
+        async def reconcile_after_feature_restart(_process):
+            recovery = await recover_active_operations(
+                application,
+                manager.router,
+                coordinator,
+            )
+            _schedule_operation_recovery(
+                application,
+                manager.router,
+                coordinator,
+                recovery,
+            )
+
+        manager.supervisor.restart_listener = reconcile_after_feature_restart
     application.add_handler(TypeHandler(Update, operation_gate), group=-100)
     application.add_handler(CallbackQueryHandler(
         operation_control_callback,
@@ -628,7 +650,15 @@ async def start_core_runtime(application, manager):
     await manager.start()
     coordinator = getattr(manager, "interaction_coordinator", None)
     if coordinator is not None:
-        await recover_active_operations(application, manager.router, coordinator)
+        recovery = await recover_active_operations(
+            application, manager.router, coordinator
+        )
+        _schedule_operation_recovery(
+            application,
+            manager.router,
+            coordinator,
+            recovery,
+        )
     await set_bot_menu(application)
     queue_core_startup_notice()
     plugin_config = (init.bot_config or {}).get("plugins") or {}
@@ -642,6 +672,25 @@ async def start_core_runtime(application, manager):
         monitor.run(),
         name="telepiplex-plugin-update-monitor",
     )
+
+
+def _schedule_operation_recovery(
+    application,
+    router,
+    coordinator,
+    recovery,
+):
+    if not recovery.get("deferred"):
+        return None
+    current = application.bot_data.get(OPERATION_RECOVERY_TASK_KEY)
+    if current is not None and not current.done():
+        return current
+    task = asyncio.create_task(
+        reconcile_deferred_operations(application, router, coordinator),
+        name="telepiplex-operation-recovery",
+    )
+    application.bot_data[OPERATION_RECOVERY_TASK_KEY] = task
+    return task
 
 
 if __name__ == "__main__":

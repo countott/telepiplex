@@ -178,6 +178,26 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
         process.client = second
         self.assertEqual(await routed.request("health", {}), "second")
 
+    async def test_successful_crash_restart_notifies_reconciliation_listener(self):
+        import asyncio
+
+        reconciled = asyncio.Event()
+        observed = []
+
+        async def listener(process):
+            observed.append(process.plugin_id)
+            reconciled.set()
+
+        supervisor = self._supervisor(restart_listener=listener)
+        process = await supervisor.start(self._release("healthy"))
+        process.child.terminate()
+
+        await asyncio.wait_for(reconciled.wait(), timeout=2)
+
+        self.assertEqual(observed, ["healthy"])
+        self.assertEqual(process.state, "healthy")
+        self.assertEqual(process.restart_count, 1)
+
     async def _wait_for(self, predicate, timeout=1):
         import asyncio
 
