@@ -66,6 +66,7 @@ class Open115Feature:
         self.runtime = runtime
         if self.jobs:
             for job in self.jobs.resumable():
+                self._restore_downloaded_operation(job)
                 runtime.spawn(self._publish_downloaded(job), task_id=job["job_id"])
 
     async def download_capability(self, request: dict) -> dict:
@@ -580,6 +581,34 @@ class Open115Feature:
             f"{link}\0{selected_path}".encode("utf-8")
         ).hexdigest()
         operation_id = str(payload.get("operation_id") or uuid.uuid4().hex)
+        if job_id in self.active_job_ids:
+            operation = next((
+                candidate
+                for candidate in self.operations.values()
+                if candidate.get("job_id") == job_id
+            ), None)
+            if operation is None:
+                raise FeatureError(
+                    "operation_unavailable",
+                    "active open115 download has no operation owner",
+                )
+            if operation["operation_id"] != operation_id:
+                raise FeatureError(
+                    "idempotency_conflict",
+                    "active open115 download belongs to another operation",
+                )
+            logger.info(
+                "open115_download_duplicate "
+                f"job_id={job_id} selected_path={selected_path}"
+            )
+            return {
+                "accepted": True,
+                "job_id": job_id,
+                "duplicate": True,
+                "state": str(operation.get("state") or "running"),
+                "operation_id": operation_id,
+                "operation": self._operation_view(operation),
+            }
         operation = self.operations.get(operation_id)
         if operation is None:
             operation = {
@@ -610,18 +639,6 @@ class Open115Feature:
             status_text="正在准备提交 115 离线下载任务。",
             control="cancel",
         )
-        if job_id in self.active_job_ids:
-            logger.info(
-                "open115_download_duplicate "
-                f"job_id={job_id} selected_path={selected_path}"
-            )
-            return {
-                "accepted": True,
-                "job_id": job_id,
-                "duplicate": True,
-                "operation_id": operation_id,
-                "operation": operation_view,
-            }
         if self.jobs:
             job = self.jobs.create_or_get(job_id, payload | {"link": link, "selected_path": selected_path})
             if job["state"] in {"completed", "failed", "downloaded", "running", "interrupted"}:
@@ -803,10 +820,8 @@ class Open115Feature:
             )
         finally:
             if info_hash and not cancel_event.is_set():
-                try:
-                    await asyncio.to_thread(self.client.del_offline_task, info_hash, 0)
-                except Exception:
-                    pass
+                operation["info_hash"] = info_hash
+                await self._cancel_offline_record_once(operation)
             self.active_job_ids.discard(job_id)
 
     async def _publish_downloaded(self, job):
@@ -814,15 +829,22 @@ class Open115Feature:
         job_id = str(job["job_id"])
         operation_id = str(payload.get("operation_id") or "")
         if operation_id and operation_id in self.operations:
-            operation = await self._report_operation(
-                operation_id,
-                state="handed_off",
-                stage="handoff_renaming",
-                status_text="115 下载完成，已交给媒体整理。",
-                control="cancel",
-                next_plugin_id="renaming",
-            )
+            current = self.operations[operation_id]
+            if current.get("state") == "handed_off":
+                operation = self._operation_view(current)
+            else:
+                operation = await self._report_operation(
+                    operation_id,
+                    state="handed_off",
+                    stage="handoff_renaming",
+                    status_text="115 下载完成，已交给媒体整理。",
+                    control="cancel",
+                    next_plugin_id="renaming",
+                )
             payload["operation_revision"] = operation["revision"]
+            if self.jobs:
+                self.jobs.update(job_id, "downloaded", result=payload)
+            self._raise_if_cancelled(current)
         await self.core.publish_event("download.completed", payload, idempotency_key=f"{job_id}:completed")
         logger.info(
             "open115_download_published "
@@ -843,9 +865,7 @@ class Open115Feature:
         operation = self.operations.get(operation_id)
         if operation is None:
             raise FeatureError("not_found", "open115 operation was not found")
-        if operation.get("state") in {
-            "completed", "cancelled", "failed", "handed_off"
-        }:
+        if operation.get("state") in {"completed", "cancelled", "failed"}:
             return {"actions": [], "operation": self._operation_view(operation)}
         try:
             requested_revision = int(request.get("revision") or 0)
@@ -869,6 +889,7 @@ class Open115Feature:
         if action != "cancel":
             raise FeatureError("invalid_control", "open115 operation control is invalid")
 
+        provisional_handoff = operation.get("state") == "handed_off"
         details = dict(operation.get("details") or {})
         details.update({
             "offline_task_record": operation.get("offline_task_record", "retained"),
@@ -901,11 +922,23 @@ class Open115Feature:
             })
             operation["details"] = details
             cancelling = self._operation_view(operation)
+        if provisional_handoff:
+            terminal = await self._finish_cancelled(operation_id)
+            if self.jobs and operation.get("job_id"):
+                job = self.jobs.get(operation["job_id"])
+                if job is not None:
+                    self.jobs.update(
+                        operation["job_id"],
+                        "cancelled",
+                        result=job.get("result") or {},
+                        error="cancelled before renaming accepted",
+                    )
+            return {"actions": [], "operation": terminal}
         return {"actions": [], "operation": cancelling}
 
     async def operation_snapshot(self, request: dict) -> dict:
         requested = str(request.get("operation_id") or "")
-        terminal = {"completed", "cancelled", "failed", "handed_off"}
+        terminal = {"completed", "cancelled", "failed"}
         operations = [
             self._operation_view(operation)
             for operation_id, operation in self.operations.items()
@@ -961,6 +994,39 @@ class Open115Feature:
             control="",
             details=details,
         )
+
+    def _restore_downloaded_operation(self, job: dict):
+        payload = job.get("result") or {}
+        operation_id = str(payload.get("operation_id") or "")
+        if not operation_id or operation_id in self.operations:
+            return
+        try:
+            revision = max(1, int(payload.get("operation_revision") or 1))
+            user_id = int(payload.get("user_id") or 0)
+            chat_id = int(payload.get("chat_id") or user_id or 0)
+        except (TypeError, ValueError):
+            return
+        if user_id <= 0 or chat_id == 0:
+            return
+        self.operations[operation_id] = {
+            "operation_id": operation_id,
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "state": "handed_off",
+            "stage": "handoff_renaming",
+            "status_text": "115 下载已完成，正在重试交给媒体整理。",
+            "control": "cancel",
+            "revision": revision,
+            "details": {"downloaded_content": "preserved"},
+            "next_plugin_id": "renaming",
+            "kind": "download",
+            "job_id": str(job.get("job_id") or ""),
+            "cancel_event": threading.Event(),
+            "info_hash": "",
+            "offline_delete_attempted": False,
+            "offline_task_record": "unknown",
+            "cancel_cleanup_done": asyncio.Event(),
+        }
 
     @staticmethod
     def _raise_if_cancelled(operation):

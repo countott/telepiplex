@@ -279,6 +279,60 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
             "deleted",
         )
 
+    async def test_lost_response_retry_preserves_live_cancel_owner(self):
+        class BlockingClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.wait_started = threading.Event()
+
+            def wait_for_download(self, link, **kwargs):
+                kwargs["progress_callback"]({
+                    "resource_name": "Show.partial",
+                    "info_hash": "retry-known-hash",
+                    "progress": 5,
+                })
+                self.wait_started.set()
+                kwargs["cancel_event"].wait(1)
+                raise RuntimeError("cancelled")
+
+        client = BlockingClient()
+        self.feature.client = client
+        request = {
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "3" * 40,
+                "selected_path": "/Downloads",
+                "operation_id": "op-retry-cancel",
+                "chat_id": 10,
+                "user_id": 1,
+            },
+            "context": {"idempotency_key": "retry-cancel-job"},
+        }
+
+        first = await self.feature.download_capability(request)
+        task = asyncio.create_task(self.runtime.tasks.pop("retry-cancel-job"))
+        self.assertTrue(await asyncio.to_thread(client.wait_started.wait, 1))
+        original_event = self.feature.operations["op-retry-cancel"][
+            "cancel_event"
+        ]
+
+        retried = await self.feature.download_capability(request)
+        self.assertTrue(retried["duplicate"])
+        self.assertIs(
+            self.feature.operations["op-retry-cancel"]["cancel_event"],
+            original_event,
+        )
+        await self.feature.operation_control({
+            "operation_id": "op-retry-cancel",
+            "action": "cancel",
+            "revision": retried["operation"]["revision"],
+        })
+        await task
+
+        self.assertEqual(client.deleted_tasks, [("retry-known-hash", 0)])
+        self.assertEqual(client.deleted_files, [])
+        self.assertEqual(self.core.reports[-1]["state"], "cancelled")
+
     async def test_cancel_before_info_hash_keeps_offline_record_without_retry(self):
         class BlockingSubmitClient(FakeClient):
             def __init__(self):
@@ -327,6 +381,39 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
             "retained",
         )
         self.assertIn("记录已保留", self.core.reports[-1]["status_text"])
+
+    async def test_source_can_cancel_before_renaming_accepts_handoff(self):
+        await self.feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "5" * 40,
+                "selected_path": "/Downloads",
+                "operation_id": "op-provisional-handoff",
+                "chat_id": 10,
+                "user_id": 1,
+            },
+            "context": {"idempotency_key": "provisional-handoff"},
+        })
+        operation = self.feature.operations["op-provisional-handoff"]
+        operation["info_hash"] = "known-handoff-hash"
+        self.feature._advance_operation(
+            "op-provisional-handoff",
+            state="handed_off",
+            stage="handoff_renaming",
+            status_text="正在交给 renaming。",
+            control="cancel",
+            next_plugin_id="renaming",
+        )
+
+        result = await self.feature.operation_control({
+            "operation_id": "op-provisional-handoff",
+            "action": "cancel",
+            "revision": operation["revision"],
+        })
+
+        self.assertEqual(result["operation"]["state"], "cancelled")
+        self.assertEqual(self.client.deleted_tasks, [("known-handoff-hash", 0)])
+        self.assertEqual(self.client.deleted_files, [])
 
     async def test_download_flow_emits_sanitized_runtime_logs(self):
         magnet = "magnet:?xt=urn:btih:" + "f" * 40
@@ -404,11 +491,43 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         await feature.download_capability({"method": "submit", "payload": {
             "link": "magnet:?xt=urn:btih:" + "d" * 40,
             "selected_path": "/Downloads",
+            "operation_id": "op-outbox",
+            "operation_revision": 4,
+            "chat_id": 10,
+            "user_id": 1,
         }, "context": {"idempotency_key": "outbox-1"}})
 
         await runtime.tasks.pop("outbox-1")
 
-        self.assertEqual(jobs.get("outbox-1")["state"], "downloaded")
+        downloaded = jobs.get("outbox-1")
+        self.assertEqual(downloaded["state"], "downloaded")
+        self.assertEqual(downloaded["result"]["operation_id"], "op-outbox")
+        self.assertEqual(
+            downloaded["result"]["operation_revision"],
+            feature.operations["op-outbox"]["revision"],
+        )
+        self.assertEqual(
+            (await feature.operation_snapshot({"operation_id": "op-outbox"}))[
+                "operations"
+            ][0]["state"],
+            "handed_off",
+        )
+
+        self.core.fail_publish = False
+        restored = Open115Feature(
+            config={"download_timeout": 30, "poll_interval": 0.01},
+            core=self.core,
+            client=self.client,
+            jobs=jobs,
+        )
+        restored_runtime = FakeRuntime()
+        restored.bind_runtime(restored_runtime)
+        self.assertEqual(
+            restored.operations["op-outbox"]["state"], "handed_off"
+        )
+        await restored_runtime.tasks.pop("outbox-1")
+        self.assertEqual(jobs.get("outbox-1")["state"], "completed")
+        self.assertEqual(self.core.events[-1][1]["operation_id"], "op-outbox")
 
     async def test_interrupted_external_transfer_requires_manual_retry(self):
         from telepiplex_open115.jobs import DownloadJobStore
