@@ -296,6 +296,24 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(broken["state"], "invalid_config")
         self.assertEqual(broken["error_code"], "invalid_config")
 
+    async def test_reserved_core_config_command_can_be_private_to_config_schema(self):
+        schema, default = self._editable_config()
+        schema["x-telepiplex-config-command"] = "config"
+        await self.manager.install(self._artifact(
+            commands=("echo",),
+            config_schema=schema,
+            config_default=default,
+        ))
+
+        state = self.manager.config_state("echo")
+
+        self.assertTrue(state["configurable"])
+        self.assertEqual(state["command"], "config")
+        self.assertNotIn(
+            "config",
+            [item.name for item in self.router.plugin_route("echo").manifest.commands],
+        )
+
     async def test_config_state_reports_invalid_config_even_when_route_is_unavailable(self):
         schema, default = self._editable_config()
         schema["x-telepiplex-config-command"] = "configure_echo"

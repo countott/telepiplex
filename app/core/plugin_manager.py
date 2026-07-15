@@ -435,7 +435,7 @@ class PluginManager:
         }
         if command and (
             not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", command)
-            or command not in declared
+            or (command not in declared and command != "config")
         ):
             return {
                 "plugin_id": plugin_id,
