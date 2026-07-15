@@ -1193,6 +1193,57 @@ class FeatureConfigStoreTest(unittest.TestCase):
             self.assertEqual(updated["auth_mode"], "scan")
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_save_directory_writeback_preserves_config_and_private_permissions(self):
+        from telepiplex_open115.config_store import FeatureConfigStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.yaml"
+            path.write_text(
+                "access_token: access\n"
+                "refresh_token: refresh\n"
+                "custom: keep\n"
+                "save_directories: []\n",
+                encoding="utf-8",
+            )
+            store = FeatureConfigStore(path)
+
+            updated = store.write_save_directories([
+                {"name": " 剧集 ", "path": " /Series "},
+                {"name": "电影", "path": "/Movies"},
+            ])
+
+            self.assertEqual(updated["save_directories"], [
+                {"name": "剧集", "path": "/Series"},
+                {"name": "电影", "path": "/Movies"},
+            ])
+            self.assertEqual(updated["access_token"], "access")
+            self.assertEqual(updated["refresh_token"], "refresh")
+            self.assertEqual(updated["custom"], "keep")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_save_directory_writeback_rejects_invalid_and_duplicate_entries(self):
+        from telepiplex_open115.config_store import FeatureConfigStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = FeatureConfigStore(Path(directory) / "config.yaml")
+            invalid = (
+                None,
+                [{"name": "", "path": "/Series"}],
+                [{"name": "剧集", "path": "Series"}],
+                [{"name": "剧集", "path": "/A", "extra": True}],
+                [
+                    {"name": "剧集", "path": "/A"},
+                    {"name": "剧集", "path": "/B"},
+                ],
+                [
+                    {"name": "A", "path": "/Series"},
+                    {"name": "B", "path": "/Series"},
+                ],
+            )
+            for value in invalid:
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    store.write_save_directories(value)
+
 
 class FeatureSourceContractTest(unittest.TestCase):
     def test_schema_declares_custom_config_command_registered_by_manifest(self):

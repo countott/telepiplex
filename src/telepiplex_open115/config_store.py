@@ -7,6 +7,8 @@ from pathlib import Path
 
 import yaml
 
+from .directories import normalize_save_directories
+
 
 class FeatureConfigStore:
     """Atomic writer for the open115 private configuration file."""
@@ -67,6 +69,14 @@ class FeatureConfigStore:
                 "access_token": access_token,
                 "refresh_token": refresh_token,
             })
+            self._write_unlocked(config)
+            return dict(config)
+
+    def write_save_directories(self, directories) -> dict:
+        normalized = normalize_save_directories(directories)
+        with self._lock:
+            config = self._read_unlocked()
+            config["save_directories"] = normalized
             self._write_unlocked(config)
             return dict(config)
 
