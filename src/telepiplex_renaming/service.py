@@ -45,6 +45,12 @@ _IRREVERSIBLE_METHODS = {
 }
 
 
+def _ambiguous_core_report_error(exc: Exception) -> bool:
+    return not isinstance(exc, FeatureError) or exc.code in {
+        "core_unavailable", "deadline_exceeded", "invalid_response",
+    }
+
+
 class StorageProxy:
     def __init__(
         self,
@@ -162,6 +168,31 @@ class RenamingFeature:
 
     def bind_runtime(self, runtime):
         self.runtime = runtime
+        if self.jobs:
+            for job in self.jobs.resumable():
+                runtime.spawn(
+                    self._resume_durable_job(job),
+                    task_id=f"renaming-resume-{job['job_id']}",
+                )
+
+    async def _resume_durable_job(self, job):
+        outcome = job.get("result") or {}
+        event_payload = outcome.get("event_payload") or {}
+        operation_id = str(event_payload.get("operation_id") or "")
+        if job.get("state") == "published":
+            await self._complete_published_job(job["job_id"], outcome)
+            return
+        if (
+            operation_id
+            and not outcome.get("handoff_operation")
+            and operation_id not in self.operations
+        ):
+            await self._accept_event_operation(
+                event_payload, job["job_id"]
+            )
+        await self._finish_operation(
+            job["job_id"], outcome, operation_id
+        )
 
     async def command(self, request: dict) -> dict:
         if str(request.get("command") or "") != "renaming_config":
@@ -202,11 +233,68 @@ class RenamingFeature:
         if self.jobs:
             existing = self.jobs.get(job_id)
             if existing and existing["state"] in {
-                "processed", "completed", "failed", "cancelled"
+                "processed", "published", "completed", "failed", "cancelled"
             }:
-                return await self._finish_operation(
-                    job_id, existing["result"], None
+                stored_payload = (
+                    (existing.get("result") or {}).get("event_payload") or {}
                 )
+                requested_operation_id = str(payload.get("operation_id") or "")
+                stored_operation_id = str(
+                    stored_payload.get("operation_id") or ""
+                )
+                if (
+                    requested_operation_id
+                    and stored_operation_id != requested_operation_id
+                ):
+                    accepted = await self._accept_event_operation(
+                        payload, job_id
+                    )
+                    if accepted:
+                        await self._report_if_active(
+                            requested_operation_id,
+                            state="interrupted",
+                            stage="replay_identity_check",
+                            status_text=(
+                                "持久化结果缺少匹配的协调任务身份；"
+                                "已停止自动发布后续 Plex 任务。"
+                            ),
+                            control="",
+                            details={"manual_check_required": True},
+                        )
+                    return {
+                        "accepted": True,
+                        "duplicate": True,
+                        "state": "interrupted",
+                        "message": (
+                            "协调任务身份未在处理结果中完整持久化；"
+                            "已停止自动发布后续 Plex 任务。"
+                        ),
+                    }
+                outcome = existing.get("result") or {}
+                if existing["state"] in {"completed", "failed", "cancelled"}:
+                    return {
+                        "accepted": True,
+                        "duplicate": True,
+                        "state": existing["state"],
+                        "organized": bool(outcome.get("organized")),
+                        "final_path": outcome.get("final_path"),
+                    }
+                if existing["state"] == "published":
+                    return await self._complete_published_job(job_id, outcome)
+                operation_id = stored_operation_id
+                if (
+                    operation_id
+                    and operation_id not in self.operations
+                    and not outcome.get("handoff_reported")
+                    and not outcome.get("handoff_operation")
+                ):
+                    restored = await self._accept_event_operation(
+                        stored_payload, job_id
+                    )
+                    operation_id = (
+                        restored["operation_id"] if restored else ""
+                    )
+                return await self._finish_operation(job_id, outcome, operation_id)
             if not self.jobs.claim(job_id):
                 return {
                     "accepted": True,
@@ -225,8 +313,58 @@ class RenamingFeature:
                 "job_id": job_id,
             })
 
-        operation = await self._accept_event_operation(payload, job_id)
+        try:
+            operation = await self._accept_event_operation(payload, job_id)
+        except Exception as exc:
+            operation_id = str(payload.get("operation_id") or "")
+            operation = self.operations.get(operation_id)
+            if operation is not None and _ambiguous_core_report_error(exc):
+                operation["ownership_pending"] = True
+                operation["ownership_report"] = self._operation_view(operation)
+                self._spawn_organization(job_id, payload, operation_id)
+                return {
+                    "accepted": True,
+                    "job_id": job_id,
+                    "state": "running",
+                    "report_pending": True,
+                    "operation_id": operation_id,
+                    "operation": self._operation_view(operation),
+                }
+            if (
+                operation is not None
+                and isinstance(exc, FeatureError)
+                and exc.code == "operation_rejected"
+            ):
+                if self.jobs:
+                    self.jobs.update(job_id, "cancelled", {
+                        "organized": False,
+                        "final_path": str(
+                            payload.get("download_root")
+                            or payload.get("final_path") or ""
+                        ),
+                        "message": "Core 已结束协调任务，未开始媒体文件变更。",
+                        "user_id": int(payload.get("user_id") or 0),
+                        "job_id": job_id,
+                    })
+                return {
+                    "accepted": True,
+                    "duplicate": True,
+                    "state": "interrupted",
+                    "operation_id": operation_id,
+                    "operation": self._operation_view(operation),
+                }
+            raise
         operation_id = operation["operation_id"] if operation else ""
+        task = self._spawn_organization(job_id, payload, operation_id)
+        result = {"accepted": True, "job_id": job_id, "state": "running"}
+        if operation:
+            result.update({
+                "operation_id": operation_id,
+                "operation": operation,
+            })
+        return result
+
+    def _spawn_organization(self, job_id, payload, operation_id):
         task_id = f"renaming-{job_id}"
         task = self.runtime.spawn(
             self._run_organization(job_id, dict(payload), operation_id),
@@ -238,19 +376,15 @@ class RenamingFeature:
                 "task_id": task_id,
                 "job_id": job_id,
             })
-        result = {"accepted": True, "job_id": job_id, "state": "running"}
-        if operation:
-            result.update({
-                "operation_id": operation_id,
-                "operation": operation,
-            })
-        return result
+        return task
 
     async def _run_organization(self, job_id, payload, operation_id):
         user_id = int(payload.get("user_id") or 0)
         event = None
         processing_complete = False
         try:
+            self._raise_if_cancelled(operation_id)
+            await self._confirm_operation_ownership(operation_id)
             self._raise_if_cancelled(operation_id)
             metadata = {}
             if isinstance(payload.get("media_metadata"), dict):
@@ -366,6 +500,10 @@ class RenamingFeature:
                     "source_path": payload.get("final_path"),
                     "final_path": result.final_path,
                     "media_metadata": contract,
+                    "operation_id": operation_id,
+                    "operation_revision": int(
+                        operation_state.get("revision") or 0
+                    ),
                 },
             }
             if self.jobs:
@@ -401,6 +539,27 @@ class RenamingFeature:
                     details={"stopped_at": stopped_at},
                 )
         except Exception as exc:
+            if (
+                isinstance(exc, FeatureError)
+                and exc.code == "ownership_rejected"
+            ):
+                outcome = {
+                    "organized": False,
+                    "final_path": str(payload.get("final_path") or ""),
+                    "message": "Core 已结束协调任务，未开始媒体文件变更。",
+                    "user_id": user_id,
+                    "job_id": job_id,
+                }
+                if self.jobs:
+                    self.jobs.update(job_id, "cancelled", outcome)
+                operation = self.operations.get(operation_id)
+                if operation is not None:
+                    operation.update({
+                        "state": "interrupted",
+                        "status_text": outcome["message"],
+                        "control": "",
+                    })
+                return
             if processing_complete:
                 raise
             stopped_at = (
@@ -442,18 +601,34 @@ class RenamingFeature:
     async def _finish_operation(self, job_id, outcome, operation_id):
         if outcome.get("organized"):
             event_payload = outcome["event_payload"]
-            if operation_id:
-                handoff = await self._report_if_active(
-                    operation_id,
-                    state="handed_off",
-                    stage="handoff_plex",
-                    status_text="媒体整理完成，已交给 Plex 管理任务。",
-                    control="cancel",
-                    next_plugin_id="plex-management",
-                )
-                if handoff:
+            if operation_id and not outcome.get("handoff_reported"):
+                handoff = outcome.get("handoff_operation")
+                if not isinstance(handoff, dict):
+                    handoff = self._advance_operation(
+                        operation_id,
+                        state="handed_off",
+                        stage="handoff_plex",
+                        status_text="媒体整理完成，已交给 Plex 管理任务。",
+                        control="cancel",
+                        next_plugin_id="plex-management",
+                    )
                     event_payload["operation_id"] = operation_id
                     event_payload["operation_revision"] = handoff["revision"]
+                    outcome["handoff_operation"] = dict(handoff)
+                    if self.jobs:
+                        self.jobs.update(job_id, "processed", outcome)
+                response = await self.core.report_operation(handoff)
+                if (
+                    not isinstance(response, dict)
+                    or response.get("accepted") is not True
+                ):
+                    raise FeatureError(
+                        "operation_rejected",
+                        "Core rejected renaming handoff ownership",
+                    )
+                outcome["handoff_reported"] = True
+                if self.jobs:
+                    self.jobs.update(job_id, "processed", outcome)
             try:
                 await self.core.publish_event(
                     "media.organized",
@@ -484,6 +659,11 @@ class RenamingFeature:
                 ),
                 control="",
             )
+        if self.jobs:
+            self.jobs.update(job_id, "published", outcome)
+        return await self._complete_published_job(job_id, outcome)
+
+    async def _complete_published_job(self, job_id, outcome):
         if outcome.get("user_id") and outcome.get("message"):
             await self.core.notify_user(
                 int(outcome["user_id"]),
@@ -494,6 +674,7 @@ class RenamingFeature:
             self.jobs.update(job_id, "completed", outcome)
         return {
             "accepted": True,
+            "duplicate": True,
             "organized": bool(outcome.get("organized")),
             "final_path": outcome.get("final_path"),
             "replayed": True,
@@ -800,7 +981,19 @@ class RenamingFeature:
 
     async def _report_operation(self, operation_id, **changes):
         view = self._advance_operation(operation_id, **changes)
-        await self.core.report_operation(view)
+        response = await self.core.report_operation(view)
+        if not isinstance(response, dict) or response.get("accepted") is not True:
+            operation = self.operations[operation_id]
+            operation.update({
+                "state": "interrupted",
+                "status_text": "Core 未接受当前 Feature 的任务所有权。",
+                "control": "",
+                "next_plugin_id": "",
+            })
+            raise FeatureError(
+                "operation_rejected",
+                "Core rejected renaming operation ownership",
+            )
         return view
 
     async def _report_if_active(self, operation_id, **changes):
@@ -813,6 +1006,39 @@ class RenamingFeature:
         }:
             return self._operation_view(current)
         return await self._report_operation(operation_id, **changes)
+
+    async def _confirm_operation_ownership(self, operation_id):
+        operation = self.operations.get(operation_id)
+        if operation is None or not operation.get("ownership_pending"):
+            return
+        report = dict(
+            operation.get("ownership_report")
+            or self._operation_view(operation)
+        )
+        retries = max(1, int(
+            self.config.get("operation_confirmation_retries") or 3
+        ))
+        response = None
+        for attempt in range(retries):
+            self._raise_if_cancelled(operation_id)
+            try:
+                response = await self.core.report_operation(report)
+                break
+            except Exception as exc:
+                if not _ambiguous_core_report_error(exc):
+                    raise
+                if attempt + 1 >= retries:
+                    raise
+                await asyncio.sleep(float(
+                    self.config.get("operation_confirmation_interval") or 0.1
+                ))
+        if not isinstance(response, dict) or response.get("accepted") is not True:
+            raise FeatureError(
+                "ownership_rejected",
+                "Core did not confirm renaming operation ownership",
+            )
+        operation["ownership_pending"] = False
+        operation.pop("ownership_report", None)
 
     def _raise_if_cancelled(self, operation_id):
         operation = self.operations.get(operation_id)

@@ -868,6 +868,304 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(core.storage.moved), moved_count)
             self.assertTrue(replay["organized"])
 
+    async def test_lost_accept_report_response_still_starts_executor_once(self):
+        from telepiplex_renaming.jobs import RenamingJobStore
+
+        class LostAcceptAckCore(FakeCore):
+            def __init__(self):
+                super().__init__()
+                self.report_attempts = 0
+
+            async def report_operation(self, operation):
+                self.report_attempts += 1
+                if self.report_attempts <= 2:
+                    raise RuntimeError("Core response lost")
+                self.reports.append(dict(operation))
+                return {"accepted": True, "revision": operation["revision"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            core = LostAcceptAckCore()
+            jobs = RenamingJobStore(Path(tmpdir) / "jobs.db")
+            feature = RenamingFeature(
+                config={"unorganized_path": "/Unorganized"},
+                core=core,
+                jobs=jobs,
+            )
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+            request = {"event_id": "lost-accept-ack", "payload": {
+                "job_id": "job-lost-accept-ack",
+                "selected_path": "/Movies",
+                "user_id": 123,
+                "chat_id": 10,
+                "final_path": "/Downloads/Release",
+                "resource_name": "Movie.2024",
+                "media_metadata": movie_contract(),
+                "operation_id": "op-lost-accept-ack",
+                "operation_revision": 5,
+            }}
+
+            accepted = await feature.download_completed(request)
+            duplicate = await feature.download_completed(request)
+
+            self.assertTrue(accepted["accepted"])
+            self.assertTrue(accepted["report_pending"])
+            self.assertTrue(duplicate["duplicate"])
+            self.assertEqual(duplicate["state"], "processing")
+            self.assertEqual(list(runtime.tasks), [
+                "renaming-job-lost-accept-ack"
+            ])
+            await runtime.wait()
+            self.assertEqual(jobs.get("job-lost-accept-ack")["state"], "completed")
+            self.assertEqual(len(core.storage.moved), 1)
+
+    async def test_rejected_operation_claim_never_changes_media_files(self):
+        from telepiplex_renaming.jobs import RenamingJobStore
+
+        class RejectedCore(FakeCore):
+            async def report_operation(self, operation):
+                self.reports.append(dict(operation))
+                return {
+                    "accepted": False,
+                    "state": "cancelled",
+                    "revision": operation["revision"],
+                }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            core = RejectedCore()
+            jobs = RenamingJobStore(Path(tmpdir) / "jobs.db")
+            feature = RenamingFeature(
+                config={"unorganized_path": "/Unorganized"},
+                core=core,
+                jobs=jobs,
+            )
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+            result = await feature.download_completed({
+                "event_id": "rejected-claim",
+                "payload": {
+                    "job_id": "job-rejected-claim",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "final_path": "/Downloads/Release",
+                    "operation_id": "op-rejected-claim",
+                    "operation_revision": 5,
+                },
+            })
+
+            self.assertEqual(result["state"], "interrupted")
+            self.assertEqual(runtime.tasks, {})
+            self.assertEqual(core.storage.moved, [])
+            self.assertEqual(jobs.get("job-rejected-claim")["state"], "cancelled")
+
+    async def test_processed_replay_restores_operation_before_plex_publish(self):
+        from telepiplex_renaming.jobs import RenamingJobStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = RenamingJobStore(Path(tmpdir) / "jobs.db")
+            jobs.claim("job-processed-replay")
+            jobs.update("job-processed-replay", "processed", {
+                "organized": True,
+                "final_path": "/Movies/Movie",
+                "message": "✅ 整理完成",
+                "user_id": 123,
+                "job_id": "job-processed-replay",
+                "event_payload": {
+                    "job_id": "job-processed-replay",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "provider": "open115",
+                    "final_path": "/Movies/Movie",
+                    "media_metadata": movie_contract(),
+                    "operation_id": "op-processed-replay",
+                    "operation_revision": 9,
+                },
+            })
+            core = FakeCore()
+            feature = RenamingFeature(
+                config={"unorganized_path": "/Unorganized"},
+                core=core,
+                jobs=jobs,
+            )
+            feature.bind_runtime(FakeRuntime())
+
+            replay = await feature.download_completed({
+                "event_id": "same-event",
+                "payload": {
+                    "job_id": "job-processed-replay",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "operation_id": "op-processed-replay",
+                    "operation_revision": 9,
+                },
+            })
+
+            self.assertTrue(replay["organized"])
+            self.assertEqual(core.reports[-1]["state"], "handed_off")
+            self.assertEqual(
+                core.events[-1][1]["operation_id"],
+                "op-processed-replay",
+            )
+            self.assertEqual(
+                core.events[-1][1]["operation_revision"],
+                core.reports[-1]["revision"],
+            )
+
+    async def test_processed_replay_without_durable_identity_stops_downstream(self):
+        from telepiplex_renaming.jobs import RenamingJobStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = RenamingJobStore(Path(tmpdir) / "jobs.db")
+            jobs.claim("job-missing-identity")
+            jobs.update("job-missing-identity", "processed", {
+                "organized": True,
+                "event_payload": {
+                    "job_id": "job-missing-identity",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "final_path": "/Movies/Movie",
+                },
+            })
+            core = FakeCore()
+            feature = RenamingFeature(
+                config={"unorganized_path": "/Unorganized"},
+                core=core,
+                jobs=jobs,
+            )
+            feature.bind_runtime(FakeRuntime())
+
+            replay = await feature.download_completed({
+                "event_id": "same-event",
+                "payload": {
+                    "job_id": "job-missing-identity",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "operation_id": "op-missing-identity",
+                },
+            })
+
+            self.assertEqual(replay["state"], "interrupted")
+            self.assertEqual(core.events, [])
+            self.assertEqual(core.reports[-1]["state"], "interrupted")
+            self.assertTrue(
+                core.reports[-1]["details"]["manual_check_required"]
+            )
+
+    async def test_completed_chain_replay_only_acks_durable_duplicate(self):
+        from telepiplex_renaming.jobs import RenamingJobStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = RenamingJobStore(Path(tmpdir) / "jobs.db")
+            outcome = {
+                "organized": True,
+                "final_path": "/Movies/Movie",
+                "message": "✅ 整理完成",
+                "user_id": 123,
+                "job_id": "job-completed-chain",
+                "handoff_reported": True,
+                "event_payload": {
+                    "job_id": "job-completed-chain",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "final_path": "/Movies/Movie",
+                    "operation_id": "op-completed-chain",
+                    "operation_revision": 12,
+                },
+            }
+            jobs.claim("job-completed-chain")
+            jobs.update("job-completed-chain", "completed", outcome)
+            core = FakeCore()
+            feature = RenamingFeature(
+                config={"unorganized_path": "/Unorganized"},
+                core=core,
+                jobs=jobs,
+            )
+            feature.bind_runtime(FakeRuntime())
+
+            replay = await feature.download_completed({
+                "event_id": "lost-source-ack",
+                "payload": {
+                    "job_id": "job-completed-chain",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "operation_id": "op-completed-chain",
+                    "operation_revision": 9,
+                },
+            })
+
+            self.assertTrue(replay["duplicate"])
+            self.assertEqual(replay["state"], "completed")
+            self.assertEqual(core.reports, [])
+            self.assertEqual(core.events, [])
+            self.assertEqual(core.notifications, [])
+
+    async def test_lost_handoff_ack_replays_same_durable_revision(self):
+        from telepiplex_renaming.jobs import RenamingJobStore
+
+        class LostAckCore(FakeCore):
+            async def report_operation(self, operation):
+                self.reports.append(dict(operation))
+                if operation["state"] == "handed_off":
+                    raise RuntimeError("handoff response lost")
+                return {"accepted": True, "revision": operation["revision"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = RenamingJobStore(Path(tmpdir) / "jobs.db")
+            outcome = {
+                "organized": True,
+                "final_path": "/Movies/Movie",
+                "message": "✅ 整理完成",
+                "user_id": 123,
+                "job_id": "job-lost-handoff-ack",
+                "event_payload": {
+                    "job_id": "job-lost-handoff-ack",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "final_path": "/Movies/Movie",
+                    "operation_id": "op-lost-handoff-ack",
+                    "operation_revision": 9,
+                },
+            }
+            jobs.claim("job-lost-handoff-ack")
+            jobs.update("job-lost-handoff-ack", "processed", outcome)
+            first_core = LostAckCore()
+            first = RenamingFeature(
+                config={"unorganized_path": "/Unorganized"},
+                core=first_core,
+                jobs=jobs,
+            )
+            first.bind_runtime(FakeRuntime())
+            request = {"event_id": "lost-handoff-source", "payload": {
+                "job_id": "job-lost-handoff-ack",
+                "user_id": 123,
+                "chat_id": 10,
+                "operation_id": "op-lost-handoff-ack",
+                "operation_revision": 9,
+            }}
+
+            with self.assertRaises(RuntimeError):
+                await first.download_completed(request)
+            durable = jobs.get("job-lost-handoff-ack")["result"]
+            proposed = durable["handoff_operation"]["revision"]
+            self.assertFalse(durable.get("handoff_reported", False))
+
+            replay_core = FakeCore()
+            replayed = RenamingFeature(
+                config={"unorganized_path": "/Unorganized"},
+                core=replay_core,
+                jobs=jobs,
+            )
+            replay_runtime = FakeRuntime()
+            replayed.bind_runtime(replay_runtime)
+            await replay_runtime.wait()
+
+            self.assertEqual(
+                [report["state"] for report in replay_core.reports],
+                ["handed_off"],
+            )
+            self.assertEqual(replay_core.reports[0]["revision"], proposed)
+            self.assertEqual(len(replay_core.events), 1)
+
 
 class FeatureSourceContractTest(unittest.TestCase):
     def test_readme_build_example_uses_current_version(self):

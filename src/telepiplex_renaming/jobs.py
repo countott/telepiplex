@@ -32,3 +32,13 @@ class RenamingJobStore:
         with sqlite3.connect(self.path) as db:
             db.execute("UPDATE renaming_jobs SET state=?, result_json=?, updated_at=? WHERE job_id=?", (str(state), json.dumps(result or {}, ensure_ascii=False, sort_keys=True), time.time(), str(job_id)))
         return self.get(job_id)
+
+    def resumable(self):
+        with sqlite3.connect(self.path) as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(
+                "SELECT job_id FROM renaming_jobs "
+                "WHERE state IN ('processed', 'published') "
+                "ORDER BY updated_at"
+            ).fetchall()
+        return [self.get(row["job_id"]) for row in rows]
