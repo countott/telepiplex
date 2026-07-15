@@ -846,6 +846,60 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("目录5", str(next_keyboard))
         self.assertIn("目录6", str(next_keyboard))
 
+    async def test_directory_editor_rejects_negative_item_index(self):
+        directories = [
+            {"name": "A", "path": "/A"},
+            {"name": "B", "path": "/B"},
+        ]
+        self.feature.config["save_directories"] = directories
+        self.feature.config_store.config["save_directories"] = directories
+        await self._open_directory_config()
+
+        response = await self.feature.callback({
+            "payload": "config:item:-1", "user_id": 1, "chat_id": 10,
+        })
+
+        self.assertIn("不可用", response["actions"][0]["text"])
+        self.assertEqual(self.feature.sessions[(10, 1)]["stage"], "directory_list")
+        self.assertNotIn("selected_index", self.feature.sessions[(10, 1)])
+
+    async def test_config_out_of_order_callback_keeps_home_navigation(self):
+        await self.feature.command({
+            "command": "config", "user_id": 1, "chat_id": 10,
+        })
+
+        response = await self.feature.callback({
+            "payload": "config:save", "user_id": 1, "chat_id": 10,
+        })
+
+        keyboard = response["actions"][0]["data"]["keyboard"]
+        self.assertIn("open115:config:auth", str(keyboard))
+        self.assertIn("open115:config:directories", str(keyboard))
+        self.assertNotIn("open115:config:back", str(keyboard))
+        self.assertEqual(self.feature.sessions[(10, 1)]["stage"], "config_home")
+
+    async def test_magnet_rejects_negative_directory_index(self):
+        self.feature.config["save_directories"] = [
+            {"name": "A", "path": "/A"},
+            {"name": "B", "path": "/B"},
+        ]
+        await self.feature.command({
+            "command": "magnet",
+            "args": ["magnet:?xt=urn:btih:" + "5" * 40],
+            "user_id": 1,
+            "chat_id": 10,
+        })
+
+        response = await self.feature.callback({
+            "payload": "path:-1", "user_id": 1, "chat_id": 10,
+        })
+
+        self.assertIn("不可用", response["actions"][0]["text"])
+        self.assertEqual(response["session"]["state"], "close")
+        self.assertEqual(response["operation"]["state"], "cancelled")
+        self.assertNotIn((10, 1), self.feature.sessions)
+        self.assertEqual(self.runtime.tasks, {})
+
     async def test_directory_working_copy_add_edit_delete_and_save(self):
         original = [
             {"name": "剧集", "path": "/Series"},

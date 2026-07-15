@@ -201,12 +201,24 @@ class Open115Feature:
                 return self._message_with_session("⚠️ 会话已失效。", "close")
             return await self._start_scan_auth(request)
         session = self.sessions.get(key)
-        if not session or not payload.startswith("path:"):
+        if (
+            not session
+            or session.get("stage") != "path"
+            or not payload.startswith("path:")
+        ):
             return {"actions": [{"kind": "send_message", "text": "⚠️ 会话已失效。"}], "session": {"state": "close"}}
         try:
-            directory = (self.config.get("save_directories") or [])[int(payload.split(":", 1)[1])]
+            directories = self.config.get("save_directories") or []
+            index = self._bounded_index(
+                directories, payload.split(":", 1)[1]
+            )
+            directory = directories[index]
         except (IndexError, TypeError, ValueError):
-            return {"actions": [{"kind": "send_message", "text": "⚠️ 保存目录不可用。"}], "session": {"state": "close"}}
+            operation = self._close_interaction(key, "保存目录不可用。")
+            result = self._message_with_session("⚠️ 保存目录不可用。", "close")
+            if operation is not None:
+                result["operation"] = operation
+            return result
         self.sessions.pop(key, None)
         operation_id = session.get("operation_id")
         operation = self.operations.get(operation_id)
@@ -396,14 +408,6 @@ class Open115Feature:
     def _start_config_session(self, request: dict) -> dict:
         key = self._session_key(request)
         self._clear_auth_session(key)
-        current = (
-            self.config_store.read()
-            if self.config_store else dict(self.config)
-        )
-        configured = bool(
-            current.get("access_token") and current.get("refresh_token")
-        )
-        directory_count = len(current.get("save_directories") or [])
         operation = self._new_operation(
             request,
             stage="config_home",
@@ -415,10 +419,34 @@ class Open115Feature:
             "operation_id": operation["operation_id"],
         }
         self._schedule_sensitive_expiry(key)
+        return self._config_home_message(key, operation=operation)
+
+    def _config_home_message(
+        self,
+        key,
+        *,
+        kind="send_message",
+        operation=None,
+        text_prefix="",
+    ):
+        current = (
+            self.config_store.read()
+            if self.config_store else dict(self.config)
+        )
+        configured = bool(
+            current.get("access_token") and current.get("refresh_token")
+        )
+        directory_count = len(current.get("save_directories") or [])
+        if operation is None:
+            session = self.sessions[key]
+            operation = self._operation_view(
+                self.operations[session["operation_id"]]
+            )
         return {
             "actions": [{
-                "kind": "send_message",
+                "kind": kind,
                 "text": (
+                    (f"{text_prefix}\n\n" if text_prefix else "") +
                     "open115 配置\n\n"
                     f"授权：{'已配置' if configured else '未配置'}\n"
                     f"保存目录：{directory_count} 个\n\n"
@@ -500,7 +528,10 @@ class Open115Feature:
             )
         if payload.startswith("config:item:") and stage == "directory_list":
             try:
-                index = int(payload.rsplit(":", 1)[1])
+                index = self._bounded_index(
+                    session["working_directories"],
+                    payload.rsplit(":", 1)[1],
+                )
                 directory = session["working_directories"][index]
             except (IndexError, TypeError, ValueError):
                 return self._directory_list_message(
@@ -616,6 +647,13 @@ class Open115Feature:
             )
         if payload == "config:save" and stage == "directory_list":
             return await self._save_directory_config(key)
+        if stage == "config_home":
+            self._schedule_sensitive_expiry(key)
+            return self._config_home_message(
+                key,
+                kind="edit_message",
+                text_prefix="⚠️ 配置操作与当前步骤不匹配。",
+            )
         return self._directory_prompt(
             key,
             "⚠️ 配置操作与当前步骤不匹配。",
@@ -701,6 +739,13 @@ class Open115Feature:
         ):
             raise ValueError("目录路径重复，请重新输入。")
         return path
+
+    @staticmethod
+    def _bounded_index(items, value):
+        index = int(value)
+        if index < 0 or index >= len(items):
+            raise IndexError("open115 directory index is out of range")
+        return index
 
     def _directory_prompt(
         self,
