@@ -1,6 +1,7 @@
 import asyncio
 import ast
 import tempfile
+import threading
 import tomllib
 import unittest
 from pathlib import Path
@@ -18,6 +19,7 @@ class FakeCore:
         self.events = []
         self.notifications = []
         self.fail_publish = False
+        self.reports = []
 
     async def publish_event(self, event_type, payload, **kwargs):
         if self.fail_publish:
@@ -28,6 +30,15 @@ class FakeCore:
     async def notify_user(self, user_id, text, **kwargs):
         self.notifications.append((user_id, text, kwargs))
         return {"accepted": True}
+
+    async def report_operation(self, report, **kwargs):
+        self.reports.append(dict(report))
+        return {
+            "accepted": True,
+            "operation_id": report["operation_id"],
+            "state": report["state"],
+            "revision": report["revision"],
+        }
 
 
 class FakeRuntime:
@@ -43,12 +54,20 @@ class FakeClient:
         self.renamed = []
         self.moved = []
         self.deleted_tasks = []
+        self.deleted_files = []
         self.tokens = ("", "")
 
     def add_offline_task(self, link, selected_path):
         return True
 
     def wait_for_download(self, link, **kwargs):
+        progress_callback = kwargs.get("progress_callback")
+        if progress_callback:
+            progress_callback({
+                "resource_name": "Show.S01E01.mkv",
+                "info_hash": "hash-1",
+                "progress": 50,
+            })
         return {
             "resource_name": "Show.S01E01.mkv",
             "info_hash": "hash-1",
@@ -99,6 +118,9 @@ class FakeClient:
         }
 
     def complete_device_authorization(self, authorization, **kwargs):
+        cancel_event = kwargs.get("cancel_event")
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("authorization cancelled")
         return {"access_token": "scan-access", "refresh_token": "scan-refresh"}
 
 
@@ -175,6 +197,135 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.renamed, [])
         self.assertEqual(self.client.moved, [])
         self.assertEqual(self.client.deleted_tasks, [("hash-1", 0)])
+
+    async def test_download_reports_stages_and_hands_same_operation_to_renaming(self):
+        result = await self.feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "1" * 40,
+                "selected_path": "/Downloads",
+                "operation_id": "op-download-1",
+                "operation_revision": 0,
+                "chat_id": 10,
+                "user_id": 1,
+            },
+            "context": {"idempotency_key": "download-operation-1"},
+        })
+
+        self.assertEqual(result["operation_id"], "op-download-1")
+        await self.runtime.tasks.pop("download-operation-1")
+
+        stages = [report["stage"] for report in self.core.reports]
+        for stage in (
+            "preparing_submission",
+            "submitted",
+            "downloading",
+            "reading_files",
+            "handoff_renaming",
+        ):
+            self.assertIn(stage, stages)
+        self.assertEqual(self.core.reports[-1]["state"], "handed_off")
+        self.assertEqual(self.core.reports[-1]["next_plugin_id"], "renaming")
+        self.assertEqual(self.core.events[0][1]["operation_id"], "op-download-1")
+
+    async def test_cancelled_download_deletes_known_offline_record_once_not_media(self):
+        class BlockingClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.wait_started = threading.Event()
+
+            def wait_for_download(self, link, **kwargs):
+                kwargs["progress_callback"]({
+                    "resource_name": "Show.partial",
+                    "info_hash": "known-hash",
+                    "progress": 5,
+                })
+                self.wait_started.set()
+                cancel_event = kwargs["cancel_event"]
+                while not cancel_event.wait(0.01):
+                    pass
+                raise RuntimeError("cancelled")
+
+        client = BlockingClient()
+        self.feature.client = client
+        await self.feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "2" * 40,
+                "selected_path": "/Downloads",
+                "operation_id": "op-cancel-1",
+                "chat_id": 10,
+                "user_id": 1,
+            },
+            "context": {"idempotency_key": "cancel-job-1"},
+        })
+        task = asyncio.create_task(self.runtime.tasks.pop("cancel-job-1"))
+        self.assertTrue(await asyncio.to_thread(client.wait_started.wait, 1))
+
+        accepted = await self.feature.operation_control({
+            "operation_id": "op-cancel-1",
+            "action": "cancel",
+            "revision": self.core.reports[-1]["revision"],
+        })
+        await task
+
+        self.assertEqual(accepted["operation"]["state"], "cancelling")
+        self.assertEqual(client.deleted_tasks, [("known-hash", 0)])
+        self.assertEqual(client.deleted_files, [])
+        self.assertEqual(self.core.reports[-1]["state"], "cancelled")
+        self.assertEqual(
+            self.core.reports[-1]["details"]["offline_task_record"],
+            "deleted",
+        )
+
+    async def test_cancel_before_info_hash_keeps_offline_record_without_retry(self):
+        class BlockingSubmitClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.add_started = threading.Event()
+                self.release_add = threading.Event()
+
+            def add_offline_task(self, link, selected_path):
+                self.add_started.set()
+                self.release_add.wait(1)
+                return True
+
+        client = BlockingSubmitClient()
+        self.feature.client = client
+        await self.feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "4" * 40,
+                "selected_path": "/Downloads",
+                "operation_id": "op-cancel-unknown",
+                "chat_id": 10,
+                "user_id": 1,
+            },
+            "context": {"idempotency_key": "cancel-job-unknown"},
+        })
+        task = asyncio.create_task(self.runtime.tasks.pop("cancel-job-unknown"))
+        self.assertTrue(await asyncio.to_thread(client.add_started.wait, 1))
+        report_count = len(self.core.reports)
+
+        await self.feature.operation_control({
+            "operation_id": "op-cancel-unknown",
+            "action": "cancel",
+            "revision": self.core.reports[-1]["revision"],
+        })
+        client.release_add.set()
+        await task
+
+        self.assertEqual(client.deleted_tasks, [])
+        self.assertFalse(any(
+            report["state"] == "running"
+            for report in self.core.reports[report_count:]
+        ))
+        self.assertEqual(self.core.reports[-1]["state"], "cancelled")
+        self.assertEqual(
+            self.core.reports[-1]["details"]["offline_task_record"],
+            "retained",
+        )
+        self.assertIn("记录已保留", self.core.reports[-1]["status_text"])
 
     async def test_download_flow_emits_sanitized_runtime_logs(self):
         magnet = "magnet:?xt=urn:btih:" + "f" * 40
@@ -283,6 +434,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
             "chat_id": 10,
         })
         self.assertEqual(command["session"]["state"], "open")
+        self.assertEqual(command["operation"]["state"], "awaiting_input")
         callback_data = command["actions"][0]["data"]["keyboard"][0][0]["callback_data"]
         self.assertEqual(callback_data, "open115:path:0")
 
@@ -295,6 +447,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(callback["session"]["state"], "close")
         self.assertIn("已加入 115 下载队列", callback["actions"][0]["text"])
+        self.assertEqual(callback["operation"]["state"], "running")
         self.assertEqual(len(self.runtime.tasks), 1)
 
     async def test_config_and_auth_offer_token_entry_and_scan_routes(self):
@@ -308,7 +461,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
             keyboard = response["actions"][0]["data"]["keyboard"]
             self.assertEqual(
                 [button["callback_data"] for row in keyboard for button in row],
-                ["open115:auth:direct", "open115:auth:scan"],
+                ["open115:auth:direct", "open115:auth:scan", "open115:exit"],
             )
             self.assertIn("Access / Refresh Token", str(keyboard))
 
@@ -366,6 +519,60 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["session"]["state"], "open")
         self.assertEqual(self.feature.config_store.writes, [])
         self.assertNotIn("access-valid", str(response))
+
+    async def test_each_open_auth_and_path_step_has_one_explicit_exit(self):
+        def exit_count(response):
+            return sum(
+                button.get("text") == "退出"
+                for action in response.get("actions", [])
+                for row in (action.get("data") or {}).get("keyboard", [])
+                for button in row
+            )
+
+        self.feature.config["save_directories"] = [
+            {"name": "剧集", "path": "/Series"},
+        ]
+        path = await self.feature.command({
+            "command": "magnet",
+            "args": ["magnet:?xt=urn:btih:" + "3" * 40],
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        self.assertEqual(exit_count(path), 1)
+
+        choose = await self.feature.command({
+            "command": "auth", "user_id": 1, "chat_id": 10,
+        })
+        self.assertEqual(exit_count(choose), 1)
+        access = await self.feature.callback({
+            "payload": "auth:direct", "user_id": 1, "chat_id": 10,
+        })
+        self.assertEqual(exit_count(access), 1)
+        invalid_access = await self.feature.message({
+            "text": "", "user_id": 1, "chat_id": 10,
+        })
+        self.assertEqual(exit_count(invalid_access), 1)
+        refresh = await self.feature.message({
+            "text": "access", "user_id": 1, "chat_id": 10,
+        })
+        self.assertEqual(exit_count(refresh), 1)
+        invalid_refresh = await self.feature.message({
+            "text": "your_refresh_token", "user_id": 1, "chat_id": 10,
+        })
+        self.assertEqual(exit_count(invalid_refresh), 1)
+
+    async def test_explicit_exit_clears_session_and_terminalizes_operation(self):
+        await self.feature.command({
+            "command": "auth", "user_id": 1, "chat_id": 10,
+        })
+
+        result = await self.feature.callback({
+            "payload": "exit", "user_id": 1, "chat_id": 10,
+        })
+
+        self.assertEqual(result["session"]["state"], "close")
+        self.assertEqual(result["operation"]["state"], "cancelled")
+        self.assertNotIn((10, 1), self.feature.sessions)
 
     async def test_direct_token_wizard_cancel_discards_pending_access(self):
         await self.feature.command({
@@ -473,6 +680,41 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("scan-access", str(self.core.notifications))
 
+    async def test_scan_authorization_can_be_cancelled_before_token_write(self):
+        self.feature.config_store = FakeConfigStore({"app_id": "app-1"})
+        await self.feature.command({
+            "command": "auth", "user_id": 9, "chat_id": 10,
+        })
+        scan = await self.feature.callback({
+            "payload": "auth:scan", "user_id": 9, "chat_id": 10,
+        })
+        operation_id = scan["operation"]["operation_id"]
+
+        accepted = await self.feature.operation_control({
+            "operation_id": operation_id,
+            "action": "cancel",
+            "revision": scan["operation"]["revision"],
+        })
+        auth_task_id = next(
+            key for key in self.runtime.tasks if key.startswith("open115-auth-")
+        )
+        await self.runtime.tasks.pop(auth_task_id)
+
+        self.assertEqual(accepted["operation"]["state"], "cancelling")
+        self.assertEqual(self.feature.config_store.writes, [])
+        self.assertEqual(self.core.reports[-1]["state"], "cancelled")
+
+    async def test_operation_snapshot_returns_current_non_terminal_tasks(self):
+        response = await self.feature.command({
+            "command": "auth", "user_id": 1, "chat_id": 10,
+        })
+
+        snapshot = await self.feature.operation_snapshot({
+            "operation_id": response["operation"]["operation_id"],
+        })
+
+        self.assertEqual(snapshot["operations"], [response["operation"]])
+
 
 class FeatureConfigStoreTest(unittest.TestCase):
     def test_token_writeback_preserves_config_and_uses_private_permissions(self):
@@ -500,10 +742,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertEqual(schema["x-telepiplex-config-command"], "config")
-        self.assertIn("config", [item["name"] for item in manifest["commands"]])
-        self.assertEqual(manifest["version"], "1.0.3")
-        self.assertEqual(project["project"]["version"], "1.0.3")
-        self.assertIn("dist/open115-1.0.3.tpx", readme)
+        commands = [item["name"] for item in manifest["commands"]]
+        self.assertNotIn("config", commands)
+        self.assertIn("auth", commands)
+        self.assertEqual(manifest["version"], "1.1.0")
+        self.assertEqual(manifest["core_api"], ">=1.1,<2.0")
+        self.assertEqual(project["project"]["version"], "1.1.0")
+        self.assertEqual(
+            project["project"]["dependencies"][0],
+            "telepiplex-plugin-sdk==1.1.0",
+        )
+        self.assertIn("dist/open115-1.1.0.tpx", readme)
 
     def test_source_has_no_core_telegram_or_init_imports(self):
         forbidden = []

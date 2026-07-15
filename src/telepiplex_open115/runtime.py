@@ -45,6 +45,8 @@ def main(context: RuntimeContext) -> FeatureRuntime:
         },
         callbacks={"open115": feature.callback},
         messages=feature.message,
+        operation_control=feature.operation_control,
+        operation_snapshot=feature.operation_snapshot,
     )
     feature.bind_runtime(runtime)
     return runtime

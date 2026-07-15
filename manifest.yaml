@@ -1,7 +1,7 @@
 plugin_id: open115
 name: 115 Storage and Download
-version: 1.0.3
-core_api: ">=1.0,<2.0"
+version: 1.1.0
+core_api: ">=1.1,<2.0"
 entry_point: telepiplex_open115.runtime:main
 provides:
   - name: download.provider
@@ -19,8 +19,6 @@ commands:
   - name: m
     description: 投递磁力链接
   - name: auth
-    description: 配置 115 授权
-  - name: config
     description: 配置 115 授权
   - name: q
     description: 退出当前会话

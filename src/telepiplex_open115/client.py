@@ -143,6 +143,7 @@ class Open115Client:
         *,
         timeout: float = 300,
         poll_interval: float = 2,
+        cancel_event=None,
     ):
         deadline = time.monotonic() + max(float(timeout), 1)
         params = {
@@ -151,6 +152,8 @@ class Open115Client:
             "sign": authorization["sign"],
         }
         while time.monotonic() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                raise Open115Error("115 device authorization cancelled")
             try:
                 response = self.session.get(
                     "https://qrcodeapi.115.com/get/status/",
@@ -170,7 +173,12 @@ class Open115Client:
                 break
             if status == "0":
                 raise Open115Error("115 device authorization expired")
-            time.sleep(max(float(poll_interval), 0.1))
+            delay = max(float(poll_interval), 0.1)
+            if cancel_event is not None:
+                if cancel_event.wait(delay):
+                    raise Open115Error("115 device authorization cancelled")
+            else:
+                time.sleep(delay)
         else:
             raise Open115Error("115 device authorization timed out")
 
@@ -286,15 +294,31 @@ class Open115Client:
                 tasks.extend(result["data"].get("tasks") or [])
         return tasks
 
-    def wait_for_download(self, link: str, *, timeout: float, poll_interval: float):
+    def wait_for_download(
+        self,
+        link: str,
+        *,
+        timeout: float,
+        poll_interval: float,
+        cancel_event=None,
+        progress_callback=None,
+    ):
         deadline = time.monotonic() + float(timeout)
         last = {"name": "", "info_hash": "", "percentDone": 0}
         while time.monotonic() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                raise Open115Error("115 download cancelled")
             for task in self.get_offline_tasks():
                 if task.get("url") != link:
                     continue
                 last = task
                 progress = float(task.get("percentDone") or 0)
+                if progress_callback is not None:
+                    progress_callback({
+                        "resource_name": str(task.get("name") or ""),
+                        "info_hash": str(task.get("info_hash") or ""),
+                        "progress": progress,
+                    })
                 if task.get("status") == 2 or progress >= 100:
                     return {
                         "resource_name": str(task.get("name") or ""),
@@ -302,7 +326,12 @@ class Open115Client:
                         "progress": 100,
                     }
                 break
-            time.sleep(float(poll_interval))
+            delay = max(float(poll_interval), 0.01)
+            if cancel_event is not None:
+                if cancel_event.wait(delay):
+                    raise Open115Error("115 download cancelled")
+            else:
+                time.sleep(delay)
         raise Open115Error(
             f"115 download timed out at {float(last.get('percentDone') or 0):.1f}%"
         )
