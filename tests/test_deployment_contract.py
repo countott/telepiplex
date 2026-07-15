@@ -67,14 +67,15 @@ class DeploymentContractTest(unittest.TestCase):
     def test_documentation_describes_independent_release_contract(self):
         chinese_required = (
             "ghcr.io/<owner>/telepiplex-core",
-            "core-v1.0.6",
+            "core-v1.0.7",
+            "同名 GitHub Release",
+            "强制设为 **Latest**",
             "open115-v1.0.2",
             "media-search-v1.0.2",
             "renaming-v1.0.2",
             "plex-management-v1.0.2",
             "`catalog` 分支",
             "catalog.yaml",
-            "releases/latest/download/catalog.yaml",
             "Feature version",
             "1.0.1",
             "不会产生 Telegram 更新通知",
@@ -87,14 +88,15 @@ class DeploymentContractTest(unittest.TestCase):
         english = (ROOT / "README_EN.md").read_text(encoding="utf-8")
         for term in (
             "ghcr.io/<owner>/telepiplex-core",
-            "core-v1.0.6",
+            "core-v1.0.7",
+            "same-tag GitHub Release",
+            "explicitly marked **Latest**",
             "open115-v1.0.2",
             "media-search-v1.0.2",
             "renaming-v1.0.2",
             "plex-management-v1.0.2",
             "`catalog` branch",
             "catalog.yaml",
-            "releases/latest/download/catalog.yaml",
             "Feature version",
             "1.0.1",
             "does not produce a Telegram update notification",
@@ -115,31 +117,27 @@ class DeploymentContractTest(unittest.TestCase):
             "https://raw.githubusercontent.com/countott/telepiplex/"
             "catalog/catalog.yaml"
         )
-        compatibility_catalog = (
-            "https://github.com/countott/telepiplex/releases/latest/download/"
-            "catalog.yaml"
-        )
         chinese = (ROOT / "README.md").read_text(encoding="utf-8")
         for term in (
             preferred_catalog,
-            compatibility_catalog,
             "catalog_refresh_interval: 21600",
             "确认更新",
             "/config/plugins/catalog.yaml",
             "不会静默更新",
         ):
             self.assertIn(term, chinese, term)
+        self.assertNotIn("releases/latest/download/catalog.yaml", chinese)
 
         english = (ROOT / "README_EN.md").read_text(encoding="utf-8")
         for term in (
             preferred_catalog,
-            compatibility_catalog,
             "catalog_refresh_interval: 21600",
             "Confirm update",
             "/config/plugins/catalog.yaml",
             "never updates silently",
         ):
             self.assertIn(term, english, term)
+        self.assertNotIn("releases/latest/download/catalog.yaml", english)
 
     def test_documentation_describes_click_only_feature_catalog_flow(self):
         chinese = (ROOT / "README.md").read_text(encoding="utf-8")

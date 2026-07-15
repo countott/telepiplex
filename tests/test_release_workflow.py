@@ -84,16 +84,17 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertNotIn("workflow_dispatch", triggers)
         self.assertIn("concurrency", workflow)
 
-    def test_core_release_tests_and_pushes_only_version_and_latest(self):
+    def test_core_release_tests_pushes_image_and_publishes_latest_release(self):
         workflow = self._workflow(CORE_WORKFLOW)
         jobs = workflow["jobs"]
         source = CORE_WORKFLOW.read_text(encoding="utf-8")
 
-        self.assertEqual(set(jobs), {"validate-core", "build-core-image"})
+        self.assertEqual(
+            set(jobs),
+            {"validate-core", "build-core-image", "publish-core-release"},
+        )
         self.assertNotIn("build-features", jobs)
-        self.assertNotIn("publish-release", jobs)
-        self.assertEqual(workflow["permissions"]["contents"], "read")
-        self.assertEqual(workflow["permissions"]["packages"], "write")
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
 
         validate = self._step(
             workflow, "validate-core", "Validate immutable Core tag"
@@ -105,19 +106,38 @@ class ReleaseWorkflowTest(unittest.TestCase):
 
         build = jobs["build-core-image"]
         self.assertEqual(build["needs"], "validate-core")
-        publish = self._step(
+        self.assertEqual(
+            build["permissions"], {"contents": "read", "packages": "write"}
+        )
+        image = self._step(
             workflow, "build-core-image", "Build and push Core image"
         )["with"]
-        self.assertEqual(publish["platforms"], "linux/amd64")
-        self.assertTrue(publish["push"])
+        self.assertEqual(image["platforms"], "linux/amd64")
+        self.assertTrue(image["push"])
         self.assertEqual(
-            set(publish["tags"].splitlines()),
+            set(image["tags"].splitlines()),
             {
                 "${{ env.CORE_IMAGE }}:${{ steps.version.outputs.version }}",
                 "${{ env.CORE_IMAGE }}:latest",
             },
         )
-        self.assertNotIn("gh release create", source)
+
+        release = jobs["publish-core-release"]
+        self.assertEqual(
+            release["needs"], ["validate-core", "build-core-image"]
+        )
+        self.assertEqual(release["permissions"], {"contents": "write"})
+        self._step(
+            workflow, "publish-core-release", "Refuse an existing Core Release"
+        )
+        create = self._step(
+            workflow, "publish-core-release", "Create GitHub Latest Release"
+        )["run"]
+        self.assertIn('gh release create "$RELEASE_TAG"', create)
+        self.assertIn('--title "$RELEASE_TAG"', create)
+        self.assertIn("--verify-tag", create)
+        self.assertIn("--latest", create)
+        self.assertNotIn("catalog.yaml", create)
         self.assertNotIn(".tpx", source)
 
     def test_core_manifest_probe_fails_closed(self):
@@ -524,47 +544,23 @@ class ReleaseWorkflowTest(unittest.TestCase):
         )
         self.assertFalse(OLD_WORKFLOW.exists(), "unsafe legacy workflow still exists")
 
-    def test_latest_release_compatibility_assets_converge_after_catalog_push(self):
+    def test_feature_release_catalog_assets_converge_after_catalog_push(self):
         workflow = self._workflow(FEATURE_WORKFLOW)
         sync = self._step(
-            workflow, "publish-feature", "Synchronize Release catalog assets"
+            workflow,
+            "publish-feature",
+            "Synchronize Feature Release catalog assets",
         )["run"]
 
-        self.assertIn("gh release upload", sync)
+        self.assertIn('gh release upload "$RELEASE_TAG"', sync)
         self.assertIn("--clobber", sync)
         self.assertIn("catalog.yaml", sync)
         self.assertIn("catalog.yaml.sha256", sync)
-        self.assertIn("LATEST_TAG", sync)
-        self.assertIn("releases/latest", sync)
-        self.assertIn("platform-v", sync)
-        self.assertNotIn("parse_feature_tag", sync)
         self.assertIn("for SYNC_ATTEMPT in 1 2 3 4 5", sync)
         self.assertIn("cmp", sync)
-
-        validator = next(
-            block
-            for block in self._python_blocks(sync)
-            if "compatibility/latest.json" in block
-        )
-        for tag, succeeds in (
-            ("platform-v1.0.5", True),
-            ("open115-v1.0.1", False),
-            ("platform-latest", False),
-        ):
-            with self.subTest(latest_tag=tag), tempfile.TemporaryDirectory() as name:
-                root = Path(name)
-                (root / "compatibility").mkdir()
-                (root / "compatibility/latest.json").write_text(
-                    json.dumps({"tag_name": tag}), encoding="utf-8"
-                )
-                result = subprocess.run(
-                    [sys.executable, "-c", validator],
-                    cwd=root,
-                    env={**os.environ, "PYTHONPATH": str(ROOT)},
-                    capture_output=True,
-                    text=True,
-                )
-                self.assertEqual(result.returncode == 0, succeeds, result.stderr)
+        self.assertNotIn("releases/latest", sync)
+        self.assertNotIn("LATEST_TAG", sync)
+        self.assertNotIn("platform-v", sync)
 
     def test_docs_specify_optimistic_catalog_publication(self):
         for path in (DESIGN, PLAN):

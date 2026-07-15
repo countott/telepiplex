@@ -1,5 +1,10 @@
 # Core GitHub Latest Release Design
 
+This design supersedes the Core Release and Latest Platform compatibility
+sections of `2026-07-14-independent-feature-and-catalog-releases-design.md`.
+Feature identity, immutable artifacts, and optimistic catalog publication from
+that design remain unchanged.
+
 ## Goal
 
 Every successful `core-v<semver>` publication must update both Core distribution

@@ -1,4 +1,4 @@
-name: Publish Telepiplex Core image
+name: Publish Telepiplex Core release
 
 on:
   push:
@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: core-release-${{ github.ref_name }}
@@ -56,6 +55,9 @@ jobs:
 
   build-core-image:
     needs: validate-core
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Core release source
@@ -113,3 +115,42 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: true
           sbom: true
+
+  publish-core-release:
+    needs:
+      - validate-core
+      - build-core-image
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse an existing Core Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Core Release already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+      - name: Write Core release notes
+        run: |
+          VERSION="${RELEASE_TAG#core-v}"
+          {
+            echo "# Telepiplex Core $VERSION"
+            echo
+            echo "- Image: \`$CORE_IMAGE:$VERSION\`"
+            echo "- Commit: \`$GITHUB_SHA\`"
+            echo "- Platform: \`linux/amd64\`"
+          } > release-notes.md
+
+      - name: Create GitHub Latest Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$RELEASE_TAG" \
+            --notes-file release-notes.md \
+            --latest

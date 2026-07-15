@@ -576,10 +576,9 @@ jobs:
             exit 1
           fi
 
-      - name: Synchronize Release catalog assets
+      - name: Synchronize Feature Release catalog assets
         env:
           GH_TOKEN: ${{ github.token }}
-          PYTHONPATH: .:sdk/src
         run: |
           SYNCHRONIZED=false
           for SYNC_ATTEMPT in 1 2 3 4 5; do
@@ -592,33 +591,6 @@ jobs:
 
             gh release upload "$RELEASE_TAG" compatibility/before/catalog.yaml compatibility/before/catalog.yaml.sha256 \
               --repo "$GITHUB_REPOSITORY" --clobber
-
-            LATEST_API="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/latest"
-            HTTP_CODE=$(curl --silent --show-error --location \
-              --header "Authorization: Bearer $GH_TOKEN" \
-              --header "Accept: application/vnd.github+json" \
-              --output compatibility/latest.json \
-              --write-out '%{http_code}' \
-              "$LATEST_API")
-            if [[ "$HTTP_CODE" != 200 ]]; then
-              echo "Latest Release probe failed: HTTP $HTTP_CODE" >&2
-              exit 1
-            fi
-            LATEST_TAG=$(python - <<'PY'
-          import json
-          import pathlib
-          import re
-
-          tag = json.loads(pathlib.Path("compatibility/latest.json").read_text()).get("tag_name")
-          if not re.fullmatch(r"platform-v[0-9]+\.[0-9]+\.[0-9]+", str(tag)):
-              raise SystemExit("Latest Release must be a stable Platform release")
-          print(tag)
-          PY
-            )
-            if [[ "$LATEST_TAG" != "$RELEASE_TAG" ]]; then
-              gh release upload "$LATEST_TAG" compatibility/before/catalog.yaml compatibility/before/catalog.yaml.sha256 \
-                --repo "$GITHUB_REPOSITORY" --clobber
-            fi
 
             git fetch --force --no-tags origin refs/heads/catalog:refs/remotes/origin/catalog
             git show refs/remotes/origin/catalog:catalog.yaml > compatibility/after/catalog.yaml
