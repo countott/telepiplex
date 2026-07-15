@@ -21,11 +21,15 @@ def main(context: RuntimeContext) -> FeatureRuntime:
         config=config, core=context.core,
         jobs=RenamingJobStore(context.state_path / "renaming.db"),
     )
-    return FeatureRuntime(
+    runtime = FeatureRuntime(
         manifest=context.manifest,
         token=context.token,
         events={"download.completed": feature.download_completed},
         commands={"renaming_config": feature.command},
         callbacks={"renaming": feature.callback},
         messages=feature.message,
+        operation_control=feature.operation_control,
+        operation_snapshot=feature.operation_snapshot,
     )
+    feature.bind_runtime(runtime)
+    return runtime

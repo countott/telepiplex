@@ -1,4 +1,5 @@
 import ast
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -433,6 +434,7 @@ class FakeCore:
         ])
         self.events = []
         self.notifications = []
+        self.reports = []
         self.fail_notification = False
 
     async def call_capability(self, capability, method, payload, **_kwargs):
@@ -462,15 +464,123 @@ class FakeCore:
         self.notifications.append((user_id, text, kwargs))
         return {"accepted": True}
 
+    async def report_operation(self, operation):
+        self.reports.append(operation)
+        return {"accepted": True, "revision": operation["revision"]}
+
+
+class FakeRuntime:
+    def __init__(self):
+        self.tasks = {}
+
+    def spawn(self, awaitable, *, task_id):
+        task = asyncio.create_task(awaitable, name=task_id)
+        self.tasks[task_id] = task
+        return task
+
+    async def wait(self):
+        tasks = list(self.tasks.values())
+        self.tasks.clear()
+        if tasks:
+            await asyncio.gather(*tasks)
+
 
 class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
+    async def test_download_event_accepts_handoff_and_runs_in_background(self):
+        core = FakeCore()
+        runtime = FakeRuntime()
+        feature = RenamingFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            core=core,
+        )
+        feature.bind_runtime(runtime)
+
+        accepted = await feature.download_completed({
+            "event_id": "event-operation",
+            "payload": {
+                "job_id": "job-operation",
+                "selected_path": "/Movies",
+                "user_id": 123,
+                "chat_id": 10,
+                "final_path": "/Downloads/Release",
+                "resource_name": "Movie.2024",
+                "media_metadata": movie_contract(),
+                "operation_id": "op-chain",
+                "operation_revision": 8,
+            },
+        })
+
+        self.assertEqual(accepted["operation"]["state"], "running")
+        self.assertEqual(core.storage.moved, [])
+        await runtime.wait()
+
+        self.assertEqual(core.reports[0]["operation_id"], "op-chain")
+        self.assertEqual(core.reports[0]["revision"], 9)
+        stages = {item["stage"] for item in core.reports}
+        self.assertTrue({
+            "organizing", "conflict_validation", "directory_preparation",
+            "renaming", "moving", "cleanup",
+        }.issubset(stages))
+        self.assertEqual(core.reports[-1]["state"], "handed_off")
+        self.assertEqual(core.reports[-1]["next_plugin_id"], "plex-management")
+        self.assertEqual(core.events[0][1]["operation_id"], "op-chain")
+        self.assertEqual(
+            core.events[0][1]["operation_revision"],
+            core.reports[-1]["revision"],
+        )
+
+    async def test_cancel_during_metadata_stops_later_pipeline(self):
+        entered = asyncio.Event()
+
+        class BlockingCore(FakeCore):
+            async def call_capability(self, capability, method, payload, **kwargs):
+                if capability == "media.search":
+                    entered.set()
+                    await asyncio.Event().wait()
+                return await super().call_capability(
+                    capability, method, payload, **kwargs
+                )
+
+        core = BlockingCore()
+        runtime = FakeRuntime()
+        feature = RenamingFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            core=core,
+        )
+        feature.bind_runtime(runtime)
+        accepted = await feature.download_completed({
+            "event_id": "event-cancel",
+            "payload": {
+                "job_id": "job-cancel", "selected_path": "/Movies",
+                "user_id": 123, "chat_id": 10,
+                "final_path": "/Downloads/Release",
+                "resource_name": "Unknown.Release",
+                "operation_id": "op-cancel", "operation_revision": 2,
+            },
+        })
+        await entered.wait()
+
+        result = await feature.operation_control({
+            "operation_id": "op-cancel",
+            "action": "cancel",
+            "revision": accepted["operation"]["revision"],
+        })
+        await runtime.wait()
+
+        self.assertEqual(result["operation"]["state"], "cancelling")
+        self.assertEqual(core.reports[-1]["state"], "cancelled")
+        self.assertEqual(core.storage.moved, [])
+        self.assertEqual(core.events, [])
+
     async def test_direct_magnet_requeries_media_search_with_release_and_file_tree(self):
         core = FakeCore()
         feature = RenamingFeature(
             config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
             core=core,
         )
-        result = await feature.download_completed({
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+        await feature.download_completed({
             "event_id": "event-direct",
             "payload": {
                 "job_id": "job-direct", "selected_path": "/Movies",
@@ -488,8 +598,8 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
                 }],
             },
         })
+        await runtime.wait()
 
-        self.assertTrue(result["organized"])
         self.assertIn("Movie.2024.1080p.WEB-DL", core.metadata_query)
         self.assertIn("Movie.2024.mkv", core.metadata_query)
         self.assertEqual(
@@ -503,7 +613,9 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
             config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
             core=core,
         )
-        result = await feature.download_completed({
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+        await feature.download_completed({
             "event_id": "event-1",
             "payload": {
                 "job_id": "job-1",
@@ -516,8 +628,8 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "media_metadata": movie_contract(),
             },
         })
+        await runtime.wait()
 
-        self.assertTrue(result["organized"])
         self.assertEqual(core.assert_capability, "storage.provider")
         self.assertEqual(core.events[0][0], "media.organized")
         self.assertEqual(core.events[0][1]["job_id"], "job-1")
@@ -532,8 +644,10 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
             config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
             core=core,
         )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
 
-        result = await feature.download_completed({
+        await feature.download_completed({
             "event_id": "event-cleanup-failed",
             "payload": {
                 "job_id": "job-cleanup-failed", "selected_path": "/Movies",
@@ -541,8 +655,8 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "resource_name": "Movie.2024", "media_metadata": movie_contract(),
             },
         })
+        await runtime.wait()
 
-        self.assertFalse(result["organized"])
         self.assertEqual(core.events, [])
         self.assertIn("源目录清理未完成", core.notifications[0][1])
 
@@ -555,6 +669,8 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
                 config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
                 core=core, jobs=RenamingJobStore(Path(tmpdir) / "jobs.db"),
             )
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
             request = {"event_id": "event-replay", "payload": {
                 "job_id": "job-replay", "selected_path": "/Movies", "user_id": 123,
                 "final_path": "/Downloads/Release", "resource_name": "Movie.2024",
@@ -563,6 +679,7 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
             core.fail_notification = True
             with self.assertRaises(RuntimeError):
                 await feature.download_completed(request)
+                await runtime.wait()
             moved_count = len(core.storage.moved)
             core.fail_notification = False
 
@@ -575,7 +692,7 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
 class FeatureSourceContractTest(unittest.TestCase):
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("dist/renaming-1.0.3.tpx", source)
+        self.assertIn("dist/renaming-1.1.0.tpx", source)
         self.assertNotIn("dist/renaming-1.0.0.tpx", source)
 
     def test_source_has_no_core_telegram_or_init_imports(self):

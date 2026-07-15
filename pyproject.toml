@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telepiplex-renaming"
-version = "1.0.3"
+version = "1.1.0"
 requires-python = ">=3.12"
-dependencies = ["telepiplex-plugin-sdk==1.0.1", "requests>=2.32,<3", "PyYAML>=6.0.2"]
+dependencies = ["telepiplex-plugin-sdk==1.1.0", "requests>=2.32,<3", "PyYAML>=6.0.2"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -68,7 +68,7 @@ class RenamingConfigWizard:
                 "data": {"keyboard": [
                     [{"text": "TVDB", "callback_data": "renaming:config:tvdb"}],
                     [{"text": "AI", "callback_data": "renaming:config:ai"}],
-                    [{"text": "取消", "callback_data": "renaming:config:cancel"}],
+                    [{"text": "退出", "callback_data": "renaming:config:cancel"}],
                 ]},
             }],
             "session": {"state": "open"},
@@ -105,7 +105,7 @@ class RenamingConfigWizard:
                     "data": {"keyboard": [[
                         {"text": "启用", "callback_data": "renaming:config:boolean:on"},
                         {"text": "停用", "callback_data": "renaming:config:boolean:off"},
-                    ]]},
+                    ], [{"text": "退出", "callback_data": "renaming:config:cancel"}]]},
                 }],
                 "session": {"state": "open"},
             }
@@ -193,7 +193,7 @@ class RenamingConfigWizard:
                 "text": "配置已收集，敏感值不会回显。确认保存并重新加载 Feature？",
                 "data": {"keyboard": [[
                     {"text": "确认保存", "callback_data": "renaming:config:confirm"},
-                    {"text": "取消", "callback_data": "renaming:config:cancel"},
+                    {"text": "退出", "callback_data": "renaming:config:cancel"},
                 ]]},
             }],
             "session": {"state": "open"},
@@ -201,7 +201,16 @@ class RenamingConfigWizard:
 
     @staticmethod
     def _message(text: str, state: str, *, edit=False) -> dict:
+        action = {
+            "kind": "edit_message" if edit else "send_message",
+            "text": text,
+        }
+        if state == "open":
+            action["data"] = {"keyboard": [[{
+                "text": "退出",
+                "callback_data": "renaming:config:cancel",
+            }]]}
         return {
-            "actions": [{"kind": "edit_message" if edit else "send_message", "text": text}],
+            "actions": [action],
             "session": {"state": state},
         }

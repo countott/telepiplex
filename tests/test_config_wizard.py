@@ -53,7 +53,7 @@ class RenamingConfigWizardTest(unittest.IsolatedAsyncioTestCase):
         buttons = result["actions"][0]["data"]["keyboard"]
         self.assertEqual(
             [row[0]["text"] for row in buttons],
-            ["TVDB", "AI", "取消"],
+            ["TVDB", "AI", "退出"],
         )
         text = result["actions"][0]["text"]
         for hidden in ("timeout", "阈值", "未整理", "selection", "MCP"):
@@ -161,6 +161,31 @@ class RenamingConfigWizardTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("config_patch", expired)
         self.assertEqual(expired["session"]["state"], "close")
+
+    async def test_every_open_configuration_step_has_one_exit(self):
+        def exits(result):
+            return [
+                button
+                for action in result.get("actions", [])
+                for row in (action.get("data") or {}).get("keyboard", [])
+                for button in row
+                if button.get("text") == "退出"
+            ]
+
+        result = await self._start()
+        self.assertEqual(result["operation"]["state"], "awaiting_input")
+        self.assertEqual(result["operation"]["control"], "exit")
+        self.assertEqual(len(exits(result)), 1)
+        result = await self.feature.callback({
+            **self.owner, "namespace": "renaming", "payload": "config:ai",
+        })
+        self.assertEqual(len(exits(result)), 1)
+        result = await self.feature.callback({
+            **self.owner, "namespace": "renaming", "payload": "config:boolean:on",
+        })
+        self.assertEqual(len(exits(result)), 1)
+        result = await self.feature.message({**self.owner, "text": "bad-url"})
+        self.assertEqual(len(exits(result)), 1)
 
 
 if __name__ == "__main__":
