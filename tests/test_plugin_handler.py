@@ -561,6 +561,30 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             "core-config-direct:open115",
         )
 
+    async def test_update_success_reports_added_config_keys_without_values(self):
+        from app.handlers.plugin_handler import plugin_update_callback
+
+        update, context, manager = self._request([], user_id=1)
+        update.callback_query = Mock()
+        update.callback_query.data = "core-plugin-update:confirm:echo@2.0.0"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        manager.update = AsyncMock(return_value=SimpleNamespace(
+            state="active", plugin_id="echo", version="2.0.0",
+            message="Feature updated",
+            details={
+                "config_added_keys": ["mcp.path", "service.timeout"],
+                "config_values": {"api_key": "operator-secret"},
+            },
+        ))
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_update_callback(update, context)
+
+        message = update.callback_query.edit_message_text.await_args_list[-1].args[0]
+        self.assertIn("新增配置项：mcp.path、service.timeout", message)
+        self.assertNotIn("operator-secret", message)
+
     async def test_core_update_callback_sanitizes_manager_errors(self):
         from app.core.plugin_manager import PluginOperationError
         from app.handlers.plugin_handler import plugin_update_callback

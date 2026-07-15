@@ -90,6 +90,37 @@ def _validate(schema: dict, value: dict) -> dict:
     return deepcopy(value)
 
 
+def _fill_missing_defaults(
+    current: dict,
+    default: dict,
+    *,
+    prefix: str = "",
+) -> tuple[dict, list[str]]:
+    """Fill absent mapping keys while always preserving operator values."""
+    merged = deepcopy(current)
+    added: list[str] = []
+    for key, default_value in default.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if key not in current:
+            merged[key] = deepcopy(default_value)
+            if isinstance(default_value, dict) and default_value:
+                _, nested = _fill_missing_defaults({}, default_value, prefix=path)
+                added.extend(nested)
+            else:
+                added.append(path)
+            continue
+        current_value = current[key]
+        if isinstance(current_value, dict) and isinstance(default_value, dict):
+            merged_value, nested = _fill_missing_defaults(
+                current_value,
+                default_value,
+                prefix=path,
+            )
+            merged[key] = merged_value
+            added.extend(nested)
+    return merged, added
+
+
 def _atomic_json(path: Path, value: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -150,16 +181,39 @@ class PluginStore:
             schema = _schema_at(staged_path)
             default = _validate(schema, _default_at(staged_path))
             config_path = self._plugin_root(manifest.plugin_id) / "config.yaml"
+            active_release = self.active(manifest.plugin_id)
+            migration_code = (
+                "config_migration_required"
+                if active_release is not None
+                else "invalid_config"
+            )
             if config_path.exists():
                 try:
                     current = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-                except (UnicodeDecodeError, yaml.YAMLError) as exc:
+                except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
                     raise StoreError(
-                        "invalid_config",
+                        migration_code,
                         f"cannot parse plugin config: {type(exc).__name__}",
                     ) from None
-                _validate(schema, current)
+                if not isinstance(current, dict):
+                    raise StoreError(
+                        migration_code,
+                        "plugin config cannot be migrated automatically",
+                    )
+                migrated, _ = _fill_missing_defaults(current, default)
+                try:
+                    _validate(schema, migrated)
+                except StoreError:
+                    raise StoreError(
+                        migration_code,
+                        "plugin config cannot be migrated automatically",
+                    ) from None
             else:
+                if active_release is not None:
+                    raise StoreError(
+                        "config_migration_required",
+                        "active plugin config is missing",
+                    )
                 (staged_path / ".validated-default.json").write_text(
                     json.dumps(default, ensure_ascii=False, sort_keys=True),
                     encoding="utf-8",
@@ -189,7 +243,12 @@ class PluginStore:
             enabled=True,
         )
 
-    def commit(self, staged: StagedRelease) -> ActiveRelease:
+    def commit(
+        self,
+        staged: StagedRelease,
+        *,
+        refresh_example: bool = True,
+    ) -> ActiveRelease:
         if staged.path.parent != self.staging_root or not staged.path.is_dir():
             raise StoreError("invalid_staging", "release is not in this store staging area")
         plugin_root = self._plugin_root(staged.plugin_id)
@@ -199,26 +258,12 @@ class PluginStore:
             raise StoreError("release_exists", f"release already exists: {staged.version}")
 
         releases_root.mkdir(parents=True, exist_ok=True)
+        had_active_release = self.active(staged.plugin_id) is not None
         os.replace(staged.path, target)
         plugin_root.joinpath("state").mkdir(parents=True, exist_ok=True)
 
         config_path = plugin_root / "config.yaml"
-        default = self.write_config_example(ActiveRelease(
-            plugin_id=staged.plugin_id,
-            version=staged.version,
-            path=target,
-            manifest=staged.manifest,
-            artifact_sha256=staged.artifact_sha256,
-            enabled=False,
-        ))
-        if not config_path.exists():
-            _atomic_yaml(config_path, default)
-        (target / ".validated-default.json").unlink(missing_ok=True)
-
-        _atomic_json(target / ".artifact.json", {
-            "artifact_sha256": staged.artifact_sha256,
-        })
-        return ActiveRelease(
+        committed = ActiveRelease(
             plugin_id=staged.plugin_id,
             version=staged.version,
             path=target,
@@ -226,6 +271,18 @@ class PluginStore:
             artifact_sha256=staged.artifact_sha256,
             enabled=False,
         )
+        _atomic_json(target / ".artifact.json", {
+            "artifact_sha256": staged.artifact_sha256,
+        })
+        (target / ".validated-default.json").unlink(missing_ok=True)
+
+        if not config_path.exists():
+            default = self.write_config_example(committed)
+            _atomic_yaml(config_path, default)
+        elif refresh_example or not had_active_release:
+            self.write_config_example(committed)
+
+        return committed
 
     def write_config_example(
         self,
@@ -238,6 +295,83 @@ class PluginStore:
             mode=0o644,
         )
         return deepcopy(default)
+
+    def migrate_config(
+        self,
+        release: ActiveRelease | StagedRelease,
+    ) -> tuple[dict, dict, list[str]]:
+        """Migrate live config by adding defaults, without replacing any value."""
+        config_path = self._plugin_root(release.plugin_id) / "config.yaml"
+        try:
+            current = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise StoreError(
+                "config_migration_required",
+                f"cannot read plugin config: {type(exc).__name__}",
+            ) from None
+        if not isinstance(current, dict):
+            raise StoreError(
+                "config_migration_required",
+                "plugin config cannot be migrated automatically",
+            )
+        default = _default_at(release.path)
+        migrated, added = _fill_missing_defaults(current, default)
+        try:
+            validated = _validate(_schema_at(release.path), migrated)
+        except StoreError:
+            raise StoreError(
+                "config_migration_required",
+                "plugin config cannot be migrated automatically",
+            ) from None
+        if validated != current:
+            try:
+                _atomic_yaml(config_path, validated)
+            except OSError as exc:
+                raise StoreError(
+                    "config_write_failed",
+                    f"cannot write plugin config: {type(exc).__name__}",
+                ) from None
+        return deepcopy(current), deepcopy(validated), added
+
+    def write_rollback_config(
+        self,
+        release: ActiveRelease | StagedRelease,
+        value: dict,
+    ) -> dict:
+        if not isinstance(value, dict):
+            raise StoreError(
+                "invalid_config",
+                "rollback config must be a mapping",
+            )
+        try:
+            _atomic_yaml(release.path / ".rollback-config.yaml", value)
+        except OSError as exc:
+            raise StoreError(
+                "config_write_failed",
+                f"cannot write rollback config: {type(exc).__name__}",
+            ) from None
+        return deepcopy(value)
+
+    def read_rollback_config(
+        self,
+        release: ActiveRelease | StagedRelease,
+    ) -> dict | None:
+        path = release.path / ".rollback-config.yaml"
+        if not path.exists():
+            return None
+        try:
+            value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise StoreError(
+                "config_migration_required",
+                f"cannot read rollback config: {type(exc).__name__}",
+            ) from None
+        if not isinstance(value, dict):
+            raise StoreError(
+                "config_migration_required",
+                "rollback config must be migrated manually",
+            )
+        return deepcopy(value)
 
     def set_active(
         self,

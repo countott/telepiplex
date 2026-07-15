@@ -3,8 +3,10 @@ import asyncio
 import tempfile
 import time
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import yaml
 
@@ -487,6 +489,280 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rolled_back.version, "1.0.0")
         self.assertEqual(self.store.active("echo").previous_version, "2.0.0")
         self.assertEqual(self.router.snapshot.capabilities["demo.echo"].client.version, "1.0.0")
+
+    async def test_update_adds_nested_defaults_without_overwriting_user_values(self):
+        old_schema = {
+            "type": "object",
+            "properties": {
+                "service": {
+                    "type": "object",
+                    "properties": {
+                        "api_key": {"type": "string"},
+                        "endpoint": {"type": "string"},
+                        "categories": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["api_key", "endpoint", "categories"],
+                    "additionalProperties": False,
+                }
+            },
+            "required": ["service"],
+            "additionalProperties": False,
+        }
+        new_schema = deepcopy(old_schema)
+        new_schema["properties"]["service"]["properties"]["timeout"] = {
+            "type": "integer"
+        }
+        new_schema["properties"]["service"]["required"].append("timeout")
+        old_default = {
+            "service": {
+                "api_key": "",
+                "endpoint": "https://old",
+                "categories": ["old-default"],
+            }
+        }
+        new_default = {
+            "service": {
+                "api_key": "",
+                "endpoint": "https://new",
+                "categories": ["new-default"],
+                "timeout": 30,
+            }
+        }
+        await self.manager.install(self._artifact(
+            "echo", "1.0.0", config_schema=old_schema,
+            config_default=old_default,
+        ))
+        await self.manager.configure("echo", {
+            "service": {
+                "api_key": "operator-secret",
+                "endpoint": "https://operator",
+                "categories": ["operator"],
+            }
+        })
+        started_configs = []
+        original_start = self.supervisor.start
+
+        async def observe_start(release, *, shadow=False):
+            started_configs.append(self.store.read_config(release))
+            return await original_start(release, shadow=shadow)
+
+        self.supervisor.start = observe_start
+
+        result = await self.manager.update(self._artifact(
+            "echo", "2.0.0", commit="b" * 40,
+            config_schema=new_schema, config_default=new_default,
+        ))
+
+        active = self.store.active("echo")
+        self.assertEqual(self.store.read_config(active), {
+            "service": {
+                "api_key": "operator-secret",
+                "endpoint": "https://operator",
+                "categories": ["operator"],
+                "timeout": 30,
+            }
+        })
+        example = self.root / "plugins/echo/config.yaml.example"
+        self.assertEqual(yaml.safe_load(example.read_text()), new_default)
+        self.assertEqual(result.details["config_added_keys"], ["service.timeout"])
+        self.assertEqual(started_configs, [self.store.read_config(active)])
+
+    async def test_update_reports_manual_migration_without_exposing_values(self):
+        old_schema, old_default = self._editable_config()
+        new_schema = deepcopy(old_schema)
+        new_schema["properties"]["prefix"] = {"type": "integer"}
+        await self.manager.install(self._artifact(
+            "echo", "1.0.0", config_schema=old_schema,
+            config_default=old_default,
+        ))
+        await self.manager.configure("echo", {"prefix": "operator-secret"})
+
+        from app.core.plugin_manager import PluginOperationError
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.update(self._artifact(
+                "echo", "2.0.0", commit="b" * 40,
+                config_schema=new_schema, config_default={"prefix": 1},
+            ))
+
+        self.assertEqual(raised.exception.code, "config_migration_required")
+        self.assertNotIn("operator-secret", str(raised.exception))
+        self.assertEqual(self.store.active("echo").version, "1.0.0")
+        self.assertEqual(
+            self.store.read_config(self.store.active("echo")),
+            {"prefix": "operator-secret"},
+        )
+
+    async def test_update_reports_migration_required_for_damaged_active_config(self):
+        old_schema, old_default = self._editable_config()
+        await self.manager.install(self._artifact(
+            "echo", "1.0.0", config_schema=old_schema,
+            config_default=old_default,
+        ))
+        config_path = self.root / "plugins/echo/config.yaml"
+
+        from app.core.plugin_manager import PluginOperationError
+        cases = (
+            ("2.0.0", "malformed"),
+            ("3.0.0", "unreadable"),
+            ("4.0.0", "missing"),
+        )
+        for version, damaged in cases:
+            with self.subTest(damaged=damaged):
+                if config_path.is_dir():
+                    config_path.rmdir()
+                if damaged == "malformed":
+                    config_path.write_text("prefix: [\n", encoding="utf-8")
+                else:
+                    config_path.unlink(missing_ok=True)
+                    if damaged == "unreadable":
+                        config_path.mkdir()
+                with self.assertRaises(PluginOperationError) as raised:
+                    await self.manager.update(self._artifact(
+                        "echo", version, commit="b" * 40,
+                        config_schema=old_schema, config_default=old_default,
+                    ))
+                self.assertEqual(
+                    raised.exception.code,
+                    "config_migration_required",
+                )
+
+    async def test_rollback_restores_config_before_new_keys_were_added(self):
+        old_schema, old_default = self._editable_config()
+        new_schema = deepcopy(old_schema)
+        new_schema["properties"]["timeout"] = {"type": "integer"}
+        new_schema["required"].append("timeout")
+        await self.manager.install(self._artifact(
+            "echo", "1.0.0", config_schema=old_schema,
+            config_default=old_default,
+        ))
+        await self.manager.configure("echo", {"prefix": "operator"})
+        await self.manager.update(self._artifact(
+            "echo", "2.0.0", commit="b" * 40,
+            config_schema=new_schema,
+            config_default={"prefix": "v2", "timeout": 30},
+        ))
+
+        result = await self.manager.rollback("echo")
+
+        active = self.store.active("echo")
+        self.assertEqual(result.version, "1.0.0")
+        self.assertEqual(self.store.read_config(active), {"prefix": "operator"})
+        self.assertEqual(
+            yaml.safe_load((
+                self.root / "plugins/echo/config.yaml.example"
+            ).read_text()),
+            old_default,
+        )
+
+    async def test_rollback_reports_migration_required_for_damaged_snapshot(self):
+        old_schema, old_default = self._editable_config()
+        new_schema = deepcopy(old_schema)
+        new_schema["properties"]["timeout"] = {"type": "integer"}
+        new_schema["required"].append("timeout")
+        await self.manager.install(self._artifact(
+            "echo", "1.0.0", config_schema=old_schema,
+            config_default=old_default,
+        ))
+        await self.manager.update(self._artifact(
+            "echo", "2.0.0", commit="b" * 40,
+            config_schema=new_schema,
+            config_default={"prefix": "v2", "timeout": 30},
+        ))
+        snapshot = self.store.active("echo").path / ".rollback-config.yaml"
+        snapshot.write_text("prefix: [\n", encoding="utf-8")
+
+        from app.core.plugin_manager import PluginOperationError
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.rollback("echo")
+
+        self.assertEqual(raised.exception.code, "config_migration_required")
+
+    async def test_failed_update_restores_config_after_default_migration(self):
+        old_schema, old_default = self._editable_config()
+        new_schema = deepcopy(old_schema)
+        new_schema["properties"]["timeout"] = {"type": "integer"}
+        new_schema["required"].append("timeout")
+        new_default = {"prefix": "v2", "timeout": 30}
+        await self.manager.install(self._artifact(
+            "echo", "1.0.0", config_schema=old_schema,
+            config_default=old_default,
+        ))
+        await self.manager.configure("echo", {"prefix": "operator"})
+        self.supervisor.unhealthy_versions.add("2.0.0")
+
+        from app.core.plugin_manager import PluginOperationError
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.update(self._artifact(
+                "echo", "2.0.0", commit="b" * 40,
+                config_schema=new_schema, config_default=new_default,
+            ))
+
+        self.assertEqual(raised.exception.code, "stabilization_failed")
+        active = self.store.active("echo")
+        self.assertEqual(active.version, "1.0.0")
+        self.assertEqual(self.store.read_config(active), {"prefix": "operator"})
+        example = self.root / "plugins/echo/config.yaml.example"
+        self.assertEqual(yaml.safe_load(example.read_text()), old_default)
+
+    async def test_failed_config_restore_reports_activation_rollback_failure(self):
+        old_schema, old_default = self._editable_config()
+        new_schema = deepcopy(old_schema)
+        new_schema["properties"]["timeout"] = {"type": "integer"}
+        new_schema["required"].append("timeout")
+        await self.manager.install(self._artifact(
+            "echo", "1.0.0", config_schema=old_schema,
+            config_default=old_default,
+        ))
+        await self.manager.configure("echo", {"prefix": "operator"})
+        self.supervisor.unhealthy_versions.add("2.0.0")
+
+        from app.core.plugin_manager import PluginOperationError
+        from app.core.plugin_store import StoreError
+        self.store.write_config = Mock(side_effect=StoreError(
+            "config_write_failed",
+            "cannot restore plugin config",
+        ))
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.update(self._artifact(
+                "echo", "2.0.0", commit="b" * 40,
+                config_schema=new_schema,
+                config_default={"prefix": "v2", "timeout": 30},
+            ))
+
+        self.assertEqual(raised.exception.code, "activation_rollback_failed")
+
+    async def test_failed_new_process_stop_reports_activation_rollback_failure(self):
+        old_schema, old_default = self._editable_config()
+        new_schema = deepcopy(old_schema)
+        new_schema["properties"]["timeout"] = {"type": "integer"}
+        new_schema["required"].append("timeout")
+        await self.manager.install(self._artifact(
+            "echo", "1.0.0", config_schema=old_schema,
+            config_default=old_default,
+        ))
+        self.supervisor.unhealthy_versions.add("2.0.0")
+        original_stop = self.supervisor.stop
+
+        async def fail_new_process_stop(process, timeout=10):
+            if process.release.version == "2.0.0":
+                raise RuntimeError("stop failed")
+            return await original_stop(process, timeout=timeout)
+
+        self.supervisor.stop = fail_new_process_stop
+
+        from app.core.plugin_manager import PluginOperationError
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.update(self._artifact(
+                "echo", "2.0.0", commit="b" * 40,
+                config_schema=new_schema,
+                config_default={"prefix": "v2", "timeout": 30},
+            ))
+
+        self.assertEqual(raised.exception.code, "activation_rollback_failed")
+        self.assertIn("new-process", raised.exception.details["failed_steps"])
 
     async def test_active_consistency_checks_store_process_route_manifest_and_schema(self):
         await self.manager.install(self._artifact("echo", "1.0.0", commit="a" * 40))

@@ -83,7 +83,7 @@ class PluginManager:
                     f"Feature is already installed: {verified.manifest.plugin_id}",
                 )
             release = await self._prepare_release(verified)
-            active = await self._activate_release(release, None, None)
+            active, _ = await self._activate_release(release, None, None)
             return self._result("active", active, "Feature installed and active")
 
     async def update(self, reference: str | Path, expected_sha256: str = "") -> PluginOperationResult:
@@ -97,10 +97,23 @@ class PluginManager:
                 raise PluginOperationError("not_installed", "Feature is not installed")
             if old_release.version == verified.manifest.version:
                 raise PluginOperationError("same_version", "Feature version is already active")
-            release = await self._prepare_release(verified)
+            release = await self._prepare_release(
+                verified,
+                refresh_example=False,
+            )
             old_process = self.supervisor.process(old_release.plugin_id)
-            active = await self._activate_release(release, old_release, old_process)
-            return self._result("active", active, "Feature updated")
+            active, added_keys = await self._activate_release(
+                release,
+                old_release,
+                old_process,
+                migrate_config=True,
+            )
+            return self._result(
+                "active",
+                active,
+                "Feature updated",
+                extra_details={"config_added_keys": added_keys},
+            )
 
     async def rollback(self, plugin_id: str) -> PluginOperationResult:
         async with self._lifecycle_lock:
@@ -110,8 +123,33 @@ class PluginManager:
             target = self.store.release(plugin_id, current.previous_version)
             if target is None:
                 raise PluginOperationError("rollback_unavailable", "Rollback release is missing")
+            try:
+                rollback_config = await asyncio.to_thread(
+                    self.store.read_rollback_config,
+                    current,
+                )
+                if rollback_config is None:
+                    current_config = await asyncio.to_thread(
+                        self.store.read_config,
+                        current,
+                    )
+                    rollback_config = await asyncio.to_thread(
+                        self.store.validate_config,
+                        target,
+                        current_config,
+                    )
+            except StoreError:
+                raise PluginOperationError(
+                    "config_migration_required",
+                    "Rollback config must be migrated manually",
+                ) from None
             old_process = self.supervisor.process(plugin_id)
-            active = await self._activate_release(target, current, old_process)
+            active, _ = await self._activate_release(
+                target,
+                current,
+                old_process,
+                replacement_config=rollback_config,
+            )
             return self._result("active", active, "Feature rolled back")
 
     async def disable(self, plugin_id: str) -> PluginOperationResult:
@@ -612,12 +650,21 @@ class PluginManager:
             )
         return verified
 
-    async def _prepare_release(self, verified) -> ActiveRelease:
+    async def _prepare_release(
+        self,
+        verified,
+        *,
+        refresh_example: bool = True,
+    ) -> ActiveRelease:
         staged = None
         try:
             staged = await asyncio.to_thread(self.store.stage, verified)
             await self._venv_installer(staged)
-            return await asyncio.to_thread(self.store.commit, staged)
+            return await asyncio.to_thread(
+                self.store.commit,
+                staged,
+                refresh_example=refresh_example,
+            )
         except Exception as exc:
             if staged is not None and staged.path.exists():
                 await asyncio.to_thread(self.store.discard, staged)
@@ -628,11 +675,36 @@ class PluginManager:
         release: ActiveRelease,
         old_release: ActiveRelease | None,
         old_process: PluginProcess | None,
-    ) -> ActiveRelease:
+        *,
+        migrate_config: bool = False,
+        replacement_config: dict | None = None,
+    ) -> tuple[ActiveRelease, list[str]]:
         new_process = None
         route_committed = False
         old_drained = False
+        previous_config = None
+        added_keys: list[str] = []
         try:
+            if migrate_config and replacement_config is not None:
+                raise PluginOperationError(
+                    "invalid_activation",
+                    "Only one config transition may be requested",
+                )
+            if migrate_config and old_release is not None:
+                previous_config, _, added_keys = await asyncio.to_thread(
+                    self.store.migrate_config,
+                    release,
+                )
+            elif replacement_config is not None and old_release is not None:
+                previous_config = await asyncio.to_thread(
+                    self.store.read_config,
+                    old_release,
+                )
+                await asyncio.to_thread(
+                    self.store.write_config,
+                    release,
+                    replacement_config,
+                )
             new_process = await self.supervisor.start(release, shadow=True)
             prepared = self.router.prepare_activation(
                 release.plugin_id,
@@ -663,41 +735,94 @@ class PluginManager:
                 self.store.write_config_example,
                 active,
             )
+            if previous_config is not None:
+                await asyncio.to_thread(
+                    self.store.write_rollback_config,
+                    active,
+                    previous_config,
+                )
             self._remember_active_config(active)
             if old_process is not None:
                 await self.supervisor.stop(old_process)
-            return active
+            return active, added_keys
         except Exception as exc:
+            rollback_errors: list[str] = []
             if route_committed:
-                if old_release is not None and old_process is not None:
-                    self.router.activate(
-                        old_release.plugin_id,
-                        old_release.manifest,
-                        self._route_client(old_process),
-                    )
-                else:
-                    self.router.deactivate(release.plugin_id)
+                try:
+                    if old_release is not None and old_process is not None:
+                        self.router.activate(
+                            old_release.plugin_id,
+                            old_release.manifest,
+                            self._route_client(old_process),
+                        )
+                    else:
+                        self.router.deactivate(release.plugin_id)
+                except Exception:
+                    rollback_errors.append("route")
             if old_release is not None:
-                self.store.set_active(
-                    old_release,
-                    previous_version=old_release.previous_version,
-                    enabled=old_release.enabled,
-                )
+                if previous_config is not None:
+                    try:
+                        await asyncio.to_thread(
+                            self.store.write_config,
+                            old_release,
+                            previous_config,
+                        )
+                    except Exception:
+                        rollback_errors.append("config")
+                try:
+                    self.store.set_active(
+                        old_release,
+                        previous_version=old_release.previous_version,
+                        enabled=old_release.enabled,
+                    )
+                except Exception:
+                    rollback_errors.append("active-state")
                 if old_process is not None:
-                    self.supervisor.promote(old_process)
-                    if old_drained:
-                        await self.supervisor.resume(old_process)
+                    try:
+                        self.supervisor.promote(old_process)
+                        if old_drained:
+                            await self.supervisor.resume(old_process)
+                    except Exception:
+                        rollback_errors.append("process")
                 try:
                     await asyncio.to_thread(
                         self.store.write_config_example,
                         old_release,
                     )
                 except Exception:
-                    pass
+                    rollback_errors.append("config-example")
+                try:
+                    self.journal.set_subscriptions(
+                        old_release.plugin_id,
+                        old_release.manifest.subscribes,
+                    )
+                except Exception:
+                    rollback_errors.append("subscriptions")
+                if previous_config is not None:
+                    try:
+                        self._remember_active_config(old_release)
+                    except Exception:
+                        rollback_errors.append("active-config")
             else:
-                self.store.clear_active(release.plugin_id)
+                try:
+                    self.store.clear_active(release.plugin_id)
+                except Exception:
+                    rollback_errors.append("active-state")
             if new_process is not None:
-                await self._safe_stop(new_process)
+                try:
+                    await self.supervisor.stop(new_process)
+                except Exception:
+                    rollback_errors.append("new-process")
+            if rollback_errors:
+                original = self._operation_error(exc, "activation_failed")
+                raise PluginOperationError(
+                    "activation_rollback_failed",
+                    "Feature activation failed and rollback was incomplete",
+                    {
+                        "original_code": original.code,
+                        "failed_steps": rollback_errors,
+                    },
+                ) from None
             raise self._operation_error(exc, "activation_failed") from None
 
     def _remember_active_config(self, release: ActiveRelease):
@@ -772,16 +897,24 @@ class PluginManager:
             raise PluginOperationError("install_failed", self._sanitize(detail))
 
     @staticmethod
-    def _result(state: str, release: ActiveRelease, message: str) -> PluginOperationResult:
+    def _result(
+        state: str,
+        release: ActiveRelease,
+        message: str,
+        *,
+        extra_details: dict | None = None,
+    ) -> PluginOperationResult:
+        details = {
+            "source_commit": release.manifest.source.commit,
+            "previous_version": release.previous_version,
+        }
+        details.update(extra_details or {})
         return PluginOperationResult(
             state=state,
             plugin_id=release.plugin_id,
             version=release.version,
             message=message,
-            details={
-                "source_commit": release.manifest.source.commit,
-                "previous_version": release.previous_version,
-            },
+            details=details,
         )
 
     def _operation_error(self, exc: Exception, fallback_code: str) -> PluginOperationError:

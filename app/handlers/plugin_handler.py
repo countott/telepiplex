@@ -60,6 +60,15 @@ def _safe_error(value) -> str:
     return text[:1000]
 
 
+def _config_migration_suffix(result) -> str:
+    details = getattr(result, "details", {}) or {}
+    keys = details.get("config_added_keys") or []
+    safe_keys = [str(key)[:100] for key in keys if str(key).strip()][:20]
+    if not safe_keys:
+        return ""
+    return "\n新增配置项：" + "、".join(safe_keys)
+
+
 async def plugin_command(update, context):
     message = update.effective_message
     if not init.check_user(update.effective_user.id):
@@ -96,7 +105,8 @@ async def plugin_command(update, context):
                 f"✅ {result.message}\n"
                 f"插件：{result.plugin_id}\n"
                 f"版本：{result.version}\n"
-                f"状态：{result.state}",
+                f"状态：{result.state}"
+                f"{_config_migration_suffix(result)}",
                 **kwargs,
             )
             return
@@ -288,7 +298,8 @@ async def plugin_update_callback(update, context):
             f"✅ {result.message}\n"
             f"插件：{result.plugin_id}\n"
             f"版本：{result.version}\n"
-            f"状态：{result.state}",
+            f"状态：{result.state}"
+            f"{_config_migration_suffix(result)}",
             **kwargs,
         )
     except PluginOperationError as exc:
