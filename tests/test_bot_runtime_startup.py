@@ -109,6 +109,11 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(manager.store.root, (root / "plugins").resolve())
             self.assertEqual(manager.journal.database_path, root / "core.db")
+            self.assertEqual(
+                manager.interaction_coordinator.database_path,
+                root / "core.db",
+            )
+            self.assertIsNotNone(manager.broker.operation_sink)
             self.assertEqual(manager.supervisor.restart_limit, 2)
             self.assertEqual(manager.broker.dispatcher.delivery_deadline, 777)
             self.assertEqual(manager.broker.socket_path, root / "plugins" / ".runtime/core.sock")
@@ -419,10 +424,18 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             if handler.__class__.__name__ == "CallbackQueryHandler"
         ]
         self.assertEqual(callback_patterns, [
+            "^core-operation:",
             "^core-plugin-install:",
             "^core-plugin-update:",
             None,
         ])
+
+        gate_calls = [
+            call for call in application.add_handler.call_args_list
+            if call.kwargs.get("group") == -100
+        ]
+        self.assertEqual(len(gate_calls), 1)
+        self.assertEqual(gate_calls[0].args[0].__class__.__name__, "TypeHandler")
 
         handler_names = [
             call.args[0].__class__.__name__

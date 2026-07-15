@@ -8,6 +8,11 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import init
 
 from app.core.plugin_manager import PluginOperationError
+from app.handlers.interaction_handler import (
+    COORDINATOR_KEY,
+    operation_markup,
+    render_operation,
+)
 
 
 MANAGER_KEY = "telepiplex_plugin_manager"
@@ -429,13 +434,46 @@ async def dynamic_message_gateway(update, context):
 
 
 async def handle_feature_result(update, context, route, result: dict):
+    coordinator = context.application.bot_data.get(COORDINATOR_KEY)
+    operation_record = None
+    operation = result.get("operation") if isinstance(result, dict) else None
+    if operation is not None:
+        if coordinator is None or not isinstance(operation, dict):
+            await _feature_feedback(
+                update,
+                "❌ Feature 返回了无效任务状态。",
+                prefer_edit=bool(getattr(update, "callback_query", None)),
+            )
+            return
+        try:
+            operation_record = coordinator.report(route.plugin_id, operation)
+        except Exception as exc:
+            await _feature_feedback(
+                update,
+                f"❌ operation_report_failed：{_safe_error(exc)}",
+                prefer_edit=bool(getattr(update, "callback_query", None)),
+            )
+            return
     if isinstance(result, dict) and "config_patch" in result:
         await _apply_feature_config_patch(update, context, route, result)
         return
-    if not await _render_actions(update, context, route, result):
+    rendered, message_id = await _render_actions(
+        update,
+        context,
+        route,
+        result,
+        operation_record=operation_record,
+    )
+    if not rendered:
         return
+    if operation_record is not None and message_id is not None:
+        operation_record = coordinator.set_message_id(
+            operation_record.operation_id, message_id
+        )
     session = result.get("session") if isinstance(result, dict) else None
     if session is None:
+        if operation_record is not None and operation_record.message_id is None:
+            await render_operation(context.application, None, operation_record)
         return
     if not isinstance(session, dict) or session.get("state") not in {"open", "close"}:
         await _feature_feedback(
@@ -453,6 +491,25 @@ async def handle_feature_result(update, context, route, result: dict):
         }
     else:
         _drop_session(context.application.bot_data, key)
+        active = coordinator.active(*key) if coordinator is not None else None
+        if (
+            active is not None
+            and active.plugin_id == route.plugin_id
+            and active.state == "awaiting_input"
+        ):
+            operation_record = coordinator.report(route.plugin_id, {
+                "operation_id": active.operation_id,
+                "chat_id": active.chat_id,
+                "user_id": active.user_id,
+                "state": "cancelled",
+                "stage": active.stage,
+                "status_text": "交互已退出。",
+                "control": "",
+                "revision": active.revision + 1,
+                "details": dict(active.details),
+            })
+    if operation_record is not None and operation_record.message_id is None:
+        await render_operation(context.application, None, operation_record)
 
 
 def merge_nested_patch(current: dict, patch: dict) -> dict:
@@ -514,7 +571,14 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
     )
 
 
-async def _render_actions(update, context, route, result: dict) -> bool:
+async def _render_actions(
+    update,
+    context,
+    route,
+    result: dict,
+    *,
+    operation_record=None,
+) -> tuple[bool, int | None]:
     actions = result.get("actions") if isinstance(result, dict) else None
     if not isinstance(actions, list) or len(actions) > 20:
         await _feature_feedback(
@@ -522,15 +586,16 @@ async def _render_actions(update, context, route, result: dict) -> bool:
             "❌ Feature 返回了无效响应。",
             prefer_edit=bool(getattr(update, "callback_query", None)),
         )
-        return False
-    for action in actions:
+        return False, None
+    last_message_id = None
+    for index, action in enumerate(actions):
         if not isinstance(action, dict) or action.get("kind") not in _SAFE_ACTIONS:
             await _feature_feedback(
                 update,
                 "❌ Feature 返回了无效响应。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
             )
-            return False
+            return False, None
         text = str(action.get("text") or "")
         if not text:
             await _feature_feedback(
@@ -538,28 +603,52 @@ async def _render_actions(update, context, route, result: dict) -> bool:
                 "❌ Feature 返回了无效响应。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
             )
-            return False
+            return False, None
         if len(text) > 4096:
             text = text[:4075].rstrip() + "\n…内容已截断"
         parse_mode = action.get("parse_mode")
         if parse_mode not in {None, "HTML", "MarkdownV2"}:
             parse_mode = None
         kwargs = {"parse_mode": parse_mode} if parse_mode else {}
-        reply_markup = _keyboard_markup(route, action.get("data"))
+        action_data = action.get("data")
+        reply_markup = _keyboard_markup(route, action_data)
         if reply_markup is False:
             await _feature_feedback(
                 update,
                 "❌ Feature 返回了无效响应。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
             )
-            return False
+            return False, None
+        if index == len(actions) - 1 and operation_record is not None:
+            control_markup = operation_markup(operation_record)
+            if control_markup is not None and not _has_explicit_control(action_data):
+                rows = list(reply_markup.inline_keyboard) if reply_markup is not None else []
+                rows.extend(control_markup.inline_keyboard)
+                reply_markup = InlineKeyboardMarkup(rows)
         if reply_markup is not None:
             kwargs["reply_markup"] = reply_markup
         if action["kind"] == "send_message":
-            await update.effective_message.reply_text(text, **kwargs)
+            sent = await update.effective_message.reply_text(text, **kwargs)
         else:
-            await update.effective_message.edit_text(text, **kwargs)
-    return True
+            sent = await update.effective_message.edit_text(text, **kwargs)
+        candidate = getattr(sent, "message_id", None)
+        if not isinstance(candidate, int) and action["kind"] == "edit_message":
+            candidate = getattr(update.effective_message, "message_id", None)
+        if isinstance(candidate, int) and candidate > 0:
+            last_message_id = candidate
+    return True, last_message_id
+
+
+def _has_explicit_control(data) -> bool:
+    if not isinstance(data, dict) or not isinstance(data.get("keyboard"), list):
+        return False
+    labels = {"退出", "取消", "取消任务", "取消并回滚", "结束", "中断任务"}
+    return any(
+        isinstance(button, dict) and str(button.get("text") or "").strip() in labels
+        for row in data["keyboard"]
+        if isinstance(row, list)
+        for button in row
+    )
 
 
 def _keyboard_markup(route, data):

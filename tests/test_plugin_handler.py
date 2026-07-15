@@ -1,6 +1,8 @@
 import asyncio
+import tempfile
 import unittest
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -128,6 +130,89 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         message = update.effective_message.reply_text.await_args.args[0]
         self.assertIn("已写入并重新加载", message)
         self.assertNotIn("kept-secret", message)
+
+    async def test_feature_result_persists_operation_and_injects_missing_exit(self):
+        from app.core.interaction_coordinator import InteractionCoordinator
+        from app.handlers.plugin_handler import handle_feature_result
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "core.db")
+            self.addCleanup(coordinator.close)
+            update, context, _manager = self._request([], user_id=1)
+            update.effective_message.reply_text.return_value = SimpleNamespace(message_id=55)
+            context.application.bot_data["telepiplex_interaction_coordinator"] = coordinator
+            context.application.bot = SimpleNamespace(
+                send_message=AsyncMock(), edit_message_text=AsyncMock()
+            )
+            route = SimpleNamespace(
+                plugin_id="media-search",
+                manifest=SimpleNamespace(callbacks=("media-search",)),
+            )
+
+            await handle_feature_result(update, context, route, {
+                "actions": [{"kind": "send_message", "text": "请输入片名"}],
+                "session": {"state": "open"},
+                "operation": {
+                    "operation_id": "op-1",
+                    "chat_id": 10,
+                    "user_id": 1,
+                    "state": "awaiting_input",
+                    "stage": "query",
+                    "status_text": "等待片名",
+                    "control": "exit",
+                    "revision": 1,
+                },
+            })
+
+            record = coordinator.active(10, 1)
+            self.assertEqual(record.message_id, 55)
+            markup = update.effective_message.reply_text.await_args.kwargs["reply_markup"]
+            button = markup.inline_keyboard[-1][0]
+            self.assertEqual(button.text, "退出")
+            self.assertEqual(button.callback_data, "core-operation:exit:op-1")
+
+    async def test_closing_session_releases_awaiting_operation(self):
+        from app.core.interaction_coordinator import InteractionCoordinator
+        from app.handlers.plugin_handler import handle_feature_result
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "core.db")
+            self.addCleanup(coordinator.close)
+            coordinator.report("media-search", {
+                "operation_id": "op-1",
+                "chat_id": 10,
+                "user_id": 1,
+                "state": "awaiting_input",
+                "stage": "query",
+                "status_text": "等待片名",
+                "control": "exit",
+                "revision": 1,
+            })
+            update, context, _manager = self._request([], user_id=1)
+            context.application.bot_data.update({
+                "telepiplex_interaction_coordinator": coordinator,
+                "telepiplex_plugin_sessions": {
+                    (10, 1): {
+                        "plugin_id": "media-search",
+                        "expires_at": 9999999999,
+                    },
+                },
+            })
+            context.application.bot = SimpleNamespace(
+                send_message=AsyncMock(), edit_message_text=AsyncMock()
+            )
+            route = SimpleNamespace(
+                plugin_id="media-search",
+                manifest=SimpleNamespace(callbacks=("media-search",)),
+            )
+
+            await handle_feature_result(update, context, route, {
+                "actions": [{"kind": "send_message", "text": "已退出"}],
+                "session": {"state": "close"},
+            })
+
+            self.assertIsNone(coordinator.active(10, 1))
+            self.assertEqual(coordinator.get("op-1").state, "cancelled")
 
     async def test_feature_config_patch_from_callback_updates_original_message(self):
         from app.handlers.plugin_handler import handle_feature_result

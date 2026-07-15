@@ -203,6 +203,16 @@ class InteractionCoordinator:
             ).fetchone()
         return self._from_row(row) if row is not None else None
 
+    def active_records(self) -> list[OperationRecord]:
+        placeholders = ",".join("?" for _ in ACTIVE_STATES)
+        with self._lock:
+            rows = self._connection.execute(
+                f"SELECT * FROM operations WHERE state IN ({placeholders}) "
+                "ORDER BY created_at, operation_id",
+                tuple(sorted(ACTIVE_STATES)),
+            ).fetchall()
+        return [self._from_row(row) for row in rows]
+
     def set_message_id(self, operation_id: str, message_id: int) -> OperationRecord:
         try:
             normalized = int(message_id)
@@ -228,6 +238,19 @@ class InteractionCoordinator:
         self, active_plugin_ids: set[str]
     ) -> list[OperationRecord]:
         active_plugins = {str(value) for value in active_plugin_ids}
+        return self._interrupt_matching(
+            lambda record: record.plugin_id not in active_plugins
+        )
+
+    def interrupt_unconfirmed(
+        self, confirmed_operation_ids: set[str]
+    ) -> list[OperationRecord]:
+        confirmed = {str(value) for value in confirmed_operation_ids}
+        return self._interrupt_matching(
+            lambda record: record.operation_id not in confirmed
+        )
+
+    def _interrupt_matching(self, predicate) -> list[OperationRecord]:
         placeholders = ",".join("?" for _ in ACTIVE_STATES)
         interrupted: list[OperationRecord] = []
         with self._lock:
@@ -240,7 +263,7 @@ class InteractionCoordinator:
                 ).fetchall()
                 for row in rows:
                     current = self._from_row(row)
-                    if current.plugin_id in active_plugins:
+                    if not predicate(current):
                         continue
                     details = dict(current.details)
                     details["interrupted_at_stage"] = current.stage
@@ -312,7 +335,7 @@ class InteractionCoordinator:
             raise InteractionError("invalid_report", "operation report must be an object")
         plugin_id = str(plugin_id or "").strip()
         operation_id = str(report.get("operation_id") or "").strip()
-        if not plugin_id or not operation_id or len(operation_id) > 128:
+        if not plugin_id or not operation_id or len(operation_id) > 40:
             raise InteractionError("invalid_operation", "operation identity is invalid")
         try:
             chat_id = int(report.get("chat_id"))

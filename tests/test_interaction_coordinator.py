@@ -146,6 +146,26 @@ class InteractionCoordinatorTest(unittest.TestCase):
         self.assertEqual(interrupted[0].revision, 2)
         self.assertIsNone(self.coordinator.active(20, 2))
 
+    def test_interrupt_unconfirmed_uses_operation_identity_not_only_plugin(self):
+        self.coordinator.report("media-search", self.report())
+        self.coordinator.report(
+            "media-search",
+            self.report(
+                operation_id="op-2",
+                chat_id=20,
+                user_id=2,
+                revision=1,
+            ),
+        )
+
+        interrupted = self.coordinator.interrupt_unconfirmed({"op-1"})
+
+        self.assertEqual([record.operation_id for record in interrupted], ["op-2"])
+        self.assertEqual(
+            [record.operation_id for record in self.coordinator.active_records()],
+            ["op-1"],
+        )
+
     def test_report_validation_rejects_unsafe_or_invalid_values(self):
         from app.core.interaction_coordinator import InteractionError
 

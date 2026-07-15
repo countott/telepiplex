@@ -47,6 +47,7 @@ class PluginManager:
         supervisor: PluginSupervisor,
         router: CapabilityRouter,
         journal: EventJournal,
+        interaction_coordinator=None,
         venv_installer=None,
         artifact_resolver=None,
         broker=None,
@@ -59,6 +60,7 @@ class PluginManager:
         self.supervisor = supervisor
         self.router = router
         self.journal = journal
+        self.interaction_coordinator = interaction_coordinator
         self.broker = broker
         self.core_api_version = str(core_api_version)
         self.install_timeout = float(install_timeout)
@@ -626,6 +628,8 @@ class PluginManager:
         if self.broker is not None:
             await self.broker.close()
         self.journal.close()
+        if self.interaction_coordinator is not None:
+            self.interaction_coordinator.close()
 
     async def _resolve_artifact(self, reference: str | Path) -> tuple[Path, str]:
         if self._artifact_resolver is None:

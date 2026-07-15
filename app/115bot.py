@@ -18,6 +18,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 from telegram.helpers import escape_markdown
@@ -27,6 +28,7 @@ from app.core.capability_router import CapabilityRouter
 from app.core.core_broker import CoreBroker
 from app.core.event_dispatcher import EventDispatcher
 from app.core.event_journal import EventJournal
+from app.core.interaction_coordinator import InteractionCoordinator
 from app.core.plugin_catalog import PluginCatalog
 from app.core.plugin_manager import PluginManager
 from app.core.plugin_store import PluginStore
@@ -39,6 +41,15 @@ from app.handlers.plugin_handler import (
     plugin_command,
     plugin_install_callback,
     plugin_update_callback,
+)
+from app.handlers.interaction_handler import (
+    COORDINATOR_KEY,
+    CONTROL_CALLBACK_PATTERN,
+    OperationReportSink,
+    operation_control_callback,
+    operation_gate,
+    recover_active_operations,
+    render_operation,
 )
 from app.handlers.config_handler import register_feature_config_handlers
 from app.utils.logger import core_log_path
@@ -140,6 +151,8 @@ def build_plugin_manager(config=None, core_database=None):
         core_database = root.parent / "core.db"
     router = CapabilityRouter()
     journal = EventJournal(Path(core_database))
+    coordinator = InteractionCoordinator(Path(core_database))
+    operation_sink = OperationReportSink(coordinator)
     runtime_root = Path(str(plugin_config.get("runtime_root") or "/tmp/telepiplex"))
     dispatcher = EventDispatcher(
         router,
@@ -158,6 +171,7 @@ def build_plugin_manager(config=None, core_database=None):
         notification_sink=lambda user_id, text: add_task_to_queue(
             user_id, None, message=text
         ),
+        operation_sink=operation_sink,
     )
     supervisor = PluginSupervisor(
         startup_timeout=float(plugin_config.get("startup_timeout") or 30),
@@ -173,6 +187,7 @@ def build_plugin_manager(config=None, core_database=None):
         supervisor=supervisor,
         router=router,
         journal=journal,
+        interaction_coordinator=coordinator,
         artifact_resolver=catalog,
         broker=broker,
         install_timeout=float(plugin_config.get("install_timeout") or 300),
@@ -584,6 +599,19 @@ async def run_application_polling(application, after_start=None, stop_event=None
 def configure_application(application, manager):
     application.bot_data["telepiplex_plugin_manager"] = manager
     application.bot_data["telepiplex_plugin_router"] = manager.router
+    coordinator = getattr(manager, "interaction_coordinator", None)
+    if coordinator is not None:
+        application.bot_data[COORDINATOR_KEY] = coordinator
+        operation_sink = getattr(getattr(manager, "broker", None), "operation_sink", None)
+        if hasattr(operation_sink, "attach"):
+            operation_sink.attach(
+                lambda record: render_operation(application, manager.router, record)
+            )
+    application.add_handler(TypeHandler(Update, operation_gate), group=-100)
+    application.add_handler(CallbackQueryHandler(
+        operation_control_callback,
+        pattern=CONTROL_CALLBACK_PATTERN,
+    ))
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reload", reload))
     application.add_handler(CommandHandler("plugin", plugin_command))
@@ -603,6 +631,9 @@ def configure_application(application, manager):
 
 async def start_core_runtime(application, manager):
     await manager.start()
+    coordinator = getattr(manager, "interaction_coordinator", None)
+    if coordinator is not None:
+        await recover_active_operations(application, manager.router, coordinator)
     queue_core_startup_notice()
     plugin_config = (init.bot_config or {}).get("plugins") or {}
     monitor = PluginUpdateMonitor(
