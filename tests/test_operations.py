@@ -2,8 +2,10 @@ import unittest
 
 
 class FakeCore:
-    def __init__(self, *, current_id="file-1"):
+    def __init__(self, *, current_id="file-1", original_id=None):
         self.files = {"/Downloads/renamed.mkv": current_id}
+        if original_id:
+            self.files["/Downloads/original.mkv"] = original_id
         self.calls = []
 
     async def call_capability(self, capability, method, payload, **_kwargs):
@@ -51,6 +53,25 @@ class RenameOperationJournalTest(unittest.IsolatedAsyncioTestCase):
             target_id="file-1",
         )
         core = FakeCore(current_id="different-file")
+
+        outcome = await journal.rollback(core)
+
+        self.assertEqual(outcome["state"], "partially_rolled_back")
+        self.assertEqual(outcome["restored"], [])
+        self.assertEqual(outcome["remaining"], ["/Downloads/renamed.mkv"])
+        self.assertFalse(any(method == "rename" for _, method, _ in core.calls))
+
+    async def test_original_path_conflict_stops_without_mutation(self):
+        from telepiplex_renaming.operations import RenameOperationJournal
+
+        journal = RenameOperationJournal()
+        journal.record_rename(
+            source_path="/Downloads/original.mkv",
+            target_path="/Downloads/renamed.mkv",
+            source_id="file-1",
+            target_id="file-1",
+        )
+        core = FakeCore(original_id="other-file")
 
         outcome = await journal.rollback(core)
 

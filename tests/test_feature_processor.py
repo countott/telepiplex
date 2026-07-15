@@ -3,6 +3,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from telepiplex_plugin_sdk.media_metadata import attach_media_metadata
@@ -486,6 +487,124 @@ class FakeRuntime:
 
 
 class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
+    async def test_rollback_is_reported_and_compensation_runs_once(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class BlockingJournal:
+            can_rollback = True
+            inverses = [SimpleNamespace(target_path="/Downloads/renamed.mkv")]
+            calls = 0
+
+            async def rollback(self, _core, *, deadline):
+                self.calls += 1
+                entered.set()
+                await release.wait()
+                return {
+                    "state": "rolled_back",
+                    "restored": ["/Downloads/original.mkv"],
+                    "remaining": [],
+                }
+
+        core = FakeCore()
+        feature = RenamingFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            core=core,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+        journal = BlockingJournal()
+        feature.operations["op-rollback"] = {
+            "operation_id": "op-rollback",
+            "chat_id": 10,
+            "user_id": 123,
+            "state": "running",
+            "stage": "renaming",
+            "status_text": "正在重命名",
+            "control": "rollback",
+            "revision": 3,
+            "details": {},
+            "journal": journal,
+            "cancel_event": SimpleNamespace(set=lambda: None),
+        }
+
+        first = await feature.operation_control({
+            "operation_id": "op-rollback",
+            "action": "rollback",
+            "revision": 3,
+        })
+        await entered.wait()
+        repeated = await feature.operation_control({
+            "operation_id": "op-rollback",
+            "action": "rollback",
+            "revision": 4,
+        })
+        release.set()
+        await runtime.wait()
+
+        self.assertEqual(repeated["operation"]["state"], "rolling_back")
+        self.assertEqual(first["operation"]["state"], "rolling_back")
+        self.assertEqual(
+            feature.operations["op-rollback"]["state"], "rolled_back"
+        )
+        self.assertEqual(journal.calls, 1)
+        self.assertEqual(
+            [report["state"] for report in core.reports],
+            ["rolling_back", "rolled_back"],
+        )
+
+    async def test_rollback_waits_for_forward_task_safe_stop(self):
+        forward_release = asyncio.Event()
+        rollback_started = asyncio.Event()
+
+        class Journal:
+            can_rollback = True
+            inverses = []
+
+            async def rollback(self, _core, *, deadline):
+                rollback_started.set()
+                return {"state": "rolled_back", "restored": [], "remaining": []}
+
+        async def forward():
+            await forward_release.wait()
+
+        core = FakeCore()
+        runtime = FakeRuntime()
+        feature = RenamingFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            core=core,
+        )
+        feature.bind_runtime(runtime)
+        forward_task = asyncio.create_task(forward())
+        feature.operations["op-forward-stop"] = {
+            "operation_id": "op-forward-stop",
+            "chat_id": 10,
+            "user_id": 123,
+            "state": "running",
+            "stage": "renaming",
+            "status_text": "正在重命名",
+            "control": "rollback",
+            "revision": 3,
+            "details": {},
+            "journal": Journal(),
+            "task": forward_task,
+            "cancel_event": SimpleNamespace(set=lambda: None),
+        }
+
+        accepted = await feature.operation_control({
+            "operation_id": "op-forward-stop",
+            "action": "rollback",
+            "revision": 3,
+        })
+        await asyncio.sleep(0)
+
+        self.assertEqual(accepted["operation"]["state"], "rolling_back")
+        self.assertFalse(rollback_started.is_set())
+        forward_release.set()
+        await runtime.wait()
+        self.assertTrue(rollback_started.is_set())
+        self.assertEqual(feature.operations["op-forward-stop"]["state"], "rolled_back")
+
     async def test_download_event_accepts_handoff_and_runs_in_background(self):
         core = FakeCore()
         runtime = FakeRuntime()
@@ -528,6 +647,14 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
             core.events[0][1]["operation_revision"],
             core.reports[-1]["revision"],
         )
+
+        cancelled = await feature.operation_control({
+            "operation_id": "op-chain",
+            "action": "cancel",
+            "revision": core.reports[-1]["revision"],
+        })
+        self.assertEqual(cancelled["operation"]["state"], "cancelled")
+        self.assertIn("后续 Plex", cancelled["operation"]["status_text"])
 
     async def test_cancel_during_metadata_stops_later_pipeline(self):
         entered = asyncio.Event()

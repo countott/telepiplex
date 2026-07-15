@@ -391,14 +391,15 @@ class RenamingFeature:
             }
             if self.jobs:
                 self.jobs.update(job_id, "cancelled", outcome)
-            await self._report_if_active(
-                operation_id,
-                state="cancelled",
-                stage=stopped_at,
-                status_text=outcome["message"],
-                control="",
-                details={"stopped_at": stopped_at},
-            )
+            if (self.operations.get(operation_id) or {}).get("state") != "rolling_back":
+                await self._report_if_active(
+                    operation_id,
+                    state="cancelled",
+                    stage=stopped_at,
+                    status_text=outcome["message"],
+                    control="",
+                    details={"stopped_at": stopped_at},
+                )
         except Exception as exc:
             if processing_complete:
                 raise
@@ -571,6 +572,8 @@ class RenamingFeature:
             "partially_rolled_back", "failed",
         }:
             return {"actions": [], "operation": self._operation_view(operation)}
+        if operation.get("state") in {"cancelling", "rolling_back"}:
+            return {"actions": [], "operation": self._operation_view(operation)}
         try:
             operation["revision"] = max(
                 int(operation.get("revision") or 0),
@@ -599,40 +602,44 @@ class RenamingFeature:
         cancel_event = operation.get("cancel_event")
         if cancel_event is not None:
             cancel_event.set()
+        if operation.get("state") == "handed_off":
+            terminal = self._advance_operation(
+                operation_id,
+                state="cancelled",
+                stage=operation.get("stage") or "handoff_plex",
+                status_text=(
+                    "已取消尚未被下游接受的后续 Plex 任务；"
+                    "已完成的媒体文件变更保持不变。"
+                ),
+                control="",
+                details={
+                    "stopped_at": operation.get("stage") or "handoff_plex",
+                    "completed_media_changes": "preserved",
+                },
+            )
+            return {"actions": [], "operation": terminal}
         if action == "rollback":
             journal = operation.get("journal")
             if journal is None or not journal.can_rollback:
                 raise FeatureError(
                     "rollback_unavailable", "verified rollback is no longer available"
                 )
-            rolling = self._advance_operation(
+            rolling = await self._report_operation(
                 operation_id,
                 state="rolling_back",
                 stage=operation.get("stage") or "renaming",
                 status_text="取消请求已接受，正在验证并回滚重命名。",
-                control="rollback",
-            )
-            outcome = await journal.rollback(
-                self.core,
-                deadline=float(self.config.get("storage_timeout") or 120),
-            )
-            terminal = self._advance_operation(
-                operation_id,
-                state=outcome["state"],
-                stage="rollback",
-                status_text=(
-                    "已取消并回滚全部可验证的重命名。"
-                    if outcome["state"] == "rolled_back"
-                    else "回滚未能完整完成，请按剩余路径人工检查。"
-                ),
                 control="",
-                details=outcome,
             )
-            return {
-                "actions": [],
-                "operation": terminal,
-                "previous_operation": rolling,
-            }
+            forward_task = operation.get("task")
+            rollback_task = self.runtime.spawn(
+                self._rollback_after_forward_stop(
+                    operation_id, journal, forward_task
+                ),
+                task_id=f"renaming-rollback-{operation_id}",
+            )
+            operation["rollback_task"] = rollback_task
+            return {"actions": [], "operation": rolling}
 
         cancelling = self._advance_operation(
             operation_id,
@@ -656,6 +663,42 @@ class RenamingFeature:
         ):
             task.cancel()
         return {"actions": [], "operation": cancelling}
+
+    async def _rollback_after_forward_stop(
+        self, operation_id, journal, forward_task
+    ):
+        if forward_task is not None and not forward_task.done():
+            try:
+                await asyncio.shield(forward_task)
+            except (asyncio.CancelledError, OperationCancelled, Exception):
+                pass
+        try:
+            outcome = await journal.rollback(
+                self.core,
+                deadline=float(self.config.get("storage_timeout") or 120),
+            )
+        except Exception as exc:
+            outcome = {
+                "state": "partially_rolled_back",
+                "restored": [],
+                "remaining": [
+                    inverse.target_path
+                    for inverse in getattr(journal, "inverses", ())
+                ],
+                "error": type(exc).__name__,
+            }
+        await self._report_operation(
+            operation_id,
+            state=outcome["state"],
+            stage="rollback",
+            status_text=(
+                "已取消并回滚全部可验证的重命名。"
+                if outcome["state"] == "rolled_back"
+                else "回滚未能完整完成，请按剩余路径人工检查。"
+            ),
+            control="",
+            details=outcome,
+        )
 
     async def operation_snapshot(self, request: dict) -> dict:
         requested = str(request.get("operation_id") or "")

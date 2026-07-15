@@ -56,27 +56,46 @@ class RenameOperationJournal:
     async def rollback(self, core, *, deadline: float = 120) -> dict:
         restored = []
         remaining = []
+        error = ""
         for inverse in reversed(self.inverses):
-            current = await self._storage(
-                core, "get_file_info", [inverse.target_path], deadline
-            )
+            try:
+                current = await self._storage(
+                    core, "get_file_info", [inverse.target_path], deadline
+                )
+                original = await self._storage(
+                    core, "get_file_info", [inverse.source_path], deadline
+                )
+            except Exception as exc:
+                remaining.append(inverse.target_path)
+                error = type(exc).__name__
+                break
             current_id = self._file_id(current)
-            if current_id != inverse.file_id:
+            if current_id != inverse.file_id or original is not None:
                 remaining.append(inverse.target_path)
                 break
             original_name = PurePosixPath(inverse.source_path).name
-            renamed = await self._storage(
-                core,
-                "rename",
-                [inverse.target_path, original_name],
-                deadline,
-            )
+            try:
+                renamed = await self._storage(
+                    core,
+                    "rename",
+                    [inverse.target_path, original_name],
+                    deadline,
+                )
+            except Exception as exc:
+                remaining.append(inverse.target_path)
+                error = type(exc).__name__
+                break
             if renamed is not True:
                 remaining.append(inverse.target_path)
                 break
-            verified = await self._storage(
-                core, "get_file_info", [inverse.source_path], deadline
-            )
+            try:
+                verified = await self._storage(
+                    core, "get_file_info", [inverse.source_path], deadline
+                )
+            except Exception as exc:
+                remaining.append(inverse.source_path)
+                error = type(exc).__name__
+                break
             if self._file_id(verified) != inverse.file_id:
                 remaining.append(inverse.source_path)
                 break
@@ -86,11 +105,14 @@ class RenameOperationJournal:
             if inverse.source_path not in restored_set:
                 remaining.append(inverse.target_path)
         remaining = list(dict.fromkeys(remaining))
-        return {
+        outcome = {
             "state": "rolled_back" if not remaining else "partially_rolled_back",
             "restored": restored,
             "remaining": remaining,
         }
+        if error:
+            outcome["error"] = error
+        return outcome
 
     @staticmethod
     async def _storage(core, method: str, args: list, deadline: float):
