@@ -227,6 +227,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.core.reports[-1]["state"], "handed_off")
         self.assertEqual(self.core.reports[-1]["next_plugin_id"], "renaming")
         self.assertEqual(self.core.events[0][1]["operation_id"], "op-download-1")
+        self.assertEqual(self.core.events[0][1]["chat_id"], 10)
 
     async def test_cancelled_download_deletes_known_offline_record_once_not_media(self):
         class BlockingClient(FakeClient):

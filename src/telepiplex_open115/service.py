@@ -734,6 +734,7 @@ class Open115Feature:
                 "provider": "open115",
                 "link": link,
                 "selected_path": selected_path,
+                "chat_id": int(operation.get("chat_id") or user_id or 0),
                 "user_id": user_id,
                 "resource_name": resource_name,
                 "download_root": final_path,
