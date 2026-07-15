@@ -16,5 +16,5 @@ Prowlarr 结果会在本地二次打分后再展示。公开配置入口是 `sea
 如果不填 `search.scoring`，Feature 会回退到内置默认权重。
 
 ```bash
-python /opt/telepiplex/tools/build_feature.py . dist/media-search-1.0.2.tpx
+python /opt/telepiplex/tools/build_feature.py . dist/media-search-1.0.3.tpx
 ```
