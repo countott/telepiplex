@@ -97,6 +97,54 @@ class InteractionCoordinatorTest(unittest.TestCase):
         self.assertEqual(record.next_plugin_id, "")
         self.assertEqual(self.coordinator.active(10, 1).operation_id, "op-1")
 
+    def test_full_feature_handoff_chain_keeps_one_gate_until_plex_completes(self):
+        chain = (
+            ("media-search", "planning", "open115"),
+            ("open115", "downloading", "renaming"),
+            ("renaming", "organizing", "plex-management"),
+        )
+        revision = 1
+        self.coordinator.report(
+            "media-search",
+            self.report(stage="planning", revision=revision),
+        )
+
+        for plugin_id, stage, next_plugin_id in chain:
+            revision += 1
+            handed_off = self.coordinator.report(
+                plugin_id,
+                self.report(
+                    state="handed_off",
+                    stage=stage,
+                    next_plugin_id=next_plugin_id,
+                    revision=revision,
+                ),
+            )
+            self.assertEqual(self.coordinator.active(10, 1), handed_off)
+            revision += 1
+            accepted = self.coordinator.report(
+                next_plugin_id,
+                self.report(
+                    state="running",
+                    stage=f"{next_plugin_id}-accepted",
+                    revision=revision,
+                ),
+            )
+            self.assertEqual(accepted.plugin_id, next_plugin_id)
+            self.assertEqual(self.coordinator.active(10, 1).operation_id, "op-1")
+
+        completed = self.coordinator.report(
+            "plex-management",
+            self.report(
+                state="completed",
+                stage="completed",
+                control="",
+                revision=revision + 1,
+            ),
+        )
+        self.assertEqual(completed.state, "completed")
+        self.assertIsNone(self.coordinator.active(10, 1))
+
     def test_source_may_finish_failed_provisional_handoff_before_target_accepts(self):
         self.coordinator.report("media-search", self.report())
         self.coordinator.report(
