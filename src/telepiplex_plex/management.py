@@ -106,6 +106,9 @@ class PlexManagementService:
             "final_path": final_path,
             "resource_name": str(event.get("resource_name") or final_path.rstrip("/").rsplit("/", 1)[-1]),
             "user_id": int(event.get("user_id") or 0),
+            "chat_id": int(event.get("chat_id") or event.get("user_id") or 0),
+            "operation_id": str(event.get("operation_id") or ""),
+            "operation_revision": int(event.get("operation_revision") or 0),
             "terminal_processor": "renaming.feature",
             "metadata": metadata,
         }

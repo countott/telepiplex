@@ -634,11 +634,17 @@ class PlexManagementServiceTest(unittest.TestCase):
         jobs = self.make_service().enqueue_organized_event_jobs({
             "final_path": "/Series/Test",
             "selected_path": "/Series",
+            "chat_id": 10,
+            "user_id": 123,
+            "operation_id": "op-series",
+            "operation_revision": 7,
             "media_metadata": contract,
         })
 
         self.assertEqual(len(jobs), 2)
         self.assertEqual([job["target"]["episode_number"] for job in jobs], [1, 2])
+        self.assertEqual(jobs[0]["payload"]["operation_id"], "op-series")
+        self.assertEqual(jobs[0]["payload"]["operation_revision"], 7)
 
     def test_one_organized_batch_scans_once_then_validates_each_final_path(self):
         completion = make_unresolved_standalone_series_completion()

@@ -147,20 +147,30 @@ class PlexFeature:
         }
         if operation:
             if not started:
-                terminal_state = "completed" if all(
-                    state == "completed" for state in states
-                ) else "failed"
-                operation = await self._report_if_active(
-                    operation_id,
-                    state=terminal_state,
-                    stage=terminal_state,
-                    status_text=(
-                        "Plex 管理任务已完成。"
-                        if terminal_state == "completed"
-                        else "Plex 管理任务未能启动。"
-                    ),
-                    control="",
-                )
+                current = self.operations[operation_id]
+                if (
+                    current.get("state") in {
+                        "running", "awaiting_input", "cancelling"
+                    }
+                    and any(state not in {"completed", "failed", "cancelled"}
+                            for state in states)
+                ):
+                    operation = self._operation_view(current)
+                else:
+                    terminal_state = "completed" if all(
+                        state == "completed" for state in states
+                    ) else "failed"
+                    operation = await self._report_if_active(
+                        operation_id,
+                        state=terminal_state,
+                        stage=terminal_state,
+                        status_text=(
+                            "Plex 管理任务已完成。"
+                            if terminal_state == "completed"
+                            else "Plex 管理任务未能启动。"
+                        ),
+                        control="",
+                    )
             result["operation_id"] = operation_id
             result["operation"] = operation
         return result
@@ -562,6 +572,16 @@ class PlexFeature:
         chat_id = int(payload.get("chat_id") or user_id or 0)
         if len(operation_id) > 40 or user_id <= 0 or chat_id == 0:
             raise FeatureError("invalid_operation", "Plex operation identity is invalid")
+        existing = self.operations.get(operation_id)
+        if existing is not None:
+            if (
+                int(existing.get("chat_id") or 0) != chat_id
+                or int(existing.get("user_id") or 0) != user_id
+            ):
+                raise FeatureError(
+                    "operation_conflict", "Plex operation owner changed"
+                )
+            return self._operation_view(existing)
         try:
             revision = max(0, int(payload.get("operation_revision") or 0))
         except (TypeError, ValueError):
@@ -717,7 +737,9 @@ class PlexFeature:
         operation = self.operations.get(operation_id)
         if operation is None:
             raise FeatureError("not_found", "Plex operation was not found")
-        if operation.get("state") in {"completed", "cancelled", "failed"}:
+        if operation.get("state") in {
+            "completed", "cancelled", "failed", "interrupted"
+        }:
             return {"actions": [], "operation": self._operation_view(operation)}
         try:
             operation["revision"] = max(
@@ -766,7 +788,9 @@ class PlexFeature:
         return {"operations": [
             self._operation_view(operation)
             for operation_id, operation in self.operations.items()
-            if operation.get("state") not in {"completed", "cancelled", "failed"}
+            if operation.get("state") not in {
+                "completed", "cancelled", "failed", "interrupted"
+            }
             and (not requested or requested == operation_id)
         ]}
 
@@ -901,6 +925,13 @@ class PlexFeature:
             return
         claimed = []
         for job_id in self.interrupted_job_ids:
+            job = self.jobs.get(job_id)
+            payload = (job or {}).get("payload") or {}
+            operation_id = str(payload.get("operation_id") or "")
+            if operation_id:
+                operation = self._restore_interrupted_operation(job)
+                await self.core.report_operation(operation)
+                continue
             if await asyncio.to_thread(self.jobs.claim, job_id):
                 claimed.append(job_id)
         if claimed:
@@ -909,6 +940,39 @@ class PlexFeature:
                 task_id="plex-resume-batch",
             )
         self.interrupted_job_ids = []
+
+    def _restore_interrupted_operation(self, job):
+        payload = (job or {}).get("payload") or {}
+        operation_id = str(payload.get("operation_id") or "")
+        user_id = int(payload.get("user_id") or 0)
+        chat_id = int(payload.get("chat_id") or user_id or 0)
+        try:
+            revision = int(payload.get("operation_revision") or 0) + 1
+        except (TypeError, ValueError):
+            revision = 1
+        operation = {
+            "operation_id": operation_id,
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "state": "interrupted",
+            "stage": str((job or {}).get("state") or "interrupted"),
+            "status_text": (
+                "Plex Feature 进程停止，协调任务已中断；"
+                "已完成的 Plex 远端操作不会自动回滚。"
+            ),
+            "control": "",
+            "revision": revision,
+            "details": {
+                "job_id": int((job or {}).get("id") or 0),
+                "stopped_at": str((job or {}).get("state") or "interrupted"),
+            },
+            "kind": "management",
+            "cancel_event": threading.Event(),
+        }
+        self.operations[operation_id] = operation
+        self.owner_operations[(chat_id, user_id)] = operation_id
+        self.job_operation_ids[int(job["id"])] = operation_id
+        return self._operation_view(operation)
 
     def _notify_sync(self, user_id, message, confirmation=None):
         if not user_id or self.loop is None:
