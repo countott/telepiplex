@@ -30,6 +30,10 @@ class WaitingForMatchConfirmation(RuntimeError):
         self.kind = str(kind)
 
 
+class PlexOperationCancelled(RuntimeError):
+    pass
+
+
 class PlexManagementService:
     def __init__(
         self,
@@ -216,7 +220,7 @@ class PlexManagementService:
         result = (job.get("step_results") or {}).get(state) or {}
         return result.get("status") in {"success", "warning", "unchanged", "confirmed"}
 
-    def run_job(self, job_id):
+    def run_job(self, job_id, *, should_cancel=None, on_stage=None):
         runners = {
             "scanning": self._scan,
             "locating": self._locate,
@@ -231,12 +235,23 @@ class PlexManagementService:
         if job["state"] == "completed":
             return job
         for state in STEP_ORDER:
+            if should_cancel and should_cancel():
+                raise PlexOperationCancelled(
+                    f"Plex operation cancelled before {state}"
+                )
             job = self.jobs.get(job_id)
             if self._step_finished(job, state):
                 continue
+            if on_stage:
+                on_stage(state, job)
             self.jobs.update(job_id, state=state, error=None)
             try:
-                step_result = runners[state](self.jobs.get(job_id))
+                if state == "locating":
+                    step_result = self._locate(
+                        self.jobs.get(job_id), should_cancel=should_cancel
+                    )
+                else:
+                    step_result = runners[state](self.jobs.get(job_id))
             except WaitingForMatchConfirmation as exc:
                 waiting = {
                     "status": "waiting",
@@ -248,6 +263,8 @@ class PlexManagementService:
                 waiting_job = self.jobs.update(job_id, state="waiting_match_confirmation")
                 self._notify_waiting(waiting_job, waiting)
                 return waiting_job
+            except PlexOperationCancelled:
+                raise
             except Exception as exc:
                 message = self._safe_error(exc)
                 if state in GATING_STEPS:
@@ -260,7 +277,7 @@ class PlexManagementService:
         self._notify_once(completed)
         return self.jobs.get(job_id)
 
-    def run_batch(self, job_ids):
+    def run_batch(self, job_ids, *, should_cancel=None, on_stage=None):
         """Scan once per library, then run each final-path job independently."""
         ordered_ids = [int(job_id) for job_id in job_ids]
         groups = {}
@@ -274,6 +291,10 @@ class PlexManagementService:
             groups.setdefault(library_id, []).append(job)
 
         for library_id, jobs in groups.items():
+            if should_cancel and should_cancel():
+                raise PlexOperationCancelled(
+                    "Plex operation cancelled before scanning"
+                )
             started = next((
                 (job.get("step_results") or {}).get("scanning")
                 for job in jobs
@@ -292,6 +313,8 @@ class PlexManagementService:
                 "batch_size": len(jobs),
             }
             for job in jobs:
+                if on_stage:
+                    on_stage("scanning", job)
                 self.jobs.update(
                     job["id"],
                     state="scanning",
@@ -323,6 +346,10 @@ class PlexManagementService:
                     ),
                     error=None,
                 )
+            if should_cancel and should_cancel():
+                raise PlexOperationCancelled(
+                    "Plex operation cancelled after scanning"
+                )
 
         results = []
         for job_id in ordered_ids:
@@ -331,7 +358,11 @@ class PlexManagementService:
                 if job:
                     results.append(job)
                 continue
-            results.append(self.run_job(job_id))
+            results.append(self.run_job(
+                job_id,
+                should_cancel=should_cancel,
+                on_stage=on_stage,
+            ))
         return results
 
     def _media_metadata(self, job):
@@ -408,7 +439,7 @@ class PlexManagementService:
             int(candidate.get("year") or 0),
         )
 
-    def _locate(self, job):
+    def _locate(self, job, *, should_cancel=None):
         scan = job["step_results"]["scanning"]
         library_id = scan["library_id"]
         contract = self._media_metadata(job)
@@ -420,6 +451,10 @@ class PlexManagementService:
             deadline = self._clock() + self.scan_timeout
             item = None
             while item is None:
+                if should_cancel and should_cancel():
+                    raise PlexOperationCancelled(
+                        "Plex operation cancelled while locating episode"
+                    )
                 item = self.plex.find_series_episode(
                     library_id,
                     tvdb_series_id=(
@@ -452,6 +487,10 @@ class PlexManagementService:
             deadline = self._clock() + self.scan_timeout
             item = None
             while item is None:
+                if should_cancel and should_cancel():
+                    raise PlexOperationCancelled(
+                        "Plex operation cancelled while locating movie"
+                    )
                 item = self.plex.find_movie(
                     library_id,
                     title=identity.get("english_title") or identity.get("chinese_title") or "",
@@ -470,6 +509,10 @@ class PlexManagementService:
         deadline = self._clock() + self.scan_timeout
         candidates = []
         while True:
+            if should_cancel and should_cancel():
+                raise PlexOperationCancelled(
+                    "Plex operation cancelled while locating item"
+                )
             candidates = self.plex.locate_candidates(library_id, before)
             if candidates or self._clock() >= deadline:
                 break
@@ -818,7 +861,9 @@ class PlexManagementService:
         self.jobs.update(job_id, state="queued", step_results=steps, error=None)
         return self.run_job(job_id)
 
-    def confirm_match(self, job_id, selection):
+    def confirm_match(
+        self, job_id, selection, *, should_cancel=None, on_stage=None
+    ):
         job = self.jobs.get(job_id)
         if not job:
             raise LookupError(f"Plex job not found: {job_id}")
@@ -838,7 +883,11 @@ class PlexManagementService:
                 "rating_key": str(selection),
             }
             self.jobs.update(job_id, state="matching", rating_key=str(selection), step_results=steps, error=None)
-        return self.run_job(job_id)
+        return self.run_job(
+            job_id,
+            should_cancel=should_cancel,
+            on_stage=on_stage,
+        )
 
     def resume_incomplete_jobs(self, executor=None):
         jobs = [job for job in self.jobs.list(1000) if job["state"] not in {"completed", "waiting_match_confirmation"}]

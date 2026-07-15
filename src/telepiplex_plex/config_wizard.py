@@ -76,7 +76,7 @@ class PlexConfigWizard:
                     [{"text": "TMDB", "callback_data": "plex:config:tmdb"}],
                     [{"text": "Fanart", "callback_data": "plex:config:fanart"}],
                     [{"text": "AI", "callback_data": "plex:config:ai"}],
-                    [{"text": "取消", "callback_data": "plex:config:cancel"}],
+                    [{"text": "退出", "callback_data": "plex:config:cancel"}],
                 ]},
             }],
             "session": {"state": "open"},
@@ -121,7 +121,7 @@ class PlexConfigWizard:
                     "data": {"keyboard": [[
                         {"text": "启用", "callback_data": "plex:config:boolean:on"},
                         {"text": "停用", "callback_data": "plex:config:boolean:off"},
-                    ]]},
+                    ], [{"text": "退出", "callback_data": "plex:config:cancel"}]]},
                 }],
                 "session": {"state": "open"},
             }
@@ -194,7 +194,7 @@ class PlexConfigWizard:
                 "text": "配置已收集，敏感值不会回显。确认保存并重新加载 Feature？",
                 "data": {"keyboard": [[
                     {"text": "确认保存", "callback_data": "plex:config:confirm"},
-                    {"text": "取消", "callback_data": "plex:config:cancel"},
+                    {"text": "退出", "callback_data": "plex:config:cancel"},
                 ]]},
             }],
             "session": {"state": "open"},
@@ -202,7 +202,16 @@ class PlexConfigWizard:
 
     @staticmethod
     def _message(text: str, state: str, *, edit=False) -> dict:
+        action = {
+            "kind": "edit_message" if edit else "send_message",
+            "text": text,
+        }
+        if state == "open":
+            action["data"] = {"keyboard": [[{
+                "text": "退出",
+                "callback_data": "plex:config:cancel",
+            }]]}
         return {
-            "actions": [{"kind": "edit_message" if edit else "send_message", "text": text}],
+            "actions": [action],
             "session": {"state": state},
         }

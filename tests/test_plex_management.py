@@ -697,6 +697,54 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertEqual(result["step_results"]["streams"]["subtitle"]["source"], "external")
         self.assertTrue(result["step_results"]["artwork"]["attempted"])
 
+    def test_run_job_stops_before_next_step_after_cancel(self):
+        from telepiplex_plex.management import PlexOperationCancelled
+
+        plex = FakePlex()
+        service = self.make_service(plex=plex)
+        job = service.enqueue_completion(make_completion())
+        cancelled = False
+        stages = []
+
+        def on_stage(stage, _job):
+            nonlocal cancelled
+            stages.append(stage)
+            if stage == "scanning":
+                cancelled = True
+
+        with self.assertRaises(PlexOperationCancelled):
+            service.run_job(
+                job["id"],
+                should_cancel=lambda: cancelled,
+                on_stage=on_stage,
+            )
+
+        self.assertEqual(stages, ["scanning"])
+        self.assertEqual(plex.calls, ["snapshot_recent", "scan_library"])
+
+    def test_cancel_while_locating_propagates_as_cancel_not_job_failure(self):
+        from telepiplex_plex.management import PlexOperationCancelled
+
+        plex = FakePlex()
+        plex.locate_candidates = Mock(return_value=[])
+        service = self.make_service(
+            plex=plex,
+            scan_poll_interval=0,
+            scan_timeout=30,
+        )
+        job = service.enqueue_completion(make_completion())
+        checks = 0
+
+        def should_cancel():
+            nonlocal checks
+            checks += 1
+            return checks >= 3
+
+        with self.assertRaises(PlexOperationCancelled):
+            service.run_job(job["id"], should_cancel=should_cancel)
+
+        self.assertNotEqual(self.jobs.get(job["id"])["state"], "failed")
+
     def test_artwork_failure_does_not_block_stream_selection(self):
         plex = FakePlex()
         service = self.make_service(plex=plex, tmdb=FakeTmdb(RuntimeError("tmdb down")))

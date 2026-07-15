@@ -22,6 +22,8 @@ def main(context: RuntimeContext) -> FeatureRuntime:
         commands={"plex": feature.command, "plex_config": feature.command},
         callbacks={"plex": feature.callback},
         messages=feature.message,
+        operation_control=feature.operation_control,
+        operation_snapshot=feature.operation_snapshot,
     )
     feature.bind_runtime(runtime)
     return runtime
