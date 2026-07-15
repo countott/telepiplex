@@ -246,6 +246,46 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
 
         manager.start.assert_awaited_once()
 
+    async def test_start_core_runtime_syncs_live_feature_commands(self):
+        bot_module = await asyncio.to_thread(load_bot_module)
+        from app.core.capability_router import CapabilityRouter
+
+        router = CapabilityRouter()
+        manager = SimpleNamespace(
+            start=AsyncMock(),
+            available_updates=AsyncMock(return_value=[]),
+            router=router,
+            interaction_coordinator=None,
+        )
+        application = SimpleNamespace(
+            bot=SimpleNamespace(
+                send_message=AsyncMock(),
+                set_my_commands=AsyncMock(),
+            ),
+            bot_data={},
+        )
+        config = {
+            "allowed_user": 42,
+            "plugins": {"catalog_refresh_interval": 300},
+        }
+
+        with (
+            patch.object(bot_module.init, "bot_config", config),
+            patch.object(bot_module, "queue_core_startup_notice"),
+        ):
+            await bot_module.start_core_runtime(application, manager)
+            task = application.bot_data["telepiplex_plugin_update_task"]
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        application.bot.set_my_commands.assert_awaited_once()
+        names = [
+            item.command
+            for item in application.bot.set_my_commands.await_args.args[0]
+        ]
+        self.assertEqual(names, ["start", "reload", "plugin", "config"])
+
     async def test_hot_runtime_config_updates_safe_fields_and_reports_restart_fields(self):
         bot_module = await asyncio.to_thread(load_bot_module)
         dispatcher = SimpleNamespace(

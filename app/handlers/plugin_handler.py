@@ -8,6 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import init
 
 from app.core.plugin_manager import PluginOperationError
+from app.core.command_catalog import sync_bot_commands
 from app.handlers.interaction_handler import (
     COORDINATOR_KEY,
     operation_markup,
@@ -101,6 +102,7 @@ async def plugin_command(update, context):
             }:
                 _clear_plugin_sessions(context.application.bot_data, result.plugin_id)
                 _clear_config_user_data(context.user_data)
+            menu_suffix = await _sync_command_menu(context)
             kwargs = {}
             if command in {"install", "update", "enable", "rollback"}:
                 markup = _config_markup(manager, result.plugin_id)
@@ -111,7 +113,8 @@ async def plugin_command(update, context):
                 f"插件：{result.plugin_id}\n"
                 f"版本：{result.version}\n"
                 f"状态：{result.state}"
-                f"{_config_migration_suffix(result)}",
+                f"{_config_migration_suffix(result)}"
+                f"{menu_suffix}",
                 **kwargs,
             )
             return
@@ -248,6 +251,7 @@ async def plugin_install_callback(update, context):
         result = await manager.install(reference)
         _clear_plugin_sessions(context.application.bot_data, result.plugin_id)
         _clear_config_user_data(context.user_data)
+        menu_suffix = await _sync_command_menu(context)
         kwargs = {}
         markup = _config_markup(manager, result.plugin_id)
         if markup is not None:
@@ -257,7 +261,8 @@ async def plugin_install_callback(update, context):
             f"插件：{result.plugin_id}\n"
             f"版本：{result.version}\n"
             f"状态：{result.state}\n\n"
-            "发送 /plugin 继续安装其他 Feature。",
+            "发送 /plugin 继续安装其他 Feature。"
+            f"{menu_suffix}",
             **kwargs,
         )
     except PluginOperationError as exc:
@@ -295,6 +300,7 @@ async def plugin_update_callback(update, context):
         result = await manager.update(reference)
         _clear_plugin_sessions(context.application.bot_data, result.plugin_id)
         _clear_config_user_data(context.user_data)
+        menu_suffix = await _sync_command_menu(context)
         kwargs = {}
         markup = _config_markup(manager, result.plugin_id)
         if markup is not None:
@@ -304,7 +310,8 @@ async def plugin_update_callback(update, context):
             f"插件：{result.plugin_id}\n"
             f"版本：{result.version}\n"
             f"状态：{result.state}"
-            f"{_config_migration_suffix(result)}",
+            f"{_config_migration_suffix(result)}"
+            f"{menu_suffix}",
             **kwargs,
         )
     except PluginOperationError as exc:
@@ -324,6 +331,18 @@ def _format_status(status: dict) -> str:
     if missing:
         lines.append("缺少能力：" + "、".join(str(item) for item in missing))
     return "\n".join(lines)
+
+
+async def _sync_command_menu(context) -> str:
+    router = context.application.bot_data.get(ROUTER_KEY)
+    if router is None:
+        return ""
+    if await sync_bot_commands(context.application, router):
+        return ""
+    return (
+        "\n\n⚠️ Telegram 命令列表同步失败；Feature 操作已完成且不会回滚，"
+        "Core 会在下次生命周期变更或重启时重试。"
+    )
 
 
 async def dynamic_command_gateway(update, context):

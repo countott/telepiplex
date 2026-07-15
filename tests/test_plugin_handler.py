@@ -536,6 +536,25 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("enable_failed", message)
         self.assertNotIn("secret-value", message)
 
+    async def test_successful_lifecycle_reports_command_menu_sync_failure(self):
+        from app.core.capability_router import CapabilityRouter
+        from app.handlers.plugin_handler import plugin_command
+
+        update, context, manager = self._request(["enable", "echo"])
+        context.application.bot_data["telepiplex_plugin_router"] = CapabilityRouter()
+        context.application.bot.set_my_commands = AsyncMock(
+            side_effect=RuntimeError("telegram unavailable")
+        )
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_command(update, context)
+
+        self.assertEqual(manager.calls, [("enable", "echo")])
+        context.application.bot.set_my_commands.assert_awaited_once()
+        message = update.effective_message.reply_text.await_args_list[-1].args[0]
+        self.assertIn("命令列表同步失败", message)
+        self.assertIn("不会回滚", message)
+
     async def test_disabling_feature_clears_its_sessions(self):
         from app.handlers.plugin_handler import plugin_command
 

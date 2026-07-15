@@ -25,6 +25,11 @@ from telegram.helpers import escape_markdown
 
 import init
 from app.core.capability_router import CapabilityRouter
+from app.core.command_catalog import (
+    build_bot_commands,
+    build_start_help,
+    sync_bot_commands,
+)
 from app.core.core_broker import CoreBroker
 from app.core.event_dispatcher import EventDispatcher
 from app.core.event_journal import EventJournal
@@ -64,12 +69,7 @@ except ImportError:
 
 
 TELEGRAM_API_TIMEOUT = 30
-CORE_BOT_COMMANDS = [
-    BotCommand("start", "获取核心状态"),
-    BotCommand("reload", "重载配置"),
-    BotCommand("plugin", "安装和管理 Feature"),
-    BotCommand("config", "配置 Feature"),
-]
+CORE_BOT_COMMANDS = build_bot_commands(None)
 SENSITIVE_CONFIG_KEYWORDS = (
     "token",
     "api_key",
@@ -215,17 +215,8 @@ def queue_core_startup_notice():
     )
 
 
-def get_help_info():
-    version = get_version()
-    return f"""
-<b>Telepiplex Core {version}</b>\n\n
-<b>命令列表</b>\n
-<code>/start</code> - 显示核心运行层状态\n
-<code>/reload</code> - 重载配置\n\n
-<code>/plugin</code> - 安装和管理 Feature\n\n
-<code>/config</code> - 配置已安装 Feature\n\n
-此分支只包含 Telepiplex 核心运行层，不包含 115 投递、媒体搜索或媒体整理业务能力。
-"""
+def get_help_info(router=None):
+    return build_start_help(router, get_version())
 
 
 async def send_bot_message_safely(bot, *, chat_id, text, **kwargs):
@@ -280,10 +271,11 @@ async def send_plugin_update_notification(application, update):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    router = context.application.bot_data.get("telepiplex_plugin_router")
     await send_bot_message_safely(
         context.bot,
         chat_id=update.effective_chat.id,
-        text=get_help_info(),
+        text=get_help_info(router),
         parse_mode="html",
         disable_web_page_preview=True,
     )
@@ -506,16 +498,19 @@ def update_logger_level():
     logging.getLogger("telegram.Bot").setLevel(logging.WARNING)
 
 
-def get_bot_menu():
-    return list(CORE_BOT_COMMANDS)
+def get_bot_menu(router=None):
+    return build_bot_commands(router)
 
 
 async def set_bot_menu(application):
-    try:
-        await application.bot.set_my_commands(get_bot_menu())
-        init.logger.info("Bot菜单命令已设置!")
-    except Exception as e:
-        init.logger.error(f"设置Bot菜单失败: {e}")
+    router = application.bot_data.get("telepiplex_plugin_router")
+    if await sync_bot_commands(application, router):
+        if init.logger:
+            init.logger.info("Bot菜单命令已设置!")
+        return True
+    if init.logger:
+        init.logger.error("设置Bot菜单失败，后续 Feature 生命周期或 Core 重启时将重试。")
+    return False
 
 
 async def post_init(application):
@@ -634,6 +629,7 @@ async def start_core_runtime(application, manager):
     coordinator = getattr(manager, "interaction_coordinator", None)
     if coordinator is not None:
         await recover_active_operations(application, manager.router, coordinator)
+    await set_bot_menu(application)
     queue_core_startup_notice()
     plugin_config = (init.bot_config or {}).get("plugins") or {}
     monitor = PluginUpdateMonitor(
