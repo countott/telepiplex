@@ -58,7 +58,6 @@ class PlexConfigWizard:
         plex = self.config.get("plex") or {}
         tmdb = self.config.get("tmdb") or {}
         fanart = self.config.get("fanart") or {}
-        ai = self.config.get("ai") or {}
         return {
             "actions": [{
                 "kind": "send_message",
@@ -66,16 +65,13 @@ class PlexConfigWizard:
                     "plex-management 配置\n\n"
                     f"Plex：{'已配置' if plex.get('token') else '未配置'}\n"
                     f"TMDB：{'已配置' if tmdb.get('api_key') else '未配置'}\n"
-                    f"Fanart：{'已配置' if fanart.get('api_key') else '未配置'}\n"
-                    f"AI：{'启用' if ai.get('enabled') else '停用'}，"
-                    f"{'已配置' if ai.get('api_key') else '未配置'}\n\n"
+                    f"Fanart：{'已配置' if fanart.get('api_key') else '未配置'}\n\n"
                     "请选择要修改的配置。内部参数请直接编辑 YAML。"
                 ),
                 "data": {"keyboard": [
                     [{"text": "Plex", "callback_data": "plex:config:plex"}],
                     [{"text": "TMDB", "callback_data": "plex:config:tmdb"}],
                     [{"text": "Fanart", "callback_data": "plex:config:fanart"}],
-                    [{"text": "AI", "callback_data": "plex:config:ai"}],
                     [{"text": "退出", "callback_data": "plex:config:cancel"}],
                 ]},
             }],
@@ -112,31 +108,6 @@ class PlexConfigWizard:
                 "open",
                 edit=True,
             )
-        if session.get("stage") == "choose" and action == "ai":
-            self._replace_session(key, {"stage": "ai_boolean", "values": {}})
-            return {
-                "actions": [{
-                    "kind": "edit_message",
-                    "text": "是否启用 AI？",
-                    "data": {"keyboard": [[
-                        {"text": "启用", "callback_data": "plex:config:boolean:on"},
-                        {"text": "停用", "callback_data": "plex:config:boolean:off"},
-                    ], [{"text": "退出", "callback_data": "plex:config:cancel"}]]},
-                }],
-                "session": {"state": "open"},
-            }
-        if session.get("stage") == "ai_boolean" and action in {
-            "boolean:on", "boolean:off"
-        }:
-            if action.endswith(":off"):
-                return self._finish(key, {"ai": {"enabled": False}})
-            session["values"]["enabled"] = True
-            session["stage"] = "ai_url"
-            return self._message(
-                "请发送 AI API 地址，例如 https://api.example/v1。",
-                "open",
-                edit=True,
-            )
         return self._message("⚠️ 配置操作与当前步骤不匹配。", "open")
 
     def message(self, request: dict) -> dict:
@@ -163,19 +134,6 @@ class PlexConfigWizard:
                     raw, (self.config.get(section) or {}).get("api_key")
                 )
                 return self._finish(key, {section: {"api_key": secret}})
-            if stage == "ai_url":
-                values["api_url"] = _url(raw)
-                session["stage"] = "ai_key"
-                return self._message("请发送 AI API Key。发送 - 保留当前值。", "open")
-            if stage == "ai_key":
-                values["api_key"] = self._secret(
-                    raw, (self.config.get("ai") or {}).get("api_key")
-                )
-                session["stage"] = "ai_model"
-                return self._message("请发送 AI 模型名称。", "open")
-            if stage == "ai_model":
-                values["model"] = _line(raw)
-                return self._finish(key, {"ai": deepcopy(values)})
         except ValueError:
             return self._message("⚠️ 输入无效，请按提示重新发送。", "open")
         return self._message("⚠️ 配置会话已失效，请重新打开 /config。", "close")

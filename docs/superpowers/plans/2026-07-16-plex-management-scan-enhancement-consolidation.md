@@ -6,7 +6,7 @@
 
 **Architecture:** `media.organized` creates one Job whose payload contains all final-path targets. The service scans each routed Plex library once, locates targets by path inside the scanning step, then runs three independently resumable enhancement steps. Telegram owns `/scan` and selection interactions; MCP exposes only scan, artwork, audio, subtitle, and Job inspection.
 
-**Tech Stack:** Python 3.12, `telepiplex-plugin-sdk` 1.1, `plexapi`, SQLite, FastMCP, python-telegram-bot response contracts, pytest.
+**Tech Stack:** Python 3.12, `telepiplex-plugin-sdk` 1.1, Core API `>=1.2,<2.0`, `plexapi`, SQLite, FastMCP, python-telegram-bot response contracts, pytest.
 
 ## Global Constraints
 

@@ -2,6 +2,7 @@ import ast
 import asyncio
 import threading
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1215,13 +1216,12 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.runs, 0)
         await runtime.tasks.pop("plex-resume")
 
-    async def test_enabled_ai_with_missing_credentials_does_not_break_feature_startup(self):
+    async def test_missing_plex_credentials_does_not_break_feature_startup(self):
         from telepiplex_plex.runtime import main
 
         config_path = self.root / "config.yaml"
         config_path.write_text(yaml.safe_dump({
             "plex": {"base_url": "", "token": ""},
-            "ai": {"enabled": True, "api_url": "", "api_key": "", "model": ""},
         }), encoding="utf-8")
         context = SimpleNamespace(
             manifest={"plugin_id": "plex-management", "version": "1.0.0"},
@@ -1254,7 +1254,7 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
 
 class FeatureSourceContractTest(unittest.TestCase):
-    def test_manifest_registers_scan_command(self):
+    def test_manifest_registers_scan_command_and_current_contract_versions(self):
         manifest = yaml.safe_load((ROOT / "manifest.yaml").read_text())
         commands = {
             command["name"]: command["description"]
@@ -1262,12 +1262,21 @@ class FeatureSourceContractTest(unittest.TestCase):
         }
 
         self.assertEqual(commands["scan"], "扫描 Plex 媒体库")
+        self.assertEqual(manifest["version"], "1.2.0")
         self.assertEqual(manifest["core_api"], ">=1.2,<2.0")
+        self.assertEqual(manifest["state_schema_version"], 2)
 
-    def test_readme_build_example_uses_current_version(self):
+    def test_package_and_readme_use_current_version(self):
+        package = tomllib.loads(
+            (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        )
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("dist/plex-management-1.1.0.tpx", source)
-        self.assertNotIn("dist/plex-management-1.0.0.tpx", source)
+
+        self.assertEqual(package["project"]["version"], "1.2.0")
+        self.assertIn("dist/plex-management-1.2.0.tpx", source)
+        self.assertNotIn("dist/plex-management-1.1.0.tpx", source)
+        self.assertIn("自动管线", source)
+        self.assertIn("`/scan`", source)
 
     def test_mcp_uses_auth_token_config_key(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())

@@ -11,13 +11,6 @@ tmdb:
 fanart:
   api_key: ""
   timeout: 15
-ai:
-  enabled: false
-  api_url: ""
-  api_key: ""
-  model: ""
-  timeout: 30
-  max_tool_rounds: 3
 mcp:
   enabled: false
   host: 127.0.0.1

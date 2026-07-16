@@ -19,14 +19,6 @@ class PlexConfigWizardTest(unittest.IsolatedAsyncioTestCase):
                 },
                 "tmdb": {"api_key": "old-tmdb-key", "timeout": 15},
                 "fanart": {"api_key": "old-fanart-key", "timeout": 15},
-                "ai": {
-                    "enabled": True,
-                    "api_url": "https://old-ai.example/v1",
-                    "api_key": "old-ai-key",
-                    "model": "old-model",
-                    "timeout": 30,
-                    "max_tool_rounds": 3,
-                },
                 "mcp": {"enabled": True, "auth_token": "never-show"},
             },
             core=None,
@@ -55,14 +47,14 @@ class PlexConfigWizardTest(unittest.IsolatedAsyncioTestCase):
         buttons = result["actions"][0]["data"]["keyboard"]
         self.assertEqual(
             [row[0]["text"] for row in buttons],
-            ["Plex", "TMDB", "Fanart", "AI", "退出"],
+            ["Plex", "TMDB", "Fanart", "退出"],
         )
         text = result["actions"][0]["text"]
-        for hidden in ("MCP", "timeout", "轮询", "max_tool_rounds"):
+        for hidden in ("AI", "MCP", "timeout", "轮询", "max_tool_rounds"):
             self.assertNotIn(hidden, text)
         for secret in (
             "old-plex-token", "old-tmdb-key", "old-fanart-key",
-            "old-ai-key", "never-show",
+            "never-show",
         ):
             self.assertNotIn(secret, text)
         self.assertIsNone(self.feature.service)
@@ -107,46 +99,14 @@ class PlexConfigWizardTest(unittest.IsolatedAsyncioTestCase):
                     section: {"api_key": expected},
                 })
 
-    async def test_ai_flow_uses_enabled_schema_key_and_public_fields_only(self):
+    async def test_removed_ai_section_cannot_start_a_configuration_flow(self):
         await self._start()
-        await self.feature.callback({
+        result = await self.feature.callback({
             **self.owner, "namespace": "plex", "payload": "config:ai"
         })
-        await self.feature.callback({
-            **self.owner,
-            "namespace": "plex",
-            "payload": "config:boolean:on",
-        })
-        await self.feature.message({
-            **self.owner, "text": "https://ai.example/v1"
-        })
-        await self.feature.message({**self.owner, "text": "new-ai-key"})
-        await self.feature.message({**self.owner, "text": "new-model"})
-        result = await self._confirm()
 
-        self.assertEqual(result["config_patch"], {
-            "ai": {
-                "enabled": True,
-                "api_url": "https://ai.example/v1",
-                "api_key": "new-ai-key",
-                "model": "new-model",
-            },
-        })
-
-    async def test_ai_can_be_disabled_without_exposing_mcp_or_thresholds(self):
-        await self._start()
-        await self.feature.callback({
-            **self.owner, "namespace": "plex", "payload": "config:ai"
-        })
-        pending = await self.feature.callback({
-            **self.owner,
-            "namespace": "plex",
-            "payload": "config:boolean:off",
-        })
-        self.assertNotIn("config_patch", pending)
-        result = await self._confirm()
-
-        self.assertEqual(result["config_patch"], {"ai": {"enabled": False}})
+        self.assertNotIn("config_patch", result)
+        self.assertIn("不匹配", result["actions"][0]["text"])
 
     async def test_expired_confirmation_cannot_submit_patch(self):
         with patch(
@@ -182,11 +142,7 @@ class PlexConfigWizardTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["operation"]["state"], "awaiting_input")
         self.assertEqual(len(exits(result)), 1)
         result = await self.feature.callback({
-            **self.owner, "namespace": "plex", "payload": "config:ai",
-        })
-        self.assertEqual(len(exits(result)), 1)
-        result = await self.feature.callback({
-            **self.owner, "namespace": "plex", "payload": "config:boolean:on",
+            **self.owner, "namespace": "plex", "payload": "config:plex",
         })
         self.assertEqual(len(exits(result)), 1)
         result = await self.feature.message({**self.owner, "text": "bad-url"})

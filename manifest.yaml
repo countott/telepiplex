@@ -1,6 +1,6 @@
 plugin_id: plex-management
 name: Plex Management
-version: 1.1.0
+version: 1.2.0
 core_api: ">=1.2,<2.0"
 entry_point: telepiplex_plex.runtime:main
 provides:
@@ -20,7 +20,7 @@ commands:
 callbacks:
   - plex
 config_schema_version: 1
-state_schema_version: 1
+state_schema_version: 2
 source:
   repository: origin
   branch: feature/plex-management
