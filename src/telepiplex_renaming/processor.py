@@ -8,7 +8,6 @@ from pathlib import Path
 import re
 
 from .context import runtime_context
-from .tvdb import TvdbConfigError, TvdbRequestError, get_tvdb_series_episodes, search_tvdb_series
 from telepiplex_plugin_sdk.media_metadata import (
     MEDIA_METADATA_KEY,
     attach_media_metadata,
@@ -27,7 +26,6 @@ from .media_naming import (
 from .tvdb_rename import (
     VIDEO_EXTENSIONS,
     build_confirmed_rename_plan,
-    build_tvdb_rename_plan,
     enrich_media_metadata_with_rename_plan,
 )
 
@@ -282,47 +280,6 @@ def _choose_movie_main_video(event, naming_metadata, file_tree):
     return None, ""
 
 
-def _tvdb_title_from_metadata(metadata):
-    metadata = metadata or {}
-    title = metadata.get("english_title") or metadata.get("query") or ""
-    year = str(metadata.get("year") or "").strip()
-    if title and year and title.endswith(f" {year}"):
-        title = title[: -len(year)].strip()
-    return " ".join(str(title or "").split())
-
-
-def _get_tvdb_candidates_and_episodes(metadata):
-    title = _tvdb_title_from_metadata(metadata)
-    if not title:
-        runtime_context.logger.warn(f"TVDB整理跳过：元数据缺少英文标题 {metadata}")
-        return [], []
-
-    try:
-        candidates = search_tvdb_series(title, year=str((metadata or {}).get("year") or "").strip())[:3]
-    except TvdbConfigError as e:
-        runtime_context.logger.info(f"TVDB整理跳过：{e}")
-        return [], []
-    except TvdbRequestError as e:
-        runtime_context.logger.warn(f"TVDB搜索失败，跳过TVDB整理: {e}")
-        return [], []
-
-    episodes = []
-    for candidate in candidates:
-        series_id = str(candidate.get("tvdb_series_id") or "").strip()
-        if not series_id:
-            continue
-        try:
-            series_episodes = get_tvdb_series_episodes(series_id, season_type="default")
-        except TvdbRequestError as e:
-            runtime_context.logger.warn(f"TVDB剧集列表获取失败 series_id={series_id}: {e}")
-            continue
-        for episode in series_episodes:
-            item = dict(episode)
-            item["tvdb_series_id"] = series_id
-            episodes.append(item)
-    return candidates, episodes
-
-
 def _has_ai_episode_inference_config():
     ai_config = runtime_context.config.get("ai") or {}
     return bool(
@@ -367,79 +324,6 @@ def _merge_tvdb_metadata(naming_metadata=None, metadata=None, filename_metadata=
             if key not in merged and _has_metadata_value(value):
                 merged[key] = value
     return merged or None
-
-
-def _attempt_legacy_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metadata):
-    if not metadata or not _has_ai_episode_inference_config():
-        return None
-
-    storage = _storage(event)
-    tvdb_candidates, tvdb_episodes = _get_tvdb_candidates_and_episodes(metadata)
-    if not tvdb_candidates or not tvdb_episodes:
-        return None
-
-    file_tree = _event_file_tree(event)
-    video_count = len([item for item in file_tree if not item.get("is_dir")])
-    if not video_count:
-        runtime_context.logger.warn(f"TVDB整理跳过：目录中未找到视频文件 {event.final_path}")
-        return None
-
-    context = {
-        "metadata": metadata,
-        "release_title": metadata.get("release_title") or event.resource_name,
-        "resource_name": event.resource_name,
-        "download_path": event.final_path,
-        "file_tree": file_tree,
-        "tvdb_candidates": tvdb_candidates,
-        "tvdb_episodes": tvdb_episodes,
-        "naming_rules": {
-            "target_root": "selected_path / chinese_title (tvdb series_name)",
-            "target_relative_path": "Series Name Season XX / Series Name SXXEXX.ext",
-            "source_file": "must exactly match one file_tree relative_path or a unique file name",
-        },
-    }
-    ai_plan = infer_tvdb_episode_plan_with_ai(context)
-    rename_plan = build_tvdb_rename_plan(
-        final_path=event.final_path,
-        selected_path=event.selected_path,
-        metadata=metadata,
-        ai_plan=ai_plan,
-        file_tree=file_tree,
-        tvdb_candidates=tvdb_candidates,
-        tvdb_episodes=tvdb_episodes,
-    )
-    if not rename_plan:
-        runtime_context.logger.warn(f"TVDB整理跳过：AI映射未通过交叉校验 path={event.final_path}")
-        return None
-
-    _assert_no_target_conflicts(storage, rename_plan)
-
-    root_source_deleted = None
-    for operation in rename_plan["operations"]:
-        storage.create_dir_recursive(operation["target_dir"])
-        current_source_path = operation["source_path"]
-        if Path(operation["source_path"]).name != operation["rename_to"]:
-            if not storage.rename(operation["source_path"], operation["rename_to"]):
-                raise RuntimeError(f"TVDB整理失败：重命名失败 {operation['source_path']}")
-            current_source_path = operation["renamed_source_path"]
-        outcome = _move_file_with_outcome(
-            storage, current_source_path, operation["target_dir"]
-        )
-        if not outcome.get("copied"):
-            raise RuntimeError(f"TVDB整理失败：移动失败 {current_source_path}")
-        if (
-            len(rename_plan["operations"]) == 1
-            and str(operation["source_path"]).rstrip("/")
-            == str(event.final_path).rstrip("/")
-        ):
-            root_source_deleted = bool(outcome.get("source_deleted"))
-
-    if root_source_deleted is False:
-        rename_plan["cleanup_complete"] = False
-    elif root_source_deleted is None and event.final_path != rename_plan["target_root"]:
-        _cleanup_source_directory(storage, event.final_path)
-
-    return rename_plan
 
 
 def _media_metadata_state(event: DownloadCompletedEvent):
@@ -545,6 +429,66 @@ def _deterministic_episode_plan(media_metadata: dict, file_tree: list[dict]):
     }
 
 
+def _locked_ai_context(media_metadata: dict) -> dict:
+    identity = media_metadata.get("identity") or {}
+    relation = media_metadata.get("relation") or {}
+    target = relation.get("target_series") if isinstance(relation.get("target_series"), dict) else {}
+    target_ids = target.get("external_ids") if isinstance(target.get("external_ids"), dict) else {}
+    identity_ids = identity.get("external_ids") if isinstance(identity.get("external_ids"), dict) else {}
+    series_id = str(target_ids.get("tvdb") or identity_ids.get("tvdb") or "").strip()
+    locked = []
+    episodes = []
+    for item in media_metadata.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            season = int(item["season_number"])
+            episode = int(item["episode_number"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        locked.append([season, episode])
+        episodes.append({
+            "tvdb_series_id": series_id,
+            "tvdb_episode_id": str(item.get("tvdb_episode_id") or item.get("item_id") or ""),
+            "season_number": season,
+            "episode_number": episode,
+        })
+    if not locked:
+        placement = media_metadata.get("placement") or {}
+        try:
+            season = int(placement["season_number"])
+            episode = int(placement["episode_number"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        else:
+            locked.append([season, episode])
+            episodes.append({
+                "tvdb_series_id": series_id,
+                "tvdb_episode_id": str(placement.get("tvdb_episode_id") or ""),
+                "season_number": season,
+                "episode_number": episode,
+            })
+    canonical_title = str(
+        target.get("english_title")
+        or identity.get("english_title")
+        or ""
+    ).strip()
+    return {
+        "locked_identity": {
+            "tvdb_series_id": series_id,
+            "canonical_latin_title": canonical_title,
+            "content_kind": identity.get("content_kind") or "",
+        },
+        "locked_episode_keys": locked,
+        "tvdb_candidates": ([{
+            "tvdb_series_id": series_id,
+            "name": canonical_title,
+            "year": target.get("year") or identity.get("year") or "",
+        }] if series_id else []),
+        "tvdb_episodes": episodes,
+    }
+
+
 def _assert_no_target_conflicts(storage, rename_plan):
     for operation in rename_plan.get("operations") or []:
         target_path = (
@@ -576,7 +520,6 @@ def _attempt_confirmed_series_rename(
     ai_plan = _deterministic_episode_plan(media_metadata, file_tree)
     ai_was_used = False
     if ai_plan is None and _has_ai_episode_inference_config():
-        tvdb_candidates, tvdb_episodes = _get_tvdb_candidates_and_episodes(metadata)
         context = {
             "metadata": metadata,
             "confirmed_media_metadata": media_metadata,
@@ -584,8 +527,7 @@ def _attempt_confirmed_series_rename(
             "resource_name": event.resource_name,
             "download_path": event.final_path,
             "file_tree": file_tree,
-            "tvdb_candidates": tvdb_candidates,
-            "tvdb_episodes": tvdb_episodes,
+            **_locked_ai_context(media_metadata),
         }
         ai_plan = infer_tvdb_episode_plan_with_ai(context)
         ai_was_used = True
@@ -627,7 +569,6 @@ def _attempt_confirmed_series_rename(
             >= max(relative_threshold, absolute_threshold)
         }
         if large_unmatched and not ai_was_used:
-            tvdb_candidates, tvdb_episodes = _get_tvdb_candidates_and_episodes(metadata)
             context = {
                 "metadata": metadata,
                 "confirmed_media_metadata": media_metadata,
@@ -636,8 +577,7 @@ def _attempt_confirmed_series_rename(
                 "resource_name": event.resource_name,
                 "download_path": event.final_path,
                 "file_tree": file_tree,
-                "tvdb_candidates": tvdb_candidates,
-                "tvdb_episodes": tvdb_episodes,
+                **_locked_ai_context(media_metadata),
             }
             ai_plan = infer_tvdb_episode_plan_with_ai(context)
             ai_was_used = True
@@ -725,17 +665,15 @@ def _attempt_confirmed_series_rename(
 
 
 def _attempt_tvdb_ai_episode_rename(event: DownloadCompletedEvent, metadata):
-    media_metadata, contract_present = _media_metadata_state(event)
+    _media_metadata, contract_present = _media_metadata_state(event)
     confirmed_series = _confirmed_series_metadata(event)
-    if contract_present:
-        if confirmed_series:
-            return _attempt_confirmed_series_rename(
-                event,
-                metadata,
-                confirmed_series,
-            )
-        return None
-    return _attempt_legacy_tvdb_ai_episode_rename(event, metadata)
+    if contract_present and confirmed_series:
+        return _attempt_confirmed_series_rename(
+            event,
+            metadata,
+            confirmed_series,
+        )
+    return None
 
 
 def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:

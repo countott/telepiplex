@@ -476,7 +476,8 @@ class RenamingFeature:
             )
             if operation_id:
                 operation_state["thread_started"] = True
-            result = await asyncio.to_thread(self._process, event)
+            processor = self._process if metadata else self._fallback_unorganized
+            result = await asyncio.to_thread(processor, event)
             self._raise_if_cancelled(operation_id)
             organized = bool(
                 result.handled

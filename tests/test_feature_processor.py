@@ -296,6 +296,35 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertTrue(storage.moved[-1][1].endswith("English Series Season 01"))
 
     @patch("telepiplex_renaming.processor.infer_tvdb_episode_plan_with_ai")
+    def test_missing_confirmed_metadata_never_runs_legacy_identity_fallback(
+        self, ai_mock
+    ):
+        from telepiplex_renaming.context import runtime_context
+        runtime_context.config["ai"] = {
+            "enable": True,
+            "api_url": "https://ai.example",
+            "api_key": "secret",
+            "model": "test",
+        }
+        event = DownloadCompletedEvent(
+            link="magnet:?x",
+            selected_path="/Series",
+            user_id=1,
+            final_path="/Downloads/Unknown.Series",
+            resource_name="Unknown.Series.S01E01",
+            naming_metadata={"english_title": "Unknown Series"},
+            metadata={},
+            storage=FakeStorage([
+                {"fn": "Unknown.Series.S01E01.mkv", "fid": "1", "fc": "1", "fs": 1000},
+            ]),
+        )
+
+        result = process_tvdb_episode(event)
+
+        self.assertFalse(result.handled)
+        ai_mock.assert_not_called()
+
+    @patch("telepiplex_renaming.processor.infer_tvdb_episode_plan_with_ai")
     def test_series_mid_batch_failure_becomes_partial_business_result(self, ai_mock):
         contract = series_contract()
         contract["items"].append({
@@ -338,7 +367,9 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertIn("部分完成（1/2）", result.message)
 
     @patch("telepiplex_renaming.processor.infer_tvdb_episode_plan_with_ai")
-    def test_unmatched_large_series_video_requires_explicit_ai_discard(self, ai_mock):
+    def test_unmatched_large_series_video_requires_explicit_ai_discard(
+        self, ai_mock
+    ):
         from telepiplex_renaming.context import runtime_context
 
         runtime_context.config["selection"].update({
@@ -358,12 +389,14 @@ class RenamingProcessorTest(unittest.TestCase):
             {"fn": "English.Series.S01E01.mkv", "fid": "1", "fc": "1", "fs": 1000},
             {"fn": "English.Series.S01E01.720p.mkv", "fid": "2", "fc": "1", "fs": 800},
         ])
+        contract = series_contract()
+        contract["identity"]["external_ids"] = {"tvdb": "100"}
         event = DownloadCompletedEvent(
             link="magnet:?x", selected_path="/Series", user_id=1,
             final_path="/Downloads/Series.Release",
             resource_name="English.Series.S01E01",
             naming_metadata={"english_title": "English Series"},
-            metadata=attach_media_metadata({}, series_contract()),
+            metadata=attach_media_metadata({}, contract),
             release={"title": "English.Series.S01E01.MULTI"},
             storage=storage,
         )
@@ -372,6 +405,9 @@ class RenamingProcessorTest(unittest.TestCase):
 
         self.assertTrue(result.message.startswith("✅"))
         ai_mock.assert_called_once()
+        context = ai_mock.call_args.args[0]
+        self.assertEqual(context["locked_episode_keys"], [[1, 1]])
+        self.assertEqual(context["tvdb_candidates"][0]["tvdb_series_id"], "100")
         self.assertIn(
             "/Downloads/Series.Release/English.Series.S01E01.720p.mkv",
             storage.deleted,
@@ -487,6 +523,43 @@ class FakeRuntime:
 
 
 class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
+    async def test_unresolved_media_search_moves_release_to_unorganized(self):
+        class UnresolvedCore(FakeCore):
+            async def call_capability(self, capability, method, payload, **kwargs):
+                if capability == "media.search":
+                    self.metadata_query = payload["query"]
+                    return {}
+                return await super().call_capability(
+                    capability, method, payload, **kwargs
+                )
+
+        core = UnresolvedCore()
+        feature = RenamingFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            core=core,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+
+        await feature.download_completed({
+            "event_id": "event-unresolved",
+            "payload": {
+                "job_id": "job-unresolved",
+                "selected_path": "/Movies",
+                "user_id": 123,
+                "final_path": "/Downloads/Unknown.Release",
+                "resource_name": "Unknown.Release.2024",
+            },
+        })
+        await runtime.wait()
+
+        self.assertEqual(core.storage.renamed, [])
+        self.assertEqual(
+            core.storage.moved,
+            [("/Downloads/Unknown.Release", "/Unorganized")],
+        )
+        self.assertIn("无法确定整理规则", core.notifications[-1][1])
+
     async def test_rollback_is_reported_and_compensation_runs_once(self):
         entered = asyncio.Event()
         release = asyncio.Event()

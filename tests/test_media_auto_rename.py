@@ -10,6 +10,26 @@ from telepiplex_renaming.media_naming import build_media_naming_plan, infer_engl
 
 
 class MediaAutoRenameTest(unittest.TestCase):
+    def test_japanese_romaji_compatibility_title_reaches_series_and_file_names(self):
+        plan = build_media_naming_plan(
+            {
+                "source": "media_metadata",
+                "chinese_title": "进击的巨人",
+                "english_title": "Shingeki no Kyojin",
+                "official_english_title": "Attack on Titan",
+                "original_language": "ja",
+                "search_title_policy": "romanized_original",
+            },
+            "Shingeki.no.Kyojin.S01E01.1080p",
+            "episode.mkv",
+        )
+
+        self.assertEqual(
+            plan.target_relative_dir,
+            "进击的巨人 (Shingeki no Kyojin)/Shingeki no Kyojin Season 01",
+        )
+        self.assertTrue(plan.file_name.startswith("Shingeki no Kyojin"))
+        self.assertNotIn("Attack on Titan", plan.file_name)
     def test_build_movie_plan_accepts_core_media_metadata_identity(self):
         plan = build_media_naming_plan(
             {
