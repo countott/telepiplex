@@ -1597,7 +1597,7 @@ class RuntimeStartupTest(unittest.TestCase):
     @staticmethod
     def _context(root: Path):
         return SimpleNamespace(
-            manifest={"plugin_id": "open115", "version": "1.2.2"},
+            manifest={"plugin_id": "open115", "version": "1.2.3"},
             token="runtime-token",
             socket_path=root / "runtime.sock",
             core_socket_path=root / "core.sock",
@@ -1671,18 +1671,20 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.2.2")
+        self.assertEqual(manifest["version"], "1.2.3")
         self.assertEqual(manifest["core_api"], ">=1.1,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.2.2")
+        self.assertEqual(project["project"]["version"], "1.2.3")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.1.0",
         )
-        self.assertIn("dist/open115-1.2.2.tpx", readme)
+        self.assertIn("dist/open115-1.2.3.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
+        self.assertIn("单级目录", readme)
+        self.assertIn("真人电影", readme)
         self.assertIn("不要以 / 开头", readme)
 
     def test_source_has_no_core_telegram_or_init_imports(self):
