@@ -524,7 +524,10 @@ class Open115Feature:
         if payload == "config:add" and stage == "directory_list":
             return self._directory_prompt(
                 key,
-                "请发送保存目录的显示名称。",
+                (
+                    "第一步（显示名称）：请发送保存目录的显示名称，例如"
+                    "“真人电影”。该名称只用于按钮展示，不是保存路径。"
+                ),
                 stage="directory_add_name",
                 status_text="等待输入保存目录名称。",
                 kind="edit_message",
@@ -585,7 +588,10 @@ class Open115Feature:
         if payload == "config:edit:name" and stage == "directory_item":
             return self._directory_prompt(
                 key,
-                "请发送新的目录名称。",
+                (
+                    "请发送新的显示名称。该名称只用于按钮展示，"
+                    "不是保存路径。"
+                ),
                 stage="directory_edit_name",
                 status_text="等待输入新的保存目录名称。",
                 kind="edit_message",
@@ -594,8 +600,8 @@ class Open115Feature:
             return self._directory_prompt(
                 key,
                 (
-                    "请从 115 根文件夹开始填写保存路径，例如 "
-                    "series/live action（末尾 / 可省略）。"
+                    "保存路径：单级目录直接输入“真人电影”；多级目录可输入"
+                    "“series/live action”。不要以 / 开头，末尾 / 可省略。"
                 ),
                 stage="directory_edit_path",
                 status_text="等待输入新的 115 保存路径。",
@@ -676,8 +682,9 @@ class Open115Feature:
                 return self._directory_prompt(
                     key,
                     (
-                        "请从 115 根文件夹开始填写保存路径，例如 "
-                        "series/live action（末尾 / 可省略）。"
+                        "第二步（保存路径）：单级目录直接输入“真人电影”；"
+                        "多级目录可输入“series/live action”。不要以 / 开头，"
+                        "末尾 / 可省略。"
                     ),
                     stage="directory_add_path",
                     status_text="等待输入 115 保存路径。",

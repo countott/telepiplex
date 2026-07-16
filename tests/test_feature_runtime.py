@@ -913,18 +913,24 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.feature.config_store.config["save_directories"] = original
         await self._open_directory_config()
 
-        await self.feature.callback({
+        name_prompt = await self.feature.callback({
             "payload": "config:add", "user_id": 1, "chat_id": 10,
         })
+        self.assertIn("第一步", name_prompt["actions"][0]["text"])
+        self.assertIn("只用于按钮展示", name_prompt["actions"][0]["text"])
         path_prompt = await self.feature.message({
-            "text": "电影", "user_id": 1, "chat_id": 10,
+            "text": "真人电影", "user_id": 1, "chat_id": 10,
         })
-        self.assertIn("115 根文件夹", path_prompt["actions"][0]["text"])
+        self.assertIn("第二步", path_prompt["actions"][0]["text"])
+        self.assertIn("单级目录", path_prompt["actions"][0]["text"])
+        self.assertIn("真人电影", path_prompt["actions"][0]["text"])
         self.assertIn("series/live action", path_prompt["actions"][0]["text"])
         added = await self.feature.message({
-            "text": "movies/live action/", "user_id": 1, "chat_id": 10,
+            "text": "真人电影", "user_id": 1, "chat_id": 10,
         })
-        self.assertIn("电影", str(added["actions"][0]["data"]["keyboard"]))
+        self.assertIn("真人电影", str(
+            added["actions"][0]["data"]["keyboard"]
+        ))
 
         await self.feature.callback({
             "payload": "config:item:0", "user_id": 1, "chat_id": 10,
@@ -964,7 +970,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         })
         expected = [
             {"name": "电视剧", "path": "tv/live action"},
-            {"name": "电影", "path": "movies/live action"},
+            {"name": "真人电影", "path": "真人电影"},
         ]
         self.assertEqual(saved["session"]["state"], "close")
         self.assertEqual(self.feature.config_store.directory_writes, [expected])
@@ -979,7 +985,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         })
         magnet_keyboard = magnet["actions"][0]["data"]["keyboard"]
         self.assertIn("电视剧", str(magnet_keyboard))
-        self.assertIn("电影", str(magnet_keyboard))
+        self.assertIn("真人电影", str(magnet_keyboard))
 
     async def test_directory_input_rejects_invalid_and_duplicate_values(self):
         original = [{"name": "剧集", "path": "series/live action"}]
