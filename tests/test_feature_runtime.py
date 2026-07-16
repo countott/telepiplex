@@ -41,7 +41,7 @@ class FakeService:
     def __init__(self, jobs):
         self.jobs = jobs
         self.runs = 0
-        self.batches = []
+        self.run_job_ids = []
 
     def enqueue_organized_event(self, payload):
         return self.jobs.create_or_get(
@@ -56,24 +56,16 @@ class FakeService:
             },
         )
 
-    def enqueue_organized_event_jobs(self, payload):
-        return [self.enqueue_organized_event(payload)]
-
-    def run_job(self, job_id):
-        self.runs += 1
-        return self.jobs.update(job_id, state="completed")
-
-    def run_batch(self, job_ids, *, should_cancel=None, on_stage=None):
-        self.batches.append(list(job_ids))
-        for stage in (
-            "scanning", "locating", "matching", "localizing", "artwork", "streams"
-        ):
+    def run_job(self, job_id, *, should_cancel=None, on_stage=None):
+        for stage in ("scanning", "artwork", "audio", "subtitle"):
             if should_cancel and should_cancel():
                 from telepiplex_plex.management import PlexOperationCancelled
                 raise PlexOperationCancelled("cancelled")
             if on_stage:
-                on_stage(stage, self.jobs.get(job_ids[0]))
-        return [self.run_job(job_id) for job_id in job_ids]
+                on_stage(stage, self.jobs.get(job_id))
+        self.runs += 1
+        self.run_job_ids.append(int(job_id))
+        return self.jobs.update(job_id, state="completed")
 
     def list_jobs(self, limit=5):
         return self.jobs.list(limit)
@@ -117,11 +109,12 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["state"], "running")
         self.assertTrue(second["duplicate"])
         self.assertEqual(len(self.runtime.tasks), 1)
-        await self.runtime.tasks.pop("plex-batch-job-1")
+        self.assertNotIn("job_ids", first)
+        await self.runtime.tasks.pop("plex-job-job-1")
         third = await self.feature.media_organized(request)
         self.assertEqual(third["state"], "completed")
         self.assertEqual(self.service.runs, 1)
-        self.assertEqual(self.service.batches, [[first["job_id"]]])
+        self.assertEqual(self.service.run_job_ids, [first["job_id"]])
 
     async def test_media_event_accepts_chain_operation_and_reports_all_stages(self):
         request = {"payload": {
@@ -135,14 +128,14 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         }}
 
         accepted = await self.feature.media_organized(request)
-        await self.runtime.tasks.pop("plex-batch-job-chain")
+        await self.runtime.tasks.pop("plex-job-job-chain")
 
         self.assertEqual(accepted["operation"]["operation_id"], "op-chain")
         self.assertEqual(accepted["operation"]["revision"], 21)
         stages = {report["stage"] for report in self.feature.core.reports}
         self.assertTrue({
-            "scan_preparing", "scanning", "locating", "matching",
-            "localizing", "artwork", "streams", "completed",
+            "scan_preparing", "scanning", "artwork", "audio",
+            "subtitle", "completed",
         }.issubset(stages))
         self.assertEqual(self.feature.core.reports[-1]["state"], "completed")
 
@@ -180,7 +173,7 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(replay["duplicate"])
         self.assertEqual(replay["state"], "interrupted")
         self.assertEqual(self.jobs.list(), [])
-        self.assertEqual(self.service.batches, [])
+        self.assertEqual(self.service.runs, 0)
 
     async def test_lost_response_retry_keeps_claimed_operation_running(self):
         request = {"event_id": "event-lost-response", "payload": {
@@ -202,10 +195,10 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retried["operation"]["state"], "running")
         self.assertEqual(retried["operation"]["revision"], 21)
         self.assertEqual(
-            list(self.runtime.tasks), ["plex-batch-event-lost-response"]
+            list(self.runtime.tasks), ["plex-job-event-lost-response"]
         )
 
-        await self.runtime.tasks.pop("plex-batch-event-lost-response")
+        await self.runtime.tasks.pop("plex-job-event-lost-response")
         self.assertEqual(self.feature.core.reports[-1]["state"], "completed")
 
     async def test_media_event_service_start_failure_terminalizes_operation(self):
@@ -263,14 +256,14 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(labels, ["确认执行", "退出"])
 
-    async def test_cancelled_batch_stops_after_current_plex_step(self):
+    async def test_cancelled_job_stops_after_current_plex_step(self):
         from telepiplex_plex.management import PlexOperationCancelled
 
         started = threading.Event()
 
         class BlockingService(FakeService):
-            def run_batch(self, job_ids, *, should_cancel=None, on_stage=None):
-                on_stage("scanning", self.jobs.get(job_ids[0]))
+            def run_job(self, job_id, *, should_cancel=None, on_stage=None):
+                on_stage("scanning", self.jobs.get(job_id))
                 started.set()
                 while not should_cancel():
                     threading.Event().wait(0.01)
@@ -313,8 +306,30 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.jobs.get(job["id"])["state"], "interrupted")
 
         await runtime.tasks.pop("plex-resume")
-        await runtime.tasks.pop("plex-resume-batch")
+        await runtime.tasks.pop(f"plex-resume-{job['id']}")
         self.assertEqual(self.jobs.get(job["id"])["state"], "completed")
+
+    async def test_restart_interrupts_new_and_legacy_active_states(self):
+        states = (
+            "running", "scanning", "artwork", "audio", "subtitle",
+            "locating", "matching", "localizing", "streams",
+        )
+        jobs = []
+        for index, state in enumerate(states):
+            job = self.jobs.create_or_get(
+                f"active-{index}",
+                {"final_path": f"/Movies/{index}"},
+            )
+            self.jobs.update(job["id"], state=state)
+            jobs.append(job)
+
+        interrupted = self.jobs.mark_incomplete_interrupted()
+
+        self.assertEqual(interrupted, [job["id"] for job in jobs])
+        self.assertTrue(all(
+            self.jobs.get(job["id"])["state"] == "interrupted"
+            for job in jobs
+        ))
 
     async def test_coordinated_interrupted_job_is_reported_not_auto_resumed(self):
         job = self.jobs.create_or_get("coordinated-old", {
@@ -378,7 +393,7 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "operation_id": "op-replay-interrupted",
             "operation_revision": 8,
         }
-        job = self.service.enqueue_organized_event_jobs(payload)[0]
+        job = self.service.enqueue_organized_event(payload)
         self.jobs.update(job["id"], state="scanning")
         core = FakeCore()
         feature = PlexFeature(
@@ -401,9 +416,9 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(replay["duplicate"])
         self.assertEqual(replay["state"], "interrupted")
         self.assertEqual(replay["operation"]["state"], "interrupted")
-        self.assertNotIn("plex-batch-same-event", runtime.tasks)
+        self.assertNotIn("plex-job-same-event", runtime.tasks)
         self.assertEqual(self.jobs.get(job["id"])["state"], "interrupted")
-        self.assertEqual(self.service.batches, [])
+        self.assertEqual(self.service.runs, 0)
         await runtime.tasks.pop("plex-resume")
 
     async def test_enabled_ai_with_missing_credentials_does_not_break_feature_startup(self):

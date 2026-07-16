@@ -19,11 +19,9 @@ from .management import PlexManagementService, PlexOperationCancelled
 _PLEX_STAGE_TEXT = {
     "scan_preparing": "正在准备 Plex 扫描任务。",
     "scanning": "Plex 已接受媒体库扫描，等待当前调用完成。",
-    "locating": "正在定位新入库的 Plex 条目。",
-    "matching": "正在验证或修正 Plex 匹配。",
-    "localizing": "正在处理 Plex 中文元数据。",
     "artwork": "正在处理 Plex 海报。",
-    "streams": "正在处理 Plex 音轨和字幕选择。",
+    "audio": "正在处理 Plex 音轨选择。",
+    "subtitle": "正在处理 Plex 字幕选择。",
 }
 
 
@@ -83,14 +81,13 @@ class PlexFeature:
         operation = await self._accept_event_operation(payload)
         operation_id = operation["operation_id"] if operation else ""
         if operation and operation.get("state") == "interrupted":
-            job_ids = sorted(
+            job_id = next((
                 job_id for job_id, owner in self.job_operation_ids.items()
                 if owner == operation_id
-            )
+            ), 0)
             return {
                 "accepted": True,
-                "job_ids": job_ids,
-                "job_id": job_ids[0] if job_ids else 0,
+                "job_id": int(job_id),
                 "state": "interrupted",
                 "duplicate": True,
                 "operation_id": operation_id,
@@ -100,8 +97,8 @@ class PlexFeature:
             }
         try:
             service = await self._ensure_service()
-            jobs = await asyncio.to_thread(
-                service.enqueue_organized_event_jobs, payload
+            job = await asyncio.to_thread(
+                service.enqueue_organized_event, payload
             )
         except Exception as exc:
             await self._report_if_active(
@@ -115,7 +112,7 @@ class PlexFeature:
                 control="",
             )
             raise
-        if not jobs:
+        if not job:
             await self._report_if_active(
                 operation_id,
                 state="failed",
@@ -139,8 +136,7 @@ class PlexFeature:
         }:
             return {
                 "accepted": True,
-                "job_ids": [job["id"] for job in jobs],
-                "job_id": jobs[0]["id"],
+                "job_id": job["id"],
                 "state": operation["state"],
                 "duplicate": True,
                 "operation_id": operation_id,
@@ -148,45 +144,42 @@ class PlexFeature:
                     self.operations[operation_id]
                 ),
             }
-        started = []
-        states = []
-        for job in jobs:
-            if job["state"] == "completed":
-                states.append("completed")
-                continue
-            if not await asyncio.to_thread(self.jobs.claim, job["id"]):
-                states.append((self.jobs.get(job["id"]) or job)["state"])
-                continue
-            started.append(job["id"])
+        started = False
+        state = str(job.get("state") or "")
+        if state != "completed" and await asyncio.to_thread(
+            self.jobs.claim,
+            job["id"],
+        ):
+            started = True
+            state = "running"
             if operation_id:
                 self.job_operation_ids[int(job["id"])] = operation_id
-            states.append("running")
+        elif state != "completed":
+            state = str((self.jobs.get(job["id"]) or job).get("state") or "")
         if started:
-            batch_id = str(
+            task_identity = str(
                 request.get("event_id")
                 or payload.get("job_id")
-                or started[0]
+                or job["id"]
             )
             try:
                 task = self.runtime.spawn(
-                    self._run_batch(started, operation_id),
-                    task_id=f"plex-batch-{batch_id}",
+                    self._run_job(job["id"], operation_id),
+                    task_id=f"plex-job-{task_identity}",
                 )
                 if operation_id:
                     self.operations[operation_id]["task"] = task
             except Exception:
-                for job_id in started:
-                    self.jobs.update(
-                        job_id,
-                        state="interrupted",
-                        error="failed to start Plex batch task",
-                    )
+                self.jobs.update(
+                    job["id"],
+                    state="interrupted",
+                    error="failed to start Plex job task",
+                )
                 raise
         result = {
             "accepted": True,
-            "job_ids": [job["id"] for job in jobs],
-            "job_id": jobs[0]["id"],
-            "state": "running" if started else states[0],
+            "job_id": job["id"],
+            "state": "running" if started else state,
             "duplicate": not started,
         }
         if operation:
@@ -196,14 +189,13 @@ class PlexFeature:
                     current.get("state") in {
                         "running", "awaiting_input", "cancelling"
                     }
-                    and any(state not in {"completed", "failed", "cancelled"}
-                            for state in states)
+                    and state not in {"completed", "failed", "cancelled"}
                 ):
                     operation = self._operation_view(current)
                 else:
-                    terminal_state = "completed" if all(
-                        state == "completed" for state in states
-                    ) else "failed"
+                    terminal_state = (
+                        "completed" if state == "completed" else "failed"
+                    )
                     operation = await self._report_if_active(
                         operation_id,
                         state=terminal_state,
@@ -542,47 +534,32 @@ class PlexFeature:
                 self.service_error = f"MCP isolated: {PlexManagementService._safe_error(exc)}"
         return service
 
-    async def _run_job(self, job_id: int):
+    async def _run_job(self, job_id: int, operation_id=""):
         try:
             service = await self._ensure_service()
-            await asyncio.to_thread(service.run_job, job_id)
-        finally:
-            job = self.jobs.get(job_id)
-            if job and job["state"] in {
-                "running", "scanning", "locating", "matching",
-                "localizing", "artwork", "streams",
-            }:
-                self.jobs.update(
-                    job_id,
-                    state="interrupted",
-                    error="interrupted before completion",
-                )
-
-    async def _run_batch(self, job_ids, operation_id=""):
-        try:
-            service = await self._ensure_service()
-            results = await asyncio.to_thread(
-                service.run_batch,
-                list(job_ids),
+            result = await asyncio.to_thread(
+                service.run_job,
+                job_id,
                 should_cancel=(
                     lambda: self._is_cancelled(operation_id)
                 ) if operation_id else None,
                 on_stage=(
                     lambda stage, job: self._stage_sync(
-                        operation_id, stage, job
+                        operation_id,
+                        stage,
+                        job,
                     )
                 ) if operation_id else None,
             )
-            await self._complete_batch_operation(operation_id, results)
+            await self._complete_batch_operation(operation_id, [result])
         except PlexOperationCancelled:
-            for job_id in job_ids:
-                job = self.jobs.get(job_id)
-                if job and job["state"] not in {"completed", "failed"}:
-                    self.jobs.update(
-                        job_id,
-                        state="cancelled",
-                        error="cancelled after current Plex step",
-                    )
+            job = self.jobs.get(job_id)
+            if job and job["state"] not in {"completed", "failed"}:
+                self.jobs.update(
+                    job_id,
+                    state="cancelled",
+                    error="cancelled after current Plex step",
+                )
             await self._finish_cancelled(operation_id)
         except Exception as exc:
             await self._report_if_active(
@@ -596,17 +573,15 @@ class PlexFeature:
                 control="",
             )
         finally:
-            for job_id in job_ids:
-                job = self.jobs.get(job_id)
-                if job and job["state"] in {
-                    "running", "scanning", "locating", "matching",
-                    "localizing", "artwork", "streams",
-                }:
-                    self.jobs.update(
-                        job_id,
-                        state="interrupted",
-                        error="interrupted before batch completion",
-                    )
+            job = self.jobs.get(job_id)
+            if job and job["state"] in {
+                "running", "scanning", "artwork", "audio", "subtitle",
+            }:
+                self.jobs.update(
+                    job_id,
+                    state="interrupted",
+                    error="interrupted before completion",
+                )
 
     async def _accept_event_operation(self, payload):
         operation_id = str(payload.get("operation_id") or "")
@@ -1035,10 +1010,10 @@ class PlexFeature:
         for job_id in legacy_job_ids:
             if await asyncio.to_thread(self.jobs.claim, job_id):
                 claimed.append(job_id)
-        if claimed:
+        for job_id in claimed:
             self.runtime.spawn(
-                self._run_batch(claimed),
-                task_id="plex-resume-batch",
+                self._run_job(job_id),
+                task_id=f"plex-resume-{job_id}",
             )
         self.interrupted_job_ids = []
 

@@ -129,8 +129,8 @@ class PlexJobRepository:
 
     def mark_incomplete_interrupted(self) -> list[int]:
         active_states = (
-            "running", "scanning", "locating", "matching", "localizing",
-            "artwork", "streams",
+            "running", "scanning", "artwork", "audio", "subtitle",
+            "locating", "matching", "localizing", "streams",
         )
         placeholders = ",".join("?" for _ in active_states)
         now = float(self._clock())

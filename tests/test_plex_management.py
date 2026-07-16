@@ -196,11 +196,22 @@ def make_four_category_routes():
 
 
 class FakePlex:
-    def __init__(self, *, wrong_match=False, poster_error=None, match_candidates=None):
+    def __init__(
+        self,
+        *,
+        wrong_match=False,
+        poster_error=None,
+        match_candidates=None,
+        missing_paths=None,
+    ):
         self.calls = []
         self.wrong_match = wrong_match
         self.poster_error = poster_error
         self.match_candidates = match_candidates
+        self.missing_paths = set(missing_paths or [])
+        self.find_paths = []
+        self.get_item_keys = []
+        self.stream_rating_keys = []
 
     def snapshot_recent(self, library_id):
         self.calls.append("snapshot_recent")
@@ -208,6 +219,21 @@ class FakePlex:
 
     def scan_library(self, library_id):
         self.calls.append("scan_library")
+
+    def find_item_by_path(self, library_id, final_path):
+        self.calls.append("find_item_by_path")
+        self.find_paths.append(str(final_path))
+        if str(final_path) in self.missing_paths:
+            return None
+        rating_key = "43" if "E02" in str(final_path) else "42"
+        return {
+            "rating_key": rating_key,
+            "title": "电影",
+            "year": 2024,
+            "media_type": "episode" if "Season" in str(final_path) else "movie",
+            "summary": "中文简介",
+            "guids": ["tmdb://20"],
+        }
 
     def locate_candidates(self, library_id, before_rating_keys):
         self.calls.append("locate_candidates")
@@ -240,8 +266,9 @@ class FakePlex:
 
     def get_item(self, rating_key):
         self.calls.append("get_item")
+        self.get_item_keys.append(str(rating_key))
         return {
-            "rating_key": "42",
+            "rating_key": str(rating_key),
             "title": "电影",
             "year": 2024,
             "media_type": "movie",
@@ -294,6 +321,7 @@ class FakePlex:
 
     def list_streams(self, rating_key):
         self.calls.append("list_streams")
+        self.stream_rating_keys.append(str(rating_key))
         return [{
             "id": 11,
             "audio_streams": [{
@@ -386,15 +414,11 @@ class PlexManagementServiceTest(unittest.TestCase):
             notifier=notifier,
         )
 
-    def test_temporary_special_routes_by_kind_and_writes_confirmed_metadata(self):
+    def test_temporary_special_routes_by_kind_and_runs_only_enhancements(self):
         plex = FakePlex()
-        plex.find_series_episode = Mock(return_value={
-            "rating_key": "42",
-            "title": "Episode 100",
-            "guids": [],
-            "media_type": "episode",
-        })
-        plex.edit_custom_episode_metadata = Mock(return_value={"rating_key": "42"})
+        plex.edit_custom_episode_metadata = Mock()
+        plex.refresh_zh_cn = Mock()
+        plex.fix_match = Mock()
         service = self.make_service(plex=plex)
 
         job = service.enqueue_completion(
@@ -403,63 +427,29 @@ class PlexManagementServiceTest(unittest.TestCase):
         result = service.run_job(job["id"])
 
         self.assertEqual(result["state"], "completed")
-        lookup = plex.find_series_episode.call_args
-        self.assertEqual(lookup.args[0], "11")
-        self.assertEqual(lookup.kwargs["season_number"], 0)
-        self.assertEqual(lookup.kwargs["episode_number"], 100)
-        self.assertEqual(
-            lookup.kwargs["expected_final_paths"],
-            [
-                "/真人剧集/想见你 (Someday or One Day)/"
-                "Someday or One Day Season 00/Someday or One Day S00E100.mkv"
-            ],
-        )
-        plex.edit_custom_episode_metadata.assert_called_once_with(
-            "42",
-            title="想见你",
-            summary="电影版延续电视剧故事。",
-            original_release_date="2022-12-24",
-            year="2022",
-        )
+        target = result["step_results"]["scanning"]["targets"]["S00E100"]
+        self.assertEqual(target["library_id"], "11")
+        self.assertEqual(target["rating_key"], "42")
         self.assertIn("set_poster_url", plex.calls)
-        self.assertNotIn("list_match_candidates", plex.calls)
-        self.assertNotIn("fix_match", plex.calls)
-        self.assertNotIn("refresh_zh_cn", plex.calls)
+        plex.edit_custom_episode_metadata.assert_not_called()
+        plex.refresh_zh_cn.assert_not_called()
+        plex.fix_match.assert_not_called()
 
-    def test_temporary_special_wrong_final_path_fails_before_any_write(self):
-        plex = FakePlex()
-        plex.find_series_episode = Mock(return_value=None)
-        plex.edit_custom_episode_metadata = Mock()
-        plex.refresh_zh_cn = Mock()
-        plex.set_poster_url = Mock()
-        plex.fix_match = Mock()
+    def test_temporary_special_wrong_final_path_fails_before_enhancements(self):
+        completion = make_media_metadata_completion("temporary_related_special")
+        final_path = completion.event.metadata["media_metadata"]["items"][0]["final_path"]
+        plex = FakePlex(missing_paths={final_path})
         service = self.make_service(plex=plex, scan_timeout=0)
 
-        job = service.enqueue_completion(
-            make_media_metadata_completion("temporary_related_special")
-        )
+        job = service.enqueue_completion(completion)
         result = service.run_job(job["id"])
 
         self.assertEqual(result["state"], "failed")
-        plex.edit_custom_episode_metadata.assert_not_called()
-        plex.refresh_zh_cn.assert_not_called()
-        plex.set_poster_url.assert_not_called()
-        plex.fix_match.assert_not_called()
+        self.assertNotIn("artwork", result["step_results"])
+        self.assertNotIn("list_streams", plex.calls)
 
-    def test_official_special_only_verifies_tvdb_episode(self):
+    def test_official_special_preserves_artwork_and_runs_stream_enhancements(self):
         plex = FakePlex()
-        official_item = {
-            "rating_key": "42",
-            "title": "Official",
-            "guids": ["tvdb://episode-5"],
-            "media_type": "episode",
-        }
-        plex.find_series_episode = Mock(return_value=official_item)
-        plex.get_item = Mock(return_value=official_item)
-        plex.edit_custom_episode_metadata = Mock()
-        plex.refresh_zh_cn = Mock()
-        plex.set_poster_url = Mock()
-        plex.fix_match = Mock()
         service = self.make_service(plex=plex)
 
         job = service.enqueue_completion(
@@ -468,25 +458,13 @@ class PlexManagementServiceTest(unittest.TestCase):
         result = service.run_job(job["id"])
 
         self.assertEqual(result["state"], "completed")
-        plex.edit_custom_episode_metadata.assert_not_called()
-        plex.refresh_zh_cn.assert_not_called()
-        plex.set_poster_url.assert_not_called()
-        plex.fix_match.assert_not_called()
+        artwork = result["step_results"]["artwork"]["targets"]["S00E005"]
+        self.assertEqual(artwork["action"], "official_artwork_preserved")
+        self.assertNotIn("set_poster_url", plex.calls)
+        self.assertEqual(plex.stream_rating_keys, ["42", "42"])
 
-    def test_ai_inferred_special_fails_without_tvdb_guid_and_never_renumbers(self):
+    def test_ai_inferred_special_no_longer_requires_match_verification(self):
         plex = FakePlex()
-        unverified = {
-            "rating_key": "42",
-            "title": "Unverified",
-            "guids": [],
-            "media_type": "episode",
-        }
-        plex.find_series_episode = Mock(return_value=unverified)
-        plex.get_item = Mock(return_value=unverified)
-        plex.edit_custom_episode_metadata = Mock()
-        plex.refresh_zh_cn = Mock()
-        plex.set_poster_url = Mock()
-        plex.fix_match = Mock()
         service = self.make_service(plex=plex)
 
         job = service.enqueue_completion(
@@ -494,42 +472,23 @@ class PlexManagementServiceTest(unittest.TestCase):
         )
         result = service.run_job(job["id"])
 
-        self.assertEqual(result["state"], "failed")
+        self.assertEqual(result["state"], "completed")
         self.assertEqual(
             job["payload"]["metadata"]["media_metadata"]["placement"]["episode_number"],
             5,
         )
-        plex.edit_custom_episode_metadata.assert_not_called()
-        plex.refresh_zh_cn.assert_not_called()
-        plex.set_poster_url.assert_not_called()
-        plex.fix_match.assert_not_called()
+        self.assertNotIn("matching", result["step_results"])
+        self.assertNotIn("localizing", result["step_results"])
 
-    def test_ai_inferred_special_retry_preserves_path_and_locked_number(self):
-        plex = FakePlex()
-        unverified = {
-            "rating_key": "42",
-            "title": "Unverified",
-            "guids": [],
-            "media_type": "episode",
-        }
-        plex.find_series_episode = Mock(return_value=unverified)
-        plex.get_item = Mock(return_value=unverified)
-        plex.edit_custom_episode_metadata = Mock()
-        plex.refresh_zh_cn = Mock()
-        plex.set_poster_url = Mock()
-        plex.fix_match = Mock()
+    def test_failed_scan_retry_preserves_path_and_locked_number(self):
+        completion = make_media_metadata_completion("ai_inferred_tvdb")
+        final_path = completion.event.metadata["media_metadata"]["items"][0]["final_path"]
+        plex = FakePlex(missing_paths={final_path})
         service = self.make_service(plex=plex)
-        job = service.enqueue_completion(
-            make_media_metadata_completion("ai_inferred_tvdb")
-        )
+        job = service.enqueue_completion(completion)
         original_path = job["payload"]["final_path"]
         self.assertEqual(service.run_job(job["id"])["state"], "failed")
-        plex.get_item.return_value = {
-            "rating_key": "42",
-            "title": "Verified",
-            "guids": ["tvdb://episode-5"],
-            "media_type": "episode",
-        }
+        plex.missing_paths.clear()
 
         retried = service.retry_job(job["id"])
 
@@ -539,10 +498,6 @@ class PlexManagementServiceTest(unittest.TestCase):
             retried["payload"]["metadata"]["media_metadata"]["placement"]["episode_number"],
             5,
         )
-        plex.edit_custom_episode_metadata.assert_not_called()
-        plex.refresh_zh_cn.assert_not_called()
-        plex.set_poster_url.assert_not_called()
-        plex.fix_match.assert_not_called()
 
     def test_all_four_contract_categories_route_without_reclassification(self):
         routes = {
@@ -571,17 +526,18 @@ class PlexManagementServiceTest(unittest.TestCase):
                 else:
                     contract["identity"]["content_kind"] = "movie"
                     contract["items"] = []
+                target = {"category_kind": category_kind}
                 job = {
                     "payload": {
                         "selected_path": "/故意错误的旧路径",
                         "metadata": completion.event.metadata,
                     }
                 }
-                self.assertEqual(service._route_library(job), library_id)
+                self.assertEqual(service._route_library(job, target), library_id)
 
-    def test_special_location_polls_until_scan_exposes_episode(self):
+    def test_special_location_polls_until_scan_exposes_final_path(self):
         plex = FakePlex()
-        plex.find_series_episode = Mock(side_effect=[None, {
+        plex.find_item_by_path = Mock(side_effect=[None, {
             "rating_key": "42",
             "title": "Episode 100",
             "guids": [],
@@ -599,9 +555,9 @@ class PlexManagementServiceTest(unittest.TestCase):
         result = service.run_job(job["id"])
 
         self.assertEqual(result["state"], "completed")
-        self.assertEqual(plex.find_series_episode.call_count, 2)
+        self.assertEqual(plex.find_item_by_path.call_count, 2)
 
-    def test_standalone_ignores_non_plex_ids_and_verifies_title_year(self):
+    def test_standalone_ignores_non_plex_ids_without_matching_or_localizing(self):
         completion = make_media_metadata_completion("standalone")
         identity = completion.event.metadata["media_metadata"]["identity"]
         identity.update({
@@ -616,22 +572,22 @@ class PlexManagementServiceTest(unittest.TestCase):
         result = service.run_job(job["id"])
 
         self.assertEqual(result["state"], "completed")
-        self.assertEqual(
-            result["step_results"]["matching"]["action"],
-            "verified_by_title_year",
-        )
+        self.assertNotIn("matching", result["step_results"])
+        self.assertNotIn("localizing", result["step_results"])
 
-    def test_organized_ordinary_series_creates_one_job_per_resolved_episode(self):
+    def test_organized_series_creates_one_job_with_all_resolved_targets(self):
         completion = make_unresolved_standalone_series_completion()
         contract = completion.result.metadata["media_metadata"]
-        contract["items"][0]["final_path"] = "/Series/Test/Season 01/Test S01E01.mkv"
+        contract["items"][0]["final_path"] = "/Series/Show/Season 01/Show S01E01.mkv"
         contract["items"].append({
             "item_id": "episode-2", "content_role": "main_episode",
             "season_number": 1, "episode_number": 2,
-            "final_path": "/Series/Test/Season 01/Test S01E02.mkv",
+            "final_path": "/Series/Show/Season 01/Show S01E02.mkv",
         })
 
-        jobs = self.make_service().enqueue_organized_event_jobs({
+        service = self.make_service()
+        job = service.enqueue_organized_event({
+            "resource_name": "Show",
             "final_path": "/Series/Test",
             "selected_path": "/Series",
             "chat_id": 10,
@@ -641,67 +597,113 @@ class PlexManagementServiceTest(unittest.TestCase):
             "media_metadata": contract,
         })
 
-        self.assertEqual(len(jobs), 2)
-        self.assertEqual([job["target"]["episode_number"] for job in jobs], [1, 2])
-        self.assertEqual(jobs[0]["payload"]["operation_id"], "op-series")
-        self.assertEqual(jobs[0]["payload"]["operation_revision"], 7)
+        self.assertEqual(len(self.jobs.list()), 1)
+        self.assertEqual(
+            [target["episode_number"] for target in job["payload"]["targets"]],
+            [1, 2],
+        )
+        self.assertEqual(job["payload"]["operation_id"], "op-series")
+        self.assertEqual(job["payload"]["operation_revision"], 7)
 
-    def test_one_organized_batch_scans_once_then_validates_each_final_path(self):
+    def test_one_organized_job_scans_once_then_locates_each_final_path(self):
         completion = make_unresolved_standalone_series_completion()
         contract = completion.result.metadata["media_metadata"]
-        contract["items"][0]["final_path"] = "/Series/Test/Season 01/Test S01E01.mkv"
+        contract["items"][0]["final_path"] = "/Series/Show/Season 01/Show S01E01.mkv"
         contract["items"].append({
             "item_id": "episode-2", "content_role": "main_episode",
             "season_number": 1, "episode_number": 2,
-            "final_path": "/Series/Test/Season 01/Test S01E02.mkv",
+            "final_path": "/Series/Show/Season 01/Show S01E02.mkv",
         })
         plex = FakePlex()
         service = self.make_service(plex=plex)
-        jobs = service.enqueue_organized_event_jobs({
-            "final_path": "/Series/Test",
+        job = service.enqueue_organized_event({
+            "resource_name": "Show",
+            "final_path": "/Series/Show",
             "selected_path": "/Series",
             "media_metadata": contract,
         })
 
-        results = service.run_batch([job["id"] for job in jobs])
-
-        self.assertEqual([job["state"] for job in results], ["completed", "completed"])
-        self.assertEqual(plex.calls.count("snapshot_recent"), 1)
-        self.assertEqual(plex.calls.count("scan_library"), 1)
-        self.assertEqual(plex.calls.count("find_series_episode"), 2)
-        scans = [result["step_results"]["scanning"] for result in results]
-        self.assertEqual(scans[0], scans[1])
-
-    def test_contract_location_ambiguity_fails_without_confirmation(self):
-        plex = FakePlex()
-        plex.find_movie = Mock(return_value=None)
-        plex.locate_candidates = Mock(return_value=[
-            {"rating_key": "42", "title": "候选一", "year": 2024, "media_type": "movie"},
-            {"rating_key": "43", "title": "候选二", "year": 2024, "media_type": "movie"},
-        ])
-        service = self.make_service(plex=plex)
-
-        job = service.enqueue_completion(make_media_metadata_completion("standalone"))
         result = service.run_job(job["id"])
 
-        self.assertEqual(result["state"], "failed")
-        self.assertNotEqual(result["state"], "waiting_match_confirmation")
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(plex.calls.count("scan_library"), 1)
+        self.assertEqual(plex.find_paths, [
+            "/Series/Show/Season 01/Show S01E01.mkv",
+            "/Series/Show/Season 01/Show S01E02.mkv",
+        ])
+        scanning = result["step_results"]["scanning"]
+        self.assertEqual(scanning["status"], "success")
+        self.assertEqual(list(scanning["libraries"]), ["11"])
+        self.assertEqual(list(scanning["targets"]), ["episode-1", "episode-2"])
+
+    def test_partial_location_warns_and_enhances_only_located_targets(self):
+        completion = make_unresolved_standalone_series_completion()
+        contract = completion.result.metadata["media_metadata"]
+        first_path = "/Series/Show/Season 01/Show S01E01.mkv"
+        second_path = "/Series/Show/Season 01/Show S01E02.mkv"
+        contract["items"] = [
+            {
+                "item_id": "episode-1",
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": 1,
+                "final_path": first_path,
+            },
+            {
+                "item_id": "episode-2",
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": 2,
+                "final_path": second_path,
+            },
+        ]
+        plex = FakePlex(missing_paths={second_path})
+        service = self.make_service(plex=plex)
+        job = service.enqueue_organized_event({
+            "resource_name": "Show",
+            "final_path": "/Series/Show",
+            "media_metadata": contract,
+        })
+
+        result = service.run_job(job["id"])
+
+        self.assertEqual(result["state"], "completed")
+        scanning = result["step_results"]["scanning"]
+        self.assertEqual(scanning["status"], "warning")
+        self.assertEqual(scanning["targets"]["episode-1"]["status"], "success")
+        self.assertEqual(scanning["targets"]["episode-2"]["status"], "warning")
+        for stage in ("artwork", "audio", "subtitle"):
+            self.assertEqual(
+                list(result["step_results"][stage]["targets"]),
+                ["episode-1"],
+            )
+        self.assertEqual(plex.get_item_keys, ["42"])
+        self.assertEqual(plex.stream_rating_keys, ["42", "42"])
 
     def test_run_job_executes_steps_in_order(self):
         plex = FakePlex()
         service = self.make_service(plex=plex)
+        stages = []
 
         job = service.enqueue_completion(make_completion())
-        result = service.run_job(job["id"])
+        result = service.run_job(
+            job["id"],
+            on_stage=lambda stage, _job: stages.append(stage),
+        )
 
         self.assertEqual(result["state"], "completed")
         self.assertEqual(plex.calls, [
-            "snapshot_recent", "scan_library", "locate_candidates", "get_item",
-            "refresh_zh_cn", "set_poster_url", "list_streams",
-            "select_audio", "select_subtitle",
+            "scan_library", "find_item_by_path", "get_item", "set_poster_url",
+            "list_streams", "select_audio", "list_streams", "select_subtitle",
         ])
-        self.assertEqual(result["step_results"]["streams"]["subtitle"]["source"], "external")
-        self.assertTrue(result["step_results"]["artwork"]["attempted"])
+        self.assertEqual(stages, ["scanning", "artwork", "audio", "subtitle"])
+        self.assertEqual(
+            result["step_results"]["subtitle"]["targets"]["legacy"]["source"],
+            "external",
+        )
+        self.assertTrue(
+            result["step_results"]["artwork"]["targets"]["legacy"]["attempted"]
+        )
 
     def test_run_job_stops_before_next_step_after_cancel(self):
         from telepiplex_plex.management import PlexOperationCancelled
@@ -726,13 +728,13 @@ class PlexManagementServiceTest(unittest.TestCase):
             )
 
         self.assertEqual(stages, ["scanning"])
-        self.assertEqual(plex.calls, ["snapshot_recent", "scan_library"])
+        self.assertEqual(plex.calls, [])
 
-    def test_cancel_while_locating_propagates_as_cancel_not_job_failure(self):
+    def test_cancel_while_scanning_for_paths_propagates_as_cancel_not_failure(self):
         from telepiplex_plex.management import PlexOperationCancelled
 
         plex = FakePlex()
-        plex.locate_candidates = Mock(return_value=[])
+        plex.find_item_by_path = Mock(return_value=None)
         service = self.make_service(
             plex=plex,
             scan_poll_interval=0,
@@ -752,56 +754,16 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertNotEqual(self.jobs.get(job["id"])["state"], "failed")
 
     def test_artwork_failure_does_not_block_stream_selection(self):
-        plex = FakePlex()
-        service = self.make_service(plex=plex, tmdb=FakeTmdb(RuntimeError("tmdb down")))
+        plex = FakePlex(poster_error=RuntimeError("poster down"))
+        service = self.make_service(plex=plex)
 
         result = service.run_job(service.enqueue_completion(make_completion())["id"])
 
         self.assertEqual(result["state"], "completed")
         self.assertEqual(result["step_results"]["artwork"]["status"], "warning")
-        self.assertEqual(result["step_results"]["streams"]["status"], "warning")
-        self.assertNotIn("set_poster_url", plex.calls)
+        self.assertEqual(result["step_results"]["audio"]["status"], "success")
+        self.assertEqual(result["step_results"]["subtitle"]["status"], "success")
         self.assertIn("select_subtitle", plex.calls)
-
-    def test_wrong_match_with_multiple_candidates_waits_for_confirmation(self):
-        plex = FakePlex(wrong_match=True, match_candidates=[
-            {"guid": "tmdb://20", "guids": ["tmdb://20"], "title": "电影 A", "year": 2024},
-            {"guid": "tmdb://20", "guids": ["tmdb://20"], "title": "电影 B", "year": 2024},
-        ])
-        service = self.make_service(plex=plex)
-
-        result = service.run_job(service.enqueue_completion(make_completion())["id"])
-
-        self.assertEqual(result["state"], "waiting_match_confirmation")
-        candidates = result["step_results"]["matching"]["candidates"]
-        self.assertEqual(len(candidates), 2)
-        self.assertNotIn("refresh_zh_cn", plex.calls)
-
-    def test_unique_exact_match_is_fixed_automatically(self):
-        plex = FakePlex(wrong_match=True)
-        service = self.make_service(plex=plex)
-
-        result = service.run_job(service.enqueue_completion(make_completion())["id"])
-
-        self.assertEqual(result["state"], "completed")
-        self.assertEqual(result["step_results"]["matching"]["action"], "fixed")
-        self.assertIn("fix_match", plex.calls)
-
-    def test_location_confirmation_resumes_without_rescanning(self):
-        plex = FakePlex()
-        plex.locate_candidates = lambda library_id, before: [
-            {"rating_key": "42", "title": "候选一", "year": 2024, "media_type": "movie"},
-            {"rating_key": "43", "title": "候选二", "year": 2024, "media_type": "movie"},
-        ]
-        service = self.make_service(plex=plex)
-        job = service.enqueue_completion(make_completion())
-        waiting = service.run_job(job["id"])
-
-        result = service.confirm_match(waiting["id"], "42")
-
-        self.assertEqual(result["state"], "completed")
-        self.assertEqual(result["rating_key"], "42")
-        self.assertEqual(plex.calls.count("scan_library"), 1)
 
     def test_enqueue_is_idempotent_and_ignores_non_renaming_completion(self):
         service = self.make_service()
@@ -925,7 +887,7 @@ class PlexManagementServiceTest(unittest.TestCase):
 
         self.assertEqual(payload["metadata"]["source"], "confirmed-event")
 
-    def test_restart_reuses_persisted_pre_scan_snapshot(self):
+    def test_restart_reuses_completed_scan_results_without_rescanning(self):
         plex = FakePlex()
         service = self.make_service(plex=plex)
         job = service.enqueue_completion(make_completion())
@@ -934,18 +896,27 @@ class PlexManagementServiceTest(unittest.TestCase):
             state="scanning",
             step_results={
                 "scanning": {
-                    "status": "started",
-                    "library_id": "12",
-                    "before_rating_keys": ["41"],
+                    "status": "success",
+                    "libraries": {
+                        "12": {"status": "success", "target_ids": ["legacy"]},
+                    },
+                    "targets": {
+                        "legacy": {
+                            "status": "success",
+                            "library_id": "12",
+                            "rating_key": "42",
+                            "final_path": "/电影/电影 (Movie)",
+                        },
+                    },
                 }
             },
         )
-        plex.snapshot_recent = Mock(side_effect=AssertionError("snapshot must be reused"))
+        plex.scan_library = Mock(side_effect=AssertionError("scan must be reused"))
 
         result = service.run_job(job["id"])
 
         self.assertEqual(result["state"], "completed")
-        plex.snapshot_recent.assert_not_called()
+        plex.scan_library.assert_not_called()
 
     def test_prepare_and_apply_operation_requires_single_use_token(self):
         plex = FakePlex(wrong_match=True)

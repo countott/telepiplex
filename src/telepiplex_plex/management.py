@@ -19,8 +19,8 @@ from . import rules as plex_rules
 from .context import logger
 
 
-STEP_ORDER = ("scanning", "locating", "matching", "localizing", "artwork", "streams")
-GATING_STEPS = {"scanning", "locating", "matching"}
+STEP_ORDER = ("scanning", "artwork", "audio", "subtitle")
+GATING_STEPS = {"scanning"}
 
 
 class WaitingForMatchConfirmation(RuntimeError):
@@ -91,10 +91,6 @@ class PlexManagementService:
         return self._enqueue_payload(payload)
 
     def enqueue_organized_event(self, event: dict):
-        jobs = self.enqueue_organized_event_jobs(event)
-        return jobs[0] if jobs else None
-
-    def enqueue_organized_event_jobs(self, event: dict):
         event = dict(event or {})
         metadata = {}
         if isinstance(event.get("media_metadata"), dict):
@@ -112,19 +108,19 @@ class PlexManagementService:
             "terminal_processor": "renaming.feature",
             "metadata": metadata,
         }
-        return self._enqueue_payload_jobs(payload)
+        return self._enqueue_payload(payload)
+
+    def enqueue_organized_event_jobs(self, event: dict):
+        job = self.enqueue_organized_event(event)
+        return [job] if job else []
 
     def _enqueue_payload(self, payload):
-        jobs = self._enqueue_payload_jobs(payload)
-        return jobs[0] if jobs else None
-
-    def _enqueue_payload_jobs(self, payload):
         metadata = payload["metadata"]
         contract_present = MEDIA_METADATA_KEY in metadata
         contract = extract_confirmed_media_metadata(metadata)
         if contract_present and contract is None:
             self._log_contract_rejection("invalid_contract")
-            return []
+            return None
         if contract:
             identity = str(contract["metadata_id"])
         else:
@@ -136,34 +132,44 @@ class PlexManagementService:
                 )
             )
         targets = self._payload_targets(payload, contract)
-        jobs = []
-        for target in targets:
-            job_payload = deepcopy(payload)
-            job_payload["target"] = deepcopy(target)
-            target_identity = "\x1f".join((
-                identity, str(target["target_id"]),
-                str(target.get("season_number") or ""),
-                str(target.get("episode_number") or ""),
-            ))
-            key = hashlib.sha256(target_identity.encode("utf-8")).hexdigest()
-            job, created = self.jobs.create_or_get_with_status(key, job_payload)
-            result = dict(job)
-            result["created"] = created
-            result["target"] = deepcopy(target)
-            jobs.append(result)
-        return jobs
+        if not targets:
+            return None
+        payload = deepcopy(payload)
+        payload["targets"] = targets
+        key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        job, created = self.jobs.create_or_get_with_status(key, payload)
+        result = dict(job)
+        result["created"] = created
+        return result
+
+    def _enqueue_payload_jobs(self, payload):
+        job = self._enqueue_payload(payload)
+        return [job] if job else []
 
     def _payload_targets(self, payload, contract):
         if not contract:
             if not payload["final_path"]:
                 return []
-            return [{"target_id": "legacy", "media_type": "movie", "final_path": payload["final_path"]}]
+            return [{
+                "target_id": "legacy",
+                "media_type": "movie",
+                "final_path": payload["final_path"],
+                "category_kind": "",
+            }]
         placement = contract["placement"]
         if placement["library_type"] == "movie":
             if not payload["final_path"]:
                 self._log_contract_rejection("terminal_path_missing")
                 return []
-            return [{"target_id": "movie", "media_type": "movie", "final_path": payload["final_path"], "mapping_kind": placement["mapping_kind"]}]
+            return [{
+                "target_id": "movie",
+                "media_type": "movie",
+                "final_path": payload["final_path"],
+                "season_number": None,
+                "episode_number": None,
+                "category_kind": placement["category_kind"],
+                "mapping_kind": placement["mapping_kind"],
+            }]
         locked = (
             (int(placement["season_number"]), int(placement["episode_number"]))
             if placement["mapping_kind"] in SERIES_EPISODE_MAPPINGS else None
@@ -181,6 +187,7 @@ class PlexManagementService:
                 "target_id": str(item.get("item_id") or f"S{season:02d}E{episode:03d}"),
                 "media_type": "episode", "final_path": final_path,
                 "season_number": season, "episode_number": episode,
+                "category_kind": placement["category_kind"],
                 "mapping_kind": placement["mapping_kind"],
             })
         if not targets:
@@ -225,12 +232,9 @@ class PlexManagementService:
 
     def run_job(self, job_id, *, should_cancel=None, on_stage=None):
         runners = {
-            "scanning": self._scan,
-            "locating": self._locate,
-            "matching": self._match,
-            "localizing": self._localize,
-            "artwork": self._artwork,
-            "streams": self._streams,
+            "artwork": self._artwork_stage,
+            "audio": self._audio_stage,
+            "subtitle": self._subtitle_stage,
         }
         job = self.jobs.get(job_id)
         if not job:
@@ -249,23 +253,12 @@ class PlexManagementService:
                 on_stage(state, job)
             self.jobs.update(job_id, state=state, error=None)
             try:
-                if state == "locating":
-                    step_result = self._locate(
+                if state == "scanning":
+                    step_result = self._scan(
                         self.jobs.get(job_id), should_cancel=should_cancel
                     )
                 else:
                     step_result = runners[state](self.jobs.get(job_id))
-            except WaitingForMatchConfirmation as exc:
-                waiting = {
-                    "status": "waiting",
-                    "kind": exc.kind,
-                    "job_id": int(job_id),
-                    "candidates": exc.candidates,
-                }
-                self._record_step(job_id, state, waiting)
-                waiting_job = self.jobs.update(job_id, state="waiting_match_confirmation")
-                self._notify_waiting(waiting_job, waiting)
-                return waiting_job
             except PlexOperationCancelled:
                 raise
             except Exception as exc:
@@ -394,7 +387,17 @@ class PlexManagementService:
         )
         return identity
 
-    def _route_library(self, job):
+    def _route_library(self, job, target=None):
+        target = dict(target or {})
+        category_kind = str(target.get("category_kind") or "")
+        if category_kind:
+            route = resolve_category_route(
+                {"category_folder": self.category_folders},
+                category_kind,
+            )
+            if not route or not route.get("plex_library_id"):
+                raise LookupError(f"No Plex library route for {category_kind}")
+            return route["plex_library_id"]
         contract = self._media_metadata(job)
         if contract:
             category_kind = contract["placement"]["category_kind"]
@@ -416,24 +419,215 @@ class PlexManagementService:
             raise LookupError(f"No Plex library route for {selected_path}")
         return max(matches)[1]
 
-    def _scan(self, job):
-        existing = (job.get("step_results") or {}).get("scanning") or {}
-        library_id = str(existing.get("library_id") or self._route_library(job))
-        if "before_rating_keys" in existing:
-            before = list(existing.get("before_rating_keys") or [])
-        else:
-            before = sorted(self.plex.snapshot_recent(library_id))
-            started = {
+    def _scan(self, job, *, should_cancel=None):
+        targets = list((job.get("payload") or {}).get("targets") or [])
+        if not targets:
+            legacy_target = (job.get("payload") or {}).get("target")
+            if isinstance(legacy_target, dict):
+                targets = [deepcopy(legacy_target)]
+        if not targets:
+            final_path = str((job.get("payload") or {}).get("final_path") or "")
+            if final_path:
+                targets = [{
+                    "target_id": "legacy",
+                    "media_type": "movie",
+                    "final_path": final_path,
+                    "category_kind": "",
+                }]
+        groups = {}
+        target_results = {}
+        for target in targets:
+            target_id = str(target.get("target_id") or "")
+            try:
+                library_id = str(self._route_library(job, target))
+            except Exception as exc:
+                target_results[target_id] = {
+                    "status": "warning",
+                    "final_path": str(target.get("final_path") or ""),
+                    "message": self._safe_error(exc),
+                }
+                continue
+            groups.setdefault(library_id, []).append(target)
+
+        scan_result = {
+            "status": "started",
+            "libraries": {},
+            "targets": target_results,
+        }
+        self.jobs.update(
+            job["id"],
+            step_results=self._merge_step(job, "scanning", scan_result),
+        )
+
+        located = 0
+        first_rating_key = ""
+        for library_id, library_targets in groups.items():
+            if should_cancel and should_cancel():
+                raise PlexOperationCancelled(
+                    "Plex operation cancelled before library scan"
+                )
+            library_result = {
                 "status": "started",
-                "library_id": library_id,
-                "before_rating_keys": before,
+                "target_ids": [
+                    str(target.get("target_id") or "")
+                    for target in library_targets
+                ],
             }
+            scan_result["libraries"][library_id] = library_result
             self.jobs.update(
                 job["id"],
-                step_results=self._merge_step(job, "scanning", started),
+                step_results=self._merge_step(job, "scanning", scan_result),
             )
-        self.plex.scan_library(library_id)
-        return {"status": "success", "library_id": library_id, "before_rating_keys": before}
+            try:
+                self.plex.scan_library(library_id)
+            except Exception as exc:
+                message = self._safe_error(exc)
+                library_result.update({"status": "warning", "message": message})
+                for target in library_targets:
+                    target_id = str(target.get("target_id") or "")
+                    target_results[target_id] = {
+                        "status": "warning",
+                        "library_id": library_id,
+                        "final_path": str(target.get("final_path") or ""),
+                        "message": message,
+                    }
+                continue
+            if should_cancel and should_cancel():
+                raise PlexOperationCancelled(
+                    "Plex operation cancelled after library scan"
+                )
+            missing = 0
+            for target in library_targets:
+                target_id = str(target.get("target_id") or "")
+                final_path = str(target.get("final_path") or "")
+                deadline = self._clock() + self.scan_timeout
+                item = None
+                while item is None:
+                    if should_cancel and should_cancel():
+                        raise PlexOperationCancelled(
+                            "Plex operation cancelled while locating final path"
+                        )
+                    item = self.plex.find_item_by_path(
+                        library_id,
+                        final_path,
+                    )
+                    if item is not None or self._clock() >= deadline:
+                        break
+                    self._sleep(self.scan_poll_interval)
+                if item is None:
+                    missing += 1
+                    target_results[target_id] = {
+                        "status": "warning",
+                        "library_id": library_id,
+                        "final_path": final_path,
+                        "message": "Plex item was not found by final path",
+                    }
+                    continue
+                rating_key = str(item.get("rating_key") or "")
+                if not rating_key:
+                    missing += 1
+                    target_results[target_id] = {
+                        "status": "warning",
+                        "library_id": library_id,
+                        "final_path": final_path,
+                        "message": "Plex item is missing a rating key",
+                    }
+                    continue
+                located += 1
+                first_rating_key = first_rating_key or rating_key
+                target_results[target_id] = {
+                    "status": "success",
+                    "library_id": library_id,
+                    "rating_key": rating_key,
+                    "final_path": final_path,
+                }
+            library_result["status"] = "warning" if missing else "success"
+            library_result["located"] = len(library_targets) - missing
+            library_result["missing"] = missing
+            self.jobs.update(
+                job["id"],
+                step_results=self._merge_step(job, "scanning", scan_result),
+            )
+
+        total = len(targets)
+        scan_result["status"] = (
+            "success" if located == total else "warning" if located else "failed"
+        )
+        scan_result["located"] = located
+        scan_result["missing"] = total - located
+        self.jobs.update(
+            job["id"],
+            rating_key=first_rating_key or None,
+            step_results=self._merge_step(job, "scanning", scan_result),
+        )
+        if not located:
+            raise LookupError("Plex scan completed but no target was located")
+        return scan_result
+
+    @staticmethod
+    def _stage_status(results):
+        statuses = [
+            str(result.get("status") or "")
+            for result in results.values()
+            if isinstance(result, dict)
+        ]
+        if any(status == "warning" for status in statuses):
+            return "warning"
+        if statuses and all(status == "unchanged" for status in statuses):
+            return "unchanged"
+        return "success"
+
+    def _located_targets(self, job):
+        payload_targets = list((job.get("payload") or {}).get("targets") or [])
+        by_id = {
+            str(target.get("target_id") or ""): target
+            for target in payload_targets
+        }
+        scanning = (job.get("step_results") or {}).get("scanning") or {}
+        located = []
+        for target_id, result in (scanning.get("targets") or {}).items():
+            if (
+                isinstance(result, dict)
+                and result.get("status") == "success"
+                and result.get("rating_key")
+            ):
+                located.append((
+                    deepcopy(by_id.get(str(target_id)) or {
+                        "target_id": str(target_id),
+                        "final_path": result.get("final_path") or "",
+                    }),
+                    str(result["rating_key"]),
+                ))
+        return located
+
+    def _run_target_stage(self, job, runner):
+        results = {}
+        for target, rating_key in self._located_targets(job):
+            target_id = str(target.get("target_id") or "")
+            target_job = deepcopy(job)
+            target_job["rating_key"] = rating_key
+            target_job["target"] = deepcopy(target)
+            try:
+                result = runner(target_job)
+            except Exception as exc:
+                result = {
+                    "status": "warning",
+                    "message": self._safe_error(exc),
+                }
+            results[target_id] = dict(result or {})
+        return {
+            "status": self._stage_status(results),
+            "targets": results,
+        }
+
+    def _artwork_stage(self, job):
+        return self._run_target_stage(job, self._artwork)
+
+    def _audio_stage(self, job):
+        return self._run_target_stage(job, self._audio_target)
+
+    def _subtitle_stage(self, job):
+        return self._run_target_stage(job, self._subtitle_target)
 
     @staticmethod
     def _candidate_identity(candidate):
@@ -776,6 +970,78 @@ class PlexManagementService:
             "message": "No automatic textless poster candidate",
             "plex_candidates": self.plex.list_posters(job["rating_key"]),
             "warnings": warnings,
+        }
+
+    def _audio_target(self, job):
+        metadata = self._effective_metadata(job)
+        tmdb_id = (metadata.get("external_ids") or {}).get("tmdb")
+        media_type = "tv" if metadata.get("media_type") in {"show", "episode", "tv"} else "movie"
+        warnings = []
+        original_language = None
+        if self.tmdb and tmdb_id:
+            try:
+                original_language = self.tmdb.details(
+                    media_type,
+                    tmdb_id,
+                ).get("original_language")
+            except Exception as exc:
+                warnings.append(self._safe_error(exc))
+        else:
+            warnings.append("TMDB original language is unavailable")
+        audio_results = []
+        for part in self.plex.list_streams(job["rating_key"]):
+            audio = plex_rules.choose_original_audio(
+                part.get("audio_streams"),
+                original_language,
+            )
+            if audio and not audio.get("selected"):
+                self.plex.select_audio(
+                    job["rating_key"],
+                    part["id"],
+                    audio["id"],
+                )
+            audio_results.append({
+                "part_id": part["id"],
+                "stream_id": audio.get("id") if audio else None,
+                "changed": bool(audio and not audio.get("selected")),
+            })
+        return {
+            "status": "warning" if warnings else "success",
+            "parts": audio_results,
+            "warnings": warnings,
+        }
+
+    def _subtitle_target(self, job):
+        subtitle_results = []
+        for part in self.plex.list_streams(job["rating_key"]):
+            subtitle = plex_rules.choose_chi_subtitle(
+                part.get("subtitle_streams")
+            )
+            if subtitle and not subtitle.get("selected"):
+                self.plex.select_subtitle(
+                    job["rating_key"],
+                    part["id"],
+                    subtitle["id"],
+                )
+            subtitle_results.append({
+                "part_id": part["id"],
+                "stream_id": subtitle.get("id") if subtitle else None,
+                "source": (
+                    "external"
+                    if subtitle and subtitle.get("external")
+                    else "embedded" if subtitle else None
+                ),
+                "changed": bool(subtitle and not subtitle.get("selected")),
+            })
+        found = any(result["stream_id"] for result in subtitle_results)
+        summary = (
+            subtitle_results[0]
+            if len(subtitle_results) == 1
+            else {"parts": subtitle_results}
+        )
+        return {
+            "status": "success" if found else "unchanged",
+            **summary,
         }
 
     def _streams(self, job):
