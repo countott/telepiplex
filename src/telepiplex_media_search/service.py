@@ -22,7 +22,11 @@ from .adapters.wikipedia import lookup_wikipedia_evidence
 from .config_wizard import MediaSearchConfigWizard
 from .planner import SearchPlanningError, build_confirmable_search_plan
 from .release_score import rank_releases
-from .search_plan import TemporarySpecialAllocator, confirm_media_metadata
+from .search_plan import (
+    TemporarySpecialAllocator,
+    confirm_media_metadata,
+    finalize_search_plan,
+)
 
 
 _LATIN = re.compile(r"[A-Za-z]")
@@ -644,6 +648,22 @@ class MediaSearchFeature:
             "source_queries": deepcopy(stored["plan"].get("source_queries") or {}),
         }
         try:
+            if (
+                (selected_plan["media_metadata"].get("placement") or {}).get("mapping_kind")
+                == "temporary_related_special"
+                and (selected_plan["media_metadata"].get("placement") or {}).get("episode_number")
+                is None
+            ):
+                selected_plan = finalize_search_plan(
+                    selected_plan,
+                    self.allocator,
+                    set(
+                        (selected_plan["media_metadata"].get("evidence") or {}).get(
+                            "occupied_special_numbers"
+                        ) or []
+                    ),
+                )
+                candidate["media_metadata"] = selected_plan["media_metadata"]
             confirm_media_metadata(selected_plan)
             route = resolve_category_route(
                 self.config,
@@ -654,9 +674,17 @@ class MediaSearchFeature:
             if candidate.get("entity_snapshot"):
                 if self.registry is None:
                     raise ValueError("canonical entity registry is unavailable")
+                relation_snapshot = deepcopy(candidate.get("relation_snapshot") or {})
+                placement = selected_plan["media_metadata"].get("placement") or {}
+                relation_snapshot.update({
+                    "mapping_kind": placement.get("mapping_kind") or "standalone",
+                    "season_number": placement.get("season_number"),
+                    "episode_number": placement.get("episode_number"),
+                    "tvdb_episode_id": placement.get("tvdb_episode_id") or "",
+                })
                 self.registry.upsert_selected(
                     candidate["entity_snapshot"],
-                    candidate.get("relation_snapshot") or {},
+                    relation_snapshot,
                 )
         except Exception:
             action = self._candidate_action(stored, index, edit=True)

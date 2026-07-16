@@ -409,6 +409,48 @@ def _candidate_context(candidate: CandidateEntity) -> dict:
     }
 
 
+def _verify_relation_hypotheses(
+    payload: dict,
+    candidates: list[CandidateEntity],
+) -> dict[str, dict]:
+    by_key = {candidate.candidate_key: candidate for candidate in candidates}
+    valid_types = {
+        "prequel", "sequel", "spin_off", "special", "extension_movie",
+    }
+    verified = {}
+    for hypothesis in (payload or {}).get("hypotheses") or []:
+        if not isinstance(hypothesis, dict):
+            continue
+        source = by_key.get(_text(hypothesis.get("candidate_key")))
+        target = by_key.get(_text(hypothesis.get("target_candidate_key")))
+        relation_type = _text(hypothesis.get("relation_type")).casefold()
+        fact_ids = hypothesis.get("fact_ids")
+        if (
+            source is None
+            or target is None
+            or source is target
+            or source.media_types != frozenset({"movie"})
+            or target.media_types != frozenset({"series"})
+            or relation_type not in valid_types
+            or not isinstance(fact_ids, list)
+            or not fact_ids
+        ):
+            continue
+        known = {fact.fact_id for fact in (*source.facts, *target.facts)}
+        source_relation_facts = {
+            fact.fact_id for fact in source.facts if fact.complex_signals
+        }
+        if not set(fact_ids).issubset(known) or not set(fact_ids).intersection(source_relation_facts):
+            continue
+        verified[source.candidate_key] = {
+            "relation_type": relation_type,
+            "target_candidate_key": target.candidate_key,
+            "fact_ids": tuple(dict.fromkeys(fact_ids)),
+            "verification": "source_relation_signal_and_target_entity",
+        }
+    return verified
+
+
 def _explicit_media_type(raw_query: str, intent: dict) -> str:
     if intent.get("scope") in {"whole_series", "season", "episode"}:
         return "series"
@@ -476,6 +518,8 @@ def _candidate_contract(
     intent: dict,
     plan_id: str,
     sources: list[dict],
+    verified_relation: dict | None = None,
+    candidates_by_key: dict[str, CandidateEntity] | None = None,
 ) -> tuple[dict, dict, dict]:
     year = next(iter(sorted(candidate.years)), "") or _text(intent.get("year"))
     media_type = next(iter(sorted(candidate.media_types)), "movie")
@@ -487,10 +531,64 @@ def _candidate_contract(
     )
     category = f"{'animated' if animation else 'live_action'}_{media_type}"
     source_fact = next((fact for fact in candidate.facts if fact.source_url), candidate.facts[0])
+    relation_type = "standalone"
+    target_contract = {}
+    relation_snapshot = {"relation_type": "standalone", "mapping_kind": "standalone"}
+    mapping_kind = "standalone"
+    library_type = media_type
+    season_number = None
+    target_candidate = None
+    if verified_relation and candidates_by_key:
+        target_candidate = candidates_by_key.get(
+            verified_relation.get("target_candidate_key") or ""
+        )
+    if target_candidate is not None:
+        try:
+            target_titles = resolve_title_policy(target_candidate)
+        except TitlePolicyError:
+            target_candidate = None
+        else:
+            relation_type = verified_relation["relation_type"]
+            target_year = next(iter(sorted(target_candidate.years)), "")
+            target_contract = {
+                **target_titles.identity_fields(),
+                "year": target_year,
+                "external_ids": dict(target_candidate.external_ids),
+            }
+            if not target_contract["chinese_title"]:
+                target_contract["chinese_title"] = (
+                    target_contract["original_title"]
+                    or target_contract["english_title"]
+                )
+            mapping_kind = "temporary_related_special"
+            library_type = "series"
+            season_number = 0
+            category = f"{'animated' if animation else 'live_action'}_series"
+            relation_snapshot = {
+                "relation_type": relation_type,
+                "target_entity_key": target_candidate.candidate_key,
+                "target_chinese_title": target_contract["chinese_title"],
+                "target_canonical_latin_title": target_contract["english_title"],
+                "target_year": target_year,
+                "target_external_ids": dict(target_candidate.external_ids),
+                "mapping_kind": mapping_kind,
+                "season_number": 0,
+                "episode_number": None,
+                "tvdb_episode_id": "",
+            }
+    content_kind = media_type
+    if target_candidate is not None:
+        content_kind = {
+            "prequel": "prequel_movie",
+            "sequel": "sequel_movie",
+            "extension_movie": "extension_movie",
+            "spin_off": "spin_off",
+            "special": "special",
+        }[relation_type]
     identity = {
         **titles.identity_fields(),
         "year": year,
-        "content_kind": media_type,
+        "content_kind": content_kind,
         "summary": "",
         "original_release_date": "",
         "poster_url": candidate.poster_url,
@@ -506,22 +604,31 @@ def _candidate_contract(
         "confirmed": False,
         "identity": identity,
         "relation": {
-            "type": "standalone",
-            "target_series": {},
-            "source": "request_entity_graph",
+            "type": relation_type,
+            "target_series": target_contract,
+            "source": (
+                "verified_relation_scorecard"
+                if target_candidate is not None
+                else "request_entity_graph"
+            ),
         },
         "placement": {
-            "library_type": media_type,
+            "library_type": library_type,
             "category_kind": category,
-            "season_number": None,
+            "season_number": season_number,
             "episode_number": None,
-            "mapping_kind": "standalone",
-            "mapping_source": "request_entity_graph",
+            "mapping_kind": mapping_kind,
+            "mapping_source": (
+                "local_allocator_after_verified_relation"
+                if target_candidate is not None
+                else "request_entity_graph"
+            ),
             "tvdb_episode_id": "",
         },
         "source_entry": {
             "title": identity["chinese_title"] or identity["english_title"],
             "url": source_fact.source_url,
+            "external_id": next(iter(source_fact.external_ids.values()), ""),
             "provider": source_fact.provider,
             "verification": "verified",
         },
@@ -535,7 +642,7 @@ def _candidate_contract(
     }
     entity = {
         "entity_key": candidate.candidate_key,
-        "content_kind": media_type,
+        "content_kind": content_kind,
         "year": year,
         **{key: value for key, value in titles.identity_fields().items() if key != "english_title"},
         "canonical_latin_title": titles.canonical_latin_title,
@@ -544,8 +651,7 @@ def _candidate_contract(
         "external_ids": dict(candidate.external_ids),
         "scoring_version": SCORING_VERSION,
     }
-    relation = {"relation_type": "standalone", "mapping_kind": "standalone"}
-    return contract, entity, relation
+    return contract, entity, relation_snapshot
 
 
 async def build_confirmable_search_plan(
@@ -570,8 +676,12 @@ async def build_confirmable_search_plan(
     graph = build_search_graph(sources)
     candidates = list(graph.candidates)
     target = normalize_title((rule_hypotheses.get("intent") or {}).get("title"))
+    complex_request = bool(
+        COMPLEX_PATTERN.search(raw_query)
+        or any(item.complex_signals for item in candidates)
+    )
     exact = [item for item in candidates if target and target in item.normalized_titles]
-    if exact:
+    if exact and not complex_request:
         candidates = exact
     if not candidates:
         raise SearchPlanningError("insufficient_independent_support")
@@ -580,7 +690,7 @@ async def build_confirmable_search_plan(
     intent["media_type"] = _explicit_media_type(raw_query, intent)
 
     relation_payload = {"hypotheses": []}
-    if COMPLEX_PATTERN.search(raw_query) or any(item.complex_signals for item in candidates):
+    if complex_request:
         relation_payload = await _budgeted(
             "relation_scout",
             budget,
@@ -594,10 +704,20 @@ async def build_confirmable_search_plan(
             ),
         ) or {"hypotheses": []}
 
+    verified_relations = await _budgeted(
+        "relation_verification",
+        budget,
+        asyncio.to_thread(
+            _verify_relation_hypotheses,
+            relation_payload,
+            candidates,
+        ),
+    )
+
     score_context = {
         "raw_query": raw_query,
         "intent": intent,
-        "relation_hypotheses": (relation_payload.get("hypotheses") or [])[:3],
+        "verified_relations": list(verified_relations.values())[:3],
         "candidates": [_candidate_context(item) for item in candidates],
     }
     raw_scores = await _budgeted(
@@ -617,7 +737,11 @@ async def build_confirmable_search_plan(
             title_values[candidate.candidate_key] = resolve_title_policy(candidate)
         except TitlePolicyError:
             continue
-        program = program_score(candidate, intent, None)
+        program = program_score(
+            candidate,
+            intent,
+            verified_relations.get(candidate.candidate_key),
+        )
         raw = raw_by_key.get(candidate.candidate_key)
         ai = AIScore(0, 0, 0, ())
         if raw is not None:
@@ -645,6 +769,8 @@ async def build_confirmable_search_plan(
             intent,
             plan_id,
             sources,
+            verified_relations.get(score.candidate_key),
+            by_key,
         )
         query = _candidate_query(
             entity["canonical_search_title"],

@@ -92,6 +92,64 @@ def ranked_search_plan():
     return result
 
 
+def related_ranked_search_plan():
+    result = ranked_search_plan()
+    candidate = result["candidates"][0]
+    contract = candidate["media_metadata"]
+    contract["identity"]["content_kind"] = "extension_movie"
+    contract["relation"] = {
+        "type": "extension_movie",
+        "target_series": {
+            "chinese_title": "中文剧集",
+            "english_title": "English Series",
+            "year": "2020",
+            "external_ids": {"tvdb": "100"},
+        },
+        "source": "verified_relation_scorecard",
+    }
+    contract["placement"].update({
+        "library_type": "series",
+        "category_kind": "live_action_series",
+        "season_number": 0,
+        "episode_number": None,
+        "mapping_kind": "temporary_related_special",
+        "mapping_source": "local_allocator_after_verified_relation",
+    })
+    source_url = "https://movie.douban.com/subject/1/"
+    contract["source_entry"] = {
+        "title": "中文标题1",
+        "url": source_url,
+        "provider": "douban",
+        "verification": "verified",
+    }
+    contract["evidence"] = {
+        "provider_statuses": {"douban": "ok"},
+        "provider_support": {"douban": {
+            "has_facts": True,
+            "source_urls": [source_url],
+            "stable_ids": ["1"],
+        }},
+        "verified_tvdb_special_candidates": [],
+        "tvdb_official_special_candidates": [],
+        "decision": {"mode": "fixed_scorecard"},
+    }
+    candidate["entity_snapshot"]["content_kind"] = "extension_movie"
+    candidate["relation_snapshot"] = {
+        "relation_type": "extension_movie",
+        "target_entity_key": "tvdb:series:100",
+        "target_chinese_title": "中文剧集",
+        "target_canonical_latin_title": "English Series",
+        "target_year": "2020",
+        "target_external_ids": {"tvdb": "100"},
+        "mapping_kind": "temporary_related_special",
+        "season_number": 0,
+        "episode_number": None,
+        "tvdb_episode_id": "",
+    }
+    result["media_metadata"] = contract
+    return result
+
+
 class FakeCore:
     def __init__(self):
         self.calls = []
@@ -573,6 +631,53 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn(plan_id, self.feature.plans)
         self.assertEqual(self.registry.count(), 0)
+
+    async def test_related_selection_allocates_and_persists_locked_special(self):
+        self.feature.config["category_folder"].append({
+            "kind": "live_action_series",
+            "name": "剧集",
+            "path": "/Series",
+            "plex_library_id": "",
+        })
+
+        async def planner(_raw_query, plan_id):
+            result = related_ranked_search_plan()
+            result["plan_id"] = plan_id
+            return result
+
+        self.feature.plan_builder = planner
+        await self.feature.command({
+            "command": "s", "args": ["关联电影"], "user_id": 1, "chat_id": 10,
+        })
+        await self.runtime.run("media-search-plan-")
+        callback = self.core.reports[-1]["details"]["keyboard"][0][0]["callback_data"]
+        plan_id = callback.split(":")[2]
+
+        await self.feature.callback({
+            "payload": f"select:{plan_id}:0", "user_id": 1, "chat_id": 10,
+        })
+
+        stored = self.feature.plans[plan_id]
+        self.assertEqual(stored["selected_path"], "/Series")
+        self.assertEqual(
+            stored["plan"]["media_metadata"]["placement"]["episode_number"],
+            100,
+        )
+        persisted = self.registry.get("tvdb:movie:1")
+        self.assertEqual(persisted["relation"]["episode_number"], 100)
+        self.assertEqual(persisted["relation"]["target_entity_key"], "tvdb:series:100")
+        rehydrated = await self.feature.metadata_capability({
+            "method": "resolve_metadata",
+            "payload": {"query": "English Title 2024"},
+        })
+        self.assertEqual(
+            rehydrated["media_metadata"]["placement"]["mapping_kind"],
+            "temporary_related_special",
+        )
+        self.assertEqual(
+            rehydrated["media_metadata"]["placement"]["episode_number"],
+            100,
+        )
 
     async def test_metadata_capability_only_rehydrates_exact_selected_entity(self):
         self.registry.upsert_selected({

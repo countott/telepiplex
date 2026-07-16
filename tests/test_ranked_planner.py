@@ -65,6 +65,72 @@ def ai_score(context):
 
 class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
     @patch("telepiplex_media_search.planner.score_candidates_with_ai", side_effect=ai_score)
+    @patch("telepiplex_media_search.planner.infer_relation_hypotheses_with_ai")
+    async def test_source_backed_movie_series_relation_is_locked_before_scoring(
+        self, relation, _score
+    ):
+        def provider(_hypotheses):
+            return {
+                "source": "douban",
+                "status": "ok",
+                "facts": [{
+                    "subject_id": "movie-1",
+                    "title": "Someday or One Day The Movie",
+                    "chinese_title": "想见你 电影版",
+                    "official_english_title": "Someday or One Day The Movie",
+                    "original_title": "想見你",
+                    "original_language": "zh",
+                    "year": "2022",
+                    "media_type": "movie",
+                    "url": "https://movie.douban.com/subject/movie-1/",
+                }, {
+                    "subject_id": "series-1",
+                    "title": "Someday or One Day",
+                    "chinese_title": "想见你",
+                    "official_english_title": "Someday or One Day",
+                    "original_title": "想見你",
+                    "original_language": "zh",
+                    "year": "2019",
+                    "media_type": "series",
+                    "url": "https://movie.douban.com/subject/series-1/",
+                }],
+            }
+
+        def relation_payload(context):
+            movie = next(
+                item for item in context["candidates"]
+                if item["facts"][0]["media_type"] == "movie"
+            )
+            series = next(
+                item for item in context["candidates"]
+                if item["facts"][0]["media_type"] == "series"
+            )
+            return {"hypotheses": [{
+                "candidate_key": movie["candidate_key"],
+                "target_candidate_key": series["candidate_key"],
+                "relation_type": "extension_movie",
+                "fact_ids": [movie["fact_ids"][0], series["fact_ids"][0]],
+            }]}
+
+        relation.side_effect = relation_payload
+        plan = await build_confirmable_search_plan(
+            "想见你 电影版",
+            "related-1",
+            {"douban": provider},
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        candidate = plan["candidates"][0]
+        self.assertEqual(candidate["media_metadata"]["relation"]["type"], "extension_movie")
+        self.assertEqual(
+            candidate["media_metadata"]["relation"]["target_series"]["english_title"],
+            "Someday or One Day",
+        )
+        self.assertEqual(candidate["media_metadata"]["placement"]["mapping_kind"], "temporary_related_special")
+        self.assertEqual(candidate["relation_snapshot"]["target_entity_key"], "douban:series:series-1")
+
+    @patch("telepiplex_media_search.planner.score_candidates_with_ai", side_effect=ai_score)
     async def test_wrong_year_keeps_title_match_not_same_year_noise(self, _score):
         plan = await build_confirmable_search_plan(
             "黑暗荣耀 2019",
