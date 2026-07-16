@@ -486,7 +486,9 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             control="exit",
             details={"photo_url": "https://image.example/poster-2.jpg"},
         ))
-        record = self.coordinator.set_message_id(record.operation_id, 44)
+        record = self.coordinator.set_message_id(
+            record.operation_id, 44, "photo"
+        )
         context = self.context()
         context.application.bot.edit_message_media = AsyncMock()
 
@@ -497,6 +499,42 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message_id, 44)
         context.application.bot.edit_message_media.assert_awaited_once()
         context.application.bot.edit_message_text.assert_not_awaited()
+
+    async def test_status_renderer_replaces_photo_before_text_progress(self):
+        from app.handlers.interaction_handler import render_operation
+
+        record = self.coordinator.report("media-search", self.report(
+            state="awaiting_input",
+            stage="candidate_selection",
+            status_text="候选 1",
+            control="exit",
+            details={"photo_url": "https://image.example/poster.jpg"},
+        ))
+        record = self.coordinator.set_message_id(
+            record.operation_id, 55, "photo"
+        )
+        record = self.coordinator.report("media-search", self.report(
+            revision=2,
+            state="running",
+            stage="prowlarr_search",
+            status_text="正在搜索片源",
+            control="cancel",
+            details={},
+        ))
+        context = self.context()
+        context.application.bot.send_message.return_value = SimpleNamespace(
+            message_id=56
+        )
+
+        message_id = await render_operation(
+            context.application, Mock(), record
+        )
+
+        self.assertEqual(message_id, 56)
+        context.application.bot.edit_message_text.assert_not_awaited()
+        context.application.bot.send_message.assert_awaited_once()
+        current = self.coordinator.get(record.operation_id)
+        self.assertEqual((current.message_id, current.message_kind), (56, "text"))
 
     async def test_status_photo_failure_falls_back_to_text(self):
         from app.handlers.interaction_handler import render_operation

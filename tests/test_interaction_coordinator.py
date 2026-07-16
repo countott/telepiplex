@@ -230,14 +230,18 @@ class InteractionCoordinatorTest(unittest.TestCase):
         from app.core.interaction_coordinator import InteractionCoordinator
 
         created = self.coordinator.report("media-search", self.report())
-        updated = self.coordinator.set_message_id(created.operation_id, 77)
+        updated = self.coordinator.set_message_id(
+            created.operation_id, 77, "photo"
+        )
         self.assertEqual(updated.message_id, 77)
+        self.assertEqual(updated.message_kind, "photo")
         self.coordinator.close()
 
         self.coordinator = InteractionCoordinator(self.database_path)
         reloaded = self.coordinator.active(10, 1)
         self.assertEqual(reloaded.operation_id, "op-1")
         self.assertEqual(reloaded.message_id, 77)
+        self.assertEqual(reloaded.message_kind, "photo")
 
     def test_interrupt_unowned_releases_only_missing_feature_operations(self):
         self.coordinator.report("media-search", self.report())

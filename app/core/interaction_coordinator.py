@@ -55,6 +55,7 @@ class OperationRecord:
     control: str
     revision: int
     message_id: int | None
+    message_kind: str
     next_plugin_id: str
     details: Mapping[str, Any]
     created_at: float
@@ -92,6 +93,7 @@ class InteractionCoordinator:
                 control TEXT NOT NULL CHECK(control IN ({controls})),
                 revision INTEGER NOT NULL CHECK(revision > 0),
                 message_id INTEGER,
+                message_kind TEXT NOT NULL DEFAULT 'text',
                 next_plugin_id TEXT NOT NULL DEFAULT '',
                 details_json TEXT NOT NULL DEFAULT '{{}}',
                 created_at REAL NOT NULL,
@@ -103,6 +105,17 @@ class InteractionCoordinator:
             CREATE INDEX IF NOT EXISTS operations_active_plugin
             ON operations(plugin_id, state, updated_at);
         """)
+        columns = {
+            str(row["name"])
+            for row in self._connection.execute(
+                "PRAGMA table_info(operations)"
+            ).fetchall()
+        }
+        if "message_kind" not in columns:
+            self._connection.execute(
+                "ALTER TABLE operations ADD COLUMN "
+                "message_kind TEXT NOT NULL DEFAULT 'text'"
+            )
 
     def close(self):
         with self._lock:
@@ -216,19 +229,41 @@ class InteractionCoordinator:
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
-    def set_message_id(self, operation_id: str, message_id: int) -> OperationRecord:
+    def set_message_id(
+        self,
+        operation_id: str,
+        message_id: int,
+        message_kind: str | None = None,
+    ) -> OperationRecord:
         try:
             normalized = int(message_id)
         except (TypeError, ValueError):
             normalized = 0
         if normalized <= 0:
             raise InteractionError("invalid_message", "message ID must be positive")
-        with self._lock, self._connection:
-            cursor = self._connection.execute(
-                "UPDATE operations SET message_id = ?, updated_at = ? "
-                "WHERE operation_id = ?",
-                (normalized, time.time(), str(operation_id)),
+        normalized_kind = str(message_kind or "").strip().casefold()
+        if normalized_kind and normalized_kind not in {"text", "photo"}:
+            raise InteractionError(
+                "invalid_message", "message kind must be text or photo"
             )
+        with self._lock, self._connection:
+            if normalized_kind:
+                cursor = self._connection.execute(
+                    "UPDATE operations SET message_id = ?, message_kind = ?, "
+                    "updated_at = ? WHERE operation_id = ?",
+                    (
+                        normalized,
+                        normalized_kind,
+                        time.time(),
+                        str(operation_id),
+                    ),
+                )
+            else:
+                cursor = self._connection.execute(
+                    "UPDATE operations SET message_id = ?, updated_at = ? "
+                    "WHERE operation_id = ?",
+                    (normalized, time.time(), str(operation_id)),
+                )
             if cursor.rowcount != 1:
                 raise InteractionError("not_found", "operation was not found")
             row = self._connection.execute(
@@ -469,6 +504,7 @@ class InteractionCoordinator:
             control=str(row["control"]),
             revision=int(row["revision"]),
             message_id=(int(row["message_id"]) if row["message_id"] is not None else None),
+            message_kind=str(row["message_kind"] or "text"),
             next_plugin_id=str(row["next_plugin_id"]),
             details=MappingProxyType(json.loads(str(row["details_json"]))),
             created_at=float(row["created_at"]),

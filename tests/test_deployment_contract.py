@@ -174,7 +174,7 @@ class DeploymentContractTest(unittest.TestCase):
         for command in (
             "/plugin install <name@version|artifact.tpx>",
             "/plugin update <name@version|artifact.tpx>",
-            "/plugin install media-search@1.2.0",
+            "/plugin install media-search@1.3.0",
             "/plugin update media-search@1.3.0",
         ):
             with self.subTest(readme="README.md", advanced_command=command):
@@ -206,7 +206,7 @@ class DeploymentContractTest(unittest.TestCase):
         for command in (
             "/plugin install <name@version|artifact.tpx>",
             "/plugin update <name@version|artifact.tpx>",
-            "/plugin install media-search@1.2.0",
+            "/plugin install media-search@1.3.0",
             "/plugin update media-search@1.3.0",
         ):
             with self.subTest(readme="README_EN.md", advanced_command=command):

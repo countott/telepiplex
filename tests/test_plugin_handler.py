@@ -706,12 +706,13 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             }]
         }
 
-        rendered, message_id = await _render_actions(
+        rendered, message_id, message_kind = await _render_actions(
             update, context, route, result
         )
 
         self.assertTrue(rendered)
         self.assertEqual(message_id, 81)
+        self.assertEqual(message_kind, "photo")
         update.effective_message.reply_photo.assert_awaited_once()
         kwargs = update.effective_message.reply_photo.await_args.kwargs
         self.assertEqual(kwargs["photo"], "https://image.example/poster.jpg")
@@ -727,6 +728,9 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         update.effective_message.reply_photo = AsyncMock(
             side_effect=RuntimeError("image unavailable")
         )
+        update.effective_message.reply_text = AsyncMock(
+            return_value=SimpleNamespace(message_id=82)
+        )
         route = SimpleNamespace(
             plugin_id="media-search",
             manifest=SimpleNamespace(callbacks=("media-search",)),
@@ -737,11 +741,12 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             "data": {"photo_url": "https://image.example/poster.jpg"},
         }]}
 
-        rendered, _message_id = await _render_actions(
+        rendered, _message_id, message_kind = await _render_actions(
             update, context, route, result
         )
 
         self.assertTrue(rendered)
+        self.assertEqual(message_kind, "text")
         update.effective_message.reply_text.assert_awaited_once_with("候选 1")
 
     async def test_feature_rejects_non_https_photo_url(self):
@@ -759,17 +764,47 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             "data": {"photo_url": "http://image.example/poster.jpg"},
         }]}
 
-        rendered, message_id = await _render_actions(
+        rendered, message_id, message_kind = await _render_actions(
             update, context, route, result
         )
 
         self.assertFalse(rendered)
         self.assertIsNone(message_id)
+        self.assertIsNone(message_kind)
         update.effective_message.reply_photo.assert_not_awaited()
         self.assertIn(
             "无效响应",
             update.effective_message.reply_text.await_args.args[0],
         )
+
+    async def test_feature_text_update_on_photo_sends_replacement_message(self):
+        from app.handlers.plugin_handler import _render_actions
+
+        update, context, _manager = self._request([], user_id=1)
+        update.effective_message.photo = [SimpleNamespace(file_id="poster")]
+        update.effective_message.edit_text = AsyncMock()
+        update.effective_message.reply_text = AsyncMock(
+            return_value=SimpleNamespace(message_id=82)
+        )
+        route = SimpleNamespace(
+            plugin_id="media-search",
+            manifest=SimpleNamespace(callbacks=("media-search",)),
+        )
+
+        rendered, message_id, message_kind = await _render_actions(
+            update,
+            context,
+            route,
+            {"actions": [{
+                "kind": "edit_message",
+                "text": "正在搜索片源",
+            }]},
+        )
+
+        self.assertTrue(rendered)
+        self.assertEqual((message_id, message_kind), (82, "text"))
+        update.effective_message.edit_text.assert_not_awaited()
+        update.effective_message.reply_text.assert_awaited_once()
 
     async def test_callback_routes_namespace_and_rejects_unknown_response_action(self):
         from app.handlers.plugin_handler import dynamic_callback_gateway

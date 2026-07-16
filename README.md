@@ -71,8 +71,8 @@ Feature 分支是开发源代码；发布物是由该分支构建的、版本不
 plugins:
   media-search:
     versions:
-      "1.2.0":
-        url: https://example.invalid/releases/media-search-1.2.0.tpx
+      "1.3.0":
+        url: https://example.invalid/releases/media-search-1.3.0.tpx
         sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
@@ -85,7 +85,7 @@ plugins:
 管理命令：
 
 ```text
-/plugin install media-search@1.2.0
+/plugin install media-search@1.3.0
 /plugin update media-search@1.3.0
 /plugin enable media-search
 /plugin disable media-search

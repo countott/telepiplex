@@ -410,21 +410,22 @@ async def render_operation(application, _router, record: OperationRecord):
         if len(caption) > 1024:
             caption = caption[:1003].rstrip() + "\n…内容已截断"
         if record.message_id is not None:
-            try:
-                await application.bot.edit_message_media(
-                    chat_id=record.chat_id,
-                    message_id=record.message_id,
-                    media=InputMediaPhoto(media=photo_url, caption=caption),
-                    reply_markup=markup,
-                )
-                return record.message_id
-            except Exception as exc:
-                _log(
-                    "warn",
-                    "任务候选海报编辑失败，改发新消息："
-                    f"operation_id={record.operation_id}, "
-                    f"error={type(exc).__name__}",
-                )
+            if record.message_kind == "photo":
+                try:
+                    await application.bot.edit_message_media(
+                        chat_id=record.chat_id,
+                        message_id=record.message_id,
+                        media=InputMediaPhoto(media=photo_url, caption=caption),
+                        reply_markup=markup,
+                    )
+                    return record.message_id
+                except Exception as exc:
+                    _log(
+                        "warn",
+                        "任务候选海报编辑失败，改发新消息："
+                        f"operation_id={record.operation_id}, "
+                        f"error={type(exc).__name__}",
+                    )
         try:
             message = await application.bot.send_photo(
                 chat_id=record.chat_id,
@@ -442,23 +443,26 @@ async def render_operation(application, _router, record: OperationRecord):
         else:
             message_id = getattr(message, "message_id", None)
             if isinstance(message_id, int) and message_id > 0:
-                coordinator.set_message_id(record.operation_id, message_id)
+                coordinator.set_message_id(
+                    record.operation_id, message_id, "photo"
+                )
                 return message_id
     if record.message_id is not None:
-        try:
-            await application.bot.edit_message_text(
-                chat_id=record.chat_id,
-                message_id=record.message_id,
-                text=text,
-                reply_markup=markup,
-            )
-            return record.message_id
-        except Exception as exc:
-            _log(
-                "warn",
-                "任务状态消息编辑失败，改发新消息："
-                f"operation_id={record.operation_id}, error={type(exc).__name__}",
-            )
+        if record.message_kind == "text":
+            try:
+                await application.bot.edit_message_text(
+                    chat_id=record.chat_id,
+                    message_id=record.message_id,
+                    text=text,
+                    reply_markup=markup,
+                )
+                return record.message_id
+            except Exception as exc:
+                _log(
+                    "warn",
+                    "任务状态消息编辑失败，改发新消息："
+                    f"operation_id={record.operation_id}, error={type(exc).__name__}",
+                )
     try:
         message = await application.bot.send_message(
             chat_id=record.chat_id,
@@ -474,7 +478,7 @@ async def render_operation(application, _router, record: OperationRecord):
         return None
     message_id = getattr(message, "message_id", None)
     if isinstance(message_id, int) and message_id > 0:
-        coordinator.set_message_id(record.operation_id, message_id)
+        coordinator.set_message_id(record.operation_id, message_id, "text")
         return message_id
     return None
 

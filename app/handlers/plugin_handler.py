@@ -482,7 +482,7 @@ async def handle_feature_result(update, context, route, result: dict):
     if isinstance(result, dict) and "config_patch" in result:
         await _apply_feature_config_patch(update, context, route, result)
         return
-    rendered, message_id = await _render_actions(
+    rendered, message_id, message_kind = await _render_actions(
         update,
         context,
         route,
@@ -493,7 +493,7 @@ async def handle_feature_result(update, context, route, result: dict):
         return
     if operation_record is not None and message_id is not None:
         operation_record = coordinator.set_message_id(
-            operation_record.operation_id, message_id
+            operation_record.operation_id, message_id, message_kind
         )
     session = result.get("session") if isinstance(result, dict) else None
     if session is None:
@@ -786,7 +786,7 @@ async def _render_actions(
     result: dict,
     *,
     operation_record=None,
-) -> tuple[bool, int | None]:
+) -> tuple[bool, int | None, str | None]:
     actions = result.get("actions") if isinstance(result, dict) else None
     if not isinstance(actions, list) or len(actions) > 20:
         await _feature_feedback(
@@ -794,8 +794,9 @@ async def _render_actions(
             "❌ Feature 返回了无效响应。",
             prefer_edit=bool(getattr(update, "callback_query", None)),
         )
-        return False, None
+        return False, None, None
     last_message_id = None
+    last_message_kind = None
     for index, action in enumerate(actions):
         if not isinstance(action, dict) or action.get("kind") not in _SAFE_ACTIONS:
             await _feature_feedback(
@@ -803,7 +804,7 @@ async def _render_actions(
                 "❌ Feature 返回了无效响应。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
             )
-            return False, None
+            return False, None, None
         text = str(action.get("text") or "")
         if not text:
             await _feature_feedback(
@@ -811,7 +812,7 @@ async def _render_actions(
                 "❌ Feature 返回了无效响应。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
             )
-            return False, None
+            return False, None, None
         if len(text) > 4096:
             text = text[:4075].rstrip() + "\n…内容已截断"
         parse_mode = action.get("parse_mode")
@@ -826,7 +827,7 @@ async def _render_actions(
                 "❌ Feature 返回了无效响应。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
             )
-            return False, None
+            return False, None, None
         if index == len(actions) - 1 and operation_record is not None:
             control_markup = operation_markup(operation_record)
             if control_markup is not None and not _has_explicit_control(action_data):
@@ -847,11 +848,16 @@ async def _render_actions(
                 "❌ Feature 返回了无效响应。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
             )
-            return False, None
+            return False, None, None
         if action["kind"] == "send_message":
             sent = await update.effective_message.reply_text(text, **kwargs)
+            rendered_kind = "text"
         elif action["kind"] == "edit_message":
-            sent = await update.effective_message.edit_text(text, **kwargs)
+            if _message_has_photo(update.effective_message):
+                sent = await update.effective_message.reply_text(text, **kwargs)
+            else:
+                sent = await update.effective_message.edit_text(text, **kwargs)
+            rendered_kind = "text"
         else:
             caption = text
             if len(caption) > 1024:
@@ -874,8 +880,10 @@ async def _render_actions(
                         ),
                         **media_kwargs,
                     )
+                rendered_kind = "photo"
             except Exception:
                 sent = await update.effective_message.reply_text(text, **kwargs)
+                rendered_kind = "text"
         candidate = getattr(sent, "message_id", None)
         if not isinstance(candidate, int) and action["kind"] in {
             "edit_message", "edit_photo",
@@ -883,7 +891,13 @@ async def _render_actions(
             candidate = getattr(update.effective_message, "message_id", None)
         if isinstance(candidate, int) and candidate > 0:
             last_message_id = candidate
-    return True, last_message_id
+            last_message_kind = rendered_kind
+    return True, last_message_id, last_message_kind
+
+
+def _message_has_photo(message) -> bool:
+    photo = getattr(message, "photo", None)
+    return isinstance(photo, (list, tuple)) and bool(photo)
 
 
 def _has_explicit_control(data) -> bool:
@@ -947,7 +961,12 @@ def _photo_url(data):
 
 async def _feature_feedback(update, text: str, *, prefer_edit: bool = False):
     query = getattr(update, "callback_query", None)
-    if prefer_edit and query is not None and hasattr(query, "edit_message_text"):
+    if (
+        prefer_edit
+        and query is not None
+        and hasattr(query, "edit_message_text")
+        and not _message_has_photo(update.effective_message)
+    ):
         await query.edit_message_text(text)
         return
     await update.effective_message.reply_text(text)

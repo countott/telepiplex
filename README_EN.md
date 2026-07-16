@@ -49,8 +49,8 @@ Feature branches are development source. Runtime releases are immutable `.tpx` a
 plugins:
   media-search:
     versions:
-      "1.2.0":
-        url: https://example.invalid/releases/media-search-1.2.0.tpx
+      "1.3.0":
+        url: https://example.invalid/releases/media-search-1.3.0.tpx
         sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
@@ -63,7 +63,7 @@ Normal operation requires only `/plugin` and a button click. If the catalog is u
 Commands:
 
 ```text
-/plugin install media-search@1.2.0
+/plugin install media-search@1.3.0
 /plugin update media-search@1.3.0
 /plugin enable media-search
 /plugin disable media-search
