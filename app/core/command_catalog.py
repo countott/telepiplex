@@ -12,6 +12,7 @@ CORE_COMMANDS = (
     ("config", "配置 Feature"),
 )
 CORE_RESERVED_COMMANDS = frozenset(command for command, _ in CORE_COMMANDS)
+LEGACY_HIDDEN_COMMANDS = frozenset({"auth", "q"})
 
 
 def active_feature_routes(router):
@@ -27,11 +28,30 @@ def active_feature_routes(router):
     return routes
 
 
+def command_is_advertised(declaration) -> bool:
+    if declaration.name in CORE_RESERVED_COMMANDS:
+        return False
+    if declaration.menu_visible is not None:
+        return declaration.menu_visible
+    return (
+        declaration.name not in LEGACY_HIDDEN_COMMANDS
+        and not declaration.name.endswith("_config")
+    )
+
+
+def advertised_feature_commands(route):
+    return tuple(
+        declaration
+        for declaration in route.manifest.commands
+        if command_is_advertised(declaration)
+    )
+
+
 def build_bot_commands(router) -> list[BotCommand]:
     commands = [BotCommand(command, description) for command, description in CORE_COMMANDS]
     seen = set(CORE_RESERVED_COMMANDS)
     for route in active_feature_routes(router):
-        for declaration in route.manifest.commands:
+        for declaration in advertised_feature_commands(route):
             if declaration.name in seen:
                 continue
             commands.append(BotCommand(
@@ -54,11 +74,7 @@ def build_start_help(router, core_version: str) -> str:
     )
     feature_count = 0
     for route in active_feature_routes(router):
-        declarations = [
-            declaration
-            for declaration in route.manifest.commands
-            if declaration.name not in CORE_RESERVED_COMMANDS
-        ]
+        declarations = advertised_feature_commands(route)
         if not declarations:
             continue
         feature_count += 1

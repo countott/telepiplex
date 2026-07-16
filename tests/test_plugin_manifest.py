@@ -40,6 +40,37 @@ class PluginManifestTest(unittest.TestCase):
         with self.assertRaises(AttributeError):
             manifest.plugin_id = "changed"
 
+    def test_command_menu_visibility_is_optional_and_boolean(self):
+        from app.core.plugin_contract import ContractError
+        from app.core.plugin_manifest import PluginManifest
+
+        value = self._value()
+        value["commands"] = [
+            {
+                "name": "visible",
+                "description": "Visible task",
+                "menu_visible": True,
+            },
+            {
+                "name": "hidden",
+                "description": "Hidden helper",
+                "menu_visible": False,
+            },
+            {"name": "legacy", "description": "Legacy command"},
+        ]
+
+        manifest = PluginManifest.from_mapping(value)
+
+        self.assertEqual(
+            [command.menu_visible for command in manifest.commands],
+            [True, False, None],
+        )
+
+        value["commands"][0]["menu_visible"] = "yes"
+        with self.assertRaises(ContractError) as raised:
+            PluginManifest.from_mapping(value)
+        self.assertEqual(raised.exception.code, "invalid_manifest")
+
     def test_rejects_missing_identity_and_invalid_versions(self):
         from app.core.plugin_contract import ContractError
         from app.core.plugin_manifest import PluginManifest

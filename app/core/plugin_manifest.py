@@ -84,6 +84,7 @@ class CapabilityDeclaration:
 class CommandDeclaration:
     name: str
     description: str
+    menu_visible: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -152,14 +153,22 @@ class PluginManifest:
             _invalid("commands must be a list")
         commands = []
         for item in raw_commands:
-            if not isinstance(item, dict) or set(item) - {"name", "description"}:
-                _invalid("commands entries require name and description")
+            if not isinstance(item, dict) or set(item) - {
+                "name", "description", "menu_visible",
+            }:
+                _invalid(
+                    "commands entries require name, description, and optional menu_visible"
+                )
             command_name = _text(item.get("name"), "commands[].name")
             if not _COMMAND.fullmatch(command_name):
                 _invalid(f"commands[].name is invalid: {command_name}")
+            menu_visible = item.get("menu_visible")
+            if "menu_visible" in item and not isinstance(menu_visible, bool):
+                _invalid("commands[].menu_visible must be boolean")
             commands.append(CommandDeclaration(
                 command_name,
                 _text(item.get("description"), "commands[].description"),
+                menu_visible,
             ))
         if len({item.name for item in commands}) != len(commands):
             _invalid("commands contains duplicates")

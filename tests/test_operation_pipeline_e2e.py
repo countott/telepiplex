@@ -338,8 +338,9 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
         )
 
         command_names = [item.command for item in build_bot_commands(self.router)]
-        for command in ("search", "magnet", "renaming_config", "plex"):
+        for command in ("search", "magnet", "plex"):
             self.assertIn(command, command_names)
+        self.assertNotIn("renaming_config", command_names)
         menu_bot = SimpleNamespace(set_my_commands=AsyncMock())
         self.assertTrue(await sync_bot_commands(
             SimpleNamespace(bot=menu_bot), self.router
