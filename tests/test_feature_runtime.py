@@ -84,6 +84,9 @@ class FakeService:
     def list_jobs(self, limit=5):
         return self.jobs.list(limit)
 
+    def list_jobs_for_owner(self, chat_id, user_id, limit=5):
+        return self.jobs.list_for_owner(chat_id, user_id, limit)
+
     def get_job(self, job_id):
         return self.jobs.get(job_id)
 
@@ -906,6 +909,131 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已失效", cancelled["actions"][0]["text"])
         self.assertEqual(self.jobs.get(job["id"])["state"], "awaiting_selection")
         self.assertEqual(self.service.confirmed_selections, [])
+
+    async def test_legacy_waiting_selection_backfills_nonce_and_callback_works(self):
+        job = self.jobs.create_or_get(
+            "legacy-waiting",
+            {
+                "user_id": 1,
+                "chat_id": 10,
+                "resource_name": "Legacy Audio Choice",
+            },
+        )
+        self.jobs.update(
+            job["id"],
+            state="awaiting_selection",
+            step_results={
+                "audio": {
+                    "status": "awaiting_selection",
+                    "waiting": {
+                        "kind": "audio",
+                        "target_id": "legacy",
+                        "rating_key": "42",
+                        "part_id": 11,
+                        "candidates": [{
+                            "id": 21,
+                            "display_title": "Japanese TrueHD",
+                            "codec": "truehd",
+                            "channels": 8,
+                            "bitrate": 4000,
+                        }],
+                        "candidate_index": 0,
+                    },
+                },
+            },
+        )
+        service = PlexManagementService(self.jobs, SimpleNamespace())
+        confirmed = []
+
+        def confirm_selection(
+            job_id,
+            index,
+            *,
+            selection_nonce,
+            should_cancel=None,
+            on_stage=None,
+        ):
+            waiting = service.pending_selection(
+                job_id,
+                selection_nonce=selection_nonce,
+            )
+            if not waiting:
+                raise ValueError("selection nonce was not persisted")
+            confirmed.append((int(job_id), int(index), selection_nonce))
+            current = self.jobs.get(job_id)
+            steps = dict(current.get("step_results") or {})
+            step = dict(steps["audio"])
+            step["status"] = "success"
+            step.pop("waiting", None)
+            steps["audio"] = step
+            return self.jobs.update(
+                job_id,
+                state="completed",
+                step_results=steps,
+            )
+
+        service.confirm_selection = confirm_selection
+        self.feature.service = service
+
+        opened = await self.feature.command({
+            "command": "plex",
+            "args": [str(job["id"])],
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        callback_data = (
+            opened["actions"][0]["data"]["keyboard"][0][0]["callback_data"]
+        )
+        nonce = (
+            self.jobs.get(job["id"])["step_results"]["audio"]["waiting"]
+            .get("selection_nonce")
+        )
+        self.assertTrue(nonce)
+        self.assertIn(f":{nonce}:pick:0", callback_data)
+
+        accepted = await self.feature.callback({
+            "payload": callback_data.removeprefix("plex:"),
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        await self.runtime.tasks.pop(f"plex-choice-{job['id']}-{nonce}")
+
+        self.assertEqual(accepted["operation"]["state"], "running")
+        self.assertEqual(confirmed, [(job["id"], 0, nonce)])
+        self.assertEqual(self.jobs.get(job["id"])["state"], "completed")
+
+    async def test_plex_history_filters_owner_before_limit(self):
+        owner_job = self.jobs.create_or_get(
+            "owner-old-history",
+            {
+                "user_id": 1,
+                "chat_id": 10,
+                "resource_name": "Owner Old Job",
+            },
+        )
+        for index in range(1001):
+            self.jobs.create_or_get(
+                f"other-new-{index}",
+                {
+                    "user_id": 2,
+                    "chat_id": 99,
+                    "resource_name": f"Other Job {index}",
+                },
+            )
+        self.feature.service = PlexManagementService(
+            self.jobs,
+            SimpleNamespace(),
+        )
+
+        listed = await self.feature.command({
+            "command": "plex",
+            "args": [],
+            "chat_id": 10,
+            "user_id": 1,
+        })
+
+        self.assertIn(f"#{owner_job['id']}", listed["actions"][0]["text"])
+        self.assertIn("Owner Old Job", listed["actions"][0]["text"])
 
     async def test_cancelled_choice_callback_cannot_revive_job_or_new_waiting_item(self):
         job = self.make_waiting_job("audio", [{

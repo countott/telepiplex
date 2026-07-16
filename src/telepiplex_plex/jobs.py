@@ -115,6 +115,72 @@ class PlexJobRepository:
             ).fetchall()
         return [self._decode_job(row) for row in rows]
 
+    def list_for_owner(self, chat_id, user_id, limit=50):
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM plex_jobs
+                WHERE CAST(json_extract(payload_json, '$.chat_id') AS INTEGER) = ?
+                  AND CAST(json_extract(payload_json, '$.user_id') AS INTEGER) = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (
+                    int(chat_id),
+                    int(user_id),
+                    max(int(limit), 1),
+                ),
+            ).fetchall()
+        return [self._decode_job(row) for row in rows]
+
+    def ensure_selection_nonce(self, job_id):
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM plex_jobs WHERE id = ?",
+                (int(job_id),),
+            ).fetchone()
+            if row is None or row["state"] != "awaiting_selection":
+                connection.commit()
+                return self._decode_job(row)
+
+            steps = json.loads(row["step_results_json"] or "{}")
+            changed = False
+            for step in steps.values():
+                if not isinstance(step, dict):
+                    continue
+                waiting = step.get("waiting")
+                if not isinstance(waiting, dict):
+                    continue
+                if not str(waiting.get("selection_nonce") or ""):
+                    waiting["selection_nonce"] = secrets.token_hex(8)
+                    changed = True
+                break
+
+            if changed:
+                connection.execute(
+                    """
+                    UPDATE plex_jobs
+                    SET step_results_json = ?, updated_at = ?
+                    WHERE id = ? AND state = 'awaiting_selection'
+                    """,
+                    (
+                        json.dumps(
+                            steps,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        float(self._clock()),
+                        int(job_id),
+                    ),
+                )
+                row = connection.execute(
+                    "SELECT * FROM plex_jobs WHERE id = ?",
+                    (int(job_id),),
+                ).fetchone()
+            connection.commit()
+        return self._decode_job(row)
+
     def claim(self, job_id) -> bool:
         now = float(self._clock())
         with self._connect() as connection:

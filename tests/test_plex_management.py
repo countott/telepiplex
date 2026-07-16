@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1696,6 +1697,87 @@ class PlexManagementServiceTest(unittest.TestCase):
             )
         self.assertEqual(plex.poster_updates, [])
         self.assertEqual(waiting_job["state"], "awaiting_selection")
+
+    def test_legacy_waiting_selection_backfills_one_nonce_only_while_awaiting(self):
+        service = self.make_service()
+        waiting = {
+            "kind": "audio",
+            "target_id": "legacy",
+            "rating_key": "42",
+            "part_id": 11,
+            "candidates": [{
+                "id": 21,
+                "display_title": "Japanese TrueHD",
+                "codec": "truehd",
+                "channels": 8,
+                "bitrate": 4000,
+            }],
+            "candidate_index": 0,
+        }
+        job = self.jobs.create_or_get(
+            "legacy-awaiting",
+            {"chat_id": 10, "user_id": 1, "final_path": "/legacy"},
+        )
+        self.jobs.update(
+            job["id"],
+            state="awaiting_selection",
+            step_results={
+                "audio": {
+                    "status": "awaiting_selection",
+                    "waiting": waiting,
+                },
+            },
+        )
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            observed = list(executor.map(
+                lambda _: service.pending_selection(job["id"]),
+                range(16),
+            ))
+
+        nonces = {
+            str(item.get("selection_nonce") or "")
+            for item in observed
+        }
+        self.assertEqual(len(nonces), 1)
+        nonce = nonces.pop()
+        self.assertTrue(nonce)
+        self.assertEqual(
+            self.jobs.get(job["id"])["step_results"]["audio"]["waiting"][
+                "selection_nonce"
+            ],
+            nonce,
+        )
+
+        for state in ("cancelled", "completed"):
+            with self.subTest(state=state):
+                inactive = self.jobs.create_or_get(
+                    f"legacy-{state}",
+                    {
+                        "chat_id": 10,
+                        "user_id": 1,
+                        "final_path": f"/{state}",
+                    },
+                )
+                self.jobs.update(
+                    inactive["id"],
+                    state=state,
+                    step_results={
+                        "audio": {
+                            "status": "awaiting_selection",
+                            "waiting": waiting,
+                        },
+                    },
+                )
+
+                self.assertIsNone(
+                    service.pending_selection(inactive["id"])
+                )
+                persisted = self.jobs.get(inactive["id"])
+                self.assertNotIn(
+                    "selection_nonce",
+                    persisted["step_results"]["audio"]["waiting"],
+                )
 
     def test_obsolete_match_and_metadata_surfaces_are_absent(self):
         service = self.make_service()

@@ -73,6 +73,27 @@ class PlexJobRepositoryTest(unittest.TestCase):
 
         self.assertEqual([job["id"] for job in jobs], [second["id"], first["id"]])
 
+    def test_list_for_owner_filters_persisted_owner_before_limit(self):
+        owner_old = self.repo.create_or_get(
+            "owner-old",
+            {"chat_id": 10, "user_id": 1, "final_path": "/owner-old"},
+        )
+        self.repo.create_or_get(
+            "other",
+            {"chat_id": 99, "user_id": 2, "final_path": "/other"},
+        )
+        owner_new = self.repo.create_or_get(
+            "owner-new",
+            {"chat_id": 10, "user_id": 1, "final_path": "/owner-new"},
+        )
+
+        jobs = self.repo.list_for_owner(10, 1, limit=2)
+
+        self.assertEqual(
+            [job["id"] for job in jobs],
+            [owner_new["id"], owner_old["id"]],
+        )
+
     def test_expired_confirmation_token_is_rejected(self):
         from telepiplex_plex.jobs import PlexJobRepository
 

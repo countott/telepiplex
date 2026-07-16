@@ -1344,7 +1344,7 @@ class PlexManagementService:
         return self.run_job(job_id)
 
     def pending_selection(self, job_id, *, selection_nonce=""):
-        job = self.jobs.get(job_id)
+        job = self.jobs.ensure_selection_nonce(job_id)
         if not job:
             raise LookupError(f"Plex job not found: {job_id}")
         if job["state"] != "awaiting_selection":
@@ -1593,6 +1593,9 @@ class PlexManagementService:
 
     def list_jobs(self, limit=50):
         return self.jobs.list(limit)
+
+    def list_jobs_for_owner(self, chat_id, user_id, limit=50):
+        return self.jobs.list_for_owner(chat_id, user_id, limit)
 
     @staticmethod
     def _normalize_action(action):

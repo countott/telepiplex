@@ -231,12 +231,12 @@ class PlexFeature:
             return await self._scan_menu(service)
         text = " ".join(str(item) for item in request.get("args") or []).strip()
         if not text:
-            jobs = await asyncio.to_thread(service.list_jobs, 1000)
-            jobs = [
-                job
-                for job in jobs
-                if self._job_owned_by_request(job, request)
-            ][:5]
+            jobs = await asyncio.to_thread(
+                service.list_jobs_for_owner,
+                int(request.get("chat_id") or 0),
+                int(request.get("user_id") or 0),
+                5,
+            )
             if not jobs:
                 return self._message("当前没有 Plex 管理任务。")
             lines = ["最近 Plex 任务："]
