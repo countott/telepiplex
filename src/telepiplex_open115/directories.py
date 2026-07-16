@@ -17,7 +17,8 @@ def normalize_save_directory_path(value) -> str:
             "open115 save directory path must start from the 115 root folder "
             "without a leading slash"
         )
-    path = path.rstrip("/")
+    if path.endswith("/"):
+        path = path[:-1]
     parts = path.split("/")
     if not path or any(not part or part in {".", ".."} for part in parts):
         raise ValueError(

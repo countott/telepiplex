@@ -4,6 +4,7 @@ from telepiplex_plugin_sdk import FeatureRuntime, RuntimeContext
 
 from .client import Open115Client
 from .config_store import FeatureConfigStore
+from .directories import normalize_save_directories
 from .service import Open115Feature
 from .jobs import DownloadJobStore
 
@@ -11,6 +12,12 @@ from .jobs import DownloadJobStore
 def main(context: RuntimeContext) -> FeatureRuntime:
     config_store = FeatureConfigStore(context.config_path)
     config = config_store.read()
+    configured_directories = config.get("save_directories") or []
+    normalized_directories = normalize_save_directories(configured_directories)
+    if configured_directories != normalized_directories:
+        config = config_store.write_save_directories(normalized_directories)
+    else:
+        config["save_directories"] = normalized_directories
 
     def persist_refreshed_tokens(access_token, refresh_token):
         current = config_store.read()

@@ -1569,6 +1569,8 @@ class FeatureConfigStoreTest(unittest.TestCase):
             "/series",
             "/",
             "series//live action",
+            "series//",
+            "series///",
             ".",
             "..",
             "./series",
@@ -1583,6 +1585,66 @@ class FeatureConfigStoreTest(unittest.TestCase):
                         "name": "剧集",
                         "path": value,
                     }])
+
+
+class RuntimeStartupTest(unittest.TestCase):
+    @staticmethod
+    def _context(root: Path):
+        return SimpleNamespace(
+            manifest={"plugin_id": "open115", "version": "1.2.1"},
+            token="runtime-token",
+            socket_path=root / "runtime.sock",
+            core_socket_path=root / "core.sock",
+            config_path=root / "config.yaml",
+            state_path=root / "state",
+            core=FakeCore(),
+        )
+
+    def test_runtime_startup_persists_canonical_save_directories(self):
+        from telepiplex_open115.runtime import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = self._context(root)
+            context.config_path.write_text(
+                yaml.safe_dump({
+                    "save_directories": [
+                        {"name": "剧集", "path": "series/live action/"},
+                    ],
+                }, allow_unicode=True),
+                encoding="utf-8",
+            )
+
+            runtime = main(context)
+            feature = runtime.commands["config"].__self__
+            expected = [
+                {"name": "剧集", "path": "series/live action"},
+            ]
+
+            self.assertEqual(feature.config["save_directories"], expected)
+            on_disk = yaml.safe_load(
+                context.config_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(on_disk["save_directories"], expected)
+
+    def test_runtime_startup_rejects_canonical_duplicate_directories(self):
+        from telepiplex_open115.runtime import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = self._context(root)
+            context.config_path.write_text(
+                yaml.safe_dump({
+                    "save_directories": [
+                        {"name": "剧集", "path": "series/live action"},
+                        {"name": "电影", "path": "series/live action/"},
+                    ],
+                }, allow_unicode=True),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "unique"):
+                main(context)
 
 
 class FeatureSourceContractTest(unittest.TestCase):
