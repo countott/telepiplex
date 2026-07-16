@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from starlette.testclient import TestClient
+import httpx
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -192,9 +192,22 @@ class PlexMcpTest(unittest.TestCase):
             self.service,
             {"host": "0.0.0.0", "path": "/mcp", "auth_token": "secret"},
         )
-        with TestClient(app) as client:
-            unauthorized = client.post("/mcp")
-            authorized = client.post("/mcp", headers={"Authorization": "Bearer secret"})
+
+        async def make_requests():
+            transport = httpx.ASGITransport(app=app)
+            async with app.app.router.lifespan_context(app.app):
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    base_url="http://testserver",
+                ) as client:
+                    unauthorized = await client.post("/mcp")
+                    authorized = await client.post(
+                        "/mcp",
+                        headers={"Authorization": "Bearer secret"},
+                    )
+            return unauthorized, authorized
+
+        unauthorized, authorized = asyncio.run(make_requests())
 
         self.assertEqual(unauthorized.status_code, 401)
         self.assertNotEqual(authorized.status_code, 401)

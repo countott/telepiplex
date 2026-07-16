@@ -128,25 +128,29 @@ class PlexJobRepository:
         return cursor.rowcount == 1
 
     def mark_incomplete_interrupted(self) -> list[int]:
-        active_states = (
-            "running", "scanning", "artwork", "audio", "subtitle",
-            "locating", "matching", "localizing", "streams",
+        restart_safe_states = (
+            "queued",
+            "awaiting_selection",
+            "completed",
+            "failed",
+            "interrupted",
+            "cancelled",
         )
-        placeholders = ",".join("?" for _ in active_states)
+        placeholders = ",".join("?" for _ in restart_safe_states)
         now = float(self._clock())
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
-                f"SELECT id FROM plex_jobs WHERE state IN ({placeholders})",
-                active_states,
+                f"SELECT id FROM plex_jobs WHERE state NOT IN ({placeholders})",
+                restart_safe_states,
             ).fetchall()
             ids = [int(row["id"]) for row in rows]
             if ids:
                 connection.execute(
                     f"UPDATE plex_jobs SET state = 'interrupted', "
                     f"error = 'interrupted by Feature process stop', updated_at = ? "
-                    f"WHERE state IN ({placeholders})",
-                    (now, *active_states),
+                    f"WHERE state NOT IN ({placeholders})",
+                    (now, *restart_safe_states),
                 )
             connection.commit()
         return ids

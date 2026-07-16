@@ -1104,11 +1104,8 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await runtime.tasks.pop(f"plex-resume-{job['id']}")
         self.assertEqual(self.jobs.get(job["id"])["state"], "completed")
 
-    async def test_restart_interrupts_new_and_legacy_active_states(self):
-        states = (
-            "running", "scanning", "artwork", "audio", "subtitle",
-            "locating", "matching", "localizing", "streams",
-        )
+    async def test_restart_interrupts_current_active_states(self):
+        states = ("running", "scanning", "artwork", "audio", "subtitle")
         jobs = []
         for index, state in enumerate(states):
             job = self.jobs.create_or_get(

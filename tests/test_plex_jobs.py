@@ -38,13 +38,13 @@ class PlexJobRepositoryTest(unittest.TestCase):
 
         updated = self.repo.update(
             job["id"],
-            state="matching",
+            state="artwork",
             rating_key="42",
             step_results={"scanning": {"status": "success"}},
             error="temporary",
         )
 
-        self.assertEqual(updated["state"], "matching")
+        self.assertEqual(updated["state"], "artwork")
         self.assertEqual(updated["rating_key"], "42")
         self.assertEqual(updated["step_results"]["scanning"]["status"], "success")
         self.assertEqual(self.repo.get(job["id"])["error"], "temporary")
@@ -53,15 +53,17 @@ class PlexJobRepositoryTest(unittest.TestCase):
         job = self.repo.create_or_get("key", {"final_path": "/x"})
         token = self.repo.issue_confirmation(
             job["id"],
-            "fix_match",
+            "plex_scan_library",
             {"rating_key": "42"},
         )
 
-        payload = self.repo.consume_confirmation(token, "fix_match")
+        payload = self.repo.consume_confirmation(token, "plex_scan_library")
 
         self.assertEqual(payload["job_id"], job["id"])
         self.assertEqual(payload["rating_key"], "42")
-        self.assertIsNone(self.repo.consume_confirmation(token, "fix_match"))
+        self.assertIsNone(
+            self.repo.consume_confirmation(token, "plex_scan_library")
+        )
 
     def test_list_returns_newest_jobs_first(self):
         first = self.repo.create_or_get("first", {"final_path": "/first"})
@@ -80,10 +82,17 @@ class PlexJobRepositoryTest(unittest.TestCase):
             clock=lambda: now[0],
         )
         job = repo.create_or_get("key", {"final_path": "/x"})
-        token = repo.issue_confirmation(job["id"], "fix_match", {}, ttl_seconds=10)
+        token = repo.issue_confirmation(
+            job["id"],
+            "plex_scan_library",
+            {},
+            ttl_seconds=10,
+        )
         now[0] = 111.0
 
-        self.assertIsNone(repo.consume_confirmation(token, "fix_match"))
+        self.assertIsNone(
+            repo.consume_confirmation(token, "plex_scan_library")
+        )
 
     def test_claim_prevents_duplicate_execution_and_completed_never_reopens(self):
         job = self.repo.create_or_get("key", {"final_path": "/x"})
@@ -92,14 +101,46 @@ class PlexJobRepositoryTest(unittest.TestCase):
         self.repo.update(job["id"], state="completed")
         self.assertFalse(self.repo.claim(job["id"]))
 
-    def test_restart_marks_in_progress_jobs_interrupted(self):
-        job = self.repo.create_or_get("key", {"final_path": "/x"})
-        self.repo.update(job["id"], state="scanning")
+    def test_restart_interrupts_current_and_retired_in_progress_states(self):
+        active_states = (
+            "running",
+            "scanning",
+            "artwork",
+            "audio",
+            "subtitle",
+            "retired_stage",
+        )
+        active_jobs = []
+        for state in active_states:
+            job = self.repo.create_or_get(state, {"final_path": f"/{state}"})
+            self.repo.update(job["id"], state=state)
+            active_jobs.append(job)
+        stable_jobs = {}
+        for state in (
+            "queued",
+            "awaiting_selection",
+            "completed",
+            "failed",
+            "interrupted",
+            "cancelled",
+        ):
+            job = self.repo.create_or_get(
+                f"stable-{state}",
+                {"final_path": f"/{state}"},
+            )
+            self.repo.update(job["id"], state=state)
+            stable_jobs[state] = job
 
         interrupted = self.repo.mark_incomplete_interrupted()
 
-        self.assertEqual(interrupted, [job["id"]])
-        self.assertEqual(self.repo.get(job["id"])["state"], "interrupted")
+        self.assertEqual(interrupted, [job["id"] for job in active_jobs])
+        self.assertTrue(all(
+            self.repo.get(job["id"])["state"] == "interrupted"
+            for job in active_jobs
+        ))
+        for state, job in stable_jobs.items():
+            with self.subTest(state=state):
+                self.assertEqual(self.repo.get(job["id"])["state"], state)
 
 
 if __name__ == "__main__":
