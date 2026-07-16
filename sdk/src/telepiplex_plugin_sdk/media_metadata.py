@@ -161,6 +161,31 @@ def _valid_items(items) -> bool:
     return True
 
 
+def _valid_title_policy(identity: dict) -> bool:
+    policy = _text(identity.get("search_title_policy"))
+    if not policy:
+        return True
+
+    canonical_title = _text(identity.get("canonical_search_title"))
+    compatibility_title = _text(identity.get("english_title"))
+    if policy == "official_english":
+        official_title = _text(identity.get("official_english_title"))
+        return bool(
+            official_title
+            and canonical_title == official_title
+            and compatibility_title == official_title
+        )
+    if policy == "romanized_original":
+        romanized_title = _text(identity.get("romanized_original_title"))
+        return bool(
+            _text(identity.get("original_language")).casefold() == "ja"
+            and romanized_title
+            and canonical_title == romanized_title
+            and compatibility_title == romanized_title
+        )
+    return False
+
+
 def validate_media_metadata(value: object, require_confirmed: bool = False):
     if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION:
         return None
@@ -184,11 +209,15 @@ def validate_media_metadata(value: object, require_confirmed: bool = False):
         return None
     if "external_ids" in identity and not isinstance(identity.get("external_ids"), dict):
         return None
+    if not _valid_title_policy(identity):
+        return None
 
     target = relation.get("target_series")
     if isinstance(target, dict) and (
         "external_ids" in target and not isinstance(target.get("external_ids"), dict)
     ):
+        return None
+    if isinstance(target, dict) and not _valid_title_policy(target):
         return None
 
     category_kind = placement.get("category_kind")

@@ -98,6 +98,52 @@ class CoreMediaMetadataTest(unittest.TestCase):
         extracted["identity"]["chinese_title"] = "changed"
         self.assertEqual(value["identity"]["chinese_title"], "想见你")
 
+    def test_v1_accepts_optional_official_english_title_policy(self):
+        value = self._value()
+        value["identity"].update({
+            "official_english_title": "Someday or One Day The Movie",
+            "canonical_search_title": "Someday or One Day The Movie",
+            "search_title_policy": "official_english",
+        })
+
+        self.assertIsNotNone(
+            validate_media_metadata(value, require_confirmed=True)
+        )
+
+    def test_v1_accepts_japanese_romaji_as_compatibility_title(self):
+        value = self._value()
+        value["identity"].update({
+            "chinese_title": "进击的巨人",
+            "english_title": "Shingeki no Kyojin",
+            "original_title": "進撃の巨人",
+            "original_language": "ja",
+            "official_english_title": "Attack on Titan",
+            "romanized_original_title": "Shingeki no Kyojin",
+            "canonical_search_title": "Shingeki no Kyojin",
+            "search_title_policy": "romanized_original",
+        })
+
+        self.assertIsNotNone(
+            validate_media_metadata(value, require_confirmed=True)
+        )
+
+    def test_v1_rejects_english_translation_in_romaji_compatibility_field(self):
+        value = self._value()
+        value["identity"].update({
+            "chinese_title": "进击的巨人",
+            "english_title": "Attack on Titan",
+            "original_title": "進撃の巨人",
+            "original_language": "ja",
+            "official_english_title": "Attack on Titan",
+            "romanized_original_title": "Shingeki no Kyojin",
+            "canonical_search_title": "Shingeki no Kyojin",
+            "search_title_policy": "romanized_original",
+        })
+
+        self.assertIsNone(
+            validate_media_metadata(value, require_confirmed=True)
+        )
+
     def test_rejects_wrong_category_pair_and_old_public_key(self):
         value = self._value()
         value["placement"]["category_kind"] = "animated_movie"
