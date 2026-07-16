@@ -761,7 +761,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_magnet_command_uses_session_and_namespaced_callback(self):
         self.feature.config["save_directories"] = [
-            {"name": "剧集", "path": "/Series"},
+            {"name": "剧集", "path": "series/live action"},
         ]
         command = await self.feature.command({
             "command": "magnet",
@@ -785,6 +785,9 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已加入 115 下载队列", callback["actions"][0]["text"])
         self.assertEqual(callback["operation"]["state"], "running")
         self.assertEqual(len(self.runtime.tasks), 1)
+        task_id = next(iter(self.runtime.tasks))
+        await self.runtime.tasks.pop(task_id)
+        self.assertEqual(self.client.added[0][1], "/series/live action")
 
     async def test_config_opens_home_while_auth_opens_authorization_directly(self):
         config = await self.feature.command({
@@ -824,7 +827,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_directory_list_is_paginated_with_bounded_keyboard(self):
         directories = [
-            {"name": f"目录{index}", "path": f"/Path{index}"}
+            {"name": f"目录{index}", "path": f"Path{index}"}
             for index in range(7)
         ]
         self.feature.config["save_directories"] = directories
@@ -849,8 +852,8 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_directory_editor_rejects_negative_item_index(self):
         directories = [
-            {"name": "A", "path": "/A"},
-            {"name": "B", "path": "/B"},
+            {"name": "A", "path": "A"},
+            {"name": "B", "path": "B"},
         ]
         self.feature.config["save_directories"] = directories
         self.feature.config_store.config["save_directories"] = directories
@@ -881,8 +884,8 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_magnet_rejects_negative_directory_index(self):
         self.feature.config["save_directories"] = [
-            {"name": "A", "path": "/A"},
-            {"name": "B", "path": "/B"},
+            {"name": "A", "path": "A"},
+            {"name": "B", "path": "B"},
         ]
         await self.feature.command({
             "command": "magnet",
@@ -903,8 +906,8 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_directory_working_copy_add_edit_delete_and_save(self):
         original = [
-            {"name": "剧集", "path": "/Series"},
-            {"name": "删除项", "path": "/Delete"},
+            {"name": "剧集", "path": "series"},
+            {"name": "删除项", "path": "delete"},
         ]
         self.feature.config["save_directories"] = original
         self.feature.config_store.config["save_directories"] = original
@@ -913,11 +916,13 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         await self.feature.callback({
             "payload": "config:add", "user_id": 1, "chat_id": 10,
         })
-        await self.feature.message({
+        path_prompt = await self.feature.message({
             "text": "电影", "user_id": 1, "chat_id": 10,
         })
+        self.assertIn("115 根文件夹", path_prompt["actions"][0]["text"])
+        self.assertIn("series/live action", path_prompt["actions"][0]["text"])
         added = await self.feature.message({
-            "text": "/Movies", "user_id": 1, "chat_id": 10,
+            "text": "movies/live action/", "user_id": 1, "chat_id": 10,
         })
         self.assertIn("电影", str(added["actions"][0]["data"]["keyboard"]))
 
@@ -937,7 +942,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
             "payload": "config:edit:path", "user_id": 1, "chat_id": 10,
         })
         await self.feature.message({
-            "text": "/TV", "user_id": 1, "chat_id": 10,
+            "text": "tv/live action/", "user_id": 1, "chat_id": 10,
         })
 
         await self.feature.callback({
@@ -958,8 +963,8 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
             "payload": "config:save", "user_id": 1, "chat_id": 10,
         })
         expected = [
-            {"name": "电视剧", "path": "/TV"},
-            {"name": "电影", "path": "/Movies"},
+            {"name": "电视剧", "path": "tv/live action"},
+            {"name": "电影", "path": "movies/live action"},
         ]
         self.assertEqual(saved["session"]["state"], "close")
         self.assertEqual(self.feature.config_store.directory_writes, [expected])
@@ -977,7 +982,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("电影", str(magnet_keyboard))
 
     async def test_directory_input_rejects_invalid_and_duplicate_values(self):
-        original = [{"name": "剧集", "path": "/Series"}]
+        original = [{"name": "剧集", "path": "series/live action"}]
         self.feature.config["save_directories"] = original
         self.feature.config_store.config["save_directories"] = original
         await self._open_directory_config()
@@ -992,16 +997,16 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         await self.feature.message({
             "text": "电影", "user_id": 1, "chat_id": 10,
         })
-        relative = await self.feature.message({
-            "text": "Movies", "user_id": 1, "chat_id": 10,
+        leading_slash = await self.feature.message({
+            "text": "/movies", "user_id": 1, "chat_id": 10,
         })
         duplicate_path = await self.feature.message({
-            "text": "/Series", "user_id": 1, "chat_id": 10,
+            "text": "series/live action/", "user_id": 1, "chat_id": 10,
         })
-        self.assertIn("绝对路径", relative["actions"][0]["text"])
+        self.assertIn("不要以 / 开头", leading_slash["actions"][0]["text"])
         self.assertIn("重复", duplicate_path["actions"][0]["text"])
         await self.feature.message({
-            "text": "/Movies", "user_id": 1, "chat_id": 10,
+            "text": "movies", "user_id": 1, "chat_id": 10,
         })
 
         await self.feature.callback({
@@ -1050,7 +1055,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("目录配置", self.core.reports[-1]["status_text"])
 
     async def test_directory_save_failure_retains_old_config_and_working_copy(self):
-        original = [{"name": "剧集", "path": "/Series"}]
+        original = [{"name": "剧集", "path": "series"}]
         self.feature.config["save_directories"] = original
         self.feature.config_store.config["save_directories"] = original
         self.feature.config_store.fail_directory_writes = True
@@ -1062,7 +1067,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
             "text": "电影", "user_id": 1, "chat_id": 10,
         })
         await self.feature.message({
-            "text": "/Movies", "user_id": 1, "chat_id": 10,
+            "text": "movies", "user_id": 1, "chat_id": 10,
         })
 
         response = await self.feature.callback({
@@ -1143,7 +1148,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.feature.config["save_directories"] = [
-            {"name": "剧集", "path": "/Series"},
+            {"name": "剧集", "path": "series"},
         ]
         path = await self.feature.command({
             "command": "magnet",
@@ -1350,7 +1355,7 @@ class Open115FeatureTest(unittest.IsolatedAsyncioTestCase):
             "text": "access-pending", "user_id": 1, "chat_id": 10,
         })
         self.feature.config["save_directories"] = [
-            {"name": "剧集", "path": "/Series"},
+            {"name": "剧集", "path": "series"},
         ]
 
         response = await self.feature.command({

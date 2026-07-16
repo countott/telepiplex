@@ -10,7 +10,10 @@ import uuid
 from telepiplex_plugin_sdk import FeatureError
 
 from .context import logger
-from .directories import normalize_save_directories
+from .directories import (
+    normalize_save_directories,
+    normalize_save_directory_path,
+)
 
 
 _MAGNET = re.compile(r"^magnet:\?xt=urn:btih:(?:[A-Fa-f0-9]{40}|[A-Za-z2-7]{32})(?:&.*)?$")
@@ -590,7 +593,10 @@ class Open115Feature:
         if payload == "config:edit:path" and stage == "directory_item":
             return self._directory_prompt(
                 key,
-                "请发送新的 115 绝对路径，例如 /Series。",
+                (
+                    "请从 115 根文件夹开始填写保存路径，例如 "
+                    "series/live action（末尾 / 可省略）。"
+                ),
                 stage="directory_edit_path",
                 status_text="等待输入新的 115 保存路径。",
                 kind="edit_message",
@@ -669,7 +675,10 @@ class Open115Feature:
                 )
                 return self._directory_prompt(
                     key,
-                    "请发送 115 绝对路径，例如 /Series。",
+                    (
+                        "请从 115 根文件夹开始填写保存路径，例如 "
+                        "series/live action（末尾 / 可省略）。"
+                    ),
                     stage="directory_add_path",
                     status_text="等待输入 115 保存路径。",
                 )
@@ -728,11 +737,17 @@ class Open115Feature:
 
     @staticmethod
     def _directory_path(value, directories, *, exclude_index=None):
-        path = str(value or "").strip()
-        if not path or "\n" in path or "\r" in path:
-            raise ValueError("目录路径必须是非空单行文本。")
-        if not path.startswith("/"):
-            raise ValueError("目录路径必须是以 / 开头的 115 绝对路径。")
+        raw_path = str(value or "").strip()
+        if raw_path.startswith("/"):
+            raise ValueError(
+                "目录路径请从 115 根文件夹开始填写，不要以 / 开头。"
+            )
+        try:
+            path = normalize_save_directory_path(raw_path)
+        except ValueError as exc:
+            raise ValueError(
+                "目录路径只能包含有效的根目录相对路径段。"
+            ) from exc
         if any(
             index != exclude_index and item.get("path") == path
             for index, item in enumerate(directories)
