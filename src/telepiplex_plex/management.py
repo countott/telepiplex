@@ -822,6 +822,17 @@ class PlexManagementService:
                 return deepcopy(result)
         return None
 
+    def _persisted_target_warnings(self, job, stage_name):
+        step = (
+            (job.get("step_results") or {}).get(str(stage_name))
+            or {}
+        )
+        target_result = (
+            (step.get("targets") or {}).get(self._target_id(job))
+            or {}
+        )
+        return list(target_result.get("warnings") or [])
+
     def _persist_part_result(
         self,
         job,
@@ -982,7 +993,7 @@ class PlexManagementService:
         metadata = self._effective_metadata(job)
         tmdb_id = (metadata.get("external_ids") or {}).get("tmdb")
         media_type = "tv" if metadata.get("media_type") in {"show", "episode", "tv"} else "movie"
-        warnings = []
+        warnings = self._persisted_target_warnings(job, "audio")
         original_language = None
         if self.tmdb and tmdb_id:
             try:
@@ -991,10 +1002,17 @@ class PlexManagementService:
                     tmdb_id,
                 ).get("original_language")
             except Exception as exc:
-                warnings.append(self._safe_error(exc))
+                message = self._safe_error(exc)
+                if message not in warnings:
+                    warnings.append(message)
         else:
-            warnings.append("TMDB original language is unavailable")
-        if not original_language and not warnings:
+            message = "TMDB original language is unavailable"
+            if message not in warnings:
+                warnings.append(message)
+        if (
+            not original_language
+            and "TMDB original language is unavailable" not in warnings
+        ):
             warnings.append("TMDB original language is unavailable")
         audio_results = []
         for part in self.plex.list_streams(job["rating_key"]):
@@ -1052,10 +1070,12 @@ class PlexManagementService:
                     part_id=part["id"],
                 )
             if not ranked and original_language:
-                warnings.append(
-                    "No original-language audio stream was found "
-                    f"for part {part['id']}"
+                message = (
+                    "No original-language audio stream was found for part "
+                    f"{part['id']}"
                 )
+                if message not in warnings:
+                    warnings.append(message)
             if audio and not audio.get("selected"):
                 self.plex.select_audio(
                     job["rating_key"],

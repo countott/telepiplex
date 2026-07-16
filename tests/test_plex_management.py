@@ -1020,6 +1020,64 @@ class PlexManagementServiceTest(unittest.TestCase):
         )
         self.assertIn(("42", 12, 32), plex.audio_selections)
 
+    def test_audio_warning_survives_later_part_selection_resume(self):
+        plex = FakePlex()
+        plex.list_streams = Mock(return_value=[
+            {
+                "id": 11,
+                "audio_streams": [{
+                    "id": 21,
+                    "language_code": "eng",
+                    "codec": "truehd",
+                    "channels": 8,
+                    "bitrate": 4000,
+                }],
+                "subtitle_streams": [],
+            },
+            {
+                "id": 12,
+                "audio_streams": [
+                    {
+                        "id": 31,
+                        "language_code": "jpn",
+                        "codec": "truehd",
+                        "channels": 8,
+                        "bitrate": 4000,
+                    },
+                    {
+                        "id": 32,
+                        "language_code": "jpn",
+                        "codec": "truehd",
+                        "channels": 8,
+                        "bitrate": 4000,
+                    },
+                ],
+                "subtitle_streams": [],
+            },
+        ])
+        service = self.make_service(plex=plex)
+        job = service.enqueue_completion(make_completion())
+
+        waiting_job = service.run_job(job["id"])
+
+        self.assertEqual(waiting_job["state"], "awaiting_selection")
+        partial = (
+            waiting_job["step_results"]["audio"]["targets"]["legacy"]
+        )
+        self.assertIn(
+            "No original-language audio stream was found for part 11",
+            partial["warnings"],
+        )
+
+        completed = service.confirm_selection(job["id"], 1)
+
+        audio = completed["step_results"]["audio"]
+        self.assertEqual(audio["status"], "warning")
+        self.assertIn(
+            "No original-language audio stream was found for part 11",
+            audio["targets"]["legacy"]["warnings"],
+        )
+
     def test_missing_original_language_does_not_select_unlabeled_audio(self):
         plex = FakePlex()
         plex.list_streams = Mock(return_value=[{
