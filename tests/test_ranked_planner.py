@@ -181,6 +181,34 @@ class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
             )
 
     @patch("telepiplex_media_search.planner.score_candidates_with_ai", side_effect=ai_score)
+    async def test_relation_stage_timeout_degrades_to_standalone(self, _score):
+        plan = await build_confirmable_search_plan(
+            "黑暗荣耀 特别篇",
+            "p-timeout-relation",
+            {"douban": sources_for_glory, "wikipedia": wikipedia_glory},
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            budget=PlanningBudget(total=1, stages={"relation_scout": 0}),
+        )
+
+        self.assertEqual(
+            plan["candidates"][0]["media_metadata"]["relation"]["type"],
+            "standalone",
+        )
+
+    async def test_scorecard_timeout_keeps_program_score_only(self):
+        plan = await build_confirmable_search_plan(
+            "黑暗荣耀 2022",
+            "p-timeout-score",
+            {"douban": sources_for_glory, "wikipedia": wikipedia_glory},
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            budget=PlanningBudget(total=1, stages={"scorecard": 0}),
+        )
+
+        self.assertEqual(plan["candidates"][0]["score"]["ai_total"], 0)
+
+    @patch("telepiplex_media_search.planner.score_candidates_with_ai", side_effect=ai_score)
     async def test_ranked_candidate_limit_is_five(self, _score):
         def many(_hypotheses):
             facts = []

@@ -58,14 +58,21 @@ class PlanningBudget:
         "candidate_finalize": 15.0,
     }
 
-    def __init__(self, *, clock=time.monotonic, total: float | None = None):
+    def __init__(
+        self,
+        *,
+        clock=time.monotonic,
+        total: float | None = None,
+        stages: dict[str, float] | None = None,
+    ):
         self.clock = clock
         self.started_at = clock()
         self.total = self.TOTAL if total is None else max(0.0, float(total))
         self.deadline = self.started_at + self.total
+        self.stages = {**self.STAGES, **(stages or {})}
 
     def remaining_for(self, stage: str) -> float:
-        stage_limit = self.STAGES[stage]
+        stage_limit = self.stages[stage]
         return max(0.0, min(stage_limit, self.deadline - self.clock()))
 
     @property
@@ -84,6 +91,21 @@ async def _budgeted(stage: str, budget: PlanningBudget, awaitable):
             return await awaitable
     except TimeoutError as exc:
         raise SearchPlanningError("planning_timed_out", (stage,)) from exc
+
+
+async def _optional_budgeted(
+    stage: str,
+    budget: PlanningBudget,
+    awaitable,
+    default,
+):
+    try:
+        return await _budgeted(stage, budget, awaitable)
+    except SearchPlanningError:
+        if budget.deadline - budget.clock() <= 0:
+            raise
+        _log_info(f"search_stage status=timed_out stage={stage}")
+        return default
 
 
 def _provider_failure(name: str, exc: Exception) -> dict:
@@ -691,7 +713,7 @@ async def build_confirmable_search_plan(
 
     relation_payload = {"hypotheses": []}
     if complex_request:
-        relation_payload = await _budgeted(
+        relation_payload = await _optional_budgeted(
             "relation_scout",
             budget,
             asyncio.to_thread(
@@ -702,6 +724,7 @@ async def build_confirmable_search_plan(
                     "candidates": [_candidate_context(item) for item in candidates],
                 },
             ),
+            {"hypotheses": []},
         ) or {"hypotheses": []}
 
     verified_relations = await _budgeted(
@@ -720,10 +743,11 @@ async def build_confirmable_search_plan(
         "verified_relations": list(verified_relations.values())[:3],
         "candidates": [_candidate_context(item) for item in candidates],
     }
-    raw_scores = await _budgeted(
+    raw_scores = await _optional_budgeted(
         "scorecard",
         budget,
         asyncio.to_thread(score_candidates_with_ai, score_context),
+        None,
     )
     raw_by_key = {
         _text(item.get("candidate_key")): item
@@ -761,6 +785,8 @@ async def build_confirmable_search_plan(
 
     by_key = {item.candidate_key: item for item in candidates}
     ranked = []
+    if budget.remaining_for("candidate_finalize") <= 0:
+        raise SearchPlanningError("planning_timed_out", ("candidate_finalize",))
     for score in ranked_scores[:5]:
         candidate = by_key[score.candidate_key]
         contract, entity, relation = _candidate_contract(
