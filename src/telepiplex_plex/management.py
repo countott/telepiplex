@@ -1430,6 +1430,22 @@ class PlexManagementService:
             "warnings": warnings,
         }
 
+    def _list_stream_candidates(self, rating_key, stream_key):
+        return [
+            {
+                "part_id": int(part.get("id") or 0),
+                "file": str(part.get("file") or ""),
+                "candidates": deepcopy(list(part.get(stream_key) or [])),
+            }
+            for part in self.plex.list_streams(rating_key)
+        ]
+
+    def list_audio_candidates(self, rating_key):
+        return self._list_stream_candidates(rating_key, "audio_streams")
+
+    def list_subtitle_candidates(self, rating_key):
+        return self._list_stream_candidates(rating_key, "subtitle_streams")
+
     def get_job(self, job_id):
         return self.jobs.get(job_id)
 

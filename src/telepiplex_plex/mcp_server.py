@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import secrets
 import threading
 from dataclasses import dataclass
@@ -70,6 +69,16 @@ def create_plex_mcp(service, config):
         """List textless TMDB/Fanart candidates and existing Plex posters."""
         return service.list_artwork_candidates(rating_key)
 
+    @mcp.tool(name="plex_list_audio_candidates", annotations=READ_ONLY)
+    def plex_list_audio_candidates(rating_key: str):
+        """List existing audio streams grouped by Plex media part."""
+        return service.list_audio_candidates(rating_key)
+
+    @mcp.tool(name="plex_list_subtitle_candidates", annotations=READ_ONLY)
+    def plex_list_subtitle_candidates(rating_key: str):
+        """List existing subtitle streams grouped by Plex media part."""
+        return service.list_subtitle_candidates(rating_key)
+
     @mcp.tool(name="plex_get_job", annotations=READ_ONLY)
     def plex_get_job(job_id: int):
         """Get one Plex management job."""
@@ -133,39 +142,6 @@ def create_plex_mcp(service, config):
         return _prepare_or_apply(service, "plex_retry_job", payload, confirmation_token)
 
     return mcp
-
-
-class PlexToolDispatcher:
-    """Expose the exact MCP tool schemas and dispatch semantics to local AI."""
-
-    def __init__(self, service):
-        self.mcp = create_plex_mcp(service, {})
-        self._schemas = None
-
-    def tool_schemas(self):
-        if self._schemas is None:
-            tools = asyncio.run(self.mcp.list_tools())
-            self._schemas = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "parameters": tool.inputSchema,
-                    },
-                }
-                for tool in tools
-            ]
-        return list(self._schemas)
-
-    def dispatch(self, name, arguments):
-        return asyncio.run(
-            self.mcp._tool_manager.call_tool(
-                str(name),
-                dict(arguments or {}),
-                convert_result=False,
-            )
-        )
 
 
 class BearerAuthMiddleware:

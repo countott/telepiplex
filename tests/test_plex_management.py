@@ -449,6 +449,38 @@ class PlexManagementServiceTest(unittest.TestCase):
         plex.refresh_zh_cn.assert_not_called()
         plex.fix_match.assert_not_called()
 
+    def test_lists_audio_and_subtitle_candidates_grouped_by_part(self):
+        plex = FakePlex()
+        service = self.make_service(plex=plex)
+
+        audio = service.list_audio_candidates("42")
+        subtitle = service.list_subtitle_candidates("42")
+
+        self.assertEqual(audio, [{
+            "part_id": 11,
+            "file": "",
+            "candidates": [{
+                "id": 21,
+                "language_code": "jpn",
+                "codec": "truehd",
+                "channels": 8,
+                "bitrate": 4000,
+                "selected": False,
+            }],
+        }])
+        self.assertEqual(subtitle, [{
+            "part_id": 11,
+            "file": "",
+            "candidates": [{
+                "id": 31,
+                "language_code": "chi",
+                "external": True,
+                "transient": False,
+                "selected": False,
+            }],
+        }])
+        self.assertEqual(plex.stream_rating_keys, ["42", "42"])
+
     def test_temporary_special_wrong_final_path_fails_before_enhancements(self):
         completion = make_media_metadata_completion("temporary_related_special")
         final_path = completion.event.metadata["media_metadata"]["items"][0]["final_path"]
