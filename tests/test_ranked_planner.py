@@ -64,6 +64,53 @@ def ai_score(context):
 
 
 class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
+    @patch("telepiplex_media_search.planner.score_candidates_with_ai")
+    async def test_below_threshold_runs_one_controlled_expansion(self, score):
+        calls = {"douban": 0, "wikipedia": 0}
+
+        def fact(provider):
+            return {
+                "subject_id": "1" if provider == "douban" else None,
+                "wikibase_item": "Q1" if provider == "wikipedia" else None,
+                "title": "The Glory",
+                "chinese_title": "黑暗荣耀",
+                "official_english_title": "The Glory",
+                "year": "2022",
+                "media_type": "series",
+            }
+
+        def douban(_hypotheses):
+            calls["douban"] += 1
+            return {"status": "ok", "facts": [fact("douban")]}
+
+        def wikipedia(_hypotheses):
+            calls["wikipedia"] += 1
+            return {
+                "status": "not_found" if calls["wikipedia"] == 1 else "ok",
+                "facts": [] if calls["wikipedia"] == 1 else [fact("wikipedia")],
+            }
+
+        def low_score(context):
+            return {"scorecards": [{
+                "candidate_key": item["candidate_key"],
+                "title_equivalence": {"score": 20, "fact_ids": [item["fact_ids"][0]]},
+                "relation_consistency": {"score": 0, "fact_ids": []},
+                "intent_relevance": {"score": 0, "fact_ids": []},
+            } for item in context["candidates"]]}
+
+        score.side_effect = low_score
+        plan = await build_confirmable_search_plan(
+            "黑暗荣耀 2022",
+            "p-expand",
+            {"douban": douban, "wikipedia": wikipedia},
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertEqual(calls, {"douban": 2, "wikipedia": 2})
+        self.assertTrue(plan["candidates"][0]["selectable"])
+        self.assertGreaterEqual(plan["candidates"][0]["score"]["total"], 65)
+
     @patch("telepiplex_media_search.planner.score_candidates_with_ai", side_effect=ai_score)
     @patch("telepiplex_media_search.planner.infer_relation_hypotheses_with_ai")
     async def test_source_backed_movie_series_relation_is_locked_before_scoring(

@@ -19,6 +19,7 @@ from .ai import (
 )
 from .candidate_score import (
     AIScore,
+    MINIMUM_SCORE,
     SCORING_VERSION,
     apply_thresholds,
     combine_score,
@@ -521,6 +522,45 @@ def _candidate_items(candidate: CandidateEntity, intent: dict) -> list[dict]:
     return sorted(items, key=lambda item: (item["season_number"], item["episode_number"]))
 
 
+def _expanded_hypotheses(candidates: list[CandidateEntity]) -> dict:
+    queries = []
+    for candidate in candidates[:3]:
+        try:
+            titles = resolve_title_policy(candidate)
+        except TitlePolicyError:
+            continue
+        year = next(iter(sorted(candidate.years)), "")
+        query = _text(f"{titles.canonical_search_title} {year}")
+        if query and query not in queries:
+            queries.append(query)
+    return {
+        "status": "ok",
+        "hypotheses": [],
+        "source_queries": {
+            "wikipedia": list(queries),
+            "douban": list(queries),
+            "tvdb": list(queries),
+        },
+        "warnings": ["controlled_expansion"],
+    }
+
+
+def _expanded_candidate(
+    original: CandidateEntity,
+    graph_candidates: tuple[CandidateEntity, ...],
+) -> CandidateEntity:
+    matches = [
+        candidate for candidate in graph_candidates
+        if original.normalized_titles.intersection(candidate.normalized_titles)
+        and original.years == candidate.years
+        and original.media_types == candidate.media_types
+    ]
+    if not matches:
+        return original
+    best = max(matches, key=lambda item: (len(item.providers), len(item.facts)))
+    return CandidateEntity(original.candidate_key, best.facts)
+
+
 def _candidate_query(canonical_title: str, year: str, media_type: str, intent: dict) -> str:
     scope = intent.get("scope") or "movie_or_series"
     if media_type == "series" and scope in {"season", "episode"}:
@@ -782,6 +822,42 @@ async def build_confirmable_search_plan(
     ranked_scores = apply_thresholds(combined)
     if not ranked_scores:
         raise SearchPlanningError("canonical_title_unavailable")
+    if ranked_scores[0].total < MINIMUM_SCORE:
+        expansion_sources = await _optional_budgeted(
+            "candidate_finalize",
+            budget,
+            collect_evidence(_expanded_hypotheses(candidates), providers),
+            [],
+        )
+        if expansion_sources:
+            sources = _merge_evidence_passes(sources, expansion_sources)
+            expanded_graph = build_search_graph(sources)
+            candidates = [
+                _expanded_candidate(candidate, expanded_graph.candidates)
+                for candidate in candidates
+            ]
+            prior_ai = {item.candidate_key: item.ai for item in ranked_scores}
+            combined = [
+                combine_score(
+                    candidate.candidate_key,
+                    program_score(
+                        candidate,
+                        intent,
+                        verified_relations.get(candidate.candidate_key),
+                    ),
+                    prior_ai.get(candidate.candidate_key, AIScore(0, 0, 0, ())),
+                )
+                for candidate in candidates
+            ]
+            ranked_scores = apply_thresholds(combined)
+            title_values = {
+                candidate.candidate_key: resolve_title_policy(candidate)
+                for candidate in candidates
+            }
+            _log_info(
+                f"search_stage status=expanded stage=candidate_finalize "
+                f"candidates={len(candidates)}"
+            )
 
     by_key = {item.candidate_key: item for item in candidates}
     ranked = []
