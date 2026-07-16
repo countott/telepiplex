@@ -365,6 +365,14 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         })
 
         keyboard = result["actions"][0]["data"]["keyboard"]
+        self.assertEqual(keyboard[0], [{
+            "text": "扫描全部媒体库",
+            "callback_data": "plex:scan:all",
+        }])
+        self.assertIn(
+            {"text": "取消", "callback_data": "plex:scan:cancel"},
+            keyboard[-1],
+        )
         buttons = [button for row in keyboard for button in row]
         self.assertIn(
             {"text": "扫描全部媒体库", "callback_data": "plex:scan:all"},
@@ -379,10 +387,23 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             buttons,
         )
         self.assertEqual(self.service.list_library_calls, 1)
+        self.assertLessEqual(len(keyboard), 10)
         self.assertTrue(all(
             len(button["callback_data"].encode("utf-8")) <= 64
             for button in buttons
         ))
+
+        cancelled = await self.feature.callback({
+            "payload": "scan:cancel",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        self.assertEqual(
+            cancelled["actions"][0]["text"],
+            "已取消 Plex 扫描选择。",
+        )
+        self.assertEqual(self.jobs.list(), [])
+        self.assertEqual(self.runtime.tasks, {})
 
     async def test_scan_menu_paginates_eight_libraries_per_page(self):
         self.service.libraries = [
@@ -413,6 +434,14 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             {"text": "下一页", "callback_data": "plex:scan:page:1"},
             first_buttons,
         )
+        self.assertIn(
+            {"text": "取消", "callback_data": "plex:scan:cancel"},
+            first["actions"][0]["data"]["keyboard"][-1],
+        )
+        self.assertLessEqual(
+            len(first["actions"][0]["data"]["keyboard"]),
+            10,
+        )
 
         second = await self.feature.callback({
             "payload": "scan:page:1",
@@ -427,6 +456,10 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             {"text": "媒体库 9", "callback_data": "plex:scan:9"},
             second_buttons,
+        )
+        self.assertIn(
+            {"text": "取消", "callback_data": "plex:scan:cancel"},
+            second["actions"][0]["data"]["keyboard"][-1],
         )
         self.assertEqual(self.service.list_library_calls, 2)
 
@@ -582,6 +615,7 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     button["text"]
                     for row in action["data"]["keyboard"]
                     for button in row
+                    if ":pick:" in button["callback_data"]
                 ]
                 self.assertTrue(all(
                     part in labels[0] for part in expected_parts
@@ -593,7 +627,176 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     and len(button["callback_data"].encode("utf-8")) <= 64
                     for row in action["data"]["keyboard"]
                     for button in row
+                    if ":pick:" in button["callback_data"]
                 ))
+                self.assertIn(
+                    {"text": "取消", "callback_data": "plex:cancel"},
+                    action["data"]["keyboard"][-1],
+                )
+
+    async def test_audio_and_subtitle_candidates_paginate_with_absolute_indexes(self):
+        cases = (
+            (
+                "audio",
+                [{
+                    "id": 100 + index,
+                    "display_title": f"Japanese Track {index + 1}",
+                    "codec": "truehd",
+                    "channels": 8,
+                    "bitrate": 4000 + index,
+                } for index in range(18)],
+            ),
+            (
+                "subtitle",
+                [{
+                    "id": 200 + index,
+                    "display_title": f"Chinese Subtitle {index + 1}",
+                    "language_code": "chi",
+                    "external": index % 2 == 0,
+                } for index in range(18)],
+            ),
+        )
+        for kind, candidates in cases:
+            with self.subTest(kind=kind):
+                job = self.make_waiting_job(kind, candidates)
+                opened = await self.feature.command({
+                    "command": "plex",
+                    "args": [str(job["id"])],
+                    "chat_id": 10,
+                    "user_id": 1,
+                })
+                first_keyboard = opened["actions"][0]["data"]["keyboard"]
+                first_picks = [
+                    button
+                    for row in first_keyboard
+                    for button in row
+                    if ":pick:" in button["callback_data"]
+                ]
+                self.assertEqual(
+                    [button["callback_data"].rsplit(":", 1)[-1]
+                     for button in first_picks],
+                    [str(index) for index in range(8)],
+                )
+                self.assertIn(
+                    {"text": "下一页", "callback_data": (
+                        f"plex:choice:{job['id']}:next"
+                    )},
+                    first_keyboard[-1],
+                )
+                self.assertIn(
+                    {"text": "取消", "callback_data": "plex:cancel"},
+                    first_keyboard[-1],
+                )
+                if kind == "audio":
+                    label = first_picks[0]["text"]
+                    self.assertIn("Japanese Track 1", label)
+                    self.assertIn("TRUEHD", label)
+                    self.assertIn("8ch", label)
+                    self.assertIn("4000kbps", label)
+
+                second = await self.feature.callback({
+                    "payload": f"choice:{job['id']}:next",
+                    "chat_id": 10,
+                    "user_id": 1,
+                })
+                second_keyboard = second["actions"][0]["data"]["keyboard"]
+                second_picks = [
+                    button
+                    for row in second_keyboard
+                    for button in row
+                    if ":pick:" in button["callback_data"]
+                ]
+                self.assertEqual(
+                    [button["callback_data"].rsplit(":", 1)[-1]
+                     for button in second_picks],
+                    [str(index) for index in range(8, 16)],
+                )
+                self.assertTrue(all(
+                    len(button["callback_data"].encode("utf-8")) <= 64
+                    for row in second_keyboard
+                    for button in row
+                ))
+
+                accepted = await self.feature.callback({
+                    "payload": f"choice:{job['id']}:pick:12",
+                    "chat_id": 10,
+                    "user_id": 1,
+                })
+                await self.runtime.tasks.pop(f"plex-choice-{job['id']}")
+                self.assertEqual(
+                    accepted["operation"]["operation_id"],
+                    opened["operation"]["operation_id"],
+                )
+                self.assertEqual(
+                    self.service.confirmed_selections[-1],
+                    (job["id"], 12),
+                )
+
+    async def test_pending_selection_cancel_persists_job_and_discloses_no_rollback(self):
+        job = self.make_waiting_job("audio", [{
+            "id": 21,
+            "display_title": "Japanese TrueHD",
+            "codec": "truehd",
+            "channels": 8,
+            "bitrate": 4000,
+        }])
+        service = PlexManagementService(self.jobs, SimpleNamespace())
+        self.feature.service = service
+        opened = await self.feature.command({
+            "command": "plex",
+            "args": [str(job["id"])],
+            "chat_id": 10,
+            "user_id": 1,
+        })
+
+        self.assertEqual(opened["operation"]["control"], "cancel")
+        self.assertIn(
+            {"text": "取消", "callback_data": "plex:cancel"},
+            opened["actions"][0]["data"]["keyboard"][-1],
+        )
+
+        cancelled = await self.feature.callback({
+            "payload": "cancel",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+
+        self.assertEqual(self.jobs.get(job["id"])["state"], "cancelled")
+        text = cancelled["operation"]["status_text"]
+        self.assertIn("后续步骤不会继续", text)
+        self.assertIn("扫描、海报和音轨/字幕写入", text)
+        self.assertIn("不会自动回滚", text)
+        self.assertEqual(service.resume_incomplete_jobs(), 0)
+        self.assertEqual(self.jobs.get(job["id"])["state"], "cancelled")
+
+    async def test_artwork_cancel_uses_photo_compatible_feedback(self):
+        job = self.make_waiting_job("artwork", [{
+            "url": "https://image.example/poster.jpg",
+            "source": "tmdb",
+        }])
+        self.feature.service = PlexManagementService(
+            self.jobs,
+            SimpleNamespace(),
+        )
+        await self.feature.command({
+            "command": "plex",
+            "args": [str(job["id"])],
+            "chat_id": 10,
+            "user_id": 1,
+        })
+
+        cancelled = await self.feature.callback({
+            "payload": "cancel",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+
+        self.assertEqual(cancelled["actions"][0]["kind"], "edit_photo")
+        self.assertEqual(
+            cancelled["actions"][0]["data"]["photo_url"],
+            "https://image.example/poster.jpg",
+        )
+        self.assertEqual(self.jobs.get(job["id"])["state"], "cancelled")
 
     async def test_choice_pick_confirms_and_continues_same_operation(self):
         job = self.make_waiting_job("artwork", [
@@ -920,6 +1123,7 @@ class FeatureSourceContractTest(unittest.TestCase):
         }
 
         self.assertEqual(commands["scan"], "扫描 Plex 媒体库")
+        self.assertEqual(manifest["core_api"], ">=1.2,<2.0")
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")

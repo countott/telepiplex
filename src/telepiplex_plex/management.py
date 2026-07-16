@@ -1326,6 +1326,22 @@ class PlexManagementService:
             on_stage=on_stage,
         )
 
+    def cancel_pending_selection(self, job_id):
+        job = self.jobs.get(job_id)
+        if not job:
+            raise LookupError(f"Plex job not found: {job_id}")
+        if job["state"] == "cancelled":
+            return job
+        if job["state"] != "awaiting_selection":
+            raise ValueError(
+                f"Plex job {job_id} is not awaiting a selection"
+            )
+        return self.jobs.update(
+            job_id,
+            state="cancelled",
+            error="cancelled while awaiting enhancement selection",
+        )
+
     def resume_incomplete_jobs(self, executor=None):
         jobs = [
             job
@@ -1333,6 +1349,7 @@ class PlexManagementService:
             if job["state"] not in {
                 "completed",
                 "awaiting_selection",
+                "cancelled",
             }
         ]
         for job in jobs:

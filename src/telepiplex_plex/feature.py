@@ -289,6 +289,11 @@ class PlexFeature:
         page = min(max(int(page), 0), page_count - 1)
         visible = libraries[page * 8:(page + 1) * 8]
         keyboard = []
+        if libraries:
+            keyboard.append([{
+                "text": "扫描全部媒体库",
+                "callback_data": "plex:scan:all",
+            }])
         for library in visible:
             library_id = str(library["id"])
             callback_data = f"plex:scan:{library_id}"
@@ -297,11 +302,6 @@ class PlexFeature:
             keyboard.append([{
                 "text": str(library.get("title") or library_id),
                 "callback_data": callback_data,
-            }])
-        if libraries:
-            keyboard.append([{
-                "text": "扫描全部媒体库",
-                "callback_data": "plex:scan:all",
             }])
         navigation = []
         if page > 0:
@@ -314,8 +314,11 @@ class PlexFeature:
                 "text": "下一页",
                 "callback_data": f"plex:scan:page:{page + 1}",
             })
-        if navigation:
-            keyboard.append(navigation)
+        navigation.append({
+            "text": "取消",
+            "callback_data": "plex:scan:cancel",
+        })
+        keyboard.append(navigation)
         text = (
             f"请选择要扫描的 Plex 媒体库（{page + 1}/{page_count}）："
             if libraries
@@ -330,6 +333,13 @@ class PlexFeature:
         return {"actions": [action]}
 
     async def _scan_callback(self, request, service, payload):
+        if payload == "scan:cancel":
+            return {
+                "actions": [{
+                    "kind": "edit_message",
+                    "text": "已取消 Plex 扫描选择。",
+                }]
+            }
         if payload.startswith("scan:page:"):
             try:
                 page = int(payload.rsplit(":", 1)[1])
@@ -484,7 +494,13 @@ class PlexFeature:
         if action in {"prev", "next"} and len(parts) == 3:
             current = int(waiting.get("candidate_index") or 0)
             offset = -1 if action == "prev" else 1
-            index = (current + offset) % len(candidates)
+            if str(waiting.get("kind") or "") == "artwork":
+                index = (current + offset) % len(candidates)
+            else:
+                page_count = max((len(candidates) + 7) // 8, 1)
+                current_page = min(current // 8, page_count - 1)
+                page = min(max(current_page + offset, 0), page_count - 1)
+                index = page * 8
             waiting = await asyncio.to_thread(
                 service.set_selection_index, job_id, index
             )
@@ -493,7 +509,7 @@ class PlexFeature:
                 state="awaiting_input",
                 stage=str(waiting["kind"]),
                 status_text=self._selection_text(job, waiting),
-                control="exit",
+                control="cancel",
                 details=self._selection_details(job, waiting),
             )
             return {
@@ -553,7 +569,7 @@ class PlexFeature:
                 state="awaiting_input",
                 stage=str(waiting["kind"]),
                 status_text=self._selection_text(job, waiting),
-                control="exit",
+                control="cancel",
                 kind="selection",
             )
             operation_id = view["operation_id"]
@@ -563,7 +579,7 @@ class PlexFeature:
             "state": "awaiting_input",
             "stage": str(waiting["kind"]),
             "status_text": self._selection_text(job, waiting),
-            "control": "exit",
+            "control": "cancel",
             "details": self._selection_details(job, waiting),
         })
         return self._operation_view(operation)
@@ -585,11 +601,14 @@ class PlexFeature:
             (job.get("payload") or {}).get("resource_name")
             or f"Job {job.get('id')}"
         )
-        position = (
-            f"（{index + 1}/{len(candidates)}）"
-            if candidates and kind == "artwork"
-            else ""
-        )
+        if candidates and kind == "artwork":
+            position = f"（{index + 1}/{len(candidates)}）"
+        elif candidates:
+            page_count = max((len(candidates) + 7) // 8, 1)
+            page = min(index // 8, page_count - 1)
+            position = f"（第 {page + 1}/{page_count} 页）"
+        else:
+            position = ""
         return (
             f"Plex 任务 #{job['id']}：{name}\n"
             f"请选择{kind_labels.get(kind, '候选')}{position}。"
@@ -637,10 +656,16 @@ class PlexFeature:
                 "text": text,
                 "data": {
                     "photo_url": str(candidates[index].get("url") or ""),
-                    "keyboard": keyboard,
+                    "keyboard": keyboard + [[{
+                        "text": "取消",
+                        "callback_data": "plex:cancel",
+                    }]],
                 },
             }
 
+        page_count = max((len(candidates) + 7) // 8, 1)
+        page = min(index // 8, page_count - 1)
+        start = page * 8
         keyboard = [
             [{
                 "text": self._candidate_label(kind, candidate),
@@ -648,31 +673,52 @@ class PlexFeature:
                     f"plex:choice:{job['id']}:pick:{candidate_index}"
                 ),
             }]
-            for candidate_index, candidate in enumerate(candidates[:10])
+            for candidate_index, candidate in enumerate(
+                candidates[start:start + 8],
+                start=start,
+            )
         ]
+        controls = []
+        if page > 0:
+            controls.append({
+                "text": "上一页",
+                "callback_data": f"plex:choice:{job['id']}:prev",
+            })
+        if page + 1 < page_count:
+            controls.append({
+                "text": "下一页",
+                "callback_data": f"plex:choice:{job['id']}:next",
+            })
+        controls.append({
+            "text": "取消",
+            "callback_data": "plex:cancel",
+        })
         return {
             "kind": "edit_message" if edit else "send_message",
             "text": text,
-            "data": {"keyboard": keyboard},
+            "data": {"keyboard": keyboard + [controls]},
         }
 
     @staticmethod
     def _candidate_label(kind, candidate):
         candidate_id = str(candidate.get("id") or "?")
-        language = str(
-            candidate.get("title")
-            or candidate.get("display_title")
+        name = str(
+            candidate.get("display_title")
+            or candidate.get("title")
             or candidate.get("language")
             or candidate.get("language_code")
             or "未知语言"
         )
         if kind == "audio":
             codec = str(candidate.get("codec") or "未知格式").upper()
-            channels = candidate.get("channels")
-            channel_text = f" · {channels}ch" if channels else ""
-            return f"#{candidate_id} · {language} · {codec}{channel_text}"
+            channels = int(candidate.get("channels") or 0)
+            bitrate = int(candidate.get("bitrate") or 0)
+            return (
+                f"#{candidate_id} · {name} · {codec} · "
+                f"{channels}ch · {bitrate}kbps"
+            )
         location = "外挂" if candidate.get("external") else "内嵌"
-        return f"#{candidate_id} · {language} · {location}"
+        return f"#{candidate_id} · {name} · {location}"
 
     async def _run_selection(self, operation_id, job_id, index):
         try:
@@ -940,7 +986,7 @@ class PlexFeature:
                     state="awaiting_input",
                     stage=str(selection["kind"]),
                     status_text=self._selection_text(waiting, selection),
-                    control="exit",
+                    control="cancel",
                     details=self._selection_details(waiting, selection),
                 )
         failed = [job for job in results if job.get("state") == "failed"]
@@ -974,13 +1020,17 @@ class PlexFeature:
             operation_id,
             state="cancelled",
             stage=operation.get("stage") or "cancelled",
-            status_text=(
-                "Plex 任务已停止，不再执行后续步骤。"
-                + (f" 已完成步骤：{'、'.join(effects)}。" if effects else "")
-                + " Plex 已接受的操作不自动回滚。"
-            ),
+            status_text=self._cancelled_status(effects),
             control="",
             details={"completed_effects": effects},
+        )
+
+    @staticmethod
+    def _cancelled_status(effects=()):
+        return (
+            "已取消 Plex 任务，后续步骤不会继续。"
+            + (f" 已完成步骤：{'、'.join(effects)}。" if effects else "")
+            + " 已由 Plex 接受的扫描、海报和音轨/字幕写入不会自动回滚。"
         )
 
     def _is_cancelled(self, operation_id):
@@ -1027,7 +1077,30 @@ class PlexFeature:
         if cancel_event is not None:
             cancel_event.set()
         task = operation.get("task")
-        if operation.get("state") == "awaiting_input" or task is None:
+        if operation.get("state") == "awaiting_input":
+            job_id = int(
+                (operation.get("details") or {}).get("job_id") or 0
+            )
+            if job_id:
+                service = await self._ensure_service()
+                job = await asyncio.to_thread(
+                    service.cancel_pending_selection, job_id
+                )
+                terminal = self._advance_operation(
+                    operation_id,
+                    state="cancelled",
+                    stage=operation.get("stage") or "selection",
+                    status_text=self._cancelled_status(),
+                    control="",
+                    details={
+                        "job_id": job_id,
+                        "job_state": str(job.get("state") or ""),
+                    },
+                )
+                return {"actions": [], "operation": terminal}
+            terminal = await self._finish_cancelled(operation_id)
+            return {"actions": [], "operation": terminal}
+        if task is None:
             terminal = await self._finish_cancelled(operation_id)
             return {"actions": [], "operation": terminal}
         cancelling = self._advance_operation(
@@ -1055,16 +1128,22 @@ class PlexFeature:
         operation = self._operation_for_owner(self._owner_key(request))
         if operation is None:
             return self._message("⚠️ Plex 交互已失效。")
+        photo_url = str(
+            (operation.get("details") or {}).get("photo_url") or ""
+        )
         result = await self.operation_control({
             "operation_id": operation["operation_id"],
             "action": action,
             "revision": operation["revision"],
         })
+        feedback = {
+            "kind": "edit_photo" if photo_url else "edit_message",
+            "text": result["operation"]["status_text"],
+        }
+        if photo_url:
+            feedback["data"] = {"photo_url": photo_url}
         return {
-            "actions": [{
-                "kind": "edit_message",
-                "text": result["operation"]["status_text"],
-            }],
+            "actions": [feedback],
             "session": {"state": "close"},
             "operation": result["operation"],
         }
