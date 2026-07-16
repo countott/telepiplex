@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import yaml
+
 from telepiplex_plugin_sdk.media_metadata import attach_media_metadata
 
 from telepiplex_renaming.models import DownloadCompletedEvent
@@ -1258,10 +1260,20 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
 
 
 class FeatureSourceContractTest(unittest.TestCase):
+    def test_release_identity_uses_new_confirmed_identity_version(self):
+        manifest = yaml.safe_load(
+            (ROOT / "manifest.yaml").read_text(encoding="utf-8")
+        )
+        project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+        self.assertEqual(manifest["version"], "1.2.0")
+        self.assertEqual(manifest["core_api"], ">=1.1,<2.0")
+        self.assertIn('version = "1.2.0"', project)
+
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("dist/renaming-1.1.0.tpx", source)
-        self.assertNotIn("dist/renaming-1.0.0.tpx", source)
+        self.assertIn("dist/renaming-1.2.0.tpx", source)
+        self.assertNotIn("dist/renaming-1.1.0.tpx", source)
 
     def test_source_has_no_core_telegram_or_init_imports(self):
         forbidden = []
