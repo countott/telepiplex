@@ -87,32 +87,99 @@ class MediaSearchFeature:
         raw_query = " ".join(str(payload.get("query") or "").split())
         if not raw_query:
             raise FeatureError("invalid_query", "metadata query is required")
-        plan_id = f"resolve-{uuid.uuid4().hex[:16]}"
-        try:
-            plan = await self.plan_builder(raw_query, plan_id)
-            contract = confirm_media_metadata(plan)
-            identity = contract.get("identity") or {}
-            return {
-                "media_metadata": contract,
-                "naming_metadata": {
-                    "source": "media-search",
-                    "media_type": (
-                        (contract.get("placement") or {}).get("library_type") or ""
-                    ),
-                    "chinese_title": identity.get("chinese_title") or "",
-                    "english_title": identity.get("english_title") or "",
-                    "year": identity.get("year") or "",
-                },
-                "source_queries": deepcopy(plan.get("source_queries") or {}),
-                "evidence": deepcopy(contract.get("evidence") or {}),
-            }
-        except SearchPlanningError as exc:
+        entity = self.registry.resolve_exact(raw_query) if self.registry else None
+        if not isinstance(entity, dict):
             raise FeatureError(
                 "metadata_unresolved",
-                f"metadata resolution failed: {getattr(exc, 'code', str(exc))}",
-            ) from exc
-        finally:
-            self.allocator.release(plan_id)
+                "metadata resolution requires an exact previously selected entity",
+            )
+        contract = self._registry_contract(entity)
+        identity = contract["identity"]
+        return {
+            "media_metadata": contract,
+            "naming_metadata": {
+                "source": "media-search-registry",
+                "media_type": contract["placement"]["library_type"],
+                "chinese_title": identity.get("chinese_title") or "",
+                "english_title": identity.get("english_title") or "",
+                "year": identity.get("year") or "",
+            },
+            "source_queries": {},
+            "evidence": deepcopy(contract.get("evidence") or {}),
+        }
+
+    @staticmethod
+    def _registry_contract(entity: dict) -> dict:
+        relation = entity.get("relation") if isinstance(entity.get("relation"), dict) else {}
+        mapping_kind = str(relation.get("mapping_kind") or "standalone")
+        related = mapping_kind != "standalone"
+        library_type = "series" if related or entity.get("content_kind") == "series" else "movie"
+        target = {}
+        if related:
+            target = {
+                "chinese_title": relation.get("target_chinese_title") or "",
+                "english_title": relation.get("target_canonical_latin_title") or "",
+                "year": relation.get("target_year") or "",
+                "external_ids": deepcopy(relation.get("target_external_ids") or {}),
+            }
+        season = relation.get("season_number") if related else None
+        episode = relation.get("episode_number") if related else None
+        items = []
+        if related and season is not None and episode is not None:
+            items = [{
+                "item_id": relation.get("tvdb_episode_id") or f"S{int(season):02d}E{int(episode):03d}",
+                "content_role": "special",
+                "season_number": int(season),
+                "episode_number": int(episode),
+            }]
+        contract = {
+            "schema_version": 1,
+            "metadata_id": f"registry:{entity['entity_key']}",
+            "confirmed": True,
+            "identity": {
+                "chinese_title": entity.get("chinese_title") or entity.get("canonical_latin_title") or "",
+                "english_title": entity.get("canonical_latin_title") or "",
+                "original_title": entity.get("original_title") or "",
+                "original_language": entity.get("original_language") or "",
+                "official_english_title": entity.get("official_english_title") or "",
+                "romanized_original_title": entity.get("romanized_original_title") or "",
+                "canonical_search_title": entity.get("canonical_search_title") or "",
+                "search_title_policy": entity.get("search_title_policy") or "",
+                "year": entity.get("year") or "",
+                "content_kind": entity.get("content_kind") or library_type,
+                "poster_url": entity.get("poster_url") or "",
+                "poster_source": entity.get("poster_source") or "",
+                "external_ids": deepcopy(entity.get("external_ids") or {}),
+            },
+            "relation": {
+                "type": relation.get("relation_type") or "standalone",
+                "target_series": target,
+                "source": "selected_entity_registry",
+            },
+            "placement": {
+                "library_type": library_type,
+                "category_kind": f"live_action_{library_type}",
+                "season_number": season,
+                "episode_number": episode,
+                "mapping_kind": mapping_kind,
+                "mapping_source": "selected_entity_registry",
+                "tvdb_episode_id": relation.get("tvdb_episode_id") or "",
+            },
+            "source_entry": {
+                "title": entity.get("chinese_title") or entity.get("canonical_latin_title") or "",
+                "external_id": entity.get("entity_key") or "",
+            },
+            "items": items,
+            "evidence": {
+                "decision": {
+                    "mode": "exact_registry_rehydrate",
+                    "scoring_version": entity.get("scoring_version") or "",
+                }
+            },
+            "warnings": [],
+        }
+        validated = confirm_media_metadata({"media_metadata": contract})
+        return validated
 
     async def command(self, request: dict) -> dict:
         command = str(request.get("command") or "")
@@ -210,6 +277,10 @@ class MediaSearchFeature:
             return result
         if action == "confirm":
             return self._start_release_search_task(plan_id, stored)
+        if action == "browse" and len(parts) == 3:
+            return self._browse_candidate(plan_id, stored, parts[2])
+        if action == "select" and len(parts) == 3:
+            return self._select_candidate(plan_id, stored, parts[2])
         if action == "release" and len(parts) == 3:
             return self._start_submission_task(plan_id, stored, parts[2])
         raise FeatureError("invalid_callback", "media-search callback action is invalid")
@@ -454,9 +525,25 @@ class MediaSearchFeature:
             return self._closed(f"❌ 无法生成媒体元数据：{message}")
         except Exception as exc:
             return self._closed(f"❌ 媒体规划失败：{type(exc).__name__}")
+        candidates = plan.get("candidates") if isinstance(plan.get("candidates"), list) else []
+        if not candidates:
+            candidates = [{
+                "candidate_key": f"legacy:{plan_id}",
+                "score": {"total": 100},
+                "recommended": True,
+                "selectable": True,
+                "media_metadata": plan.get("media_metadata") or {},
+                "prowlarr_queries": list(plan.get("prowlarr_queries") or []),
+                "poster_url": (plan.get("media_metadata") or {}).get("identity", {}).get("poster_url") or "",
+                "reasons": [],
+            }]
+        selectable = [item for item in candidates if item.get("selectable") is not False]
+        if not selectable:
+            self.allocator.release(plan_id)
+            return self._closed("❌ 候选最高评分低于 65，受控检索后仍不足以安全确认。")
         route = resolve_category_route(
             self.config,
-            (plan.get("media_metadata", {}).get("placement") or {}).get("category_kind"),
+            (selectable[0].get("media_metadata", {}).get("placement") or {}).get("category_kind"),
         )
         if not route:
             self.allocator.release(plan_id)
@@ -465,26 +552,120 @@ class MediaSearchFeature:
             "owner": self._owner_key(request),
             "created_at": time.time(),
             "plan": plan,
+            "candidates": tuple(deepcopy(candidates)),
             "selected_path": route["path"],
             "results": [],
             "operation_id": operation_id,
         }
-        contract = plan["media_metadata"]
-        identity = contract["identity"]
-        placement = contract["placement"]
-        title = identity.get("chinese_title") or identity.get("english_title") or "未知"
-        marker = placement.get("mapping_kind") or "unknown"
+        action = self._candidate_action(self.plans[plan_id], 0, edit=False)
         return {
-            "actions": [{
-                "kind": "send_message",
-                "text": f"媒体方案：{title} ({identity.get('year') or '年份未知'})\n映射：{marker}\n确认后搜索片源。",
-                "data": {"keyboard": [[
-                    {"text": "确认并搜索", "callback_data": f"media-search:confirm:{plan_id}"},
-                    {"text": "退出", "callback_data": f"media-search:cancel:{plan_id}"},
-                ]]},
-            }],
+            "actions": [action],
             "session": {"state": "close"},
         }
+
+    def _candidate_action(self, stored: dict, index: int, *, edit: bool) -> dict:
+        candidates = stored["candidates"]
+        candidate = candidates[index]
+        contract = candidate["media_metadata"]
+        identity = contract.get("identity") or {}
+        placement = contract.get("placement") or {}
+        score = candidate.get("score") or {}
+        title = identity.get("chinese_title") or identity.get("english_title") or "未知"
+        relation = (contract.get("relation") or {}).get("type") or "standalone"
+        recommended = " · 推荐" if candidate.get("recommended") else ""
+        text = (
+            f"候选 {index + 1}/{len(candidates)}{recommended}\n"
+            f"{title} ({identity.get('year') or '年份未知'})\n"
+            f"类型：{placement.get('library_type') or '未知'} · 关系：{relation}\n"
+            f"评分：{score.get('total', 0)}/100"
+        )
+        navigation = []
+        if len(candidates) > 1:
+            navigation = [{
+                "text": "上一项",
+                "callback_data": f"media-search:browse:{stored['plan']['plan_id']}:{(index - 1) % len(candidates)}",
+            }, {
+                "text": "下一项",
+                "callback_data": f"media-search:browse:{stored['plan']['plan_id']}:{(index + 1) % len(candidates)}",
+            }]
+        keyboard = [navigation] if navigation else []
+        if candidate.get("selectable") is not False:
+            callback_data = (
+                f"media-search:confirm:{stored['plan']['plan_id']}"
+                if str(candidate.get("candidate_key") or "").startswith("legacy:")
+                else f"media-search:select:{stored['plan']['plan_id']}:{index}"
+            )
+            keyboard.append([{
+                "text": "选择并搜索片源",
+                "callback_data": callback_data,
+            }])
+        keyboard.append([{
+            "text": "退出",
+            "callback_data": f"media-search:cancel:{stored['plan']['plan_id']}",
+        }])
+        poster = str(candidate.get("poster_url") or "")
+        data = {"keyboard": keyboard, "candidate_key": candidate.get("candidate_key") or ""}
+        if poster.startswith("https://"):
+            data["photo_url"] = poster
+            kind = "edit_photo" if edit else "send_photo"
+        else:
+            kind = "edit_message" if edit else "send_message"
+        return {"kind": kind, "text": text, "data": data}
+
+    def _browse_candidate(self, plan_id: str, stored: dict, raw_index: str) -> dict:
+        try:
+            index = int(raw_index)
+            stored["candidates"][index]
+        except (ValueError, IndexError):
+            raise FeatureError("invalid_candidate", "selected candidate is invalid") from None
+        action = self._candidate_action(stored, index, edit=True)
+        operation = self._advance_operation(
+            stored["operation_id"],
+            state="awaiting_input",
+            stage="candidate_selection",
+            status_text=action["text"],
+            control="exit",
+            details=deepcopy(action["data"]),
+        )
+        return {"actions": [action], "operation": operation}
+
+    def _select_candidate(self, plan_id: str, stored: dict, raw_index: str) -> dict:
+        try:
+            index = int(raw_index)
+            candidate = deepcopy(stored["candidates"][index])
+        except (ValueError, IndexError):
+            raise FeatureError("invalid_candidate", "selected candidate is invalid") from None
+        if candidate.get("selectable") is False:
+            return {"actions": [self._candidate_action(stored, index, edit=True)]}
+        selected_plan = {
+            "plan_id": plan_id,
+            "media_metadata": candidate["media_metadata"],
+            "prowlarr_queries": list(candidate.get("prowlarr_queries") or []),
+            "source_queries": deepcopy(stored["plan"].get("source_queries") or {}),
+        }
+        try:
+            confirm_media_metadata(selected_plan)
+            route = resolve_category_route(
+                self.config,
+                (candidate["media_metadata"].get("placement") or {}).get("category_kind"),
+            )
+            if not route:
+                raise ValueError("candidate route is unavailable")
+            if candidate.get("entity_snapshot"):
+                if self.registry is None:
+                    raise ValueError("canonical entity registry is unavailable")
+                self.registry.upsert_selected(
+                    candidate["entity_snapshot"],
+                    candidate.get("relation_snapshot") or {},
+                )
+        except Exception:
+            action = self._candidate_action(stored, index, edit=True)
+            action["text"] += "\n❌ 选中实体无法安全持久化，请重试或退出。"
+            return {"actions": [action]}
+        stored["plan"] = selected_plan
+        stored["selected_path"] = route["path"]
+        stored["selected_candidate_key"] = candidate.get("candidate_key") or ""
+        return self._start_release_search_task(plan_id, stored)
 
     async def _confirm_and_search(self, plan_id: str, stored: dict) -> dict:
         plan = stored["plan"]

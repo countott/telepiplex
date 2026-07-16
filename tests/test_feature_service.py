@@ -1,5 +1,7 @@
 import ast
 import asyncio
+from copy import deepcopy
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -40,6 +42,56 @@ def search_plan():
     }
 
 
+def ranked_search_plan():
+    result = search_plan()
+    candidates = []
+    for index, (title, year, poster) in enumerate((
+        ("English Title", "2024", "https://image.example/top.jpg"),
+        ("English Alternate", "2023", "https://image.example/second.jpg"),
+    )):
+        contract = deepcopy(result["media_metadata"])
+        contract["identity"].update({
+            "chinese_title": f"中文标题{index + 1}",
+            "english_title": title,
+            "year": year,
+            "poster_url": poster,
+            "poster_source": "tvdb",
+        })
+        candidates.append({
+            "candidate_key": f"tvdb:movie:{index + 1}",
+            "score": {"total": 92 - index * 10},
+            "recommended": index == 0,
+            "selectable": True,
+            "media_metadata": contract,
+            "prowlarr_queries": [f"{title} {year}"],
+            "poster_url": poster,
+            "reasons": [],
+            "entity_snapshot": {
+                "entity_key": f"tvdb:movie:{index + 1}",
+                "content_kind": "movie",
+                "year": year,
+                "chinese_title": f"中文标题{index + 1}",
+                "original_title": title,
+                "original_language": "en",
+                "official_english_title": title,
+                "romanized_original_title": "",
+                "canonical_search_title": title,
+                "search_title_policy": "official_english",
+                "canonical_latin_title": title,
+                "poster_url": poster,
+                "poster_source": "tvdb",
+                "external_ids": {"tvdb": str(index + 1)},
+                "scoring_version": "media-entity-v1",
+            },
+            "relation_snapshot": {
+                "relation_type": "standalone",
+                "mapping_kind": "standalone",
+            },
+        })
+    result["candidates"] = candidates
+    return result
+
+
 class FakeCore:
     def __init__(self):
         self.calls = []
@@ -73,9 +125,14 @@ class FakeRuntime:
 
 class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        from telepiplex_media_search.entity_registry import CanonicalEntityRegistry
         from telepiplex_media_search.service import MediaSearchFeature
 
         self.core = FakeCore()
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.registry = CanonicalEntityRegistry(
+            Path(self.tempdir.name) / "media_entities.db"
+        )
         self.search_queries = []
 
         async def planner(raw_query, plan_id):
@@ -109,6 +166,7 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             release_search=search,
             release_rank=lambda items, limit: items[:limit],
             release_resolver=lambda item: item["magnet_url"],
+            registry=self.registry,
         )
         self.runtime = FakeRuntime()
         self.feature.bind_runtime(self.runtime)
@@ -116,6 +174,7 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         for awaitable in self.runtime.tasks.values():
             awaitable.close()
+        self.tempdir.cleanup()
 
     async def _prepare_search(self):
         command = await self.feature.command({
@@ -448,11 +507,99 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(cancelled["operation"]["state"], "cancelled")
 
-    async def test_metadata_capability_requeries_sources_without_downloading(self):
-        self.feature.allocator = Mock()
+    async def test_ranked_plan_renders_top_candidate_poster(self):
+        async def planner(_raw_query, plan_id):
+            result = ranked_search_plan()
+            result["plan_id"] = plan_id
+            return result
+
+        self.feature.plan_builder = planner
+        await self.feature.command({
+            "command": "s", "args": ["候选"], "user_id": 1, "chat_id": 10,
+        })
+        await self.runtime.run("media-search-plan-")
+
+        report = self.core.reports[-1]
+        self.assertEqual(report["details"]["photo_url"], "https://image.example/top.jpg")
+        self.assertIn("92/100", report["status_text"])
+
+    async def test_browse_does_not_persist_and_select_persists_once(self):
+        async def planner(_raw_query, plan_id):
+            result = ranked_search_plan()
+            result["plan_id"] = plan_id
+            return result
+
+        self.feature.plan_builder = planner
+        await self.feature.command({
+            "command": "s", "args": ["候选"], "user_id": 1, "chat_id": 10,
+        })
+        await self.runtime.run("media-search-plan-")
+        next_callback = self.core.reports[-1]["details"]["keyboard"][0][1]["callback_data"]
+        plan_id = next_callback.split(":")[2]
+
+        browsed = await self.feature.callback({
+            "payload": f"browse:{plan_id}:1", "user_id": 1, "chat_id": 10,
+        })
+        self.assertEqual(self.registry.count(), 0)
+        self.assertEqual(browsed["actions"][0]["kind"], "edit_photo")
+
+        selected = await self.feature.callback({
+            "payload": f"select:{plan_id}:1", "user_id": 1, "chat_id": 10,
+        })
+        self.assertEqual(self.registry.count(), 1)
+        self.assertEqual(selected["operation"]["stage"], "prowlarr_search")
+        self.assertEqual(
+            self.registry.get("tvdb:movie:2")["canonical_latin_title"],
+            "English Alternate",
+        )
+
+    async def test_cancel_discards_ranked_candidates_without_persistence(self):
+        async def planner(_raw_query, plan_id):
+            result = ranked_search_plan()
+            result["plan_id"] = plan_id
+            return result
+
+        self.feature.plan_builder = planner
+        await self.feature.command({
+            "command": "s", "args": ["候选"], "user_id": 1, "chat_id": 10,
+        })
+        await self.runtime.run("media-search-plan-")
+        callback = self.core.reports[-1]["details"]["keyboard"][-1][0]["callback_data"]
+        plan_id = callback.rsplit(":", 1)[-1]
+
+        await self.feature.callback({
+            "payload": f"cancel:{plan_id}", "user_id": 1, "chat_id": 10,
+        })
+
+        self.assertNotIn(plan_id, self.feature.plans)
+        self.assertEqual(self.registry.count(), 0)
+
+    async def test_metadata_capability_only_rehydrates_exact_selected_entity(self):
+        self.registry.upsert_selected({
+            "entity_key": "tvdb:movie:1",
+            "content_kind": "movie",
+            "year": "2024",
+            "chinese_title": "中文标题",
+            "original_title": "English Title",
+            "original_language": "en",
+            "official_english_title": "English Title",
+            "romanized_original_title": "",
+            "canonical_search_title": "English Title",
+            "search_title_policy": "official_english",
+            "canonical_latin_title": "English Title",
+            "poster_url": "",
+            "poster_source": "",
+            "external_ids": {"tvdb": "1"},
+            "scoring_version": "media-entity-v1",
+        }, {"relation_type": "standalone", "mapping_kind": "standalone"})
+
+        async def forbidden_planner(*_args):
+            raise AssertionError("noninteractive resolution must not plan")
+
+        self.feature.plan_builder = forbidden_planner
         resolved = await self.feature.metadata_capability({
             "method": "resolve_metadata",
-            "payload": {"query": "English.Title.2024.1080p.WEB-DL"},
+            "payload": {"query": "English Title 2024"},
             "context": {"idempotency_key": "rename-job-1"},
         })
 
@@ -461,10 +608,16 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             resolved["media_metadata"]["identity"]["english_title"],
             "English Title",
         )
-        self.assertEqual(resolved["naming_metadata"]["source"], "media-search")
+        self.assertEqual(resolved["naming_metadata"]["source"], "media-search-registry")
         self.assertEqual(self.core.calls, [])
-        released_plan_id = self.feature.allocator.release.call_args.args[0]
-        self.assertTrue(released_plan_id.startswith("resolve-"))
+
+        from telepiplex_plugin_sdk import FeatureError
+        with self.assertRaises(FeatureError) as raised:
+            await self.feature.metadata_capability({
+                "method": "resolve_metadata",
+                "payload": {"query": "English Title"},
+            })
+        self.assertEqual(raised.exception.code, "metadata_unresolved")
 
 
 class FeatureSourceContractTest(unittest.TestCase):
