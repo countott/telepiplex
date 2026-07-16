@@ -175,6 +175,20 @@ identity必须包含中英文标题、year、content_kind、summary、original_r
 输入事实：
 """
 
+RELATION_SCOUT_PROMPT = """你是影视作品关系审查员。只返回 JSON，不要返回 Markdown。
+你只能引用输入中的 candidate_key 和 fact_id，不得编造标题、年份、稳定 ID、集号或来源事实。
+最多输出 3 个关系假设；假设不是事实，后续必须由程序定向复查。
+结构：{"hypotheses":[{"candidate_key":"string","relation_type":"standalone|prequel|sequel|spin_off|special|extension_movie","target_candidate_key":"string","fact_ids":["string"],"reason":"string"}]}
+输入事实：
+"""
+
+SCORECARD_PROMPT = """你是影视候选固定量表评分员。只返回 JSON，不要返回 Markdown。
+不得输出 media_metadata、title_zh、title_en、数据库字段或任何新事实/稳定 ID。
+只能引用输入已有的 candidate_key 与 fact_id。逐候选按固定上限评分：标题等价 20、关系一致 10、意图相关 10。
+结构：{"scorecards":[{"candidate_key":"string","title_equivalence":{"score":0,"fact_ids":["string"],"reason":"string"},"relation_consistency":{"score":0,"fact_ids":["string"],"reason":"string"},"intent_relevance":{"score":0,"fact_ids":["string"],"reason":"string"}}]}
+输入事实：
+"""
+
 def check_ai_api_available():
     url = runtime_context.config.get("ai", {}).get("api_url", "")
     if not url:
@@ -353,6 +367,42 @@ def infer_media_metadata_draft_with_ai(context: dict):
     _log_ai_info(f"AI中立元数据原始响应 result={_compact_json_for_log(result)}")
     parsed = parse_ai_json_response(result)
     return parsed if isinstance(parsed, dict) else None
+
+
+def infer_relation_hypotheses_with_ai(context: dict):
+    if not check_ai_api_available():
+        return None
+    prompt = RELATION_SCOUT_PROMPT + json.dumps(
+        context or {}, ensure_ascii=False, separators=(",", ":")
+    )
+    result = chat_completion(prompt, max_tokens=1800)
+    parsed = parse_ai_json_response(result)
+    if not isinstance(parsed, dict) or set(parsed) != {"hypotheses"}:
+        return None
+    hypotheses = parsed.get("hypotheses")
+    if not isinstance(hypotheses, list) or any(
+        not isinstance(item, dict) for item in hypotheses
+    ):
+        return None
+    return {"hypotheses": hypotheses[:3]}
+
+
+def score_candidates_with_ai(context: dict):
+    if not check_ai_api_available():
+        return None
+    prompt = SCORECARD_PROMPT + json.dumps(
+        context or {}, ensure_ascii=False, separators=(",", ":")
+    )
+    result = chat_completion(prompt, max_tokens=2200)
+    parsed = parse_ai_json_response(result)
+    if not isinstance(parsed, dict) or set(parsed) != {"scorecards"}:
+        return None
+    scorecards = parsed.get("scorecards")
+    if not isinstance(scorecards, list) or any(
+        not isinstance(item, dict) for item in scorecards
+    ):
+        return None
+    return {"scorecards": scorecards[:5]}
 
 
 def normalize_search_query_with_ai(raw_query: str):
