@@ -10,7 +10,6 @@ from telepiplex_plugin_sdk import FeatureError
 from .adapters.fanart import FanartAdapter
 from .adapters.plex import PlexAdapter
 from .adapters.tmdb import TmdbAdapter
-from .ai import PlexAIOrchestrator
 from .config_wizard import PlexConfigWizard
 from .jobs import PlexJobRepository
 from .management import PlexManagementService, PlexOperationCancelled
@@ -49,13 +48,10 @@ class PlexFeature:
         self.service_factory = service_factory or self._build_service
         self.service = None
         self.service_error = ""
-        self.ai = None
-        self.ai_error = ""
         self.mcp_handle = None
         self.runtime = None
         self.loop = None
         self._service_lock = asyncio.Lock()
-        self.pending_writes = {}
         self.operations = {}
         self.owner_operations = {}
         self.job_operation_ids = {}
@@ -229,6 +225,10 @@ class PlexFeature:
             service = await self._ensure_service()
         except Exception:
             return self._message(f"⚠️ Plex Feature 暂不可用：{self.service_error or 'configuration error'}")
+        if command == "scan":
+            if request.get("args"):
+                return self._message("用法：/scan")
+            return await self._scan_menu(service)
         text = " ".join(str(item) for item in request.get("args") or []).strip()
         if not text:
             jobs = await asyncio.to_thread(service.list_jobs, 5)
@@ -239,28 +239,20 @@ class PlexFeature:
                 f"#{job['id']} {job['state']} {job['payload'].get('resource_name') or ''}"
                 for job in jobs
             )
-            if self.ai_error:
-                lines.append(f"AI 已隔离：{self.ai_error}")
             return self._message("\n".join(lines))
-        if self.ai is None:
-            return self._message(f"Plex AI 未启用或已隔离：{self.ai_error or 'missing configuration'}")
-        operation = self._new_operation(
-            request,
-            state="running",
-            stage="ai_planning",
-            status_text="Plex AI 正在规划只读操作。",
-            control="cancel",
-            kind="ai",
+        if not text.isdecimal():
+            return self._message("用法：/plex [Job ID]")
+        job = await asyncio.to_thread(service.get_job, int(text))
+        if not job:
+            return self._message(f"⚠️ Plex 任务不存在：#{text}")
+        waiting = await asyncio.to_thread(
+            service.pending_selection, job["id"]
         )
-        operation_id = operation["operation_id"]
-        task_id = f"plex-ai-{operation_id}"
-        task = self.runtime.spawn(
-            self._run_ai(operation_id, text),
-            task_id=task_id,
-        )
-        self.operations[operation_id].update({"task": task, "task_id": task_id})
+        if not waiting:
+            return self._message(PlexManagementService.format_job_summary(job))
+        operation = self._selection_operation(request, job, waiting)
         return {
-            "actions": [{"kind": "send_message", "text": "⏳ Plex AI 正在规划..."}],
+            "actions": [self._selection_action(job, waiting)],
             "operation": operation,
         }
 
@@ -273,32 +265,10 @@ class PlexFeature:
         if payload in {"exit", "cancel"}:
             return await self._cancel_owner_interaction(request, payload)
         service = await self._ensure_service()
-        if payload.startswith("write:"):
-            token = payload.split(":", 1)[1]
-            pending = self.pending_writes.pop(token, None)
-            if not pending:
-                return self._message("⚠️ Plex 确认已失效。")
-            operation_id = str(pending.get("operation_id") or "")
-            operation = self._advance_operation(
-                operation_id,
-                state="running",
-                stage="applying_write",
-                status_text="正在执行已确认的 Plex 写操作。",
-                control="cancel",
-            )
-            task_id = f"plex-write-{operation_id}"
-            task = self.runtime.spawn(
-                self._apply_write(operation_id, token, pending, service),
-                task_id=task_id,
-            )
-            self.operations[operation_id].update({"task": task, "task_id": task_id})
-            return {
-                "actions": [{
-                    "kind": "edit_message",
-                    "text": "⏳ 正在执行已确认的 Plex 操作...",
-                }],
-                "operation": operation,
-            }
+        if payload.startswith("scan:"):
+            return await self._scan_callback(request, service, payload)
+        if payload.startswith("choice:"):
+            return await self._choice_callback(request, service, payload)
         return self._message("⚠️ Plex callback 无效。")
 
     async def message(self, request: dict) -> dict:
@@ -307,6 +277,429 @@ class PlexFeature:
                 request, self.config_wizard.message(request)
             )
         return self._message("⚠️ Plex 配置会话已失效。")
+
+    async def _scan_menu(self, service, *, page=0, edit=False):
+        libraries = await asyncio.to_thread(service.list_libraries)
+        libraries = [
+            dict(library)
+            for library in libraries
+            if str((library or {}).get("id") or "").strip()
+        ]
+        page_count = max((len(libraries) + 7) // 8, 1)
+        page = min(max(int(page), 0), page_count - 1)
+        visible = libraries[page * 8:(page + 1) * 8]
+        keyboard = []
+        for library in visible:
+            library_id = str(library["id"])
+            callback_data = f"plex:scan:{library_id}"
+            if len(callback_data.encode("utf-8")) > 64:
+                continue
+            keyboard.append([{
+                "text": str(library.get("title") or library_id),
+                "callback_data": callback_data,
+            }])
+        if libraries:
+            keyboard.append([{
+                "text": "扫描全部媒体库",
+                "callback_data": "plex:scan:all",
+            }])
+        navigation = []
+        if page > 0:
+            navigation.append({
+                "text": "上一页",
+                "callback_data": f"plex:scan:page:{page - 1}",
+            })
+        if page + 1 < page_count:
+            navigation.append({
+                "text": "下一页",
+                "callback_data": f"plex:scan:page:{page + 1}",
+            })
+        if navigation:
+            keyboard.append(navigation)
+        text = (
+            f"请选择要扫描的 Plex 媒体库（{page + 1}/{page_count}）："
+            if libraries
+            else "当前没有可扫描的 Plex 媒体库。"
+        )
+        action = {
+            "kind": "edit_message" if edit else "send_message",
+            "text": text,
+        }
+        if keyboard:
+            action["data"] = {"keyboard": keyboard}
+        return {"actions": [action]}
+
+    async def _scan_callback(self, request, service, payload):
+        if payload.startswith("scan:page:"):
+            try:
+                page = int(payload.rsplit(":", 1)[1])
+            except (TypeError, ValueError):
+                return self._message("⚠️ Plex 扫描页码无效。")
+            return await self._scan_menu(service, page=page, edit=True)
+
+        selected = payload.split(":", 1)[1]
+        libraries = await asyncio.to_thread(service.list_libraries)
+        libraries = [
+            dict(library)
+            for library in libraries
+            if str((library or {}).get("id") or "").strip()
+        ]
+        by_id = {
+            str(library["id"]): library
+            for library in libraries
+        }
+        if selected == "all":
+            if not libraries:
+                return {
+                    "actions": [{
+                        "kind": "edit_message",
+                        "text": "当前没有可扫描的 Plex 媒体库。",
+                    }]
+                }
+            library_ids = None
+            target_text = "全部媒体库"
+        else:
+            library = by_id.get(selected)
+            if not library:
+                return {
+                    "actions": [{
+                        "kind": "edit_message",
+                        "text": "⚠️ Plex 媒体库列表已变化，请重新执行 /scan。",
+                    }]
+                }
+            library_ids = [selected]
+            target_text = str(library.get("title") or selected)
+
+        operation = self._new_operation(
+            request,
+            state="running",
+            stage="scanning",
+            status_text=f"正在提交 Plex 扫描：{target_text}。",
+            control="cancel",
+            kind="manual_scan",
+        )
+        operation_id = operation["operation_id"]
+        task_id = f"plex-scan-{operation_id}"
+        task = self.runtime.spawn(
+            self._run_manual_scan(operation_id, library_ids),
+            task_id=task_id,
+        )
+        self.operations[operation_id].update({
+            "task": task,
+            "task_id": task_id,
+        })
+        return {
+            "actions": [{
+                "kind": "edit_message",
+                "text": f"⏳ 正在提交 Plex 扫描：{target_text}...",
+            }],
+            "operation": operation,
+        }
+
+    async def _run_manual_scan(self, operation_id, library_ids):
+        try:
+            service = await self._ensure_service()
+            result = await asyncio.to_thread(
+                service.scan_libraries,
+                library_ids,
+                should_cancel=lambda: self._is_cancelled(operation_id),
+            )
+            self._raise_if_cancelled(operation_id)
+            failed = list(result.get("failed") or [])
+            succeeded = list(result.get("succeeded") or [])
+            state = "failed" if failed and not succeeded else "completed"
+            await self._report_operation(
+                operation_id,
+                state=state,
+                stage=state,
+                status_text=self._scan_summary(result),
+                control="",
+                details={
+                    "succeeded": succeeded,
+                    "failed": failed,
+                },
+            )
+        except PlexOperationCancelled:
+            await self._finish_cancelled(operation_id)
+        except Exception as exc:
+            await self._report_if_active(
+                operation_id,
+                state="failed",
+                stage="scanning",
+                status_text=f"Plex 手动扫描失败：{type(exc).__name__}",
+                control="",
+            )
+
+    @staticmethod
+    def _scan_summary(result):
+        succeeded = list((result or {}).get("succeeded") or [])
+        failed = list((result or {}).get("failed") or [])
+        lines = ["Plex 媒体库扫描提交完成。"]
+        if succeeded:
+            lines.append(
+                "成功：" + "、".join(
+                    str(library.get("title") or library.get("id") or "")
+                    for library in succeeded
+                )
+            )
+        if failed:
+            lines.append(
+                "失败：" + "；".join(
+                    (
+                        str(library.get("title") or library.get("id") or "")
+                        + (
+                            f"（{library.get('error')}）"
+                            if library.get("error")
+                            else ""
+                        )
+                    )
+                    for library in failed
+                )
+            )
+        if not succeeded and not failed:
+            lines.append("没有可扫描的媒体库。")
+        return "\n".join(lines)
+
+    async def _choice_callback(self, request, service, payload):
+        parts = payload.split(":")
+        if len(parts) < 3:
+            return self._message("⚠️ Plex 选择已失效。")
+        try:
+            job_id = int(parts[1])
+        except (TypeError, ValueError):
+            return self._message("⚠️ Plex 选择已失效。")
+        job = await asyncio.to_thread(service.get_job, job_id)
+        if not job:
+            return self._message("⚠️ Plex 选择已失效。")
+        waiting = await asyncio.to_thread(service.pending_selection, job_id)
+        if not waiting:
+            return self._message("⚠️ Plex 选择已失效。")
+        operation = self._selection_operation(request, job, waiting)
+        operation_id = operation["operation_id"]
+        action = parts[2]
+        candidates = list(waiting.get("candidates") or [])
+        if not candidates:
+            return self._message("⚠️ Plex 当前没有可选候选。")
+
+        if action in {"prev", "next"} and len(parts) == 3:
+            current = int(waiting.get("candidate_index") or 0)
+            offset = -1 if action == "prev" else 1
+            index = (current + offset) % len(candidates)
+            waiting = await asyncio.to_thread(
+                service.set_selection_index, job_id, index
+            )
+            view = self._advance_operation(
+                operation_id,
+                state="awaiting_input",
+                stage=str(waiting["kind"]),
+                status_text=self._selection_text(job, waiting),
+                control="exit",
+                details=self._selection_details(job, waiting),
+            )
+            return {
+                "actions": [self._selection_action(job, waiting, edit=True)],
+                "operation": view,
+            }
+
+        if action != "pick" or len(parts) != 4:
+            return self._message("⚠️ Plex 选择已失效。")
+        try:
+            index = int(parts[3])
+        except (TypeError, ValueError):
+            return self._message("⚠️ Plex 选择已失效。")
+        if index < 0 or index >= len(candidates):
+            return self._message("⚠️ Plex 选择已失效。")
+
+        view = self._advance_operation(
+            operation_id,
+            state="running",
+            stage=str(waiting["kind"]),
+            status_text="已确认候选，继续执行 Plex 管理任务。",
+            control="cancel",
+            details={"job_id": job_id},
+        )
+        task_id = f"plex-choice-{job_id}"
+        task = self.runtime.spawn(
+            self._run_selection(operation_id, job_id, index),
+            task_id=task_id,
+        )
+        self.operations[operation_id].update({
+            "task": task,
+            "task_id": task_id,
+        })
+        progress = {
+            "kind": (
+                "edit_photo"
+                if str(waiting.get("kind") or "") == "artwork"
+                else "edit_message"
+            ),
+            "text": "⏳ 已确认候选，继续执行 Plex 管理任务...",
+        }
+        if progress["kind"] == "edit_photo":
+            progress["data"] = {
+                "photo_url": str(candidates[index].get("url") or ""),
+            }
+        return {"actions": [progress], "operation": view}
+
+    def _selection_operation(self, request, job, waiting):
+        job_id = int(job["id"])
+        operation_id = self.job_operation_ids.get(job_id)
+        operation = self.operations.get(operation_id) if operation_id else None
+        if operation is None or operation.get("state") in {
+            "completed", "cancelled", "failed", "interrupted",
+        }:
+            view = self._new_operation(
+                request,
+                state="awaiting_input",
+                stage=str(waiting["kind"]),
+                status_text=self._selection_text(job, waiting),
+                control="exit",
+                kind="selection",
+            )
+            operation_id = view["operation_id"]
+            self.job_operation_ids[job_id] = operation_id
+            operation = self.operations[operation_id]
+        operation.update({
+            "state": "awaiting_input",
+            "stage": str(waiting["kind"]),
+            "status_text": self._selection_text(job, waiting),
+            "control": "exit",
+            "details": self._selection_details(job, waiting),
+        })
+        return self._operation_view(operation)
+
+    @staticmethod
+    def _selection_text(job, waiting):
+        kind_labels = {
+            "artwork": "海报",
+            "audio": "音轨",
+            "subtitle": "字幕",
+        }
+        kind = str(waiting.get("kind") or "")
+        candidates = list(waiting.get("candidates") or [])
+        index = min(
+            max(int(waiting.get("candidate_index") or 0), 0),
+            max(len(candidates) - 1, 0),
+        )
+        name = (
+            (job.get("payload") or {}).get("resource_name")
+            or f"Job {job.get('id')}"
+        )
+        position = (
+            f"（{index + 1}/{len(candidates)}）"
+            if candidates and kind == "artwork"
+            else ""
+        )
+        return (
+            f"Plex 任务 #{job['id']}：{name}\n"
+            f"请选择{kind_labels.get(kind, '候选')}{position}。"
+        )
+
+    def _selection_details(self, job, waiting):
+        action = self._selection_action(job, waiting)
+        data = dict(action.get("data") or {})
+        details = {
+            "job_id": int(job["id"]),
+            "candidate_index": int(waiting.get("candidate_index") or 0),
+            "keyboard": list(data.get("keyboard") or []),
+        }
+        if data.get("photo_url"):
+            details["photo_url"] = str(data["photo_url"])
+        return details
+
+    def _selection_action(self, job, waiting, *, edit=False):
+        kind = str(waiting.get("kind") or "")
+        candidates = list(waiting.get("candidates") or [])
+        index = min(
+            max(int(waiting.get("candidate_index") or 0), 0),
+            max(len(candidates) - 1, 0),
+        )
+        text = self._selection_text(job, waiting)
+        if kind == "artwork":
+            keyboard = [[
+                {
+                    "text": "上一张",
+                    "callback_data": f"plex:choice:{job['id']}:prev",
+                },
+                {
+                    "text": "选择此海报",
+                    "callback_data": (
+                        f"plex:choice:{job['id']}:pick:{index}"
+                    ),
+                },
+                {
+                    "text": "下一张",
+                    "callback_data": f"plex:choice:{job['id']}:next",
+                },
+            ]]
+            return {
+                "kind": "edit_photo" if edit else "send_photo",
+                "text": text,
+                "data": {
+                    "photo_url": str(candidates[index].get("url") or ""),
+                    "keyboard": keyboard,
+                },
+            }
+
+        keyboard = [
+            [{
+                "text": self._candidate_label(kind, candidate),
+                "callback_data": (
+                    f"plex:choice:{job['id']}:pick:{candidate_index}"
+                ),
+            }]
+            for candidate_index, candidate in enumerate(candidates[:10])
+        ]
+        return {
+            "kind": "edit_message" if edit else "send_message",
+            "text": text,
+            "data": {"keyboard": keyboard},
+        }
+
+    @staticmethod
+    def _candidate_label(kind, candidate):
+        candidate_id = str(candidate.get("id") or "?")
+        language = str(
+            candidate.get("title")
+            or candidate.get("display_title")
+            or candidate.get("language")
+            or candidate.get("language_code")
+            or "未知语言"
+        )
+        if kind == "audio":
+            codec = str(candidate.get("codec") or "未知格式").upper()
+            channels = candidate.get("channels")
+            channel_text = f" · {channels}ch" if channels else ""
+            return f"#{candidate_id} · {language} · {codec}{channel_text}"
+        location = "外挂" if candidate.get("external") else "内嵌"
+        return f"#{candidate_id} · {language} · {location}"
+
+    async def _run_selection(self, operation_id, job_id, index):
+        try:
+            service = await self._ensure_service()
+            result = await asyncio.to_thread(
+                service.confirm_selection,
+                job_id,
+                index,
+                should_cancel=lambda: self._is_cancelled(operation_id),
+                on_stage=lambda stage, job: self._stage_sync(
+                    operation_id, stage, job
+                ),
+            )
+            await self._complete_batch_operation(operation_id, [result])
+        except PlexOperationCancelled:
+            await self._finish_cancelled(operation_id)
+        except Exception as exc:
+            await self._report_if_active(
+                operation_id,
+                state="failed",
+                stage=(
+                    (self.operations.get(operation_id) or {}).get("stage")
+                    or "selection"
+                ),
+                status_text=f"Plex 候选确认失败：{type(exc).__name__}",
+                control="",
+            )
 
     async def management_capability(self, request: dict) -> dict:
         """Expose stable read-only job inspection to other Features."""
@@ -323,88 +716,6 @@ class PlexFeature:
             limit = min(max(int(params.get("limit") or 20), 1), 100)
             return {"jobs": await asyncio.to_thread(service.list_jobs, limit)}
         raise ValueError(f"unsupported plex.management method: {method}")
-
-    async def _run_ai(self, operation_id, text):
-        try:
-            result = await asyncio.to_thread(self.ai.run, text)
-            self._raise_if_cancelled(operation_id)
-            message = str(result.get("message") or "Plex AI 未返回内容。")
-            confirmation = result.get("confirmation") or {}
-            token = str(confirmation.get("confirmation_token") or "")
-            if token:
-                self.pending_writes[token] = {
-                    "action": confirmation.get("action") or "",
-                    "payload": confirmation.get("payload") or {},
-                    "operation_id": operation_id,
-                }
-                await self._report_operation(
-                    operation_id,
-                    state="awaiting_input",
-                    stage="ai_confirmation",
-                    status_text=message,
-                    control="exit",
-                    details={"keyboard": [[
-                        {
-                            "text": "确认执行",
-                            "callback_data": f"plex:write:{token}",
-                        },
-                        {"text": "退出", "callback_data": "plex:exit"},
-                    ]]},
-                )
-            else:
-                await self._report_operation(
-                    operation_id,
-                    state="completed",
-                    stage="completed",
-                    status_text=message,
-                    control="",
-                )
-        except PlexOperationCancelled:
-            await self._finish_cancelled(operation_id)
-        except Exception as exc:
-            await self._report_if_active(
-                operation_id,
-                state="failed",
-                stage="ai_planning",
-                status_text=f"Plex AI 请求失败：{type(exc).__name__}",
-                control="",
-            )
-
-    async def _apply_write(self, operation_id, token, pending, service):
-        try:
-            result = await asyncio.to_thread(
-                service.apply_operation,
-                pending["action"], pending["payload"], token,
-            )
-            operation = self.operations[operation_id]
-            if operation["cancel_event"].is_set():
-                await self._report_if_active(
-                    operation_id,
-                    state="cancelled",
-                    stage="applying_write",
-                    status_text=(
-                        "取消请求到达时 Plex 调用已完成；已停止后续管线，"
-                        "本次 Plex 变更不自动回滚。"
-                    ),
-                    control="",
-                    details={"completed_action": result.get("action") or ""},
-                )
-                return
-            await self._report_operation(
-                operation_id,
-                state="completed",
-                stage="completed",
-                status_text=f"Plex 操作已执行：{result['action']}",
-                control="",
-            )
-        except Exception as exc:
-            await self._report_if_active(
-                operation_id,
-                state="failed",
-                stage="applying_write",
-                status_text=f"Plex 写操作失败：{type(exc).__name__}",
-                control="",
-            )
 
     async def _ensure_service(self):
         if self.service is not None:
@@ -438,20 +749,6 @@ class PlexFeature:
             scan_poll_interval=plex_config.get("scan_poll_interval", 5),
             scan_timeout=plex_config.get("scan_timeout", 300),
         )
-        ai_config = self.config.get("ai") or {}
-        if ai_config.get("enabled"):
-            if all(str(ai_config.get(key) or "").strip() for key in ("api_url", "api_key", "model")):
-                try:
-                    from .mcp_server import PlexToolDispatcher
-                    self.ai = PlexAIOrchestrator(
-                        ai_config,
-                        PlexToolDispatcher(service),
-                        max_tool_rounds=ai_config.get("max_tool_rounds", 3),
-                    )
-                except Exception as exc:
-                    self.ai_error = PlexManagementService._safe_error(exc)
-            else:
-                self.ai_error = "AI credentials are incomplete"
         mcp_config = self.config.get("mcp") or {}
         if mcp_config.get("enabled"):
             try:
@@ -628,6 +925,24 @@ class PlexFeature:
         if not operation_id or operation_id not in self.operations:
             return None
         results = [job for job in (results or []) if isinstance(job, dict)]
+        waiting = next((
+            job for job in results
+            if job.get("state") == "awaiting_selection"
+        ), None)
+        if waiting:
+            service = await self._ensure_service()
+            selection = await asyncio.to_thread(
+                service.pending_selection, waiting["id"]
+            )
+            if selection:
+                return await self._report_operation(
+                    operation_id,
+                    state="awaiting_input",
+                    stage=str(selection["kind"]),
+                    status_text=self._selection_text(waiting, selection),
+                    control="exit",
+                    details=self._selection_details(waiting, selection),
+                )
         failed = [job for job in results if job.get("state") == "failed"]
         if failed:
             return await self._report_operation(
@@ -698,15 +1013,12 @@ class PlexFeature:
             raise FeatureError("stale_control", "Plex operation control changed")
         owner = (operation["chat_id"], operation["user_id"])
         self.config_wizard.sessions.pop(owner, None)
-        for token, pending in list(self.pending_writes.items()):
-            if pending.get("operation_id") == operation_id:
-                self.pending_writes.pop(token, None)
         if action == "exit":
             terminal = self._advance_operation(
                 operation_id,
                 state="cancelled",
                 stage=operation.get("stage") or "interaction",
-                status_text="已退出 Plex 交互，未执行确认写操作。",
+                status_text="已退出 Plex 交互。",
                 control="",
             )
             return {"actions": [], "operation": terminal}

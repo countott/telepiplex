@@ -12,7 +12,9 @@ subscribes:
 publishes: []
 commands:
   - name: plex
-    description: 查看 Plex 任务或使用隔离的 Plex AI
+    description: 查看 Plex 任务
+  - name: scan
+    description: 扫描 Plex 媒体库
   - name: plex_config
     description: 配置 Plex 管理
 callbacks:

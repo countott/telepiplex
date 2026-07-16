@@ -10,6 +10,10 @@ import yaml
 
 from telepiplex_plex.feature import PlexFeature
 from telepiplex_plex.jobs import PlexJobRepository
+from telepiplex_plex.management import (
+    PlexManagementService,
+    PlexOperationCancelled,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +46,15 @@ class FakeService:
         self.jobs = jobs
         self.runs = 0
         self.run_job_ids = []
+        self.libraries = [
+            {"id": "12", "title": "电影", "media_type": "movie"},
+            {"id": "13", "title": "剧集", "media_type": "show"},
+        ]
+        self.list_library_calls = 0
+        self.scan_requests = []
+        self.scan_result = None
+        self.selection_indexes = []
+        self.confirmed_selections = []
 
     def enqueue_organized_event(self, payload):
         return self.jobs.create_or_get(
@@ -73,6 +86,82 @@ class FakeService:
     def get_job(self, job_id):
         return self.jobs.get(job_id)
 
+    def list_libraries(self):
+        self.list_library_calls += 1
+        return [dict(library) for library in self.libraries]
+
+    def scan_libraries(self, library_ids=None, *, should_cancel=None):
+        requested = (
+            None
+            if library_ids is None
+            else [str(library_id) for library_id in library_ids]
+        )
+        self.scan_requests.append(requested)
+        if self.scan_result is not None:
+            return self.scan_result
+        selected = self.libraries if requested is None else [
+            library for library in self.libraries
+            if str(library["id"]) in requested
+        ]
+        return {
+            "succeeded": [dict(library) for library in selected],
+            "failed": [],
+        }
+
+    def pending_selection(self, job_id):
+        job = self.jobs.get(job_id)
+        if not job:
+            raise LookupError(f"Plex job not found: {job_id}")
+        for name in ("scanning", "artwork", "audio", "subtitle"):
+            waiting = (
+                ((job or {}).get("step_results") or {}).get(name) or {}
+            ).get("waiting")
+            if isinstance(waiting, dict):
+                return dict(waiting)
+        return None
+
+    def set_selection_index(self, job_id, index):
+        job = self.jobs.get(job_id)
+        waiting = self.pending_selection(job_id)
+        candidates = list((waiting or {}).get("candidates") or [])
+        index = int(index)
+        if not waiting or index < 0 or index >= len(candidates):
+            raise ValueError("selection index is out of range")
+        steps = dict(job.get("step_results") or {})
+        kind = str(waiting["kind"])
+        step = dict(steps[kind])
+        updated = dict(waiting)
+        updated["candidate_index"] = index
+        step["waiting"] = updated
+        steps[kind] = step
+        self.jobs.update(job_id, step_results=steps)
+        self.selection_indexes.append((int(job_id), index))
+        return updated
+
+    def confirm_selection(
+        self,
+        job_id,
+        index,
+        *,
+        should_cancel=None,
+        on_stage=None,
+    ):
+        waiting = self.set_selection_index(job_id, index)
+        self.confirmed_selections.append((int(job_id), int(index)))
+        if on_stage:
+            on_stage(str(waiting["kind"]), self.jobs.get(job_id))
+        job = self.jobs.get(job_id)
+        steps = dict(job.get("step_results") or {})
+        step = dict(steps[str(waiting["kind"])])
+        step["status"] = "success"
+        step.pop("waiting", None)
+        steps[str(waiting["kind"])] = step
+        return self.jobs.update(
+            job_id,
+            state="completed",
+            step_results=steps,
+        )
+
 
 class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -95,6 +184,34 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             if hasattr(awaitable, "close"):
                 awaitable.close()
         self.temp.cleanup()
+
+    def make_waiting_job(self, kind, candidates, *, candidate_index=0):
+        job = self.jobs.create_or_get(
+            f"waiting-{kind}-{len(self.jobs.list())}",
+            {
+                "user_id": 1,
+                "chat_id": 10,
+                "resource_name": f"{kind.title()} Choice",
+            },
+        )
+        waiting = {
+            "kind": kind,
+            "target_id": "target-1",
+            "rating_key": "42",
+            "part_id": 11 if kind != "artwork" else 0,
+            "candidates": candidates,
+            "candidate_index": candidate_index,
+        }
+        return self.jobs.update(
+            job["id"],
+            state="awaiting_selection",
+            step_results={
+                kind: {
+                    "status": "awaiting_selection",
+                    "waiting": waiting,
+                }
+            },
+        )
 
     async def test_duplicate_media_event_executes_job_once_and_completed_is_terminal(self):
         request = {"payload": {
@@ -228,33 +345,354 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(core.reports[-1]["state"], "failed")
         self.assertIn("初始化失败", core.reports[-1]["status_text"])
 
-    async def test_ai_confirmation_has_explicit_exit_and_operation_status(self):
-        self.feature.service = self.service
-        self.feature.ai = SimpleNamespace(run=lambda _text: {
-            "message": "准备刷新元数据",
-            "confirmation": {
-                "confirmation_token": "token-1",
-                "action": "refresh_chinese_metadata",
-                "payload": {"rating_key": "42"},
-            },
+    async def test_plex_non_numeric_argument_returns_usage_without_ai_task(self):
+        result = await self.feature.command({
+            "command": "plex",
+            "args": ["刷新", "元数据"],
+            "chat_id": 10,
+            "user_id": 1,
         })
 
-        accepted = await self.feature.command({
-            "command": "plex", "args": ["刷新", "元数据"],
-            "chat_id": 10, "user_id": 1,
+        self.assertEqual(result["actions"][0]["text"], "用法：/plex [Job ID]")
+        self.assertEqual(self.runtime.tasks, {})
+
+    async def test_scan_menu_lists_live_libraries_and_scan_all(self):
+        result = await self.feature.command({
+            "command": "scan",
+            "args": [],
+            "chat_id": 10,
+            "user_id": 1,
+        })
+
+        keyboard = result["actions"][0]["data"]["keyboard"]
+        buttons = [button for row in keyboard for button in row]
+        self.assertIn(
+            {"text": "扫描全部媒体库", "callback_data": "plex:scan:all"},
+            buttons,
+        )
+        self.assertIn(
+            {"text": "电影", "callback_data": "plex:scan:12"},
+            buttons,
+        )
+        self.assertIn(
+            {"text": "剧集", "callback_data": "plex:scan:13"},
+            buttons,
+        )
+        self.assertEqual(self.service.list_library_calls, 1)
+        self.assertTrue(all(
+            len(button["callback_data"].encode("utf-8")) <= 64
+            for button in buttons
+        ))
+
+    async def test_scan_menu_paginates_eight_libraries_per_page(self):
+        self.service.libraries = [
+            {"id": str(index), "title": f"媒体库 {index}"}
+            for index in range(1, 10)
+        ]
+
+        first = await self.feature.command({
+            "command": "scan",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        first_buttons = [
+            button
+            for row in first["actions"][0]["data"]["keyboard"]
+            for button in row
+        ]
+        self.assertEqual(
+            len([
+                button for button in first_buttons
+                if button["callback_data"].startswith("plex:scan:")
+                and button["callback_data"].count(":") == 2
+                and button["callback_data"].rsplit(":", 1)[-1].isdigit()
+            ]),
+            8,
+        )
+        self.assertIn(
+            {"text": "下一页", "callback_data": "plex:scan:page:1"},
+            first_buttons,
+        )
+
+        second = await self.feature.callback({
+            "payload": "scan:page:1",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        second_buttons = [
+            button
+            for row in second["actions"][0]["data"]["keyboard"]
+            for button in row
+        ]
+        self.assertIn(
+            {"text": "媒体库 9", "callback_data": "plex:scan:9"},
+            second_buttons,
+        )
+        self.assertEqual(self.service.list_library_calls, 2)
+
+    async def test_scan_selection_validates_fresh_list_and_scans_only_that_id(self):
+        before_jobs = self.jobs.list()
+
+        accepted = await self.feature.callback({
+            "payload": "scan:12",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        task_id = f"plex-scan-{accepted['operation']['operation_id']}"
+        await self.runtime.tasks.pop(task_id)
+
+        self.assertEqual(self.service.scan_requests, [["12"]])
+        self.assertEqual(self.jobs.list(), before_jobs)
+        self.assertEqual(self.feature.core.reports[-1]["state"], "completed")
+        self.assertIn("电影", self.feature.core.reports[-1]["status_text"])
+
+    async def test_scan_rejects_library_removed_from_fresh_list(self):
+        await self.feature.command({
+            "command": "scan",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        self.service.libraries = [{"id": "13", "title": "剧集"}]
+
+        result = await self.feature.callback({
+            "payload": "scan:12",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+
+        self.assertIn("媒体库列表已变化", result["actions"][0]["text"])
+        self.assertEqual(self.service.scan_requests, [])
+        self.assertEqual(self.runtime.tasks, {})
+        self.assertEqual(self.service.list_library_calls, 2)
+
+    async def test_scan_all_reports_successes_and_failures(self):
+        self.service.scan_result = {
+            "succeeded": [{"id": "12", "title": "电影"}],
+            "failed": [{
+                "id": "13",
+                "title": "剧集",
+                "error": "scan unavailable",
+            }],
+        }
+
+        accepted = await self.feature.callback({
+            "payload": "scan:all",
+            "chat_id": 10,
+            "user_id": 1,
         })
         await self.runtime.tasks.pop(
-            f"plex-ai-{accepted['operation']['operation_id']}"
+            f"plex-scan-{accepted['operation']['operation_id']}"
         )
 
         report = self.feature.core.reports[-1]
+        self.assertEqual(self.service.scan_requests, [None])
+        self.assertEqual(report["state"], "completed")
+        self.assertIn("电影", report["status_text"])
+        self.assertIn("剧集", report["status_text"])
+        self.assertIn("失败", report["status_text"])
+
+    async def test_plex_numeric_reopens_artwork_as_photo_carousel(self):
+        job = self.make_waiting_job("artwork", [
+            {"url": "https://image.example/one.jpg", "source": "tmdb"},
+            {"url": "https://image.example/two.jpg", "source": "fanart"},
+        ])
+
+        result = await self.feature.command({
+            "command": "plex",
+            "args": [str(job["id"])],
+            "chat_id": 10,
+            "user_id": 1,
+        })
+
+        action = result["actions"][0]
+        self.assertEqual(action["kind"], "send_photo")
+        self.assertEqual(
+            action["data"]["photo_url"],
+            "https://image.example/one.jpg",
+        )
+        self.assertEqual(
+            [button["text"] for button in action["data"]["keyboard"][0]],
+            ["上一张", "选择此海报", "下一张"],
+        )
+        self.assertEqual(result["operation"]["state"], "awaiting_input")
+
+        next_result = await self.feature.callback({
+            "payload": f"choice:{job['id']}:next",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        self.assertEqual(
+            next_result["actions"][0]["data"]["photo_url"],
+            "https://image.example/two.jpg",
+        )
+        self.assertEqual(self.service.selection_indexes[-1], (job["id"], 1))
+
+    async def test_audio_and_subtitle_waiting_use_labeled_candidate_buttons(self):
+        cases = (
+            (
+                "audio",
+                [
+                    {
+                        "id": 21,
+                        "language_code": "jpn",
+                        "codec": "truehd",
+                        "channels": 8,
+                    },
+                    {
+                        "id": 22,
+                        "language_code": "jpn",
+                        "codec": "dts",
+                        "channels": 6,
+                    },
+                ],
+                ("#21", "jpn", "TRUEHD"),
+            ),
+            (
+                "subtitle",
+                [
+                    {
+                        "id": 31,
+                        "language_code": "chi",
+                        "title": "简体中文",
+                        "external": True,
+                    },
+                    {
+                        "id": 32,
+                        "language_code": "chi",
+                        "title": "繁体中文",
+                        "external": False,
+                    },
+                ],
+                ("#31", "简体中文", "外挂"),
+            ),
+        )
+        for kind, candidates, expected_parts in cases:
+            with self.subTest(kind=kind):
+                job = self.make_waiting_job(kind, candidates)
+                result = await self.feature.command({
+                    "command": "plex",
+                    "args": [str(job["id"])],
+                    "chat_id": 10,
+                    "user_id": 1,
+                })
+
+                action = result["actions"][0]
+                self.assertEqual(action["kind"], "send_message")
+                labels = [
+                    button["text"]
+                    for row in action["data"]["keyboard"]
+                    for button in row
+                ]
+                self.assertTrue(all(
+                    part in labels[0] for part in expected_parts
+                ))
+                self.assertTrue(all(
+                    button["callback_data"].startswith(
+                        f"plex:choice:{job['id']}:pick:"
+                    )
+                    and len(button["callback_data"].encode("utf-8")) <= 64
+                    for row in action["data"]["keyboard"]
+                    for button in row
+                ))
+
+    async def test_choice_pick_confirms_and_continues_same_operation(self):
+        job = self.make_waiting_job("artwork", [
+            {"url": "https://image.example/one.jpg", "source": "tmdb"},
+            {"url": "https://image.example/two.jpg", "source": "fanart"},
+        ])
+        opened = await self.feature.command({
+            "command": "plex",
+            "args": [str(job["id"])],
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        operation_id = opened["operation"]["operation_id"]
+
+        accepted = await self.feature.callback({
+            "payload": f"choice:{job['id']}:pick:1",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        await self.runtime.tasks.pop(f"plex-choice-{job['id']}")
+
+        self.assertEqual(accepted["operation"]["operation_id"], operation_id)
+        self.assertEqual(
+            self.service.confirmed_selections,
+            [(job["id"], 1)],
+        )
+        self.assertEqual(
+            self.feature.core.reports[-1]["operation_id"],
+            operation_id,
+        )
+        self.assertEqual(self.feature.core.reports[-1]["state"], "completed")
+
+    async def test_stale_choice_callback_returns_expired_feedback(self):
+        result = await self.feature.callback({
+            "payload": "choice:999:pick:0",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+
+        self.assertEqual(
+            result["actions"][0]["text"],
+            "⚠️ Plex 选择已失效。",
+        )
+
+    async def test_media_job_waiting_selection_reports_photo_choice(self):
+        class WaitingService(FakeService):
+            def run_job(
+                nested_self,
+                job_id,
+                *,
+                should_cancel=None,
+                on_stage=None,
+            ):
+                waiting = {
+                    "kind": "artwork",
+                    "target_id": "target-1",
+                    "rating_key": "42",
+                    "part_id": 0,
+                    "candidates": [
+                        {"url": "https://image.example/one.jpg"},
+                        {"url": "https://image.example/two.jpg"},
+                    ],
+                    "candidate_index": 0,
+                }
+                return nested_self.jobs.update(
+                    job_id,
+                    state="awaiting_selection",
+                    step_results={
+                        "artwork": {
+                            "status": "awaiting_selection",
+                            "waiting": waiting,
+                        }
+                    },
+                )
+
+        service = WaitingService(self.jobs)
+        self.feature.service = service
+        accepted = await self.feature.media_organized({"payload": {
+            "job_id": "job-waiting",
+            "user_id": 1,
+            "chat_id": 10,
+            "resource_name": "Movie",
+            "final_path": "/Movies/Movie",
+            "operation_id": "op-waiting",
+            "operation_revision": 1,
+        }})
+        await self.runtime.tasks.pop("plex-job-job-waiting")
+
+        report = self.feature.core.reports[-1]
+        self.assertEqual(report["operation_id"], accepted["operation_id"])
         self.assertEqual(report["state"], "awaiting_input")
-        labels = [
-            button["text"]
-            for row in report["details"]["keyboard"]
-            for button in row
-        ]
-        self.assertEqual(labels, ["确认执行", "退出"])
+        self.assertEqual(
+            report["details"]["photo_url"],
+            "https://image.example/one.jpg",
+        )
+        self.assertEqual(
+            [button["text"] for button in report["details"]["keyboard"][0]],
+            ["上一张", "选择此海报", "下一张"],
+        )
 
     async def test_obsolete_match_callback_is_rejected(self):
         self.feature.service = self.service
@@ -453,6 +891,7 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         runtime = main(context)
         self.assertEqual(runtime.state, "starting")
         self.assertIn("media.organized", runtime.events)
+        self.assertIn("scan", runtime.commands)
 
     async def test_management_capability_is_read_only_and_whitelisted(self):
         job = self.jobs.create_or_get("visible", {"final_path": "/Movies/Visible"})
@@ -473,6 +912,15 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
 
 class FeatureSourceContractTest(unittest.TestCase):
+    def test_manifest_registers_scan_command(self):
+        manifest = yaml.safe_load((ROOT / "manifest.yaml").read_text())
+        commands = {
+            command["name"]: command["description"]
+            for command in manifest["commands"]
+        }
+
+        self.assertEqual(commands["scan"], "扫描 Plex 媒体库")
+
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("dist/plex-management-1.1.0.tpx", source)
@@ -493,6 +941,65 @@ class FeatureSourceContractTest(unittest.TestCase):
                          else [node.module] if isinstance(node, ast.ImportFrom) and node.module else [])
                 forbidden.extend(name for name in names if name.split(".", 1)[0] in {"app", "init", "telegram"})
         self.assertEqual(forbidden, [])
+
+
+class PlexManualScanServiceTest(unittest.TestCase):
+    def test_scan_libraries_continues_after_failure(self):
+        class ScanPlex:
+            def __init__(self):
+                self.calls = []
+
+            def list_libraries(self):
+                return [
+                    {"id": "12", "title": "电影"},
+                    {"id": "13", "title": "剧集"},
+                ]
+
+            def scan_library(self, library_id):
+                self.calls.append(str(library_id))
+                if str(library_id) == "12":
+                    raise RuntimeError("movie scan failed")
+
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = PlexJobRepository(Path(temp) / "jobs.db")
+            plex = ScanPlex()
+            service = PlexManagementService(jobs, plex)
+
+            result = service.scan_libraries()
+
+        self.assertEqual(plex.calls, ["12", "13"])
+        self.assertEqual(
+            [library["id"] for library in result["succeeded"]],
+            ["13"],
+        )
+        self.assertEqual(
+            [library["id"] for library in result["failed"]],
+            ["12"],
+        )
+
+    def test_scan_libraries_observes_cancel_after_failed_call(self):
+        cancelled = False
+
+        class ScanPlex:
+            def list_libraries(self):
+                return [{"id": "12", "title": "电影"}]
+
+            def scan_library(self, _library_id):
+                nonlocal cancelled
+                cancelled = True
+                raise RuntimeError("scan failed while cancellation arrived")
+
+        with tempfile.TemporaryDirectory() as temp:
+            service = PlexManagementService(
+                PlexJobRepository(Path(temp) / "jobs.db"),
+                ScanPlex(),
+            )
+
+            with self.assertRaises(PlexOperationCancelled):
+                service.scan_libraries(
+                    ["12"],
+                    should_cancel=lambda: cancelled,
+                )
 
 
 if __name__ == "__main__":

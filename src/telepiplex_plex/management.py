@@ -1348,6 +1348,54 @@ class PlexManagementService:
     def list_libraries(self):
         return self.plex.list_libraries()
 
+    def scan_libraries(self, library_ids=None, *, should_cancel=None):
+        libraries = [
+            dict(library)
+            for library in self.plex.list_libraries()
+            if str((library or {}).get("id") or "").strip()
+        ]
+        for library in libraries:
+            library["id"] = str(library["id"])
+        by_id = {
+            str(library["id"]): library
+            for library in libraries
+        }
+        if library_ids is None:
+            requested_ids = list(by_id)
+        else:
+            requested_ids = []
+            for library_id in library_ids:
+                library_id = str(library_id or "").strip()
+                if library_id and library_id not in requested_ids:
+                    requested_ids.append(library_id)
+
+        result = {"succeeded": [], "failed": []}
+        for library_id in requested_ids:
+            if should_cancel and should_cancel():
+                raise PlexOperationCancelled(
+                    "Plex operation cancelled before manual library scan"
+                )
+            library = dict(by_id.get(library_id) or {
+                "id": library_id,
+                "title": library_id,
+            })
+            if library_id not in by_id:
+                library["error"] = "Plex library is no longer available"
+                result["failed"].append(library)
+                continue
+            try:
+                self.plex.scan_library(library_id)
+            except Exception as exc:
+                library["error"] = self._safe_error(exc)
+                result["failed"].append(library)
+            else:
+                result["succeeded"].append(library)
+            if should_cancel and should_cancel():
+                raise PlexOperationCancelled(
+                    "Plex operation cancelled after manual library scan"
+                )
+        return result
+
     def inspect_item(self, rating_key):
         return self.plex.get_item(rating_key)
 
