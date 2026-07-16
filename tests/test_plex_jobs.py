@@ -101,6 +101,39 @@ class PlexJobRepositoryTest(unittest.TestCase):
         self.repo.update(job["id"], state="completed")
         self.assertFalse(self.repo.claim(job["id"]))
 
+    def test_retry_claim_is_atomic_and_limited_to_retryable_terminal_states(self):
+        for state in ("failed", "interrupted", "cancelled"):
+            with self.subTest(state=state):
+                job = self.repo.create_or_get(
+                    f"retryable-{state}",
+                    {"final_path": f"/{state}"},
+                )
+                self.repo.update(job["id"], state=state)
+
+                self.assertTrue(self.repo.claim_retry(job["id"]))
+                self.assertEqual(self.repo.get(job["id"])["state"], "running")
+                self.assertFalse(self.repo.claim_retry(job["id"]))
+
+        for state in (
+            "queued",
+            "running",
+            "scanning",
+            "artwork",
+            "audio",
+            "subtitle",
+            "awaiting_selection",
+            "completed",
+        ):
+            with self.subTest(state=state):
+                job = self.repo.create_or_get(
+                    f"not-retryable-{state}",
+                    {"final_path": f"/{state}"},
+                )
+                self.repo.update(job["id"], state=state)
+
+                self.assertFalse(self.repo.claim_retry(job["id"]))
+                self.assertEqual(self.repo.get(job["id"])["state"], state)
+
     def test_restart_interrupts_current_and_retired_in_progress_states(self):
         active_states = (
             "running",

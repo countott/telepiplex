@@ -210,6 +210,7 @@ class FakePlex:
         self.match_candidates = match_candidates
         self.missing_paths = set(missing_paths or [])
         self.find_paths = []
+        self.index_path_batches = []
         self.get_item_keys = []
         self.stream_rating_keys = []
         self.poster_updates = []
@@ -236,6 +237,15 @@ class FakePlex:
             "media_type": "episode" if "Season" in str(final_path) else "movie",
             "summary": "中文简介",
             "guids": ["tmdb://20"],
+        }
+
+    def index_items_by_paths(self, library_id, final_paths):
+        paths = [str(path) for path in final_paths]
+        self.calls.append("index_items_by_paths")
+        self.index_path_batches.append(paths)
+        return {
+            path: self.find_item_by_path(library_id, path)
+            for path in paths
         }
 
     def locate_candidates(self, library_id, before_rating_keys):
@@ -411,6 +421,8 @@ class PlexManagementServiceTest(unittest.TestCase):
         category_folders=None,
         scan_poll_interval=0,
         scan_timeout=0,
+        clock=None,
+        sleeper=None,
     ):
         from telepiplex_plex.management import PlexManagementService
 
@@ -424,7 +436,8 @@ class PlexManagementServiceTest(unittest.TestCase):
             ),
             scan_poll_interval=scan_poll_interval,
             scan_timeout=scan_timeout,
-            sleeper=lambda _: None,
+            clock=clock or __import__("time").time,
+            sleeper=sleeper or (lambda _: None),
             notifier=notifier,
         )
 
@@ -494,7 +507,7 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertNotIn("artwork", result["step_results"])
         self.assertNotIn("list_streams", plex.calls)
 
-    def test_official_special_preserves_artwork_and_runs_stream_enhancements(self):
+    def test_official_special_runs_show_artwork_and_stream_enhancements(self):
         plex = FakePlex()
         service = self.make_service(plex=plex)
 
@@ -505,8 +518,8 @@ class PlexManagementServiceTest(unittest.TestCase):
 
         self.assertEqual(result["state"], "completed")
         artwork = result["step_results"]["artwork"]["targets"]["S00E005"]
-        self.assertEqual(artwork["action"], "official_artwork_preserved")
-        self.assertNotIn("set_poster_url", plex.calls)
+        self.assertTrue(artwork["attempted"])
+        self.assertIn("set_poster_url", plex.calls)
         self.assertEqual(plex.stream_rating_keys, ["42", "42"])
 
     def test_ai_inferred_special_no_longer_requires_match_verification(self):
@@ -523,6 +536,9 @@ class PlexManagementServiceTest(unittest.TestCase):
             job["payload"]["metadata"]["media_metadata"]["placement"]["episode_number"],
             5,
         )
+        artwork = result["step_results"]["artwork"]["targets"]["S00E005"]
+        self.assertTrue(artwork["attempted"])
+        self.assertIn("set_poster_url", plex.calls)
         self.assertNotIn("matching", result["step_results"])
         self.assertNotIn("localizing", result["step_results"])
 
@@ -726,6 +742,120 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertEqual(plex.get_item_keys, ["42"])
         self.assertEqual(plex.stream_rating_keys, ["42", "42"])
 
+    def test_retry_reuses_successful_library_and_located_target_progress(self):
+        completion = make_unresolved_standalone_series_completion()
+        contract = completion.result.metadata["media_metadata"]
+        first_path = "/Series/Show/Season 01/Show S01E01.mkv"
+        second_path = "/Series/Show/Season 01/Show S01E02.mkv"
+        contract["items"] = [
+            {
+                "item_id": "episode-1",
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": 1,
+                "final_path": first_path,
+            },
+            {
+                "item_id": "episode-2",
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": 2,
+                "final_path": second_path,
+            },
+        ]
+        plex = FakePlex()
+        service = self.make_service(plex=plex)
+        job = service.enqueue_organized_event({
+            "resource_name": "Show",
+            "final_path": "/Series/Show",
+            "media_metadata": contract,
+        })
+        self.jobs.update(
+            job["id"],
+            state="interrupted",
+            rating_key="42",
+            step_results={
+                "scanning": {
+                    "status": "started",
+                    "libraries": {
+                        "11": {
+                            "status": "success",
+                            "target_ids": ["episode-1", "episode-2"],
+                        },
+                    },
+                    "targets": {
+                        "episode-1": {
+                            "status": "success",
+                            "library_id": "11",
+                            "rating_key": "42",
+                            "final_path": first_path,
+                        },
+                        "episode-2": {
+                            "status": "warning",
+                            "library_id": "11",
+                            "final_path": second_path,
+                            "message": "interrupted before location completed",
+                        },
+                    },
+                },
+            },
+        )
+
+        result = service.retry_job(job["id"])
+
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(plex.calls.count("scan_library"), 0)
+        self.assertEqual(plex.index_path_batches, [[second_path]])
+        self.assertNotIn(first_path, plex.find_paths)
+        scanning = result["step_results"]["scanning"]
+        self.assertEqual(scanning["targets"]["episode-1"]["rating_key"], "42")
+        self.assertEqual(scanning["targets"]["episode-2"]["rating_key"], "43")
+
+    def test_library_group_uses_one_deadline_and_one_batch_read_per_poll(self):
+        completion = make_unresolved_standalone_series_completion()
+        contract = completion.result.metadata["media_metadata"]
+        first_path = "/Series/Show/Season 01/Show S01E01.mkv"
+        second_path = "/Series/Show/Season 01/Show S01E02.mkv"
+        contract["items"] = [
+            {
+                "item_id": "episode-1",
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": 1,
+                "final_path": first_path,
+            },
+            {
+                "item_id": "episode-2",
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": 2,
+                "final_path": second_path,
+            },
+        ]
+        now = [0.0]
+        plex = FakePlex(missing_paths={first_path, second_path})
+        service = self.make_service(
+            plex=plex,
+            scan_poll_interval=1,
+            scan_timeout=1,
+            clock=lambda: now[0],
+            sleeper=lambda seconds: now.__setitem__(0, now[0] + seconds),
+        )
+        job = service.enqueue_organized_event({
+            "resource_name": "Show",
+            "final_path": "/Series/Show",
+            "media_metadata": contract,
+        })
+
+        result = service.run_job(job["id"])
+
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(plex.index_path_batches, [
+            [first_path, second_path],
+            [first_path, second_path],
+        ])
+        self.assertEqual(now[0], 1)
+
     def test_later_lookup_exception_preserves_earlier_target_and_continues(self):
         completion = make_unresolved_standalone_series_completion()
         contract = completion.result.metadata["media_metadata"]
@@ -762,43 +892,32 @@ class PlexManagementServiceTest(unittest.TestCase):
             "final_path": "/Series/Show",
             "media_metadata": contract,
         })
-        first_was_persisted = False
-
-        def find_item_by_path(_library_id, final_path):
-            nonlocal first_was_persisted
-            plex.find_paths.append(str(final_path))
-            if final_path == first_path:
-                return {
+        def index_items_by_paths(_library_id, final_paths):
+            plex.index_path_batches.append(list(final_paths))
+            return {
+                first_path: {
                     "rating_key": "42",
                     "title": "Episode 1",
                     "year": 2024,
                     "media_type": "episode",
                     "summary": "",
                     "guids": ["tmdb://20"],
-                }
-            if final_path == second_path:
-                persisted = self.jobs.get(job["id"])["step_results"]["scanning"]
-                first_was_persisted = (
-                    (persisted.get("targets") or {})
-                    .get("episode-1", {})
-                    .get("status")
-                    == "success"
-                )
-                raise RuntimeError("path lookup failed")
-            return {
-                "rating_key": "43",
-                "title": "Episode 3",
-                "year": 2024,
-                "media_type": "episode",
-                "summary": "",
-                "guids": ["tmdb://20"],
+                },
+                second_path: RuntimeError("path lookup failed"),
+                third_path: {
+                    "rating_key": "43",
+                    "title": "Episode 3",
+                    "year": 2024,
+                    "media_type": "episode",
+                    "summary": "",
+                    "guids": ["tmdb://20"],
+                },
             }
 
-        plex.find_item_by_path = find_item_by_path
+        plex.index_items_by_paths = index_items_by_paths
 
         result = service.run_job(job["id"])
 
-        self.assertTrue(first_was_persisted)
         self.assertEqual(result["state"], "completed")
         scanning = result["step_results"]["scanning"]
         self.assertEqual(scanning["status"], "warning")
@@ -828,7 +947,8 @@ class PlexManagementServiceTest(unittest.TestCase):
 
         self.assertEqual(result["state"], "completed")
         self.assertEqual(plex.calls, [
-            "scan_library", "find_item_by_path", "get_item", "set_poster_url",
+            "scan_library", "index_items_by_paths", "find_item_by_path",
+            "get_item", "set_poster_url",
             "list_streams", "select_audio", "list_streams", "select_subtitle",
         ])
         self.assertEqual(stages, ["scanning", "artwork", "audio", "subtitle"])
@@ -934,10 +1054,18 @@ class PlexManagementServiceTest(unittest.TestCase):
             waiting_job["step_results"]["artwork"]["waiting"],
             waiting,
         )
-        updated = service.set_selection_index(original["id"], 1)
+        updated = service.set_selection_index(
+            original["id"],
+            1,
+            selection_nonce=waiting["selection_nonce"],
+        )
         self.assertEqual(updated["candidate_index"], 1)
 
-        completed = service.confirm_selection(original["id"], 1)
+        completed = service.confirm_selection(
+            original["id"],
+            1,
+            selection_nonce=waiting["selection_nonce"],
+        )
 
         self.assertEqual(completed["id"], original["id"])
         self.assertEqual(completed["state"], "completed")
@@ -980,7 +1108,12 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertEqual(waiting_job["state"], "awaiting_selection")
         self.assertEqual(service.pending_selection(job["id"])["kind"], "audio")
 
-        completed = service.confirm_selection(job["id"], 1)
+        waiting = service.pending_selection(job["id"])
+        completed = service.confirm_selection(
+            job["id"],
+            1,
+            selection_nonce=waiting["selection_nonce"],
+        )
 
         self.assertEqual(completed["state"], "completed")
         self.assertIn(("42", 11, 22), plex.audio_selections)
@@ -1043,7 +1176,12 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertEqual([part["part_id"] for part in partial], [11])
         self.assertEqual(plex.audio_selections, [("42", 11, 21)])
 
-        completed = service.confirm_selection(job["id"], 1)
+        waiting = service.pending_selection(job["id"])
+        completed = service.confirm_selection(
+            job["id"],
+            1,
+            selection_nonce=waiting["selection_nonce"],
+        )
 
         self.assertEqual(completed["state"], "completed")
         self.assertEqual(
@@ -1101,7 +1239,12 @@ class PlexManagementServiceTest(unittest.TestCase):
             partial["warnings"],
         )
 
-        completed = service.confirm_selection(job["id"], 1)
+        waiting = service.pending_selection(job["id"])
+        completed = service.confirm_selection(
+            job["id"],
+            1,
+            selection_nonce=waiting["selection_nonce"],
+        )
 
         audio = completed["step_results"]["audio"]
         self.assertEqual(audio["status"], "warning")
@@ -1171,7 +1314,12 @@ class PlexManagementServiceTest(unittest.TestCase):
             "subtitle",
         )
 
-        completed = service.confirm_selection(job["id"], 1)
+        waiting = service.pending_selection(job["id"])
+        completed = service.confirm_selection(
+            job["id"],
+            1,
+            selection_nonce=waiting["selection_nonce"],
+        )
 
         self.assertEqual(completed["state"], "completed")
         self.assertIn(("42", 11, 32), plex.subtitle_selections)
@@ -1234,7 +1382,12 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertEqual([part["part_id"] for part in partial], [11])
         self.assertEqual(plex.subtitle_selections, [("42", 11, 41)])
 
-        completed = service.confirm_selection(job["id"], 1)
+        waiting = service.pending_selection(job["id"])
+        completed = service.confirm_selection(
+            job["id"],
+            1,
+            selection_nonce=waiting["selection_nonce"],
+        )
 
         self.assertEqual(completed["state"], "completed")
         self.assertEqual(
@@ -1471,6 +1624,78 @@ class PlexManagementServiceTest(unittest.TestCase):
                 preview["payload"],
                 preview["confirmation_token"],
             )
+
+    def test_retry_rejects_non_retryable_states_without_running(self):
+        service = self.make_service()
+        service.run_job = Mock(
+            side_effect=AssertionError("non-retryable job must not run")
+        )
+        for state in (
+            "queued",
+            "running",
+            "scanning",
+            "artwork",
+            "audio",
+            "subtitle",
+            "awaiting_selection",
+            "completed",
+        ):
+            with self.subTest(state=state):
+                job = self.jobs.create_or_get(
+                    f"retry-state-{state}",
+                    {"final_path": f"/{state}"},
+                )
+                self.jobs.update(job["id"], state=state)
+
+                with self.assertRaisesRegex(ValueError, "not retryable"):
+                    service.retry_job(job["id"])
+
+        service.run_job.assert_not_called()
+
+    def test_cancelled_selection_invalidates_waiting_record_and_nonce(self):
+        plex = FakePlex()
+        tmdb = FakeTmdb()
+        tmdb.textless_posters = Mock(return_value=[
+            {
+                "url": "https://tmdb/first.jpg",
+                "iso_639_1": None,
+                "vote_count": 8,
+                "vote_average": 8,
+                "width": 1000,
+                "height": 1500,
+            },
+            {
+                "url": "https://tmdb/second.jpg",
+                "iso_639_1": None,
+                "vote_count": 8,
+                "vote_average": 8,
+                "width": 1000,
+                "height": 1500,
+            },
+        ])
+        service = self.make_service(plex=plex, tmdb=tmdb)
+        job = service.enqueue_completion(make_completion())
+        waiting_job = service.run_job(job["id"])
+        waiting = service.pending_selection(job["id"])
+        nonce = waiting["selection_nonce"]
+
+        service.cancel_pending_selection(job["id"])
+
+        cancelled = self.jobs.get(job["id"])
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.assertIsNone(service.pending_selection(job["id"]))
+        self.assertNotIn(
+            "waiting",
+            cancelled["step_results"]["artwork"],
+        )
+        with self.assertRaisesRegex(ValueError, "not awaiting"):
+            service.confirm_selection(
+                job["id"],
+                0,
+                selection_nonce=nonce,
+            )
+        self.assertEqual(plex.poster_updates, [])
+        self.assertEqual(waiting_job["state"], "awaiting_selection")
 
     def test_obsolete_match_and_metadata_surfaces_are_absent(self):
         service = self.make_service()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import secrets
 import time
 from copy import deepcopy
 
@@ -39,6 +40,7 @@ class WaitingForSelection(RuntimeError):
         self.candidates = deepcopy(list(candidates or []))
         self.rating_key = str(rating_key or "")
         self.part_id = int(part_id or 0)
+        self.selection_nonce = secrets.token_hex(8)
         self.step_result = None
 
     def as_dict(self, candidate_index=0):
@@ -49,6 +51,7 @@ class WaitingForSelection(RuntimeError):
             "part_id": self.part_id,
             "candidates": deepcopy(self.candidates),
             "candidate_index": int(candidate_index),
+            "selection_nonce": self.selection_nonce,
         }
 
 
@@ -470,10 +473,27 @@ class PlexManagementService:
                     "final_path": final_path,
                     "category_kind": "",
                 }]
+        persisted = deepcopy(
+            ((job.get("step_results") or {}).get("scanning") or {})
+        )
+        library_results = dict(persisted.get("libraries") or {})
+        target_results = dict(persisted.get("targets") or {})
         groups = {}
-        target_results = {}
         for target in targets:
             target_id = str(target.get("target_id") or "")
+            previous = target_results.get(target_id) or {}
+            if (
+                previous.get("status") == "success"
+                and previous.get("rating_key")
+            ):
+                library_id = str(previous.get("library_id") or "")
+                if library_id:
+                    group = groups.setdefault(
+                        library_id,
+                        {"targets": [], "unresolved": []},
+                    )
+                    group["targets"].append(target)
+                    continue
             try:
                 library_id = str(self._route_library(job, target))
             except Exception as exc:
@@ -483,108 +503,168 @@ class PlexManagementService:
                     "message": self._safe_error(exc),
                 }
                 continue
-            groups.setdefault(library_id, []).append(target)
+            group = groups.setdefault(
+                library_id,
+                {"targets": [], "unresolved": []},
+            )
+            group["targets"].append(target)
+            group["unresolved"].append(target)
 
         scan_result = {
             "status": "started",
-            "libraries": {},
+            "libraries": library_results,
             "targets": target_results,
         }
-        self.jobs.update(
-            job["id"],
-            step_results=self._merge_step(job, "scanning", scan_result),
-        )
 
-        located = 0
-        first_rating_key = ""
-        for library_id, library_targets in groups.items():
+        def persist_scan():
+            current = self.jobs.get(job["id"])
+            rating_key = next((
+                str(result.get("rating_key") or "")
+                for target_id, result in target_results.items()
+                if (
+                    target_id in target_ids
+                    and isinstance(result, dict)
+                    and result.get("status") == "success"
+                    and result.get("rating_key")
+                )
+            ), "")
+            return self.jobs.update(
+                job["id"],
+                rating_key=rating_key or None,
+                step_results=self._merge_step(
+                    current,
+                    "scanning",
+                    scan_result,
+                ),
+            )
+
+        target_ids = {
+            str(target.get("target_id") or "")
+            for target in targets
+        }
+        persist_scan()
+        for library_id, group in groups.items():
             if should_cancel and should_cancel():
                 raise PlexOperationCancelled(
                     "Plex operation cancelled before library scan"
                 )
-            library_result = {
-                "status": "started",
-                "target_ids": [
-                    str(target.get("target_id") or "")
-                    for target in library_targets
-                ],
-            }
+            library_targets = list(group["targets"])
+            unresolved = list(group["unresolved"])
+            library_target_ids = [
+                str(target.get("target_id") or "")
+                for target in library_targets
+            ]
+            library_result = dict(library_results.get(library_id) or {})
+            library_result["target_ids"] = library_target_ids
             scan_result["libraries"][library_id] = library_result
-            self.jobs.update(
-                job["id"],
-                step_results=self._merge_step(job, "scanning", scan_result),
-            )
-            try:
-                self.plex.scan_library(library_id)
-            except Exception as exc:
-                message = self._safe_error(exc)
-                library_result.update({"status": "warning", "message": message})
-                for target in library_targets:
-                    target_id = str(target.get("target_id") or "")
-                    target_results[target_id] = {
-                        "status": "warning",
-                        "library_id": library_id,
-                        "final_path": str(target.get("final_path") or ""),
-                        "message": message,
-                    }
-                self.jobs.update(
-                    job["id"],
-                    step_results=self._merge_step(
-                        job,
-                        "scanning",
-                        scan_result,
-                    ),
-                )
+            if not unresolved:
+                library_result["status"] = "success"
+                library_result["located"] = len(library_targets)
+                library_result["missing"] = 0
+                persist_scan()
                 continue
+
+            if library_result.get("status") != "success":
+                library_result.update({
+                    "status": "started",
+                    "located": sum(
+                        1
+                        for target_id in library_target_ids
+                        if (
+                            (target_results.get(target_id) or {}).get("status")
+                            == "success"
+                        )
+                    ),
+                    "missing": len(unresolved),
+                })
+                library_result.pop("message", None)
+                persist_scan()
+                try:
+                    self.plex.scan_library(library_id)
+                except Exception as exc:
+                    message = self._safe_error(exc)
+                    library_result.update({
+                        "status": "warning",
+                        "message": message,
+                    })
+                    for target in unresolved:
+                        target_id = str(target.get("target_id") or "")
+                        target_results[target_id] = {
+                            "status": "warning",
+                            "library_id": library_id,
+                            "final_path": str(target.get("final_path") or ""),
+                            "message": message,
+                        }
+                    persist_scan()
+                    continue
+                library_result["status"] = "success"
+                library_result.pop("message", None)
+                persist_scan()
+
             if should_cancel and should_cancel():
                 raise PlexOperationCancelled(
                     "Plex operation cancelled after library scan"
                 )
-            missing = 0
-            for index, target in enumerate(library_targets, start=1):
-                target_id = str(target.get("target_id") or "")
-                final_path = str(target.get("final_path") or "")
-                deadline = self._clock() + self.scan_timeout
-                item = None
-                lookup_error = ""
-                while item is None:
-                    if should_cancel and should_cancel():
-                        raise PlexOperationCancelled(
-                            "Plex operation cancelled while locating final path"
-                        )
-                    try:
-                        item = self.plex.find_item_by_path(
+
+            pending = {
+                str(target.get("target_id") or ""): target
+                for target in unresolved
+            }
+            deadline = self._clock() + self.scan_timeout
+            while pending:
+                if should_cancel and should_cancel():
+                    raise PlexOperationCancelled(
+                        "Plex operation cancelled while locating final paths"
+                    )
+                paths = [
+                    str(target.get("final_path") or "")
+                    for target in pending.values()
+                ]
+                try:
+                    if hasattr(self.plex, "index_items_by_paths"):
+                        indexed = self.plex.index_items_by_paths(
                             library_id,
-                            final_path,
+                            paths,
                         )
-                    except PlexOperationCancelled:
-                        raise
-                    except Exception as exc:
-                        lookup_error = self._safe_error(exc)
-                        break
-                    if item is not None or self._clock() >= deadline:
-                        break
-                    self._sleep(self.scan_poll_interval)
-                if lookup_error:
-                    missing += 1
-                    target_results[target_id] = {
-                        "status": "warning",
-                        "library_id": library_id,
-                        "final_path": final_path,
-                        "message": lookup_error,
-                    }
-                elif item is None:
-                    missing += 1
-                    target_results[target_id] = {
-                        "status": "warning",
-                        "library_id": library_id,
-                        "final_path": final_path,
-                        "message": "Plex item was not found by final path",
-                    }
-                else:
+                    else:
+                        indexed = {
+                            path: self.plex.find_item_by_path(
+                                library_id,
+                                path,
+                            )
+                            for path in paths
+                        }
+                except PlexOperationCancelled:
+                    raise
+                except Exception as exc:
+                    message = self._safe_error(exc)
+                    for target_id, target in pending.items():
+                        target_results[target_id] = {
+                            "status": "warning",
+                            "library_id": library_id,
+                            "final_path": str(target.get("final_path") or ""),
+                            "message": message,
+                        }
+                    pending.clear()
+                    persist_scan()
+                    break
+
+                for target_id, target in list(pending.items()):
+                    final_path = str(target.get("final_path") or "")
+                    item = (indexed or {}).get(final_path)
+                    if isinstance(item, Exception):
+                        target_results[target_id] = {
+                            "status": "warning",
+                            "library_id": library_id,
+                            "final_path": final_path,
+                            "message": self._safe_error(item),
+                        }
+                        pending.pop(target_id, None)
+                        continue
+                    if item is None:
+                        continue
                     rating_key = str(item.get("rating_key") or "")
                     if not rating_key:
-                        missing += 1
                         target_results[target_id] = {
                             "status": "warning",
                             "library_id": library_id,
@@ -592,44 +672,67 @@ class PlexManagementService:
                             "message": "Plex item is missing a rating key",
                         }
                     else:
-                        located += 1
-                        first_rating_key = first_rating_key or rating_key
                         target_results[target_id] = {
                             "status": "success",
                             "library_id": library_id,
                             "rating_key": rating_key,
                             "final_path": final_path,
                         }
-                library_result["located"] = index - missing
-                library_result["missing"] = missing
-                self.jobs.update(
-                    job["id"],
-                    rating_key=first_rating_key or None,
-                    step_results=self._merge_step(
-                        job,
-                        "scanning",
-                        scan_result,
-                    ),
-                )
-            library_result["status"] = "warning" if missing else "success"
-            library_result["located"] = len(library_targets) - missing
-            library_result["missing"] = missing
-            self.jobs.update(
-                job["id"],
-                step_results=self._merge_step(job, "scanning", scan_result),
-            )
+                    pending.pop(target_id, None)
 
-        total = len(targets)
+                located_in_library = sum(
+                    1
+                    for target_id in library_target_ids
+                    if (
+                        (target_results.get(target_id) or {}).get("status")
+                        == "success"
+                    )
+                )
+                library_result["located"] = located_in_library
+                library_result["missing"] = (
+                    len(library_target_ids) - located_in_library
+                )
+                persist_scan()
+                if not pending or self._clock() >= deadline:
+                    break
+                self._sleep(self.scan_poll_interval)
+
+            for target_id, target in pending.items():
+                target_results[target_id] = {
+                    "status": "warning",
+                    "library_id": library_id,
+                    "final_path": str(target.get("final_path") or ""),
+                    "message": "Plex item was not found by final path",
+                }
+            located_in_library = sum(
+                1
+                for target_id in library_target_ids
+                if (
+                    (target_results.get(target_id) or {}).get("status")
+                    == "success"
+                )
+            )
+            library_result["located"] = located_in_library
+            library_result["missing"] = (
+                len(library_target_ids) - located_in_library
+            )
+            persist_scan()
+
+        total = len(target_ids)
+        located = sum(
+            1
+            for target_id in target_ids
+            if (
+                (target_results.get(target_id) or {}).get("status")
+                == "success"
+            )
+        )
         scan_result["status"] = (
             "success" if located == total else "warning" if located else "failed"
         )
         scan_result["located"] = located
         scan_result["missing"] = total - located
-        self.jobs.update(
-            job["id"],
-            rating_key=first_rating_key or None,
-            step_results=self._merge_step(job, "scanning", scan_result),
-        )
+        persist_scan()
         if not located:
             raise LookupError("Plex scan completed but no target was located")
         return scan_result
@@ -912,12 +1015,6 @@ class PlexManagementService:
             if contract
             else ""
         )
-        if mapping_kind in {"tvdb_official", "ai_inferred_tvdb"}:
-            return {
-                "status": "unchanged",
-                "action": "official_artwork_preserved",
-                "attempted": False,
-            }
         if mapping_kind == "temporary_related_special":
             identity = contract.get("identity") or {}
             poster_url = str(identity.get("poster_url") or "").strip()
@@ -1223,6 +1320,11 @@ class PlexManagementService:
         job = self.jobs.get(job_id)
         if not job:
             raise LookupError(f"Plex job not found: {job_id}")
+        if job["state"] not in {"failed", "interrupted", "cancelled"}:
+            raise ValueError(
+                f"Plex job {job_id} is not retryable from state "
+                f"{job['state']}"
+            )
         steps = dict(job.get("step_results") or {})
         restart_index = 0
         for index, name in enumerate(STEP_ORDER):
@@ -1231,29 +1333,45 @@ class PlexManagementService:
                 break
         else:
             restart_index = len(STEP_ORDER)
-        for name in STEP_ORDER[restart_index:]:
+        for name in STEP_ORDER[restart_index + 1:]:
             steps.pop(name, None)
-        self.jobs.update(job_id, state="queued", step_results=steps, error=None)
+        if not self.jobs.claim_retry(job_id, step_results=steps):
+            current = self.jobs.get(job_id)
+            state = str((current or {}).get("state") or "missing")
+            raise ValueError(
+                f"Plex job {job_id} is not retryable from state {state}"
+            )
         return self.run_job(job_id)
 
-    def pending_selection(self, job_id):
+    def pending_selection(self, job_id, *, selection_nonce=""):
         job = self.jobs.get(job_id)
         if not job:
             raise LookupError(f"Plex job not found: {job_id}")
+        if job["state"] != "awaiting_selection":
+            return None
         for name in STEP_ORDER:
             waiting = (
                 ((job.get("step_results") or {}).get(name) or {})
                 .get("waiting")
             )
             if isinstance(waiting, dict):
+                if (
+                    selection_nonce
+                    and str(waiting.get("selection_nonce") or "")
+                    != str(selection_nonce)
+                ):
+                    return None
                 return deepcopy(waiting)
         return None
 
-    def set_selection_index(self, job_id, index):
+    def set_selection_index(self, job_id, index, *, selection_nonce):
         job = self.jobs.get(job_id)
         if not job:
             raise LookupError(f"Plex job not found: {job_id}")
-        waiting = self.pending_selection(job_id)
+        waiting = self.pending_selection(
+            job_id,
+            selection_nonce=selection_nonce,
+        )
         if not waiting:
             raise ValueError(f"Plex job {job_id} is not awaiting a selection")
         try:
@@ -1274,11 +1392,22 @@ class PlexManagementService:
         job_id,
         index,
         *,
+        selection_nonce,
         should_cancel=None,
         on_stage=None,
     ):
-        waiting = self.set_selection_index(job_id, index)
+        waiting = self.set_selection_index(
+            job_id,
+            index,
+            selection_nonce=selection_nonce,
+        )
         job = self.jobs.get(job_id)
+        if (
+            job["state"] != "awaiting_selection"
+            or str(waiting.get("selection_nonce") or "")
+            != str(selection_nonce or "")
+        ):
+            raise ValueError(f"Plex job {job_id} is not awaiting a selection")
         candidate = deepcopy(waiting["candidates"][int(index)])
         kind = str(waiting["kind"])
         rating_key = str(waiting.get("rating_key") or "")
@@ -1334,15 +1463,28 @@ class PlexManagementService:
         job = self.jobs.get(job_id)
         if not job:
             raise LookupError(f"Plex job not found: {job_id}")
-        if job["state"] == "cancelled":
-            return job
-        if job["state"] != "awaiting_selection":
+        if job["state"] not in {"awaiting_selection", "cancelled"}:
             raise ValueError(
                 f"Plex job {job_id} is not awaiting a selection"
             )
+        steps = deepcopy(job.get("step_results") or {})
+        for name in STEP_ORDER:
+            step = steps.get(name)
+            if not isinstance(step, dict):
+                continue
+            waiting = step.pop("waiting", None)
+            if not isinstance(waiting, dict):
+                continue
+            step["status"] = "cancelled"
+            target_id = str(waiting.get("target_id") or "")
+            target_result = (step.get("targets") or {}).get(target_id)
+            if isinstance(target_result, dict):
+                target_result.pop("waiting", None)
+                target_result["status"] = "cancelled"
         return self.jobs.update(
             job_id,
             state="cancelled",
+            step_results=steps,
             error="cancelled while awaiting enhancement selection",
         )
 
@@ -1478,6 +1620,16 @@ class PlexManagementService:
     def prepare_operation(self, action, payload):
         action = self._validate_operation(self._normalize_action(action))
         payload = dict(payload or {})
+        if action == "retry_job":
+            job_id = int(payload.get("job_id") or 0)
+            job = self.jobs.get(job_id)
+            if not job:
+                raise LookupError(f"Plex job not found: {job_id}")
+            if job["state"] not in {"failed", "interrupted", "cancelled"}:
+                raise ValueError(
+                    f"Plex job {job_id} is not retryable from state "
+                    f"{job['state']}"
+                )
         token = self.jobs.issue_confirmation(
             int(payload.get("job_id") or 0),
             action,

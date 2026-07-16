@@ -231,7 +231,12 @@ class PlexFeature:
             return await self._scan_menu(service)
         text = " ".join(str(item) for item in request.get("args") or []).strip()
         if not text:
-            jobs = await asyncio.to_thread(service.list_jobs, 5)
+            jobs = await asyncio.to_thread(service.list_jobs, 1000)
+            jobs = [
+                job
+                for job in jobs
+                if self._job_owned_by_request(job, request)
+            ][:5]
             if not jobs:
                 return self._message("当前没有 Plex 管理任务。")
             lines = ["最近 Plex 任务："]
@@ -243,7 +248,7 @@ class PlexFeature:
         if not text.isdecimal():
             return self._message("用法：/plex [Job ID]")
         job = await asyncio.to_thread(service.get_job, int(text))
-        if not job:
+        if not job or not self._job_owned_by_request(job, request):
             return self._message(f"⚠️ Plex 任务不存在：#{text}")
         waiting = await asyncio.to_thread(
             service.pending_selection, job["id"]
@@ -472,26 +477,33 @@ class PlexFeature:
 
     async def _choice_callback(self, request, service, payload):
         parts = payload.split(":")
-        if len(parts) < 3:
+        if len(parts) < 4:
             return self._message("⚠️ Plex 选择已失效。")
         try:
             job_id = int(parts[1])
         except (TypeError, ValueError):
             return self._message("⚠️ Plex 选择已失效。")
-        job = await asyncio.to_thread(service.get_job, job_id)
-        if not job:
+        selection_nonce = str(parts[2] or "")
+        if not selection_nonce:
             return self._message("⚠️ Plex 选择已失效。")
-        waiting = await asyncio.to_thread(service.pending_selection, job_id)
+        job = await asyncio.to_thread(service.get_job, job_id)
+        if not job or not self._job_owned_by_request(job, request):
+            return self._message("⚠️ Plex 选择已失效。")
+        waiting = await asyncio.to_thread(
+            service.pending_selection,
+            job_id,
+            selection_nonce=selection_nonce,
+        )
         if not waiting:
             return self._message("⚠️ Plex 选择已失效。")
         operation = self._selection_operation(request, job, waiting)
         operation_id = operation["operation_id"]
-        action = parts[2]
+        action = parts[3]
         candidates = list(waiting.get("candidates") or [])
         if not candidates:
             return self._message("⚠️ Plex 当前没有可选候选。")
 
-        if action in {"prev", "next"} and len(parts) == 3:
+        if action in {"prev", "next"} and len(parts) == 4:
             current = int(waiting.get("candidate_index") or 0)
             offset = -1 if action == "prev" else 1
             if str(waiting.get("kind") or "") == "artwork":
@@ -502,7 +514,10 @@ class PlexFeature:
                 page = min(max(current_page + offset, 0), page_count - 1)
                 index = page * 8
             waiting = await asyncio.to_thread(
-                service.set_selection_index, job_id, index
+                service.set_selection_index,
+                job_id,
+                index,
+                selection_nonce=selection_nonce,
             )
             view = self._advance_operation(
                 operation_id,
@@ -517,10 +532,10 @@ class PlexFeature:
                 "operation": view,
             }
 
-        if action != "pick" or len(parts) != 4:
+        if action != "pick" or len(parts) != 5:
             return self._message("⚠️ Plex 选择已失效。")
         try:
-            index = int(parts[3])
+            index = int(parts[4])
         except (TypeError, ValueError):
             return self._message("⚠️ Plex 选择已失效。")
         if index < 0 or index >= len(candidates):
@@ -534,9 +549,14 @@ class PlexFeature:
             control="cancel",
             details={"job_id": job_id},
         )
-        task_id = f"plex-choice-{job_id}"
+        task_id = f"plex-choice-{job_id}-{selection_nonce}"
         task = self.runtime.spawn(
-            self._run_selection(operation_id, job_id, index),
+            self._run_selection(
+                operation_id,
+                job_id,
+                index,
+                selection_nonce,
+            ),
             task_id=task_id,
         )
         self.operations[operation_id].update({
@@ -629,6 +649,7 @@ class PlexFeature:
     def _selection_action(self, job, waiting, *, edit=False):
         kind = str(waiting.get("kind") or "")
         candidates = list(waiting.get("candidates") or [])
+        selection_nonce = str(waiting.get("selection_nonce") or "")
         index = min(
             max(int(waiting.get("candidate_index") or 0), 0),
             max(len(candidates) - 1, 0),
@@ -638,17 +659,24 @@ class PlexFeature:
             keyboard = [[
                 {
                     "text": "上一张",
-                    "callback_data": f"plex:choice:{job['id']}:prev",
+                    "callback_data": (
+                        f"plex:choice:{job['id']}:"
+                        f"{selection_nonce}:prev"
+                    ),
                 },
                 {
                     "text": "选择此海报",
                     "callback_data": (
-                        f"plex:choice:{job['id']}:pick:{index}"
+                        f"plex:choice:{job['id']}:"
+                        f"{selection_nonce}:pick:{index}"
                     ),
                 },
                 {
                     "text": "下一张",
-                    "callback_data": f"plex:choice:{job['id']}:next",
+                    "callback_data": (
+                        f"plex:choice:{job['id']}:"
+                        f"{selection_nonce}:next"
+                    ),
                 },
             ]]
             return {
@@ -670,7 +698,8 @@ class PlexFeature:
             [{
                 "text": self._candidate_label(kind, candidate),
                 "callback_data": (
-                    f"plex:choice:{job['id']}:pick:{candidate_index}"
+                    f"plex:choice:{job['id']}:"
+                    f"{selection_nonce}:pick:{candidate_index}"
                 ),
             }]
             for candidate_index, candidate in enumerate(
@@ -682,12 +711,18 @@ class PlexFeature:
         if page > 0:
             controls.append({
                 "text": "上一页",
-                "callback_data": f"plex:choice:{job['id']}:prev",
+                "callback_data": (
+                    f"plex:choice:{job['id']}:"
+                    f"{selection_nonce}:prev"
+                ),
             })
         if page + 1 < page_count:
             controls.append({
                 "text": "下一页",
-                "callback_data": f"plex:choice:{job['id']}:next",
+                "callback_data": (
+                    f"plex:choice:{job['id']}:"
+                    f"{selection_nonce}:next"
+                ),
             })
         controls.append({
             "text": "取消",
@@ -713,20 +748,37 @@ class PlexFeature:
             codec = str(candidate.get("codec") or "未知格式").upper()
             channels = int(candidate.get("channels") or 0)
             bitrate = int(candidate.get("bitrate") or 0)
-            return (
-                f"#{candidate_id} · {name} · {codec} · "
-                f"{channels}ch · {bitrate}kbps"
+            prefix = f"#{candidate_id} · "
+            suffix = (
+                f" · {codec} · {channels}ch · {bitrate}kbps"
             )
-        location = "外挂" if candidate.get("external") else "内嵌"
-        return f"#{candidate_id} · {name} · {location}"
+        else:
+            prefix = f"#{candidate_id} · "
+            location = "外挂" if candidate.get("external") else "内嵌"
+            suffix = f" · {location}"
+        available = 64 - len(prefix) - len(suffix)
+        if len(name) > available:
+            name = (
+                name[:max(available - 1, 0)] + "…"
+                if available > 0
+                else ""
+            )
+        return f"{prefix}{name}{suffix}"[:64]
 
-    async def _run_selection(self, operation_id, job_id, index):
+    async def _run_selection(
+        self,
+        operation_id,
+        job_id,
+        index,
+        selection_nonce,
+    ):
         try:
             service = await self._ensure_service()
             result = await asyncio.to_thread(
                 service.confirm_selection,
                 job_id,
                 index,
+                selection_nonce=selection_nonce,
                 should_cancel=lambda: self._is_cancelled(operation_id),
                 on_stage=lambda stage, job: self._stage_sync(
                     operation_id, stage, job
@@ -1082,9 +1134,6 @@ class PlexFeature:
             )
             return {"actions": [], "operation": terminal}
 
-        cancel_event = operation.get("cancel_event")
-        if cancel_event is not None:
-            cancel_event.set()
         task = operation.get("task")
         if operation.get("state") == "awaiting_input":
             job_id = int(
@@ -1092,6 +1141,18 @@ class PlexFeature:
             )
             if job_id:
                 service = await self._ensure_service()
+                persisted = await asyncio.to_thread(
+                    service.get_job,
+                    job_id,
+                )
+                if not self._job_owned_by_owner(persisted, owner):
+                    raise FeatureError(
+                        "stale_control",
+                        "Plex job owner changed",
+                    )
+                cancel_event = operation.get("cancel_event")
+                if cancel_event is not None:
+                    cancel_event.set()
                 job = await asyncio.to_thread(
                     service.cancel_pending_selection, job_id
                 )
@@ -1109,6 +1170,9 @@ class PlexFeature:
                 return {"actions": [], "operation": terminal}
             terminal = await self._finish_cancelled(operation_id)
             return {"actions": [], "operation": terminal}
+        cancel_event = operation.get("cancel_event")
+        if cancel_event is not None:
+            cancel_event.set()
         if task is None:
             terminal = await self._finish_cancelled(operation_id)
             return {"actions": [], "operation": terminal}
@@ -1274,8 +1338,18 @@ class PlexFeature:
     def _owner_key(request):
         return int(request.get("chat_id") or 0), int(request.get("user_id") or 0)
 
+    @staticmethod
+    def _job_owned_by_owner(job, owner):
+        payload = (job or {}).get("payload") or {}
+        return (
+            int(payload.get("chat_id") or 0) == int(owner[0])
+            and int(payload.get("user_id") or 0) == int(owner[1])
+        )
+
+    def _job_owned_by_request(self, job, request):
+        return self._job_owned_by_owner(job, self._owner_key(request))
+
     async def _resume_interrupted(self):
-        legacy_job_ids = []
         for job_id in self.interrupted_job_ids:
             job = self.jobs.get(job_id)
             payload = (job or {}).get("payload") or {}
@@ -1288,24 +1362,6 @@ class PlexFeature:
                     else self._restore_interrupted_operation(job)
                 )
                 await self.core.report_operation(operation)
-                continue
-            legacy_job_ids.append(job_id)
-        if not legacy_job_ids:
-            self.interrupted_job_ids = []
-            return
-        try:
-            await self._ensure_service()
-        except Exception:
-            return
-        claimed = []
-        for job_id in legacy_job_ids:
-            if await asyncio.to_thread(self.jobs.claim, job_id):
-                claimed.append(job_id)
-        for job_id in claimed:
-            self.runtime.spawn(
-                self._run_job(job_id),
-                task_id=f"plex-resume-{job_id}",
-            )
         self.interrupted_job_ids = []
 
     def _restore_interrupted_operation(self, job):

@@ -58,6 +58,12 @@ class PlexAdapter:
         ]
 
     def find_item_by_path(self, library_id, final_path):
+        return self.index_items_by_paths(
+            library_id,
+            [final_path],
+        ).get(str(final_path))
+
+    def index_items_by_paths(self, library_id, final_paths):
         section = self.server.library.sectionByID(int(library_id))
         section_type = str(self._value(section, "type", "") or "")
         if section_type == "movie":
@@ -66,16 +72,33 @@ class PlexAdapter:
             library_types = ("episode",)
         else:
             library_types = ("movie", "episode")
-        matches = []
+        expected_paths = [
+            str(path)
+            for path in final_paths or []
+            if str(path or "").strip()
+        ]
+        matches = {
+            expected_path: []
+            for expected_path in expected_paths
+        }
         for library_type in library_types:
             for candidate in section.search(libtype=library_type):
                 item = self._item_dict(candidate)
-                if any(
-                    self._media_path_matches(part.get("file"), final_path)
-                    for part in item.get("parts") or []
-                ):
-                    matches.append(item)
-        return matches[0] if len(matches) == 1 else None
+                for expected_path in expected_paths:
+                    if any(
+                        self._media_path_matches(
+                            part.get("file"),
+                            expected_path,
+                        )
+                        for part in item.get("parts") or []
+                    ):
+                        matches[expected_path].append(item)
+        return {
+            expected_path: (
+                candidates[0] if len(candidates) == 1 else None
+            )
+            for expected_path, candidates in matches.items()
+        }
 
     @staticmethod
     def _media_path_matches(actual_path, expected_path):

@@ -127,6 +127,33 @@ class PlexJobRepository:
             connection.commit()
         return cursor.rowcount == 1
 
+    def claim_retry(self, job_id, *, step_results=_UNSET) -> bool:
+        assignments = [
+            "state = 'running'",
+            "error = NULL",
+        ]
+        values = []
+        if step_results is not _UNSET:
+            assignments.append("step_results_json = ?")
+            values.append(json.dumps(
+                step_results or {},
+                ensure_ascii=False,
+                sort_keys=True,
+            ))
+        assignments.append("updated_at = ?")
+        values.append(float(self._clock()))
+        values.append(int(job_id))
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                f"UPDATE plex_jobs SET {', '.join(assignments)} "
+                "WHERE id = ? "
+                "AND state IN ('failed', 'interrupted', 'cancelled')",
+                values,
+            )
+            connection.commit()
+        return cursor.rowcount == 1
+
     def mark_incomplete_interrupted(self) -> list[int]:
         restart_safe_states = (
             "queued",

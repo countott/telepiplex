@@ -188,6 +188,62 @@ class PlexAdapterTest(unittest.TestCase):
         self.assertEqual(result["grandparent_rating_key"], "40")
 
     @patch("telepiplex_plex.adapters.plex.PlexServer")
+    def test_index_items_by_paths_reads_library_once_for_all_targets(
+        self,
+        plex_server,
+    ):
+        from telepiplex_plex.adapters.plex import PlexAdapter
+
+        first_part = Mock(
+            id=11,
+            file="/mnt/media/Series/Season 01/Show S01E01.mkv",
+        )
+        first_part.audioStreams.return_value = []
+        first_part.subtitleStreams.return_value = []
+        first = Mock(
+            ratingKey="42",
+            title="Episode 1",
+            year=2024,
+            type="episode",
+            summary="",
+            guids=[],
+            media=[Mock(parts=[first_part])],
+        )
+        second_part = Mock(
+            id=12,
+            file="/mnt/media/Series/Season 01/Show S01E02.mkv",
+        )
+        second_part.audioStreams.return_value = []
+        second_part.subtitleStreams.return_value = []
+        second = Mock(
+            ratingKey="43",
+            title="Episode 2",
+            year=2024,
+            type="episode",
+            summary="",
+            guids=[],
+            media=[Mock(parts=[second_part])],
+        )
+        section = plex_server.return_value.library.sectionByID.return_value
+        section.type = "show"
+        section.search.return_value = [first, second]
+        paths = [
+            "/Series/Season 01/Show S01E01.mkv",
+            "/Series/Season 01/Show S01E02.mkv",
+        ]
+
+        indexed = PlexAdapter(
+            "http://plex:32400",
+            "token",
+        ).index_items_by_paths("12", paths)
+
+        section.search.assert_called_once_with(libtype="episode")
+        self.assertEqual(
+            [indexed[path]["rating_key"] for path in paths],
+            ["42", "43"],
+        )
+
+    @patch("telepiplex_plex.adapters.plex.PlexServer")
     def test_stream_operations_target_part_and_stream_ids(self, plex_server):
         from telepiplex_plex.adapters.plex import PlexAdapter
 

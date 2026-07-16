@@ -109,24 +109,38 @@ class FakeService:
             "failed": [],
         }
 
-    def pending_selection(self, job_id):
+    def pending_selection(self, job_id, *, selection_nonce=""):
         job = self.jobs.get(job_id)
         if not job:
             raise LookupError(f"Plex job not found: {job_id}")
+        if job["state"] != "awaiting_selection":
+            return None
         for name in ("scanning", "artwork", "audio", "subtitle"):
             waiting = (
                 ((job or {}).get("step_results") or {}).get(name) or {}
             ).get("waiting")
             if isinstance(waiting, dict):
+                if (
+                    selection_nonce
+                    and str(waiting.get("selection_nonce") or "")
+                    != str(selection_nonce)
+                ):
+                    return None
                 return dict(waiting)
         return None
 
-    def set_selection_index(self, job_id, index):
+    def set_selection_index(self, job_id, index, *, selection_nonce=""):
         job = self.jobs.get(job_id)
         waiting = self.pending_selection(job_id)
         candidates = list((waiting or {}).get("candidates") or [])
         index = int(index)
-        if not waiting or index < 0 or index >= len(candidates):
+        if (
+            not waiting
+            or str(waiting.get("selection_nonce") or "")
+            != str(selection_nonce or "")
+            or index < 0
+            or index >= len(candidates)
+        ):
             raise ValueError("selection index is out of range")
         steps = dict(job.get("step_results") or {})
         kind = str(waiting["kind"])
@@ -144,10 +158,15 @@ class FakeService:
         job_id,
         index,
         *,
+        selection_nonce="",
         should_cancel=None,
         on_stage=None,
     ):
-        waiting = self.set_selection_index(job_id, index)
+        waiting = self.set_selection_index(
+            job_id,
+            index,
+            selection_nonce=selection_nonce,
+        )
         self.confirmed_selections.append((int(job_id), int(index)))
         if on_stage:
             on_stage(str(waiting["kind"]), self.jobs.get(job_id))
@@ -160,6 +179,23 @@ class FakeService:
         return self.jobs.update(
             job_id,
             state="completed",
+            step_results=steps,
+        )
+
+    def cancel_pending_selection(self, job_id):
+        job = self.jobs.get(job_id)
+        if not job or job["state"] != "awaiting_selection":
+            raise ValueError("job is not awaiting selection")
+        steps = dict(job.get("step_results") or {})
+        for name in ("scanning", "artwork", "audio", "subtitle"):
+            step = dict(steps.get(name) or {})
+            if isinstance(step.get("waiting"), dict):
+                step.pop("waiting", None)
+                step["status"] = "cancelled"
+                steps[name] = step
+        return self.jobs.update(
+            job_id,
+            state="cancelled",
             step_results=steps,
         )
 
@@ -202,6 +238,7 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "part_id": 11 if kind != "artwork" else 0,
             "candidates": candidates,
             "candidate_index": candidate_index,
+            "selection_nonce": f"nonce-{job['id']}",
         }
         return self.jobs.update(
             job["id"],
@@ -551,7 +588,11 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["operation"]["state"], "awaiting_input")
 
         next_result = await self.feature.callback({
-            "payload": f"choice:{job['id']}:next",
+            "payload": (
+                f"choice:{job['id']}:"
+                f"{job['step_results']['artwork']['waiting']['selection_nonce']}:"
+                "next"
+            ),
             "chat_id": 10,
             "user_id": 1,
         })
@@ -623,7 +664,9 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 ))
                 self.assertTrue(all(
                     button["callback_data"].startswith(
-                        f"plex:choice:{job['id']}:pick:"
+                        f"plex:choice:{job['id']}:"
+                        f"{job['step_results'][kind]['waiting']['selection_nonce']}:"
+                        "pick:"
                     )
                     and len(button["callback_data"].encode("utf-8")) <= 64
                     for row in action["data"]["keyboard"]
@@ -634,6 +677,47 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     {"text": "取消", "callback_data": "plex:cancel"},
                     action["data"]["keyboard"][-1],
                 )
+
+    async def test_candidate_labels_truncate_at_inline_button_boundary(self):
+        cases = (
+            (
+                "audio",
+                {
+                    "id": 21,
+                    "codec": "truehd",
+                    "channels": 8,
+                    "bitrate": 4000,
+                },
+            ),
+            (
+                "subtitle",
+                {
+                    "id": 31,
+                    "language_code": "chi",
+                    "external": True,
+                },
+            ),
+        )
+        for kind, candidate in cases:
+            with self.subTest(kind=kind):
+                one = self.feature._candidate_label(
+                    kind,
+                    {**candidate, "display_title": "名"},
+                )
+                fixed_length = len(one) - 1
+                exact_name = "名" * (64 - fixed_length)
+                exact = self.feature._candidate_label(
+                    kind,
+                    {**candidate, "display_title": exact_name},
+                )
+                overflow = self.feature._candidate_label(
+                    kind,
+                    {**candidate, "display_title": exact_name + "名"},
+                )
+
+                self.assertEqual(len(exact), 64)
+                self.assertEqual(len(overflow), 64)
+                self.assertIn("…", overflow)
 
     async def test_audio_and_subtitle_candidates_paginate_with_absolute_indexes(self):
         cases = (
@@ -680,7 +764,9 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertIn(
                     {"text": "下一页", "callback_data": (
-                        f"plex:choice:{job['id']}:next"
+                        f"plex:choice:{job['id']}:"
+                        f"{job['step_results'][kind]['waiting']['selection_nonce']}:"
+                        "next"
                     )},
                     first_keyboard[-1],
                 )
@@ -696,7 +782,11 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("4000kbps", label)
 
                 second = await self.feature.callback({
-                    "payload": f"choice:{job['id']}:next",
+                    "payload": (
+                        f"choice:{job['id']}:"
+                        f"{job['step_results'][kind]['waiting']['selection_nonce']}:"
+                        "next"
+                    ),
                     "chat_id": 10,
                     "user_id": 1,
                 })
@@ -719,11 +809,18 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 ))
 
                 accepted = await self.feature.callback({
-                    "payload": f"choice:{job['id']}:pick:12",
+                    "payload": (
+                        f"choice:{job['id']}:"
+                        f"{job['step_results'][kind]['waiting']['selection_nonce']}:"
+                        "pick:12"
+                    ),
                     "chat_id": 10,
                     "user_id": 1,
                 })
-                await self.runtime.tasks.pop(f"plex-choice-{job['id']}")
+                await self.runtime.tasks.pop(
+                    f"plex-choice-{job['id']}-"
+                    f"{job['step_results'][kind]['waiting']['selection_nonce']}"
+                )
                 self.assertEqual(
                     accepted["operation"]["operation_id"],
                     opened["operation"]["operation_id"],
@@ -769,6 +866,97 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不会自动回滚", text)
         self.assertEqual(service.resume_incomplete_jobs(), 0)
         self.assertEqual(self.jobs.get(job["id"])["state"], "cancelled")
+
+    async def test_plex_job_views_choices_and_cancellation_require_job_owner(self):
+        job = self.make_waiting_job("audio", [{
+            "id": 21,
+            "display_title": "Japanese TrueHD",
+            "codec": "truehd",
+            "channels": 8,
+            "bitrate": 4000,
+        }])
+        nonce = job["step_results"]["audio"]["waiting"]["selection_nonce"]
+
+        listed = await self.feature.command({
+            "command": "plex",
+            "args": [],
+            "chat_id": 99,
+            "user_id": 2,
+        })
+        inspected = await self.feature.command({
+            "command": "plex",
+            "args": [str(job["id"])],
+            "chat_id": 99,
+            "user_id": 2,
+        })
+        chosen = await self.feature.callback({
+            "payload": f"choice:{job['id']}:{nonce}:pick:0",
+            "chat_id": 99,
+            "user_id": 2,
+        })
+        cancelled = await self.feature.callback({
+            "payload": "cancel",
+            "chat_id": 99,
+            "user_id": 2,
+        })
+
+        self.assertNotIn(f"#{job['id']}", listed["actions"][0]["text"])
+        self.assertIn("不存在", inspected["actions"][0]["text"])
+        self.assertIn("已失效", chosen["actions"][0]["text"])
+        self.assertIn("已失效", cancelled["actions"][0]["text"])
+        self.assertEqual(self.jobs.get(job["id"])["state"], "awaiting_selection")
+        self.assertEqual(self.service.confirmed_selections, [])
+
+    async def test_cancelled_choice_callback_cannot_revive_job_or_new_waiting_item(self):
+        job = self.make_waiting_job("audio", [{
+            "id": 21,
+            "display_title": "Japanese TrueHD",
+            "codec": "truehd",
+            "channels": 8,
+            "bitrate": 4000,
+        }])
+        old_waiting = job["step_results"]["audio"]["waiting"]
+        old_nonce = old_waiting["selection_nonce"]
+        await self.feature.command({
+            "command": "plex",
+            "args": [str(job["id"])],
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        await self.feature.callback({
+            "payload": "cancel",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        new_waiting = {
+            **old_waiting,
+            "selection_nonce": "nonce-new",
+        }
+        self.jobs.update(
+            job["id"],
+            state="awaiting_selection",
+            step_results={
+                "audio": {
+                    "status": "awaiting_selection",
+                    "waiting": new_waiting,
+                },
+            },
+        )
+
+        stale = await self.feature.callback({
+            "payload": f"choice:{job['id']}:{old_nonce}:pick:0",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+
+        self.assertIn("已失效", stale["actions"][0]["text"])
+        current = self.jobs.get(job["id"])
+        self.assertEqual(current["state"], "awaiting_selection")
+        self.assertEqual(
+            current["step_results"]["audio"]["waiting"]["selection_nonce"],
+            "nonce-new",
+        )
+        self.assertEqual(self.service.confirmed_selections, [])
 
     async def test_artwork_cancel_uses_photo_compatible_feedback(self):
         job = self.make_waiting_job("artwork", [{
@@ -821,7 +1009,11 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         })
 
         await self.feature.callback({
-            "payload": f"choice:{job['id']}:pick:0",
+            "payload": (
+                f"choice:{job['id']}:"
+                f"{job['step_results']['artwork']['waiting']['selection_nonce']}:"
+                "pick:0"
+            ),
             "chat_id": 10,
             "user_id": 1,
         })
@@ -830,7 +1022,10 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "chat_id": 10,
             "user_id": 1,
         })
-        await self.runtime.tasks.pop(f"plex-choice-{job['id']}")
+        await self.runtime.tasks.pop(
+            f"plex-choice-{job['id']}-"
+            f"{job['step_results']['artwork']['waiting']['selection_nonce']}"
+        )
 
         self.assertEqual(plex.poster_updates, [])
         self.assertEqual(self.jobs.get(job["id"])["state"], "cancelled")
@@ -887,6 +1082,11 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     service.confirm_selection(
                         job["id"],
                         0,
+                        selection_nonce=(
+                            job["step_results"][kind]["waiting"][
+                                "selection_nonce"
+                            ]
+                        ),
                         should_cancel=lambda: True,
                     )
 
@@ -922,11 +1122,18 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
 
         await self.feature.callback({
-            "payload": f"choice:{job['id']}:pick:0",
+            "payload": (
+                f"choice:{job['id']}:"
+                f"{job['step_results']['artwork']['waiting']['selection_nonce']}:"
+                "pick:0"
+            ),
             "chat_id": 10,
             "user_id": 1,
         })
-        await self.runtime.tasks.pop(f"plex-choice-{job['id']}")
+        await self.runtime.tasks.pop(
+            f"plex-choice-{job['id']}-"
+            f"{job['step_results']['artwork']['waiting']['selection_nonce']}"
+        )
 
         self.assertEqual(
             plex.poster_updates,
@@ -952,11 +1159,18 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         operation_id = opened["operation"]["operation_id"]
 
         accepted = await self.feature.callback({
-            "payload": f"choice:{job['id']}:pick:1",
+            "payload": (
+                f"choice:{job['id']}:"
+                f"{job['step_results']['artwork']['waiting']['selection_nonce']}:"
+                "pick:1"
+            ),
             "chat_id": 10,
             "user_id": 1,
         })
-        await self.runtime.tasks.pop(f"plex-choice-{job['id']}")
+        await self.runtime.tasks.pop(
+            f"plex-choice-{job['id']}-"
+            f"{job['step_results']['artwork']['waiting']['selection_nonce']}"
+        )
 
         self.assertEqual(accepted["operation"]["operation_id"], operation_id)
         self.assertEqual(
@@ -1089,7 +1303,7 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cancelling["operation"]["state"], "cancelling")
         self.assertEqual(self.feature.core.reports[-1]["state"], "cancelled")
 
-    async def test_in_progress_job_is_marked_interrupted_then_resumed(self):
+    async def test_uncoordinated_interrupted_job_requires_explicit_retry(self):
         job = self.jobs.create_or_get("old", {"final_path": "/Movies/Old"})
         self.jobs.update(job["id"], state="scanning")
         feature = PlexFeature(
@@ -1101,8 +1315,9 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.jobs.get(job["id"])["state"], "interrupted")
 
         await runtime.tasks.pop("plex-resume")
-        await runtime.tasks.pop(f"plex-resume-{job['id']}")
-        self.assertEqual(self.jobs.get(job["id"])["state"], "completed")
+        self.assertNotIn(f"plex-resume-{job['id']}", runtime.tasks)
+        self.assertEqual(self.jobs.get(job["id"])["state"], "interrupted")
+        self.assertEqual(self.service.runs, 0)
 
     async def test_restart_interrupts_current_active_states(self):
         states = ("running", "scanning", "artwork", "audio", "subtitle")
