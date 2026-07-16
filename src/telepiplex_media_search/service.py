@@ -9,6 +9,7 @@ from copy import deepcopy
 from telepiplex_plugin_sdk import FeatureError
 from telepiplex_plugin_sdk.media_metadata import resolve_category_route
 
+from .ai import infer_relation_hypotheses_with_ai
 from .adapters.douban import lookup_douban_evidence
 from .adapters.prowlarr import resolve_prowlarr_download_url, search_prowlarr
 from .adapters.tvdb import (
@@ -20,12 +21,20 @@ from .adapters.tvdb import (
 )
 from .adapters.wikipedia import lookup_wikipedia_evidence
 from .config_wizard import MediaSearchConfigWizard
+from .direct_link import DirectLinkError, resolve_direct_link
+from .input_contract import classify_search_input
 from .planner import SearchPlanningError, build_confirmable_search_plan
-from .release_score import rank_releases
+from .release_score import filter_relevant_releases, rank_releases
 from .search_plan import (
     TemporarySpecialAllocator,
     confirm_media_metadata,
     finalize_search_plan,
+)
+from .series_scope import (
+    SeriesScopeError,
+    apply_series_scope,
+    series_inventory,
+    series_scope_options,
 )
 
 
@@ -48,6 +57,11 @@ _PLANNING_ERROR_MESSAGES = {
     "complex_identity_requires_ai": "该条目包含复杂媒体关系，需要 AI 判断。",
     "ai_unavailable_after_gate_failure": "规则证据不足，且 AI 当前不可用；请补充年份、媒体类型或稍后重试。",
     "ai_invalid_after_gate_failure": "规则证据不足，且 AI 未能生成有效计划；请补充信息后重试。",
+    "ambiguous_numeric_role": "片名末尾数字无法证明是正式标题的一部分，请补充年份、完整片名或条目链接。",
+    "too_many_candidates": "合格候选超过 7 个，请补充年份、完整片名、电影/剧集类型，或提供豆瓣/TVDB 链接。",
+    "unsupported_metadata_link": "链接不是可识别的豆瓣/TVDB作品、季或单集地址。",
+    "direct_link_not_found": "无法读取该豆瓣/TVDB条目，请检查链接是否有效。",
+    "direct_link_invalid": "链接条目缺少可验证的标题或稳定ID。",
 }
 
 
@@ -61,7 +75,6 @@ class MediaSearchFeature:
         release_search=None,
         release_rank=None,
         release_resolver=None,
-        registry=None,
     ):
         self.config = config
         self.core = core
@@ -70,9 +83,9 @@ class MediaSearchFeature:
         self.release_search = release_search or self._search_releases
         self.release_rank = release_rank or rank_releases
         self.release_resolver = release_resolver or resolve_prowlarr_download_url
-        self.registry = registry
         self.plans = {}
         self.awaiting_queries = set()
+        self.awaiting_scope_inputs = {}
         self.config_wizard = MediaSearchConfigWizard(config)
         self.runtime = None
         self.operations = {}
@@ -91,99 +104,95 @@ class MediaSearchFeature:
         raw_query = " ".join(str(payload.get("query") or "").split())
         if not raw_query:
             raise FeatureError("invalid_query", "metadata query is required")
-        entity = self.registry.resolve_exact(raw_query) if self.registry else None
-        if not isinstance(entity, dict):
+        plan_id = f"cap-{uuid.uuid4().hex[:10]}"
+        try:
+            plan = await self.plan_builder(raw_query, plan_id)
+        except SearchPlanningError as exc:
             raise FeatureError(
                 "metadata_unresolved",
-                "metadata resolution requires an exact previously selected entity",
+                f"metadata resolution failed: {exc.code}",
+            ) from exc
+        candidates = [
+            item
+            for item in plan.get("candidates") or []
+            if item.get("selectable") is not False
+        ]
+        if len(candidates) != 1:
+            raise FeatureError(
+                "metadata_unresolved",
+                "noninteractive metadata resolution requires exactly one candidate",
             )
-        contract = self._registry_contract(entity)
+        selected = candidates[0]
+        selected_plan = {
+            "plan_id": plan_id,
+            "media_metadata": deepcopy(selected.get("media_metadata") or {}),
+            "prowlarr_queries": list(selected.get("prowlarr_queries") or []),
+        }
+        contract = selected_plan["media_metadata"]
+        placement = contract.get("placement") or {}
+        if placement.get("mapping_kind") == "temporary_related_special":
+            prefix = (
+                "animated"
+                if str(placement.get("category_kind") or "").startswith("animated_")
+                else "live_action"
+            )
+            placement.update({
+                "library_type": "movie",
+                "category_kind": f"{prefix}_movie",
+                "season_number": None,
+                "episode_number": None,
+                "mapping_kind": "standalone",
+                "mapping_source": "noninteractive_standalone",
+                "tvdb_episode_id": "",
+            })
+            contract["items"] = []
+        elif placement.get("library_type") == "series":
+            decision = ((contract.get("evidence") or {}).get("decision") or {})
+            scope = str(decision.get("scope") or "movie_or_series")
+            if scope == "episode":
+                contract = apply_series_scope(
+                    contract,
+                    "episode",
+                    season_number=decision.get("season_number"),
+                    episode_number=decision.get("episode_number"),
+                )
+            elif scope == "season":
+                contract = apply_series_scope(
+                    contract,
+                    "season",
+                    season_number=decision.get("season_number"),
+                )
+            elif scope == "whole_series":
+                contract = apply_series_scope(contract, "whole_series")
+            else:
+                raise FeatureError(
+                    "metadata_unresolved",
+                    "series metadata resolution requires an explicit scope",
+                )
+            selected_plan["media_metadata"] = contract
+        try:
+            contract = confirm_media_metadata(selected_plan)
+        except ValueError as exc:
+            raise FeatureError(
+                "metadata_unresolved",
+                "resolved metadata did not pass the canonical contract",
+            ) from exc
         identity = contract["identity"]
         return {
             "media_metadata": contract,
             "naming_metadata": {
-                "source": "media-search-registry",
-                "media_type": contract["placement"]["library_type"],
+                "source": "media-search-live",
+                "media_type": (
+                    (contract.get("retrieval") or {}).get("media_type")
+                    or contract["placement"]["library_type"]
+                ),
                 "chinese_title": identity.get("chinese_title") or "",
                 "english_title": identity.get("english_title") or "",
                 "year": identity.get("year") or "",
             },
-            "source_queries": {},
+            "source_queries": deepcopy(plan.get("source_queries") or {}),
             "evidence": deepcopy(contract.get("evidence") or {}),
         }
-
-    @staticmethod
-    def _registry_contract(entity: dict) -> dict:
-        relation = entity.get("relation") if isinstance(entity.get("relation"), dict) else {}
-        mapping_kind = str(relation.get("mapping_kind") or "standalone")
-        related = mapping_kind != "standalone"
-        library_type = "series" if related or entity.get("content_kind") == "series" else "movie"
-        target = {}
-        if related:
-            target = {
-                "chinese_title": relation.get("target_chinese_title") or "",
-                "english_title": relation.get("target_canonical_latin_title") or "",
-                "year": relation.get("target_year") or "",
-                "external_ids": deepcopy(relation.get("target_external_ids") or {}),
-            }
-        season = relation.get("season_number") if related else None
-        episode = relation.get("episode_number") if related else None
-        items = []
-        if related and season is not None and episode is not None:
-            items = [{
-                "item_id": relation.get("tvdb_episode_id") or f"S{int(season):02d}E{int(episode):03d}",
-                "content_role": "special",
-                "season_number": int(season),
-                "episode_number": int(episode),
-            }]
-        contract = {
-            "schema_version": 1,
-            "metadata_id": f"registry:{entity['entity_key']}",
-            "confirmed": True,
-            "identity": {
-                "chinese_title": entity.get("chinese_title") or entity.get("canonical_latin_title") or "",
-                "english_title": entity.get("canonical_latin_title") or "",
-                "original_title": entity.get("original_title") or "",
-                "original_language": entity.get("original_language") or "",
-                "official_english_title": entity.get("official_english_title") or "",
-                "romanized_original_title": entity.get("romanized_original_title") or "",
-                "canonical_search_title": entity.get("canonical_search_title") or "",
-                "search_title_policy": entity.get("search_title_policy") or "",
-                "year": entity.get("year") or "",
-                "content_kind": entity.get("content_kind") or library_type,
-                "poster_url": entity.get("poster_url") or "",
-                "poster_source": entity.get("poster_source") or "",
-                "external_ids": deepcopy(entity.get("external_ids") or {}),
-            },
-            "relation": {
-                "type": relation.get("relation_type") or "standalone",
-                "target_series": target,
-                "source": "selected_entity_registry",
-            },
-            "placement": {
-                "library_type": library_type,
-                "category_kind": f"live_action_{library_type}",
-                "season_number": season,
-                "episode_number": episode,
-                "mapping_kind": mapping_kind,
-                "mapping_source": "selected_entity_registry",
-                "tvdb_episode_id": relation.get("tvdb_episode_id") or "",
-            },
-            "source_entry": {
-                "title": entity.get("chinese_title") or entity.get("canonical_latin_title") or "",
-                "external_id": entity.get("entity_key") or "",
-            },
-            "items": items,
-            "evidence": {
-                "decision": {
-                    "mode": "exact_registry_rehydrate",
-                    "scoring_version": entity.get("scoring_version") or "",
-                }
-            },
-            "warnings": [],
-        }
-        validated = confirm_media_metadata({"media_metadata": contract})
-        return validated
 
     async def command(self, request: dict) -> dict:
         command = str(request.get("command") or "")
@@ -241,6 +250,8 @@ class MediaSearchFeature:
                 request, self.config_wizard.message(request)
             )
         key = self._owner_key(request)
+        if key in self.awaiting_scope_inputs:
+            return self._handle_scope_input(request, key)
         if key not in self.awaiting_queries:
             return {
                 "actions": [{"kind": "send_message", "text": "⚠️ 搜索会话已失效。"}],
@@ -284,7 +295,11 @@ class MediaSearchFeature:
         if action == "browse" and len(parts) == 3:
             return self._browse_candidate(plan_id, stored, parts[2])
         if action == "select" and len(parts) == 3:
-            return self._select_candidate(plan_id, stored, parts[2])
+            return await self._select_candidate(plan_id, stored, parts[2])
+        if action == "scope" and len(parts) == 3:
+            return self._scope_callback(plan_id, stored, parts[2], request)
+        if action == "placement" and len(parts) == 3:
+            return self._placement_callback(plan_id, stored, parts[2])
         if action == "release" and len(parts) == 3:
             return self._start_submission_task(plan_id, stored, parts[2])
         raise FeatureError("invalid_callback", "media-search callback action is invalid")
@@ -633,7 +648,9 @@ class MediaSearchFeature:
         )
         return {"actions": [action], "operation": operation}
 
-    def _select_candidate(self, plan_id: str, stored: dict, raw_index: str) -> dict:
+    async def _select_candidate(
+        self, plan_id: str, stored: dict, raw_index: str
+    ) -> dict:
         try:
             index = int(raw_index)
             candidate = deepcopy(stored["candidates"][index])
@@ -648,60 +665,515 @@ class MediaSearchFeature:
             "source_queries": deepcopy(stored["plan"].get("source_queries") or {}),
         }
         try:
-            if (
-                (selected_plan["media_metadata"].get("placement") or {}).get("mapping_kind")
-                == "temporary_related_special"
-                and (selected_plan["media_metadata"].get("placement") or {}).get("episode_number")
-                is None
-            ):
-                selected_plan = finalize_search_plan(
-                    selected_plan,
-                    self.allocator,
-                    set(
-                        (selected_plan["media_metadata"].get("evidence") or {}).get(
-                            "occupied_special_numbers"
-                        ) or []
-                    ),
-                )
-                candidate["media_metadata"] = selected_plan["media_metadata"]
-            confirm_media_metadata(selected_plan)
-            route = resolve_category_route(
-                self.config,
-                (candidate["media_metadata"].get("placement") or {}).get("category_kind"),
-            )
-            if not route:
-                raise ValueError("candidate route is unavailable")
-            if candidate.get("entity_snapshot"):
-                if self.registry is None:
-                    raise ValueError("canonical entity registry is unavailable")
-                relation_snapshot = deepcopy(candidate.get("relation_snapshot") or {})
-                placement = selected_plan["media_metadata"].get("placement") or {}
-                relation_snapshot.update({
-                    "mapping_kind": placement.get("mapping_kind") or "standalone",
-                    "season_number": placement.get("season_number"),
-                    "episode_number": placement.get("episode_number"),
-                    "tvdb_episode_id": placement.get("tvdb_episode_id") or "",
-                })
-                self.registry.upsert_selected(
-                    candidate["entity_snapshot"],
-                    relation_snapshot,
-                )
-        except Exception:
+            await self._apply_selected_relation(candidate, selected_plan, stored)
+            contract = selected_plan["media_metadata"]
+            placement = contract.get("placement") or {}
+            if placement.get("mapping_kind") == "temporary_related_special":
+                stored["plan"] = selected_plan
+                stored["selected_candidate_key"] = candidate.get("candidate_key") or ""
+                return self._related_placement_action(plan_id, stored)
+            if placement.get("library_type") == "series":
+                if not contract.get("items"):
+                    raise SeriesScopeError("tvdb_scope_not_verified")
+                decision = ((contract.get("evidence") or {}).get("decision") or {})
+                scope = str(decision.get("scope") or "movie_or_series")
+                if scope == "episode":
+                    selected_plan["media_metadata"] = apply_series_scope(
+                        contract,
+                        "episode",
+                        season_number=decision.get("season_number"),
+                        episode_number=decision.get("episode_number"),
+                    )
+                elif scope == "whole_series":
+                    selected_plan["media_metadata"] = apply_series_scope(
+                        contract, "whole_series"
+                    )
+                else:
+                    stored["plan"] = selected_plan
+                    stored["selected_candidate_key"] = (
+                        candidate.get("candidate_key") or ""
+                    )
+                    return self._series_scope_action(plan_id, stored)
+        except (ValueError, SeriesScopeError):
             action = self._candidate_action(stored, index, edit=True)
-            action["text"] += "\n❌ 选中实体无法安全持久化，请重试或退出。"
+            action["text"] += "\n❌ TVDB 无法验证该剧集的季集范围，请重试或提供 TVDB 链接。"
             return {"actions": [action]}
         stored["plan"] = selected_plan
-        stored["selected_path"] = route["path"]
         stored["selected_candidate_key"] = candidate.get("candidate_key") or ""
+        return self._start_selected_release(plan_id, stored)
+
+    async def _apply_selected_relation(
+        self,
+        candidate: dict,
+        selected_plan: dict,
+        stored: dict,
+    ) -> None:
+        contract = selected_plan["media_metadata"]
+        placement = contract.get("placement") or {}
+        identity = contract.get("identity") or {}
+        if (
+            placement.get("mapping_kind") != "standalone"
+            or identity.get("content_kind") != "movie"
+        ):
+            return
+        pool = stored["plan"].get("relation_pool") or []
+        selected_key = str(candidate.get("candidate_key") or "")
+        selected = next(
+            (
+                item
+                for item in pool
+                if str(item.get("candidate_key") or "") == selected_key
+            ),
+            None,
+        )
+        targets = [
+            item
+            for item in pool
+            if item.get("media_type") == "series"
+            and str(
+                ((item.get("identity") or {}).get("external_ids") or {}).get(
+                    "tvdb"
+                )
+                or ""
+            )
+            and str(item.get("candidate_key") or "") != selected_key
+        ]
+        if not selected or not targets:
+            return
+        selected_signal_facts = {
+            str(fact.get("fact_id") or "")
+            for fact in selected.get("facts") or []
+            if fact.get("complex_signals")
+        }
+        if not selected_signal_facts:
+            return
+        try:
+            configured_timeout = float(
+                ((self.config.get("ai") or {}).get("relation_timeout") or 5)
+            )
+        except (TypeError, ValueError):
+            configured_timeout = 5
+        try:
+            async with asyncio.timeout(max(1, min(configured_timeout, 15))):
+                payload = await asyncio.to_thread(
+                    infer_relation_hypotheses_with_ai,
+                    {
+                        "raw_query": stored["plan"].get("raw_query") or "",
+                        "selected_candidate_key": selected_key,
+                        "candidates": [
+                            {
+                                key: value
+                                for key, value in item.items()
+                                if key in {
+                                    "candidate_key", "fact_ids", "facts"
+                                }
+                            }
+                            for item in (selected, *targets)
+                        ],
+                    },
+                )
+        except Exception:
+            return
+        hypotheses = (
+            payload.get("hypotheses")
+            if isinstance(payload, dict)
+            else []
+        )
+        allowed_relations = {
+            "prequel", "sequel", "spin_off", "special", "extension_movie",
+        }
+        target_by_key = {
+            str(item.get("candidate_key") or ""): item for item in targets
+        }
+        known_fact_ids = {
+            str(fact.get("fact_id") or "")
+            for item in (selected, *targets)
+            for fact in item.get("facts") or []
+        }
+        verified = None
+        for hypothesis in hypotheses or []:
+            if not isinstance(hypothesis, dict):
+                continue
+            fact_ids = hypothesis.get("fact_ids")
+            target = target_by_key.get(
+                str(hypothesis.get("target_candidate_key") or "")
+            )
+            if (
+                str(hypothesis.get("candidate_key") or "") != selected_key
+                or target is None
+                or hypothesis.get("relation_type") not in allowed_relations
+                or not isinstance(fact_ids, list)
+                or not fact_ids
+                or not set(fact_ids).issubset(known_fact_ids)
+                or not set(fact_ids).intersection(selected_signal_facts)
+            ):
+                continue
+            verified = (hypothesis, target)
+            break
+        if verified is None:
+            return
+        hypothesis, target = verified
+        target_identity = deepcopy(target.get("identity") or {})
+        relation_type = str(hypothesis["relation_type"])
+        contract["identity"]["content_kind"] = {
+            "prequel": "prequel_movie",
+            "sequel": "sequel_movie",
+            "spin_off": "spin_off",
+            "special": "special",
+            "extension_movie": "extension_movie",
+        }[relation_type]
+        contract["relation"] = {
+            "type": relation_type,
+            "target_series": target_identity,
+            "source": "selected_candidate_source_verified_ai_hint",
+        }
+        prefix = (
+            "animated"
+            if str(placement.get("category_kind") or "").startswith("animated_")
+            else "live_action"
+        )
+        placement.update({
+            "library_type": "series",
+            "category_kind": f"{prefix}_series",
+            "season_number": 0,
+            "episode_number": None,
+            "mapping_kind": "temporary_related_special",
+            "mapping_source": "selected_candidate_relation",
+            "tvdb_episode_id": "",
+        })
+        (contract.get("evidence") or {}).setdefault("decision", {})[
+            "relation_fact_ids"
+        ] = list(dict.fromkeys(hypothesis.get("fact_ids") or []))
+
+    def _series_scope_action(self, plan_id: str, stored: dict) -> dict:
+        contract = stored["plan"]["media_metadata"]
+        options = series_scope_options(contract)
+        inventory = series_inventory(contract)
+        decision = ((contract.get("evidence") or {}).get("decision") or {})
+        scope = str(decision.get("scope") or "movie_or_series")
+        labels = {
+            "whole_series": "全剧（推荐）",
+            "season": "指定季",
+            "episode": "指定集",
+            "season_all": "搜索整季（推荐）",
+            "season_episode": "指定单集",
+        }
+        keyboard = [[{
+            "text": labels[choice],
+            "callback_data": f"media-search:scope:{plan_id}:{choice}",
+        }] for choice in options]
+        keyboard.append([{
+            "text": "退出",
+            "callback_data": f"media-search:cancel:{plan_id}",
+        }])
+        if scope == "season":
+            season = decision.get("season_number")
+            aired = inventory.aired_by_season.get(int(season or 0), ())
+            total = inventory.all_by_season.get(int(season or 0), ())
+            text = (
+                f"已确认第 {season} 季：共 {len(total)} 集，"
+                f"当前已播 {len(aired)} 集。请选择下载范围。"
+            )
+        else:
+            text = (
+                f"已确认剧集，共 {len(inventory.seasons)} 季。"
+                "请选择本次下载范围。"
+            )
+        action = {
+            "kind": "edit_message",
+            "text": text,
+            "data": {"keyboard": keyboard},
+        }
+        operation = self._advance_operation(
+            stored["operation_id"],
+            state="awaiting_input",
+            stage="series_scope",
+            status_text=text,
+            control="exit",
+            details=deepcopy(action["data"]),
+        )
+        return {"actions": [action], "operation": operation}
+
+    def _related_placement_action(self, plan_id: str, stored: dict) -> dict:
+        contract = stored["plan"]["media_metadata"]
+        relation = contract.get("relation") or {}
+        target = relation.get("target_series") or {}
+        target_title = (
+            target.get("chinese_title")
+            or target.get("english_title")
+            or "目标剧集"
+        )
+        text = (
+            f"已验证该电影与《{target_title}》存在"
+            f"{relation.get('type') or '关联'}关系。请选择本次整理方式；"
+            "无论如何，Prowlarr 都按电影标题和年份检索。"
+        )
+        data = {"keyboard": [
+            [{
+                "text": f"归入《{target_title}》Specials（推荐）",
+                "callback_data": f"media-search:placement:{plan_id}:special",
+            }],
+            [{
+                "text": "按独立电影整理",
+                "callback_data": f"media-search:placement:{plan_id}:standalone",
+            }],
+            [{
+                "text": "退出",
+                "callback_data": f"media-search:cancel:{plan_id}",
+            }],
+        ]}
+        action = {"kind": "edit_message", "text": text, "data": data}
+        operation = self._advance_operation(
+            stored["operation_id"],
+            state="awaiting_input",
+            stage="related_movie_placement",
+            status_text=text,
+            control="exit",
+            details=deepcopy(data),
+        )
+        return {"actions": [action], "operation": operation}
+
+    def _placement_callback(
+        self,
+        plan_id: str,
+        stored: dict,
+        choice: str,
+    ) -> dict:
+        plan = deepcopy(stored["plan"])
+        contract = plan["media_metadata"]
+        placement = contract.get("placement") or {}
+        if choice == "standalone":
+            prefix = (
+                "animated"
+                if str(placement.get("category_kind") or "").startswith("animated_")
+                else "live_action"
+            )
+            placement.update({
+                "library_type": "movie",
+                "category_kind": f"{prefix}_movie",
+                "season_number": None,
+                "episode_number": None,
+                "mapping_kind": "standalone",
+                "mapping_source": "user_selected_standalone",
+                "tvdb_episode_id": "",
+            })
+            contract["items"] = []
+        elif choice == "special":
+            official = (
+                (contract.get("evidence") or {}).get(
+                    "tvdb_official_special_candidates"
+                )
+                or []
+            )
+            if len(official) == 1:
+                selected = official[0]
+                placement.update({
+                    "season_number": 0,
+                    "episode_number": int(selected.get("episode_number") or 0),
+                    "mapping_kind": "tvdb_official",
+                    "mapping_source": "tvdb_official",
+                    "tvdb_episode_id": str(selected.get("episode_id") or ""),
+                })
+                contract["items"] = [{
+                    "item_id": str(selected.get("episode_id") or ""),
+                    "content_role": "special",
+                    "season_number": 0,
+                    "episode_number": int(selected.get("episode_number") or 0),
+                }]
+            else:
+                try:
+                    plan = finalize_search_plan(
+                        plan,
+                        self.allocator,
+                        set(
+                            (contract.get("evidence") or {}).get(
+                                "occupied_special_numbers"
+                            )
+                            or []
+                        ),
+                    )
+                except ValueError:
+                    return self._closed("❌ 无法为本次任务分配临时 Special 编号。")
+        else:
+            raise FeatureError(
+                "invalid_callback", "related movie placement is invalid"
+            )
+        stored["plan"] = plan
+        return self._start_selected_release(plan_id, stored)
+
+    def _scope_callback(
+        self,
+        plan_id: str,
+        stored: dict,
+        choice: str,
+        request: dict,
+    ) -> dict:
+        contract = stored["plan"]["media_metadata"]
+        decision = ((contract.get("evidence") or {}).get("decision") or {})
+        if choice == "whole_series":
+            stored["plan"]["media_metadata"] = apply_series_scope(
+                contract, "whole_series"
+            )
+            return self._start_selected_release(plan_id, stored)
+        if choice == "season_all":
+            stored["plan"]["media_metadata"] = apply_series_scope(
+                contract,
+                "season",
+                season_number=decision.get("season_number"),
+            )
+            return self._start_selected_release(plan_id, stored)
+        if choice == "season":
+            return self._scope_input_action(
+                plan_id, stored, request, phase="season"
+            )
+        if choice == "season_episode":
+            return self._scope_input_action(
+                plan_id,
+                stored,
+                request,
+                phase="episode",
+                season_number=decision.get("season_number"),
+            )
+        if choice == "episode":
+            seasons = series_inventory(contract).seasons
+            if len(seasons) == 1:
+                return self._scope_input_action(
+                    plan_id,
+                    stored,
+                    request,
+                    phase="episode",
+                    season_number=seasons[0],
+                )
+            return self._scope_input_action(
+                plan_id, stored, request, phase="episode_season"
+            )
+        raise FeatureError("invalid_callback", "series scope choice is invalid")
+
+    def _scope_input_action(
+        self,
+        plan_id: str,
+        stored: dict,
+        request: dict,
+        *,
+        phase: str,
+        season_number=None,
+    ) -> dict:
+        owner = self._owner_key(request)
+        self.awaiting_scope_inputs[owner] = {
+            "plan_id": plan_id,
+            "phase": phase,
+            "season_number": season_number,
+        }
+        text = {
+            "season": "请输入季号，例如：2",
+            "episode_season": "请先输入季号，例如：2",
+            "episode": f"请输入第 {season_number} 季的集号，例如：3",
+        }[phase]
+        action = {
+            "kind": "edit_message",
+            "text": text,
+            "data": {"keyboard": [[{
+                "text": "退出",
+                "callback_data": f"media-search:cancel:{plan_id}",
+            }]]},
+        }
+        operation = self._advance_operation(
+            stored["operation_id"],
+            state="awaiting_input",
+            stage="series_scope_number",
+            status_text=text,
+            control="exit",
+            details=deepcopy(action["data"]),
+        )
+        return {
+            "actions": [action],
+            "session": {"state": "open"},
+            "operation": operation,
+        }
+
+    def _handle_scope_input(self, request: dict, owner) -> dict:
+        pending = self.awaiting_scope_inputs.get(owner) or {}
+        plan_id = str(pending.get("plan_id") or "")
+        stored = self.plans.get(plan_id)
+        if not stored:
+            self.awaiting_scope_inputs.pop(owner, None)
+            return self._closed("⚠️ 搜索任务已过期，请重新搜索。")
+        raw = " ".join(str(request.get("text") or "").split())
+        if not raw.isdigit() or int(raw) < 1:
+            return {
+                "actions": [{"kind": "send_message", "text": "请输入大于 0 的数字。"}],
+                "session": {"state": "open"},
+            }
+        number = int(raw)
+        contract = stored["plan"]["media_metadata"]
+        inventory = series_inventory(contract)
+        phase = pending.get("phase")
+        if phase in {"season", "episode_season"}:
+            if number not in inventory.seasons:
+                return {
+                    "actions": [{"kind": "send_message", "text": "该季不存在，请重新输入。"}],
+                    "session": {"state": "open"},
+                }
+            if phase == "episode_season":
+                return self._scope_input_action(
+                    plan_id,
+                    stored,
+                    request,
+                    phase="episode",
+                    season_number=number,
+                )
+            self.awaiting_scope_inputs.pop(owner, None)
+            stored["plan"]["media_metadata"] = apply_series_scope(
+                contract, "season", season_number=number
+            )
+            return self._start_selected_release(plan_id, stored)
+        if phase == "episode":
+            try:
+                scoped = apply_series_scope(
+                    contract,
+                    "episode",
+                    season_number=pending.get("season_number"),
+                    episode_number=number,
+                )
+            except SeriesScopeError as exc:
+                message = (
+                    "该集尚未播出，请输入已播集号。"
+                    if str(exc) == "episode_not_aired"
+                    else "该集不存在，请重新输入。"
+                )
+                return {
+                    "actions": [{"kind": "send_message", "text": message}],
+                    "session": {"state": "open"},
+                }
+            self.awaiting_scope_inputs.pop(owner, None)
+            stored["plan"]["media_metadata"] = scoped
+            return self._start_selected_release(plan_id, stored)
+        raise FeatureError("invalid_state", "series scope input state is invalid")
+
+    def _start_selected_release(self, plan_id: str, stored: dict) -> dict:
+        contract = stored["plan"]["media_metadata"]
+        route = resolve_category_route(
+            self.config,
+            (contract.get("placement") or {}).get("category_kind"),
+        )
+        if not route:
+            self._release_plan(plan_id)
+            return self._closed("❌ 媒体分类没有对应保存目录。")
+        stored["selected_path"] = route["path"]
         return self._start_release_search_task(plan_id, stored)
 
     async def _confirm_and_search(self, plan_id: str, stored: dict) -> dict:
         plan = stored["plan"]
         contract = confirm_media_metadata(plan)
         query = self._english_prowlarr_query(plan, contract)
-        media_type = str((contract.get("placement") or {}).get("library_type") or "")
+        media_type = str(
+            (contract.get("retrieval") or {}).get("media_type")
+            or (contract.get("placement") or {}).get("library_type")
+            or ""
+        )
         try:
             items = await asyncio.to_thread(self.release_search, query, media_type)
+            items = filter_relevant_releases(items, query)
             limit = int((((self.config.get("search") or {}).get("prowlarr") or {}).get("result_limit") or 8))
             results = self.release_rank(items, limit)
         except Exception as exc:
@@ -829,12 +1301,26 @@ class MediaSearchFeature:
             "douban": self._douban_provider,
             "tvdb": self._tvdb_provider,
         }
+        parsed = classify_search_input(raw_query)
+        if parsed.kind == "invalid_link":
+            raise SearchPlanningError("unsupported_metadata_link")
+        locked_identity = None
+        planning_query = raw_query
+        if parsed.kind == "link":
+            try:
+                direct = await asyncio.to_thread(resolve_direct_link, parsed.link)
+            except DirectLinkError as exc:
+                raise SearchPlanningError(str(exc)) from exc
+            planning_query = direct.query
+            locked_identity = direct.stable_identity
+            providers[direct.provider] = lambda _hypotheses: direct.evidence
         return await build_confirmable_search_plan(
-            raw_query,
+            planning_query,
             plan_id,
             providers,
             lambda contract: set((contract.get("evidence") or {}).get("occupied_special_numbers") or []),
             self.allocator,
+            locked_identity=locked_identity,
         )
 
     def _wikipedia_provider(self, hypotheses: dict):
@@ -893,6 +1379,10 @@ class MediaSearchFeature:
 
     @staticmethod
     def _english_prowlarr_query(plan: dict, contract: dict) -> str:
+        retrieval = contract.get("retrieval") or {}
+        retrieval_query = " ".join(str(retrieval.get("query") or "").split())
+        if retrieval_query and _LATIN.search(retrieval_query):
+            return retrieval_query
         identity = contract.get("identity") or {}
         english = " ".join(str(identity.get("english_title") or "").split())
         year = " ".join(str(identity.get("year") or "").split())
@@ -911,10 +1401,6 @@ class MediaSearchFeature:
                         return query
             season = placement.get("season_number")
             episode = placement.get("episode_number")
-            if season is None:
-                first = next(iter(contract.get("items") or []), {})
-                season = first.get("season_number")
-                episode = first.get("episode_number")
             if english and _LATIN.search(english) and season is not None:
                 marker = f"S{int(season):02d}"
                 if scope != "season" and episode is not None:
@@ -931,6 +1417,9 @@ class MediaSearchFeature:
 
     def _release_plan(self, plan_id: str):
         self.plans.pop(plan_id, None)
+        for owner, pending in tuple(self.awaiting_scope_inputs.items()):
+            if str(pending.get("plan_id") or "") == plan_id:
+                self.awaiting_scope_inputs.pop(owner, None)
         self.allocator.release(plan_id)
 
     async def operation_control(self, request: dict) -> dict:

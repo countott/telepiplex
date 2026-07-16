@@ -47,7 +47,7 @@ class CanonicalTitles:
 
 def _preferred_fact_values(candidate: CandidateEntity, field: str) -> list[str]:
     result = []
-    for provider in ("tvdb", "douban", "wikipedia", "registry"):
+    for provider in ("tvdb", "douban", "wikipedia"):
         for fact in candidate.facts:
             value = _text(getattr(fact, field, ""))
             if fact.provider == provider and value and value not in result:

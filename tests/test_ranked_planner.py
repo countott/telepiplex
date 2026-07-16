@@ -7,278 +7,251 @@ from telepiplex_media_search.planner import (
     build_confirmable_search_plan,
 )
 from telepiplex_media_search.search_plan import TemporarySpecialAllocator
+from telepiplex_media_search.search_plan import confirm_media_metadata
+from telepiplex_media_search.series_scope import apply_series_scope
 
 
-def sources_for_glory(_hypotheses):
+def _fact(provider, number, *, title=None, media_type="movie", episodes=None):
+    title = title or f"Movie {number}"
+    key = "subject_id" if provider == "douban" else "wikibase_item"
     return {
-        "source": "douban",
-        "status": "ok",
-        "facts": [{
-            "subject_id": "35314632",
-            "title": "The Glory",
-            "chinese_title": "黑暗荣耀",
-            "english_title": "The Glory",
-            "official_english_title": "The Glory",
-            "original_title": "더 글로리",
-            "original_language": "ko",
-            "year": "2022",
-            "media_type": "series",
-            "url": "https://movie.douban.com/subject/35314632/",
-        }, {
-            "subject_id": "noise",
-            "title": "Terminator: Dark Fate",
-            "english_title": "Terminator: Dark Fate",
-            "official_english_title": "Terminator: Dark Fate",
-            "year": "2019",
-            "media_type": "movie",
-            "url": "https://movie.douban.com/subject/noise/",
-        }],
-        "source_urls": [],
+        key: f"{provider}-{number}",
+        "title": title,
+        "english_title": title,
+        "official_english_title": title,
+        "chinese_title": title,
+        "year": "2024",
+        "media_type": media_type,
+        "episodes": episodes or [],
     }
 
 
-def wikipedia_glory(_hypotheses):
-    return {
-        "source": "wikipedia",
-        "status": "ok",
-        "facts": [{
-            "wikibase_item": "Q114639581",
-            "title": "黑暗荣耀",
-            "english_title": "The Glory",
-            "official_english_title": "The Glory",
-            "year": "2022",
-            "media_type": "series",
-            "url": "https://zh.wikipedia.org/wiki/黑暗荣耀",
-        }],
-        "source_urls": [],
-    }
+def _provider(provider, count, *, title=None, media_type="movie", episodes=None):
+    def provide(_hypotheses):
+        if provider == "tvdb":
+            key = "series" if media_type == "series" else "movies"
+            facts = []
+            for number in range(count):
+                entity_id = f"tvdb-{number}"
+                item = {
+                    f"tvdb_{media_type}_id": entity_id,
+                    "name": title or f"Movie {number}",
+                    "english_title": title or f"Movie {number}",
+                    "official_english_title": title or f"Movie {number}",
+                    "year": "2024",
+                    "media_type": media_type,
+                }
+                facts.append({
+                    key: [item],
+                    "episodes_by_series": {
+                        entity_id: episodes or []
+                    } if media_type == "series" else {},
+                })
+            return {"source": provider, "status": "ok", "facts": facts}
+        return {
+            "source": provider,
+            "status": "ok",
+            "facts": [
+                _fact(
+                    provider,
+                    number,
+                    title=title,
+                    media_type=media_type,
+                    episodes=episodes,
+                )
+                for number in range(count)
+            ],
+        }
 
-
-def ai_score(context):
-    return {"scorecards": [{
-        "candidate_key": item["candidate_key"],
-        "title_equivalence": {"score": 20, "fact_ids": [item["fact_ids"][0]]},
-        "relation_consistency": {"score": 10, "fact_ids": [item["fact_ids"][0]]},
-        "intent_relevance": {"score": 10, "fact_ids": [item["fact_ids"][0]]},
-    } for item in context["candidates"]]}
+    return provide
 
 
 class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
-    @patch("telepiplex_media_search.planner.score_candidates_with_ai")
-    async def test_below_threshold_runs_one_controlled_expansion(self, score):
-        calls = {"douban": 0, "wikipedia": 0}
-
-        def fact(provider):
-            return {
-                "subject_id": "1" if provider == "douban" else None,
-                "wikibase_item": "Q1" if provider == "wikipedia" else None,
-                "title": "The Glory",
-                "chinese_title": "黑暗荣耀",
-                "official_english_title": "The Glory",
-                "year": "2022",
-                "media_type": "series",
-            }
-
-        def douban(_hypotheses):
-            calls["douban"] += 1
-            return {"status": "ok", "facts": [fact("douban")]}
-
-        def wikipedia(_hypotheses):
-            calls["wikipedia"] += 1
-            return {
-                "status": "not_found" if calls["wikipedia"] == 1 else "ok",
-                "facts": [] if calls["wikipedia"] == 1 else [fact("wikipedia")],
-            }
-
-        def low_score(context):
-            return {"scorecards": [{
-                "candidate_key": item["candidate_key"],
-                "title_equivalence": {"score": 20, "fact_ids": [item["fact_ids"][0]]},
-                "relation_consistency": {"score": 0, "fact_ids": []},
-                "intent_relevance": {"score": 0, "fact_ids": []},
-            } for item in context["candidates"]]}
-
-        score.side_effect = low_score
+    async def test_seven_qualified_candidates_are_all_returned(self):
         plan = await build_confirmable_search_plan(
-            "黑暗荣耀 2022",
-            "p-expand",
-            {"douban": douban, "wikipedia": wikipedia},
+            "Movie",
+            "p-seven",
+            {
+                "douban": _provider("douban", 7),
+                "wikipedia": _provider("wikipedia", 7),
+            },
             lambda _contract: set(),
             TemporarySpecialAllocator(),
         )
 
-        self.assertEqual(calls, {"douban": 2, "wikipedia": 2})
+        self.assertEqual(len(plan["candidates"]), 7)
+        self.assertTrue(all(item["selectable"] for item in plan["candidates"]))
+
+    async def test_title_family_within_gate_keeps_all_volume_candidates(self):
+        def volume_provider(provider):
+            def provide(_hypotheses):
+                key = (
+                    "subject_id"
+                    if provider == "douban"
+                    else "wikibase_item"
+                )
+                return {
+                    "source": provider,
+                    "status": "ok",
+                    "facts": [{
+                        key: f"{provider}-1",
+                        "title": "Kill Bill Vol 1",
+                        "english_title": "Kill Bill Vol 1",
+                        "chinese_title": "杀死比尔",
+                        "year": "2003",
+                        "media_type": "movie",
+                    }, {
+                        key: f"{provider}-2",
+                        "title": "Kill Bill Vol 2",
+                        "english_title": "Kill Bill Vol 2",
+                        "chinese_title": "杀死比尔2",
+                        "year": "2004",
+                        "media_type": "movie",
+                    }],
+                }
+            return provide
+
+        plan = await build_confirmable_search_plan(
+            "杀死比尔",
+            "p-volumes",
+            {
+                "douban": volume_provider("douban"),
+                "wikipedia": volume_provider("wikipedia"),
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertEqual(len(plan["candidates"]), 2)
+
+    async def test_eight_qualified_candidates_are_rejected_without_truncation(self):
+        with self.assertRaises(SearchPlanningError) as raised:
+            await build_confirmable_search_plan(
+                "Movie",
+                "p-eight",
+                {
+                    "douban": _provider("douban", 8),
+                    "wikipedia": _provider("wikipedia", 8),
+                },
+                lambda _contract: set(),
+                TemporarySpecialAllocator(),
+            )
+
+        self.assertEqual(raised.exception.code, "too_many_candidates")
+
+    async def test_direct_link_anchor_is_selectable_with_one_authoritative_source(self):
+        plan = await build_confirmable_search_plan(
+            "Movie 1 2024",
+            "p-direct",
+            {"douban": _provider("douban", 1, title="Movie 1")},
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            locked_identity=("douban_subject", "douban-0"),
+        )
+
+        self.assertEqual(len(plan["candidates"]), 1)
         self.assertTrue(plan["candidates"][0]["selectable"])
-        self.assertGreaterEqual(plan["candidates"][0]["score"]["total"], 65)
 
-    @patch("telepiplex_media_search.planner.score_candidates_with_ai", side_effect=ai_score)
-    @patch("telepiplex_media_search.planner.infer_relation_hypotheses_with_ai")
-    async def test_source_backed_movie_series_relation_is_locked_before_scoring(
-        self, relation, _score
-    ):
-        def provider(_hypotheses):
-            return {
-                "source": "douban",
-                "status": "ok",
-                "facts": [{
-                    "subject_id": "movie-1",
-                    "title": "Someday or One Day The Movie",
-                    "chinese_title": "想见你 电影版",
-                    "official_english_title": "Someday or One Day The Movie",
-                    "original_title": "想見你",
-                    "original_language": "zh",
-                    "year": "2022",
-                    "media_type": "movie",
-                    "url": "https://movie.douban.com/subject/movie-1/",
-                }, {
-                    "subject_id": "series-1",
-                    "title": "Someday or One Day",
-                    "chinese_title": "想见你",
-                    "official_english_title": "Someday or One Day",
-                    "original_title": "想見你",
-                    "original_language": "zh",
-                    "year": "2019",
-                    "media_type": "series",
-                    "url": "https://movie.douban.com/subject/series-1/",
-                }],
-            }
-
-        def relation_payload(context):
-            movie = next(
-                item for item in context["candidates"]
-                if item["facts"][0]["media_type"] == "movie"
-            )
-            series = next(
-                item for item in context["candidates"]
-                if item["facts"][0]["media_type"] == "series"
-            )
-            return {"hypotheses": [{
-                "candidate_key": movie["candidate_key"],
-                "target_candidate_key": series["candidate_key"],
-                "relation_type": "extension_movie",
-                "fact_ids": [movie["fact_ids"][0], series["fact_ids"][0]],
-            }]}
-
-        relation.side_effect = relation_payload
+    @patch("telepiplex_media_search.planner.infer_search_hypotheses_with_ai")
+    async def test_clear_query_does_not_require_ai_score_or_intent(self, infer):
         plan = await build_confirmable_search_plan(
-            "想见你 电影版",
-            "related-1",
-            {"douban": provider},
+            "Movie 1",
+            "p-clear",
+            {
+                "douban": _provider("douban", 1, title="Movie 1"),
+                "wikipedia": _provider("wikipedia", 1, title="Movie 1"),
+            },
             lambda _contract: set(),
             TemporarySpecialAllocator(),
         )
 
-        candidate = plan["candidates"][0]
-        self.assertEqual(candidate["media_metadata"]["relation"]["type"], "extension_movie")
+        infer.assert_not_called()
+        self.assertNotIn("ai_total", plan["candidates"][0]["score"])
         self.assertEqual(
-            candidate["media_metadata"]["relation"]["target_series"]["english_title"],
-            "Someday or One Day",
+            plan["candidates"][0]["media_metadata"]["evidence"]["decision"]["mode"],
+            "deterministic_bounded",
         )
-        self.assertEqual(candidate["media_metadata"]["placement"]["mapping_kind"], "temporary_related_special")
-        self.assertEqual(candidate["relation_snapshot"]["target_entity_key"], "douban:series:series-1")
 
-    @patch("telepiplex_media_search.planner.score_candidates_with_ai", side_effect=ai_score)
-    async def test_wrong_year_keeps_title_match_not_same_year_noise(self, _score):
+    async def test_bare_number_requires_official_title_match(self):
+        with self.assertRaises(SearchPlanningError) as raised:
+            await build_confirmable_search_plan(
+                "蝙蝠侠1",
+                "p-batman",
+                {
+                    "douban": _provider("douban", 1, title="蝙蝠侠"),
+                    "wikipedia": _provider("wikipedia", 1, title="蝙蝠侠"),
+                },
+                lambda _contract: set(),
+                TemporarySpecialAllocator(),
+            )
+        self.assertEqual(raised.exception.code, "ambiguous_numeric_role")
+
         plan = await build_confirmable_search_plan(
-            "黑暗荣耀 2019",
-            "p1",
-            {"douban": sources_for_glory, "wikipedia": wikipedia_glory},
+            "变形金刚3",
+            "p-transformers",
+            {
+                "douban": _provider("douban", 1, title="变形金刚3"),
+                "wikipedia": _provider("wikipedia", 1, title="变形金刚3"),
+            },
             lambda _contract: set(),
             TemporarySpecialAllocator(),
         )
+        self.assertEqual(len(plan["candidates"]), 1)
 
-        self.assertEqual(
-            plan["candidates"][0]["media_metadata"]["identity"]["english_title"],
+    async def test_bare_series_never_falls_back_to_first_episode(self):
+        episodes = [{
+            "tvdb_episode_id": "e1",
+            "season_number": 1,
+            "episode_number": 1,
+            "aired": "2022-12-30",
+        }]
+        plan = await build_confirmable_search_plan(
             "The Glory",
-        )
-        self.assertNotIn(
-            "Terminator",
-            [item["media_metadata"]["identity"]["english_title"] for item in plan["candidates"]],
-        )
-        self.assertEqual(plan["candidates"][0]["score"]["release_consistency"], 0)
-
-    @patch("telepiplex_media_search.planner.score_candidates_with_ai", side_effect=ai_score)
-    @patch("telepiplex_media_search.planner.infer_relation_hypotheses_with_ai")
-    async def test_relation_scout_runs_before_scoring_for_complex_signals(
-        self, relation, score
-    ):
-        calls = []
-        relation.side_effect = lambda _context: calls.append("relation_scout") or {"hypotheses": []}
-        score.side_effect = lambda context: calls.append("scorecard") or ai_score(context)
-
-        await build_confirmable_search_plan(
-            "黑暗荣耀 特别篇",
-            "p2",
-            {"douban": sources_for_glory, "wikipedia": wikipedia_glory},
+            "p-series",
+            {
+                "douban": _provider(
+                    "douban", 1, title="The Glory", media_type="series"
+                ),
+                "tvdb": _provider(
+                    "tvdb",
+                    1,
+                    title="The Glory",
+                    media_type="series",
+                    episodes=episodes,
+                ),
+            },
             lambda _contract: set(),
             TemporarySpecialAllocator(),
         )
+        candidate = plan["candidates"][0]
 
-        self.assertLess(calls.index("relation_scout"), calls.index("scorecard"))
+        self.assertEqual(
+            candidate["media_metadata"]["evidence"]["decision"]["scope"],
+            "movie_or_series",
+        )
+        self.assertEqual(
+            candidate["media_metadata"]["retrieval"]["query"],
+            "The Glory 2024",
+        )
+        self.assertNotIn("S01E01", candidate["prowlarr_queries"][0])
+        scoped = apply_series_scope(
+            candidate["media_metadata"], "whole_series"
+        )
+        confirmed = confirm_media_metadata({
+            "media_metadata": scoped,
+        })
+        self.assertTrue(confirmed["confirmed"])
 
     async def test_exhausted_total_budget_fails_structurally(self):
         with self.assertRaisesRegex(SearchPlanningError, "planning_timed_out"):
             await build_confirmable_search_plan(
-                "黑暗荣耀",
-                "p3",
-                {"douban": sources_for_glory},
+                "Movie",
+                "p-budget",
+                {"douban": _provider("douban", 1)},
                 lambda _contract: set(),
                 TemporarySpecialAllocator(),
                 budget=PlanningBudget(total=0),
             )
-
-    @patch("telepiplex_media_search.planner.score_candidates_with_ai", side_effect=ai_score)
-    async def test_relation_stage_timeout_degrades_to_standalone(self, _score):
-        plan = await build_confirmable_search_plan(
-            "黑暗荣耀 特别篇",
-            "p-timeout-relation",
-            {"douban": sources_for_glory, "wikipedia": wikipedia_glory},
-            lambda _contract: set(),
-            TemporarySpecialAllocator(),
-            budget=PlanningBudget(total=1, stages={"relation_scout": 0}),
-        )
-
-        self.assertEqual(
-            plan["candidates"][0]["media_metadata"]["relation"]["type"],
-            "standalone",
-        )
-
-    async def test_scorecard_timeout_keeps_program_score_only(self):
-        plan = await build_confirmable_search_plan(
-            "黑暗荣耀 2022",
-            "p-timeout-score",
-            {"douban": sources_for_glory, "wikipedia": wikipedia_glory},
-            lambda _contract: set(),
-            TemporarySpecialAllocator(),
-            budget=PlanningBudget(total=1, stages={"scorecard": 0}),
-        )
-
-        self.assertEqual(plan["candidates"][0]["score"]["ai_total"], 0)
-
-    @patch("telepiplex_media_search.planner.score_candidates_with_ai", side_effect=ai_score)
-    async def test_ranked_candidate_limit_is_five(self, _score):
-        def many(_hypotheses):
-            facts = []
-            for number in range(8):
-                facts.append({
-                    "subject_id": str(number),
-                    "title": f"Movie {number}",
-                    "english_title": f"Movie {number}",
-                    "official_english_title": f"Movie {number}",
-                    "year": "2024",
-                    "media_type": "movie",
-                })
-            return {"source": "douban", "status": "ok", "facts": facts}
-
-        plan = await build_confirmable_search_plan(
-            "unknown",
-            "p4",
-            {"douban": many},
-            lambda _contract: set(),
-            TemporarySpecialAllocator(),
-        )
-
-        self.assertEqual(len(plan["candidates"]), 5)
 
 
 if __name__ == "__main__":

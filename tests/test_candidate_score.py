@@ -1,12 +1,9 @@
 import unittest
 
 from telepiplex_media_search.candidate_score import (
-    AIScore,
     CandidateScore,
-    ScorecardError,
     apply_thresholds,
     program_score,
-    validate_ai_scorecard,
 )
 from telepiplex_media_search.entity_graph import CandidateEntity, EvidenceFact
 
@@ -55,33 +52,10 @@ class CandidateScoreTest(unittest.TestCase):
         self.assertTrue(score.excluded)
         self.assertIn("explicit_type_conflict", score.reason_codes)
 
-    def test_ai_unknown_fact_reference_is_rejected(self):
-        payload = {
-            "candidate_key": "tvdb:series:411469",
-            "title_equivalence": {"score": 20, "fact_ids": ["invented:1"]},
-            "relation_consistency": {"score": 10, "fact_ids": ["tvdb:1"]},
-            "intent_relevance": {"score": 10, "fact_ids": ["tvdb:1"]},
-        }
-
-        with self.assertRaisesRegex(ScorecardError, "unknown_fact_id"):
-            validate_ai_scorecard(payload, {"tvdb:1"})
-
-    def test_ai_contract_rejects_full_metadata_and_out_of_range_scores(self):
-        payload = {
-            "candidate_key": "x",
-            "media_metadata": {},
-            "title_equivalence": {"score": 21, "fact_ids": ["tvdb:1"]},
-            "relation_consistency": {"score": 10, "fact_ids": ["tvdb:1"]},
-            "intent_relevance": {"score": 10, "fact_ids": ["tvdb:1"]},
-        }
-
-        with self.assertRaises(ScorecardError):
-            validate_ai_scorecard(payload, {"tvdb:1"})
-
     def test_thresholds_and_lead_are_fixed(self):
         program = program_score(candidate(), {}, None)
-        high = CandidateScore("a", program, AIScore(20, 10, 10, ()), 90)
-        close = CandidateScore("b", program, AIScore(20, 10, 10, ()), 82)
+        high = CandidateScore("a", program, 90)
+        close = CandidateScore("b", program, 82)
 
         ranked = apply_thresholds([high, close])
 
@@ -90,8 +64,8 @@ class CandidateScoreTest(unittest.TestCase):
 
     def test_threshold_marks_clear_leader_recommended(self):
         program = program_score(candidate(), {}, None)
-        high = CandidateScore("a", program, AIScore(20, 10, 10, ()), 90)
-        low = CandidateScore("b", program, AIScore(10, 5, 5, ()), 75)
+        high = CandidateScore("a", program, 90)
+        low = CandidateScore("b", program, 75)
 
         ranked = apply_thresholds([high, low])
 

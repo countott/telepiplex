@@ -1,4 +1,4 @@
-"""Fixed, versioned candidate scoring. No runtime weight learning."""
+"""Fixed, deterministic candidate ordering. No runtime weight learning."""
 
 from __future__ import annotations
 
@@ -40,35 +40,12 @@ class ProgramScore:
 
 
 @dataclass(frozen=True)
-class AIScore:
-    title_equivalence: int
-    relation_consistency: int
-    intent_relevance: int
-    fact_ids: tuple[str, ...]
-
-    @property
-    def total(self) -> int:
-        return min(40, sum((
-            self.title_equivalence,
-            self.relation_consistency,
-            self.intent_relevance,
-        )))
-
-
-@dataclass(frozen=True)
 class CandidateScore:
     candidate_key: str
     program: ProgramScore
-    ai: AIScore
     total: int
     recommended: bool = False
     selectable: bool = False
-
-
-class ScorecardError(ValueError):
-    def __init__(self, code: str):
-        self.code = code
-        super().__init__(code)
 
 
 def _shared_stable_identity(candidate: CandidateEntity) -> int:
@@ -147,52 +124,10 @@ def program_score(
     )
 
 
-_COMPONENTS = {
-    "title_equivalence": 20,
-    "relation_consistency": 10,
-    "intent_relevance": 10,
-}
-
-
-def validate_ai_scorecard(payload: object, valid_fact_ids: set[str]) -> AIScore:
-    if not isinstance(payload, dict):
-        raise ScorecardError("invalid_scorecard")
-    allowed = {"candidate_key", "reasons", *_COMPONENTS}
-    if set(payload).difference(allowed):
-        raise ScorecardError("unexpected_scorecard_field")
-    if not _text(payload.get("candidate_key")):
-        raise ScorecardError("candidate_key_missing")
-    scores = {}
-    referenced = []
-    for name, maximum in _COMPONENTS.items():
-        component = payload.get(name)
-        if not isinstance(component, dict) or set(component).difference({"score", "fact_ids", "reason"}):
-            raise ScorecardError("invalid_score_component")
-        score = component.get("score")
-        if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= maximum:
-            raise ScorecardError("score_out_of_range")
-        fact_ids = component.get("fact_ids")
-        if not isinstance(fact_ids, list) or any(not isinstance(item, str) for item in fact_ids):
-            raise ScorecardError("invalid_fact_ids")
-        if score and not fact_ids:
-            raise ScorecardError("missing_fact_reference")
-        for fact_id in fact_ids:
-            if fact_id not in valid_fact_ids:
-                raise ScorecardError("unknown_fact_id")
-            if fact_id not in referenced:
-                referenced.append(fact_id)
-        scores[name] = score
-    return AIScore(
-        title_equivalence=scores["title_equivalence"],
-        relation_consistency=scores["relation_consistency"],
-        intent_relevance=scores["intent_relevance"],
-        fact_ids=tuple(referenced),
-    )
-
-
-def combine_score(candidate_key: str, program: ProgramScore, ai: AIScore) -> CandidateScore:
-    total = 0 if program.excluded else min(100, program.total + ai.total)
-    return CandidateScore(candidate_key, program, ai, total)
+def combine_score(candidate_key: str, program: ProgramScore) -> CandidateScore:
+    # Normalize the fixed 60-point program score to a user-facing 100 points.
+    total = 0 if program.excluded else round(program.total * 100 / 60)
+    return CandidateScore(candidate_key, program, total)
 
 
 def apply_thresholds(scores: list[CandidateScore]) -> list[CandidateScore]:

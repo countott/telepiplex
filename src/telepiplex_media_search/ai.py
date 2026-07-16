@@ -149,12 +149,11 @@ JSON结构：
 输入事实如下：
 """
 
-SEARCH_HYPOTHESIS_PROMPT = """你是影视搜索检索假设生成器。只返回JSON。
-本步骤只处理严格规则和首轮证据未能唯一确认的场景。区分用户明确表达与模型推断；保留同名电影/剧集歧义。
-输出 status、hypotheses、source_queries 和 warnings。source_queries 必须分别包含 wikipedia、douban、tvdb 数组。
-不得输出 Prowlarr query，不得冻结最终目录，不得分配临时 S00E100+。
+SEARCH_HYPOTHESIS_PROMPT = """你是影视搜索意图解释器。只返回JSON。
+只在规则无法理解非标准自然语言或首轮零候选时使用。你的输出只是待外部来源验证的意图提示。
+不得输出豆瓣/TVDB/IMDb/TMDB稳定ID、用户未提供的年份、官方英文名结论、罗马字结论、TVDB库存、Prowlarr query、路径、media_metadata或Season 00编号。
 JSON结构：
-{"status":"ok|blocked","hypotheses":[{"title":"string","year":"string","content_identity":"movie|series|main_episode|ova|narrative_bonus|non_narrative_extra|special|prequel_movie|sequel_movie|extension_movie|spin_off","scope":"movie|whole_series|season|episode","season_number":null,"episode_number":null,"possible_related_series":["string"],"explicit_facts":["string"],"inferred_facts":["string"]}],"source_queries":{"wikipedia":["string"],"douban":["string"],"tvdb":["string"]},"warnings":["string"]}
+{"status":"parsed|needs_clarification|unsupported","title_hints":["string"],"media_type_hint":"movie|series|unknown","scope_hint":"work|whole_series|season|episode|latest_aired|unknown","season_number":null,"episode_number":null,"numeric_tokens":[{"value":1,"role":"year|official_title_part|season|episode|ambiguous"}],"relation_hint":"none|prequel|sequel|special|movie_version|unknown","clarification_reason":"string"}
 用户输入：
 """
 
@@ -162,13 +161,6 @@ RELATION_SCOUT_PROMPT = """你是影视作品关系审查员。只返回 JSON，
 你只能引用输入中的 candidate_key 和 fact_id，不得编造标题、年份、稳定 ID、集号或来源事实。
 最多输出 3 个关系假设；假设不是事实，后续必须由程序定向复查。
 结构：{"hypotheses":[{"candidate_key":"string","relation_type":"standalone|prequel|sequel|spin_off|special|extension_movie","target_candidate_key":"string","fact_ids":["string"],"reason":"string"}]}
-输入事实：
-"""
-
-SCORECARD_PROMPT = """你是影视候选固定量表评分员。只返回 JSON，不要返回 Markdown。
-不得输出 media_metadata、title_zh、title_en、数据库字段或任何新事实/稳定 ID。
-只能引用输入已有的 candidate_key 与 fact_id。逐候选按固定上限评分：标题等价 20、关系一致 10、意图相关 10。
-结构：{"scorecards":[{"candidate_key":"string","title_equivalence":{"score":0,"fact_ids":["string"],"reason":"string"},"relation_consistency":{"score":0,"fact_ids":["string"],"reason":"string"},"intent_relevance":{"score":0,"fact_ids":["string"],"reason":"string"}}]}
 输入事实：
 """
 
@@ -329,13 +321,87 @@ def infer_search_hypotheses_with_ai(context):
     parsed = parse_ai_json_response(result)
     if not isinstance(parsed, dict):
         return None
-    source_queries = parsed.get("source_queries")
-    if not isinstance(source_queries, dict):
+    allowed = {
+        "status",
+        "title_hints",
+        "media_type_hint",
+        "scope_hint",
+        "season_number",
+        "episode_number",
+        "numeric_tokens",
+        "relation_hint",
+        "clarification_reason",
+    }
+    if set(parsed) != allowed:
         return None
-    for name in ("wikipedia", "douban", "tvdb"):
-        if not isinstance(source_queries.get(name), list):
+    if parsed.get("status") not in {
+        "parsed", "needs_clarification", "unsupported"
+    }:
+        return None
+    titles = parsed.get("title_hints")
+    if (
+        not isinstance(titles, list)
+        or any(not isinstance(item, str) for item in titles)
+    ):
+        return None
+    titles = [
+        " ".join(item.split())
+        for item in titles[:3]
+        if " ".join(item.split())
+    ]
+    if parsed["status"] != "parsed" or not titles:
+        return None
+    media_type = parsed.get("media_type_hint")
+    scope = parsed.get("scope_hint")
+    if media_type not in {"movie", "series", "unknown"}:
+        return None
+    if scope not in {
+        "work", "whole_series", "season", "episode", "latest_aired", "unknown"
+    }:
+        return None
+    for key in ("season_number", "episode_number"):
+        value = parsed.get(key)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+        ):
             return None
-    return _without_prowlarr_query(parsed)
+    numeric_tokens = parsed.get("numeric_tokens")
+    if not isinstance(numeric_tokens, list) or any(
+        not isinstance(item, dict)
+        or set(item) != {"value", "role"}
+        or isinstance(item.get("value"), bool)
+        or not isinstance(item.get("value"), int)
+        or item.get("role") not in {
+            "year", "official_title_part", "season", "episode", "ambiguous"
+        }
+        for item in numeric_tokens
+    ):
+        return None
+    mapped_scope = {
+        "work": "movie_or_series",
+        "unknown": "movie_or_series",
+        "latest_aired": "movie_or_series",
+    }.get(scope, scope)
+    hypotheses = [{
+        "title": title,
+        "year": "",
+        "content_identity": media_type,
+        "scope": mapped_scope,
+        "season_number": parsed.get("season_number"),
+        "episode_number": parsed.get("episode_number"),
+        "possible_related_series": [],
+        "explicit_facts": [],
+        "inferred_facts": ["ai_intent_hint"],
+    } for title in titles]
+    return {
+        "status": "ok",
+        "hypotheses": hypotheses,
+        "source_queries": {
+            name: list(titles) for name in ("wikipedia", "douban", "tvdb")
+        },
+        "warnings": ["ai_intent_hint_requires_source_verification"],
+        "intent_hint": parsed,
+    }
 
 
 def infer_relation_hypotheses_with_ai(context: dict):
@@ -354,24 +420,6 @@ def infer_relation_hypotheses_with_ai(context: dict):
     ):
         return None
     return {"hypotheses": hypotheses[:3]}
-
-
-def score_candidates_with_ai(context: dict):
-    if not check_ai_api_available():
-        return None
-    prompt = SCORECARD_PROMPT + json.dumps(
-        context or {}, ensure_ascii=False, separators=(",", ":")
-    )
-    result = chat_completion(prompt, max_tokens=2200)
-    parsed = parse_ai_json_response(result)
-    if not isinstance(parsed, dict) or set(parsed) != {"scorecards"}:
-        return None
-    scorecards = parsed.get("scorecards")
-    if not isinstance(scorecards, list) or any(
-        not isinstance(item, dict) for item in scorecards
-    ):
-        return None
-    return {"scorecards": scorecards[:5]}
 
 
 def normalize_search_query_with_ai(raw_query: str):

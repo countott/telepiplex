@@ -225,6 +225,17 @@ def _fetch_subject(subject_url: str, timeout: float, errors: list[str]) -> dict 
     return None
 
 
+def lookup_douban_subject(subject_id: str, timeout: float = 10) -> dict | None:
+    subject_id = _text(subject_id)
+    if not subject_id.isdigit():
+        return None
+    return _fetch_subject(
+        f"https://movie.douban.com/subject/{subject_id}/",
+        timeout,
+        [],
+    )
+
+
 def lookup_douban_evidence(
     queries: list[str],
     timeout: float = 10,

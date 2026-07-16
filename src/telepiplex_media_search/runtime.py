@@ -5,15 +5,13 @@ import yaml
 from telepiplex_plugin_sdk import FeatureRuntime, RuntimeContext
 
 from .context import runtime_context
-from .entity_registry import CanonicalEntityRegistry
 from .service import MediaSearchFeature
 
 
 def main(context: RuntimeContext) -> FeatureRuntime:
     config = yaml.safe_load(context.config_path.read_text(encoding="utf-8")) or {}
     runtime_context.configure(config)
-    registry = CanonicalEntityRegistry(context.state_path / "media_entities.db")
-    feature = MediaSearchFeature(config=config, core=context.core, registry=registry)
+    feature = MediaSearchFeature(config=config, core=context.core)
     runtime = FeatureRuntime(
         manifest=context.manifest,
         token=context.token,

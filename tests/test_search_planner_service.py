@@ -32,37 +32,44 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
             {"wikipedia": "not_found", "douban": "server_down"},
         )
 
-    @patch("telepiplex_media_search.planner.score_candidates_with_ai", return_value=None)
-    async def test_ai_unavailable_never_generates_media_metadata(self, _score):
-        def provider(_hypotheses):
-            return {
-                "status": "ok",
-                "facts": [{
-                    "subject_id": "1",
-                    "title": "The Grand Budapest Hotel",
-                    "chinese_title": "布达佩斯大饭店",
-                    "official_english_title": "The Grand Budapest Hotel",
-                    "original_title": "The Grand Budapest Hotel",
-                    "original_language": "en",
-                    "year": "2014",
-                    "media_type": "movie",
-                }],
-            }
+    @patch("telepiplex_media_search.planner.infer_search_hypotheses_with_ai")
+    async def test_clear_query_never_requires_ai(self, infer):
+        def provider(provider_name):
+            def provide(_hypotheses):
+                key = "subject_id" if provider_name == "douban" else "wikibase_item"
+                return {
+                    "status": "ok",
+                    "facts": [{
+                        key: "1",
+                        "title": "The Grand Budapest Hotel",
+                        "chinese_title": "布达佩斯大饭店",
+                        "official_english_title": "The Grand Budapest Hotel",
+                        "original_title": "The Grand Budapest Hotel",
+                        "original_language": "en",
+                        "year": "2014",
+                        "media_type": "movie",
+                    }],
+                }
+            return provide
 
         plan = await build_confirmable_search_plan(
             "布达佩斯大饭店",
             "p1",
-            {"douban": provider},
+            {
+                "douban": provider("douban"),
+                "wikipedia": provider("wikipedia"),
+            },
             lambda _contract: set(),
             TemporarySpecialAllocator(),
         )
 
         candidate = plan["candidates"][0]
-        self.assertEqual(candidate["score"]["ai_total"], 0)
-        self.assertFalse(candidate["selectable"])
+        infer.assert_not_called()
+        self.assertNotIn("ai_total", candidate["score"])
+        self.assertTrue(candidate["selectable"])
         self.assertEqual(
             candidate["media_metadata"]["evidence"]["decision"]["mode"],
-            "fixed_scorecard",
+            "deterministic_bounded",
         )
 
     def test_provider_support_collects_only_provider_specific_stable_ids(self):

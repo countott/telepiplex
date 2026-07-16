@@ -257,6 +257,7 @@ def _normalize_search_item(item: dict, media_type: str) -> dict:
         "overview": str(item.get("overview") or "").strip(),
         "aliases": _search_alias_values(item),
         "cover_url": _search_cover_url(item),
+        "slug": str(item.get("slug") or "").strip(),
     }
     normalized[f"tvdb_{entity_type}_id"] = entity_id
     return normalized
@@ -313,6 +314,87 @@ def search_tvdb_series(query: str, year: str = "") -> list[dict]:
 
 def search_tvdb_movies(query: str, year: str = "") -> list[dict]:
     return _search_tvdb(query, "movies", year)
+
+
+def _entity_payload(path: str) -> dict | None:
+    data = _tvdb_get(path)
+    payload = data.get("data") if isinstance(data, dict) else None
+    return payload if isinstance(payload, dict) else None
+
+
+def _find_by_slug(items: list[dict], slug: str) -> dict | None:
+    slug = str(slug or "").strip().casefold()
+    return next(
+        (
+            item
+            for item in items
+            if str(item.get("slug") or "").strip().casefold() == slug
+        ),
+        None,
+    )
+
+
+def get_tvdb_series(series_id: str) -> dict | None:
+    series_id = str(series_id or "").strip()
+    if not series_id:
+        return None
+    if series_id.isdigit():
+        payload = _entity_payload(f"/series/{series_id}/extended")
+        if not payload:
+            return None
+        result = _normalize_search_item(payload, "series")
+    else:
+        result = _find_by_slug(
+            search_tvdb_series(series_id.replace("-", " ")),
+            series_id,
+        )
+        if not result:
+            return None
+    result["episodes"] = get_tvdb_series_episodes(
+        result.get("tvdb_series_id") or result.get("tvdb_id")
+    )
+    return result
+
+
+def get_tvdb_movie(movie_id: str) -> dict | None:
+    movie_id = str(movie_id or "").strip()
+    if not movie_id:
+        return None
+    if movie_id.isdigit():
+        payload = _entity_payload(f"/movies/{movie_id}/extended")
+        return _normalize_search_item(payload, "movie") if payload else None
+    return _find_by_slug(
+        search_tvdb_movies(movie_id.replace("-", " ")),
+        movie_id,
+    )
+
+
+def get_tvdb_season(season_id: str) -> dict | None:
+    payload = _entity_payload(f"/seasons/{str(season_id or '').strip()}/extended")
+    if not payload:
+        return None
+    return {
+        "tvdb_season_id": payload.get("id"),
+        "tvdb_series_id": (
+            payload.get("seriesId")
+            or payload.get("series_id")
+            or (payload.get("series") or {}).get("id")
+        ),
+        "season_number": payload.get("number") or payload.get("seasonNumber"),
+    }
+
+
+def get_tvdb_episode(episode_id: str) -> dict | None:
+    payload = _entity_payload(f"/episodes/{str(episode_id or '').strip()}/extended")
+    if not payload:
+        return None
+    result = _normalize_episode(payload)
+    result["tvdb_series_id"] = (
+        payload.get("seriesId")
+        or payload.get("series_id")
+        or (payload.get("series") or {}).get("id")
+    )
+    return result
 
 
 def _normalize_episode(item: dict) -> dict:

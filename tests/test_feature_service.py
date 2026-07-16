@@ -1,10 +1,9 @@
 import ast
 import asyncio
 from copy import deepcopy
-import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import yaml
 
@@ -26,6 +25,11 @@ def search_plan():
                 "year": "2024",
                 "content_kind": "movie",
                 "external_ids": {},
+            },
+            "retrieval": {
+                "media_type": "movie",
+                "scope": "work",
+                "query": "English Title 2024",
             },
             "relation": {"target_series": None, "source": "evidence"},
             "placement": {
@@ -57,6 +61,7 @@ def ranked_search_plan():
             "poster_url": poster,
             "poster_source": "tvdb",
         })
+        contract["retrieval"]["query"] = f"{title} {year}"
         candidates.append({
             "candidate_key": f"tvdb:movie:{index + 1}",
             "score": {"total": 92 - index * 10},
@@ -150,6 +155,45 @@ def related_ranked_search_plan():
     return result
 
 
+def series_ranked_search_plan():
+    result = ranked_search_plan()
+    candidate = result["candidates"][0]
+    contract = candidate["media_metadata"]
+    contract["identity"].update({
+        "chinese_title": "黑暗荣耀",
+        "english_title": "The Glory",
+        "year": "2022",
+        "content_kind": "series",
+    })
+    contract["retrieval"] = {
+        "media_type": "series",
+        "scope": "work",
+        "query": "The Glory 2022",
+    }
+    contract["placement"].update({
+        "library_type": "series",
+        "category_kind": "live_action_series",
+    })
+    contract["items"] = [{
+        "item_id": f"e{number}",
+        "content_role": "main_episode",
+        "season_number": 1,
+        "episode_number": number,
+        "aired": "2022-12-30",
+    } for number in range(1, 9)]
+    contract["evidence"] = {
+        "decision": {
+            "mode": "deterministic_bounded",
+            "scope": "movie_or_series",
+            "season_number": None,
+            "episode_number": None,
+        }
+    }
+    candidate["prowlarr_queries"] = ["The Glory 2022"]
+    result["media_metadata"] = contract
+    return result
+
+
 class FakeCore:
     def __init__(self):
         self.calls = []
@@ -183,14 +227,9 @@ class FakeRuntime:
 
 class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        from telepiplex_media_search.entity_registry import CanonicalEntityRegistry
         from telepiplex_media_search.service import MediaSearchFeature
 
         self.core = FakeCore()
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.registry = CanonicalEntityRegistry(
-            Path(self.tempdir.name) / "media_entities.db"
-        )
         self.search_queries = []
 
         async def planner(raw_query, plan_id):
@@ -216,6 +255,11 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "name": "电影",
                     "path": "/Movies",
                     "plex_library_id": "",
+                }, {
+                    "kind": "live_action_series",
+                    "name": "剧集",
+                    "path": "/Series",
+                    "plex_library_id": "",
                 }],
                 "search": {"prowlarr": {"result_limit": 8}},
             },
@@ -224,7 +268,6 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             release_search=search,
             release_rank=lambda items, limit: items[:limit],
             release_resolver=lambda item: item["magnet_url"],
-            registry=self.registry,
         )
         self.runtime = FakeRuntime()
         self.feature.bind_runtime(self.runtime)
@@ -232,7 +275,6 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         for awaitable in self.runtime.tasks.values():
             awaitable.close()
-        self.tempdir.cleanup()
 
     async def _prepare_search(self):
         command = await self.feature.command({
@@ -328,6 +370,11 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "episode_number": 7,
         })
         contract["items"] = [{"season_number": 9, "episode_number": 7}]
+        contract["retrieval"] = {
+            "media_type": "series",
+            "scope": "episode",
+            "query": "English Title S09E07",
+        }
         plan["prowlarr_queries"] = ["中文标题 第九季第七集", "English Title S09E07"]
 
         self.assertEqual(
@@ -343,6 +390,11 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "season_number": 1, "episode_number": 2,
         })
         contract["items"] = [{"season_number": 1, "episode_number": 2}]
+        contract["retrieval"] = {
+            "media_type": "series",
+            "scope": "episode",
+            "query": "English Title S01E02",
+        }
         plan["prowlarr_queries"] = ["中文 English Title S01E02"]
 
         self.assertEqual(
@@ -370,6 +422,11 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "season_number": 2,
                     "episode_number": 5,
                 }]
+                contract["retrieval"] = {
+                    "media_type": "series",
+                    "scope": scope,
+                    "query": expected,
+                }
 
                 self.assertEqual(
                     self.feature._english_prowlarr_query(plan, contract),
@@ -388,6 +445,11 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "decision": {"mode": "ai", "scope": "movie_or_series"}
         }
         contract["items"] = [{"season_number": 1, "episode_number": 1}]
+        contract["retrieval"] = {
+            "media_type": "series",
+            "scope": "whole_series",
+            "query": "The Glory 2022",
+        }
         plan["prowlarr_queries"] = ["The Glory 2022"]
 
         self.assertEqual(
@@ -581,7 +643,7 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["details"]["photo_url"], "https://image.example/top.jpg")
         self.assertIn("92/100", report["status_text"])
 
-    async def test_browse_does_not_persist_and_select_persists_once(self):
+    async def test_browse_and_select_keep_only_request_scoped_state(self):
         async def planner(_raw_query, plan_id):
             result = ranked_search_plan()
             result["plan_id"] = plan_id
@@ -598,17 +660,15 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         browsed = await self.feature.callback({
             "payload": f"browse:{plan_id}:1", "user_id": 1, "chat_id": 10,
         })
-        self.assertEqual(self.registry.count(), 0)
         self.assertEqual(browsed["actions"][0]["kind"], "edit_photo")
 
         selected = await self.feature.callback({
             "payload": f"select:{plan_id}:1", "user_id": 1, "chat_id": 10,
         })
-        self.assertEqual(self.registry.count(), 1)
         self.assertEqual(selected["operation"]["stage"], "prowlarr_search")
         self.assertEqual(
-            self.registry.get("tvdb:movie:2")["canonical_latin_title"],
-            "English Alternate",
+            self.feature.plans[plan_id]["selected_candidate_key"],
+            "tvdb:movie:2",
         )
 
     async def test_cancel_discards_ranked_candidates_without_persistence(self):
@@ -630,16 +690,8 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         })
 
         self.assertNotIn(plan_id, self.feature.plans)
-        self.assertEqual(self.registry.count(), 0)
 
-    async def test_related_selection_allocates_and_persists_locked_special(self):
-        self.feature.config["category_folder"].append({
-            "kind": "live_action_series",
-            "name": "剧集",
-            "path": "/Series",
-            "plex_library_id": "",
-        })
-
+    async def test_related_selection_prompts_then_allocates_task_local_special(self):
         async def planner(_raw_query, plan_id):
             result = related_ranked_search_plan()
             result["plan_id"] = plan_id
@@ -653,55 +705,150 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         callback = self.core.reports[-1]["details"]["keyboard"][0][0]["callback_data"]
         plan_id = callback.split(":")[2]
 
-        await self.feature.callback({
+        placement = await self.feature.callback({
             "payload": f"select:{plan_id}:0", "user_id": 1, "chat_id": 10,
+        })
+        self.assertIn(
+            "Specials",
+            placement["actions"][0]["data"]["keyboard"][0][0]["text"],
+        )
+
+        started = await self.feature.callback({
+            "payload": f"placement:{plan_id}:special",
+            "user_id": 1,
+            "chat_id": 10,
         })
 
         stored = self.feature.plans[plan_id]
+        self.assertEqual(started["operation"]["stage"], "prowlarr_search")
         self.assertEqual(stored["selected_path"], "/Series")
         self.assertEqual(
             stored["plan"]["media_metadata"]["placement"]["episode_number"],
             100,
         )
-        persisted = self.registry.get("tvdb:movie:1")
-        self.assertEqual(persisted["relation"]["episode_number"], 100)
-        self.assertEqual(persisted["relation"]["target_entity_key"], "tvdb:series:100")
-        rehydrated = await self.feature.metadata_capability({
-            "method": "resolve_metadata",
-            "payload": {"query": "English Title 2024"},
+        self.assertEqual(
+            stored["plan"]["media_metadata"]["retrieval"]["query"],
+            "English Title 2024",
+        )
+
+    @patch("telepiplex_media_search.service.infer_relation_hypotheses_with_ai")
+    async def test_relation_ai_runs_only_after_selected_movie(self, relation_ai):
+        async def planner(_raw_query, plan_id):
+            result = ranked_search_plan()
+            result["plan_id"] = plan_id
+            result["candidates"] = result["candidates"][:1]
+            result["raw_query"] = "中文标题 电影版"
+            result["relation_pool"] = [{
+                "candidate_key": "tvdb:movie:1",
+                "fact_ids": ["douban:movie"],
+                "facts": [{
+                    "fact_id": "douban:movie",
+                    "complex_signals": ["provider_relation_signal"],
+                }],
+                "media_type": "movie",
+                "identity": {},
+            }, {
+                "candidate_key": "tvdb:series:100",
+                "fact_ids": ["tvdb:series"],
+                "facts": [{
+                    "fact_id": "tvdb:series",
+                    "complex_signals": [],
+                }],
+                "media_type": "series",
+                "identity": {
+                    "chinese_title": "中文剧集",
+                    "english_title": "English Series",
+                    "year": "2020",
+                    "external_ids": {"tvdb": "100"},
+                },
+            }]
+            return result
+
+        relation_ai.return_value = {"hypotheses": [{
+            "candidate_key": "tvdb:movie:1",
+            "target_candidate_key": "tvdb:series:100",
+            "relation_type": "extension_movie",
+            "fact_ids": ["douban:movie", "tvdb:series"],
+        }]}
+        self.feature.plan_builder = planner
+        await self.feature.command({
+            "command": "s",
+            "args": ["中文标题", "电影版"],
+            "user_id": 1,
+            "chat_id": 10,
         })
-        self.assertEqual(
-            rehydrated["media_metadata"]["placement"]["mapping_kind"],
-            "temporary_related_special",
+        await self.runtime.run("media-search-plan-")
+        self.assertFalse(relation_ai.called)
+        callback = self.core.reports[-1]["details"]["keyboard"][0][0]["callback_data"]
+        plan_id = callback.split(":")[2]
+
+        selected = await self.feature.callback({
+            "payload": f"select:{plan_id}:0",
+            "user_id": 1,
+            "chat_id": 10,
+        })
+
+        relation_ai.assert_called_once()
+        self.assertIn(
+            "Specials",
+            selected["actions"][0]["data"]["keyboard"][0][0]["text"],
         )
         self.assertEqual(
-            rehydrated["media_metadata"]["placement"]["episode_number"],
-            100,
+            self.feature.plans[plan_id]["plan"]["media_metadata"]["retrieval"]["query"],
+            "English Title 2024",
         )
 
-    async def test_metadata_capability_only_rehydrates_exact_selected_entity(self):
-        self.registry.upsert_selected({
-            "entity_key": "tvdb:movie:1",
-            "content_kind": "movie",
-            "year": "2024",
-            "chinese_title": "中文标题",
-            "original_title": "English Title",
-            "original_language": "en",
-            "official_english_title": "English Title",
-            "romanized_original_title": "",
-            "canonical_search_title": "English Title",
-            "search_title_policy": "official_english",
-            "canonical_latin_title": "English Title",
-            "poster_url": "",
-            "poster_source": "",
-            "external_ids": {"tvdb": "1"},
-            "scoring_version": "media-entity-v1",
-        }, {"relation_type": "standalone", "mapping_kind": "standalone"})
+    async def test_bare_series_requires_scope_before_prowlarr(self):
+        async def planner(_raw_query, plan_id):
+            result = series_ranked_search_plan()
+            result["plan_id"] = plan_id
+            return result
 
-        async def forbidden_planner(*_args):
-            raise AssertionError("noninteractive resolution must not plan")
+        self.feature.plan_builder = planner
+        await self.feature.command({
+            "command": "s",
+            "args": ["黑暗荣耀"],
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("media-search-plan-")
+        callback = self.core.reports[-1]["details"]["keyboard"][0][0]["callback_data"]
+        plan_id = callback.split(":")[2]
 
-        self.feature.plan_builder = forbidden_planner
+        scope = await self.feature.callback({
+            "payload": f"select:{plan_id}:0",
+            "user_id": 1,
+            "chat_id": 10,
+        })
+
+        self.assertEqual(self.search_queries, [])
+        labels = [
+            row[0]["text"]
+            for row in scope["actions"][0]["data"]["keyboard"]
+        ]
+        self.assertIn("全剧（推荐）", labels)
+        self.assertIn("指定集", labels)
+        self.assertNotIn("指定季", labels)
+
+        started = await self.feature.callback({
+            "payload": f"scope:{plan_id}:whole_series",
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        self.assertEqual(started["operation"]["stage"], "prowlarr_search")
+        await self.runtime.run("media-search-releases-")
+
+        self.assertEqual(self.search_queries, [("The Glory 2022", "series")])
+
+    async def test_metadata_capability_resolves_once_without_registry(self):
+        async def live_planner(_raw_query, plan_id):
+            result = ranked_search_plan()
+            result["plan_id"] = plan_id
+            result["candidates"] = result["candidates"][:1]
+            result["candidates"][0]["media_metadata"]["metadata_id"] = plan_id
+            return result
+
+        self.feature.plan_builder = live_planner
         resolved = await self.feature.metadata_capability({
             "method": "resolve_metadata",
             "payload": {"query": "English Title 2024"},
@@ -713,10 +860,16 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             resolved["media_metadata"]["identity"]["english_title"],
             "English Title",
         )
-        self.assertEqual(resolved["naming_metadata"]["source"], "media-search-registry")
+        self.assertEqual(resolved["naming_metadata"]["source"], "media-search-live")
         self.assertEqual(self.core.calls, [])
 
         from telepiplex_plugin_sdk import FeatureError
+        async def ambiguous_planner(_raw_query, plan_id):
+            result = ranked_search_plan()
+            result["plan_id"] = plan_id
+            return result
+
+        self.feature.plan_builder = ambiguous_planner
         with self.assertRaises(FeatureError) as raised:
             await self.feature.metadata_capability({
                 "method": "resolve_metadata",
@@ -732,9 +885,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.2.0")
+        self.assertEqual(manifest["version"], "1.3.0")
         self.assertEqual(manifest["core_api"], ">=1.2,<2.0")
-        self.assertIn('version = "1.2.0"', project)
+        self.assertIn('version = "1.3.0"', project)
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
@@ -763,7 +916,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("dist/media-search-1.2.0.tpx", source)
+        self.assertIn("dist/media-search-1.3.0.tpx", source)
+        self.assertNotIn("dist/media-search-1.2.0.tpx", source)
         self.assertNotIn("dist/media-search-1.1.0.tpx", source)
 
     def test_source_has_no_core_telegram_or_init_imports(self):

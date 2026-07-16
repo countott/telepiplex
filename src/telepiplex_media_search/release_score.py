@@ -158,6 +158,31 @@ def _selectable_url(item: dict) -> str:
     return item.get("magnet_url") or item.get("download_url") or item.get("magnetUrl") or item.get("downloadUrl") or ""
 
 
+def _identity_prefix(value: str) -> str:
+    value = " ".join(str(value or "").split())
+    value = re.split(
+        r"(?i)(?<![A-Za-z0-9])"
+        r"(?:S\d{1,2}(?:E\d{1,3})?|19\d{2}|20\d{2})"
+        r"(?![A-Za-z0-9])",
+        value,
+        maxsplit=1,
+    )[0]
+    return re.sub(
+        r"[^A-Za-z0-9\u3400-\u9fff]+", "", value
+    ).casefold()
+
+
+def filter_relevant_releases(items: list[dict], query: str) -> list[dict]:
+    expected = _identity_prefix(query)
+    if not expected:
+        return list(items or [])
+    return [
+        item
+        for item in items or []
+        if expected in _identity_prefix(item.get("title") or "")
+    ]
+
+
 def rank_releases(items: list[dict], limit: int) -> list[dict]:
     ranked = []
     for item in items:

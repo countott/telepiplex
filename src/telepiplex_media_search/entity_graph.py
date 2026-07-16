@@ -117,7 +117,7 @@ class CandidateEntity:
 
     @property
     def poster_url(self) -> str:
-        for provider in ("tvdb", "douban", "wikipedia", "registry"):
+        for provider in ("tvdb", "douban", "wikipedia"):
             for fact in self.facts:
                 if fact.provider == provider and fact.poster_url:
                     return fact.poster_url

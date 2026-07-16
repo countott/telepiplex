@@ -9,25 +9,23 @@ import time
 import unicodedata
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import replace
 
 from .context import runtime_context
 
 from .ai import (
-    infer_relation_hypotheses_with_ai,
     infer_search_hypotheses_with_ai,
-    score_candidates_with_ai,
 )
 from .candidate_score import (
-    AIScore,
     MINIMUM_SCORE,
     SCORING_VERSION,
     apply_thresholds,
     combine_score,
     program_score,
-    validate_ai_scorecard,
 )
-from .deterministic import COMPLEX_PATTERN, build_rule_hypotheses, evaluate_deterministic_plan
+from .deterministic import build_rule_hypotheses
 from .entity_graph import CandidateEntity, build_search_graph, normalize_title
+from .input_contract import classify_search_input, has_ambiguous_bare_number
 from .search_plan import (
     TEMPORARY_MAPPING_KIND,
     TemporarySpecialAllocator,
@@ -44,6 +42,9 @@ class SearchPlanningError(RuntimeError):
         super().__init__(self.code)
 
 
+MAX_DISPLAY_CANDIDATES = 7
+
+
 def _log_info(message: str):
     if runtime_context.logger:
         runtime_context.logger.info(message)
@@ -53,10 +54,8 @@ class PlanningBudget:
     TOTAL = 90.0
     STAGES = {
         "base_evidence": 15.0,
-        "relation_scout": 20.0,
-        "relation_verification": 15.0,
-        "scorecard": 25.0,
-        "candidate_finalize": 15.0,
+        "intent_fallback": 20.0,
+        "candidate_finalize": 25.0,
     }
 
     def __init__(
@@ -264,8 +263,17 @@ def _verified_tvdb_special_candidates(sources: list[dict]) -> list[dict]:
                     episode_id = _text(
                         episode.get("tvdb_episode_id") or episode.get("id") or ""
                     )
+                    episode_number = _integer(
+                        episode.get("episode_number")
+                        or episode.get("number")
+                    )
                     key = (series_id, episode_id)
-                    if not episode_id or key in seen:
+                    if (
+                        not episode_id
+                        or episode_number is None
+                        or episode_number < 1
+                        or key in seen
+                    ):
                         continue
                     seen.add(key)
                     candidates.append({
@@ -275,6 +283,7 @@ def _verified_tvdb_special_candidates(sources: list[dict]) -> list[dict]:
                             episode.get("name") or episode.get("title") or ""
                         ),
                         "season_number": 0,
+                        "episode_number": episode_number,
                     })
     return candidates
 
@@ -432,6 +441,30 @@ def _candidate_context(candidate: CandidateEntity) -> dict:
     }
 
 
+def _relation_pool_entry(candidate: CandidateEntity) -> dict | None:
+    try:
+        titles = resolve_title_policy(candidate)
+    except TitlePolicyError:
+        return None
+    year = next(iter(sorted(candidate.years)), "")
+    identity = {
+        **titles.identity_fields(),
+        "year": year,
+        "external_ids": dict(candidate.external_ids),
+    }
+    if not identity.get("chinese_title"):
+        identity["chinese_title"] = (
+            identity.get("original_title")
+            or identity.get("english_title")
+            or ""
+        )
+    return {
+        **_candidate_context(candidate),
+        "media_type": next(iter(sorted(candidate.media_types)), ""),
+        "identity": identity,
+    }
+
+
 def _verify_relation_hypotheses(
     payload: dict,
     candidates: list[CandidateEntity],
@@ -518,6 +551,7 @@ def _candidate_items(candidate: CandidateEntity, intent: dict) -> list[dict]:
                 "content_role": "main_episode",
                 "season_number": key[0],
                 "episode_number": key[1],
+                "aired": _text(episode.get("aired") or episode.get("firstAired")),
             })
     return sorted(items, key=lambda item: (item["season_number"], item["episode_number"]))
 
@@ -572,6 +606,25 @@ def _candidate_query(canonical_title: str, year: str, media_type: str, intent: d
                 marker += f"E{episode:0{3 if episode >= 100 else 2}d}"
             return f"{canonical_title} {marker}"
     return _text(f"{canonical_title} {year}")
+
+
+def _candidate_is_qualified(
+    candidate: CandidateEntity,
+    intent: dict,
+    *,
+    direct_anchor: bool,
+) -> bool:
+    if not candidate.facts or len(candidate.media_types) != 1:
+        return False
+    if len(candidate.years) != 1:
+        return False
+    requested_year = _text(intent.get("year"))
+    if requested_year and requested_year not in candidate.years:
+        return False
+    media_type = next(iter(candidate.media_types))
+    if media_type == "series" and not _text(candidate.external_ids.get("tvdb")):
+        return False
+    return direct_anchor or len(candidate.providers) >= 2
 
 
 def _candidate_contract(
@@ -665,6 +718,16 @@ def _candidate_contract(
         "metadata_id": plan_id,
         "confirmed": False,
         "identity": identity,
+        "retrieval": {
+            "media_type": media_type,
+            "scope": intent.get("scope") or "movie_or_series",
+            "query": _candidate_query(
+                titles.canonical_search_title,
+                year,
+                media_type,
+                intent,
+            ),
+        },
         "relation": {
             "type": relation_type,
             "target_series": target_contract,
@@ -698,10 +761,21 @@ def _candidate_contract(
         "evidence": {
             "provider_statuses": provider_statuses,
             "provider_support": provider_support,
-            "decision": {"mode": "fixed_scorecard", "scoring_version": SCORING_VERSION},
+            "decision": {
+                "mode": "deterministic_bounded",
+                "scoring_version": SCORING_VERSION,
+                "scope": intent.get("scope") or "movie_or_series",
+                "season_number": intent.get("season_number"),
+                "episode_number": intent.get("episode_number"),
+            },
         },
         "warnings": [],
     }
+    verified_specials = _verified_tvdb_special_candidates(sources)
+    contract["evidence"]["verified_tvdb_special_candidates"] = verified_specials
+    contract["evidence"]["tvdb_official_special_candidates"] = (
+        _matching_tvdb_official_candidates(contract, verified_specials)
+    )
     entity = {
         "entity_key": candidate.candidate_key,
         "content_kind": content_kind,
@@ -724,11 +798,15 @@ async def build_confirmable_search_plan(
     allocator: TemporarySpecialAllocator,
     *,
     budget: PlanningBudget | None = None,
+    locked_identity: tuple[str, str] | None = None,
 ) -> dict:
     # occupied_loader/allocator are applied only after an interactive selection;
     # no unselected candidate may reserve a persistent or logical episode slot.
     del occupied_loader, allocator
     budget = budget or PlanningBudget()
+    parsed_input = classify_search_input(raw_query)
+    if parsed_input.kind == "invalid_link":
+        raise SearchPlanningError("unsupported_metadata_link")
     rule_hypotheses = build_rule_hypotheses(raw_query)
     sources = await _budgeted(
         "base_evidence",
@@ -736,67 +814,90 @@ async def build_confirmable_search_plan(
         collect_evidence(rule_hypotheses, providers),
     )
     graph = build_search_graph(sources)
-    candidates = list(graph.candidates)
+    all_candidates = list(graph.candidates)
+    candidates = list(all_candidates)
+    if locked_identity:
+        key, value = locked_identity
+        candidates = [
+            candidate
+            for candidate in candidates
+            if _text(candidate.external_ids.get(key)) == _text(value)
+        ]
     target = normalize_title((rule_hypotheses.get("intent") or {}).get("title"))
-    complex_request = bool(
-        COMPLEX_PATTERN.search(raw_query)
-        or any(item.complex_signals for item in candidates)
-    )
-    exact = [item for item in candidates if target and target in item.normalized_titles]
-    if exact and not complex_request:
-        candidates = exact
+    exact = [
+        item
+        for item in candidates
+        if target and target in item.normalized_titles
+    ]
+    title_matches = [
+        item
+        for item in candidates
+        if target
+        and any(
+            title.startswith(target)
+            for title in item.normalized_titles
+        )
+    ]
+    if title_matches:
+        candidates = title_matches
+    else:
+        candidates = []
+    if has_ambiguous_bare_number(raw_query, parsed_input) and not exact:
+        raise SearchPlanningError("ambiguous_numeric_role")
     if not candidates:
-        raise SearchPlanningError("insufficient_independent_support")
-    candidates = candidates[:5]
+        ai_hypotheses = await _optional_budgeted(
+            "intent_fallback",
+            budget,
+            asyncio.to_thread(
+                infer_search_hypotheses_with_ai,
+                {
+                    "raw_query": raw_query,
+                    "intent": rule_hypotheses.get("intent") or {},
+                },
+            ),
+            None,
+        )
+        if ai_hypotheses:
+            retry_sources = await _optional_budgeted(
+                "candidate_finalize",
+                budget,
+                collect_evidence(ai_hypotheses, providers),
+                [],
+            )
+            if retry_sources:
+                sources = _merge_evidence_passes(sources, retry_sources)
+                candidates = list(build_search_graph(sources).candidates)
+                retry_targets = {
+                    normalize_title(item.get("title"))
+                    for item in ai_hypotheses.get("hypotheses") or []
+                    if normalize_title(item.get("title"))
+                }
+                matches = [
+                    item
+                    for item in candidates
+                    if any(
+                        title.startswith(retry_target)
+                        for retry_target in retry_targets
+                        for title in item.normalized_titles
+                    )
+                ]
+                candidates = matches
+        if not candidates:
+            raise SearchPlanningError("insufficient_independent_support")
     intent = dict(rule_hypotheses.get("intent") or {})
     intent["media_type"] = _explicit_media_type(raw_query, intent)
 
-    relation_payload = {"hypotheses": []}
-    if complex_request:
-        relation_payload = await _optional_budgeted(
-            "relation_scout",
-            budget,
-            asyncio.to_thread(
-                infer_relation_hypotheses_with_ai,
-                {
-                    "raw_query": raw_query,
-                    "intent": intent,
-                    "candidates": [_candidate_context(item) for item in candidates],
-                },
-            ),
-            {"hypotheses": []},
-        ) or {"hypotheses": []}
+    verified_relations = {}
 
-    verified_relations = await _budgeted(
-        "relation_verification",
-        budget,
-        asyncio.to_thread(
-            _verify_relation_hypotheses,
-            relation_payload,
-            candidates,
-        ),
-    )
-
-    score_context = {
-        "raw_query": raw_query,
-        "intent": intent,
-        "verified_relations": list(verified_relations.values())[:3],
-        "candidates": [_candidate_context(item) for item in candidates],
-    }
-    raw_scores = await _optional_budgeted(
-        "scorecard",
-        budget,
-        asyncio.to_thread(score_candidates_with_ai, score_context),
-        None,
-    )
-    raw_by_key = {
-        _text(item.get("candidate_key")): item
-        for item in ((raw_scores or {}).get("scorecards") or [])
-        if isinstance(item, dict)
-    }
     combined = []
     title_values = {}
     for candidate in candidates:
+        if not _candidate_is_qualified(
+            candidate,
+            intent,
+            direct_anchor=bool(locked_identity),
+        ):
+            continue
         try:
             title_values[candidate.candidate_key] = resolve_title_policy(candidate)
         except TitlePolicyError:
@@ -806,23 +907,18 @@ async def build_confirmable_search_plan(
             intent,
             verified_relations.get(candidate.candidate_key),
         )
-        raw = raw_by_key.get(candidate.candidate_key)
-        ai = AIScore(0, 0, 0, ())
-        if raw is not None:
-            try:
-                ai = validate_ai_scorecard(
-                    raw,
-                    {fact.fact_id for fact in candidate.facts},
-                )
-            except ValueError:
-                _log_info(
-                    f"ai_stage=scorecard status=invalid candidate={candidate.candidate_key}"
-                )
-        combined.append(combine_score(candidate.candidate_key, program, ai))
+        combined.append(combine_score(candidate.candidate_key, program))
     ranked_scores = apply_thresholds(combined)
-    if not ranked_scores:
-        raise SearchPlanningError("canonical_title_unavailable")
-    if ranked_scores[0].total < MINIMUM_SCORE:
+    if locked_identity:
+        ranked_scores = [
+            replace(
+                item,
+                total=max(item.total, MINIMUM_SCORE),
+                selectable=not item.program.excluded,
+            )
+            for item in ranked_scores
+        ]
+    if not ranked_scores or ranked_scores[0].total < MINIMUM_SCORE:
         expansion_sources = await _optional_budgeted(
             "candidate_finalize",
             budget,
@@ -836,34 +932,57 @@ async def build_confirmable_search_plan(
                 _expanded_candidate(candidate, expanded_graph.candidates)
                 for candidate in candidates
             ]
-            prior_ai = {item.candidate_key: item.ai for item in ranked_scores}
-            combined = [
-                combine_score(
+            combined = []
+            for candidate in candidates:
+                if not _candidate_is_qualified(
+                    candidate,
+                    intent,
+                    direct_anchor=bool(locked_identity),
+                ):
+                    continue
+                combined.append(combine_score(
                     candidate.candidate_key,
                     program_score(
                         candidate,
                         intent,
                         verified_relations.get(candidate.candidate_key),
                     ),
-                    prior_ai.get(candidate.candidate_key, AIScore(0, 0, 0, ())),
-                )
-                for candidate in candidates
-            ]
+                ))
             ranked_scores = apply_thresholds(combined)
-            title_values = {
-                candidate.candidate_key: resolve_title_policy(candidate)
-                for candidate in candidates
-            }
+            if locked_identity:
+                ranked_scores = [
+                    replace(
+                        item,
+                        total=max(item.total, MINIMUM_SCORE),
+                        selectable=not item.program.excluded,
+                    )
+                    for item in ranked_scores
+                ]
+            title_values = {}
+            for candidate in candidates:
+                if any(
+                    item.candidate_key == candidate.candidate_key
+                    for item in ranked_scores
+                ):
+                    title_values[candidate.candidate_key] = (
+                        resolve_title_policy(candidate)
+                    )
             _log_info(
                 f"search_stage status=expanded stage=candidate_finalize "
                 f"candidates={len(candidates)}"
             )
 
+    ranked_scores = [item for item in ranked_scores if item.selectable]
+    if not ranked_scores:
+        raise SearchPlanningError("insufficient_independent_support")
+    if len(ranked_scores) > MAX_DISPLAY_CANDIDATES:
+        raise SearchPlanningError("too_many_candidates")
+
     by_key = {item.candidate_key: item for item in candidates}
     ranked = []
     if budget.remaining_for("candidate_finalize") <= 0:
         raise SearchPlanningError("planning_timed_out", ("candidate_finalize",))
-    for score in ranked_scores[:5]:
+    for score in ranked_scores:
         candidate = by_key[score.candidate_key]
         contract, entity, relation = _candidate_contract(
             candidate,
@@ -874,12 +993,7 @@ async def build_confirmable_search_plan(
             verified_relations.get(score.candidate_key),
             by_key,
         )
-        query = _candidate_query(
-            entity["canonical_search_title"],
-            entity["year"],
-            entity["content_kind"],
-            intent,
-        )
+        query = contract["retrieval"]["query"]
         contract["evidence"]["decision"]["score"] = score.total
         score_value = {
             "version": score.program.version,
@@ -888,10 +1002,6 @@ async def build_confirmable_search_plan(
             "release_consistency": score.program.release_consistency,
             "type_and_scope": score.program.type_and_scope,
             "program_total": score.program.total,
-            "title_equivalence": score.ai.title_equivalence,
-            "relation_consistency": score.ai.relation_consistency,
-            "intent_relevance": score.ai.intent_relevance,
-            "ai_total": score.ai.total,
             "total": score.total,
         }
         ranked.append({
@@ -913,9 +1023,15 @@ async def build_confirmable_search_plan(
     )
     return {
         "plan_id": plan_id,
+        "raw_query": raw_query,
         "media_metadata": deepcopy(top["media_metadata"]),
         "prowlarr_queries": list(top["prowlarr_queries"]),
         "candidates": ranked,
         "source_queries": deepcopy(rule_hypotheses.get("source_queries") or {}),
         "scoring_version": SCORING_VERSION,
+        "relation_pool": [
+            entry
+            for candidate in all_candidates
+            if (entry := _relation_pool_entry(candidate)) is not None
+        ],
     }

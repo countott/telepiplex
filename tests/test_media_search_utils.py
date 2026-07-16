@@ -1,5 +1,4 @@
 import sys
-import types
 import unittest
 from pathlib import Path
 
@@ -7,9 +6,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
-sys.modules.setdefault("yaml", types.SimpleNamespace(safe_load=lambda stream: {}))
 
-from telepiplex_media_search.release_score import rank_releases
+from telepiplex_media_search.release_score import (
+    filter_relevant_releases,
+    rank_releases,
+)
 from telepiplex_media_search.search_query import parse_douban_page_title
 from telepiplex_media_search.search_resolution import candidate_to_prowlarr_query, parse_search_intent
 
@@ -61,6 +62,25 @@ class MediaSearchUtilsTest(unittest.TestCase):
             limit=2,
         )
         self.assertEqual(ranked[0]["title"], "Movie 1080p WEB-DL")
+
+    def test_release_relevance_rejects_episode_title_false_positive(self):
+        results = filter_relevant_releases(
+            [
+                {"title": "The.Glory.S01E01.2160p.WEB-DL"},
+                {
+                    "title": (
+                        "The.Not.Very.Grand.Tour.S01E01."
+                        "The.Glory.and.The"
+                    )
+                },
+            ],
+            "The Glory S01E01",
+        )
+
+        self.assertEqual(
+            [item["title"] for item in results],
+            ["The.Glory.S01E01.2160p.WEB-DL"],
+        )
 
 
 if __name__ == "__main__":
