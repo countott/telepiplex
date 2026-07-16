@@ -27,9 +27,9 @@ plugins:
   restart_limit: 3
 ```
 
-## Core API 1.1 and Telegram interactions
+## Core API 1.2 and Telegram interactions
 
-Core API 1.1 remains startup-compatible with API 1.0 Features and adds persisted operation status, explicit exit/cancel/rollback controls, cross-Feature handoff, and process-restart recovery for 1.1 Features. Both `/start` and Telegram's native command menu are generated from the manifests of currently enabled, routable Features. Disabled, dependency-blocked, and Core-reserved commands are not advertised as executable.
+Core API 1.2 remains startup-compatible with API 1.0/1.1 Features. On top of the persisted operation status, explicit exit/cancel/rollback controls, cross-Feature handoff, and process-restart recovery introduced in 1.1, it adds safe `send_photo` / `edit_photo` poster actions. Features using those actions must declare `core_api: ">=1.2,<2.0"`. Both `/start` and Telegram's native command menu are generated from the manifests of currently enabled, routable Features. Disabled, dependency-blocked, and Core-reserved commands are not advertised as executable.
 
 Each user may own only one active interaction at a time. While input is requested, Core accepts only ordinary text or callback IDs shown by the current status message. While work is running, cancelling, or rolling back, unrelated commands and stale buttons are blocked. Controls mean:
 

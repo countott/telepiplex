@@ -29,9 +29,9 @@ plugins:
   restart_limit: 3
 ```
 
-## Core API 1.1 与 Telegram 交互
+## Core API 1.2 与 Telegram 交互
 
-Core API 1.1 保持对 API 1.0 Feature 的启动兼容，并为 1.1 Feature 增加持久化任务状态、显式退出/取消/回滚控制、跨 Feature 任务交接和进程重启恢复。`/start` 与 Telegram 原生命令列表都从当前已启用且依赖可路由的 Feature `manifest.yaml` 动态生成；停用、被依赖阻塞或声明 Core 保留命令的 Feature 不会被错误展示。
+Core API 1.2 保持对 API 1.0/1.1 Feature 的启动兼容，在 1.1 的持久化任务状态、显式退出/取消/回滚控制、跨 Feature 任务交接和进程重启恢复之上，新增安全的 `send_photo` / `edit_photo` 海报交互动作。使用这些海报动作的 Feature 必须声明 `core_api: ">=1.2,<2.0"`。`/start` 与 Telegram 原生命令列表都从当前已启用且依赖可路由的 Feature `manifest.yaml` 动态生成；停用、被依赖阻塞或声明 Core 保留命令的 Feature 不会被错误展示。
 
 同一用户同一时间只允许一个活动交互。等待输入时，只接受当前状态消息实际展示的按钮或普通文本；任务运行、取消或回滚期间，其他命令和过期按钮会被拦截。按钮含义如下：
 

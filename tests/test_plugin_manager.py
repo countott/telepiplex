@@ -1057,7 +1057,7 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         updates = await self.manager.available_updates()
 
         self.assertEqual(len(updates), 1)
-        self.assertEqual(resolver.calls, [({"echo": "1.0.0"}, "1.1")])
+        self.assertEqual(resolver.calls, [({"echo": "1.0.0"}, "1.2")])
 
     async def test_available_updates_is_empty_for_basic_resolver(self):
         self.manager._artifact_resolver = SimpleNamespace(resolve=None)
@@ -1098,7 +1098,7 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolver.refreshed, 1)
         self.assertEqual(resolver.calls, [(
             {"echo"},
-            "1.1",
+            "1.2",
             {"demo.echo"},
         )])
 

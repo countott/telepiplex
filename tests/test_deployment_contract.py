@@ -47,6 +47,19 @@ class DeploymentContractTest(unittest.TestCase):
             ):
                 self.assertIn(term, source, f"{name}: {term}")
 
+    def test_photo_actions_are_declared_as_core_api_1_2(self):
+        from app.core.plugin_contract import CORE_API_VERSION
+
+        self.assertEqual(CORE_API_VERSION, "1.2")
+        self.assertIn(
+            "Core API 1.2",
+            (ROOT / "README.md").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "Core API 1.2",
+            (ROOT / "README_EN.md").read_text(encoding="utf-8"),
+        )
+
     def test_build_script_only_references_existing_dockerfiles(self):
         source = (ROOT / "build.sh").read_text(encoding="utf-8")
         dockerfiles = re.findall(r"docker\s+build\s+-f\s+([^\s]+)", source)
