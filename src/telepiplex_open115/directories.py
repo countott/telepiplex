@@ -10,6 +10,22 @@ def _single_line(value, *, field: str) -> str:
     return text
 
 
+def normalize_save_directory_path(value) -> str:
+    path = _single_line(value, field="path")
+    if path.startswith("/"):
+        raise ValueError(
+            "open115 save directory path must start from the 115 root folder "
+            "without a leading slash"
+        )
+    path = path.rstrip("/")
+    parts = path.split("/")
+    if not path or any(not part or part in {".", ".."} for part in parts):
+        raise ValueError(
+            "open115 save directory path must contain safe root-relative segments"
+        )
+    return path
+
+
 def normalize_save_directories(value) -> list[dict[str, str]]:
     if not isinstance(value, list):
         raise ValueError("open115 save_directories must be a list")
@@ -22,9 +38,7 @@ def normalize_save_directories(value) -> list[dict[str, str]]:
                 "open115 save directory must contain only name and path"
             )
         name = _single_line(item.get("name"), field="name")
-        path = _single_line(item.get("path"), field="path")
-        if not path.startswith("/"):
-            raise ValueError("open115 save directory path must be absolute")
+        path = normalize_save_directory_path(item.get("path"))
         if name in names or path in paths:
             raise ValueError(
                 "open115 save directory name and path must be unique"

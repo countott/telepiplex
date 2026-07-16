@@ -21,7 +21,10 @@
         "type": "object",
         "properties": {
           "name": {"type": "string", "minLength": 1},
-          "path": {"type": "string", "pattern": "^/"}
+          "path": {
+            "type": "string",
+            "pattern": "^(?!/)(?!\\s)(?!.*\\s/?$)(?!.*//)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\r\\n/]+(?:/[^\\r\\n/]+)*/?$"
+          }
         },
         "required": ["name", "path"],
         "additionalProperties": false

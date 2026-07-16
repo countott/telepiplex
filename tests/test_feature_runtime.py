@@ -1,5 +1,6 @@
 import asyncio
 import ast
+import re
 import tempfile
 import threading
 import tomllib
@@ -1505,13 +1506,13 @@ class FeatureConfigStoreTest(unittest.TestCase):
             store = FeatureConfigStore(path)
 
             updated = store.write_save_directories([
-                {"name": " 剧集 ", "path": " /Series "},
-                {"name": "电影", "path": "/Movies"},
+                {"name": " 剧集 ", "path": " series/ "},
+                {"name": "电影", "path": "movies"},
             ])
 
             self.assertEqual(updated["save_directories"], [
-                {"name": "剧集", "path": "/Series"},
-                {"name": "电影", "path": "/Movies"},
+                {"name": "剧集", "path": "series"},
+                {"name": "电影", "path": "movies"},
             ])
             self.assertEqual(updated["access_token"], "access")
             self.assertEqual(updated["refresh_token"], "refresh")
@@ -1525,21 +1526,58 @@ class FeatureConfigStoreTest(unittest.TestCase):
             store = FeatureConfigStore(Path(directory) / "config.yaml")
             invalid = (
                 None,
-                [{"name": "", "path": "/Series"}],
-                [{"name": "剧集", "path": "Series"}],
-                [{"name": "剧集", "path": "/A", "extra": True}],
+                [{"name": "", "path": "series"}],
+                [{"name": "剧集", "path": "/series"}],
+                [{"name": "剧集", "path": "a", "extra": True}],
                 [
-                    {"name": "剧集", "path": "/A"},
-                    {"name": "剧集", "path": "/B"},
+                    {"name": "剧集", "path": "a"},
+                    {"name": "剧集", "path": "b"},
                 ],
                 [
-                    {"name": "A", "path": "/Series"},
-                    {"name": "B", "path": "/Series"},
+                    {"name": "A", "path": "series"},
+                    {"name": "B", "path": "series/"},
                 ],
             )
             for value in invalid:
                 with self.subTest(value=value), self.assertRaises(ValueError):
                     store.write_save_directories(value)
+
+    def test_save_directory_writeback_normalizes_root_relative_paths(self):
+        from telepiplex_open115.config_store import FeatureConfigStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = FeatureConfigStore(Path(directory) / "config.yaml")
+            updated = store.write_save_directories([
+                {"name": "剧集", "path": " series/live action/ "},
+                {"name": "电影", "path": "movies"},
+            ])
+
+            self.assertEqual(updated["save_directories"], [
+                {"name": "剧集", "path": "series/live action"},
+                {"name": "电影", "path": "movies"},
+            ])
+
+    def test_save_directory_writeback_rejects_command_and_unsafe_paths(self):
+        from telepiplex_open115.config_store import FeatureConfigStore
+
+        invalid_paths = (
+            "/series",
+            "/",
+            "series//live action",
+            ".",
+            "..",
+            "./series",
+            "series/../live action",
+            "series/./live action",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            store = FeatureConfigStore(Path(directory) / "config.yaml")
+            for value in invalid_paths:
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    store.write_save_directories([{
+                        "name": "剧集",
+                        "path": value,
+                    }])
 
 
 class FeatureSourceContractTest(unittest.TestCase):
@@ -1550,6 +1588,13 @@ class FeatureSourceContractTest(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertEqual(schema["x-telepiplex-config-command"], "config")
+        path_pattern = schema["properties"]["save_directories"]["items"][
+            "properties"
+        ]["path"]["pattern"]
+        for value in ("series/live action", "series/live action/"):
+            self.assertIsNotNone(re.fullmatch(path_pattern, value))
+        for value in ("/series", "/", "series//live", ".", "series/../live"):
+            self.assertIsNone(re.fullmatch(path_pattern, value))
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
