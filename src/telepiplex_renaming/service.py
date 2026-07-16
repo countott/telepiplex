@@ -13,6 +13,7 @@ from telepiplex_plugin_sdk.media_metadata import (
 )
 
 from .config_wizard import RenamingConfigWizard
+from .context import runtime_context
 from .models import DownloadCompletedEvent, PostDownloadResult
 from .operations import OperationCancelled, RenameOperationJournal
 from .processor import process_generic_media, process_tvdb_episode
@@ -176,23 +177,34 @@ class RenamingFeature:
                 )
 
     async def _resume_durable_job(self, job):
-        outcome = job.get("result") or {}
-        event_payload = outcome.get("event_payload") or {}
-        operation_id = str(event_payload.get("operation_id") or "")
-        if job.get("state") == "published":
-            await self._complete_published_job(job["job_id"], outcome)
-            return
-        if (
-            operation_id
-            and not outcome.get("handoff_operation")
-            and operation_id not in self.operations
-        ):
-            await self._accept_event_operation(
-                event_payload, job["job_id"]
+        try:
+            outcome = job.get("result") or {}
+            event_payload = outcome.get("event_payload") or {}
+            operation_id = str(event_payload.get("operation_id") or "")
+            if job.get("state") == "published":
+                await self._complete_published_job(job["job_id"], outcome)
+                return
+            if (
+                operation_id
+                and not outcome.get("handoff_operation")
+                and operation_id not in self.operations
+            ):
+                await self._accept_event_operation(
+                    event_payload, job["job_id"]
+                )
+            await self._finish_operation(
+                job["job_id"], outcome, operation_id
             )
-        await self._finish_operation(
-            job["job_id"], outcome, operation_id
-        )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger = runtime_context.logger
+            if logger:
+                logger.warning(
+                    "durable_job_resume_deferred "
+                    f"job_id={job.get('job_id') or ''} "
+                    f"error={type(exc).__name__}"
+                )
 
     async def command(self, request: dict) -> dict:
         if str(request.get("command") or "") != "renaming_config":

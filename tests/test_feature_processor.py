@@ -523,6 +523,23 @@ class FakeRuntime:
 
 
 class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
+    async def test_resume_durable_job_defers_transient_failure(self):
+        feature = RenamingFeature(
+            config={"unorganized_path": "/Unorganized"},
+            core=FakeCore(),
+        )
+
+        async def fail(*_args, **_kwargs):
+            raise RuntimeError("handoff temporarily unavailable")
+
+        feature._finish_operation = fail
+
+        await feature._resume_durable_job({
+            "job_id": "job-retry-later",
+            "state": "processed",
+            "result": {"event_payload": {}},
+        })
+
     async def test_unresolved_media_search_moves_release_to_unorganized(self):
         class UnresolvedCore(FakeCore):
             async def call_capability(self, capability, method, payload, **kwargs):
