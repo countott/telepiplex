@@ -5,7 +5,7 @@ import re
 import threading
 import time
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 import init
 
 from app.core.plugin_manager import PluginOperationError
@@ -34,7 +34,7 @@ _USAGE = (
     "/plugin status <plugin_id>\n"
     "/plugin doctor"
 )
-_SAFE_ACTIONS = {"send_message", "edit_message"}
+_SAFE_ACTIONS = {"send_message", "edit_message", "send_photo", "edit_photo"}
 _CORE_UPDATE_CALLBACK_RE = re.compile(
     r"^core-plugin-update:(?P<action>confirm|decline):"
     r"(?P<reference>[a-z][a-z0-9-]{0,63}@\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$"
@@ -829,12 +829,51 @@ async def _render_actions(
                 reply_markup = InlineKeyboardMarkup(rows)
         if reply_markup is not None:
             kwargs["reply_markup"] = reply_markup
+        photo_action = action["kind"] in {"send_photo", "edit_photo"}
+        photo_url = _photo_url(action_data) if photo_action else None
+        if photo_url is False or (
+            not photo_action
+            and isinstance(action_data, dict)
+            and "photo_url" in action_data
+        ):
+            await _feature_feedback(
+                update,
+                "❌ Feature 返回了无效响应。",
+                prefer_edit=bool(getattr(update, "callback_query", None)),
+            )
+            return False, None
         if action["kind"] == "send_message":
             sent = await update.effective_message.reply_text(text, **kwargs)
-        else:
+        elif action["kind"] == "edit_message":
             sent = await update.effective_message.edit_text(text, **kwargs)
+        else:
+            caption = text
+            if len(caption) > 1024:
+                caption = caption[:1003].rstrip() + "\n…内容已截断"
+            media_kwargs = dict(kwargs)
+            parse_mode = media_kwargs.pop("parse_mode", None)
+            try:
+                if action["kind"] == "send_photo":
+                    sent = await update.effective_message.reply_photo(
+                        photo=photo_url,
+                        caption=caption,
+                        **media_kwargs,
+                    )
+                else:
+                    sent = await update.effective_message.edit_media(
+                        media=InputMediaPhoto(
+                            media=photo_url,
+                            caption=caption,
+                            parse_mode=parse_mode,
+                        ),
+                        **media_kwargs,
+                    )
+            except Exception:
+                sent = await update.effective_message.reply_text(text, **kwargs)
         candidate = getattr(sent, "message_id", None)
-        if not isinstance(candidate, int) and action["kind"] == "edit_message":
+        if not isinstance(candidate, int) and action["kind"] in {
+            "edit_message", "edit_photo",
+        }:
             candidate = getattr(update.effective_message, "message_id", None)
         if isinstance(candidate, int) and candidate > 0:
             last_message_id = candidate
@@ -856,9 +895,11 @@ def _has_explicit_control(data) -> bool:
 def _keyboard_markup(route, data):
     if data is None:
         return None
-    if not isinstance(data, dict) or set(data) - {"keyboard"}:
+    if not isinstance(data, dict) or set(data) - {"keyboard", "photo_url"}:
         return False
     keyboard = data.get("keyboard")
+    if keyboard is None:
+        return None
     if not isinstance(keyboard, list) or not keyboard or len(keyboard) > 10:
         return False
     namespaces = set(getattr(getattr(route, "manifest", None), "callbacks", ()))
@@ -883,6 +924,19 @@ def _keyboard_markup(route, data):
             buttons.append(InlineKeyboardButton(text, callback_data=callback_data))
         rows.append(buttons)
     return InlineKeyboardMarkup(rows)
+
+
+def _photo_url(data):
+    if not isinstance(data, dict):
+        return False
+    photo_url = str(data.get("photo_url") or "").strip()
+    if (
+        not photo_url.startswith("https://")
+        or len(photo_url) > 2048
+        or any(character.isspace() for character in photo_url)
+    ):
+        return False
+    return photo_url
 
 
 async def _feature_feedback(update, text: str, *, prefer_edit: bool = False):
