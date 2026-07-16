@@ -62,6 +62,23 @@ class TvdbAdapterTest(unittest.TestCase):
         self.assertEqual(item["english_title"], "The Glory")
         self.assertIn("黑暗荣耀", item["aliases"])
 
+    def test_structured_japanese_titles_are_preserved(self):
+        item = tvdb._normalize_search_item(
+            {
+                "tvdb_id": "267440",
+                "name": "進撃の巨人",
+                "original_language": "ja",
+                "official_english_title": "Attack on Titan",
+                "romanized_original_title": "Shingeki no Kyojin",
+            },
+            "series",
+        )
+
+        self.assertEqual(item["original_title"], "進撃の巨人")
+        self.assertEqual(item["original_language"], "ja")
+        self.assertEqual(item["official_english_title"], "Attack on Titan")
+        self.assertEqual(item["romanized_original_title"], "Shingeki no Kyojin")
+
     @patch.object(tvdb, "_tvdb_get")
     def test_movie_search_uses_translation_endpoint_only_without_latin_title(self, get_mock):
         get_mock.side_effect = [

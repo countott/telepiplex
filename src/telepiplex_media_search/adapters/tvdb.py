@@ -187,6 +187,20 @@ def _preferred_english_title(item: dict) -> str:
     return ""
 
 
+def _original_language(item: dict, original_title: str) -> str:
+    value = str(
+        item.get("original_language")
+        or item.get("originalLanguage")
+        or item.get("language")
+        or ""
+    ).strip().casefold()
+    if value in {"ja", "jpn", "japanese", "日语", "日語"}:
+        return "ja"
+    if re.search(r"[\u3040-\u30ff]", original_title):
+        return "ja"
+    return value
+
+
 def _search_cover_url(item: dict) -> str:
     for key in ("image_url", "poster"):
         value = str(item.get(key) or "").strip()
@@ -210,11 +224,34 @@ def _search_cover_url(item: dict) -> str:
 def _normalize_search_item(item: dict, media_type: str) -> dict:
     entity_type = "series" if media_type == "series" else "movie"
     entity_id = str(item.get("tvdb_id") or item.get("id") or "").strip()
+    original_title = str(
+        item.get("original_title")
+        or item.get("originalTitle")
+        or item.get("original_name")
+        or item.get("originalName")
+        or item.get("name")
+        or ""
+    ).strip()
+    official_english_title = str(
+        item.get("official_english_title")
+        or item.get("officialEnglishTitle")
+        or _preferred_english_title(item)
+    ).strip()
     normalized = {
         "tvdb_id": entity_id,
         "media_type": entity_type,
         "name": str(item.get("name") or "").strip(),
-        "english_title": _preferred_english_title(item),
+        "english_title": official_english_title,
+        "original_title": original_title,
+        "original_language": _original_language(item, original_title),
+        "official_english_title": official_english_title,
+        "romanized_original_title": str(
+            item.get("romanized_original_title")
+            or item.get("romanizedOriginalTitle")
+            or item.get("romaji_title")
+            or item.get("romajiTitle")
+            or ""
+        ).strip(),
         "year": str(item.get("year") or item.get("first_air_time") or item.get("firstAired") or "").strip()[:4],
         "type": str(item.get("type") or entity_type).strip(),
         "overview": str(item.get("overview") or "").strip(),
@@ -259,6 +296,7 @@ def _search_tvdb(query: str, entity_type: str, year: str = "") -> list[dict]:
         if not normalized.get("english_title") and normalized.get("tvdb_id"):
             try:
                 normalized["english_title"] = _translation_name(entity_type, normalized["tvdb_id"])
+                normalized["official_english_title"] = normalized["english_title"]
             except (TvdbConfigError, TvdbRequestError) as e:
                 logger = runtime_context.logger
                 if logger:

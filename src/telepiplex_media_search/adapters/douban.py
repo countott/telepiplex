@@ -66,6 +66,23 @@ def _contains_latin(value: str) -> bool:
     return bool(re.search(r"[A-Za-z]", value))
 
 
+def _contains_japanese_script(value: str) -> bool:
+    return bool(re.search(r"[\u3040-\u30ff]", value))
+
+
+def _language(data: dict, original_title: str) -> str:
+    value = _text(
+        data.get("original_language")
+        or data.get("originalLanguage")
+        or data.get("language")
+    ).casefold()
+    if value in {"ja", "jpn", "japanese", "日语", "日語"}:
+        return "ja"
+    if _contains_japanese_script(original_title):
+        return "ja"
+    return value
+
+
 def _list_values(value) -> list[str]:
     if isinstance(value, list):
         raw = value
@@ -120,8 +137,14 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
 
     title = _text(data.get("title") or data.get("name"))
     chinese_title = title if _contains_cjk(title) else ""
+    original_title = _text(
+        data.get("original_title")
+        or data.get("originalTitle")
+        or data.get("original_name")
+        or data.get("originalName")
+    )
     candidates = [
-        data.get("original_title"),
+        original_title,
         data.get("originalTitle"),
         data.get("original_name"),
         data.get("originalName"),
@@ -142,6 +165,17 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
         if item and item not in aliases:
             aliases.append(item)
     genres = _list_values(data.get("genres") or data.get("genre"))
+    official_english_title = _text(
+        data.get("official_english_title")
+        or data.get("officialEnglishTitle")
+        or english_title
+    )
+    romanized_original_title = _text(
+        data.get("romanized_original_title")
+        or data.get("romanizedOriginalTitle")
+        or data.get("romaji_title")
+        or data.get("romajiTitle")
+    )
     year_match = re.search(r"\b(19\d{2}|20\d{2})\b", _text(data.get("release_year") or data.get("year")))
     return {
         "subject_id": subject_id,
@@ -150,6 +184,10 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
         "title": english_title or chinese_title or title,
         "chinese_title": chinese_title,
         "english_title": english_title,
+        "original_title": original_title,
+        "original_language": _language(data, original_title),
+        "official_english_title": official_english_title,
+        "romanized_original_title": romanized_original_title,
         "year": year_match.group(1) if year_match else "",
         "media_type": _media_type(data),
         "aliases": aliases,
