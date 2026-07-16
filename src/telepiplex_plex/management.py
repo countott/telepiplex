@@ -491,30 +491,53 @@ class PlexManagementService:
                         "final_path": str(target.get("final_path") or ""),
                         "message": message,
                     }
+                self.jobs.update(
+                    job["id"],
+                    step_results=self._merge_step(
+                        job,
+                        "scanning",
+                        scan_result,
+                    ),
+                )
                 continue
             if should_cancel and should_cancel():
                 raise PlexOperationCancelled(
                     "Plex operation cancelled after library scan"
                 )
             missing = 0
-            for target in library_targets:
+            for index, target in enumerate(library_targets, start=1):
                 target_id = str(target.get("target_id") or "")
                 final_path = str(target.get("final_path") or "")
                 deadline = self._clock() + self.scan_timeout
                 item = None
+                lookup_error = ""
                 while item is None:
                     if should_cancel and should_cancel():
                         raise PlexOperationCancelled(
                             "Plex operation cancelled while locating final path"
                         )
-                    item = self.plex.find_item_by_path(
-                        library_id,
-                        final_path,
-                    )
+                    try:
+                        item = self.plex.find_item_by_path(
+                            library_id,
+                            final_path,
+                        )
+                    except PlexOperationCancelled:
+                        raise
+                    except Exception as exc:
+                        lookup_error = self._safe_error(exc)
+                        break
                     if item is not None or self._clock() >= deadline:
                         break
                     self._sleep(self.scan_poll_interval)
-                if item is None:
+                if lookup_error:
+                    missing += 1
+                    target_results[target_id] = {
+                        "status": "warning",
+                        "library_id": library_id,
+                        "final_path": final_path,
+                        "message": lookup_error,
+                    }
+                elif item is None:
                     missing += 1
                     target_results[target_id] = {
                         "status": "warning",
@@ -522,25 +545,36 @@ class PlexManagementService:
                         "final_path": final_path,
                         "message": "Plex item was not found by final path",
                     }
-                    continue
-                rating_key = str(item.get("rating_key") or "")
-                if not rating_key:
-                    missing += 1
-                    target_results[target_id] = {
-                        "status": "warning",
-                        "library_id": library_id,
-                        "final_path": final_path,
-                        "message": "Plex item is missing a rating key",
-                    }
-                    continue
-                located += 1
-                first_rating_key = first_rating_key or rating_key
-                target_results[target_id] = {
-                    "status": "success",
-                    "library_id": library_id,
-                    "rating_key": rating_key,
-                    "final_path": final_path,
-                }
+                else:
+                    rating_key = str(item.get("rating_key") or "")
+                    if not rating_key:
+                        missing += 1
+                        target_results[target_id] = {
+                            "status": "warning",
+                            "library_id": library_id,
+                            "final_path": final_path,
+                            "message": "Plex item is missing a rating key",
+                        }
+                    else:
+                        located += 1
+                        first_rating_key = first_rating_key or rating_key
+                        target_results[target_id] = {
+                            "status": "success",
+                            "library_id": library_id,
+                            "rating_key": rating_key,
+                            "final_path": final_path,
+                        }
+                library_result["located"] = index - missing
+                library_result["missing"] = missing
+                self.jobs.update(
+                    job["id"],
+                    rating_key=first_rating_key or None,
+                    step_results=self._merge_step(
+                        job,
+                        "scanning",
+                        scan_result,
+                    ),
+                )
             library_result["status"] = "warning" if missing else "success"
             library_result["located"] = len(library_targets) - missing
             library_result["missing"] = missing

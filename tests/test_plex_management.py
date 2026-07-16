@@ -680,6 +680,95 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertEqual(plex.get_item_keys, ["42"])
         self.assertEqual(plex.stream_rating_keys, ["42", "42"])
 
+    def test_later_lookup_exception_preserves_earlier_target_and_continues(self):
+        completion = make_unresolved_standalone_series_completion()
+        contract = completion.result.metadata["media_metadata"]
+        first_path = "/Series/Show/Season 01/Show S01E01.mkv"
+        second_path = "/Series/Show/Season 01/Show S01E02.mkv"
+        third_path = "/Series/Show/Season 01/Show S01E03.mkv"
+        contract["items"] = [
+            {
+                "item_id": "episode-1",
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": 1,
+                "final_path": first_path,
+            },
+            {
+                "item_id": "episode-2",
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": 2,
+                "final_path": second_path,
+            },
+            {
+                "item_id": "episode-3",
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": 3,
+                "final_path": third_path,
+            },
+        ]
+        plex = FakePlex()
+        service = self.make_service(plex=plex)
+        job = service.enqueue_organized_event({
+            "resource_name": "Show",
+            "final_path": "/Series/Show",
+            "media_metadata": contract,
+        })
+        first_was_persisted = False
+
+        def find_item_by_path(_library_id, final_path):
+            nonlocal first_was_persisted
+            plex.find_paths.append(str(final_path))
+            if final_path == first_path:
+                return {
+                    "rating_key": "42",
+                    "title": "Episode 1",
+                    "year": 2024,
+                    "media_type": "episode",
+                    "summary": "",
+                    "guids": ["tmdb://20"],
+                }
+            if final_path == second_path:
+                persisted = self.jobs.get(job["id"])["step_results"]["scanning"]
+                first_was_persisted = (
+                    (persisted.get("targets") or {})
+                    .get("episode-1", {})
+                    .get("status")
+                    == "success"
+                )
+                raise RuntimeError("path lookup failed")
+            return {
+                "rating_key": "43",
+                "title": "Episode 3",
+                "year": 2024,
+                "media_type": "episode",
+                "summary": "",
+                "guids": ["tmdb://20"],
+            }
+
+        plex.find_item_by_path = find_item_by_path
+
+        result = service.run_job(job["id"])
+
+        self.assertTrue(first_was_persisted)
+        self.assertEqual(result["state"], "completed")
+        scanning = result["step_results"]["scanning"]
+        self.assertEqual(scanning["status"], "warning")
+        self.assertEqual(scanning["targets"]["episode-1"]["status"], "success")
+        self.assertEqual(scanning["targets"]["episode-2"]["status"], "warning")
+        self.assertEqual(scanning["targets"]["episode-3"]["status"], "success")
+        self.assertIn(
+            "path lookup failed",
+            scanning["targets"]["episode-2"]["message"],
+        )
+        for stage in ("artwork", "audio", "subtitle"):
+            self.assertEqual(
+                list(result["step_results"][stage]["targets"]),
+                ["episode-1", "episode-3"],
+            )
+
     def test_run_job_executes_steps_in_order(self):
         plex = FakePlex()
         service = self.make_service(plex=plex)
