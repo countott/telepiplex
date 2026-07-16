@@ -734,6 +734,15 @@ class PlexFeature:
             )
             await self._complete_batch_operation(operation_id, [result])
         except PlexOperationCancelled:
+            job = self.jobs.get(job_id)
+            if job and job["state"] not in {
+                "completed", "failed", "cancelled",
+            }:
+                self.jobs.update(
+                    job_id,
+                    state="cancelled",
+                    error="cancelled after current Plex selection call",
+                )
             await self._finish_cancelled(operation_id)
         except Exception as exc:
             await self._report_if_active(

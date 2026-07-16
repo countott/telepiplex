@@ -1283,6 +1283,10 @@ class PlexManagementService:
         kind = str(waiting["kind"])
         rating_key = str(waiting.get("rating_key") or "")
         part_id = int(waiting.get("part_id") or 0)
+        if should_cancel and should_cancel():
+            raise PlexOperationCancelled(
+                f"Plex operation cancelled before {kind} selection"
+            )
         if kind == "artwork":
             url = str(candidate.get("url") or "")
             if not url:

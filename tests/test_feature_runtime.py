@@ -798,6 +798,145 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.jobs.get(job["id"])["state"], "cancelled")
 
+    async def test_choice_cancel_before_worker_skips_write_and_cancels_job(self):
+        class RecordingPlex:
+            def __init__(nested_self):
+                nested_self.poster_updates = []
+
+            def set_poster_url(nested_self, rating_key, url):
+                nested_self.poster_updates.append((rating_key, url))
+
+        plex = RecordingPlex()
+        job = self.make_waiting_job("artwork", [{
+            "url": "https://image.example/poster.jpg",
+            "source": "tmdb",
+        }])
+        self.feature.service = PlexManagementService(self.jobs, plex)
+        opened = await self.feature.command({
+            "command": "plex",
+            "args": [str(job["id"])],
+            "chat_id": 10,
+            "user_id": 1,
+        })
+
+        await self.feature.callback({
+            "payload": f"choice:{job['id']}:pick:0",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        cancelled = await self.feature.callback({
+            "payload": "cancel",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        await self.runtime.tasks.pop(f"plex-choice-{job['id']}")
+
+        self.assertEqual(plex.poster_updates, [])
+        self.assertEqual(self.jobs.get(job["id"])["state"], "cancelled")
+        self.assertEqual(
+            cancelled["operation"]["operation_id"],
+            opened["operation"]["operation_id"],
+        )
+        self.assertEqual(cancelled["operation"]["state"], "cancelled")
+        self.assertIn(
+            "不会自动回滚",
+            cancelled["operation"]["status_text"],
+        )
+
+    async def test_confirm_selection_checks_cancel_before_any_plex_mutation(self):
+        class RecordingPlex:
+            def __init__(nested_self):
+                nested_self.calls = []
+
+            def set_poster_url(nested_self, rating_key, url):
+                nested_self.calls.append(("artwork", rating_key, url))
+
+            def select_audio(
+                nested_self,
+                rating_key,
+                part_id,
+                stream_id,
+            ):
+                nested_self.calls.append(
+                    ("audio", rating_key, part_id, stream_id)
+                )
+
+            def select_subtitle(
+                nested_self,
+                rating_key,
+                part_id,
+                stream_id,
+            ):
+                nested_self.calls.append(
+                    ("subtitle", rating_key, part_id, stream_id)
+                )
+
+        candidates = {
+            "artwork": {"url": "https://image.example/poster.jpg"},
+            "audio": {"id": 21},
+            "subtitle": {"id": 31},
+        }
+        for kind, candidate in candidates.items():
+            with self.subTest(kind=kind):
+                plex = RecordingPlex()
+                job = self.make_waiting_job(kind, [candidate])
+                service = PlexManagementService(self.jobs, plex)
+
+                with self.assertRaises(PlexOperationCancelled):
+                    service.confirm_selection(
+                        job["id"],
+                        0,
+                        should_cancel=lambda: True,
+                    )
+
+                self.assertEqual(plex.calls, [])
+
+    async def test_choice_cancel_after_remote_write_cancels_job_without_rollback_claim(self):
+        class CancellingPlex:
+            def __init__(nested_self):
+                nested_self.poster_updates = []
+                nested_self.on_write = None
+
+            def set_poster_url(nested_self, rating_key, url):
+                nested_self.poster_updates.append((rating_key, url))
+                nested_self.on_write()
+
+        plex = CancellingPlex()
+        job = self.make_waiting_job("artwork", [{
+            "url": "https://image.example/poster.jpg",
+            "source": "tmdb",
+        }])
+        self.feature.service = PlexManagementService(self.jobs, plex)
+        opened = await self.feature.command({
+            "command": "plex",
+            "args": [str(job["id"])],
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        operation_id = opened["operation"]["operation_id"]
+        plex.on_write = (
+            lambda: self.feature.operations[operation_id][
+                "cancel_event"
+            ].set()
+        )
+
+        await self.feature.callback({
+            "payload": f"choice:{job['id']}:pick:0",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+        await self.runtime.tasks.pop(f"plex-choice-{job['id']}")
+
+        self.assertEqual(
+            plex.poster_updates,
+            [("42", "https://image.example/poster.jpg")],
+        )
+        self.assertEqual(self.jobs.get(job["id"])["state"], "cancelled")
+        report = self.feature.core.reports[-1]
+        self.assertEqual(report["operation_id"], operation_id)
+        self.assertEqual(report["state"], "cancelled")
+        self.assertIn("不会自动回滚", report["status_text"])
+
     async def test_choice_pick_confirms_and_continues_same_operation(self):
         job = self.make_waiting_job("artwork", [
             {"url": "https://image.example/one.jpg", "source": "tmdb"},
