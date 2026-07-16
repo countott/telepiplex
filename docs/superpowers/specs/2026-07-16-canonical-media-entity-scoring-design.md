@@ -345,6 +345,11 @@ media-search 输出最终 confirmed `media_metadata v1`：
 - `evidence`：仅随本次下游任务传递的最小决策摘要，不写入实体数据库；
 - `warnings`：未验证关系、来源缺失等可见警告。
 
+交互式 `/s` 必须经过本次用户确认。非交互的
+`media.search.resolve_metadata` 只能按稳定 ID，或“规范标题 + 年份”精确复用已经
+持久化的实体；它不能自动选择新候选，也不能写入新实体。注册表没有精确命中时返回
+`metadata_unresolved`。
+
 renaming 必须遵守：
 
 - 有 confirmed `media_metadata`：直接使用，不重判作品身份。
