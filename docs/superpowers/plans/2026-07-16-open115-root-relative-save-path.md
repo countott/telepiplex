@@ -279,7 +279,7 @@ self.assertIn("不要以 / 开头", readme)
 PYTHONPATH=src:/Users/young/Documents/telepiplex/.worktrees/telepiplex-core/sdk/src /Users/young/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m unittest tests.test_feature_runtime.FeatureSourceContractTest -v
 ```
 
-Expected: failure because manifest and project versions are still 1.2.0 and README lacks the new path contract.
+Expected: failure because manifest and project versions, plus the README build artifact path, still identify immutable 1.2.1.
 
 - [ ] **Step 3: Bump version and document the new path rule**
 
