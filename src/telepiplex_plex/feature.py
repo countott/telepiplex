@@ -299,56 +299,6 @@ class PlexFeature:
                 }],
                 "operation": operation,
             }
-        if payload.startswith("match:"):
-            _, job_id, raw_index = payload.split(":", 2)
-            job = service.get_job(int(job_id))
-            waiting = next((
-                value for value in (job or {}).get("step_results", {}).values()
-                if isinstance(value, dict) and value.get("status") == "waiting"
-            ), None)
-            candidates = (waiting or {}).get("candidates") or []
-            try:
-                candidate = candidates[int(raw_index)]
-            except (IndexError, ValueError):
-                return self._message("⚠️ Plex 候选已失效。")
-            selection = (
-                candidate.get("rating_key")
-                if waiting.get("kind") == "location"
-                else candidate.get("guid")
-            )
-            operation_id = self.job_operation_ids.get(int(job_id), "")
-            if not operation_id:
-                operation = self._new_operation(
-                    request,
-                    state="running",
-                    stage="matching",
-                    status_text="正在应用 Plex 人工匹配。",
-                    control="cancel",
-                    kind="manual_match",
-                )
-                operation_id = operation["operation_id"]
-                self.job_operation_ids[int(job_id)] = operation_id
-            else:
-                operation = self._advance_operation(
-                    operation_id,
-                    state="running",
-                    stage="matching",
-                    status_text="正在应用 Plex 人工匹配。",
-                    control="cancel",
-                )
-            task_id = f"plex-match-{operation_id}"
-            task = self.runtime.spawn(
-                self._confirm_match(operation_id, int(job_id), selection, service),
-                task_id=task_id,
-            )
-            self.operations[operation_id].update({"task": task, "task_id": task_id})
-            return {
-                "actions": [{
-                    "kind": "edit_message",
-                    "text": "⏳ 正在应用 Plex 人工匹配并继续任务...",
-                }],
-                "operation": operation,
-            }
         return self._message("⚠️ Plex callback 无效。")
 
     async def message(self, request: dict) -> dict:
@@ -453,29 +403,6 @@ class PlexFeature:
                 state="failed",
                 stage="applying_write",
                 status_text=f"Plex 写操作失败：{type(exc).__name__}",
-                control="",
-            )
-
-    async def _confirm_match(self, operation_id, job_id, selection, service):
-        try:
-            result = await asyncio.to_thread(
-                service.confirm_match,
-                job_id,
-                selection,
-                should_cancel=lambda: self._is_cancelled(operation_id),
-                on_stage=lambda stage, job: self._stage_sync(
-                    operation_id, stage, job
-                ),
-            )
-            await self._complete_batch_operation(operation_id, [result])
-        except PlexOperationCancelled:
-            await self._finish_cancelled(operation_id)
-        except Exception as exc:
-            await self._report_if_active(
-                operation_id,
-                state="failed",
-                stage="matching",
-                status_text=f"Plex 人工匹配失败：{type(exc).__name__}",
                 control="",
             )
 
@@ -701,42 +628,6 @@ class PlexFeature:
         if not operation_id or operation_id not in self.operations:
             return None
         results = [job for job in (results or []) if isinstance(job, dict)]
-        waiting = [
-            job for job in results
-            if job.get("state") == "waiting_match_confirmation"
-        ]
-        if waiting:
-            keyboard = []
-            for job in waiting:
-                self.job_operation_ids[int(job["id"])] = operation_id
-                step = next((
-                    value
-                    for value in (job.get("step_results") or {}).values()
-                    if isinstance(value, dict) and value.get("status") == "waiting"
-                ), {})
-                for index, candidate in enumerate(step.get("candidates") or []):
-                    title = str(
-                        candidate.get("title")
-                        or candidate.get("name")
-                        or f"候选 {index + 1}"
-                    )
-                    year = str(candidate.get("year") or "")
-                    keyboard.append([{
-                        "text": f"{title} {year}".strip()[:48],
-                        "callback_data": f"plex:match:{job['id']}:{index}",
-                    }])
-            keyboard.append([{
-                "text": "取消任务",
-                "callback_data": "plex:cancel",
-            }])
-            return await self._report_operation(
-                operation_id,
-                state="awaiting_input",
-                stage="manual_match",
-                status_text="Plex 需要人工选择匹配候选后才能继续。",
-                control="cancel",
-                details={"keyboard": keyboard},
-            )
         failed = [job for job in results if job.get("state") == "failed"]
         if failed:
             return await self._report_operation(

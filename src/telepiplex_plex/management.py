@@ -704,16 +704,33 @@ class PlexManagementService:
                 result = runner(target_job)
             except WaitingForSelection as exc:
                 waiting = exc.as_dict()
-                results[target_id] = {
+                persisted_job = self.jobs.get(job["id"])
+                persisted_step = deepcopy(
+                    (
+                        (persisted_job.get("step_results") or {})
+                        .get(stage_name)
+                    )
+                    or {}
+                )
+                persisted_results = dict(
+                    persisted_step.get("targets") or {}
+                )
+                persisted_results.update(deepcopy(results))
+                target_result = dict(
+                    persisted_results.get(target_id) or {}
+                )
+                target_result.update({
                     "status": "awaiting_selection",
                     "waiting": waiting,
-                }
-                exc.step_result = {
+                })
+                persisted_results[target_id] = target_result
+                persisted_step.update({
                     "status": "awaiting_selection",
-                    "targets": results,
+                    "targets": persisted_results,
                     "waiting": waiting,
                     "confirmed_selections": confirmed_selections,
-                }
+                })
+                exc.step_result = persisted_step
                 raise
             except Exception as exc:
                 result = {
@@ -735,271 +752,6 @@ class PlexManagementService:
 
     def _subtitle_stage(self, job):
         return self._run_target_stage(job, self._subtitle_target, "subtitle")
-
-    @staticmethod
-    def _candidate_identity(candidate):
-        return (
-            str(candidate.get("title") or "").strip().casefold(),
-            int(candidate.get("year") or 0),
-        )
-
-    def _locate(self, job, *, should_cancel=None):
-        scan = job["step_results"]["scanning"]
-        library_id = scan["library_id"]
-        contract = self._media_metadata(job)
-        plex_target = (job.get("payload") or {}).get("target") or {}
-        if contract and plex_target.get("media_type") == "episode":
-            placement = contract["placement"]
-            identity = ((contract.get("relation") or {}).get("target_series") or {}) if placement["mapping_kind"] in SERIES_EPISODE_MAPPINGS else (contract.get("identity") or {})
-            expected_final_paths = [plex_target.get("final_path")]
-            deadline = self._clock() + self.scan_timeout
-            item = None
-            while item is None:
-                if should_cancel and should_cancel():
-                    raise PlexOperationCancelled(
-                        "Plex operation cancelled while locating episode"
-                    )
-                item = self.plex.find_series_episode(
-                    library_id,
-                    tvdb_series_id=(
-                        (identity.get("external_ids") or {}).get("tvdb") or ""
-                    ),
-                    title=(
-                        identity.get("english_title")
-                        or identity.get("chinese_title")
-                        or ""
-                    ),
-                    year=identity.get("year") or "",
-                    season_number=plex_target["season_number"],
-                    episode_number=plex_target["episode_number"],
-                    expected_final_paths=expected_final_paths,
-                )
-                if item is not None or self._clock() >= deadline:
-                    break
-                self._sleep(self.scan_poll_interval)
-            if not item:
-                raise LookupError("Confirmed Plex episode was not found")
-            self.jobs.update(job["id"], rating_key=str(item["rating_key"]))
-            return {
-                "status": "success",
-                "rating_key": str(item["rating_key"]),
-                "candidates": [item],
-            }
-
-        if contract and plex_target.get("media_type") == "movie":
-            identity = contract.get("identity") or {}
-            deadline = self._clock() + self.scan_timeout
-            item = None
-            while item is None:
-                if should_cancel and should_cancel():
-                    raise PlexOperationCancelled(
-                        "Plex operation cancelled while locating movie"
-                    )
-                item = self.plex.find_movie(
-                    library_id,
-                    title=identity.get("english_title") or identity.get("chinese_title") or "",
-                    year=identity.get("year") or "",
-                    expected_final_paths=[plex_target.get("final_path")],
-                )
-                if item is not None or self._clock() >= deadline:
-                    break
-                self._sleep(self.scan_poll_interval)
-            if not item:
-                raise LookupError("Confirmed Plex movie was not found")
-            self.jobs.update(job["id"], rating_key=str(item["rating_key"]))
-            return {"status": "success", "rating_key": str(item["rating_key"]), "candidates": [item]}
-
-        before = set(scan.get("before_rating_keys") or [])
-        deadline = self._clock() + self.scan_timeout
-        candidates = []
-        while True:
-            if should_cancel and should_cancel():
-                raise PlexOperationCancelled(
-                    "Plex operation cancelled while locating item"
-                )
-            candidates = self.plex.locate_candidates(library_id, before)
-            if candidates or self._clock() >= deadline:
-                break
-            self._sleep(self.scan_poll_interval)
-        if not candidates:
-            raise LookupError("Plex scan completed but no new item was located")
-        metadata = self._effective_metadata(job)
-        expected = (
-            str(metadata.get("title") or metadata.get("original_title") or "").strip().casefold(),
-            int(metadata.get("year") or 0),
-        )
-        exact = [item for item in candidates if self._candidate_identity(item) == expected]
-        chosen = exact[0] if len(exact) == 1 else candidates[0] if len(candidates) == 1 else None
-        if chosen is None:
-            if contract:
-                raise LookupError("Contract-bound Plex location is ambiguous")
-            raise RuntimeError(
-                "Legacy Plex location confirmation is no longer supported"
-            )
-        self.jobs.update(job["id"], rating_key=str(chosen["rating_key"]))
-        return {"status": "success", "rating_key": str(chosen["rating_key"]), "candidates": candidates}
-
-    def _match(self, job):
-        rating_key = str(job.get("rating_key") or "")
-        if not rating_key:
-            raise LookupError("Plex rating key is missing")
-        contract = self._media_metadata(job)
-        if contract:
-            mapping_kind = contract["placement"]["mapping_kind"]
-            item = self.plex.get_item(rating_key)
-            if mapping_kind == "temporary_related_special":
-                return {
-                    "status": "unchanged",
-                    "action": "custom_metadata_pending",
-                    "item": item,
-                }
-            if mapping_kind == "tvdb_official":
-                expected = {
-                    "tvdb": str(contract["placement"]["tvdb_episode_id"])
-                }
-                if not plex_rules.external_ids_match(expected, item.get("guids")):
-                    raise RuntimeError(
-                        "Official Plex Special does not match confirmed TVDB episode"
-                    )
-                return {"status": "success", "action": "verified", "item": item}
-            if mapping_kind == "ai_inferred_tvdb":
-                if not any(
-                    str(guid).startswith("tvdb://")
-                    for guid in item.get("guids") or []
-                ):
-                    raise RuntimeError(
-                        "AI-inferred Special is still not verified by TVDB"
-                    )
-                return {
-                    "status": "success",
-                    "action": "verified_after_scan",
-                    "item": item,
-                }
-            if mapping_kind == "standalone":
-                target = (job.get("payload") or {}).get("target") or {}
-                if target.get("media_type") == "episode":
-                    return {"status": "success", "action": "verified_by_series_episode_path", "item": item}
-                expected = {
-                    source: str(value)
-                    for source, value in (
-                        (contract.get("identity") or {}).get("external_ids") or {}
-                    ).items()
-                    if source in {"imdb", "tmdb", "tvdb"}
-                    and str(value).strip()
-                }
-                if expected and plex_rules.external_ids_match(
-                    expected, item.get("guids")
-                ):
-                    return {
-                        "status": "success",
-                        "action": "verified",
-                        "item": item,
-                    }
-                if expected:
-                    identity = contract.get("identity") or {}
-                    candidates = self.plex.list_match_candidates(
-                        rating_key,
-                        title=(
-                            identity.get("english_title")
-                            or identity.get("chinese_title")
-                        ),
-                        year=identity.get("year"),
-                    )
-                    exact = plex_rules.choose_exact_match(expected, candidates)
-                    if exact is None:
-                        raise RuntimeError(
-                            "Standalone Plex match could not be verified"
-                        )
-                    fixed = self.plex.fix_match(rating_key, exact["guid"])
-                    if not plex_rules.external_ids_match(
-                        expected, fixed.get("guids")
-                    ):
-                        raise RuntimeError(
-                            "Standalone Plex match verification failed"
-                        )
-                    return {
-                        "status": "success",
-                        "action": "fixed",
-                        "item": fixed,
-                    }
-                expected_identity = self._candidate_identity(
-                    self._effective_metadata(job)
-                )
-                if self._candidate_identity(item) != expected_identity:
-                    raise RuntimeError(
-                        "Standalone Plex title/year could not be verified"
-                    )
-                return {
-                    "status": "success",
-                    "action": "verified_by_title_year",
-                    "item": item,
-                }
-        return self._legacy_match(job, rating_key)
-
-    def _legacy_match(self, job, rating_key):
-        metadata = job["payload"].get("metadata") or {}
-        external_ids = metadata.get("external_ids") or {}
-        item = self.plex.get_item(rating_key)
-        if plex_rules.external_ids_match(external_ids, item.get("guids")):
-            return {"status": "success", "action": "verified", "item": item}
-        candidates = self.plex.list_match_candidates(
-            rating_key,
-            title=metadata.get("title") or metadata.get("original_title"),
-            year=metadata.get("year"),
-        )
-        exact = plex_rules.choose_exact_match(external_ids, candidates)
-        if exact is None:
-            raise RuntimeError(
-                "Legacy Plex match confirmation is no longer supported"
-            )
-        fixed = self.plex.fix_match(rating_key, exact["guid"])
-        if not plex_rules.external_ids_match(external_ids, fixed.get("guids")):
-            raise RuntimeError("Plex match verification failed after fixMatch")
-        return {"status": "success", "action": "fixed", "candidate": exact, "item": fixed}
-
-    @staticmethod
-    def _contains_chinese(value):
-        return bool(re.search(r"[\u3400-\u9fff]", str(value or "")))
-
-    def _localize(self, job):
-        contract = self._media_metadata(job)
-        mapping_kind = (
-            (contract.get("placement") or {}).get("mapping_kind")
-            if contract
-            else ""
-        )
-        if mapping_kind in {"tvdb_official", "ai_inferred_tvdb"}:
-            return {
-                "status": "unchanged",
-                "action": "official_metadata_preserved",
-            }
-        if mapping_kind == "temporary_related_special":
-            identity = contract["identity"]
-            item = self.plex.edit_custom_episode_metadata(
-                job["rating_key"],
-                title=(
-                    identity.get("chinese_title")
-                    or identity.get("english_title")
-                    or ""
-                ),
-                summary=identity.get("summary") or "",
-                original_release_date=(
-                    identity.get("original_release_date") or ""
-                ),
-                year=identity.get("year") or "",
-            )
-            return {
-                "status": "success",
-                "action": "custom_metadata",
-                "item": item,
-            }
-        item = self.plex.refresh_zh_cn(job["rating_key"])
-        localized = self._contains_chinese(item.get("title")) or self._contains_chinese(item.get("summary"))
-        return {
-            "status": "success" if localized else "warning",
-            "language": "zh-CN",
-            "verified_chinese": localized,
-        }
 
     @staticmethod
     def _external_ids_from_item(item):
@@ -1049,6 +801,73 @@ class PlexManagementService:
             ):
                 return deepcopy(selection.get("candidate") or {})
         return None
+
+    def _persisted_part_result(self, job, stage_name, part_id):
+        step = (
+            (job.get("step_results") or {}).get(str(stage_name))
+            or {}
+        )
+        target_result = (
+            (step.get("targets") or {}).get(self._target_id(job))
+            or {}
+        )
+        parts = target_result.get("parts")
+        if not isinstance(parts, list):
+            parts = [target_result] if target_result.get("part_id") else []
+        for result in parts:
+            if (
+                int((result or {}).get("part_id") or 0) == int(part_id)
+                and self._selection_finished(result)
+            ):
+                return deepcopy(result)
+        return None
+
+    def _persist_part_result(
+        self,
+        job,
+        stage_name,
+        part_result,
+        *,
+        warnings=None,
+    ):
+        current = self.jobs.get(job["id"])
+        steps = deepcopy(current.get("step_results") or {})
+        step = deepcopy(steps.get(str(stage_name)) or {})
+        targets = dict(step.get("targets") or {})
+        for target_id, result in (job.get("_stage_results") or {}).items():
+            targets.setdefault(str(target_id), deepcopy(result))
+        target_id = self._target_id(job)
+        target_result = dict(targets.get(target_id) or {})
+        parts = target_result.get("parts")
+        if not isinstance(parts, list):
+            parts = [target_result] if target_result.get("part_id") else []
+        part_id = int(part_result.get("part_id") or 0)
+        parts = [
+            result
+            for result in parts
+            if int((result or {}).get("part_id") or 0) != part_id
+        ]
+        parts.append(deepcopy(part_result))
+        target_result = {
+            "status": "started",
+            "parts": parts,
+        }
+        if warnings is not None:
+            target_result["warnings"] = list(warnings)
+        targets[target_id] = target_result
+        step.update({
+            "status": "started",
+            "targets": targets,
+        })
+        step.pop("waiting", None)
+        steps[str(stage_name)] = step
+        updated = self.jobs.update(
+            job["id"],
+            step_results=steps,
+            error=None,
+        )
+        job["step_results"] = deepcopy(updated.get("step_results") or {})
+        return deepcopy(part_result)
 
     def _artwork_item(self, job):
         rating_key = str(job.get("rating_key") or "")
@@ -1179,6 +998,14 @@ class PlexManagementService:
             warnings.append("TMDB original language is unavailable")
         audio_results = []
         for part in self.plex.list_streams(job["rating_key"]):
+            persisted = self._persisted_part_result(
+                job,
+                "audio",
+                part["id"],
+            )
+            if persisted:
+                audio_results.append(persisted)
+                continue
             confirmed = self._confirmed_selection(
                 job,
                 "audio",
@@ -1186,12 +1013,19 @@ class PlexManagementService:
                 part_id=part["id"],
             )
             if confirmed:
-                audio_results.append({
+                part_result = {
+                    "status": "confirmed",
                     "part_id": part["id"],
                     "stream_id": confirmed.get("id"),
                     "changed": True,
                     "confirmed": True,
-                })
+                }
+                audio_results.append(self._persist_part_result(
+                    job,
+                    "audio",
+                    part_result,
+                    warnings=warnings,
+                ))
                 continue
             ranked = (
                 plex_rules.rank_original_audio(
@@ -1228,11 +1062,22 @@ class PlexManagementService:
                     part["id"],
                     audio["id"],
                 )
-            audio_results.append({
+            part_result = {
+                "status": (
+                    "success"
+                    if audio and not audio.get("selected")
+                    else "unchanged"
+                ),
                 "part_id": part["id"],
                 "stream_id": audio.get("id") if audio else None,
                 "changed": bool(audio and not audio.get("selected")),
-            })
+            }
+            audio_results.append(self._persist_part_result(
+                job,
+                "audio",
+                part_result,
+                warnings=warnings,
+            ))
         return {
             "status": "warning" if warnings else "success",
             "parts": audio_results,
@@ -1242,6 +1087,14 @@ class PlexManagementService:
     def _subtitle_target(self, job):
         subtitle_results = []
         for part in self.plex.list_streams(job["rating_key"]):
+            persisted = self._persisted_part_result(
+                job,
+                "subtitle",
+                part["id"],
+            )
+            if persisted:
+                subtitle_results.append(persisted)
+                continue
             confirmed = self._confirmed_selection(
                 job,
                 "subtitle",
@@ -1249,7 +1102,8 @@ class PlexManagementService:
                 part_id=part["id"],
             )
             if confirmed:
-                subtitle_results.append({
+                part_result = {
+                    "status": "confirmed",
                     "part_id": part["id"],
                     "stream_id": confirmed.get("id"),
                     "source": (
@@ -1259,7 +1113,12 @@ class PlexManagementService:
                     ),
                     "changed": True,
                     "confirmed": True,
-                })
+                }
+                subtitle_results.append(self._persist_part_result(
+                    job,
+                    "subtitle",
+                    part_result,
+                ))
                 continue
             ranked = plex_rules.rank_chi_subtitles(
                 part.get("subtitle_streams")
@@ -1281,7 +1140,12 @@ class PlexManagementService:
                     part["id"],
                     subtitle["id"],
                 )
-            subtitle_results.append({
+            part_result = {
+                "status": (
+                    "success"
+                    if subtitle and not subtitle.get("selected")
+                    else "unchanged"
+                ),
                 "part_id": part["id"],
                 "stream_id": subtitle.get("id") if subtitle else None,
                 "source": (
@@ -1290,7 +1154,12 @@ class PlexManagementService:
                     else "embedded" if subtitle else None
                 ),
                 "changed": bool(subtitle and not subtitle.get("selected")),
-            })
+            }
+            subtitle_results.append(self._persist_part_result(
+                job,
+                "subtitle",
+                part_result,
+            ))
         found = any(result["stream_id"] for result in subtitle_results)
         summary = (
             subtitle_results[0]
@@ -1300,47 +1169,6 @@ class PlexManagementService:
         return {
             "status": "success" if found else "unchanged",
             **summary,
-        }
-
-    def _streams(self, job):
-        metadata = self._effective_metadata(job)
-        tmdb_id = (metadata.get("external_ids") or {}).get("tmdb")
-        media_type = "tv" if metadata.get("media_type") in {"show", "episode", "tv"} else "movie"
-        warnings = []
-        original_language = None
-        if self.tmdb and tmdb_id:
-            try:
-                original_language = self.tmdb.details(media_type, tmdb_id).get("original_language")
-            except Exception as exc:
-                warnings.append(self._safe_error(exc))
-        else:
-            warnings.append("TMDB original language is unavailable")
-        audio_results = []
-        subtitle_results = []
-        for part in self.plex.list_streams(job["rating_key"]):
-            audio = plex_rules.choose_original_audio(part.get("audio_streams"), original_language)
-            if audio and not audio.get("selected"):
-                self.plex.select_audio(job["rating_key"], part["id"], audio["id"])
-            audio_results.append({
-                "part_id": part["id"],
-                "stream_id": audio.get("id") if audio else None,
-                "changed": bool(audio and not audio.get("selected")),
-            })
-            subtitle = plex_rules.choose_chi_subtitle(part.get("subtitle_streams"))
-            if subtitle and not subtitle.get("selected"):
-                self.plex.select_subtitle(job["rating_key"], part["id"], subtitle["id"])
-            subtitle_results.append({
-                "part_id": part["id"],
-                "stream_id": subtitle.get("id") if subtitle else None,
-                "source": "external" if subtitle and subtitle.get("external") else "embedded" if subtitle else None,
-                "changed": bool(subtitle and not subtitle.get("selected")),
-            })
-        subtitle_summary = subtitle_results[0] if len(subtitle_results) == 1 else {"parts": subtitle_results}
-        return {
-            "status": "warning" if warnings else "success",
-            "audio": audio_results,
-            "subtitle": subtitle_summary,
-            "warnings": warnings,
         }
 
     def _notify_once(self, job):
@@ -1478,34 +1306,6 @@ class PlexManagementService:
             on_stage=on_stage,
         )
 
-    def confirm_match(
-        self, job_id, selection, *, should_cancel=None, on_stage=None
-    ):
-        job = self.jobs.get(job_id)
-        if not job:
-            raise LookupError(f"Plex job not found: {job_id}")
-        if "://" in str(selection):
-            fixed = self.plex.fix_match(job["rating_key"], str(selection))
-            expected = job["payload"].get("metadata", {}).get("external_ids") or {}
-            if not plex_rules.external_ids_match(expected, fixed.get("guids")):
-                raise RuntimeError("Selected Plex match does not match expected external IDs")
-            steps = self._merge_step(job, "matching", {"status": "confirmed", "candidate_guid": str(selection)})
-            self.jobs.update(job_id, state="localizing", step_results=steps, error=None)
-        else:
-            steps = dict(job.get("step_results") or {})
-            for name in STEP_ORDER[2:]:
-                steps.pop(name, None)
-            steps["locating"] = {
-                "status": "confirmed",
-                "rating_key": str(selection),
-            }
-            self.jobs.update(job_id, state="matching", rating_key=str(selection), step_results=steps, error=None)
-        return self.run_job(
-            job_id,
-            should_cancel=should_cancel,
-            on_stage=on_stage,
-        )
-
     def resume_incomplete_jobs(self, executor=None):
         jobs = [
             job
@@ -1531,10 +1331,6 @@ class PlexManagementService:
     def inspect_item(self, rating_key):
         return self.plex.get_item(rating_key)
 
-    def list_match_candidates(self, rating_key):
-        item = self.plex.get_item(rating_key)
-        return self.plex.list_match_candidates(rating_key, title=item.get("title"), year=item.get("year"))
-
     def list_artwork_candidates(self, rating_key):
         item = self.plex.get_item(rating_key)
         tmdb, fanart, warnings = self._artwork_candidates(item)
@@ -1555,22 +1351,28 @@ class PlexManagementService:
     def _normalize_action(action):
         aliases = {
             "plex_scan_library": "scan_library",
-            "plex_fix_match": "fix_match",
-            "plex_refresh_chinese_metadata": "refresh_chinese_metadata",
             "plex_set_textless_poster": "set_textless_poster",
             "plex_select_original_audio": "select_original_audio",
             "plex_select_chi_subtitle": "select_chi_subtitle",
-            "plex_run_management_pipeline": "run_management_pipeline",
             "plex_retry_job": "retry_job",
-            "plex_apply_metadata_batch": "metadata_batch",
         }
         return aliases.get(str(action), str(action))
 
+    @staticmethod
+    def _validate_operation(action):
+        if action not in {
+            "scan_library",
+            "set_textless_poster",
+            "select_original_audio",
+            "select_chi_subtitle",
+            "retry_job",
+        }:
+            raise ValueError(f"Unsupported Plex operation: {action}")
+        return action
+
     def prepare_operation(self, action, payload):
-        action = self._normalize_action(action)
+        action = self._validate_operation(self._normalize_action(action))
         payload = dict(payload or {})
-        if action == "metadata_batch":
-            payload = self._validated_metadata_batch(payload)
         token = self.jobs.issue_confirmation(
             int(payload.get("job_id") or 0),
             action,
@@ -1583,33 +1385,8 @@ class PlexManagementService:
             "confirmation_token": token,
         }
 
-    def _validated_metadata_batch(self, payload):
-        changes = payload.get("changes")
-        if not isinstance(changes, list) or not changes or len(changes) > 20:
-            raise ValueError("metadata_batch requires 1 to 20 changes")
-        allowed = {
-            "fix_match",
-            "refresh_chinese_metadata",
-            "set_textless_poster",
-        }
-        normalized = []
-        for change in changes:
-            if not isinstance(change, dict):
-                raise ValueError("metadata_batch change must be an object")
-            action = self._normalize_action(change.get("action"))
-            change_payload = change.get("payload")
-            if action not in allowed or not isinstance(change_payload, dict):
-                raise ValueError(
-                    "metadata_batch only accepts match, localization, and poster writes"
-                )
-            normalized.append({
-                "action": action,
-                "payload": dict(change_payload),
-            })
-        return {"changes": normalized}
-
     def apply_operation(self, action, payload, confirmation_token):
-        action = self._normalize_action(action)
+        action = self._validate_operation(self._normalize_action(action))
         confirmed = self.jobs.consume_confirmation(confirmation_token, action)
         if not confirmed:
             raise ValueError("Invalid, expired, or already used confirmation token")
@@ -1621,26 +1398,9 @@ class PlexManagementService:
         return {"status": "applied", "action": action, "result": result}
 
     def _execute_operation(self, action, payload):
-        if action == "metadata_batch":
-            validated = self._validated_metadata_batch(payload)
-            return {
-                "results": [
-                    {
-                        "action": change["action"],
-                        "result": self._execute_operation(
-                            change["action"], change["payload"]
-                        ),
-                    }
-                    for change in validated["changes"]
-                ]
-            }
         if action == "scan_library":
             self.plex.scan_library(payload["library_id"])
             return {"library_id": str(payload["library_id"])}
-        if action == "fix_match":
-            return self.plex.fix_match(payload["rating_key"], payload["candidate_guid"])
-        if action == "refresh_chinese_metadata":
-            return self.plex.refresh_zh_cn(payload["rating_key"])
         if action == "set_textless_poster":
             return self.plex.set_poster_url(payload["rating_key"], payload["url"])
         if action == "select_original_audio":
@@ -1649,8 +1409,6 @@ class PlexManagementService:
         if action == "select_chi_subtitle":
             self.plex.select_subtitle(payload["rating_key"], payload["part_id"], payload["stream_id"])
             return dict(payload)
-        if action == "run_management_pipeline":
-            return self.run_job(payload["job_id"])
         if action == "retry_job":
             return self.retry_job(payload["job_id"])
         raise ValueError(f"Unsupported Plex operation: {action}")

@@ -132,6 +132,25 @@ class PlexRuleTest(unittest.TestCase):
         )
         self.assertIsNone(choose_original_audio(streams, "en"))
 
+    def test_original_audio_requires_a_known_original_language(self):
+        from telepiplex_plex.rules import (
+            choose_original_audio,
+            rank_original_audio,
+        )
+
+        streams = [{
+            "id": 1,
+            "language_code": "",
+            "codec": "truehd",
+            "channels": 8,
+            "bitrate": 4000,
+        }]
+
+        self.assertEqual(rank_original_audio(streams, None), [])
+        self.assertEqual(rank_original_audio(streams, ""), [])
+        self.assertIsNone(choose_original_audio(streams, None))
+        self.assertIsNone(choose_original_audio(streams, ""))
+
     def test_subtitle_prefers_external_chi_then_embedded_chi(self):
         from telepiplex_plex.rules import (
             choose_chi_subtitle,

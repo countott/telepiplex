@@ -256,6 +256,20 @@ class PlexFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(labels, ["确认执行", "退出"])
 
+    async def test_obsolete_match_callback_is_rejected(self):
+        self.feature.service = self.service
+
+        result = await self.feature.callback({
+            "payload": "match:1:0",
+            "chat_id": 10,
+            "user_id": 1,
+        })
+
+        self.assertEqual(
+            result["actions"][0]["text"],
+            "⚠️ Plex callback 无效。",
+        )
+
     async def test_cancelled_job_stops_after_current_plex_step(self):
         from telepiplex_plex.management import PlexOperationCancelled
 

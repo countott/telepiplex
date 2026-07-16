@@ -65,11 +65,6 @@ def create_plex_mcp(service, config):
         """Inspect normalized metadata and streams for one Plex item."""
         return service.inspect_item(rating_key)
 
-    @mcp.tool(name="plex_list_match_candidates", annotations=READ_ONLY)
-    def plex_list_match_candidates(rating_key: str):
-        """List metadata match candidates for a Plex item."""
-        return service.list_match_candidates(rating_key)
-
     @mcp.tool(name="plex_list_artwork_candidates", annotations=READ_ONLY)
     def plex_list_artwork_candidates(rating_key: str):
         """List textless TMDB/Fanart candidates and existing Plex posters."""
@@ -90,29 +85,6 @@ def create_plex_mcp(service, config):
         """Prepare or confirm a Plex library scan."""
         payload = {"library_id": library_id}
         return _prepare_or_apply(service, "plex_scan_library", payload, confirmation_token)
-
-    @mcp.tool(name="plex_fix_match", annotations=WRITE)
-    def plex_fix_match(
-        job_id: int,
-        rating_key: str,
-        candidate_guid: str,
-        confirmation_token: str = "",
-    ):
-        """Prepare or confirm applying one explicit metadata match."""
-        payload = {
-            "job_id": int(job_id),
-            "rating_key": rating_key,
-            "candidate_guid": candidate_guid,
-        }
-        return _prepare_or_apply(service, "plex_fix_match", payload, confirmation_token)
-
-    @mcp.tool(name="plex_refresh_chinese_metadata", annotations=WRITE)
-    def plex_refresh_chinese_metadata(rating_key: str, confirmation_token: str = ""):
-        """Prepare or confirm an item-level zh-CN metadata refresh."""
-        payload = {"rating_key": rating_key}
-        return _prepare_or_apply(
-            service, "plex_refresh_chinese_metadata", payload, confirmation_token
-        )
 
     @mcp.tool(name="plex_set_textless_poster", annotations=WRITE)
     def plex_set_textless_poster(
@@ -154,33 +126,11 @@ def create_plex_mcp(service, config):
         }
         return _prepare_or_apply(service, "plex_select_chi_subtitle", payload, confirmation_token)
 
-    @mcp.tool(name="plex_run_management_pipeline", annotations=WRITE)
-    def plex_run_management_pipeline(job_id: int, confirmation_token: str = ""):
-        """Prepare or confirm running a queued Plex management job."""
-        payload = {"job_id": int(job_id)}
-        return _prepare_or_apply(
-            service, "plex_run_management_pipeline", payload, confirmation_token
-        )
-
     @mcp.tool(name="plex_retry_job", annotations=WRITE)
     def plex_retry_job(job_id: int, confirmation_token: str = ""):
         """Prepare or confirm retrying a Plex management job."""
         payload = {"job_id": int(job_id)}
         return _prepare_or_apply(service, "plex_retry_job", payload, confirmation_token)
-
-    @mcp.tool(name="plex_apply_metadata_batch", annotations=WRITE)
-    def plex_apply_metadata_batch(
-        changes: list[dict],
-        confirmation_token: str = "",
-    ):
-        """Prepare or confirm one grouped set of high-risk metadata writes."""
-        payload = {"changes": list(changes or [])}
-        return _prepare_or_apply(
-            service,
-            "metadata_batch",
-            payload,
-            confirmation_token,
-        )
 
     return mcp
 

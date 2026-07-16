@@ -954,6 +954,72 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertIn(("42", 11, 22), plex.audio_selections)
         self.assertIn(("42", 11, 31), plex.subtitle_selections)
 
+    def test_audio_partial_results_are_persisted_and_not_replayed(self):
+        plex = FakePlex()
+        plex.list_streams = Mock(return_value=[
+            {
+                "id": 11,
+                "audio_streams": [{
+                    "id": 21,
+                    "language_code": "jpn",
+                    "codec": "truehd",
+                    "channels": 8,
+                    "bitrate": 4000,
+                }],
+                "subtitle_streams": [{
+                    "id": 41,
+                    "language_code": "chi",
+                    "external": True,
+                    "transient": False,
+                }],
+            },
+            {
+                "id": 12,
+                "audio_streams": [
+                    {
+                        "id": 31,
+                        "language_code": "jpn",
+                        "codec": "truehd",
+                        "channels": 8,
+                        "bitrate": 4000,
+                    },
+                    {
+                        "id": 32,
+                        "language_code": "jpn",
+                        "codec": "truehd",
+                        "channels": 8,
+                        "bitrate": 4000,
+                    },
+                ],
+                "subtitle_streams": [{
+                    "id": 42,
+                    "language_code": "chi",
+                    "external": True,
+                    "transient": False,
+                }],
+            },
+        ])
+        service = self.make_service(plex=plex)
+        job = service.enqueue_completion(make_completion())
+
+        waiting_job = service.run_job(job["id"])
+
+        self.assertEqual(waiting_job["state"], "awaiting_selection")
+        partial = (
+            waiting_job["step_results"]["audio"]["targets"]["legacy"]["parts"]
+        )
+        self.assertEqual([part["part_id"] for part in partial], [11])
+        self.assertEqual(plex.audio_selections, [("42", 11, 21)])
+
+        completed = service.confirm_selection(job["id"], 1)
+
+        self.assertEqual(completed["state"], "completed")
+        self.assertEqual(
+            [selection for selection in plex.audio_selections if selection[1] == 11],
+            [("42", 11, 21)],
+        )
+        self.assertIn(("42", 12, 32), plex.audio_selections)
+
     def test_missing_original_language_does_not_select_unlabeled_audio(self):
         plex = FakePlex()
         plex.list_streams = Mock(return_value=[{
@@ -1019,6 +1085,77 @@ class PlexManagementServiceTest(unittest.TestCase):
 
         self.assertEqual(completed["state"], "completed")
         self.assertIn(("42", 11, 32), plex.subtitle_selections)
+
+    def test_subtitle_partial_results_are_persisted_and_not_replayed(self):
+        plex = FakePlex()
+        plex.list_streams = Mock(return_value=[
+            {
+                "id": 11,
+                "audio_streams": [{
+                    "id": 21,
+                    "language_code": "jpn",
+                    "codec": "truehd",
+                    "channels": 8,
+                    "bitrate": 4000,
+                    "selected": True,
+                }],
+                "subtitle_streams": [{
+                    "id": 41,
+                    "language_code": "chi",
+                    "external": True,
+                    "transient": False,
+                }],
+            },
+            {
+                "id": 12,
+                "audio_streams": [{
+                    "id": 22,
+                    "language_code": "jpn",
+                    "codec": "truehd",
+                    "channels": 8,
+                    "bitrate": 4000,
+                    "selected": True,
+                }],
+                "subtitle_streams": [
+                    {
+                        "id": 51,
+                        "language_code": "chi",
+                        "external": True,
+                        "transient": False,
+                    },
+                    {
+                        "id": 52,
+                        "language_code": "chi",
+                        "external": True,
+                        "transient": False,
+                    },
+                ],
+            },
+        ])
+        service = self.make_service(plex=plex)
+        job = service.enqueue_completion(make_completion())
+
+        waiting_job = service.run_job(job["id"])
+
+        self.assertEqual(waiting_job["state"], "awaiting_selection")
+        partial = (
+            waiting_job["step_results"]["subtitle"]["targets"]["legacy"]["parts"]
+        )
+        self.assertEqual([part["part_id"] for part in partial], [11])
+        self.assertEqual(plex.subtitle_selections, [("42", 11, 41)])
+
+        completed = service.confirm_selection(job["id"], 1)
+
+        self.assertEqual(completed["state"], "completed")
+        self.assertEqual(
+            [
+                selection
+                for selection in plex.subtitle_selections
+                if selection[1] == 11
+            ],
+            [("42", 11, 41)],
+        )
+        self.assertIn(("42", 12, 52), plex.subtitle_selections)
 
     def test_series_artwork_targets_show_once_for_multiple_episodes(self):
         completion = make_unresolved_standalone_series_completion()
@@ -1223,46 +1360,42 @@ class PlexManagementServiceTest(unittest.TestCase):
         plex.scan_library.assert_not_called()
 
     def test_prepare_and_apply_operation_requires_single_use_token(self):
-        plex = FakePlex(wrong_match=True)
-        service = self.make_service(plex=plex)
-        job = service.enqueue_completion(make_completion())
-
-        preview = service.prepare_operation(
-            "fix_match", {"job_id": job["id"], "rating_key": "42", "candidate_guid": "tmdb://20"}
-        )
-        applied = service.apply_operation("fix_match", preview["payload"], preview["confirmation_token"])
-
-        self.assertEqual(applied["status"], "applied")
-        with self.assertRaises(ValueError):
-            service.apply_operation("fix_match", preview["payload"], preview["confirmation_token"])
-
-    def test_metadata_changes_share_one_confirmation_token(self):
         plex = FakePlex()
         service = self.make_service(plex=plex)
-        changes = [
-            {
-                "action": "refresh_chinese_metadata",
-                "payload": {"rating_key": "42"},
-            },
-            {
-                "action": "set_textless_poster",
-                "payload": {"rating_key": "42", "url": "https://image/poster.jpg"},
-            },
-        ]
 
-        preview = service.prepare_operation("metadata_batch", {"changes": changes})
+        preview = service.prepare_operation(
+            "set_textless_poster",
+            {"rating_key": "42", "url": "https://image/poster.jpg"},
+        )
         applied = service.apply_operation(
-            "metadata_batch", preview["payload"], preview["confirmation_token"]
+            "set_textless_poster",
+            preview["payload"],
+            preview["confirmation_token"],
         )
 
         self.assertEqual(applied["status"], "applied")
-        self.assertEqual(len(applied["result"]["results"]), 2)
-        self.assertIn("refresh_zh_cn", plex.calls)
-        self.assertIn("set_poster_url", plex.calls)
+        self.assertIn(("42", "https://image/poster.jpg"), plex.poster_updates)
         with self.assertRaises(ValueError):
-            service.prepare_operation("metadata_batch", {"changes": [{
-                "action": "scan_library", "payload": {"library_id": "12"},
-            }]})
+            service.apply_operation(
+                "set_textless_poster",
+                preview["payload"],
+                preview["confirmation_token"],
+            )
+
+    def test_obsolete_match_and_metadata_surfaces_are_absent(self):
+        service = self.make_service()
+
+        self.assertFalse(hasattr(service, "confirm_match"))
+        self.assertFalse(hasattr(service, "list_match_candidates"))
+        for action in (
+            "fix_match",
+            "refresh_chinese_metadata",
+            "run_management_pipeline",
+            "metadata_batch",
+        ):
+            with self.subTest(action=action):
+                with self.assertRaises(ValueError):
+                    service.prepare_operation(action, {})
 
 
 if __name__ == "__main__":

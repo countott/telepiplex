@@ -37,12 +37,10 @@ class PlexMcpTest(unittest.TestCase):
 
         self.assertEqual(names, {
             "plex_server_status", "plex_list_libraries", "plex_inspect_item",
-            "plex_list_match_candidates", "plex_list_artwork_candidates",
-            "plex_get_job", "plex_list_jobs", "plex_scan_library",
-            "plex_fix_match", "plex_refresh_chinese_metadata",
+            "plex_list_artwork_candidates", "plex_get_job", "plex_list_jobs",
+            "plex_scan_library",
             "plex_set_textless_poster", "plex_select_original_audio",
-            "plex_select_chi_subtitle", "plex_run_management_pipeline",
-            "plex_retry_job", "plex_apply_metadata_batch",
+            "plex_select_chi_subtitle", "plex_retry_job",
         })
 
     def test_read_tool_calls_shared_service(self):
@@ -60,44 +58,46 @@ class PlexMcpTest(unittest.TestCase):
         from telepiplex_plex.mcp_server import create_plex_mcp
 
         mcp = create_plex_mcp(self.service, {})
-        arguments = {"job_id": 1, "rating_key": "42", "candidate_guid": "tmdb://20"}
+        arguments = {
+            "rating_key": "42",
+            "url": "https://image/poster.jpg",
+        }
         preview = asyncio.run(
-            mcp._tool_manager.call_tool("plex_fix_match", arguments, convert_result=False)
+            mcp._tool_manager.call_tool(
+                "plex_set_textless_poster",
+                arguments,
+                convert_result=False,
+            )
         )
         applied = asyncio.run(
             mcp._tool_manager.call_tool(
-                "plex_fix_match", {**arguments, "confirmation_token": "once"}, convert_result=False
+                "plex_set_textless_poster",
+                {**arguments, "confirmation_token": "once"},
+                convert_result=False,
             )
         )
 
         self.assertEqual(preview["confirmation_token"], "once")
         self.assertEqual(applied["status"], "applied")
         self.service.prepare_operation.assert_called_once_with(
-            "plex_fix_match",
-            {"job_id": 1, "rating_key": "42", "candidate_guid": "tmdb://20"},
+            "plex_set_textless_poster",
+            arguments,
         )
         self.service.apply_operation.assert_called_once()
 
-    def test_metadata_batch_prepares_one_grouped_confirmation(self):
+    def test_obsolete_match_and_metadata_tools_are_not_registered(self):
         from telepiplex_plex.mcp_server import create_plex_mcp
 
         mcp = create_plex_mcp(self.service, {})
-        changes = [{
-            "action": "refresh_chinese_metadata",
-            "payload": {"rating_key": "42"},
-        }]
-        preview = asyncio.run(
-            mcp._tool_manager.call_tool(
-                "plex_apply_metadata_batch",
-                {"changes": changes},
-                convert_result=False,
-            )
-        )
+        names = {tool.name for tool in asyncio.run(mcp.list_tools())}
 
-        self.assertEqual(preview["confirmation_token"], "once")
-        self.service.prepare_operation.assert_called_once_with(
-            "metadata_batch", {"changes": changes}
-        )
+        self.assertTrue({
+            "plex_list_match_candidates",
+            "plex_fix_match",
+            "plex_refresh_chinese_metadata",
+            "plex_run_management_pipeline",
+            "plex_apply_metadata_batch",
+        }.isdisjoint(names))
 
     def test_bearer_auth_rejects_missing_token_before_mcp_dispatch(self):
         from telepiplex_plex.mcp_server import create_plex_mcp_app

@@ -150,6 +150,8 @@ def _audio_rank(stream):
 
 def rank_original_audio(streams, original_language):
     target_language = _normalize_language(original_language)
+    if not target_language:
+        return []
     candidates = [
         stream
         for stream in streams or []
