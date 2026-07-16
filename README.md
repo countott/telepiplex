@@ -9,5 +9,5 @@
 构建（先提交当前分支）：
 
 ```bash
-python /opt/telepiplex/tools/build_feature.py . dist/open115-1.2.1.tpx
+python /opt/telepiplex/tools/build_feature.py . dist/open115-1.2.2.tpx
 ```

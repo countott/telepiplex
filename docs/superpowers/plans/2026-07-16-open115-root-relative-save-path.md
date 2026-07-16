@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace Telegram-incompatible `/`-prefixed save-directory input with one canonical root-relative path contract and publish Open115 1.2.1.
+**Goal:** Replace Telegram-incompatible `/`-prefixed save-directory input with one canonical root-relative path contract and publish the reviewed Open115 1.2.2 follow-up.
 
 **Architecture:** Centralize path validation and canonicalization in `directories.py`, then reuse it from both persistent configuration normalization and the Telegram directory editor. Keep stored paths root-relative while preserving the existing download boundary that prepends `/` before calling the 115 API.
 
@@ -16,7 +16,7 @@
 - Preserve case and spaces inside path segments.
 - Keep 115 API paths absolute by retaining `_start_download` boundary normalization.
 - Do not add legacy absolute-path migration because the deployed `save_directories` is empty.
-- Release version is exactly `1.2.1`.
+- Release version is exactly `1.2.2`; immutable `1.2.1` was an intermediate release superseded after code review.
 
 ---
 
@@ -249,26 +249,26 @@ git commit -m "fix(open115): accept Telegram-safe directory paths"
 
 ---
 
-### Task 3: Version 1.2.1, documentation, build, and publication
+### Task 3: Version 1.2.2, documentation, build, and publication
 
 **Files:**
 - Modify: `tests/test_feature_runtime.py`
 - Modify: `manifest.yaml`
 - Modify: `pyproject.toml`
 - Modify: `README.md`
-- Create: `dist/open115-1.2.1.tpx` outside the Feature branch worktree using the Core builder.
+- Create: `dist/open115-1.2.2.tpx` outside the Feature branch worktree using the Core builder.
 
 **Interfaces:**
 - Consumes: canonical root-relative path behavior from Tasks 1 and 2.
-- Produces: immutable Open115 `1.2.1` identity and `open115-v1.2.1` GitHub Release/catalog entry.
+- Produces: immutable Open115 `1.2.2` identity and `open115-v1.2.2` GitHub Release/catalog entry.
 
 - [ ] **Step 1: Write the failing version and documentation contract assertions**
 
 Change the existing source contract assertions to expect:
 
 ```python
-self.assertEqual(manifest["version"], "1.2.1")
-self.assertEqual(project["project"]["version"], "1.2.1")
+self.assertEqual(manifest["version"], "1.2.2")
+self.assertEqual(project["project"]["version"], "1.2.2")
 self.assertIn("series/live action", readme)
 self.assertIn("不要以 / 开头", readme)
 ```
@@ -283,7 +283,7 @@ Expected: failure because manifest and project versions are still 1.2.0 and READ
 
 - [ ] **Step 3: Bump version and document the new path rule**
 
-Set `manifest.yaml` and `pyproject.toml` to `1.2.1`. Update README to state that Telegram directory paths start from the 115 root folder, use `series/live action` as the example, may end with `/`, and must not start with `/` because Telegram reserves that prefix for commands.
+Set `manifest.yaml` and `pyproject.toml` to `1.2.2`. Update README to state that Telegram directory paths start from the 115 root folder, use `series/live action` as the example, may end with one `/`, and must not start with `/` because Telegram reserves that prefix for commands.
 
 - [ ] **Step 4: Run all verification and commit the release identity**
 
@@ -299,7 +299,7 @@ Commit the release identity:
 
 ```bash
 git add tests/test_feature_runtime.py manifest.yaml pyproject.toml README.md
-git commit -m "chore(open115): prepare 1.2.1"
+git commit -m "chore(open115): prepare 1.2.2"
 ```
 
 - [ ] **Step 5: Build, push, tag, and verify the remote release**
@@ -309,13 +309,20 @@ Build from the Core worktree using the verified source commit after the release 
 ```bash
 PYTHONPATH=.:sdk/src /Users/young/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 tools/build_tpx.py \
   /Users/young/Documents/telepiplex/.worktrees/open115 \
-  /Users/young/Documents/telepiplex/dist/open115-1.2.1.tpx
+  /Users/young/Documents/telepiplex/dist/open115-1.2.2.tpx
 ```
 
-Expected: all tests pass, compilation and diff checks exit zero, and `verify_tpx` reports Open115 1.2.1 with the current `feature/open115` source commit.
+Expected: all tests pass, compilation and diff checks exit zero, and `verify_tpx` reports Open115 1.2.2 with the current `feature/open115` source commit.
 
 ```bash
 git push origin feature/open115
 ```
 
-Create annotated tag `open115-v1.2.1` on the current `feature/telepiplex-core` release-infrastructure commit and push it. Wait for `Publish one Telepiplex Feature` to finish successfully. Verify the public Release contains `open115-1.2.1.tpx`, `catalog.yaml`, and `catalog.yaml.sha256`; download and run Core `verify_tpx`; confirm its source commit equals remote `feature/open115`; finally confirm `origin/catalog` contains Open115 1.2.1 with the same SHA-256 and source commit.
+Create annotated tag `open115-v1.2.2` on the current `feature/telepiplex-core` release-infrastructure commit and push it. Wait for `Publish one Telepiplex Feature` to finish successfully. Verify the public Release contains `open115-1.2.2.tpx`, `catalog.yaml`, and `catalog.yaml.sha256`; download and run Core `verify_tpx`; confirm its source commit equals remote `feature/open115`; finally confirm `origin/catalog` contains Open115 1.2.2 with the same SHA-256 and source commit.
+
+### Code-review follow-up included in 1.2.2
+
+The immutable 1.2.1 publication exposed two review findings that are resolved before 1.2.2 publication:
+
+- Permit at most one optional trailing slash; reject `series//` and `series///` instead of silently canonicalizing them.
+- Normalize and persist disk configuration during runtime startup, and reject entries that become duplicates after canonicalization.
