@@ -57,6 +57,7 @@ class MediaSearchFeature:
         release_search=None,
         release_rank=None,
         release_resolver=None,
+        registry=None,
     ):
         self.config = config
         self.core = core
@@ -65,6 +66,7 @@ class MediaSearchFeature:
         self.release_search = release_search or self._search_releases
         self.release_rank = release_rank or rank_releases
         self.release_resolver = release_resolver or resolve_prowlarr_download_url
+        self.registry = registry
         self.plans = {}
         self.awaiting_queries = set()
         self.config_wizard = MediaSearchConfigWizard(config)
