@@ -4,8 +4,9 @@ import asyncio
 import inspect
 import re
 import time
+from collections.abc import Mapping
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import ApplicationHandlerStop
 
 try:
@@ -403,6 +404,46 @@ async def render_operation(application, _router, record: OperationRecord):
         f"任务状态：{record.state}\n阶段：{record.stage or '-'}"
     )
     markup = operation_markup(record, _router)
+    photo_url = _operation_photo_url(record.details)
+    if photo_url:
+        caption = text
+        if len(caption) > 1024:
+            caption = caption[:1003].rstrip() + "\n…内容已截断"
+        if record.message_id is not None:
+            try:
+                await application.bot.edit_message_media(
+                    chat_id=record.chat_id,
+                    message_id=record.message_id,
+                    media=InputMediaPhoto(media=photo_url, caption=caption),
+                    reply_markup=markup,
+                )
+                return record.message_id
+            except Exception as exc:
+                _log(
+                    "warn",
+                    "任务候选海报编辑失败，改发新消息："
+                    f"operation_id={record.operation_id}, "
+                    f"error={type(exc).__name__}",
+                )
+        try:
+            message = await application.bot.send_photo(
+                chat_id=record.chat_id,
+                photo=photo_url,
+                caption=caption,
+                reply_markup=markup,
+            )
+        except Exception as exc:
+            _log(
+                "warn",
+                "任务候选海报发送失败，降级为文本："
+                f"operation_id={record.operation_id}, "
+                f"error={type(exc).__name__}",
+            )
+        else:
+            message_id = getattr(message, "message_id", None)
+            if isinstance(message_id, int) and message_id > 0:
+                coordinator.set_message_id(record.operation_id, message_id)
+                return message_id
     if record.message_id is not None:
         try:
             await application.bot.edit_message_text(
@@ -436,6 +477,19 @@ async def render_operation(application, _router, record: OperationRecord):
         coordinator.set_message_id(record.operation_id, message_id)
         return message_id
     return None
+
+
+def _operation_photo_url(details) -> str:
+    if not isinstance(details, Mapping):
+        return ""
+    photo_url = str(details.get("photo_url") or "").strip()
+    if (
+        photo_url.startswith("https://")
+        and len(photo_url) <= 2048
+        and not any(character.isspace() for character in photo_url)
+    ):
+        return photo_url
+    return ""
 
 
 async def recover_active_operations(application, router, coordinator):

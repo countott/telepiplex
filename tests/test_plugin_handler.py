@@ -412,6 +412,33 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             )
             stale.callback_query.answer.assert_awaited_once_with("当前任务执行中")
 
+    async def test_feature_result_persists_candidate_photo_for_operation_rendering(self):
+        from app.handlers.plugin_handler import _with_rendered_keyboard
+
+        route = SimpleNamespace(
+            plugin_id="media-search",
+            manifest=SimpleNamespace(callbacks=("media-search",)),
+        )
+        operation = {"details": {}}
+        result = {"actions": [{
+            "kind": "send_photo",
+            "text": "候选 1",
+            "data": {
+                "photo_url": "https://image.example/poster.jpg",
+                "keyboard": [[{
+                    "text": "选择此项",
+                    "callback_data": "media-search:select:p1:0",
+                }]],
+            },
+        }]}
+
+        normalized = _with_rendered_keyboard(route, result, operation)
+
+        self.assertEqual(
+            normalized["details"]["photo_url"],
+            "https://image.example/poster.jpg",
+        )
+
     async def test_feature_config_patch_from_callback_updates_original_message(self):
         from app.handlers.plugin_handler import handle_feature_result
 

@@ -546,12 +546,18 @@ def _with_rendered_keyboard(route, result: dict, operation: dict) -> dict:
         if not isinstance(action, dict):
             continue
         data = action.get("data")
-        if not isinstance(data, dict) or "keyboard" not in data:
-            continue
-        if _keyboard_markup(route, data) is False:
-            return normalized
         details = dict(normalized.get("details") or {})
-        details["keyboard"] = deepcopy(data["keyboard"])
+        if isinstance(data, dict) and "keyboard" in data:
+            if _keyboard_markup(route, data) is False:
+                return normalized
+            details["keyboard"] = deepcopy(data["keyboard"])
+        if action.get("kind") in {"send_photo", "edit_photo"}:
+            photo_url = _photo_url(data)
+            if photo_url is False:
+                return normalized
+            details["photo_url"] = photo_url
+        else:
+            details.pop("photo_url", None)
         normalized["details"] = details
         return normalized
     return normalized

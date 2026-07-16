@@ -449,6 +449,81 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         context.application.bot.send_message.assert_awaited_once()
         self.assertEqual(self.coordinator.get("op-1").message_id, 34)
 
+    async def test_status_renderer_sends_candidate_photo(self):
+        from app.handlers.interaction_handler import render_operation
+
+        record = self.coordinator.report("media-search", self.report(
+            state="awaiting_input",
+            stage="candidate_selection",
+            status_text="候选 1",
+            control="exit",
+            details={"photo_url": "https://image.example/poster.jpg"},
+        ))
+        context = self.context()
+        context.application.bot.send_photo = AsyncMock(
+            return_value=SimpleNamespace(message_id=55)
+        )
+
+        message_id = await render_operation(
+            context.application, Mock(), record
+        )
+
+        self.assertEqual(message_id, 55)
+        context.application.bot.send_photo.assert_awaited_once()
+        self.assertEqual(
+            context.application.bot.send_photo.await_args.kwargs["photo"],
+            "https://image.example/poster.jpg",
+        )
+        context.application.bot.send_message.assert_not_awaited()
+
+    async def test_status_renderer_edits_existing_candidate_photo(self):
+        from app.handlers.interaction_handler import render_operation
+
+        record = self.coordinator.report("media-search", self.report(
+            state="awaiting_input",
+            stage="candidate_selection",
+            status_text="候选 2",
+            control="exit",
+            details={"photo_url": "https://image.example/poster-2.jpg"},
+        ))
+        record = self.coordinator.set_message_id(record.operation_id, 44)
+        context = self.context()
+        context.application.bot.edit_message_media = AsyncMock()
+
+        message_id = await render_operation(
+            context.application, Mock(), record
+        )
+
+        self.assertEqual(message_id, 44)
+        context.application.bot.edit_message_media.assert_awaited_once()
+        context.application.bot.edit_message_text.assert_not_awaited()
+
+    async def test_status_photo_failure_falls_back_to_text(self):
+        from app.handlers.interaction_handler import render_operation
+
+        record = self.coordinator.report("media-search", self.report(
+            state="awaiting_input",
+            stage="candidate_selection",
+            status_text="候选 1",
+            control="exit",
+            details={"photo_url": "https://image.example/poster.jpg"},
+        ))
+        context = self.context()
+        context.application.bot.send_photo = AsyncMock(
+            side_effect=RuntimeError("image unavailable")
+        )
+        context.application.bot.send_message.return_value = SimpleNamespace(
+            message_id=56
+        )
+
+        message_id = await render_operation(
+            context.application, Mock(), record
+        )
+
+        self.assertEqual(message_id, 56)
+        context.application.bot.send_photo.assert_awaited_once()
+        context.application.bot.send_message.assert_awaited_once()
+
     async def test_status_renderer_accepts_only_current_feature_keyboard(self):
         from app.handlers.interaction_handler import render_operation
 
