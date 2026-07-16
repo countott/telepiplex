@@ -76,37 +76,45 @@ def _resolution(item):
     return int(_number(item.get("width"))) * int(_number(item.get("height")))
 
 
-def choose_textless_poster(tmdb_posters, fanart_posters):
+def _poster_rank(item):
+    source = str(item.get("source") or "")
+    return (
+        2 if source == "tmdb" else 1,
+        _number(
+            item.get("vote_count")
+            if source == "tmdb"
+            else item.get("likes")
+        ),
+        _number(item.get("vote_average")),
+        _resolution(item),
+    )
+
+
+def rank_textless_posters(tmdb_posters, fanart_posters):
     tmdb_candidates = [
         dict(item, source="tmdb")
         for item in tmdb_posters or []
         if item.get("iso_639_1") is None
     ]
-    if tmdb_candidates:
-        return max(
-            tmdb_candidates,
-            key=lambda item: (
-                _number(item.get("vote_count")),
-                _number(item.get("vote_average")),
-                _resolution(item),
-                str(item.get("file_path") or ""),
-            ),
-        )
     fanart_candidates = [
         dict(item, source="fanart")
         for item in fanart_posters or []
         if str(item.get("lang") or "") == "00"
     ]
-    if fanart_candidates:
-        return max(
-            fanart_candidates,
-            key=lambda item: (
-                _number(item.get("likes")),
-                _resolution(item),
-                str(item.get("url") or ""),
-            ),
-        )
-    return None
+    return sorted(
+        tmdb_candidates + fanart_candidates,
+        key=_poster_rank,
+        reverse=True,
+    )
+
+
+def choose_textless_poster(tmdb_posters, fanart_posters):
+    ranked = rank_textless_posters(tmdb_posters, fanart_posters)
+    if not ranked:
+        return None
+    if len(ranked) > 1 and _poster_rank(ranked[0]) == _poster_rank(ranked[1]):
+        return None
+    return ranked[0]
 
 
 def _normalize_language(value):
@@ -137,53 +145,55 @@ def _audio_rank(stream):
         _audio_tier(stream),
         int(_number(stream.get("channels"))),
         int(_number(stream.get("bitrate"))),
-        bool(stream.get("selected")),
     )
 
 
-def choose_original_audio(streams, original_language):
+def rank_original_audio(streams, original_language):
     target_language = _normalize_language(original_language)
     candidates = [
         stream
         for stream in streams or []
         if _normalize_language(stream.get("language_code")) == target_language
     ]
-    if not candidates:
+    return sorted(candidates, key=_audio_rank, reverse=True)
+
+
+def choose_original_audio(streams, original_language):
+    ranked = rank_original_audio(streams, original_language)
+    if not ranked:
         return None
-    ranked = sorted(candidates, key=_audio_rank, reverse=True)
     if len(ranked) > 1 and _audio_rank(ranked[0]) == _audio_rank(ranked[1]):
         return None
     return ranked[0]
 
 
-def choose_chi_subtitle(streams):
-    chinese = [
+def _subtitle_tier(stream):
+    if stream.get("external") and stream.get("selected"):
+        return 3
+    if stream.get("external") and not stream.get("transient"):
+        return 2
+    if not stream.get("external"):
+        return 1
+    return 0
+
+
+def rank_chi_subtitles(streams):
+    candidates = [
         stream
         for stream in streams or []
-        if str(stream.get("language_code") or "").strip().lower() == "chi"
+        if _normalize_language(stream.get("language_code")) == "chi"
+        and _subtitle_tier(stream)
     ]
-    selected_external = next(
-        (
-            stream
-            for stream in chinese
-            if stream.get("external") and stream.get("selected")
-        ),
-        None,
-    )
-    if selected_external:
-        return selected_external
-    external = sorted(
-        (
-            stream
-            for stream in chinese
-            if stream.get("external") and not stream.get("transient")
-        ),
-        key=lambda stream: int(stream.get("id") or 0),
-    )
-    if external:
-        return external[0]
-    embedded = sorted(
-        (stream for stream in chinese if not stream.get("external")),
-        key=lambda stream: int(stream.get("id") or 0),
-    )
-    return embedded[0] if embedded else None
+    return sorted(candidates, key=_subtitle_tier, reverse=True)
+
+
+def choose_chi_subtitle(streams):
+    ranked = rank_chi_subtitles(streams)
+    if not ranked:
+        return None
+    if (
+        len(ranked) > 1
+        and _subtitle_tier(ranked[0]) == _subtitle_tier(ranked[1])
+    ):
+        return None
+    return ranked[0]

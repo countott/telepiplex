@@ -57,6 +57,26 @@ class PlexAdapter:
             if str(self._value(item, "ratingKey", "") or "") not in before
         ]
 
+    def find_item_by_path(self, library_id, final_path):
+        section = self.server.library.sectionByID(int(library_id))
+        section_type = str(self._value(section, "type", "") or "")
+        if section_type == "movie":
+            library_types = ("movie",)
+        elif section_type == "show":
+            library_types = ("episode",)
+        else:
+            library_types = ("movie", "episode")
+        matches = []
+        for library_type in library_types:
+            for candidate in section.search(libtype=library_type):
+                item = self._item_dict(candidate)
+                if any(
+                    self._media_path_matches(part.get("file"), final_path)
+                    for part in item.get("parts") or []
+                ):
+                    matches.append(item)
+        return matches[0] if len(matches) == 1 else None
+
     @staticmethod
     def _media_path_matches(actual_path, expected_path):
         actual = str(actual_path or "").replace("\\", "/").rstrip("/")
@@ -182,6 +202,12 @@ class PlexAdapter:
             parts.extend(cls._part_dict(part) for part in getattr(media, "parts", []) or [])
         return {
             "rating_key": str(cls._value(item, "ratingKey", "") or ""),
+            "parent_rating_key": str(
+                cls._value(item, "parentRatingKey", "") or ""
+            ),
+            "grandparent_rating_key": str(
+                cls._value(item, "grandparentRatingKey", "") or ""
+            ),
             "title": str(cls._value(item, "title", "") or ""),
             "original_title": str(cls._value(item, "originalTitle", "") or ""),
             "year": int(cls._value(item, "year", 0) or 0),
@@ -193,61 +219,6 @@ class PlexAdapter:
 
     def get_item(self, rating_key):
         return self._item_dict(self.server.fetchItem(int(rating_key)))
-
-    def edit_custom_episode_metadata(
-        self,
-        rating_key,
-        *,
-        title="",
-        summary="",
-        original_release_date="",
-        year="",
-    ):
-        item = self.server.fetchItem(int(rating_key))
-        if title:
-            item.editTitle(str(title), locked=True)
-        if summary:
-            item.editSummary(str(summary), locked=True)
-        if original_release_date:
-            item.editOriginallyAvailable(str(original_release_date), locked=True)
-        elif year:
-            item.editField("year", int(year), locked=True)
-        return self._item_dict(item.reload())
-
-    @classmethod
-    def _match_dict(cls, candidate):
-        guid = str(cls._value(candidate, "guid", "") or "")
-        return {
-            "guid": guid,
-            "guids": [guid] if guid else [],
-            "title": str(cls._value(candidate, "name", "") or ""),
-            "year": int(cls._value(candidate, "year", 0) or 0),
-            "score": int(cls._value(candidate, "score", 0) or 0),
-        }
-
-    def list_match_candidates(self, rating_key, title=None, year=None, language="zh-CN"):
-        item = self.server.fetchItem(int(rating_key))
-        return [
-            self._match_dict(candidate)
-            for candidate in item.matches(title=title, year=year, language=language)
-        ]
-
-    def fix_match(self, rating_key, candidate_guid, language="zh-CN"):
-        item = self.server.fetchItem(int(rating_key))
-        candidates = item.matches(language=language)
-        candidate = next(
-            candidate
-            for candidate in candidates
-            if str(self._value(candidate, "guid", "") or "") == str(candidate_guid)
-        )
-        item.fixMatch(candidate)
-        return self._item_dict(item.reload())
-
-    def refresh_zh_cn(self, rating_key):
-        item = self.server.fetchItem(int(rating_key))
-        item.editAdvanced(languageOverride="zh-CN")
-        item.refresh()
-        return self._item_dict(item.reload())
 
     @classmethod
     def _poster_dict(cls, poster):

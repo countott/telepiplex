@@ -212,6 +212,9 @@ class FakePlex:
         self.find_paths = []
         self.get_item_keys = []
         self.stream_rating_keys = []
+        self.poster_updates = []
+        self.audio_selections = []
+        self.subtitle_selections = []
 
     def snapshot_recent(self, library_id):
         self.calls.append("snapshot_recent")
@@ -315,6 +318,7 @@ class FakePlex:
 
     def set_poster_url(self, rating_key, url):
         self.calls.append("set_poster_url")
+        self.poster_updates.append((str(rating_key), str(url)))
         if self.poster_error:
             raise self.poster_error
         return {"rating_key": rating_key}
@@ -336,9 +340,19 @@ class FakePlex:
 
     def select_audio(self, rating_key, part_id, stream_id):
         self.calls.append("select_audio")
+        self.audio_selections.append((
+            str(rating_key),
+            int(part_id),
+            int(stream_id),
+        ))
 
     def select_subtitle(self, rating_key, part_id, stream_id):
         self.calls.append("select_subtitle")
+        self.subtitle_selections.append((
+            str(rating_key),
+            int(part_id),
+            int(stream_id),
+        ))
 
     def server_status(self):
         return {"online": True}
@@ -853,6 +867,207 @@ class PlexManagementServiceTest(unittest.TestCase):
         self.assertEqual(result["step_results"]["audio"]["status"], "success")
         self.assertEqual(result["step_results"]["subtitle"]["status"], "success")
         self.assertIn("select_subtitle", plex.calls)
+
+    def test_ambiguous_artwork_waits_then_confirms_and_resumes_same_job(self):
+        plex = FakePlex()
+        tmdb = FakeTmdb()
+        tmdb.textless_posters = Mock(return_value=[
+            {
+                "url": "https://tmdb/first.jpg",
+                "iso_639_1": None,
+                "vote_count": 8,
+                "vote_average": 8,
+                "width": 1000,
+                "height": 1500,
+            },
+            {
+                "url": "https://tmdb/second.jpg",
+                "iso_639_1": None,
+                "vote_count": 8,
+                "vote_average": 8,
+                "width": 1000,
+                "height": 1500,
+            },
+        ])
+        service = self.make_service(plex=plex, tmdb=tmdb)
+        original = service.enqueue_completion(make_completion())
+
+        waiting_job = service.run_job(original["id"])
+
+        self.assertEqual(waiting_job["state"], "awaiting_selection")
+        waiting = service.pending_selection(original["id"])
+        self.assertEqual(waiting["kind"], "artwork")
+        self.assertEqual(waiting["candidate_index"], 0)
+        self.assertEqual(
+            waiting_job["step_results"]["artwork"]["waiting"],
+            waiting,
+        )
+        updated = service.set_selection_index(original["id"], 1)
+        self.assertEqual(updated["candidate_index"], 1)
+
+        completed = service.confirm_selection(original["id"], 1)
+
+        self.assertEqual(completed["id"], original["id"])
+        self.assertEqual(completed["state"], "completed")
+        self.assertIn(("42", "https://tmdb/second.jpg"), plex.poster_updates)
+        self.assertIn("select_audio", plex.calls)
+        self.assertIn("select_subtitle", plex.calls)
+
+    def test_ambiguous_audio_waits_then_applies_selected_stream(self):
+        plex = FakePlex()
+        plex.list_streams = Mock(return_value=[{
+            "id": 11,
+            "audio_streams": [
+                {
+                    "id": 21,
+                    "language_code": "jpn",
+                    "codec": "truehd",
+                    "channels": 8,
+                    "bitrate": 4000,
+                },
+                {
+                    "id": 22,
+                    "language_code": "jpn",
+                    "codec": "truehd",
+                    "channels": 8,
+                    "bitrate": 4000,
+                },
+            ],
+            "subtitle_streams": [{
+                "id": 31,
+                "language_code": "chi",
+                "external": True,
+                "transient": False,
+            }],
+        }])
+        service = self.make_service(plex=plex)
+        job = service.enqueue_completion(make_completion())
+
+        waiting_job = service.run_job(job["id"])
+
+        self.assertEqual(waiting_job["state"], "awaiting_selection")
+        self.assertEqual(service.pending_selection(job["id"])["kind"], "audio")
+
+        completed = service.confirm_selection(job["id"], 1)
+
+        self.assertEqual(completed["state"], "completed")
+        self.assertIn(("42", 11, 22), plex.audio_selections)
+        self.assertIn(("42", 11, 31), plex.subtitle_selections)
+
+    def test_missing_original_language_does_not_select_unlabeled_audio(self):
+        plex = FakePlex()
+        plex.list_streams = Mock(return_value=[{
+            "id": 11,
+            "audio_streams": [{
+                "id": 21,
+                "language_code": "",
+                "codec": "truehd",
+                "channels": 8,
+                "bitrate": 4000,
+            }],
+            "subtitle_streams": [],
+        }])
+        tmdb = FakeTmdb()
+        tmdb.details = Mock(return_value={})
+        service = self.make_service(plex=plex, tmdb=tmdb)
+        job = service.enqueue_completion(make_completion())
+
+        result = service.run_job(job["id"])
+
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(result["step_results"]["audio"]["status"], "warning")
+        self.assertEqual(plex.audio_selections, [])
+
+    def test_ambiguous_subtitle_waits_then_applies_selected_stream(self):
+        plex = FakePlex()
+        plex.list_streams = Mock(return_value=[{
+            "id": 11,
+            "audio_streams": [{
+                "id": 21,
+                "language_code": "jpn",
+                "codec": "truehd",
+                "channels": 8,
+                "bitrate": 4000,
+            }],
+            "subtitle_streams": [
+                {
+                    "id": 31,
+                    "language_code": "chi",
+                    "external": True,
+                    "transient": False,
+                },
+                {
+                    "id": 32,
+                    "language_code": "chi",
+                    "external": True,
+                    "transient": False,
+                },
+            ],
+        }])
+        service = self.make_service(plex=plex)
+        job = service.enqueue_completion(make_completion())
+
+        waiting_job = service.run_job(job["id"])
+
+        self.assertEqual(waiting_job["state"], "awaiting_selection")
+        self.assertEqual(
+            service.pending_selection(job["id"])["kind"],
+            "subtitle",
+        )
+
+        completed = service.confirm_selection(job["id"], 1)
+
+        self.assertEqual(completed["state"], "completed")
+        self.assertIn(("42", 11, 32), plex.subtitle_selections)
+
+    def test_series_artwork_targets_show_once_for_multiple_episodes(self):
+        completion = make_unresolved_standalone_series_completion()
+        contract = completion.result.metadata["media_metadata"]
+        contract["items"] = [
+            {
+                "item_id": "episode-1",
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": 1,
+                "final_path": "/Series/Show/Season 01/Show S01E01.mkv",
+            },
+            {
+                "item_id": "episode-2",
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": 2,
+                "final_path": "/Series/Show/Season 01/Show S01E02.mkv",
+            },
+        ]
+        plex = FakePlex()
+
+        def get_item(rating_key):
+            plex.get_item_keys.append(str(rating_key))
+            if str(rating_key) in {"42", "43"}:
+                return {
+                    "rating_key": str(rating_key),
+                    "grandparent_rating_key": "99",
+                    "title": "Episode",
+                    "media_type": "episode",
+                    "guids": [],
+                }
+            return {
+                "rating_key": "99",
+                "title": "Show",
+                "media_type": "show",
+                "guids": ["tmdb://20"],
+            }
+
+        plex.get_item = get_item
+        service = self.make_service(plex=plex)
+        job = service.enqueue_completion(completion)
+
+        result = service.run_job(job["id"])
+
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(plex.poster_updates, [("99", "https://tmdb/poster.jpg")])
+        second = result["step_results"]["artwork"]["targets"]["episode-2"]
+        self.assertEqual(second["action"], "series_artwork_already_processed")
 
     def test_enqueue_is_idempotent_and_ignores_non_renaming_completion(self):
         service = self.make_service()

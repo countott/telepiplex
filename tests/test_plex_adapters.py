@@ -67,6 +67,8 @@ class PlexAdapterTest(unittest.TestCase):
         part.subtitleStreams.return_value = [subtitle]
         item = Mock(
             ratingKey="42",
+            parentRatingKey="41",
+            grandparentRatingKey="40",
             title="电影",
             year=2024,
             type="movie",
@@ -79,6 +81,8 @@ class PlexAdapterTest(unittest.TestCase):
         result = PlexAdapter("http://plex:32400", "token").get_item("42")
 
         self.assertEqual(result["rating_key"], "42")
+        self.assertEqual(result["parent_rating_key"], "41")
+        self.assertEqual(result["grandparent_rating_key"], "40")
         self.assertEqual(result["guids"], ["tmdb://20"])
         self.assertEqual(result["parts"][0]["audio_streams"][0]["language_code"], "jpn")
         self.assertTrue(result["parts"][0]["subtitle_streams"][0]["external"])
@@ -116,36 +120,72 @@ class PlexAdapterTest(unittest.TestCase):
         self.assertEqual([item["rating_key"] for item in candidates], ["42"])
 
     @patch("telepiplex_plex.adapters.plex.PlexServer")
-    def test_match_refresh_and_artwork_operations(self, plex_server):
+    def test_artwork_operations_return_plain_data(self, plex_server):
         from telepiplex_plex.adapters.plex import PlexAdapter
 
-        candidate = Mock(guid="tmdb://20", name="电影", year="2024", score=98)
         reloaded = Mock(
             ratingKey="42", title="电影", year=2024, type="movie", summary="中文", guids=[], media=[]
         )
         item = plex_server.return_value.fetchItem.return_value
-        item.matches.return_value = [candidate]
         item.reload.return_value = reloaded
         item.posters.return_value = [
             Mock(key="/poster/1", provider="com.plexapp.agents.themoviedb", ratingKey="metadata://1", thumb="/thumb/1", selected=True)
         ]
         adapter = PlexAdapter("http://plex:32400", "token")
 
-        matches = adapter.list_match_candidates("42", title="电影", year=2024)
-        fixed = adapter.fix_match("42", "tmdb://20")
-        localized = adapter.refresh_zh_cn("42")
         posters = adapter.list_posters("42")
         uploaded = adapter.set_poster_url("42", "https://image.example/poster.jpg")
 
-        self.assertEqual(matches[0]["guid"], "tmdb://20")
-        item.fixMatch.assert_called_once_with(candidate)
-        self.assertEqual(fixed["rating_key"], "42")
-        item.editAdvanced.assert_called_once_with(languageOverride="zh-CN")
-        item.refresh.assert_called_once_with()
-        self.assertEqual(localized["summary"], "中文")
         self.assertTrue(posters[0]["selected"])
         item.uploadPoster.assert_called_once_with(url="https://image.example/poster.jpg")
         self.assertEqual(uploaded["rating_key"], "42")
+        self.assertFalse(hasattr(adapter, "list_match_candidates"))
+        self.assertFalse(hasattr(adapter, "fix_match"))
+        self.assertFalse(hasattr(adapter, "refresh_zh_cn"))
+        self.assertFalse(hasattr(adapter, "edit_custom_episode_metadata"))
+
+    @patch("telepiplex_plex.adapters.plex.PlexServer")
+    def test_find_item_by_path_returns_one_matching_media_item(self, plex_server):
+        from telepiplex_plex.adapters.plex import PlexAdapter
+
+        matching_part = Mock(id=11, file="/mnt/media/Series/Season 01/Show S01E01.mkv")
+        matching_part.audioStreams.return_value = []
+        matching_part.subtitleStreams.return_value = []
+        matching = Mock(
+            ratingKey="42",
+            parentRatingKey="41",
+            grandparentRatingKey="40",
+            title="Episode 1",
+            year=2024,
+            type="episode",
+            summary="",
+            guids=[],
+            media=[Mock(parts=[matching_part])],
+        )
+        other_part = Mock(id=12, file="/mnt/media/Series/Season 01/Show S01E02.mkv")
+        other_part.audioStreams.return_value = []
+        other_part.subtitleStreams.return_value = []
+        other = Mock(
+            ratingKey="43",
+            title="Episode 2",
+            year=2024,
+            type="episode",
+            summary="",
+            guids=[],
+            media=[Mock(parts=[other_part])],
+        )
+        section = plex_server.return_value.library.sectionByID.return_value
+        section.type = "show"
+        section.search.return_value = [matching, other]
+
+        result = PlexAdapter("http://plex:32400", "token").find_item_by_path(
+            "12",
+            "/Series/Season 01/Show S01E01.mkv",
+        )
+
+        section.search.assert_called_once_with(libtype="episode")
+        self.assertEqual(result["rating_key"], "42")
+        self.assertEqual(result["grandparent_rating_key"], "40")
 
     @patch("telepiplex_plex.adapters.plex.PlexServer")
     def test_stream_operations_target_part_and_stream_ids(self, plex_server):

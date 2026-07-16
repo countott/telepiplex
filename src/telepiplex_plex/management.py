@@ -23,11 +23,33 @@ STEP_ORDER = ("scanning", "artwork", "audio", "subtitle")
 GATING_STEPS = {"scanning"}
 
 
-class WaitingForMatchConfirmation(RuntimeError):
-    def __init__(self, candidates, kind="match"):
-        super().__init__("Plex confirmation required")
-        self.candidates = list(candidates or [])
+class WaitingForSelection(RuntimeError):
+    def __init__(
+        self,
+        kind,
+        target_id,
+        candidates,
+        *,
+        rating_key="",
+        part_id=0,
+    ):
+        super().__init__("Plex enhancement selection required")
         self.kind = str(kind)
+        self.target_id = str(target_id)
+        self.candidates = deepcopy(list(candidates or []))
+        self.rating_key = str(rating_key or "")
+        self.part_id = int(part_id or 0)
+        self.step_result = None
+
+    def as_dict(self, candidate_index=0):
+        return {
+            "kind": self.kind,
+            "target_id": self.target_id,
+            "rating_key": self.rating_key,
+            "part_id": self.part_id,
+            "candidates": deepcopy(self.candidates),
+            "candidate_index": int(candidate_index),
+        }
 
 
 class PlexOperationCancelled(RuntimeError):
@@ -261,6 +283,20 @@ class PlexManagementService:
                     step_result = runners[state](self.jobs.get(job_id))
             except PlexOperationCancelled:
                 raise
+            except WaitingForSelection as exc:
+                waiting = exc.as_dict()
+                step_result = exc.step_result or {
+                    "status": "awaiting_selection",
+                    "waiting": waiting,
+                }
+                self._record_step(job_id, state, step_result)
+                waiting_job = self.jobs.update(
+                    job_id,
+                    state="awaiting_selection",
+                    error=None,
+                )
+                self._notify_waiting(waiting_job, waiting)
+                return self.jobs.get(job_id)
             except Exception as exc:
                 message = self._safe_error(exc)
                 if state in GATING_STEPS:
@@ -634,15 +670,51 @@ class PlexManagementService:
                 ))
         return located
 
-    def _run_target_stage(self, job, runner):
+    @staticmethod
+    def _selection_finished(result):
+        return str((result or {}).get("status") or "") in {
+            "success",
+            "warning",
+            "unchanged",
+            "confirmed",
+        }
+
+    def _run_target_stage(self, job, runner, stage_name):
+        current_step = (
+            (job.get("step_results") or {}).get(stage_name)
+            or {}
+        )
+        previous_results = dict(current_step.get("targets") or {})
+        confirmed_selections = deepcopy(
+            list(current_step.get("confirmed_selections") or [])
+        )
         results = {}
         for target, rating_key in self._located_targets(job):
             target_id = str(target.get("target_id") or "")
+            previous = previous_results.get(target_id) or {}
+            if self._selection_finished(previous):
+                results[target_id] = deepcopy(previous)
+                continue
             target_job = deepcopy(job)
             target_job["rating_key"] = rating_key
             target_job["target"] = deepcopy(target)
+            target_job["_stage_name"] = str(stage_name)
+            target_job["_stage_results"] = deepcopy(results)
             try:
                 result = runner(target_job)
+            except WaitingForSelection as exc:
+                waiting = exc.as_dict()
+                results[target_id] = {
+                    "status": "awaiting_selection",
+                    "waiting": waiting,
+                }
+                exc.step_result = {
+                    "status": "awaiting_selection",
+                    "targets": results,
+                    "waiting": waiting,
+                    "confirmed_selections": confirmed_selections,
+                }
+                raise
             except Exception as exc:
                 result = {
                     "status": "warning",
@@ -652,16 +724,17 @@ class PlexManagementService:
         return {
             "status": self._stage_status(results),
             "targets": results,
+            "confirmed_selections": confirmed_selections,
         }
 
     def _artwork_stage(self, job):
-        return self._run_target_stage(job, self._artwork)
+        return self._run_target_stage(job, self._artwork, "artwork")
 
     def _audio_stage(self, job):
-        return self._run_target_stage(job, self._audio_target)
+        return self._run_target_stage(job, self._audio_target, "audio")
 
     def _subtitle_stage(self, job):
-        return self._run_target_stage(job, self._subtitle_target)
+        return self._run_target_stage(job, self._subtitle_target, "subtitle")
 
     @staticmethod
     def _candidate_identity(candidate):
@@ -760,7 +833,9 @@ class PlexManagementService:
         if chosen is None:
             if contract:
                 raise LookupError("Contract-bound Plex location is ambiguous")
-            raise WaitingForMatchConfirmation(candidates, kind="location")
+            raise RuntimeError(
+                "Legacy Plex location confirmation is no longer supported"
+            )
         self.jobs.update(job["id"], rating_key=str(chosen["rating_key"]))
         return {"status": "success", "rating_key": str(chosen["rating_key"]), "candidates": candidates}
 
@@ -874,7 +949,9 @@ class PlexManagementService:
         )
         exact = plex_rules.choose_exact_match(external_ids, candidates)
         if exact is None:
-            raise WaitingForMatchConfirmation(candidates, kind="match")
+            raise RuntimeError(
+                "Legacy Plex match confirmation is no longer supported"
+            )
         fixed = self.plex.fix_match(rating_key, exact["guid"])
         if not plex_rules.external_ids_match(external_ids, fixed.get("guids")):
             raise RuntimeError("Plex match verification failed after fixMatch")
@@ -953,6 +1030,51 @@ class PlexManagementService:
                 warnings.append(self._safe_error(exc))
         return tmdb_posters, fanart_posters, warnings
 
+    @staticmethod
+    def _target_id(job):
+        return str((job.get("target") or {}).get("target_id") or "")
+
+    def _confirmed_selection(self, job, kind, *, rating_key, part_id=0):
+        step = (
+            (job.get("step_results") or {}).get(str(kind))
+            or {}
+        )
+        target_id = self._target_id(job)
+        for selection in step.get("confirmed_selections") or []:
+            if (
+                str(selection.get("kind") or "") == str(kind)
+                and str(selection.get("target_id") or "") == target_id
+                and str(selection.get("rating_key") or "") == str(rating_key)
+                and int(selection.get("part_id") or 0) == int(part_id or 0)
+            ):
+                return deepcopy(selection.get("candidate") or {})
+        return None
+
+    def _artwork_item(self, job):
+        rating_key = str(job.get("rating_key") or "")
+        item = self.plex.get_item(rating_key)
+        if (
+            item.get("media_type") == "episode"
+            and item.get("grandparent_rating_key")
+        ):
+            rating_key = str(item["grandparent_rating_key"])
+            item = self.plex.get_item(rating_key)
+        return rating_key, item
+
+    def _series_artwork_already_processed(self, job, rating_key):
+        target_id = self._target_id(job)
+        for existing_target_id, result in (
+            job.get("_stage_results") or {}
+        ).items():
+            if (
+                str(existing_target_id) != target_id
+                and str((result or {}).get("rating_key") or "")
+                == str(rating_key)
+                and self._selection_finished(result)
+            ):
+                return True
+        return False
+
     def _artwork(self, job):
         contract = self._media_metadata(job)
         mapping_kind = (
@@ -983,26 +1105,57 @@ class PlexManagementService:
                     "url": poster_url,
                     "source": identity.get("poster_source") or "media_metadata",
                 },
+                "rating_key": str(job["rating_key"]),
             }
-        item = dict((job["step_results"].get("matching") or {}).get("item") or {})
-        if not item:
-            item = self.plex.get_item(job["rating_key"])
+        artwork_rating_key, item = self._artwork_item(job)
+        if self._series_artwork_already_processed(job, artwork_rating_key):
+            return {
+                "status": "unchanged",
+                "action": "series_artwork_already_processed",
+                "attempted": False,
+                "rating_key": artwork_rating_key,
+            }
+        confirmed = self._confirmed_selection(
+            job,
+            "artwork",
+            rating_key=artwork_rating_key,
+        )
+        if confirmed:
+            return {
+                "status": "success",
+                "attempted": True,
+                "selected": confirmed,
+                "rating_key": artwork_rating_key,
+            }
         item["external_ids"] = self._effective_metadata(job).get("external_ids") or {}
         tmdb_posters, fanart_posters, warnings = self._artwork_candidates(item)
+        ranked = plex_rules.rank_textless_posters(
+            tmdb_posters,
+            fanart_posters,
+        )
         chosen = plex_rules.choose_textless_poster(tmdb_posters, fanart_posters)
         if chosen:
-            self.plex.set_poster_url(job["rating_key"], chosen["url"])
+            self.plex.set_poster_url(artwork_rating_key, chosen["url"])
             return {
                 "status": "warning" if warnings else "success",
                 "attempted": True,
                 "selected": chosen,
+                "rating_key": artwork_rating_key,
                 "warnings": warnings,
             }
+        if ranked:
+            raise WaitingForSelection(
+                "artwork",
+                self._target_id(job),
+                ranked,
+                rating_key=artwork_rating_key,
+            )
         return {
             "status": "warning" if warnings else "unchanged",
             "attempted": True,
             "message": "No automatic textless poster candidate",
-            "plex_candidates": self.plex.list_posters(job["rating_key"]),
+            "plex_candidates": self.plex.list_posters(artwork_rating_key),
+            "rating_key": artwork_rating_key,
             "warnings": warnings,
         }
 
@@ -1022,12 +1175,53 @@ class PlexManagementService:
                 warnings.append(self._safe_error(exc))
         else:
             warnings.append("TMDB original language is unavailable")
+        if not original_language and not warnings:
+            warnings.append("TMDB original language is unavailable")
         audio_results = []
         for part in self.plex.list_streams(job["rating_key"]):
-            audio = plex_rules.choose_original_audio(
-                part.get("audio_streams"),
-                original_language,
+            confirmed = self._confirmed_selection(
+                job,
+                "audio",
+                rating_key=job["rating_key"],
+                part_id=part["id"],
             )
+            if confirmed:
+                audio_results.append({
+                    "part_id": part["id"],
+                    "stream_id": confirmed.get("id"),
+                    "changed": True,
+                    "confirmed": True,
+                })
+                continue
+            ranked = (
+                plex_rules.rank_original_audio(
+                    part.get("audio_streams"),
+                    original_language,
+                )
+                if original_language
+                else []
+            )
+            audio = (
+                plex_rules.choose_original_audio(
+                    part.get("audio_streams"),
+                    original_language,
+                )
+                if original_language
+                else None
+            )
+            if ranked and audio is None:
+                raise WaitingForSelection(
+                    "audio",
+                    self._target_id(job),
+                    ranked,
+                    rating_key=job["rating_key"],
+                    part_id=part["id"],
+                )
+            if not ranked and original_language:
+                warnings.append(
+                    "No original-language audio stream was found "
+                    f"for part {part['id']}"
+                )
             if audio and not audio.get("selected"):
                 self.plex.select_audio(
                     job["rating_key"],
@@ -1048,9 +1242,39 @@ class PlexManagementService:
     def _subtitle_target(self, job):
         subtitle_results = []
         for part in self.plex.list_streams(job["rating_key"]):
+            confirmed = self._confirmed_selection(
+                job,
+                "subtitle",
+                rating_key=job["rating_key"],
+                part_id=part["id"],
+            )
+            if confirmed:
+                subtitle_results.append({
+                    "part_id": part["id"],
+                    "stream_id": confirmed.get("id"),
+                    "source": (
+                        "external"
+                        if confirmed.get("external")
+                        else "embedded"
+                    ),
+                    "changed": True,
+                    "confirmed": True,
+                })
+                continue
+            ranked = plex_rules.rank_chi_subtitles(
+                part.get("subtitle_streams")
+            )
             subtitle = plex_rules.choose_chi_subtitle(
                 part.get("subtitle_streams")
             )
+            if ranked and subtitle is None:
+                raise WaitingForSelection(
+                    "subtitle",
+                    self._target_id(job),
+                    ranked,
+                    rating_key=job["rating_key"],
+                    part_id=part["id"],
+                )
             if subtitle and not subtitle.get("selected"):
                 self.plex.select_subtitle(
                     job["rating_key"],
@@ -1164,6 +1388,96 @@ class PlexManagementService:
         self.jobs.update(job_id, state="queued", step_results=steps, error=None)
         return self.run_job(job_id)
 
+    def pending_selection(self, job_id):
+        job = self.jobs.get(job_id)
+        if not job:
+            raise LookupError(f"Plex job not found: {job_id}")
+        for name in STEP_ORDER:
+            waiting = (
+                ((job.get("step_results") or {}).get(name) or {})
+                .get("waiting")
+            )
+            if isinstance(waiting, dict):
+                return deepcopy(waiting)
+        return None
+
+    def set_selection_index(self, job_id, index):
+        job = self.jobs.get(job_id)
+        if not job:
+            raise LookupError(f"Plex job not found: {job_id}")
+        waiting = self.pending_selection(job_id)
+        if not waiting:
+            raise ValueError(f"Plex job {job_id} is not awaiting a selection")
+        try:
+            index = int(index)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Selection index must be an integer") from exc
+        candidates = list(waiting.get("candidates") or [])
+        if index < 0 or index >= len(candidates):
+            raise ValueError(f"Selection index is out of range: {index}")
+        kind = str(waiting["kind"])
+        steps = deepcopy(job.get("step_results") or {})
+        steps[kind]["waiting"]["candidate_index"] = index
+        self.jobs.update(job_id, step_results=steps, error=None)
+        return deepcopy(steps[kind]["waiting"])
+
+    def confirm_selection(
+        self,
+        job_id,
+        index,
+        *,
+        should_cancel=None,
+        on_stage=None,
+    ):
+        waiting = self.set_selection_index(job_id, index)
+        job = self.jobs.get(job_id)
+        candidate = deepcopy(waiting["candidates"][int(index)])
+        kind = str(waiting["kind"])
+        rating_key = str(waiting.get("rating_key") or "")
+        part_id = int(waiting.get("part_id") or 0)
+        if kind == "artwork":
+            url = str(candidate.get("url") or "")
+            if not url:
+                raise ValueError("Selected artwork candidate has no URL")
+            self.plex.set_poster_url(rating_key, url)
+        elif kind == "audio":
+            self.plex.select_audio(rating_key, part_id, candidate["id"])
+        elif kind == "subtitle":
+            self.plex.select_subtitle(rating_key, part_id, candidate["id"])
+        else:
+            raise ValueError(f"Unsupported Plex selection kind: {kind}")
+
+        steps = deepcopy(job.get("step_results") or {})
+        step = steps[kind]
+        confirmed = list(step.get("confirmed_selections") or [])
+        confirmed.append({
+            "kind": kind,
+            "target_id": str(waiting.get("target_id") or ""),
+            "rating_key": rating_key,
+            "part_id": part_id,
+            "candidate_index": int(index),
+            "candidate": candidate,
+        })
+        step["confirmed_selections"] = confirmed
+        step["status"] = "started"
+        step.pop("waiting", None)
+        target_id = str(waiting.get("target_id") or "")
+        target_result = (step.get("targets") or {}).get(target_id)
+        if isinstance(target_result, dict):
+            target_result.pop("waiting", None)
+            target_result["status"] = "started"
+        self.jobs.update(
+            job_id,
+            state=kind,
+            step_results=steps,
+            error=None,
+        )
+        return self.run_job(
+            job_id,
+            should_cancel=should_cancel,
+            on_stage=on_stage,
+        )
+
     def confirm_match(
         self, job_id, selection, *, should_cancel=None, on_stage=None
     ):
@@ -1193,7 +1507,14 @@ class PlexManagementService:
         )
 
     def resume_incomplete_jobs(self, executor=None):
-        jobs = [job for job in self.jobs.list(1000) if job["state"] not in {"completed", "waiting_match_confirmation"}]
+        jobs = [
+            job
+            for job in self.jobs.list(1000)
+            if job["state"] not in {
+                "completed",
+                "awaiting_selection",
+            }
+        ]
         for job in jobs:
             if executor:
                 executor.submit(self.run_job, job["id"])
