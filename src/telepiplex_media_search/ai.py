@@ -158,23 +158,6 @@ JSON结构：
 用户输入：
 """
 
-MEDIA_METADATA_DRAFT_PROMPT = """你是影视中立元数据规划器。只返回JSON。
-严格规则无法唯一确认时，AI负责完整分析媒体身份、关系和范围；Wikipedia、豆瓣和TVDB是可失败的证据提供者。
-读取Wikipedia、豆瓣和TVDB的状态；任一证据源server_down不能阻止第二阶段AI。
-引用server_down或AI补出的来源条目时，source_entry必须标明availability/verification，并在warnings中明确说明未实时验证。
-只要存在对应剧集版，电影版默认归入目标剧集Season 00；优先TVDB官方Special。
-standalone只允许在不存在剧集关联时使用，target_series必须为空，season_number和episode_number必须为null。
-普通主系列也使用standalone，但library_type=series时必须在items中列出用户确认的每个目标集（例如S01E01）；不得把普通集写进顶层Season 00锁。
-items中的season_number/episode_number是后续重命名不可改写的锁，content_role使用允许的content_kind值。
-temporary_related_special的episode_number必须为null，由本地分配器从S00E100开始填写。
-tvdb_official必须输出目标tvdb series ID和tvdb_episode_id。
-ai_inferred_tvdb必须输出明确的未实时验证warning。
-identity必须包含中英文标题、year、content_kind、summary、original_release_date、poster_url、poster_source和external_ids。
-只返回以下结构：
-{"plan_id":"string","media_metadata":{"schema_version":1,"metadata_id":"","confirmed":false,"identity":{},"relation":{"type":"string","target_series":{},"source":"string"},"placement":{"library_type":"movie|series","category_kind":"live_action_series|live_action_movie|animated_movie|animated_series","season_number":null,"episode_number":null,"mapping_kind":"tvdb_official|ai_inferred_tvdb|temporary_related_special|standalone","mapping_source":"string","tvdb_episode_id":"string"},"source_entry":{},"items":[{"item_id":"string","content_role":"main_episode|ova|narrative_bonus|non_narrative_extra|special","season_number":1,"episode_number":1}],"evidence":{},"warnings":[]},"prowlarr_queries":["string"]}
-输入事实：
-"""
-
 RELATION_SCOUT_PROMPT = """你是影视作品关系审查员。只返回 JSON，不要返回 Markdown。
 你只能引用输入中的 candidate_key 和 fact_id，不得编造标题、年份、稳定 ID、集号或来源事实。
 最多输出 3 个关系假设；假设不是事实，后续必须由程序定向复查。
@@ -353,20 +336,6 @@ def infer_search_hypotheses_with_ai(context):
         if not isinstance(source_queries.get(name), list):
             return None
     return _without_prowlarr_query(parsed)
-
-
-def infer_media_metadata_draft_with_ai(context: dict):
-    if not check_ai_api_available():
-        return None
-
-    prompt = MEDIA_METADATA_DRAFT_PROMPT + json.dumps(
-        context or {}, ensure_ascii=False, indent=2
-    )
-    _log_ai_info(f"AI中立元数据输入 context={_compact_json_for_log(context)}")
-    result = chat_completion(prompt, max_tokens=8192)
-    _log_ai_info(f"AI中立元数据原始响应 result={_compact_json_for_log(result)}")
-    parsed = parse_ai_json_response(result)
-    return parsed if isinstance(parsed, dict) else None
 
 
 def infer_relation_hypotheses_with_ai(context: dict):

@@ -4,22 +4,36 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import time
 import unicodedata
 from collections.abc import Callable
+from copy import deepcopy
 
 from .context import runtime_context
 
 from .ai import (
-    infer_media_metadata_draft_with_ai,
+    infer_relation_hypotheses_with_ai,
     infer_search_hypotheses_with_ai,
+    score_candidates_with_ai,
 )
-from .deterministic import build_rule_hypotheses, evaluate_deterministic_plan
+from .candidate_score import (
+    AIScore,
+    SCORING_VERSION,
+    apply_thresholds,
+    combine_score,
+    program_score,
+    validate_ai_scorecard,
+)
+from .deterministic import COMPLEX_PATTERN, build_rule_hypotheses, evaluate_deterministic_plan
+from .entity_graph import CandidateEntity, build_search_graph, normalize_title
 from .search_plan import (
     TEMPORARY_MAPPING_KIND,
     TemporarySpecialAllocator,
     finalize_search_plan,
     normalize_source_locator,
 )
+from .title_policy import TitlePolicyError, resolve_title_policy
 
 
 class SearchPlanningError(RuntimeError):
@@ -30,7 +44,46 @@ class SearchPlanningError(RuntimeError):
 
 
 def _log_info(message: str):
-    runtime_context.logger.info(message)
+    if runtime_context.logger:
+        runtime_context.logger.info(message)
+
+
+class PlanningBudget:
+    TOTAL = 90.0
+    STAGES = {
+        "base_evidence": 15.0,
+        "relation_scout": 20.0,
+        "relation_verification": 15.0,
+        "scorecard": 25.0,
+        "candidate_finalize": 15.0,
+    }
+
+    def __init__(self, *, clock=time.monotonic, total: float | None = None):
+        self.clock = clock
+        self.started_at = clock()
+        self.total = self.TOTAL if total is None else max(0.0, float(total))
+        self.deadline = self.started_at + self.total
+
+    def remaining_for(self, stage: str) -> float:
+        stage_limit = self.STAGES[stage]
+        return max(0.0, min(stage_limit, self.deadline - self.clock()))
+
+    @property
+    def elapsed(self) -> float:
+        return max(0.0, self.clock() - self.started_at)
+
+
+async def _budgeted(stage: str, budget: PlanningBudget, awaitable):
+    remaining = budget.remaining_for(stage)
+    if remaining <= 0:
+        if hasattr(awaitable, "close"):
+            awaitable.close()
+        raise SearchPlanningError("planning_timed_out", (stage,))
+    try:
+        async with asyncio.timeout(remaining):
+            return await awaitable
+    except TimeoutError as exc:
+        raise SearchPlanningError("planning_timed_out", (stage,)) from exc
 
 
 def _provider_failure(name: str, exc: Exception) -> dict:
@@ -339,86 +392,302 @@ def _finalize_draft(
         raise SearchPlanningError("invalid_media_metadata") from exc
 
 
+def _candidate_context(candidate: CandidateEntity) -> dict:
+    return {
+        "candidate_key": candidate.candidate_key,
+        "fact_ids": [fact.fact_id for fact in candidate.facts],
+        "facts": [{
+            "fact_id": fact.fact_id,
+            "provider": fact.provider,
+            "titles": list(fact.titles),
+            "year": fact.year,
+            "media_type": fact.media_type,
+            "external_ids": dict(fact.external_ids),
+            "original_language": fact.original_language,
+            "complex_signals": list(fact.complex_signals),
+        } for fact in candidate.facts],
+    }
+
+
+def _explicit_media_type(raw_query: str, intent: dict) -> str:
+    if intent.get("scope") in {"whole_series", "season", "episode"}:
+        return "series"
+    lowered = _text(raw_query).casefold()
+    if re.search(r"电影|電影|movie|film", lowered):
+        return "movie"
+    if re.search(r"电视剧|電視劇|剧集|劇集|series|tv\s*show", lowered):
+        return "series"
+    return ""
+
+
+def _candidate_poster_source(candidate: CandidateEntity) -> str:
+    poster = candidate.poster_url
+    return next(
+        (fact.provider for fact in candidate.facts if fact.poster_url == poster),
+        "",
+    )
+
+
+def _candidate_items(candidate: CandidateEntity, intent: dict) -> list[dict]:
+    if candidate.media_types != frozenset({"series"}):
+        return []
+    scope = intent.get("scope") or "movie_or_series"
+    items = []
+    seen = set()
+    for fact in candidate.facts:
+        for episode in fact.episodes:
+            key = (_integer(episode.get("season_number")), _integer(episode.get("episode_number")))
+            if None in key or key[0] < 0 or key[1] < 1 or key in seen:
+                continue
+            if scope == "season" and key[0] != _integer(intent.get("season_number")):
+                continue
+            if scope == "episode" and key != (
+                _integer(intent.get("season_number")),
+                _integer(intent.get("episode_number")),
+            ):
+                continue
+            seen.add(key)
+            items.append({
+                "item_id": _text(episode.get("tvdb_episode_id") or episode.get("id"))
+                or f"S{key[0]:02d}E{key[1]:03d}",
+                "content_role": "main_episode",
+                "season_number": key[0],
+                "episode_number": key[1],
+            })
+    return sorted(items, key=lambda item: (item["season_number"], item["episode_number"]))
+
+
+def _candidate_query(canonical_title: str, year: str, media_type: str, intent: dict) -> str:
+    scope = intent.get("scope") or "movie_or_series"
+    if media_type == "series" and scope in {"season", "episode"}:
+        season = _integer(intent.get("season_number"))
+        episode = _integer(intent.get("episode_number"))
+        if season is not None:
+            marker = f"S{season:02d}"
+            if scope == "episode" and episode is not None:
+                marker += f"E{episode:0{3 if episode >= 100 else 2}d}"
+            return f"{canonical_title} {marker}"
+    return _text(f"{canonical_title} {year}")
+
+
+def _candidate_contract(
+    candidate: CandidateEntity,
+    titles,
+    intent: dict,
+    plan_id: str,
+    sources: list[dict],
+) -> tuple[dict, dict, dict]:
+    year = next(iter(sorted(candidate.years)), "") or _text(intent.get("year"))
+    media_type = next(iter(sorted(candidate.media_types)), "movie")
+    animation = any(
+        signal in _text(genre).casefold()
+        for fact in candidate.facts
+        for genre in fact.genres
+        for signal in ("animation", "animated", "anime", "动画", "動畫")
+    )
+    category = f"{'animated' if animation else 'live_action'}_{media_type}"
+    source_fact = next((fact for fact in candidate.facts if fact.source_url), candidate.facts[0])
+    identity = {
+        **titles.identity_fields(),
+        "year": year,
+        "content_kind": media_type,
+        "summary": "",
+        "original_release_date": "",
+        "poster_url": candidate.poster_url,
+        "poster_source": _candidate_poster_source(candidate),
+        "external_ids": dict(candidate.external_ids),
+    }
+    if not identity["chinese_title"]:
+        identity["chinese_title"] = identity["original_title"] or identity["english_title"]
+    provider_statuses, provider_support = _provider_status_and_support(sources)
+    contract = {
+        "schema_version": 1,
+        "metadata_id": plan_id,
+        "confirmed": False,
+        "identity": identity,
+        "relation": {
+            "type": "standalone",
+            "target_series": {},
+            "source": "request_entity_graph",
+        },
+        "placement": {
+            "library_type": media_type,
+            "category_kind": category,
+            "season_number": None,
+            "episode_number": None,
+            "mapping_kind": "standalone",
+            "mapping_source": "request_entity_graph",
+            "tvdb_episode_id": "",
+        },
+        "source_entry": {
+            "title": identity["chinese_title"] or identity["english_title"],
+            "url": source_fact.source_url,
+            "provider": source_fact.provider,
+            "verification": "verified",
+        },
+        "items": _candidate_items(candidate, intent),
+        "evidence": {
+            "provider_statuses": provider_statuses,
+            "provider_support": provider_support,
+            "decision": {"mode": "fixed_scorecard", "scoring_version": SCORING_VERSION},
+        },
+        "warnings": [],
+    }
+    entity = {
+        "entity_key": candidate.candidate_key,
+        "content_kind": media_type,
+        "year": year,
+        **{key: value for key, value in titles.identity_fields().items() if key != "english_title"},
+        "canonical_latin_title": titles.canonical_latin_title,
+        "poster_url": candidate.poster_url,
+        "poster_source": _candidate_poster_source(candidate),
+        "external_ids": dict(candidate.external_ids),
+        "scoring_version": SCORING_VERSION,
+    }
+    relation = {"relation_type": "standalone", "mapping_kind": "standalone"}
+    return contract, entity, relation
+
+
 async def build_confirmable_search_plan(
     raw_query: str,
     plan_id: str,
     providers: dict[str, Callable],
     occupied_loader: Callable[[dict], set[int]],
     allocator: TemporarySpecialAllocator,
+    *,
+    budget: PlanningBudget | None = None,
 ) -> dict:
+    # occupied_loader/allocator are applied only after an interactive selection;
+    # no unselected candidate may reserve a persistent or logical episode slot.
+    del occupied_loader, allocator
+    budget = budget or PlanningBudget()
     rule_hypotheses = build_rule_hypotheses(raw_query)
-    first_sources = await collect_evidence(rule_hypotheses, providers)
-    deterministic = evaluate_deterministic_plan(
-        plan_id, raw_query, first_sources
+    sources = await _budgeted(
+        "base_evidence",
+        budget,
+        collect_evidence(rule_hypotheses, providers),
     )
-    if deterministic.plan is not None:
-        plan = _finalize_draft(
-            deterministic.plan,
-            plan_id=plan_id,
-            sources=first_sources,
-            decision=deterministic.decision,
-            occupied_loader=occupied_loader,
-            allocator=allocator,
-        )
-        placement = plan["media_metadata"]["placement"]
-        _log_info(
-            "search_plan status=ready decision=deterministic "
-            f"metadata_id={plan_id} mapping_kind={placement.get('mapping_kind')} "
-            f"query={(plan.get('prowlarr_queries') or [''])[0]}"
-        )
-        return plan
+    graph = build_search_graph(sources)
+    candidates = list(graph.candidates)
+    target = normalize_title((rule_hypotheses.get("intent") or {}).get("title"))
+    exact = [item for item in candidates if target and target in item.normalized_titles]
+    if exact:
+        candidates = exact
+    if not candidates:
+        raise SearchPlanningError("insufficient_independent_support")
+    candidates = candidates[:5]
+    intent = dict(rule_hypotheses.get("intent") or {})
+    intent["media_type"] = _explicit_media_type(raw_query, intent)
 
-    ai_input = {
+    relation_payload = {"hypotheses": []}
+    if COMPLEX_PATTERN.search(raw_query) or any(item.complex_signals for item in candidates):
+        relation_payload = await _budgeted(
+            "relation_scout",
+            budget,
+            asyncio.to_thread(
+                infer_relation_hypotheses_with_ai,
+                {
+                    "raw_query": raw_query,
+                    "intent": intent,
+                    "candidates": [_candidate_context(item) for item in candidates],
+                },
+            ),
+        ) or {"hypotheses": []}
+
+    score_context = {
         "raw_query": raw_query,
-        "intent": rule_hypotheses["intent"],
-        "sources": first_sources,
-        "gate_reason_codes": list(deterministic.reason_codes),
+        "intent": intent,
+        "relation_hypotheses": (relation_payload.get("hypotheses") or [])[:3],
+        "candidates": [_candidate_context(item) for item in candidates],
     }
-    hypotheses = await asyncio.to_thread(infer_search_hypotheses_with_ai, ai_input)
-    if not isinstance(hypotheses, dict):
-        _log_info(f"ai_stage=hypothesis status=unavailable metadata_id={plan_id}")
-        raise SearchPlanningError(
-            "ai_unavailable_after_gate_failure",
-            deterministic.reason_codes,
-        )
-    _log_info(f"ai_stage=hypothesis status=ok metadata_id={plan_id}")
-    second_sources = await collect_evidence(hypotheses, providers)
-    sources = _merge_evidence_passes(first_sources, second_sources)
-    context = {
-        "raw_query": raw_query,
-        "plan_id": plan_id,
-        "intent": rule_hypotheses["intent"],
-        "gate_reason_codes": list(deterministic.reason_codes),
-        "hypotheses": hypotheses,
-        "sources": sources,
-    }
-    draft = await asyncio.to_thread(infer_media_metadata_draft_with_ai, context)
-    if not isinstance(draft, dict):
-        _log_info(f"ai_stage=media_metadata status=unavailable metadata_id={plan_id}")
-        raise SearchPlanningError(
-            "ai_invalid_after_gate_failure",
-            deterministic.reason_codes,
-        )
-    _log_info(f"ai_stage=media_metadata status=ok metadata_id={plan_id}")
-    decision = dict(deterministic.decision)
-    decision.update({
-        "mode": "ai",
-        "ai_required": True,
-        "ai_stage_one_status": "ok",
-        "ai_stage_two_status": "ok",
-    })
-    plan = _finalize_draft(
-        draft,
-        plan_id=plan_id,
-        sources=sources,
-        decision=decision,
-        occupied_loader=occupied_loader,
-        allocator=allocator,
+    raw_scores = await _budgeted(
+        "scorecard",
+        budget,
+        asyncio.to_thread(score_candidates_with_ai, score_context),
     )
-    placement = plan["media_metadata"]["placement"]
+    raw_by_key = {
+        _text(item.get("candidate_key")): item
+        for item in ((raw_scores or {}).get("scorecards") or [])
+        if isinstance(item, dict)
+    }
+    combined = []
+    title_values = {}
+    for candidate in candidates:
+        try:
+            title_values[candidate.candidate_key] = resolve_title_policy(candidate)
+        except TitlePolicyError:
+            continue
+        program = program_score(candidate, intent, None)
+        raw = raw_by_key.get(candidate.candidate_key)
+        ai = AIScore(0, 0, 0, ())
+        if raw is not None:
+            try:
+                ai = validate_ai_scorecard(
+                    raw,
+                    {fact.fact_id for fact in candidate.facts},
+                )
+            except ValueError:
+                _log_info(
+                    f"ai_stage=scorecard status=invalid candidate={candidate.candidate_key}"
+                )
+        combined.append(combine_score(candidate.candidate_key, program, ai))
+    ranked_scores = apply_thresholds(combined)
+    if not ranked_scores:
+        raise SearchPlanningError("canonical_title_unavailable")
+
+    by_key = {item.candidate_key: item for item in candidates}
+    ranked = []
+    for score in ranked_scores[:5]:
+        candidate = by_key[score.candidate_key]
+        contract, entity, relation = _candidate_contract(
+            candidate,
+            title_values[score.candidate_key],
+            intent,
+            plan_id,
+            sources,
+        )
+        query = _candidate_query(
+            entity["canonical_search_title"],
+            entity["year"],
+            entity["content_kind"],
+            intent,
+        )
+        contract["evidence"]["decision"]["score"] = score.total
+        score_value = {
+            "version": score.program.version,
+            "stable_identity": score.program.stable_identity,
+            "independent_sources": score.program.independent_sources,
+            "release_consistency": score.program.release_consistency,
+            "type_and_scope": score.program.type_and_scope,
+            "program_total": score.program.total,
+            "title_equivalence": score.ai.title_equivalence,
+            "relation_consistency": score.ai.relation_consistency,
+            "intent_relevance": score.ai.intent_relevance,
+            "ai_total": score.ai.total,
+            "total": score.total,
+        }
+        ranked.append({
+            "candidate_key": score.candidate_key,
+            "score": score_value,
+            "recommended": score.recommended,
+            "selectable": score.selectable,
+            "media_metadata": contract,
+            "prowlarr_queries": [query],
+            "poster_url": candidate.poster_url,
+            "reasons": list(score.program.reason_codes),
+            "entity_snapshot": entity,
+            "relation_snapshot": relation,
+        })
+    top = ranked[0]
     _log_info(
-        "search_plan status=ready "
-        f"metadata_id={plan_id} mapping_kind={placement.get('mapping_kind')} "
-        f"query={(plan.get('prowlarr_queries') or [''])[0]}"
+        f"search_plan status=ranked metadata_id={plan_id} "
+        f"candidates={len(ranked)} elapsed={budget.elapsed:.3f}"
     )
-    return plan
+    return {
+        "plan_id": plan_id,
+        "media_metadata": deepcopy(top["media_metadata"]),
+        "prowlarr_queries": list(top["prowlarr_queries"]),
+        "candidates": ranked,
+        "source_queries": deepcopy(rule_hypotheses.get("source_queries") or {}),
+        "scoring_version": SCORING_VERSION,
+    }
