@@ -450,6 +450,7 @@ def _relation_pool_entry(candidate: CandidateEntity) -> dict | None:
     year = next(iter(sorted(candidate.years)), "")
     identity = {
         **titles.identity_fields(),
+        "aliases": list(candidate.titles),
         "year": year,
         "external_ids": dict(candidate.external_ids),
     }
@@ -772,6 +773,7 @@ def _candidate_contract(
         }[relation_type]
     identity = {
         **titles.identity_fields(),
+        "aliases": list(candidate.titles),
         "year": year,
         "content_kind": content_kind,
         "summary": "",

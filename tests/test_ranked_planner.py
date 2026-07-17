@@ -67,6 +67,54 @@ def _provider(provider, count, *, title=None, media_type="movie", episodes=None)
 
 
 class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
+    @patch(
+        "telepiplex_media_search.planner.infer_candidate_scorecard_with_ai",
+        return_value=None,
+    )
+    async def test_candidate_contract_carries_only_verified_title_aliases(
+        self,
+        _scorecard,
+    ):
+        def provider(name):
+            def provide(_hypotheses):
+                key = (
+                    "subject_id"
+                    if name == "douban"
+                    else "wikibase_item"
+                )
+                return {
+                    "source": name,
+                    "status": "ok",
+                    "facts": [{
+                        key: f"{name}-1",
+                        "title": "黑暗荣耀",
+                        "english_title": "The Glory",
+                        "official_english_title": "The Glory",
+                        "aliases": ["The Glory", "더 글로리"],
+                        "year": "2022",
+                        "media_type": "series",
+                        "external_ids": {"tvdb": "411469"},
+                    }],
+                }
+
+            return provide
+
+        plan = await build_confirmable_search_plan(
+            "黑暗荣耀",
+            "p-aliases",
+            {
+                "douban": provider("douban"),
+                "wikipedia": provider("wikipedia"),
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            locked_identity=("tvdb", "411469"),
+        )
+
+        aliases = plan["candidates"][0]["media_metadata"]["identity"]["aliases"]
+        self.assertIn("The Glory", aliases)
+        self.assertIn("더 글로리", aliases)
+
     async def test_seven_qualified_candidates_are_all_returned(self):
         plan = await build_confirmable_search_plan(
             "Movie",
