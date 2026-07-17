@@ -32,8 +32,16 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
             {"wikipedia": "not_found", "douban": "server_down"},
         )
 
+    @patch(
+        "telepiplex_media_search.planner.infer_candidate_scorecard_with_ai",
+        return_value=None,
+    )
     @patch("telepiplex_media_search.planner.infer_search_hypotheses_with_ai")
-    async def test_clear_query_never_requires_ai(self, infer):
+    async def test_clear_query_survives_unavailable_scorecard(
+        self,
+        infer,
+        scorecard,
+    ):
         def provider(provider_name):
             def provide(_hypotheses):
                 key = "subject_id" if provider_name == "douban" else "wikibase_item"
@@ -65,7 +73,8 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
 
         candidate = plan["candidates"][0]
         infer.assert_not_called()
-        self.assertNotIn("ai_total", candidate["score"])
+        scorecard.assert_called_once()
+        self.assertEqual(candidate["score"]["ai_total"], 0)
         self.assertTrue(candidate["selectable"])
         self.assertEqual(
             candidate["media_metadata"]["evidence"]["decision"]["mode"],

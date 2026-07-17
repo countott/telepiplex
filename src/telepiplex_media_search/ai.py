@@ -164,22 +164,35 @@ RELATION_SCOUT_PROMPT = """你是影视作品关系审查员。只返回 JSON，
 输入事实：
 """
 
+CANDIDATE_SCORECARD_PROMPT = """你是影视候选评分员。只返回 JSON，不要返回 Markdown。
+你不是数据库，也不能补全事实。你只能引用输入中的 candidate_key 和 fact_id。
+不得输出或修改标题、年份、媒体类型、外部 ID、检索范围、Prowlarr query 或候选集合。
+必须为输入中的每个候选返回且只返回一项评分；不得遗漏、增加或合并候选。
+固定评分维度：
+1. title_equivalence：0-20，用户作品表达与已验证标题事实的语义等价程度。
+2. intent_relevance：0-10，候选媒体类型和年份事实与用户明确意图的相关程度。
+3. relation_consistency：0-10，候选已验证关系事实与用户关系表达的一致程度；没有关系表达时按事实一致性评分。
+每项必须列出实际使用的 fact_ids。total 可省略，程序会自行重算。
+结构：{"scores":[{"candidate_key":"string","title_equivalence":0,"intent_relevance":0,"relation_consistency":0,"fact_ids":["string"]}]}
+输入事实：
+"""
+
 def check_ai_api_available():
     url = runtime_context.config.get("ai", {}).get("api_url", "")
     if not url:
         if runtime_context.logger:
-            runtime_context.logger.warn("AI API URL 未定义.")
+            runtime_context.logger.info("AI API URL 未定义，跳过可选 AI 阶段。")
         return False
     model = runtime_context.config.get("ai", {}).get("model", "")
     if not model:
         if runtime_context.logger:
-            runtime_context.logger.warn("AI 模型未定义.")
+            runtime_context.logger.info("AI 模型未定义，跳过可选 AI 阶段。")
         return False
     
     api_key = runtime_context.config.get("ai", {}).get("api_key", "")
     if not api_key:
         if runtime_context.logger:
-            runtime_context.logger.warn("AI API Key 未定义.")
+            runtime_context.logger.info("AI API Key 未定义，跳过可选 AI 阶段。")
         return False
     return True
 
@@ -420,6 +433,32 @@ def infer_relation_hypotheses_with_ai(context: dict):
     ):
         return None
     return {"hypotheses": hypotheses[:3]}
+
+
+def infer_candidate_scorecard_with_ai(context: dict):
+    if not check_ai_api_available():
+        return None
+    prompt = CANDIDATE_SCORECARD_PROMPT + json.dumps(
+        context or {},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    _log_ai_info(
+        f"AI候选评分输入 context={_compact_json_for_log(context)}"
+    )
+    result = chat_completion(prompt, max_tokens=2400)
+    _log_ai_info(
+        f"AI候选评分原始响应 result={_compact_json_for_log(result)}"
+    )
+    parsed = parse_ai_json_response(result)
+    if not isinstance(parsed, dict) or set(parsed) != {"scores"}:
+        return None
+    scores = parsed.get("scores")
+    if not isinstance(scores, list) or any(
+        not isinstance(item, dict) for item in scores
+    ):
+        return None
+    return {"scores": scores[:7]}
 
 
 def normalize_search_query_with_ai(raw_query: str):

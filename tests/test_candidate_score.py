@@ -3,7 +3,9 @@ import unittest
 from telepiplex_media_search.candidate_score import (
     CandidateScore,
     apply_thresholds,
+    combine_score,
     program_score,
+    validate_ai_candidate_score,
 )
 from telepiplex_media_search.entity_graph import CandidateEntity, EvidenceFact
 
@@ -71,6 +73,73 @@ class CandidateScoreTest(unittest.TestCase):
 
         self.assertTrue(ranked[0].recommended)
         self.assertFalse(ranked[1].recommended)
+
+    def test_ai_scorecard_is_recomputed_from_fact_bound_dimensions(self):
+        score = validate_ai_candidate_score(
+            {
+                "candidate_key": "tvdb:series:411469",
+                "title_equivalence": 18,
+                "intent_relevance": 9,
+                "relation_consistency": 8,
+                "fact_ids": ["tvdb:1", "douban:1", "wikipedia:1"],
+                "total": 99,
+            },
+            candidate_key="tvdb:series:411469",
+            allowed_fact_ids={"tvdb:1", "douban:1", "wikipedia:1"},
+        )
+
+        self.assertEqual(score.total, 35)
+        self.assertEqual(
+            combine_score(
+                "tvdb:series:411469",
+                program_score(
+                    candidate(),
+                    {
+                        "year": "2022",
+                        "media_type": "series",
+                        "scope": "whole_series",
+                    },
+                    None,
+                ),
+                score,
+            ).total,
+            95,
+        )
+
+    def test_unknown_fact_or_out_of_range_dimension_discards_ai_score(self):
+        for payload in (
+            {
+                "candidate_key": "tvdb:series:411469",
+                "title_equivalence": 21,
+                "intent_relevance": 9,
+                "relation_consistency": 8,
+                "fact_ids": ["tvdb:1"],
+            },
+            {
+                "candidate_key": "tvdb:series:411469",
+                "title_equivalence": 18,
+                "intent_relevance": 9,
+                "relation_consistency": 8,
+                "fact_ids": ["fact:invented"],
+            },
+        ):
+            with self.subTest(payload=payload):
+                self.assertIsNone(validate_ai_candidate_score(
+                    payload,
+                    candidate_key="tvdb:series:411469",
+                    allowed_fact_ids={"tvdb:1"},
+                ))
+
+    def test_hard_gate_candidate_is_selectable_without_ai_points(self):
+        program = program_score(candidate(), {}, None)
+
+        ranked = apply_thresholds([
+            combine_score("tvdb:series:411469", program, None)
+        ])
+
+        self.assertEqual(ranked[0].total, 57)
+        self.assertTrue(ranked[0].selectable)
+        self.assertFalse(ranked[0].recommended)
 
 
 if __name__ == "__main__":

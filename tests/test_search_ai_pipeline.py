@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from telepiplex_media_search.ai import (
+    infer_candidate_scorecard_with_ai,
     infer_relation_hypotheses_with_ai,
     infer_search_hypotheses_with_ai,
 )
@@ -70,6 +71,37 @@ class SearchAiPipelineTest(unittest.TestCase):
 
         self.assertEqual(len(result["hypotheses"]), 3)
         self.assertIn("不得编造", chat_mock.call_args.args[0])
+
+    @patch("telepiplex_media_search.ai.check_ai_api_available", return_value=True)
+    @patch("telepiplex_media_search.ai.chat_completion")
+    def test_candidate_scorecard_returns_only_score_objects(
+        self,
+        chat_mock,
+        _available,
+    ):
+        chat_mock.return_value = {
+            "choices": [{"message": {"content": json.dumps({
+                "scores": [{
+                    "candidate_key": "tvdb:series:1",
+                    "title_equivalence": 18,
+                    "intent_relevance": 9,
+                    "relation_consistency": 8,
+                    "fact_ids": ["tvdb:1"],
+                }],
+            })}}],
+        }
+
+        result = infer_candidate_scorecard_with_ai({
+            "candidates": [{"candidate_key": "tvdb:series:1"}],
+        })
+
+        self.assertEqual(
+            result["scores"][0]["candidate_key"],
+            "tvdb:series:1",
+        )
+        prompt = chat_mock.call_args.args[0]
+        self.assertIn("只能引用输入中的 candidate_key 和 fact_id", prompt)
+        self.assertIn("不得输出或修改标题、年份", prompt)
 
 if __name__ == "__main__":
     unittest.main()

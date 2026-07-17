@@ -152,8 +152,16 @@ class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(plan["candidates"]), 1)
         self.assertTrue(plan["candidates"][0]["selectable"])
 
+    @patch(
+        "telepiplex_media_search.planner.infer_candidate_scorecard_with_ai",
+        return_value=None,
+    )
     @patch("telepiplex_media_search.planner.infer_search_hypotheses_with_ai")
-    async def test_clear_query_does_not_require_ai_score_or_intent(self, infer):
+    async def test_clear_query_does_not_require_ai_availability(
+        self,
+        infer,
+        scorecard,
+    ):
         plan = await build_confirmable_search_plan(
             "Movie 1",
             "p-clear",
@@ -166,11 +174,51 @@ class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         infer.assert_not_called()
-        self.assertNotIn("ai_total", plan["candidates"][0]["score"])
+        scorecard.assert_called_once()
+        self.assertEqual(plan["candidates"][0]["score"]["ai_total"], 0)
         self.assertEqual(
             plan["candidates"][0]["media_metadata"]["evidence"]["decision"]["mode"],
             "deterministic_bounded",
         )
+
+    @patch("telepiplex_media_search.planner.infer_candidate_scorecard_with_ai")
+    async def test_ai_can_reorder_but_not_remove_candidates(self, scorecard):
+        def score(context):
+            keys = [
+                item["candidate_key"]
+                for item in context["candidates"]
+            ]
+            return {"scores": [{
+                "candidate_key": key,
+                "title_equivalence": 20 if index else 4,
+                "intent_relevance": 10 if index else 2,
+                "relation_consistency": 10 if index else 1,
+                "fact_ids": [
+                    fact["fact_id"]
+                    for fact in context["candidates"][index]["facts"]
+                ],
+            } for index, key in enumerate(keys)]}
+
+        scorecard.side_effect = score
+        plan = await build_confirmable_search_plan(
+            "Movie",
+            "p-ai-order",
+            {
+                "douban": _provider("douban", 2),
+                "wikipedia": _provider("wikipedia", 2),
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertEqual(len(plan["candidates"]), 2)
+        self.assertGreater(
+            plan["candidates"][0]["score"]["ai_total"],
+            plan["candidates"][1]["score"]["ai_total"],
+        )
+        self.assertTrue(all(
+            item["selectable"] for item in plan["candidates"]
+        ))
 
     async def test_bare_number_requires_official_title_match(self):
         with self.assertRaises(SearchPlanningError) as raised:

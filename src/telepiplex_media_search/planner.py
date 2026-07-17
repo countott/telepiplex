@@ -9,19 +9,19 @@ import time
 import unicodedata
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import replace
 
 from .context import runtime_context
 
 from .ai import (
+    infer_candidate_scorecard_with_ai,
     infer_search_hypotheses_with_ai,
 )
 from .candidate_score import (
-    MINIMUM_SCORE,
     SCORING_VERSION,
     apply_thresholds,
     combine_score,
     program_score,
+    validate_ai_candidate_score,
 )
 from .deterministic import build_rule_hypotheses
 from .entity_graph import CandidateEntity, build_search_graph, normalize_title
@@ -609,6 +609,75 @@ def _candidate_query(canonical_title: str, year: str, media_type: str, intent: d
     )
 
 
+def _candidate_score_context(
+    raw_query: str,
+    intent: dict,
+    candidates: list[CandidateEntity],
+) -> dict:
+    return {
+        "intent": {
+            "raw_query": _text(raw_query),
+            "title": _text(intent.get("title")),
+            "year": _text(intent.get("year")),
+            "media_type": _text(intent.get("media_type")),
+            "scope": _text(intent.get("scope")),
+            "season_number": _integer(intent.get("season_number")),
+            "episode_number": _integer(intent.get("episode_number")),
+        },
+        "candidates": [{
+            "candidate_key": candidate.candidate_key,
+            "facts": [{
+                "fact_id": fact.fact_id,
+                "provider": fact.provider,
+                "titles": list(fact.titles),
+                "year": fact.year,
+                "media_type": fact.media_type,
+                "external_ids": dict(fact.external_ids),
+                "original_language": fact.original_language,
+                "official_english_title": fact.official_english_title,
+                "romanized_original_title": fact.romanized_original_title,
+                "complex_signals": list(fact.complex_signals),
+            } for fact in candidate.facts],
+        } for candidate in candidates],
+    }
+
+
+def _validated_candidate_ai_scores(
+    payload,
+    candidates: list[CandidateEntity],
+) -> dict:
+    if not isinstance(payload, dict) or set(payload) != {"scores"}:
+        return {}
+    scores = payload.get("scores")
+    if not isinstance(scores, list) or len(scores) != len(candidates):
+        return {}
+    expected_keys = [candidate.candidate_key for candidate in candidates]
+    actual_keys = [
+        str(item.get("candidate_key") or "")
+        if isinstance(item, dict)
+        else ""
+        for item in scores
+    ]
+    if len(set(actual_keys)) != len(actual_keys) or set(actual_keys) != set(
+        expected_keys
+    ):
+        return {}
+    raw_by_key = {item["candidate_key"]: item for item in scores}
+    result = {}
+    for candidate in candidates:
+        validated = validate_ai_candidate_score(
+            raw_by_key[candidate.candidate_key],
+            candidate_key=candidate.candidate_key,
+            allowed_fact_ids={
+                fact.fact_id for fact in candidate.facts
+            },
+        )
+        if validated is None:
+            return {}
+        result[candidate.candidate_key] = validated
+    return result
+
+
 def _candidate_is_qualified(
     candidate: CandidateEntity,
     intent: dict,
@@ -910,16 +979,7 @@ async def build_confirmable_search_plan(
         )
         combined.append(combine_score(candidate.candidate_key, program))
     ranked_scores = apply_thresholds(combined)
-    if locked_identity:
-        ranked_scores = [
-            replace(
-                item,
-                total=max(item.total, MINIMUM_SCORE),
-                selectable=not item.program.excluded,
-            )
-            for item in ranked_scores
-        ]
-    if not ranked_scores or ranked_scores[0].total < MINIMUM_SCORE:
+    if not ranked_scores:
         expansion_sources = await _optional_budgeted(
             "candidate_finalize",
             budget,
@@ -950,15 +1010,6 @@ async def build_confirmable_search_plan(
                     ),
                 ))
             ranked_scores = apply_thresholds(combined)
-            if locked_identity:
-                ranked_scores = [
-                    replace(
-                        item,
-                        total=max(item.total, MINIMUM_SCORE),
-                        selectable=not item.program.excluded,
-                    )
-                    for item in ranked_scores
-                ]
             title_values = {}
             for candidate in candidates:
                 if any(
@@ -973,6 +1024,35 @@ async def build_confirmable_search_plan(
                 f"candidates={len(candidates)}"
             )
 
+    candidates_by_key = {
+        candidate.candidate_key: candidate for candidate in candidates
+    }
+    score_candidates = [
+        candidates_by_key[item.candidate_key]
+        for item in ranked_scores
+        if item.candidate_key in candidates_by_key
+    ]
+    ai_payload = await _optional_budgeted(
+        "candidate_finalize",
+        budget,
+        asyncio.to_thread(
+            infer_candidate_scorecard_with_ai,
+            _candidate_score_context(raw_query, intent, score_candidates),
+        ),
+        None,
+    )
+    ai_scores = _validated_candidate_ai_scores(
+        ai_payload,
+        score_candidates,
+    )
+    ranked_scores = apply_thresholds([
+        combine_score(
+            item.candidate_key,
+            item.program,
+            ai_scores.get(item.candidate_key),
+        )
+        for item in ranked_scores
+    ])
     ranked_scores = [item for item in ranked_scores if item.selectable]
     if not ranked_scores:
         raise SearchPlanningError("insufficient_independent_support")
@@ -1003,6 +1083,19 @@ async def build_confirmable_search_plan(
             "release_consistency": score.program.release_consistency,
             "type_and_scope": score.program.type_and_scope,
             "program_total": score.program.total,
+            "ai_total": score.ai.total if score.ai else 0,
+            "ai_dimensions": {
+                "title_equivalence": (
+                    score.ai.title_equivalence if score.ai else 0
+                ),
+                "intent_relevance": (
+                    score.ai.intent_relevance if score.ai else 0
+                ),
+                "relation_consistency": (
+                    score.ai.relation_consistency if score.ai else 0
+                ),
+            },
+            "ai_fact_ids": list(score.ai.fact_ids) if score.ai else [],
             "total": score.total,
         }
         ranked.append({

@@ -40,10 +40,27 @@ class ProgramScore:
 
 
 @dataclass(frozen=True)
+class CandidateAiScore:
+    title_equivalence: int
+    intent_relevance: int
+    relation_consistency: int
+    fact_ids: tuple[str, ...]
+
+    @property
+    def total(self) -> int:
+        return (
+            self.title_equivalence
+            + self.intent_relevance
+            + self.relation_consistency
+        )
+
+
+@dataclass(frozen=True)
 class CandidateScore:
     candidate_key: str
     program: ProgramScore
     total: int
+    ai: CandidateAiScore | None = None
     recommended: bool = False
     selectable: bool = False
 
@@ -124,10 +141,65 @@ def program_score(
     )
 
 
-def combine_score(candidate_key: str, program: ProgramScore) -> CandidateScore:
-    # Normalize the fixed 60-point program score to a user-facing 100 points.
-    total = 0 if program.excluded else round(program.total * 100 / 60)
-    return CandidateScore(candidate_key, program, total)
+def validate_ai_candidate_score(
+    payload,
+    *,
+    candidate_key: str,
+    allowed_fact_ids: set[str] | frozenset[str],
+) -> CandidateAiScore | None:
+    if not isinstance(payload, dict):
+        return None
+    allowed_keys = {
+        "candidate_key",
+        "title_equivalence",
+        "intent_relevance",
+        "relation_consistency",
+        "fact_ids",
+        "total",
+    }
+    required_keys = allowed_keys - {"total"}
+    if not required_keys.issubset(payload) or not set(payload).issubset(
+        allowed_keys
+    ):
+        return None
+    if str(payload.get("candidate_key") or "") != candidate_key:
+        return None
+    dimensions = (
+        ("title_equivalence", 20),
+        ("intent_relevance", 10),
+        ("relation_consistency", 10),
+    )
+    values = {}
+    for name, maximum in dimensions:
+        value = payload.get(name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        if value < 0 or value > maximum:
+            return None
+        values[name] = value
+    fact_ids = payload.get("fact_ids")
+    if (
+        not isinstance(fact_ids, list)
+        or not fact_ids
+        or any(not isinstance(item, str) or not item for item in fact_ids)
+        or not set(fact_ids).issubset(set(allowed_fact_ids))
+    ):
+        return None
+    return CandidateAiScore(
+        title_equivalence=values["title_equivalence"],
+        intent_relevance=values["intent_relevance"],
+        relation_consistency=values["relation_consistency"],
+        fact_ids=tuple(dict.fromkeys(fact_ids)),
+    )
+
+
+def combine_score(
+    candidate_key: str,
+    program: ProgramScore,
+    ai: CandidateAiScore | None = None,
+) -> CandidateScore:
+    total = 0 if program.excluded else program.total + (ai.total if ai else 0)
+    return CandidateScore(candidate_key, program, total, ai)
 
 
 def apply_thresholds(scores: list[CandidateScore]) -> list[CandidateScore]:
@@ -146,6 +218,6 @@ def apply_thresholds(scores: list[CandidateScore]) -> list[CandidateScore]:
         result.append(replace(
             item,
             recommended=recommended,
-            selectable=item.total >= MINIMUM_SCORE and not item.program.excluded,
+            selectable=not item.program.excluded,
         ))
     return result
