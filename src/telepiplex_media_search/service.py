@@ -60,6 +60,8 @@ _PLANNING_ERROR_MESSAGES = {
     "ambiguous_numeric_role": "片名末尾数字无法证明是正式标题的一部分，请补充年份、完整片名或条目链接。",
     "too_many_candidates": "合格候选超过 7 个，请补充年份、完整片名、电影/剧集类型，或提供豆瓣/TVDB 链接。",
     "unsupported_metadata_link": "链接不是可识别的豆瓣/TVDB作品、季或单集地址。",
+    "unsupported_scope_syntax": "不支持范围、1x02 或英文数字单词写法；请使用作品名、S01、S01E01 或数字季/集。",
+    "unsupported_special_scope": "暂不支持 Special、Season 0、OVA、OAD 或附加内容下载。",
     "direct_link_not_found": "无法读取该豆瓣/TVDB条目，请检查链接是否有效。",
     "direct_link_invalid": "链接条目缺少可验证的标题或稳定ID。",
 }
@@ -1302,8 +1304,8 @@ class MediaSearchFeature:
             "tvdb": self._tvdb_provider,
         }
         parsed = classify_search_input(raw_query)
-        if parsed.kind == "invalid_link":
-            raise SearchPlanningError("unsupported_metadata_link")
+        if parsed.kind in {"invalid_link", "unsupported_text"}:
+            raise SearchPlanningError(parsed.reason)
         locked_identity = None
         planning_query = raw_query
         if parsed.kind == "link":

@@ -6,6 +6,10 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from .query_normalization import (
+    has_unsupported_range_syntax,
+    normalize_query_text,
+)
 from .search_query import extract_douban_subject_id, is_supported_metadata_url
 from .search_resolution import parse_search_intent
 
@@ -84,23 +88,30 @@ def _metadata_link(raw_query: str) -> MetadataLink | None:
 
 
 def classify_search_input(raw_query: str) -> ParsedInput:
-    raw_query = " ".join(str(raw_query or "").split())
-    link = _metadata_link(raw_query)
+    collapsed_query = " ".join(str(raw_query or "").split())
+    link = _metadata_link(collapsed_query)
     if link:
         return ParsedInput(
             kind="link",
-            raw_query=raw_query,
+            raw_query=collapsed_query,
             media_type=link.media_type,
             scope=link.scope,
             link=link,
         )
-    if is_supported_metadata_url(raw_query):
+    if is_supported_metadata_url(collapsed_query):
         return ParsedInput(
             kind="invalid_link",
-            raw_query=raw_query,
+            raw_query=collapsed_query,
             reason="unsupported_metadata_link",
         )
+    if has_unsupported_range_syntax(collapsed_query):
+        return ParsedInput(
+            kind="unsupported_text",
+            raw_query=collapsed_query,
+            reason="unsupported_scope_syntax",
+        )
 
+    raw_query = normalize_query_text(collapsed_query)
     intent = parse_search_intent(raw_query)
     scope = str(intent.get("scope") or "movie_or_series")
     if scope == "movie_or_series":

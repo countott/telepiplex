@@ -805,8 +805,8 @@ async def build_confirmable_search_plan(
     del occupied_loader, allocator
     budget = budget or PlanningBudget()
     parsed_input = classify_search_input(raw_query)
-    if parsed_input.kind == "invalid_link":
-        raise SearchPlanningError("unsupported_metadata_link")
+    if parsed_input.kind in {"invalid_link", "unsupported_text"}:
+        raise SearchPlanningError(parsed_input.reason)
     rule_hypotheses = build_rule_hypotheses(raw_query)
     sources = await _budgeted(
         "base_evidence",

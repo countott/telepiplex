@@ -75,14 +75,12 @@ def _parse_number_token(value: str) -> int:
 
 
 CHINESE_NUMBER_PATTERN = r"\d+|[零〇一二两三四五六七八九十]+"
-ENGLISH_NUMBER_PATTERN = r"\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty"
-SEASON_EPISODE_WORD_PATTERN = rf"(?:{ENGLISH_NUMBER_PATTERN})"
+SEASON_EPISODE_WORD_PATTERN = r"(?:\d+)"
 
 
 def _strip_scope_text(text: str) -> str:
     patterns = [
         r"(?i)\bS\d{1,2}\s*E\d{1,3}\b",
-        r"(?i)\b\d{1,2}\s*x\s*\d{1,3}\b",
         rf"(?i)\bseason\s*(?:{SEASON_EPISODE_WORD_PATTERN})\s*(?:episode|ep)\s*(?:{SEASON_EPISODE_WORD_PATTERN})\b",
         r"(?i)\bS\d{1,2}\b",
         rf"第?\s*(?:{CHINESE_NUMBER_PATTERN})\s*季\s*第?\s*(?:{CHINESE_NUMBER_PATTERN})\s*[集话話]",
@@ -111,11 +109,6 @@ def parse_search_intent(raw_query: str) -> dict:
         intent["year"] = year_match.group(1)
 
     episode_match = re.search(r"(?i)\bS(\d{1,2})\s*E(\d{1,3})\b", query)
-    if not episode_match:
-        episode_match = re.search(
-            r"(?i)\b(\d{1,2})\s*x\s*(\d{1,3})\b",
-            query,
-        )
     if not episode_match:
         episode_match = re.search(
             rf"(?i)\bseason\s*({SEASON_EPISODE_WORD_PATTERN})\s*(?:episode|ep)\s*({SEASON_EPISODE_WORD_PATTERN})\b",

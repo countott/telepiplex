@@ -65,6 +65,59 @@ class DirectLinkTest(unittest.TestCase):
         self.assertEqual((direct.season_number, direct.episode_number), (1, 3))
         self.assertIn("S01E03", direct.query)
 
+    @patch("telepiplex_media_search.direct_link.get_tvdb_episode")
+    @patch("telepiplex_media_search.direct_link.get_tvdb_series")
+    def test_tvdb_s00_episode_link_is_rejected(self, series, episode):
+        episode.return_value = {
+            "tvdb_episode_id": "1",
+            "tvdb_series_id": "2",
+            "season_number": 0,
+            "episode_number": 1,
+        }
+        series.return_value = {
+            "tvdb_series_id": "2",
+            "english_title": "Series",
+            "episodes": [],
+        }
+
+        with self.assertRaisesRegex(
+            DirectLinkError,
+            "unsupported_special_scope",
+        ):
+            resolve_direct_link(MetadataLink(
+                provider="tvdb",
+                media_type="series",
+                entity_id="1",
+                scope="episode",
+                url="https://thetvdb.com/episodes/1",
+            ))
+
+    @patch("telepiplex_media_search.direct_link.get_tvdb_season")
+    @patch("telepiplex_media_search.direct_link.get_tvdb_series")
+    def test_tvdb_s00_season_link_is_rejected(self, series, season):
+        season.return_value = {
+            "tvdb_season_id": "1",
+            "tvdb_series_id": "2",
+            "season_number": 0,
+        }
+        series.return_value = {
+            "tvdb_series_id": "2",
+            "english_title": "Series",
+            "episodes": [],
+        }
+
+        with self.assertRaisesRegex(
+            DirectLinkError,
+            "unsupported_special_scope",
+        ):
+            resolve_direct_link(MetadataLink(
+                provider="tvdb",
+                media_type="series",
+                entity_id="1",
+                scope="season",
+                url="https://thetvdb.com/seasons/1",
+            ))
+
     @patch(
         "telepiplex_media_search.direct_link.lookup_douban_subject",
         return_value=None,

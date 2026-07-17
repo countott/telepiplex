@@ -126,6 +126,8 @@ def resolve_direct_link(link: MetadataLink) -> DirectEntity:
         series, season_number, episode_number = _tvdb_series_entity(link)
         if not isinstance(series, dict):
             raise DirectLinkError("direct_link_not_found")
+        if link.scope in {"season", "episode"} and season_number == 0:
+            raise DirectLinkError("unsupported_special_scope")
         title = _text(series.get("english_title") or series.get("name"))
         entity_id = _text(series.get("tvdb_series_id") or series.get("tvdb_id"))
         fact = {

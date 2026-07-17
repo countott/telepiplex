@@ -19,6 +19,39 @@ class InputContractTest(unittest.TestCase):
             ("episode", 1, 3),
         )
 
+    def test_nfkc_and_punctuation_keep_the_full_title(self):
+        parsed = classify_search_input("《蝙蝠侠：黑暗骑士》")
+
+        self.assertEqual(parsed.title, "蝙蝠侠 黑暗骑士")
+
+    def test_numeric_english_season_and_episode_are_supported(self):
+        season = classify_search_input("The Glory Season 01")
+        episode = classify_search_input("The Glory Season 1 Episode 2")
+
+        self.assertEqual((season.scope, season.season_number), ("season", 1))
+        self.assertEqual(
+            (episode.scope, episode.season_number, episode.episode_number),
+            ("episode", 1, 2),
+        )
+
+    def test_ranges_and_number_words_are_rejected(self):
+        for query in (
+            "Title S01-S03",
+            "Title S01E01-E05",
+            "Title Season One",
+        ):
+            with self.subTest(query=query):
+                parsed = classify_search_input(query)
+
+                self.assertEqual(parsed.kind, "unsupported_text")
+                self.assertEqual(parsed.reason, "unsupported_scope_syntax")
+
+    def test_1x02_is_not_a_supported_user_scope(self):
+        parsed = classify_search_input("Title 1x02")
+
+        self.assertEqual(parsed.kind, "unsupported_text")
+        self.assertEqual(parsed.reason, "unsupported_scope_syntax")
+
     def test_year_is_not_an_ambiguous_bare_number(self):
         parsed = classify_search_input("蝙蝠侠 1989")
 
