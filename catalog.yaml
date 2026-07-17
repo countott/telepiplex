@@ -67,6 +67,17 @@ plugins:
           branch: feature/media-search
           commit: 6e1c2f08aed447a227af4d2a9ea54a6262e7a024
         url: https://github.com/countott/telepiplex/releases/download/media-search-v1.3.0/media-search-1.3.0.tpx
+      1.4.0:
+        core_api: '>=1.2,<2.0'
+        provides:
+        - media.search
+        requires:
+        - download.provider
+        sha256: 48c1482944b70d960b70253c10a9745317989e0b6d4dc174d344be0b3ecba545
+        source:
+          branch: feature/media-search
+          commit: 44085257a3979bbfd69be6fcb550337ba3c0c9b4
+        url: https://github.com/countott/telepiplex/releases/download/media-search-v1.4.0/media-search-1.4.0.tpx
   open115:
     versions:
       1.0.1:
@@ -266,5 +277,5 @@ plugins:
           branch: feature/renaming
           commit: 0b1ef63bdafe83367f69e35a41ac3f5ae23f53b9
         url: https://github.com/countott/telepiplex/releases/download/renaming-v1.2.0/renaming-1.2.0.tpx
-release: plex-management-v1.2.0
+release: media-search-v1.4.0
 schema_version: 1
