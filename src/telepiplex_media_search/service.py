@@ -25,6 +25,7 @@ from .adapters.tvdb import (
 )
 from .adapters.wikipedia import lookup_wikipedia_evidence
 from .config_wizard import MediaSearchConfigWizard
+from .context import runtime_context
 from .direct_link import DirectLinkError, resolve_direct_link
 from .input_contract import classify_search_input
 from .planner import SearchPlanningError, build_confirmable_search_plan
@@ -117,6 +118,19 @@ class MediaSearchFeature:
         raw_query = " ".join(str(payload.get("query") or "").split())
         if not raw_query:
             raise FeatureError("invalid_query", "metadata query is required")
+        probe = (
+            payload.get("probe")
+            if isinstance(payload.get("probe"), dict)
+            else {}
+        )
+        if probe and runtime_context.logger:
+            runtime_context.logger.info(
+                "metadata_probe "
+                f"content_shape={str(probe.get('content_shape') or 'unknown')} "
+                f"seasons={len(probe.get('observed_seasons') or [])} "
+                f"episodes={len(probe.get('observed_episodes') or [])} "
+                f"videos={str(probe.get('video_count') or 0)}"
+            )
         plan_id = f"cap-{uuid.uuid4().hex[:10]}"
         try:
             plan = await self.plan_builder(raw_query, plan_id)

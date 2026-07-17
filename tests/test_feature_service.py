@@ -960,7 +960,10 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.search_queries, [("The Glory", "series")])
 
     async def test_metadata_capability_resolves_once_without_registry(self):
-        async def live_planner(_raw_query, plan_id):
+        planner_queries = []
+
+        async def live_planner(raw_query, plan_id):
+            planner_queries.append(raw_query)
             result = ranked_search_plan()
             result["plan_id"] = plan_id
             result["candidates"] = result["candidates"][:1]
@@ -968,13 +971,30 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             return result
 
         self.feature.plan_builder = live_planner
-        resolved = await self.feature.metadata_capability({
-            "method": "resolve_metadata",
-            "payload": {"query": "English Title 2024"},
-            "context": {"idempotency_key": "rename-job-1"},
-        })
+        with self.assertLogs(
+            "telepiplex.media-search",
+            level="INFO",
+        ) as captured:
+            resolved = await self.feature.metadata_capability({
+                "method": "resolve_metadata",
+                "payload": {
+                    "query": "English Title 2024",
+                    "probe": {
+                        "content_shape": "movie",
+                        "observed_seasons": [],
+                        "observed_episodes": [],
+                        "video_count": 1,
+                    },
+                },
+                "context": {"idempotency_key": "rename-job-1"},
+            })
 
         self.assertTrue(resolved["media_metadata"]["confirmed"])
+        self.assertEqual(planner_queries, ["English Title 2024"])
+        self.assertTrue(any(
+            "metadata_probe content_shape=movie" in line
+            for line in captured.output
+        ))
         self.assertEqual(
             resolved["media_metadata"]["identity"]["english_title"],
             "English Title",
