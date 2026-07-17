@@ -10,6 +10,7 @@ import yaml
 
 from telepiplex_plugin_sdk.media_metadata import attach_media_metadata
 
+from telepiplex_renaming.content_probe import build_metadata_probe
 from telepiplex_renaming.models import DownloadCompletedEvent
 from telepiplex_renaming.processor import process_generic_media, process_tvdb_episode
 from telepiplex_renaming.service import RenamingFeature
@@ -154,6 +155,38 @@ class RenamingProcessorTest(unittest.TestCase):
             "ai": {},
             "metadata": {},
         })
+
+    def test_probe_uses_root_identity_and_separates_content_shape(self):
+        probe = build_metadata_probe({
+            "download_root": "/Downloads/The.Office.US",
+            "resource_name": "The.Office.US",
+            "release": {"title": "The.Office.US.S01-S09.1080p"},
+            "file_tree": [{
+                "relative_path": "S01/The.Office.S01E01.mkv",
+                "is_dir": False,
+            }, {
+                "relative_path": "S09/The.Office.S09E23.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "The Office US")
+        self.assertEqual(probe["content_shape"], "multi_season_pack")
+        self.assertEqual(probe["observed_seasons"], [1, 9])
+        self.assertNotIn("S09E23", probe["identity_query"])
+
+    def test_probe_strips_scope_and_quality_but_keeps_movie_year(self):
+        probe = build_metadata_probe({
+            "resource_name": "Movie.2024.1080p.WEB-DL.mkv",
+            "file_tree": [{
+                "relative_path": "Movie.2024.1080p.WEB-DL.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "Movie 2024")
+        self.assertEqual(probe["year_hint"], "2024")
+        self.assertEqual(probe["content_shape"], "movie")
 
     def test_ordinary_movie_keeps_largest_video_and_deletes_everything_else(self):
         storage = FakeStorage([
@@ -479,6 +512,7 @@ class FakeCore:
     async def call_capability(self, capability, method, payload, **_kwargs):
         self.assert_capability = capability
         if capability == "media.search":
+            self.metadata_payload = payload
             self.metadata_query = payload["query"]
             return {
                 "media_metadata": movie_contract(),
@@ -844,7 +878,7 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(core.storage.moved, [])
         self.assertEqual(core.events, [])
 
-    async def test_direct_magnet_requeries_media_search_with_release_and_file_tree(self):
+    async def test_direct_magnet_sends_structured_probe_not_file_tree_sentence(self):
         core = FakeCore()
         feature = RenamingFeature(
             config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
@@ -872,8 +906,13 @@ class RenamingFeatureTest(unittest.IsolatedAsyncioTestCase):
         })
         await runtime.wait()
 
-        self.assertIn("Movie.2024.1080p.WEB-DL", core.metadata_query)
-        self.assertIn("Movie.2024.mkv", core.metadata_query)
+        self.assertEqual(core.metadata_payload["query"], "Movie 2024")
+        self.assertEqual(
+            core.metadata_payload["probe"]["content_shape"],
+            "movie",
+        )
+        self.assertNotIn("|", core.metadata_payload["query"])
+        self.assertNotIn("1080p", core.metadata_payload["query"])
         self.assertEqual(
             core.storage.renamed[0][0],
             "/Downloads/Movie.2024.mkv",

@@ -13,6 +13,7 @@ from telepiplex_plugin_sdk.media_metadata import (
 )
 
 from .config_wizard import RenamingConfigWizard
+from .content_probe import build_metadata_probe
 from .context import runtime_context
 from .models import DownloadCompletedEvent, PostDownloadResult
 from .operations import OperationCancelled, RenameOperationJournal
@@ -418,10 +419,14 @@ class RenamingFeature:
                     control="cancel",
                 )
                 try:
+                    probe = build_metadata_probe(payload)
                     resolved = await self.core.call_capability(
                         "media.search",
                         "resolve_metadata",
-                        {"query": self._metadata_query(payload)},
+                        {
+                            "query": probe["identity_query"],
+                            "probe": probe,
+                        },
                         deadline=float(self.config.get("metadata_timeout") or 120),
                         idempotency_key=f"{job_id}:metadata",
                     )
@@ -1079,25 +1084,6 @@ class RenamingFeature:
     @staticmethod
     def _owner_key(request):
         return int(request.get("chat_id") or 0), int(request.get("user_id") or 0)
-
-    @staticmethod
-    def _metadata_query(payload):
-        values = []
-        release = payload.get("release")
-        if isinstance(release, dict):
-            values.append(release.get("title"))
-        values.append(payload.get("resource_name"))
-        for node in payload.get("file_tree") or []:
-            if isinstance(node, dict) and not node.get("is_dir"):
-                values.append(node.get("relative_path") or node.get("name"))
-        cleaned = []
-        seen = set()
-        for value in values:
-            value = " ".join(str(value or "").split())
-            if value and value not in seen:
-                seen.add(value)
-                cleaned.append(value)
-        return " | ".join(cleaned)
 
     def _process(self, event: DownloadCompletedEvent) -> PostDownloadResult:
         result = process_tvdb_episode(event)
