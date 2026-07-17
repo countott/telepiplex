@@ -30,6 +30,7 @@ class DirectLinkTest(unittest.TestCase):
         self.assertEqual(direct.stable_identity, ("douban_subject", "35314632"))
         self.assertEqual(direct.scope, "work")
         self.assertEqual(direct.media_type, "series")
+        self.assertEqual(direct.query, "The Glory")
 
     @patch("telepiplex_media_search.direct_link.get_tvdb_episode")
     @patch("telepiplex_media_search.direct_link.get_tvdb_series")

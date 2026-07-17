@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from datetime import date, datetime
 
+from .prowlarr_query import build_prowlarr_query
+
 
 def _collapse_spaces(value: str) -> str:
     return " ".join(str(value or "").replace("\xa0", " ").split())
@@ -163,11 +165,6 @@ def _candidate_query_title(entry: dict) -> str:
     if title and re.search(r"[A-Za-z]", title):
         return title
     return title
-
-
-def _clean_prowlarr_query_text(value: str) -> str:
-    value = re.sub(r"[^\w\u4e00-\u9fff]+", " ", str(value or ""), flags=re.UNICODE)
-    return _collapse_spaces(value)
 
 
 def _strip_trailing_season_suffix(value: str) -> str:
@@ -403,18 +400,15 @@ def build_confirmation_candidates(
 
 
 def candidate_to_prowlarr_query(candidate: dict) -> str:
-    title = _clean_prowlarr_query_text(_candidate_query_title(candidate))
+    title = _candidate_query_title(candidate)
     scope = candidate.get("scope")
     if candidate.get("media_type") == "movie" or scope == "movie":
-        year = str(candidate.get("year") or "").strip()
-        return _collapse_spaces(f"{title} {year}" if year and year not in title else title)
-
-    title = _clean_prowlarr_query_text(_strip_trailing_season_suffix(title))
-    if scope == "whole_series":
-        year = str(candidate.get("year") or "").strip()
-        return _collapse_spaces(f"{title} {year}" if year and year not in title else title)
-    if scope == "episode":
-        return _collapse_spaces(f"{title} S{int(candidate.get('season_number')):02d}E{int(candidate.get('episode_number')):02d}")
-    if scope == "season":
-        return _collapse_spaces(f"{title} S{int(candidate.get('season_number')):02d}")
-    return title
+        scope = "movie"
+    else:
+        title = _strip_trailing_season_suffix(title)
+    return build_prowlarr_query(
+        title,
+        scope or "work",
+        candidate.get("season_number"),
+        candidate.get("episode_number"),
+    )

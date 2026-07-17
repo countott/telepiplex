@@ -26,6 +26,7 @@ from .candidate_score import (
 from .deterministic import build_rule_hypotheses
 from .entity_graph import CandidateEntity, build_search_graph, normalize_title
 from .input_contract import classify_search_input, has_ambiguous_bare_number
+from .prowlarr_query import build_prowlarr_query
 from .search_plan import (
     TEMPORARY_MAPPING_KIND,
     TemporarySpecialAllocator,
@@ -596,16 +597,16 @@ def _expanded_candidate(
 
 
 def _candidate_query(canonical_title: str, year: str, media_type: str, intent: dict) -> str:
+    del year
     scope = intent.get("scope") or "movie_or_series"
-    if media_type == "series" and scope in {"season", "episode"}:
-        season = _integer(intent.get("season_number"))
-        episode = _integer(intent.get("episode_number"))
-        if season is not None:
-            marker = f"S{season:02d}"
-            if scope == "episode" and episode is not None:
-                marker += f"E{episode:0{3 if episode >= 100 else 2}d}"
-            return f"{canonical_title} {marker}"
-    return _text(f"{canonical_title} {year}")
+    if media_type == "movie":
+        scope = "movie"
+    return build_prowlarr_query(
+        canonical_title,
+        scope,
+        _integer(intent.get("season_number")),
+        _integer(intent.get("episode_number")),
+    )
 
 
 def _candidate_is_qualified(

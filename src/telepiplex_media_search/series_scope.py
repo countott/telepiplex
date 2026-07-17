@@ -6,6 +6,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date
 
+from .prowlarr_query import build_prowlarr_query
+
 
 class SeriesScopeError(ValueError):
     pass
@@ -90,14 +92,11 @@ def apply_series_scope(
     english = " ".join(
         str((result.get("identity") or {}).get("english_title") or "").split()
     )
-    year = " ".join(
-        str((result.get("identity") or {}).get("year") or "").split()
-    )
     if not english:
         raise SeriesScopeError("english_title_missing")
     choice = str(choice or "")
     if choice == "whole_series":
-        query = " ".join(value for value in (english, year) if value)
+        query = build_prowlarr_query(english, "whole_series")
         selected = [
             item
             for item in result.get("items") or []
@@ -114,7 +113,11 @@ def apply_series_scope(
             aired = inventory.aired_by_season.get(season_number, ())
             if not aired:
                 raise SeriesScopeError("season_not_aired")
-            query = f"{english} S{season_number:02d}"
+            query = build_prowlarr_query(
+                english,
+                "season",
+                season_number=season_number,
+            )
             selected = [
                 item
                 for item in result.get("items") or []
@@ -129,7 +132,12 @@ def apply_series_scope(
                 raise SeriesScopeError("episode_not_found")
             if episode_number not in inventory.aired_by_season.get(season_number, ()):
                 raise SeriesScopeError("episode_not_aired")
-            query = f"{english} S{season_number:02d}E{episode_number:02d}"
+            query = build_prowlarr_query(
+                english,
+                "episode",
+                season_number=season_number,
+                episode_number=episode_number,
+            )
             selected = [
                 item
                 for item in result.get("items") or []

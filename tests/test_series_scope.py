@@ -82,7 +82,7 @@ class SeriesScopeTest(unittest.TestCase):
             today=date(2026, 7, 16),
         )
 
-        self.assertEqual(value["retrieval"]["query"], "The Glory 2022")
+        self.assertEqual(value["retrieval"]["query"], "The Glory")
         self.assertNotIn("S01E01", value["retrieval"]["query"])
 
     def test_unreleased_episode_is_rejected(self):

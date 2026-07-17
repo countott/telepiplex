@@ -12,6 +12,7 @@ from .adapters.tvdb import (
     get_tvdb_series,
 )
 from .input_contract import MetadataLink
+from .prowlarr_query import build_prowlarr_query
 
 
 class DirectLinkError(ValueError):
@@ -32,19 +33,12 @@ class DirectEntity:
 
     @property
     def query(self) -> str:
-        base = " ".join(value for value in (self.title, self.year) if value)
-        if self.scope == "season" and self.season_number is not None:
-            return f"{base} S{self.season_number:02d}"
-        if (
-            self.scope == "episode"
-            and self.season_number is not None
-            and self.episode_number is not None
-        ):
-            return (
-                f"{base} S{self.season_number:02d}"
-                f"E{self.episode_number:02d}"
-            )
-        return base
+        return build_prowlarr_query(
+            self.title,
+            self.scope,
+            self.season_number,
+            self.episode_number,
+        )
 
 
 def _text(value) -> str:

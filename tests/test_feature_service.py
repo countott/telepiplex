@@ -312,7 +312,7 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(confirmed["operation"]["stage"], "prowlarr_search")
         await self.runtime.run("media-search-releases-")
 
-        self.assertEqual(self.search_queries, [("English Title 2024", "movie")])
+        self.assertEqual(self.search_queries, [("English Title", "movie")])
         self.assertIn("找到 1 个", self.core.reports[-1]["status_text"])
         self.assertEqual(self.core.reports[-1]["state"], "awaiting_input")
 
@@ -404,7 +404,7 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_rule_series_queries_preserve_requested_scope(self):
         cases = {
-            "whole_series": "English Title 2024",
+            "whole_series": "English Title",
             "season": "English Title S02",
             "episode": "English Title S02E05",
         }
@@ -433,7 +433,7 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                     expected,
                 )
 
-    async def test_ai_whole_series_uses_clean_ai_query_when_scope_is_unknown(self):
+    async def test_whole_series_query_uses_locked_canonical_identity(self):
         plan = search_plan()
         contract = plan["media_metadata"]
         contract["identity"]["content_kind"] = "series"
@@ -454,7 +454,7 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             self.feature._english_prowlarr_query(plan, contract),
-            "The Glory 2022",
+            "English Title",
         )
 
     async def test_selected_release_calls_download_provider_with_canonical_contract(self):
@@ -838,7 +838,7 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(started["operation"]["stage"], "prowlarr_search")
         await self.runtime.run("media-search-releases-")
 
-        self.assertEqual(self.search_queries, [("The Glory 2022", "series")])
+        self.assertEqual(self.search_queries, [("The Glory", "series")])
 
     async def test_metadata_capability_resolves_once_without_registry(self):
         async def live_planner(_raw_query, plan_id):

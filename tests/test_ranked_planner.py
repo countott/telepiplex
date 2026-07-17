@@ -231,7 +231,7 @@ class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             candidate["media_metadata"]["retrieval"]["query"],
-            "The Glory 2024",
+            "The Glory",
         )
         self.assertNotIn("S01E01", candidate["prowlarr_queries"][0])
         scoped = apply_series_scope(

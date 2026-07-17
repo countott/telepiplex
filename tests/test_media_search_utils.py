@@ -11,11 +11,39 @@ from telepiplex_media_search.release_score import (
     filter_relevant_releases,
     rank_releases,
 )
+from telepiplex_media_search.prowlarr_query import build_prowlarr_query
 from telepiplex_media_search.search_query import parse_douban_page_title
 from telepiplex_media_search.search_resolution import candidate_to_prowlarr_query, parse_search_intent
 
 
 class MediaSearchUtilsTest(unittest.TestCase):
+    def test_canonical_queries_are_minimal(self):
+        self.assertEqual(
+            build_prowlarr_query("Kill Bill Vol. 1", "movie"),
+            "Kill Bill Vol 1",
+        )
+        self.assertEqual(
+            build_prowlarr_query("The Office US", "whole_series"),
+            "The Office US",
+        )
+        self.assertEqual(
+            build_prowlarr_query(
+                "The Office US",
+                "season",
+                season_number=1,
+            ),
+            "The Office US S01",
+        )
+        self.assertEqual(
+            build_prowlarr_query(
+                "The Office US",
+                "episode",
+                season_number=1,
+                episode_number=2,
+            ),
+            "The Office US S01E02",
+        )
+
     def test_candidate_to_prowlarr_query_preserves_episode_scope(self):
         query = candidate_to_prowlarr_query(
             {
@@ -28,7 +56,7 @@ class MediaSearchUtilsTest(unittest.TestCase):
         )
         self.assertEqual(query, "Rick and Morty S09E07")
 
-    def test_candidate_to_prowlarr_query_adds_year_for_whole_series(self):
+    def test_candidate_to_prowlarr_query_omits_year_for_whole_series(self):
         query = candidate_to_prowlarr_query(
             {
                 "media_type": "series",
@@ -38,7 +66,7 @@ class MediaSearchUtilsTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(query, "Someday or One Day 2019")
+        self.assertEqual(query, "Someday or One Day")
 
     def test_parse_search_intent_recognizes_chinese_episode(self):
         intent = parse_search_intent("瑞克和莫蒂 第九季第七集")

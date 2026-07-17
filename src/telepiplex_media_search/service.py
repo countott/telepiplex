@@ -24,6 +24,7 @@ from .config_wizard import MediaSearchConfigWizard
 from .direct_link import DirectLinkError, resolve_direct_link
 from .input_contract import classify_search_input
 from .planner import SearchPlanningError, build_confirmable_search_plan
+from .prowlarr_query import build_prowlarr_query
 from .release_score import filter_relevant_releases, rank_releases
 from .search_plan import (
     TemporarySpecialAllocator,
@@ -1381,41 +1382,48 @@ class MediaSearchFeature:
 
     @staticmethod
     def _english_prowlarr_query(plan: dict, contract: dict) -> str:
+        del plan
         retrieval = contract.get("retrieval") or {}
-        retrieval_query = " ".join(str(retrieval.get("query") or "").split())
-        if retrieval_query and _LATIN.search(retrieval_query):
-            return retrieval_query
         identity = contract.get("identity") or {}
         english = " ".join(str(identity.get("english_title") or "").split())
-        year = " ".join(str(identity.get("year") or "").split())
+        if not english or not _LATIN.search(english):
+            raise FeatureError(
+                "english_title_missing",
+                "Prowlarr search requires a canonical Latin title",
+            )
+        media_type = str(retrieval.get("media_type") or "")
+        scope = str(retrieval.get("scope") or "work")
+        if media_type == "movie":
+            scope = "movie"
+        decision = ((contract.get("evidence") or {}).get("decision") or {})
         placement = contract.get("placement") or {}
-        if placement.get("library_type") == "series":
-            decision = ((contract.get("evidence") or {}).get("decision") or {})
-            scope = str(decision.get("scope") or "")
-            if scope == "whole_series" and english and _LATIN.search(english):
-                return " ".join(item for item in (english, year) if item)
-            if decision.get("mode") == "ai" and scope not in {
-                "whole_series", "season", "episode"
-            }:
-                for query in plan.get("prowlarr_queries") or []:
-                    query = " ".join(str(query).split())
-                    if _LATIN.search(query) and not re.search(r"[\u3400-\u9fff]", query):
-                        return query
+        season = decision.get("season_number")
+        episode = decision.get("episode_number")
+        if season is None:
             season = placement.get("season_number")
+        if episode is None:
             episode = placement.get("episode_number")
-            if english and _LATIN.search(english) and season is not None:
-                marker = f"S{int(season):02d}"
-                if scope != "season" and episode is not None:
-                    width = 2 if int(episode) < 100 else 3
-                    marker += f"E{int(episode):0{width}d}"
-                return f"{english} {marker}"
-        if english and _LATIN.search(english):
-            return " ".join(item for item in (english, year) if item)
-        for query in plan.get("prowlarr_queries") or []:
-            query = " ".join(str(query).split())
-            if _LATIN.search(query):
-                return query
-        raise FeatureError("english_title_missing", "Prowlarr search requires an English title")
+        if scope in {"season", "episode"} and season is None:
+            items = contract.get("items") or []
+            first = next(
+                (item for item in items if isinstance(item, dict)),
+                {},
+            )
+            season = first.get("season_number")
+            if episode is None:
+                episode = first.get("episode_number")
+        try:
+            return build_prowlarr_query(
+                english,
+                scope,
+                season_number=season,
+                episode_number=episode,
+            )
+        except (TypeError, ValueError) as exc:
+            raise FeatureError(
+                "bounded_scope_incomplete",
+                "Prowlarr search scope is incomplete",
+            ) from exc
 
     def _release_plan(self, plan_id: str):
         self.plans.pop(plan_id, None)
