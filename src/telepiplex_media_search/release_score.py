@@ -132,24 +132,53 @@ def _score_size(size: int) -> int:
     return min(15, int(gib / 2))
 
 
-def score_release(item: dict) -> tuple[int, list[str]]:
+def score_release_details(item: dict) -> tuple[int, list[dict]]:
     title = item.get("title") or ""
     scoring = _get_scoring_config()
-    score = 0
-    features = []
+    details = []
 
     for keyword, keyword_score in _keyword_score_entries(scoring):
         if _contains_keyword(title, keyword):
-            features.append(keyword)
-            score += keyword_score
+            details.append({
+                "kind": "keyword",
+                "label": keyword,
+                "score": keyword_score,
+            })
 
     indexer_score, indexer_name = _indexer_score(item.get("indexer"), scoring)
     if indexer_name:
-        features.append(f"indexer:{indexer_name}")
-        score += indexer_score
+        details.append({
+            "kind": "indexer",
+            "label": indexer_name,
+            "score": indexer_score,
+        })
 
-    score += _score_seeders(_safe_int(item.get("seeders")))
-    score += _score_size(_safe_int(item.get("size")))
+    seeders = _safe_int(item.get("seeders"))
+    details.append({
+        "kind": "seeders",
+        "label": str(seeders),
+        "score": _score_seeders(seeders),
+    })
+    size = _safe_int(item.get("size"))
+    details.append({
+        "kind": "size",
+        "label": str(size),
+        "score": _score_size(size),
+    })
+    return sum(detail["score"] for detail in details), details
+
+
+def score_release(item: dict) -> tuple[int, list[str]]:
+    score, details = score_release_details(item)
+    features = [
+        (
+            detail["label"]
+            if detail["kind"] == "keyword"
+            else f"indexer:{detail['label']}"
+        )
+        for detail in details
+        if detail["kind"] in {"keyword", "indexer"}
+    ]
 
     return score, features
 
@@ -188,10 +217,19 @@ def rank_releases(items: list[dict], limit: int) -> list[dict]:
     for item in items:
         if not _selectable_url(item):
             continue
-        score, features = score_release(item)
+        score, details = score_release_details(item)
         enriched = item.copy()
         enriched["score"] = score
-        enriched["features"] = features
+        enriched["score_details"] = details
+        enriched["features"] = [
+            (
+                detail["label"]
+                if detail["kind"] == "keyword"
+                else f"indexer:{detail['label']}"
+            )
+            for detail in details
+            if detail["kind"] in {"keyword", "indexer"}
+        ]
         ranked.append(enriched)
 
     ranked.sort(key=lambda item: (item["score"], _safe_int(item.get("seeders")), _safe_int(item.get("size"))), reverse=True)

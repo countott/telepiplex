@@ -11,6 +11,7 @@ from telepiplex_media_search.release_score import (
     filter_relevant_releases,
     rank_releases,
 )
+from telepiplex_media_search.context import runtime_context
 from telepiplex_media_search.prowlarr_query import build_prowlarr_query
 from telepiplex_media_search.search_query import parse_douban_page_title
 from telepiplex_media_search.search_resolution import candidate_to_prowlarr_query, parse_search_intent
@@ -90,6 +91,44 @@ class MediaSearchUtilsTest(unittest.TestCase):
             limit=2,
         )
         self.assertEqual(ranked[0]["title"], "Movie 1080p WEB-DL")
+
+    def test_ranked_release_keeps_weighted_score_details(self):
+        original = runtime_context.config
+        runtime_context.config = {
+            "search": {
+                "scoring": {
+                    "indexer_scores": {"M-Team": 30},
+                },
+            },
+        }
+        try:
+            ranked = rank_releases([{
+                "title": "Title.2160p.WEB-DL",
+                "magnet_url": "magnet:?x",
+                "indexer": "M-Team",
+                "seeders": 20,
+                "size": 50 * 1024 ** 3,
+            }], 12)
+        finally:
+            runtime_context.config = original
+
+        details = ranked[0]["score_details"]
+        self.assertIn(
+            {"kind": "keyword", "label": "2160p", "score": 35},
+            details,
+        )
+        self.assertIn(
+            {"kind": "indexer", "label": "M-Team", "score": 30},
+            details,
+        )
+        self.assertTrue(any(
+            item["kind"] == "seeders" for item in details
+        ))
+        self.assertTrue(any(item["kind"] == "size" for item in details))
+        self.assertEqual(
+            ranked[0]["score"],
+            sum(item["score"] for item in details),
+        )
 
     def test_release_relevance_rejects_episode_title_false_positive(self):
         results = filter_relevant_releases(
