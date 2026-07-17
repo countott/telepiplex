@@ -11,7 +11,11 @@ from telepiplex_plugin_sdk.media_metadata import resolve_category_route
 
 from .ai import infer_relation_hypotheses_with_ai
 from .adapters.douban import lookup_douban_evidence
-from .adapters.prowlarr import resolve_prowlarr_download_url, search_prowlarr
+from .adapters.prowlarr import (
+    get_prowlarr_indexer_summary,
+    resolve_prowlarr_download_url,
+    search_prowlarr,
+)
 from .adapters.tvdb import (
     TvdbConfigError,
     TvdbRequestError,
@@ -25,7 +29,9 @@ from .direct_link import DirectLinkError, resolve_direct_link
 from .input_contract import classify_search_input
 from .planner import SearchPlanningError, build_confirmable_search_plan
 from .prowlarr_query import build_prowlarr_query
-from .release_score import filter_relevant_releases, rank_releases
+from .release_gate import gate_releases
+from .release_report import format_release_report, release_keyboard
+from .release_score import rank_releases
 from .search_plan import (
     TemporarySpecialAllocator,
     confirm_media_metadata,
@@ -78,6 +84,7 @@ class MediaSearchFeature:
         release_search=None,
         release_rank=None,
         release_resolver=None,
+        indexer_summary=None,
     ):
         self.config = config
         self.core = core
@@ -86,6 +93,9 @@ class MediaSearchFeature:
         self.release_search = release_search or self._search_releases
         self.release_rank = release_rank or rank_releases
         self.release_resolver = release_resolver or resolve_prowlarr_download_url
+        self.indexer_summary = (
+            indexer_summary or get_prowlarr_indexer_summary
+        )
         self.plans = {}
         self.awaiting_queries = set()
         self.awaiting_scope_inputs = {}
@@ -1175,30 +1185,54 @@ class MediaSearchFeature:
             or ""
         )
         try:
-            items = await asyncio.to_thread(self.release_search, query, media_type)
-            items = filter_relevant_releases(items, query)
-            limit = int((((self.config.get("search") or {}).get("prowlarr") or {}).get("result_limit") or 8))
-            results = self.release_rank(items, limit)
+            raw_items = await asyncio.to_thread(
+                self.release_search,
+                query,
+                media_type,
+            )
         except Exception as exc:
             self._release_plan(plan_id)
             return self._closed(f"❌ Prowlarr 搜索失败：{type(exc).__name__}")
+        try:
+            indexer_summary = await asyncio.to_thread(
+                self.indexer_summary,
+                raw_items,
+            )
+        except Exception as exc:
+            indexer_summary = {
+                "enabled_indexers": [],
+                "result_sources": {},
+                "down_indexers": [],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        gate = gate_releases(raw_items, contract)
+        try:
+            configured_limit = int(
+                (((self.config.get("search") or {}).get("prowlarr") or {})
+                 .get("result_limit") or 12)
+            )
+        except (TypeError, ValueError):
+            configured_limit = 12
+        limit = min(12, max(1, configured_limit))
+        results = self.release_rank(list(gate.eligible), limit)
+        text = format_release_report(
+            query,
+            gate,
+            results,
+            indexer_summary,
+        )
         if not results:
             self._release_plan(plan_id)
-            return self._closed("⚠️ Prowlarr 未找到可用片源。")
+            return self._closed(text)
         stored["confirmed_contract"] = contract
         stored["results"] = results
-        keyboard = [[{
-            "text": self._release_label(item, index),
-            "callback_data": f"media-search:release:{plan_id}:{index}",
-        }] for index, item in enumerate(results)]
-        keyboard.append([{
-            "text": "退出",
-            "callback_data": f"media-search:cancel:{plan_id}",
-        }])
+        stored["gate_report"] = gate
+        stored["indexer_summary"] = indexer_summary
+        keyboard = release_keyboard(plan_id, len(results))
         return {
             "actions": [{
                 "kind": "edit_message",
-                "text": f"找到 {len(results)} 个片源；Prowlarr 查询：{query}",
+                "text": text,
                 "data": {"keyboard": keyboard},
             }]
         }
@@ -1623,11 +1657,6 @@ class MediaSearchFeature:
         if operation.get("next_plugin_id"):
             view["next_plugin_id"] = str(operation["next_plugin_id"])
         return view
-
-    @staticmethod
-    def _release_label(item: dict, index: int) -> str:
-        title = " ".join(str(item.get("title") or f"Result {index + 1}").split())
-        return title[:48]
 
     @staticmethod
     def _owner_key(request):

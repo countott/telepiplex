@@ -41,7 +41,7 @@
               },
               "additionalProperties": true
             },
-            "result_limit": {"type": "integer", "minimum": 1, "maximum": 100, "title": "结果数量"}
+            "result_limit": {"type": "integer", "minimum": 1, "maximum": 12, "title": "结果数量"}
           },
           "additionalProperties": true
         },

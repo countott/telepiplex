@@ -26,7 +26,7 @@ search:
     categories:
       movie: 2000
       tv: 5000
-    result_limit: 8
+    result_limit: 12
   scoring:
     prefer_resolution:
       - "2160p"

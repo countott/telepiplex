@@ -140,6 +140,7 @@ def format_release_report(
             f"原始 {int(getattr(gate, 'raw_count', 0) or 0)}，"
             f"合格 {eligible}，拒绝 {rejection_text}"
         ),
+        f"找到 {len(ranked or [])} 个同身份、同范围片源。",
         *_indexer_lines(indexer_summary),
     ]
     if not ranked:

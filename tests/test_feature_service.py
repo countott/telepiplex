@@ -316,6 +316,125 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("找到 1 个", self.core.reports[-1]["status_text"])
         self.assertEqual(self.core.reports[-1]["state"], "awaiting_input")
 
+    async def test_wrong_scope_never_enters_release_rank(self):
+        from telepiplex_media_search.series_scope import apply_series_scope
+
+        contract = series_ranked_search_plan()["candidates"][0][
+            "media_metadata"
+        ]
+        contract = apply_series_scope(
+            contract,
+            "season",
+            season_number=1,
+        )
+        plan_id = "scope-gate"
+        stored = {
+            "plan": {
+                "plan_id": plan_id,
+                "media_metadata": contract,
+                "prowlarr_queries": ["The Glory S01"],
+            },
+        }
+        self.feature.plans[plan_id] = stored
+        self.feature.release_search = lambda *_: [
+            {
+                "title": "The.Glory.S01E01",
+                "magnet_url": "magnet:?xt=urn:btih:" + "a" * 40,
+            },
+            {
+                "title": "The.Glory.S01",
+                "magnet_url": "magnet:?xt=urn:btih:" + "b" * 40,
+            },
+            {
+                "title": "The.Glory.S01-S02",
+                "magnet_url": "magnet:?xt=urn:btih:" + "c" * 40,
+            },
+        ]
+        ranked_inputs = []
+        self.feature.release_rank = (
+            lambda items, limit: ranked_inputs.extend(items) or list(items)
+        )
+        self.feature.indexer_summary = lambda _items: {}
+
+        await self.feature._confirm_and_search(plan_id, stored)
+
+        self.assertEqual(
+            [item["title"] for item in ranked_inputs],
+            ["The.Glory.S01"],
+        )
+
+    async def test_no_exact_scope_reports_counts_without_fallback_buttons(self):
+        from telepiplex_media_search.series_scope import apply_series_scope
+
+        contract = series_ranked_search_plan()["candidates"][0][
+            "media_metadata"
+        ]
+        contract = apply_series_scope(
+            contract,
+            "season",
+            season_number=1,
+        )
+        plan_id = "scope-zero"
+        stored = {
+            "plan": {
+                "plan_id": plan_id,
+                "media_metadata": contract,
+                "prowlarr_queries": ["The Glory S01"],
+            },
+        }
+        self.feature.plans[plan_id] = stored
+        self.feature.release_search = lambda *_: [{
+            "title": "The.Glory.S01E01",
+            "magnet_url": "magnet:?xt=urn:btih:" + "a" * 40,
+        }]
+        self.feature.indexer_summary = lambda _items: {}
+
+        result = await self.feature._confirm_and_search(plan_id, stored)
+        action = result["actions"][0]
+
+        self.assertIn("未自动展示其他范围", action["text"])
+        self.assertNotIn("keyboard", action.get("data") or {})
+        self.assertNotIn(plan_id, self.feature.plans)
+
+    async def test_twelve_results_render_four_rows_of_three(self):
+        from telepiplex_media_search.series_scope import apply_series_scope
+
+        contract = series_ranked_search_plan()["candidates"][0][
+            "media_metadata"
+        ]
+        contract = apply_series_scope(
+            contract,
+            "season",
+            season_number=1,
+        )
+        plan_id = "scope-twelve"
+        stored = {
+            "plan": {
+                "plan_id": plan_id,
+                "media_metadata": contract,
+                "prowlarr_queries": ["The Glory S01"],
+            },
+        }
+        self.feature.plans[plan_id] = stored
+        self.feature.config["search"]["prowlarr"]["result_limit"] = 100
+        self.feature.release_search = lambda *_: [{
+            "title": f"The.Glory.S01.1080p.Group{index}",
+            "magnet_url": (
+                "magnet:?xt=urn:btih:"
+                f"{index + 1:040x}"
+            ),
+        } for index in range(20)]
+        self.feature.indexer_summary = lambda _items: {}
+
+        result = await self.feature._confirm_and_search(plan_id, stored)
+        keyboard = result["actions"][0]["data"]["keyboard"]
+
+        self.assertEqual(
+            [len(row) for row in keyboard[:-1]],
+            [3, 3, 3, 3],
+        )
+        self.assertEqual(len(stored["results"]), 12)
+
     async def test_planning_failure_uses_safe_specific_reason(self):
         from telepiplex_media_search.planner import SearchPlanningError
 

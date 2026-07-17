@@ -68,6 +68,21 @@ class ConfigSchemaContractTest(unittest.TestCase):
         Draft202012Validator.check_schema(schema)
         Draft202012Validator(schema).validate(default)
 
+    def test_prowlarr_result_limit_is_fixed_at_twelve(self):
+        schema = json.loads(
+            (ROOT / "config.schema.json").read_text(encoding="utf-8")
+        )
+        default = yaml.safe_load(
+            (ROOT / "config.default.yaml").read_text(encoding="utf-8")
+        )
+
+        result_limit = (
+            schema["properties"]["search"]["properties"]["prowlarr"]
+            ["properties"]["result_limit"]
+        )
+        self.assertEqual(default["search"]["prowlarr"]["result_limit"], 12)
+        self.assertEqual(result_limit["maximum"], 12)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,6 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
 from telepiplex_media_search.release_score import (
-    filter_relevant_releases,
     rank_releases,
 )
 from telepiplex_media_search.context import runtime_context
@@ -129,26 +128,6 @@ class MediaSearchUtilsTest(unittest.TestCase):
             ranked[0]["score"],
             sum(item["score"] for item in details),
         )
-
-    def test_release_relevance_rejects_episode_title_false_positive(self):
-        results = filter_relevant_releases(
-            [
-                {"title": "The.Glory.S01E01.2160p.WEB-DL"},
-                {
-                    "title": (
-                        "The.Not.Very.Grand.Tour.S01E01."
-                        "The.Glory.and.The"
-                    )
-                },
-            ],
-            "The Glory S01E01",
-        )
-
-        self.assertEqual(
-            [item["title"] for item in results],
-            ["The.Glory.S01E01.2160p.WEB-DL"],
-        )
-
 
 if __name__ == "__main__":
     unittest.main()
