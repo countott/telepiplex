@@ -277,5 +277,16 @@ plugins:
           branch: feature/renaming
           commit: 0b1ef63bdafe83367f69e35a41ac3f5ae23f53b9
         url: https://github.com/countott/telepiplex/releases/download/renaming-v1.2.0/renaming-1.2.0.tpx
-release: media-search-v1.4.0
+      1.3.0:
+        core_api: '>=1.1,<2.0'
+        provides: []
+        requires:
+        - media.search
+        - storage.provider
+        sha256: bf8667a1968495b50f9a1b70fdde94bd7159b1b57a05fc8fd51b78197d161f2a
+        source:
+          branch: feature/renaming
+          commit: e0893e750c097ae2416849b5f5dd864a91be10ce
+        url: https://github.com/countott/telepiplex/releases/download/renaming-v1.3.0/renaming-1.3.0.tpx
+release: renaming-v1.3.0
 schema_version: 1
