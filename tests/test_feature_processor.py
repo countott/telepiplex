@@ -1305,13 +1305,13 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.2.0")
+        self.assertEqual(manifest["version"], "1.3.0")
         self.assertEqual(manifest["core_api"], ">=1.1,<2.0")
-        self.assertIn('version = "1.2.0"', project)
+        self.assertIn('version = "1.3.0"', project)
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("dist/renaming-1.2.0.tpx", source)
+        self.assertIn("dist/renaming-1.3.0.tpx", source)
         self.assertNotIn("dist/renaming-1.1.0.tpx", source)
 
     def test_source_has_no_core_telegram_or_init_imports(self):
