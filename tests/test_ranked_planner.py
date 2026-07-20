@@ -6,9 +6,14 @@ from telepiplex_media_search.planner import (
     SearchPlanningError,
     build_confirmable_search_plan,
 )
+from telepiplex_media_search.evidence_verifier import (
+    VerifiedAiDecision,
+    VerifiedEquivalenceEdge,
+)
 from telepiplex_media_search.search_plan import TemporarySpecialAllocator
 from telepiplex_media_search.search_plan import confirm_media_metadata
 from telepiplex_media_search.series_scope import apply_series_scope
+from telepiplex_media_search.source_orchestrator import OrchestrationOutcome
 
 
 def _fact(provider, number, *, title=None, media_type="movie", episodes=None):
@@ -66,7 +71,236 @@ def _provider(provider, count, *, title=None, media_type="movie", episodes=None)
     return provide
 
 
+def _orchestrated_movie_outcome(
+    *,
+    chinese_title,
+    english_title,
+    year,
+    split_languages=False,
+):
+    douban = {
+        "subject_id": f"d-{year}-{len(chinese_title)}",
+        "title": chinese_title,
+        "chinese_title": chinese_title,
+        "year": year,
+        "media_type": "movie",
+    }
+    if not split_languages:
+        douban.update({
+            "english_title": english_title,
+            "official_english_title": english_title,
+        })
+    wikipedia = {
+        "wikibase_item": f"Q-{year}-{len(english_title)}",
+        "title": english_title,
+        "english_title": english_title,
+        "official_english_title": english_title,
+        "year": year,
+        "media_type": "movie",
+    }
+    sources = (
+        {
+            "source": "douban",
+            "status": "ok",
+            "facts": [douban],
+            "source_urls": [],
+            "query_summaries": [chinese_title],
+        },
+        {
+            "source": "wikipedia",
+            "status": "ok",
+            "facts": [wikipedia],
+            "source_urls": [],
+            "query_summaries": [english_title],
+        },
+        {
+            "source": "tvdb",
+            "status": "not_found",
+            "facts": [],
+            "source_urls": [],
+            "query_summaries": [english_title],
+        },
+    )
+    edges = ()
+    if split_languages:
+        edges = (VerifiedEquivalenceEdge(
+            f"douban:d-{year}-{len(chinese_title)}",
+            f"wikipedia:Q-{year}-{len(english_title)}",
+            "same_entity",
+            "verified cross-language title pair",
+        ),)
+    intent = {
+        "title_hints": [chinese_title, english_title],
+        "media_type_hint": "movie",
+        "year_hint": year,
+        "scope": "work",
+        "season_number": None,
+        "episode_number": None,
+    }
+    decision = VerifiedAiDecision(
+        "resolved",
+        intent,
+        edges,
+        (),
+        "confirm",
+    )
+    return OrchestrationOutcome(
+        "resolved",
+        intent,
+        sources,
+        decision,
+        0,
+        "",
+    )
+
+
 class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_ai_first_typo_result_is_not_filtered_by_raw_query_prefix(self):
+        calls = []
+        outcome = _orchestrated_movie_outcome(
+            chinese_title="蝙蝠侠：侠影之谜",
+            english_title="Batman Begins",
+            year="2005",
+        )
+
+        async def orchestrate(raw_query, _gateway):
+            calls.append(raw_query)
+            return outcome
+
+        def forbidden_provider(_hypotheses):
+            raise AssertionError("AI-first success must not re-run rule providers")
+
+        plan = await build_confirmable_search_plan(
+            "蝙蝠侠：谍影之谜",
+            "p-ai-first-typo",
+            {
+                "douban": forbidden_provider,
+                "wikipedia": forbidden_provider,
+                "tvdb": forbidden_provider,
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            source_gateway=object(),
+            source_orchestrator=orchestrate,
+        )
+
+        self.assertEqual(calls, ["蝙蝠侠：谍影之谜"])
+        self.assertEqual(len(plan["candidates"]), 1)
+        contract = plan["candidates"][0]["media_metadata"]
+        self.assertEqual(contract["identity"]["english_title"], "Batman Begins")
+        self.assertEqual(
+            contract["evidence"]["decision"]["mode"],
+            "ai_tool_orchestrated",
+        )
+
+    async def test_ai_verified_cross_language_edge_forms_candidate(self):
+        outcome = _orchestrated_movie_outcome(
+            chinese_title="布达佩斯大饭店",
+            english_title="The Grand Budapest Hotel",
+            year="2014",
+            split_languages=True,
+        )
+
+        async def orchestrate(_raw_query, _gateway):
+            return outcome
+
+        plan = await build_confirmable_search_plan(
+            "布达佩斯大饭店",
+            "p-ai-edge",
+            {},
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            source_gateway=object(),
+            source_orchestrator=orchestrate,
+        )
+
+        self.assertEqual(len(plan["candidates"]), 1)
+        self.assertEqual(
+            set(
+                plan["candidates"][0]["media_metadata"]["evidence"]
+                ["provider_statuses"]
+            ),
+            {"douban", "wikipedia", "tvdb"},
+        )
+
+    async def test_log_regression_titles_reach_confirmation_candidates(self):
+        cases = (
+            ("蝙蝠侠：谍影之谜", "蝙蝠侠：侠影之谜", "Batman Begins", "2005"),
+            ("蝙蝠侠：黑暗骑士", "蝙蝠侠：黑暗骑士", "The Dark Knight", "2008"),
+            ("蝙蝠侠黑暗骑士", "蝙蝠侠：黑暗骑士", "The Dark Knight", "2008"),
+            ("蜂蜜与四叶草", "蜂蜜与四叶草", "Honey and Clover", "2006"),
+            ("布达佩斯大饭店", "布达佩斯大饭店", "The Grand Budapest Hotel", "2014"),
+        )
+        for index, (raw, chinese, english, year) in enumerate(cases):
+            with self.subTest(raw=raw):
+                outcome = _orchestrated_movie_outcome(
+                    chinese_title=chinese,
+                    english_title=english,
+                    year=year,
+                )
+
+                async def orchestrate(_raw_query, _gateway, value=outcome):
+                    return value
+
+                plan = await build_confirmable_search_plan(
+                    raw,
+                    f"p-log-{index}",
+                    {},
+                    lambda _contract: set(),
+                    TemporarySpecialAllocator(),
+                    source_gateway=object(),
+                    source_orchestrator=orchestrate,
+                )
+
+                self.assertGreaterEqual(len(plan["candidates"]), 1)
+
+    async def test_ai_fallback_runs_existing_deterministic_chain(self):
+        async def orchestrate(_raw_query, _gateway):
+            return OrchestrationOutcome(
+                "fallback",
+                {},
+                (),
+                None,
+                0,
+                "ai_unavailable",
+            )
+
+        plan = await build_confirmable_search_plan(
+            "Movie 1",
+            "p-ai-fallback",
+            {
+                "douban": _provider("douban", 1, title="Movie 1"),
+                "wikipedia": _provider("wikipedia", 1, title="Movie 1"),
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            source_gateway=object(),
+            source_orchestrator=orchestrate,
+        )
+
+        self.assertEqual(len(plan["candidates"]), 1)
+        self.assertEqual(
+            plan["candidates"][0]["media_metadata"]["evidence"]["decision"]["mode"],
+            "deterministic_bounded",
+        )
+
+    async def test_direct_anchor_never_calls_source_orchestrator(self):
+        async def forbidden(_raw_query, _gateway):
+            raise AssertionError("direct links must bypass AI orchestration")
+
+        plan = await build_confirmable_search_plan(
+            "Movie 1 2024",
+            "p-direct-no-ai",
+            {"douban": _provider("douban", 1, title="Movie 1")},
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            locked_identity=("douban_subject", "douban-0"),
+            source_gateway=object(),
+            source_orchestrator=forbidden,
+        )
+
+        self.assertEqual(len(plan["candidates"]), 1)
+
     @patch(
         "telepiplex_media_search.planner.infer_candidate_scorecard_with_ai",
         return_value=None,

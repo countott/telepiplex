@@ -24,7 +24,12 @@ from .candidate_score import (
     validate_ai_candidate_score,
 )
 from .deterministic import build_rule_hypotheses
-from .entity_graph import CandidateEntity, build_search_graph, normalize_title
+from .entity_graph import (
+    CandidateEntity,
+    build_search_graph,
+    merge_verified_equivalence_edges,
+    normalize_title,
+)
 from .input_contract import classify_search_input, has_ambiguous_bare_number
 from .prowlarr_query import build_prowlarr_query
 from .search_plan import (
@@ -33,6 +38,7 @@ from .search_plan import (
     finalize_search_plan,
     normalize_source_locator,
 )
+from .source_orchestrator import orchestrate_sources
 from .title_policy import TitlePolicyError, resolve_title_policy
 
 
@@ -57,6 +63,7 @@ class PlanningBudget:
         "base_evidence": 15.0,
         "intent_fallback": 20.0,
         "candidate_finalize": 25.0,
+        "source_orchestration": 65.0,
     }
 
     def __init__(
@@ -698,6 +705,69 @@ def _candidate_is_qualified(
     return direct_anchor or len(candidate.providers) >= 2
 
 
+def _orchestrated_intent(
+    ai_intent: dict,
+    rule_intent: dict,
+    raw_query: str,
+) -> dict:
+    hints = ai_intent.get("title_hints")
+    title = next(
+        (
+            _text(item)
+            for item in (hints if isinstance(hints, list) else [])
+            if _text(item)
+        ),
+        _text(rule_intent.get("title")),
+    )
+    ai_scope = {
+        "work": "movie_or_series",
+        "unknown": "movie_or_series",
+    }.get(
+        _text(ai_intent.get("scope")).casefold(),
+        _text(ai_intent.get("scope")).casefold(),
+    )
+    rule_scope = _text(rule_intent.get("scope")).casefold()
+    explicit_scope = (
+        rule_scope
+        if rule_scope in {"whole_series", "season", "episode"}
+        else ""
+    )
+    explicit_type = _explicit_media_type(raw_query, rule_intent)
+    ai_type = _text(ai_intent.get("media_type_hint")).casefold()
+    if ai_type == "unknown":
+        ai_type = ""
+    return {
+        "title": title,
+        "year": (
+            _text(rule_intent.get("year"))
+            or _text(ai_intent.get("year_hint"))
+        ),
+        "media_type": explicit_type or ai_type,
+        "scope": explicit_scope or ai_scope or "movie_or_series",
+        "season_number": (
+            rule_intent.get("season_number")
+            or ai_intent.get("season_number")
+        ),
+        "episode_number": (
+            rule_intent.get("episode_number")
+            or ai_intent.get("episode_number")
+        ),
+    }
+
+
+def _actual_source_queries(sources: list[dict]) -> dict:
+    result = {}
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        name = _text(source.get("source")).casefold()
+        if not name:
+            continue
+        queries = source.get("query_summaries")
+        result[name] = list(queries) if isinstance(queries, list) else []
+    return result
+
+
 def _candidate_contract(
     candidate: CandidateEntity,
     titles,
@@ -871,6 +941,8 @@ async def build_confirmable_search_plan(
     *,
     budget: PlanningBudget | None = None,
     locked_identity: tuple[str, str] | None = None,
+    source_gateway=None,
+    source_orchestrator=orchestrate_sources,
 ) -> dict:
     # occupied_loader/allocator are applied only after an interactive selection;
     # no unselected candidate may reserve a persistent or logical episode slot.
@@ -880,84 +952,141 @@ async def build_confirmable_search_plan(
     if parsed_input.kind in {"invalid_link", "unsupported_text"}:
         raise SearchPlanningError(parsed_input.reason)
     rule_hypotheses = build_rule_hypotheses(raw_query)
-    sources = await _budgeted(
-        "base_evidence",
-        budget,
-        collect_evidence(rule_hypotheses, providers),
-    )
-    graph = build_search_graph(sources)
-    all_candidates = list(graph.candidates)
-    candidates = list(all_candidates)
-    if locked_identity:
-        key, value = locked_identity
-        candidates = [
-            candidate
-            for candidate in candidates
-            if _text(candidate.external_ids.get(key)) == _text(value)
-        ]
-    target = normalize_title((rule_hypotheses.get("intent") or {}).get("title"))
-    exact = [
-        item
-        for item in candidates
-        if target and target in item.normalized_titles
-    ]
-    title_matches = [
-        item
-        for item in candidates
-        if target
-        and any(
-            title.startswith(target)
-            for title in item.normalized_titles
-        )
-    ]
-    if title_matches:
-        candidates = title_matches
-    else:
-        candidates = []
-    if has_ambiguous_bare_number(raw_query, parsed_input) and not exact:
-        raise SearchPlanningError("ambiguous_numeric_role")
-    if not candidates:
-        ai_hypotheses = await _optional_budgeted(
-            "intent_fallback",
+    orchestrated = False
+    sources = []
+    candidates = []
+    all_candidates = []
+    intent = {}
+    orchestration = None
+    if source_gateway is not None and locked_identity is None:
+        orchestration = await _optional_budgeted(
+            "source_orchestration",
             budget,
-            asyncio.to_thread(
-                infer_search_hypotheses_with_ai,
-                {
-                    "raw_query": raw_query,
-                    "intent": rule_hypotheses.get("intent") or {},
-                },
+            source_orchestrator(
+                raw_query,
+                source_gateway,
             ),
             None,
         )
-        if ai_hypotheses:
-            retry_sources = await _optional_budgeted(
-                "candidate_finalize",
-                budget,
-                collect_evidence(ai_hypotheses, providers),
-                [],
+        if (
+            orchestration is not None
+            and getattr(orchestration, "status", "fallback") != "fallback"
+            and getattr(orchestration, "decision", None) is not None
+        ):
+            sources = [
+                dict(item)
+                for item in (getattr(orchestration, "sources", ()) or ())
+                if isinstance(item, dict)
+            ]
+            graph = build_search_graph(sources)
+            graph = merge_verified_equivalence_edges(
+                graph,
+                orchestration.decision.equivalence_edges,
             )
-            if retry_sources:
-                sources = _merge_evidence_passes(sources, retry_sources)
-                candidates = list(build_search_graph(sources).candidates)
-                retry_targets = {
-                    normalize_title(item.get("title"))
-                    for item in ai_hypotheses.get("hypotheses") or []
-                    if normalize_title(item.get("title"))
-                }
-                matches = [
-                    item
-                    for item in candidates
-                    if any(
-                        title.startswith(retry_target)
-                        for retry_target in retry_targets
-                        for title in item.normalized_titles
-                    )
-                ]
-                candidates = matches
+            all_candidates = list(graph.candidates)
+            candidates = list(all_candidates)
+            intent = _orchestrated_intent(
+                getattr(orchestration, "intent", {}) or {},
+                rule_hypotheses.get("intent") or {},
+                raw_query,
+            )
+            orchestrated = True
+            _log_info(
+                "search_stage status=orchestrated "
+                f"targeted_rounds={getattr(orchestration, 'targeted_rounds', 0)} "
+                f"candidates={len(candidates)}"
+            )
+        elif orchestration is not None:
+            _log_info(
+                "search_stage status=fallback stage=source_orchestration "
+                f"reason={getattr(orchestration, 'fallback_reason', '')}"
+            )
+
+    if not orchestrated:
+        sources = await _budgeted(
+            "base_evidence",
+            budget,
+            collect_evidence(rule_hypotheses, providers),
+        )
+        graph = build_search_graph(sources)
+        all_candidates = list(graph.candidates)
+        candidates = list(all_candidates)
+        if locked_identity:
+            key, value = locked_identity
+            candidates = [
+                candidate
+                for candidate in candidates
+                if _text(candidate.external_ids.get(key)) == _text(value)
+            ]
+        target = normalize_title(
+            (rule_hypotheses.get("intent") or {}).get("title")
+        )
+        exact = [
+            item
+            for item in candidates
+            if target and target in item.normalized_titles
+        ]
+        title_matches = [
+            item
+            for item in candidates
+            if target
+            and any(
+                title.startswith(target)
+                for title in item.normalized_titles
+            )
+        ]
+        if title_matches:
+            candidates = title_matches
+        else:
+            candidates = []
+        if has_ambiguous_bare_number(raw_query, parsed_input) and not exact:
+            raise SearchPlanningError("ambiguous_numeric_role")
         if not candidates:
-            raise SearchPlanningError("insufficient_independent_support")
-    intent = dict(rule_hypotheses.get("intent") or {})
-    intent["media_type"] = _explicit_media_type(raw_query, intent)
+            ai_hypotheses = await _optional_budgeted(
+                "intent_fallback",
+                budget,
+                asyncio.to_thread(
+                    infer_search_hypotheses_with_ai,
+                    {
+                        "raw_query": raw_query,
+                        "intent": rule_hypotheses.get("intent") or {},
+                    },
+                ),
+                None,
+            )
+            if ai_hypotheses:
+                retry_sources = await _optional_budgeted(
+                    "candidate_finalize",
+                    budget,
+                    collect_evidence(ai_hypotheses, providers),
+                    [],
+                )
+                if retry_sources:
+                    sources = _merge_evidence_passes(
+                        sources,
+                        retry_sources,
+                    )
+                    candidates = list(build_search_graph(sources).candidates)
+                    retry_targets = {
+                        normalize_title(item.get("title"))
+                        for item in ai_hypotheses.get("hypotheses") or []
+                        if normalize_title(item.get("title"))
+                    }
+                    matches = [
+                        item
+                        for item in candidates
+                        if any(
+                            title.startswith(retry_target)
+                            for retry_target in retry_targets
+                            for title in item.normalized_titles
+                        )
+                    ]
+                    candidates = matches
+        intent = dict(rule_hypotheses.get("intent") or {})
+        intent["media_type"] = _explicit_media_type(raw_query, intent)
+
+    if not candidates:
+        raise SearchPlanningError("insufficient_independent_support")
 
     verified_relations = {}
 
@@ -981,7 +1110,7 @@ async def build_confirmable_search_plan(
         )
         combined.append(combine_score(candidate.candidate_key, program))
     ranked_scores = apply_thresholds(combined)
-    if not ranked_scores:
+    if not ranked_scores and not orchestrated:
         expansion_sources = await _optional_budgeted(
             "candidate_finalize",
             budget,
@@ -1026,35 +1155,36 @@ async def build_confirmable_search_plan(
                 f"candidates={len(candidates)}"
             )
 
-    candidates_by_key = {
-        candidate.candidate_key: candidate for candidate in candidates
-    }
-    score_candidates = [
-        candidates_by_key[item.candidate_key]
-        for item in ranked_scores
-        if item.candidate_key in candidates_by_key
-    ]
-    ai_payload = await _optional_budgeted(
-        "candidate_finalize",
-        budget,
-        asyncio.to_thread(
-            infer_candidate_scorecard_with_ai,
-            _candidate_score_context(raw_query, intent, score_candidates),
-        ),
-        None,
-    )
-    ai_scores = _validated_candidate_ai_scores(
-        ai_payload,
-        score_candidates,
-    )
-    ranked_scores = apply_thresholds([
-        combine_score(
-            item.candidate_key,
-            item.program,
-            ai_scores.get(item.candidate_key),
+    if not orchestrated:
+        candidates_by_key = {
+            candidate.candidate_key: candidate for candidate in candidates
+        }
+        score_candidates = [
+            candidates_by_key[item.candidate_key]
+            for item in ranked_scores
+            if item.candidate_key in candidates_by_key
+        ]
+        ai_payload = await _optional_budgeted(
+            "candidate_finalize",
+            budget,
+            asyncio.to_thread(
+                infer_candidate_scorecard_with_ai,
+                _candidate_score_context(raw_query, intent, score_candidates),
+            ),
+            None,
         )
-        for item in ranked_scores
-    ])
+        ai_scores = _validated_candidate_ai_scores(
+            ai_payload,
+            score_candidates,
+        )
+        ranked_scores = apply_thresholds([
+            combine_score(
+                item.candidate_key,
+                item.program,
+                ai_scores.get(item.candidate_key),
+            )
+            for item in ranked_scores
+        ])
     ranked_scores = [item for item in ranked_scores if item.selectable]
     if not ranked_scores:
         raise SearchPlanningError("insufficient_independent_support")
@@ -1076,6 +1206,15 @@ async def build_confirmable_search_plan(
             verified_relations.get(score.candidate_key),
             by_key,
         )
+        contract["evidence"]["decision"]["mode"] = (
+            "ai_tool_orchestrated"
+            if orchestrated
+            else "deterministic_bounded"
+        )
+        if orchestrated and orchestration is not None:
+            contract["evidence"]["decision"]["targeted_rounds"] = int(
+                getattr(orchestration, "targeted_rounds", 0)
+            )
         query = contract["retrieval"]["query"]
         contract["evidence"]["decision"]["score"] = score.total
         score_value = {
@@ -1123,7 +1262,11 @@ async def build_confirmable_search_plan(
         "media_metadata": deepcopy(top["media_metadata"]),
         "prowlarr_queries": list(top["prowlarr_queries"]),
         "candidates": ranked,
-        "source_queries": deepcopy(rule_hypotheses.get("source_queries") or {}),
+        "source_queries": (
+            _actual_source_queries(sources)
+            if orchestrated
+            else deepcopy(rule_hypotheses.get("source_queries") or {})
+        ),
         "scoring_version": SCORING_VERSION,
         "relation_pool": [
             entry

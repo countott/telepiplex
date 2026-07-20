@@ -1,7 +1,9 @@
 import asyncio
 import threading
 import unittest
+from unittest.mock import AsyncMock, Mock, patch
 
+from telepiplex_media_search.service import MediaSearchFeature
 from telepiplex_media_search.source_tools import (
     FIRST_ROUND_TOOL,
     TARGETED_TOOLS,
@@ -183,6 +185,24 @@ class SourceToolGatewayTest(unittest.IsolatedAsyncioTestCase):
                 },
                 known_facts={"wikipedia:Q166262": {}},
             )
+
+    @patch(
+        "telepiplex_media_search.service.build_confirmable_search_plan",
+        new_callable=AsyncMock,
+    )
+    async def test_feature_plain_text_build_passes_server_gateway(self, build):
+        build.return_value = {"plan_id": "p-text", "candidates": []}
+        feature = MediaSearchFeature(config={}, core=Mock())
+
+        result = await feature._build_plan("Batman", "p-text")
+
+        self.assertEqual(result["plan_id"], "p-text")
+        gateway = build.call_args.kwargs["source_gateway"]
+        self.assertIsInstance(gateway, SourceToolGateway)
+        self.assertEqual(
+            set(gateway.providers),
+            {"wikipedia", "douban", "tvdb"},
+        )
 
 
 if __name__ == "__main__":

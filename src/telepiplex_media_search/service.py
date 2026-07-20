@@ -1364,6 +1364,7 @@ class MediaSearchFeature:
             raise SearchPlanningError(parsed.reason)
         locked_identity = None
         planning_query = raw_query
+        source_gateway = self._source_tool_gateway()
         if parsed.kind == "link":
             try:
                 direct = await asyncio.to_thread(resolve_direct_link, parsed.link)
@@ -1372,6 +1373,7 @@ class MediaSearchFeature:
             planning_query = direct.query
             locked_identity = direct.stable_identity
             providers[direct.provider] = lambda _hypotheses: direct.evidence
+            source_gateway = None
         return await build_confirmable_search_plan(
             planning_query,
             plan_id,
@@ -1379,6 +1381,7 @@ class MediaSearchFeature:
             lambda contract: set((contract.get("evidence") or {}).get("occupied_special_numbers") or []),
             self.allocator,
             locked_identity=locked_identity,
+            source_gateway=source_gateway,
         )
 
     def _wikipedia_provider(self, hypotheses: dict):
