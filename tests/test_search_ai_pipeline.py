@@ -3,13 +3,92 @@ import unittest
 from unittest.mock import patch
 
 from telepiplex_media_search.ai import (
+    chat_completion_messages,
+    extract_ai_message,
     infer_candidate_scorecard_with_ai,
     infer_relation_hypotheses_with_ai,
     infer_search_hypotheses_with_ai,
 )
+from telepiplex_media_search.context import runtime_context
 
 
 class SearchAiPipelineTest(unittest.TestCase):
+    def setUp(self):
+        runtime_context.configure({
+            "ai": {
+                "enable": True,
+                "api_url": "https://ai.example/v1",
+                "api_key": "secret-key",
+                "model": "tool-model",
+                "timeout": 12,
+            },
+        })
+
+    @patch("telepiplex_media_search.ai.requests.post")
+    def test_tool_transport_sends_messages_tools_and_forced_choice(self, post):
+        post.return_value.status_code = 200
+        post.return_value.json.return_value = {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [],
+                },
+            }],
+        }
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "search_media_sources",
+                "parameters": {"type": "object"},
+            },
+        }]
+
+        result = chat_completion_messages(
+            [
+                {"role": "system", "content": "system-contract"},
+                {"role": "user", "content": "query"},
+            ],
+            tools=tools,
+            tool_choice={
+                "type": "function",
+                "function": {"name": "search_media_sources"},
+            },
+            max_tokens=2048,
+        )
+
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["model"], "tool-model")
+        self.assertEqual(payload["messages"][0]["role"], "system")
+        self.assertEqual(
+            payload["tools"][0]["function"]["name"],
+            "search_media_sources",
+        )
+        self.assertEqual(
+            payload["tool_choice"]["function"]["name"],
+            "search_media_sources",
+        )
+        self.assertEqual(payload["max_tokens"], 2048)
+        self.assertEqual(
+            extract_ai_message(result),
+            {
+                "role": "assistant",
+                "tool_calls": [],
+            },
+        )
+
+    @patch("telepiplex_media_search.ai.requests.post")
+    def test_tool_transport_omits_tool_fields_for_plain_messages(self, post):
+        post.return_value.status_code = 200
+        post.return_value.json.return_value = {
+            "choices": [{"message": {"role": "assistant", "content": "{}"}}],
+        }
+
+        chat_completion_messages([{"role": "user", "content": "query"}])
+
+        payload = post.call_args.kwargs["json"]
+        self.assertNotIn("tools", payload)
+        self.assertNotIn("tool_choice", payload)
+
     @patch("telepiplex_media_search.ai.check_ai_api_available", return_value=True)
     @patch("telepiplex_media_search.ai.chat_completion")
     def test_intent_hint_is_converted_to_source_queries(self, chat_mock, _available):

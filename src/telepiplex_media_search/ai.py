@@ -217,8 +217,12 @@ def _ai_request_timeout():
     return max(timeout, 1)
 
 
-def chat_completion(tip_words, max_tokens=8192):
-    url = runtime_context.config.get("ai").get("api_url")
+def _ai_config() -> dict:
+    return (runtime_context.config or {}).get("ai") or {}
+
+
+def _chat_completion_url() -> str:
+    url = str(_ai_config().get("api_url") or "").strip()
     # 智能判断是否需要拼接 /chat/completions
     # 如果URL中不包含 chat/completions 也不包含 messages (适配Anthropic风格)，且不以 / 结尾，则尝试拼接
     if "chat/completions" not in url and "messages" not in url:
@@ -226,29 +230,78 @@ def chat_completion(tip_words, max_tokens=8192):
             url = url[:-1] + "/chat/completions"
         else:
             url = url + "/chat/completions"
-            
-    payload = {
-        "model": runtime_context.config.get("ai").get("model"),
-        "messages": [{"role": "user", "content": tip_words}],
-        "max_tokens": max_tokens
-    }
+    return url
+
+
+def _post_chat_completion(payload: dict):
+    config = _ai_config()
     headers = {
-        "Authorization": f"Bearer {runtime_context.config.get('ai').get('api_key')}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {config.get('api_key') or ''}",
+        "Content-Type": "application/json",
     }
 
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=_ai_request_timeout())
+        response = requests.post(
+            _chat_completion_url(),
+            json=payload,
+            headers=headers,
+            timeout=_ai_request_timeout(),
+        )
         if response.status_code != 200:
-            runtime_context.logger.warn(f"AI API请求失败: {sanitize_log_value(response.text)}")
+            logger = runtime_context.logger
+            if logger:
+                logger.warning(
+                    "AI API请求失败: "
+                    f"{sanitize_log_value(response.text)}"
+                )
             return None
-            
-        result = response.json()
-        return result
-        
+
+        return response.json()
     except Exception as e:
-        runtime_context.logger.error(f"调用AI接口出错: {e}")
+        logger = runtime_context.logger
+        if logger:
+            logger.error(f"调用AI接口出错: {type(e).__name__}: {e}")
         return None
+
+
+def chat_completion_messages(
+    messages: list[dict],
+    *,
+    tools: list[dict] | None = None,
+    tool_choice=None,
+    max_tokens: int = 4096,
+):
+    """Send one OpenAI-compatible chat request without exposing credentials."""
+
+    payload = {
+        "model": _ai_config().get("model"),
+        "messages": list(messages or []),
+        "max_tokens": max_tokens,
+    }
+    if tools is not None:
+        payload["tools"] = tools
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
+    return _post_chat_completion(payload)
+
+
+def chat_completion(tip_words, max_tokens=8192):
+    return chat_completion_messages(
+        [{"role": "user", "content": tip_words}],
+        max_tokens=max_tokens,
+    )
+
+
+def extract_ai_message(result) -> dict | None:
+    """Return the first assistant message from an OpenAI-compatible response."""
+
+    if not isinstance(result, dict):
+        return None
+    choices = result.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    message = choices[0].get("message")
+    return dict(message) if isinstance(message, dict) else None
 
 
 def _strip_json_markdown(text: str) -> str:
