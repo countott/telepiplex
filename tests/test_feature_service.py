@@ -593,12 +593,34 @@ class MediaSearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         capability, method, payload, kwargs = self.core.calls[0]
         self.assertEqual((capability, method), ("download.provider", "submit"))
         self.assertEqual(payload["selected_path"], "/Movies")
+        self.assertEqual(payload["media_metadata"]["schema_version"], 1)
         self.assertTrue(payload["media_metadata"]["confirmed"])
-        self.assertEqual(payload["media_metadata"]["identity"]["chinese_title"], "中文标题")
+        self.assertEqual(
+            payload["media_metadata"]["identity"]["chinese_title"],
+            "中文标题",
+        )
+        self.assertEqual(
+            payload["naming_metadata"],
+            {
+                "source": "confirmed",
+                "media_type": "movie",
+                "chinese_title": "中文标题",
+                "english_title": "English Title",
+                "year": "2024",
+            },
+        )
+        self.assertEqual(
+            payload["release"],
+            {
+                "title": "English.Title.2024.1080p.WEB-DL",
+                "indexer": "test",
+                "size": 100,
+            },
+        )
         self.assertEqual(payload["operation_id"], self.core.reports[-1]["operation_id"])
         self.assertEqual(payload["operation_revision"], self.core.reports[-1]["revision"])
         self.assertEqual(self.core.reports[-1]["state"], "handed_off")
-        self.assertTrue(kwargs["idempotency_key"].startswith(plan_id))
+        self.assertEqual(kwargs["idempotency_key"], f"{plan_id}:release:0")
 
     async def test_rejected_handoff_never_calls_download_provider(self):
         original_report = self.core.report_operation
