@@ -26,20 +26,38 @@ _token_cache = {
 class TvdbConfigError(Exception):
     """Raised when TVDB metadata config is missing."""
 
+    def __init__(self, message: str, code: str = "credential_missing"):
+        self.code = str(code or "credential_missing")
+        super().__init__(message)
+
 
 class TvdbRequestError(Exception):
     """Raised when TVDB API calls fail."""
+
+    def __init__(self, message: str, code: str = "server_down"):
+        self.code = str(code or "server_down")
+        super().__init__(message)
+
+
+class TvdbAuthenticationError(TvdbRequestError):
+    """Raised when configured TVDB credentials are rejected."""
+
+    def __init__(self, message: str):
+        super().__init__(message, "authentication_failed")
 
 
 def _get_tvdb_config():
     metadata_config = runtime_context.config.get("metadata") or {}
     tvdb_config = metadata_config.get("tvdb") or {}
     if not tvdb_config.get("enable", False):
-        raise TvdbConfigError("metadata.tvdb.enable 未开启")
+        raise TvdbConfigError("metadata.tvdb.enable 未开启", "disabled")
 
     api_key = str(tvdb_config.get("api_key") or "").strip()
     if not api_key:
-        raise TvdbConfigError("metadata.tvdb.api_key 未配置")
+        raise TvdbConfigError(
+            "metadata.tvdb.api_key 未配置",
+            "credential_missing",
+        )
 
     base_url = str(tvdb_config.get("base_url") or TVDB_BASE_URL).strip().rstrip("/")
     subscriber_pin = str(tvdb_config.get("subscriber_pin") or "").strip()
@@ -54,6 +72,23 @@ def _get_tvdb_config():
         "subscriber_pin": subscriber_pin,
         "timeout": max(5, min(timeout, 60)),
     }
+
+
+def _status_code(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    try:
+        return int(getattr(response, "status_code", None))
+    except (TypeError, ValueError):
+        return None
+
+
+def _clear_token_cache() -> None:
+    _token_cache.update({
+        "token": "",
+        "created_at": 0.0,
+        "api_key": "",
+        "subscriber_pin": "",
+    })
 
 
 def _login_tvdb(config: dict) -> str:
@@ -79,13 +114,20 @@ def _login_tvdb(config: dict) -> str:
         response.raise_for_status()
         data = response.json()
     except Exception as e:
-        raise TvdbRequestError(f"TVDB 登录失败: {e}") from e
+        if _status_code(e) in {401, 403}:
+            _clear_token_cache()
+            raise TvdbAuthenticationError(
+                "TVDB 登录认证失败"
+            ) from e
+        code = "timeout" if isinstance(e, requests.Timeout) else "server_down"
+        raise TvdbRequestError(f"TVDB 登录失败: {e}", code) from e
 
     token = ""
     if isinstance(data, dict):
         token = str((data.get("data") or {}).get("token") or "").strip()
     if not token:
-        raise TvdbRequestError("TVDB 登录响应缺少 token")
+        _clear_token_cache()
+        raise TvdbAuthenticationError("TVDB 登录响应缺少 token")
 
     _token_cache.update(
         {
@@ -101,17 +143,32 @@ def _login_tvdb(config: dict) -> str:
 def _tvdb_get(path: str, params: dict | None = None):
     config = _get_tvdb_config()
     token = _login_tvdb(config)
-    try:
-        response = requests.get(
-            f"{config['base_url']}{path}",
-            headers={"Authorization": f"Bearer {token}"},
-            params=params or {},
-            timeout=config["timeout"],
-        )
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        raise TvdbRequestError(f"TVDB 请求失败: {e}") from e
+    for attempt in range(2):
+        try:
+            response = requests.get(
+                f"{config['base_url']}{path}",
+                headers={"Authorization": f"Bearer {token}"},
+                params=params or {},
+                timeout=config["timeout"],
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            if _status_code(e) in {401, 403}:
+                _clear_token_cache()
+                if attempt == 0:
+                    token = _login_tvdb(config)
+                    continue
+                raise TvdbAuthenticationError(
+                    "TVDB 请求认证失败"
+                ) from e
+            code = (
+                "timeout"
+                if isinstance(e, requests.Timeout)
+                else "server_down"
+            )
+            raise TvdbRequestError(f"TVDB 请求失败: {e}", code) from e
+    raise TvdbRequestError("TVDB 请求失败")
 
 
 def _contains_latin(value: str) -> bool:

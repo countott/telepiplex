@@ -1,7 +1,9 @@
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import requests
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,9 +11,94 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
 from telepiplex_media_search.adapters import tvdb
+from telepiplex_media_search.context import runtime_context
+from telepiplex_media_search.service import MediaSearchFeature
 
 
 class TvdbAdapterTest(unittest.TestCase):
+    def setUp(self):
+        tvdb._token_cache.update({
+            "token": "",
+            "created_at": 0.0,
+            "api_key": "",
+            "subscriber_pin": "",
+        })
+
+    def test_disabled_and_missing_credentials_have_distinct_codes(self):
+        runtime_context.configure({
+            "metadata": {"tvdb": {"enable": False}},
+        })
+        with self.assertRaises(tvdb.TvdbConfigError) as disabled:
+            tvdb._get_tvdb_config()
+        self.assertEqual(disabled.exception.code, "disabled")
+
+        runtime_context.configure({
+            "metadata": {"tvdb": {"enable": True, "api_key": ""}},
+        })
+        with self.assertRaises(tvdb.TvdbConfigError) as missing:
+            tvdb._get_tvdb_config()
+        self.assertEqual(missing.exception.code, "credential_missing")
+
+    @patch.object(tvdb.requests, "post")
+    def test_login_unauthorized_is_authentication_failure(self, post):
+        runtime_context.configure({
+            "metadata": {
+                "tvdb": {
+                    "enable": True,
+                    "api_key": "configured-secret",
+                },
+            },
+        })
+        rejected = Mock(status_code=401)
+        rejected.raise_for_status.side_effect = requests.HTTPError(
+            "unauthorized",
+            response=rejected,
+        )
+        post.return_value = rejected
+
+        with self.assertRaises(tvdb.TvdbAuthenticationError):
+            tvdb._login_tvdb(tvdb._get_tvdb_config())
+
+    def test_feature_provider_reports_missing_credentials(self):
+        config = {
+            "metadata": {
+                "tvdb": {
+                    "enable": True,
+                    "api_key": "",
+                },
+            },
+        }
+        runtime_context.configure(config)
+        feature = MediaSearchFeature(config=config, core=Mock())
+
+        result = feature._tvdb_provider({
+            "hypotheses": [{"title": "The Glory", "year": "2022"}],
+        })
+
+        self.assertEqual(result["status"], "credential_missing")
+
+    @patch(
+        "telepiplex_media_search.service.search_tvdb_movies",
+        side_effect=tvdb.TvdbAuthenticationError("rejected"),
+    )
+    def test_feature_provider_reports_authentication_failure(self, _search):
+        config = {
+            "metadata": {
+                "tvdb": {
+                    "enable": True,
+                    "api_key": "configured-secret",
+                },
+            },
+        }
+        runtime_context.configure(config)
+        feature = MediaSearchFeature(config=config, core=Mock())
+
+        result = feature._tvdb_provider({
+            "hypotheses": [{"title": "The Glory", "year": "2022"}],
+        })
+
+        self.assertEqual(result["status"], "authentication_failed")
+
     def test_korean_primary_name_uses_latin_alias_and_search_image(self):
         item = tvdb._normalize_search_item(
             {

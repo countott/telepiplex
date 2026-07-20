@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import html
 import re
+import threading
+import time
+from copy import deepcopy
 from urllib.parse import unquote, unquote_plus
 
 import requests
@@ -13,6 +16,11 @@ USER_AGENT = "Telepiplex/1.0 (media metadata lookup)"
 _SUBJECT_PATTERN = re.compile(
     r"(?:https?:)?//movie\.douban\.com/subject/(\d+)/?|(?<![\w/])/subject/(\d+)/?"
 )
+_QUERY_CACHE: dict[tuple[str, ...], tuple[float, dict]] = {}
+_SUBJECT_CACHE: dict[str, tuple[float, dict]] = {}
+_CIRCUIT_STATE = {"failures": 0, "open_until": 0.0}
+_SEMAPHORES: dict[int, threading.BoundedSemaphore] = {}
+_STATE_LOCK = threading.Lock()
 
 
 def _text(value) -> str:
@@ -42,6 +50,81 @@ def _headers(referer: str = "") -> dict:
     if referer:
         result["Referer"] = referer
     return result
+
+
+def _cache_get(cache: dict, key, ttl: float):
+    if ttl <= 0:
+        return None
+    cached = cache.get(key)
+    if not cached:
+        return None
+    created_at, value = cached
+    if time.monotonic() - created_at >= ttl:
+        cache.pop(key, None)
+        return None
+    return deepcopy(value)
+
+
+def _cache_put(cache: dict, key, value) -> None:
+    cache[key] = (time.monotonic(), deepcopy(value))
+
+
+def _semaphore(max_concurrency: int) -> threading.BoundedSemaphore:
+    limit = max(1, int(max_concurrency or 1))
+    with _STATE_LOCK:
+        return _SEMAPHORES.setdefault(
+            limit,
+            threading.BoundedSemaphore(limit),
+        )
+
+
+def _circuit_is_open() -> bool:
+    return float(_CIRCUIT_STATE.get("open_until") or 0) > time.monotonic()
+
+
+def _record_success() -> None:
+    with _STATE_LOCK:
+        _CIRCUIT_STATE.update({"failures": 0, "open_until": 0.0})
+
+
+def _record_failure(
+    *,
+    threshold: int,
+    seconds: float,
+) -> None:
+    with _STATE_LOCK:
+        failures = int(_CIRCUIT_STATE.get("failures") or 0) + 1
+        _CIRCUIT_STATE["failures"] = failures
+        if failures >= max(1, int(threshold or 1)):
+            _CIRCUIT_STATE["open_until"] = (
+                time.monotonic() + max(1.0, float(seconds or 1))
+            )
+
+
+def _exception_status(exc: Exception) -> str:
+    if isinstance(exc, requests.Timeout):
+        return "timeout"
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code == 403:
+        return "blocked"
+    if status_code == 429:
+        return "rate_limited"
+    return "server_down"
+
+
+def _failure_status(errors: list[tuple[str, str]]) -> str:
+    statuses = {status for status, _error in errors}
+    for status in ("rate_limited", "blocked", "timeout", "server_down"):
+        if status in statuses:
+            return status
+    return "server_down"
+
+
+def _error_text(errors: list[tuple[str, str]]) -> str:
+    return "; ".join(
+        error for _status, error in errors if _text(error)
+    )
 
 
 def _subject_urls(value: str) -> list[str]:
@@ -196,7 +279,11 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
     }
 
 
-def _fetch_subject(subject_url: str, timeout: float, errors: list[str]) -> dict | None:
+def _fetch_subject(
+    subject_url: str,
+    timeout: float,
+    errors: list[tuple[str, str]],
+) -> dict | None:
     subject_id = next(iter(re.findall(r"/subject/(\d+)", subject_url)), "")
     attempts = (
         (
@@ -218,27 +305,47 @@ def _fetch_subject(subject_url: str, timeout: float, errors: list[str]) -> dict 
             response.raise_for_status()
             fact = _normalize_payload(response.json(), subject_url)
         except Exception as exc:
-            errors.append(str(exc))
+            errors.append((_exception_status(exc), str(exc)))
             continue
         if fact:
             return fact
     return None
 
 
-def lookup_douban_subject(subject_id: str, timeout: float = 10) -> dict | None:
+def lookup_douban_subject(
+    subject_id: str,
+    timeout: float = 10,
+    *,
+    cache_ttl: float = 900,
+    max_concurrency: int = 2,
+) -> dict | None:
     subject_id = _text(subject_id)
     if not subject_id.isdigit():
         return None
-    return _fetch_subject(
-        f"https://movie.douban.com/subject/{subject_id}/",
-        timeout,
-        [],
-    )
+    cached = _cache_get(_SUBJECT_CACHE, subject_id, float(cache_ttl or 0))
+    if cached is not None:
+        return cached
+    if _circuit_is_open():
+        return None
+    with _semaphore(max_concurrency):
+        result = _fetch_subject(
+            f"https://movie.douban.com/subject/{subject_id}/",
+            timeout,
+            [],
+        )
+    if result:
+        _cache_put(_SUBJECT_CACHE, subject_id, result)
+    return result
 
 
 def lookup_douban_evidence(
     queries: list[str],
     timeout: float = 10,
+    *,
+    cache_ttl: float = 900,
+    max_concurrency: int = 2,
+    circuit_breaker_failures: int = 3,
+    circuit_breaker_seconds: float = 300,
 ) -> dict:
     cleaned = []
     for item in queries or []:
@@ -247,34 +354,61 @@ def lookup_douban_evidence(
             cleaned.append(item)
     if not cleaned:
         return _result("not_found")
+    if _circuit_is_open():
+        return _result("blocked", error="douban circuit open")
+    cache_key = tuple(item.casefold() for item in cleaned)
+    cached = _cache_get(_QUERY_CACHE, cache_key, float(cache_ttl or 0))
+    if cached is not None:
+        return cached
 
     urls = []
-    errors = []
+    errors: list[tuple[str, str]] = []
     successful_searches = 0
-    for query in cleaned:
-        try:
-            response = requests.get(
-                "https://www.douban.com/search",
-                params={"cat": "1002", "q": query},
-                headers=_headers("https://www.douban.com/"),
-                timeout=timeout,
-            )
-            response.raise_for_status()
-            successful_searches += 1
-        except Exception as exc:
-            errors.append(str(exc))
-            continue
-        for url in _subject_urls(response.text):
-            if url not in urls:
-                urls.append(url)
+    with _semaphore(max_concurrency):
+        for query in cleaned:
+            try:
+                response = requests.get(
+                    "https://www.douban.com/search",
+                    params={"cat": "1002", "q": query},
+                    headers=_headers("https://www.douban.com/"),
+                    timeout=timeout,
+                )
+                response.raise_for_status()
+                successful_searches += 1
+            except Exception as exc:
+                errors.append((_exception_status(exc), str(exc)))
+                continue
+            for url in _subject_urls(response.text):
+                if url not in urls:
+                    urls.append(url)
 
-    facts = []
-    for url in urls:
-        fact = _fetch_subject(url, timeout, errors)
-        if fact:
-            facts.append(fact)
+        facts = []
+        for url in urls:
+            subject_id = next(iter(re.findall(r"/subject/(\d+)", url)), "")
+            fact = _cache_get(
+                _SUBJECT_CACHE,
+                subject_id,
+                float(cache_ttl or 0),
+            )
+            if fact is None:
+                fact = _fetch_subject(url, timeout, errors)
+                if fact and subject_id:
+                    _cache_put(_SUBJECT_CACHE, subject_id, fact)
+            if fact:
+                facts.append(fact)
     if facts:
-        return _result("ok", facts, [item["url"] for item in facts])
+        result = _result("ok", facts, [item["url"] for item in facts])
+        _record_success()
+        _cache_put(_QUERY_CACHE, cache_key, result)
+        return result
     if successful_searches and not urls:
-        return _result("not_found")
-    return _result("server_down", error="; ".join(item for item in errors if item))
+        result = _result("not_found")
+        _record_success()
+        _cache_put(_QUERY_CACHE, cache_key, result)
+        return result
+    status = _failure_status(errors)
+    _record_failure(
+        threshold=circuit_breaker_failures,
+        seconds=circuit_breaker_seconds,
+    )
+    return _result(status, error=_error_text(errors))

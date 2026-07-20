@@ -10,15 +10,21 @@ from telepiplex_plugin_sdk import FeatureError
 from telepiplex_plugin_sdk.media_metadata import resolve_category_route
 
 from .ai import infer_relation_hypotheses_with_ai
-from .adapters.douban import lookup_douban_evidence
+from .adapters.douban import (
+    lookup_douban_evidence,
+    lookup_douban_subject,
+)
 from .adapters.prowlarr import (
     get_prowlarr_indexer_summary,
     resolve_prowlarr_download_url,
     search_prowlarr,
 )
 from .adapters.tvdb import (
+    TvdbAuthenticationError,
     TvdbConfigError,
     TvdbRequestError,
+    get_tvdb_movie,
+    get_tvdb_series,
     get_tvdb_series_episodes,
     search_tvdb_movies,
     search_tvdb_series,
@@ -44,6 +50,7 @@ from .series_scope import (
     series_inventory,
     series_scope_options,
 )
+from .source_tools import SourceToolGateway
 
 
 _LATIN = re.compile(r"[A-Za-z]")
@@ -1378,17 +1385,57 @@ class MediaSearchFeature:
         config = (((self.config.get("metadata") or {}).get("wikipedia") or {}))
         if not config.get("enable", True):
             return {"source": "wikipedia", "status": "disabled", "facts": [], "source_urls": [], "error": ""}
-        queries = ((hypotheses.get("source_queries") or {}).get("wikipedia") or [])
+        source_queries = hypotheses.get("source_queries") or {}
+        zh_queries = source_queries.get("wikipedia_zh")
+        en_queries = source_queries.get("wikipedia_en")
+        timeout = float(config.get("timeout") or 10)
+        if isinstance(zh_queries, list) or isinstance(en_queries, list):
+            results = []
+            configured = tuple(config.get("languages") or ["zh", "en"])
+            if "zh" in configured and zh_queries:
+                results.append(lookup_wikipedia_evidence(
+                    zh_queries,
+                    languages=("zh",),
+                    timeout=timeout,
+                ))
+            if "en" in configured and en_queries:
+                results.append(lookup_wikipedia_evidence(
+                    en_queries,
+                    languages=("en",),
+                    timeout=timeout,
+                ))
+            if results:
+                return self._merge_source_results("wikipedia", results)
+        queries = source_queries.get("wikipedia") or []
         return lookup_wikipedia_evidence(
             queries,
             languages=tuple(config.get("languages") or ["zh", "en"]),
-            timeout=float(config.get("timeout") or 10),
+            timeout=timeout,
         )
 
-    @staticmethod
-    def _douban_provider(hypotheses: dict):
+    def _douban_provider(self, hypotheses: dict):
         queries = ((hypotheses.get("source_queries") or {}).get("douban") or [])
-        return lookup_douban_evidence(queries, timeout=10.0)
+        config = ((self.config.get("metadata") or {}).get("douban") or {})
+        if not config.get("enable", True):
+            return {
+                "source": "douban",
+                "status": "disabled",
+                "facts": [],
+                "source_urls": [],
+                "error": "",
+            }
+        return lookup_douban_evidence(
+            queries,
+            timeout=float(config.get("timeout") or 10),
+            cache_ttl=float(config.get("cache_ttl") or 900),
+            max_concurrency=int(config.get("max_concurrency") or 2),
+            circuit_breaker_failures=int(
+                config.get("circuit_breaker_failures") or 3
+            ),
+            circuit_breaker_seconds=float(
+                config.get("circuit_breaker_seconds") or 300
+            ),
+        )
 
     def _tvdb_provider(self, hypotheses: dict):
         facts = []
@@ -1410,10 +1457,217 @@ class MediaSearchFeature:
                         "episodes_by_series": episodes,
                     })
         except TvdbConfigError as exc:
-            return {"source": "tvdb", "status": "disabled", "facts": [], "source_urls": [], "error": str(exc)}
-        except (TvdbRequestError, OSError) as exc:
+            return {
+                "source": "tvdb",
+                "status": exc.code,
+                "facts": [],
+                "source_urls": [],
+                "error": str(exc),
+            }
+        except TvdbAuthenticationError as exc:
+            return {
+                "source": "tvdb",
+                "status": "authentication_failed",
+                "facts": [],
+                "source_urls": [],
+                "error": str(exc),
+            }
+        except TvdbRequestError as exc:
+            return {
+                "source": "tvdb",
+                "status": exc.code,
+                "facts": [],
+                "source_urls": [],
+                "error": str(exc),
+            }
+        except OSError as exc:
             return {"source": "tvdb", "status": "server_down", "facts": [], "source_urls": [], "error": str(exc)}
         return {"source": "tvdb", "status": "ok" if facts else "not_found", "facts": facts, "source_urls": [], "error": ""}
+
+    @staticmethod
+    def _merge_source_results(source: str, results: list[dict]) -> dict:
+        facts = []
+        urls = []
+        errors = []
+        statuses = []
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            statuses.append(str(result.get("status") or "server_down"))
+            facts.extend(
+                item
+                for item in (result.get("facts") or [])
+                if isinstance(item, dict)
+            )
+            for url in result.get("source_urls") or []:
+                if url and url not in urls:
+                    urls.append(url)
+            if result.get("error"):
+                errors.append(str(result["error"]))
+        if facts:
+            status = "ok"
+        elif "not_found" in statuses:
+            status = "not_found"
+        else:
+            status = next(iter(statuses), "server_down")
+        return {
+            "source": source,
+            "status": status,
+            "facts": facts,
+            "source_urls": urls,
+            "error": "; ".join(errors),
+        }
+
+    def _targeted_wikipedia(self, arguments: dict) -> dict:
+        queries = list(arguments.get("queries") or [])
+        return self._wikipedia_provider({
+            "source_queries": {
+                "wikipedia_zh": queries,
+                "wikipedia_en": queries,
+            },
+        })
+
+    def _targeted_douban_subject(self, arguments: dict) -> dict:
+        config = ((self.config.get("metadata") or {}).get("douban") or {})
+        facts = []
+        for subject_id in arguments.get("subject_ids") or []:
+            fact = lookup_douban_subject(
+                subject_id,
+                timeout=float(config.get("timeout") or 10),
+                cache_ttl=float(config.get("cache_ttl") or 900),
+                max_concurrency=int(config.get("max_concurrency") or 2),
+            )
+            if fact:
+                facts.append(fact)
+        return {
+            "source": "douban",
+            "status": "ok" if facts else "not_found",
+            "facts": facts,
+            "source_urls": [
+                item.get("url") for item in facts if item.get("url")
+            ],
+            "error": "",
+        }
+
+    def _targeted_tvdb_entity(self, arguments: dict) -> dict:
+        facts = []
+        try:
+            for query in arguments.get("queries") or []:
+                title = query.get("title") or ""
+                year = query.get("year") or ""
+                media_type = query.get("media_type") or "unknown"
+                movies = (
+                    search_tvdb_movies(title, year)
+                    if media_type in {"movie", "unknown"}
+                    else []
+                )
+                series = (
+                    search_tvdb_series(title, year)
+                    if media_type in {"series", "unknown"}
+                    else []
+                )
+                facts.append({
+                    "movies": movies[:5],
+                    "series": series[:5],
+                    "episodes_by_series": {},
+                })
+            for entity in arguments.get("entity_ids") or []:
+                media_type = entity.get("media_type")
+                entity_id = entity.get("tvdb_id")
+                item = (
+                    get_tvdb_series(entity_id)
+                    if media_type == "series"
+                    else get_tvdb_movie(entity_id)
+                )
+                if item:
+                    facts.append({
+                        "movies": [item] if media_type == "movie" else [],
+                        "series": [item] if media_type == "series" else [],
+                        "episodes_by_series": (
+                            {str(entity_id): item.get("episodes") or []}
+                            if media_type == "series"
+                            else {}
+                        ),
+                    })
+        except TvdbConfigError as exc:
+            return {
+                "source": "tvdb",
+                "status": exc.code,
+                "facts": [],
+                "source_urls": [],
+                "error": str(exc),
+            }
+        except TvdbRequestError as exc:
+            return {
+                "source": "tvdb",
+                "status": exc.code,
+                "facts": [],
+                "source_urls": [],
+                "error": str(exc),
+            }
+        return {
+            "source": "tvdb",
+            "status": "ok" if facts else "not_found",
+            "facts": facts,
+            "source_urls": [],
+            "error": "",
+        }
+
+    def _targeted_tvdb_episodes(self, arguments: dict) -> dict:
+        facts = []
+        try:
+            for series_id in arguments.get("series_ids") or []:
+                episodes = get_tvdb_series_episodes(series_id)
+                facts.append({
+                    "movies": [],
+                    "series": [{
+                        "tvdb_series_id": str(series_id),
+                        "media_type": "series",
+                    }],
+                    "episodes_by_series": {
+                        str(series_id): episodes,
+                    },
+                })
+        except TvdbConfigError as exc:
+            return {
+                "source": "tvdb",
+                "status": exc.code,
+                "facts": [],
+                "source_urls": [],
+                "error": str(exc),
+            }
+        except TvdbRequestError as exc:
+            return {
+                "source": "tvdb",
+                "status": exc.code,
+                "facts": [],
+                "source_urls": [],
+                "error": str(exc),
+            }
+        return {
+            "source": "tvdb",
+            "status": "ok" if facts else "not_found",
+            "facts": facts,
+            "source_urls": [],
+            "error": "",
+        }
+
+    def _source_tool_gateway(self) -> SourceToolGateway:
+        return SourceToolGateway(
+            {
+                "wikipedia": self._wikipedia_provider,
+                "douban": self._douban_provider,
+                "tvdb": self._tvdb_provider,
+            },
+            targeted_handlers={
+                "lookup_wikipedia_entity": self._targeted_wikipedia,
+                "lookup_douban_subject": self._targeted_douban_subject,
+                "lookup_tvdb_entity": self._targeted_tvdb_entity,
+                "lookup_tvdb_episodes": self._targeted_tvdb_episodes,
+            },
+            config=self.config,
+            logger=runtime_context.logger,
+        )
 
     @staticmethod
     def _search_releases(query: str, media_type: str):
