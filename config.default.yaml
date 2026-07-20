@@ -73,6 +73,13 @@ metadata:
     enable: true
     languages: [zh, en]
     timeout: 10
+  douban:
+    enable: true
+    timeout: 10
+    cache_ttl: 900
+    max_concurrency: 2
+    circuit_breaker_failures: 3
+    circuit_breaker_seconds: 300
   tvdb:
     enable: true
     api_key: ""
@@ -85,3 +92,8 @@ ai:
   api_key: ""
   model: ""
   timeout: 60
+  source_orchestration:
+    enable: true
+    max_targeted_rounds: 2
+    max_tools_per_round: 3
+    protocol: openai_tools_v1

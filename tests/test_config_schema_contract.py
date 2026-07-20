@@ -32,11 +32,54 @@ class ConfigSchemaContractTest(unittest.TestCase):
         )
         self.assertEqual(
             set(ai["properties"]),
-            {"enable", "api_url", "api_key", "model", "timeout"},
+            {
+                "enable",
+                "api_url",
+                "api_key",
+                "model",
+                "timeout",
+                "source_orchestration",
+            },
         )
         self.assertTrue(tvdb["properties"]["api_key"]["writeOnly"])
         self.assertTrue(tvdb["properties"]["subscriber_pin"]["writeOnly"])
         self.assertTrue(ai["properties"]["api_key"]["writeOnly"])
+
+    def test_source_orchestration_and_douban_defaults_are_bounded(self):
+        schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))
+        default = yaml.safe_load((ROOT / "config.default.yaml").read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            default["metadata"]["douban"],
+            {
+                "enable": True,
+                "timeout": 10,
+                "cache_ttl": 900,
+                "max_concurrency": 2,
+                "circuit_breaker_failures": 3,
+                "circuit_breaker_seconds": 300,
+            },
+        )
+        self.assertEqual(
+            default["ai"]["source_orchestration"],
+            {
+                "enable": True,
+                "max_targeted_rounds": 2,
+                "max_tools_per_round": 3,
+                "protocol": "openai_tools_v1",
+            },
+        )
+        orchestration = (
+            schema["properties"]["ai"]["properties"]["source_orchestration"]
+        )
+        self.assertEqual(
+            orchestration["properties"]["max_targeted_rounds"]["maximum"],
+            2,
+        )
+        self.assertEqual(
+            orchestration["properties"]["max_tools_per_round"]["maximum"],
+            3,
+        )
 
     def test_search_scoring_is_part_of_public_config_contract(self):
         schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))

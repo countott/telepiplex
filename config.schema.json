@@ -104,6 +104,19 @@
           },
           "additionalProperties": true
         },
+        "douban": {
+          "type": "object",
+          "title": "豆瓣",
+          "properties": {
+            "enable": {"type": "boolean", "title": "启用"},
+            "timeout": {"type": "number", "minimum": 1, "maximum": 300, "title": "超时（秒）"},
+            "cache_ttl": {"type": "number", "minimum": 0, "maximum": 86400, "title": "缓存时长（秒）"},
+            "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 8, "title": "最大并发"},
+            "circuit_breaker_failures": {"type": "integer", "minimum": 1, "maximum": 20, "title": "熔断失败阈值"},
+            "circuit_breaker_seconds": {"type": "number", "minimum": 1, "maximum": 3600, "title": "熔断时长（秒）"}
+          },
+          "additionalProperties": true
+        },
         "tvdb": {
           "type": "object",
           "title": "TVDB",
@@ -127,7 +140,18 @@
         "api_url": {"type": "string", "title": "API 地址"},
         "api_key": {"type": "string", "title": "API Key", "writeOnly": true},
         "model": {"type": "string", "title": "模型"},
-        "timeout": {"type": "number", "minimum": 1, "maximum": 600, "title": "超时（秒）"}
+        "timeout": {"type": "number", "minimum": 1, "maximum": 600, "title": "超时（秒）"},
+        "source_orchestration": {
+          "type": "object",
+          "title": "来源编排",
+          "properties": {
+            "enable": {"type": "boolean", "title": "启用"},
+            "max_targeted_rounds": {"type": "integer", "minimum": 0, "maximum": 2, "title": "最多定向查询轮数"},
+            "max_tools_per_round": {"type": "integer", "minimum": 1, "maximum": 3, "title": "每轮最多工具数"},
+            "protocol": {"type": "string", "enum": ["openai_tools_v1"], "title": "工具协议"}
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": true
     }

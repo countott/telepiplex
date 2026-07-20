@@ -1024,16 +1024,18 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.4.0")
+        self.assertEqual(manifest["version"], "1.5.0")
         self.assertEqual(manifest["core_api"], ">=1.2,<2.0")
-        self.assertIn('version = "1.4.0"', project)
+        self.assertIn('version = "1.5.0"', project)
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
 
         self.assertTrue(config["metadata"]["wikipedia"]["enable"])
+        self.assertTrue(config["metadata"]["douban"]["enable"])
         self.assertTrue(config["metadata"]["tvdb"]["enable"])
         self.assertTrue(config["ai"]["enable"])
+        self.assertTrue(config["ai"]["source_orchestration"]["enable"])
 
     def test_prowlarr_is_not_disabled_by_legacy_hidden_search_flag(self):
         from telepiplex_media_search.adapters.prowlarr import _get_prowlarr_config
@@ -1055,7 +1057,12 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("dist/media-search-1.4.0.tpx", source)
+        self.assertIn("dist/media-search-1.5.0.tpx", source)
+        self.assertIn("search_media_sources", source)
+        self.assertIn("最多两轮", source)
+        self.assertIn("不会交给 AI", source)
+        self.assertIn("renaming", source)
+        self.assertNotIn("dist/media-search-1.4.0.tpx", source)
         self.assertNotIn("dist/media-search-1.2.0.tpx", source)
         self.assertNotIn("dist/media-search-1.1.0.tpx", source)
 
