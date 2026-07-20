@@ -32,9 +32,9 @@
 
 只有满足以下至少一种强证据的值才视为秘密：
 
-1. 位于 Authorization、Cookie、密码、口令、API Key、client secret、access token、
-   refresh token、session secret、webhook secret 或 private key 等明确敏感字段中，
-   且不是示例或占位符；
+1. 位于 Authorization、认证或会话 Cookie、密码、口令、API Key、client secret、
+   access token、refresh token、session secret、webhook secret 或 private key 等
+   明确敏感字段中，且不是示例或占位符；
 2. 位于明确的凭据赋值、命令行参数、HTTP 头、URL 敏感查询参数或带认证信息的连接串中；
 3. 符合已知真实凭据前缀或完整结构，例如私钥 PEM 块、Bearer/JWT、常见云平台、
    GitHub、Slack 或 OpenAI 令牌格式；
@@ -56,7 +56,8 @@
 3. **重建与复扫**：重建嵌套归档和顶层 ZIP，重新运行同一检测器。任何仍存在的
    高置信度命中、无法安全处理的命中或格式损坏都会使流程失败。
 4. **加密与交付**：使用现有独立密钥重新生成 AES-256-CBC + PBKDF2 加密包、
-   HMAC 和 SHA-256 校验文件。验证通过后，用脱敏版本替换旧加密产物。
+   HMAC 和 SHA-256 校验文件。全部新产物先在临时目录中验证；验证通过后，再逐个
+   原子替换旧加密产物。
 
 实现应把规则、格式遍历、文本替换、图片处理和报告生成分开，使每一部分可以单独
 测试。秘密值集合只存在于处理进程内存中，不写入调试文件。
@@ -92,4 +93,3 @@
 6. 实际解密得到的 ZIP 与加密前 ZIP 逐字节一致，且 ZIP 完整性测试通过；
 7. 修改密文一个字节后，解密工具在产生明文前拒绝处理；
 8. 最终密钥目录权限为 `700`，密钥文件权限为 `600`，FileVault 保持开启。
-
