@@ -310,3 +310,59 @@ def build_search_graph(sources: list[dict]) -> SearchGraph:
     ]
     candidates.sort(key=lambda item: item.candidate_key)
     return SearchGraph(tuple(candidates))
+
+
+def merge_verified_equivalence_edges(
+    graph: SearchGraph,
+    edges,
+) -> SearchGraph:
+    """Merge candidate components connected by already verified fact edges."""
+
+    candidates = list((graph or SearchGraph(())).candidates)
+    if not candidates or not edges:
+        return SearchGraph(tuple(candidates))
+    parent = list(range(len(candidates)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    by_fact = {
+        fact.fact_id: index
+        for index, candidate in enumerate(candidates)
+        for fact in candidate.facts
+    }
+    for edge in edges:
+        if isinstance(edge, dict):
+            left_id = _text(edge.get("left_fact_id"))
+            right_id = _text(edge.get("right_fact_id"))
+        else:
+            left_id = _text(getattr(edge, "left_fact_id", ""))
+            right_id = _text(getattr(edge, "right_fact_id", ""))
+        left = by_fact.get(left_id)
+        right = by_fact.get(right_id)
+        if left is not None and right is not None:
+            union(left, right)
+
+    components: dict[int, list[EvidenceFact]] = {}
+    for index, candidate in enumerate(candidates):
+        facts = components.setdefault(find(index), [])
+        known = {fact.fact_id for fact in facts}
+        facts.extend(
+            fact for fact in candidate.facts if fact.fact_id not in known
+        )
+    merged = [
+        CandidateEntity(_candidate_key(facts), tuple(facts))
+        for facts in components.values()
+        if facts
+    ]
+    merged.sort(key=lambda item: item.candidate_key)
+    return SearchGraph(tuple(merged))
