@@ -1,4 +1,17 @@
 plugins:
+  download:
+    versions:
+      1.0.0:
+        host_api: '>=1.1,<2.0'
+        provides:
+        - download.provider
+        - storage.provider
+        requires: []
+        sha256: 7901b57e2a94a94d86eeece893afba69647f951a395c366f35efee180667e182
+        source:
+          branch: main
+          commit: 1d9a6c4efb5dd449b86f9aa09347b79a3cc4e49a
+        url: https://github.com/countott/telepiplex/releases/download/download-v1.0.0/download-1.0.0.tpx
   search:
     versions:
       1.0.0:
@@ -12,5 +25,5 @@ plugins:
           branch: main
           commit: 1d9a6c4efb5dd449b86f9aa09347b79a3cc4e49a
         url: https://github.com/countott/telepiplex/releases/download/search-v1.0.0/search-1.0.0.tpx
-release: search-v1.0.0
+release: download-v1.0.0
 schema_version: 1
