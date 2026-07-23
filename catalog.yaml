@@ -38,5 +38,17 @@ plugins:
           branch: main
           commit: 1d9a6c4efb5dd449b86f9aa09347b79a3cc4e49a
         url: https://github.com/countott/telepiplex/releases/download/search-v1.0.0/search-1.0.0.tpx
-release: rename-v1.0.0
+  sync:
+    versions:
+      1.0.0:
+        host_api: '>=1.2,<2.0'
+        provides:
+        - library.sync
+        requires: []
+        sha256: c5164190d79e1835ce180eef9be4fceb20a329894832ac05745b3dc25840abc1
+        source:
+          branch: main
+          commit: 1d9a6c4efb5dd449b86f9aa09347b79a3cc4e49a
+        url: https://github.com/countott/telepiplex/releases/download/sync-v1.0.0/sync-1.0.0.tpx
+release: sync-v1.0.0
 schema_version: 1
