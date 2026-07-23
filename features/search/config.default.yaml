@@ -1,0 +1,99 @@
+category_folder:
+  - kind: live_action_movie
+    name: 真人电影
+    path: /真人电影
+    plex_library_id: ""
+  - kind: animated_movie
+    name: 动画电影
+    path: /动画电影
+    plex_library_id: ""
+  - kind: live_action_series
+    name: 真人剧集
+    path: /真人剧集
+    plex_library_id: ""
+  - kind: animated_series
+    name: 动画剧集
+    path: /动画剧集
+    plex_library_id: ""
+search:
+  enable: true
+  prowlarr:
+    base_url: http://127.0.0.1:9696
+    api_key: ""
+    timeout: 150
+    status_timeout: 15
+    indexer_ids: "-2"
+    categories:
+      movie: 2000
+      tv: 5000
+    result_limit: 12
+  scoring:
+    prefer_resolution:
+      - "2160p"
+      - "1080p"
+    prefer_source:
+      - "WEB-DL"
+      - "BluRay"
+      - "Remux"
+    prefer_codec:
+      - "HEVC"
+      - "H.265"
+      - "x265"
+      - "H.264"
+      - "x264"
+    prefer_audio:
+      - "Atmos"
+      - "TrueHD"
+      - "DTS-HD"
+      - "EAC3"
+    reject_keywords:
+      - "CAM"
+      - "TS"
+      - "TC"
+      - "枪版"
+      - "抢先"
+      - "HC"
+      - "HDTC"
+      - "HDCAM"
+    keyword_scores:
+      "2160p": 35
+      "1080p": 25
+      "WEB-DL": 25
+      "BluRay": 22
+      "Remux": 24
+      "国配": 10
+      "中字": 8
+      "CAM": -90
+      "枪版": -90
+    indexer_scores:
+      "M-Team": 30
+      "TorrentLeech": 10
+metadata:
+  wikipedia:
+    enable: true
+    languages: [zh, en]
+    timeout: 10
+  douban:
+    enable: true
+    timeout: 10
+    cache_ttl: 900
+    max_concurrency: 2
+    circuit_breaker_failures: 3
+    circuit_breaker_seconds: 300
+  tvdb:
+    enable: true
+    api_key: ""
+    base_url: https://api4.thetvdb.com/v4
+    subscriber_pin: ""
+    timeout: 15
+ai:
+  enable: true
+  api_url: ""
+  api_key: ""
+  model: ""
+  timeout: 60
+  source_orchestration:
+    enable: true
+    max_targeted_rounds: 2
+    max_tools_per_round: 3
+    protocol: openai_tools_v1

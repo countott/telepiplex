@@ -1,0 +1,17 @@
+plugin_id: caption
+name: caption
+version: 0.1.0
+host_api: ">=1.2,<2.0"
+entry_point: telepiplex_caption.runtime:main
+provides: []
+requires: []
+subscribes: []
+publishes: []
+commands: []
+callbacks: []
+config_schema_version: 1
+state_schema_version: 1
+source:
+  repository: origin
+  branch: main
+  commit: "0000000000000000000000000000000000000000"

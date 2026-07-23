@@ -1,0 +1,32 @@
+plugin_id: download
+name: download
+version: 1.0.0
+host_api: ">=1.1,<2.0"
+entry_point: telepiplex_download.runtime:main
+provides:
+  - name: download.provider
+    exclusive: true
+  - name: storage.provider
+    exclusive: true
+requires: []
+subscribes: []
+publishes:
+  - download.completed
+  - download.failed
+commands:
+  - name: magnet
+    description: 投递磁力链接
+  - name: m
+    description: 投递磁力链接
+  - name: auth
+    description: 配置 115 授权
+  - name: q
+    description: 退出当前会话
+callbacks:
+  - download
+config_schema_version: 1
+state_schema_version: 1
+source:
+  repository: origin
+  branch: main
+  commit: "0000000000000000000000000000000000000000"

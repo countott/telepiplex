@@ -1,0 +1,4 @@
+python-telegram-bot==22.3
+PyYAML>=6.0.2
+jsonschema>=4.23,<5
+packaging>=24,<27

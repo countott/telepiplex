@@ -1,0 +1,156 @@
+name: Publish Telepiplex release
+
+on:
+  push:
+    tags:
+      - telepiplex-v*
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telepiplex-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TELEPIPLEX_IMAGE: ghcr.io/${{ github.repository_owner }}/telepiplex
+  RELEASE_TAG: ${{ github.ref_name }}
+
+jobs:
+  validate-telepiplex:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Telepiplex release source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install Telepiplex test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest setuptools wheel
+
+      - name: Validate immutable Telepiplex tag
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^telepiplex-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Invalid Telepiplex release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+      - name: Run Telepiplex tests
+        env:
+          PYTHONPATH: .:sdk/src
+        run: python -m pytest -q
+
+      - name: Compile tracked Python
+        env:
+          PYTHONPATH: .:sdk/src
+        run: python -m compileall -q app sdk tools tests
+
+  build-telepiplex-image:
+    needs: validate-telepiplex
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Telepiplex release source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Refuse an existing immutable image tag
+        id: version
+        run: |
+          VERSION="${RELEASE_TAG#telepiplex-v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          set +e
+          INSPECT_OUTPUT=$(docker buildx imagetools inspect "$TELEPIPLEX_IMAGE:$VERSION" 2>&1)
+          INSPECT_STATUS=$?
+          set -e
+          if [[ "$INSPECT_STATUS" -eq 0 ]]; then
+            echo "Telepiplex image tag already exists: $TELEPIPLEX_IMAGE:$VERSION" >&2
+            exit 1
+          fi
+          if grep -Eiq 'manifest[ _-]*(unknown|not[ _-]*found)|MANIFEST_UNKNOWN' <<< "$INSPECT_OUTPUT" \
+            || grep -Eiq '^ERROR: .+: not found$' <<< "$INSPECT_OUTPUT"; then
+            echo "Confirmed unused Telepiplex image tag: $TELEPIPLEX_IMAGE:$VERSION"
+          else
+            echo "Unable to prove Telepiplex image tag is unused; refusing publication." >&2
+            printf '%s\n' "$INSPECT_OUTPUT" >&2
+            exit 1
+          fi
+
+      - name: Build and push Telepiplex image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.TELEPIPLEX_IMAGE }}:${{ steps.version.outputs.version }}
+            ${{ env.TELEPIPLEX_IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+  publish-telepiplex-release:
+    needs:
+      - validate-telepiplex
+      - build-telepiplex-image
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse an existing Telepiplex Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Telepiplex Release already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+      - name: Write Telepiplex release notes
+        run: |
+          VERSION="${RELEASE_TAG#telepiplex-v}"
+          {
+            echo "# Telepiplex $VERSION"
+            echo
+            echo "- Image: \`$TELEPIPLEX_IMAGE:$VERSION\`"
+            echo "- Commit: \`$GITHUB_SHA\`"
+            echo "- Platform: \`linux/amd64\`"
+          } > release-notes.md
+
+      - name: Create GitHub Latest Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$RELEASE_TAG" \
+            --notes-file release-notes.md \
+            --latest

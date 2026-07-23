@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "x-telepiplex-config-command": "search_config",
+  "properties": {
+    "category_folder": {
+      "type": "array",
+      "minItems": 4,
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {"enum": ["live_action_movie", "animated_movie", "live_action_series", "animated_series"]},
+          "name": {"type": "string", "minLength": 1},
+          "path": {"type": "string", "pattern": "^/"},
+          "plex_library_id": {"type": "string"}
+        },
+        "required": ["kind", "name", "path", "plex_library_id"],
+        "additionalProperties": false
+      }
+    },
+    "search": {
+      "type": "object",
+      "title": "搜索",
+      "properties": {
+        "enable": {"type": "boolean", "title": "启用搜索"},
+        "prowlarr": {
+          "type": "object",
+          "title": "Prowlarr",
+          "properties": {
+            "base_url": {"type": "string", "title": "服务地址"},
+            "api_key": {"type": "string", "title": "API Key", "writeOnly": true},
+            "timeout": {"type": "number", "minimum": 1, "maximum": 600, "title": "搜索超时（秒）"},
+            "status_timeout": {"type": "number", "minimum": 1, "maximum": 300, "title": "状态超时（秒）"},
+            "indexer_ids": {"type": "string", "title": "Indexer IDs"},
+            "categories": {
+              "type": "object",
+              "title": "搜索分类",
+              "properties": {
+                "movie": {"type": "integer", "minimum": 0, "title": "电影分类"},
+                "tv": {"type": "integer", "minimum": 0, "title": "剧集分类"}
+              },
+              "additionalProperties": true
+            },
+            "result_limit": {"type": "integer", "minimum": 1, "maximum": 12, "title": "结果数量"}
+          },
+          "additionalProperties": true
+        },
+        "scoring": {
+          "type": "object",
+          "title": "评分",
+          "properties": {
+            "prefer_resolution": {
+              "type": "array",
+              "title": "优先分辨率",
+              "items": {"type": "string"}
+            },
+            "prefer_source": {
+              "type": "array",
+              "title": "优先片源",
+              "items": {"type": "string"}
+            },
+            "prefer_codec": {
+              "type": "array",
+              "title": "优先编码",
+              "items": {"type": "string"}
+            },
+            "prefer_audio": {
+              "type": "array",
+              "title": "优先音频",
+              "items": {"type": "string"}
+            },
+            "reject_keywords": {
+              "type": "array",
+              "title": "排斥关键词",
+              "items": {"type": "string"}
+            },
+            "keyword_scores": {
+              "type": "object",
+              "title": "关键词权重",
+              "additionalProperties": {"type": "integer"}
+            },
+            "indexer_scores": {
+              "type": "object",
+              "title": "Indexer 权重",
+              "additionalProperties": {"type": "integer"}
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "metadata": {
+      "type": "object",
+      "title": "元数据",
+      "properties": {
+        "wikipedia": {
+          "type": "object",
+          "title": "Wikipedia",
+          "properties": {
+            "enable": {"type": "boolean", "title": "启用"},
+            "languages": {"type": "array", "items": {"type": "string"}},
+            "timeout": {"type": "number", "minimum": 1, "maximum": 300, "title": "超时（秒）"}
+          },
+          "additionalProperties": true
+        },
+        "douban": {
+          "type": "object",
+          "title": "豆瓣",
+          "properties": {
+            "enable": {"type": "boolean", "title": "启用"},
+            "timeout": {"type": "number", "minimum": 1, "maximum": 300, "title": "超时（秒）"},
+            "cache_ttl": {"type": "number", "minimum": 0, "maximum": 86400, "title": "缓存时长（秒）"},
+            "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 8, "title": "最大并发"},
+            "circuit_breaker_failures": {"type": "integer", "minimum": 1, "maximum": 20, "title": "熔断失败阈值"},
+            "circuit_breaker_seconds": {"type": "number", "minimum": 1, "maximum": 3600, "title": "熔断时长（秒）"}
+          },
+          "additionalProperties": true
+        },
+        "tvdb": {
+          "type": "object",
+          "title": "TVDB",
+          "properties": {
+            "enable": {"type": "boolean", "title": "启用"},
+            "api_key": {"type": "string", "title": "API Key", "writeOnly": true},
+            "base_url": {"type": "string", "title": "API 地址"},
+            "subscriber_pin": {"type": "string", "title": "Subscriber PIN", "writeOnly": true},
+            "timeout": {"type": "number", "minimum": 1, "maximum": 300, "title": "超时（秒）"}
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "ai": {
+      "type": "object",
+      "title": "AI",
+      "properties": {
+        "enable": {"type": "boolean", "title": "启用"},
+        "api_url": {"type": "string", "title": "API 地址"},
+        "api_key": {"type": "string", "title": "API Key", "writeOnly": true},
+        "model": {"type": "string", "title": "模型"},
+        "timeout": {"type": "number", "minimum": 1, "maximum": 600, "title": "超时（秒）"},
+        "source_orchestration": {
+          "type": "object",
+          "title": "来源编排",
+          "properties": {
+            "enable": {"type": "boolean", "title": "启用"},
+            "max_targeted_rounds": {"type": "integer", "minimum": 0, "maximum": 2, "title": "最多定向查询轮数"},
+            "max_tools_per_round": {"type": "integer", "minimum": 1, "maximum": 3, "title": "每轮最多工具数"},
+            "protocol": {"type": "string", "enum": ["openai_tools_v1"], "title": "工具协议"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "required": ["category_folder", "search", "metadata", "ai"],
+  "additionalProperties": false
+}

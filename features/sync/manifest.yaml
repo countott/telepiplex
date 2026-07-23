@@ -1,0 +1,27 @@
+plugin_id: sync
+name: sync
+version: 1.0.0
+host_api: ">=1.2,<2.0"
+entry_point: telepiplex_sync.runtime:main
+provides:
+  - name: library.sync
+    exclusive: true
+requires: []
+subscribes:
+  - media.organized
+publishes: []
+commands:
+  - name: sync
+    description: 查看 Plex 任务
+  - name: scan
+    description: 扫描 Plex 媒体库
+  - name: sync_config
+    description: 配置 Plex 管理
+callbacks:
+  - sync
+config_schema_version: 1
+state_schema_version: 2
+source:
+  repository: origin
+  branch: main
+  commit: "0000000000000000000000000000000000000000"

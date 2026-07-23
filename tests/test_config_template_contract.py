@@ -1,0 +1,54 @@
+import unittest
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[1]
+BUSINESS_TERMS = (
+    "115_app_id",
+    "access_token",
+    "refresh_token",
+    "download",
+    "search",
+    "prowlarr",
+    "media",
+    "metadata",
+    "tvdb",
+    "plex",
+    "ai",
+    "category_folder",
+    "modules",
+)
+
+
+class ConfigTemplateContractTest(unittest.TestCase):
+    def test_runtime_templates_are_identical_host_only_contracts(self):
+        app_source = (ROOT / "app/config.yaml.example").read_text(encoding="utf-8")
+        runtime_source = (ROOT / "config/config.yaml.example").read_text(encoding="utf-8")
+
+        self.assertEqual(app_source, runtime_source)
+        parsed = yaml.safe_load(runtime_source)
+        self.assertEqual(
+            set(parsed),
+            {"log_level", "bot_token", "allowed_user", "plugins"},
+        )
+        self.assertEqual(parsed["plugins"]["root"], "/config/plugins")
+        self.assertEqual(
+            parsed["plugins"]["catalog"],
+            "https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml",
+        )
+        self.assertEqual(parsed["plugins"]["catalog_refresh_interval"], 21600)
+        self.assertIn(
+            "/config/plugins/<plugin_id>/config.yaml.example",
+            runtime_source,
+        )
+        for term in BUSINESS_TERMS:
+            self.assertNotIn(term, parsed)
+
+    def test_legacy_host_module_snippet_is_removed(self):
+        self.assertFalse((ROOT / "config/modules/host.yaml.example").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,24 @@
+plugin_id: rename
+name: rename
+version: 1.0.0
+host_api: ">=1.1,<2.0"
+entry_point: telepiplex_rename.runtime:main
+provides: []
+requires:
+  - storage.provider
+  - media.search
+subscribes:
+  - download.completed
+publishes:
+  - media.organized
+commands:
+  - name: rename_config
+    description: 配置媒体整理
+callbacks:
+  - rename
+config_schema_version: 1
+state_schema_version: 1
+source:
+  repository: origin
+  branch: main
+  commit: "0000000000000000000000000000000000000000"

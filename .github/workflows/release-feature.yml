@@ -1,0 +1,609 @@
+name: Publish one Telepiplex Feature
+
+on:
+  push:
+    tags:
+      - download-v*
+      - search-v*
+      - rename-v*
+      - sync-v*
+      - caption-v*
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.ref_name }}
+
+jobs:
+  build-feature:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      plugin_id: ${{ steps.feature.outputs.plugin_id }}
+      version: ${{ steps.feature.outputs.version }}
+      branch: ${{ steps.feature.outputs.branch }}
+      source_dir: ${{ steps.feature.outputs.source_dir }}
+      asset: ${{ steps.feature.outputs.asset }}
+      source_commit: ${{ steps.artifact.outputs.source_commit }}
+      artifact_name: ${{ steps.feature.outputs.artifact_name }}
+    steps:
+      - name: Checkout Telepiplex release infrastructure
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install Feature build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt build setuptools wheel
+
+      - name: Resolve immutable Feature identity
+        id: feature
+        env:
+          PYTHONPATH: .:sdk/src
+        run: |
+          python - "$RELEASE_TAG" >> "$GITHUB_OUTPUT" <<'PY'
+          import sys
+          from tools.update_feature_catalog import (
+              FEATURE_SOURCE_BRANCH,
+              FEATURE_SOURCE_DIRS,
+              parse_feature_tag,
+          )
+
+          plugin_id, version = parse_feature_tag(sys.argv[1])
+          print(f"plugin_id={plugin_id}")
+          print(f"version={version}")
+          print(f"branch={FEATURE_SOURCE_BRANCH}")
+          print(f"source_dir={FEATURE_SOURCE_DIRS[plugin_id]}")
+          print(f"asset={plugin_id}-{version}.tpx")
+          print(f"artifact_name=feature-{plugin_id}-{version}")
+          PY
+
+      - name: Probe immutable Feature Release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rm -rf release-metadata
+          mkdir -p release-metadata
+          RELEASE_API="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
+          HTTP_CODE=$(curl --silent --show-error --location \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --output release-metadata/release.json \
+            --write-out '%{http_code}' \
+            "$RELEASE_API")
+          case "$HTTP_CODE" in
+            200)
+              python - <<'PY'
+          import json
+          import pathlib
+
+          release = json.loads(pathlib.Path("release-metadata/release.json").read_text())
+          if release.get("draft") is not False or release.get("prerelease") is not False:
+              raise SystemExit("existing Feature Release is not publicly published")
+          PY
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              rm -f release-metadata/release.json
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              rm -f release-metadata/release.json
+              echo "Feature Release probe failed: HTTP $HTTP_CODE" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Reuse matching catalog artifact
+        id: prior
+        if: steps.release.outputs.exists == 'false'
+        env:
+          PLUGIN_ID: ${{ steps.feature.outputs.plugin_id }}
+          VERSION: ${{ steps.feature.outputs.version }}
+          FEATURE_BRANCH: ${{ steps.feature.outputs.branch }}
+          ASSET_NAME: ${{ steps.feature.outputs.asset }}
+          GH_TOKEN: ${{ github.token }}
+          PYTHONPATH: .:sdk/src
+        run: |
+          rm -rf prior-catalog
+          mkdir -p prior-catalog dist
+          FEATURE_COMMIT="$GITHUB_SHA"
+          export FEATURE_COMMIT
+          BASIC_AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          GIT_AUTH=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic $BASIC_AUTH")
+
+          set +e
+          git "${GIT_AUTH[@]}" ls-remote --exit-code --heads origin refs/heads/catalog >/dev/null 2>&1
+          LS_REMOTE_STATUS=$?
+          set -e
+          case "$LS_REMOTE_STATUS" in
+            0)
+              git "${GIT_AUTH[@]}" fetch --force --no-tags origin refs/heads/catalog:refs/remotes/origin/catalog
+              git show refs/remotes/origin/catalog:catalog.yaml > prior-catalog/catalog.yaml
+              ;;
+            2)
+              CATALOG_URL="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/catalog.yaml"
+              HTTP_CODE=$(curl --silent --show-error --location \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --output prior-catalog/catalog.yaml.tmp \
+                --write-out '%{http_code}' \
+                "$CATALOG_URL")
+              case "$HTTP_CODE" in
+                200) mv prior-catalog/catalog.yaml.tmp prior-catalog/catalog.yaml ;;
+                404) rm -f prior-catalog/catalog.yaml.tmp ;;
+                *)
+                  rm -f prior-catalog/catalog.yaml.tmp
+                  echo "Previous catalog download failed: HTTP $HTTP_CODE" >&2
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *)
+              echo "Previous catalog branch probe failed operationally with status $LS_REMOTE_STATUS" >&2
+              exit 1
+              ;;
+          esac
+
+          rm -f prior-catalog/reuse.yaml
+          if [[ -f prior-catalog/catalog.yaml ]]; then
+            python - <<'PY'
+          import os
+          import pathlib
+          import re
+          from urllib.parse import urlsplit
+          import yaml
+
+          catalog = yaml.safe_load(pathlib.Path("prior-catalog/catalog.yaml").read_text())
+          versions = catalog.get("plugins", {}).get(os.environ["PLUGIN_ID"], {}).get("versions", {})
+          entry = versions.get(os.environ["VERSION"])
+          if entry is not None:
+              if not isinstance(entry, dict):
+                  raise SystemExit("previous Feature catalog entry is invalid")
+              source = entry.get("source") or {}
+              if source.get("branch") != os.environ["FEATURE_BRANCH"]:
+                  raise SystemExit("previous Feature source branch differs without a version bump")
+              if source.get("commit") != os.environ["FEATURE_COMMIT"]:
+                  raise SystemExit("previous Feature source commit differs without a version bump")
+              url = entry["url"]
+              sha256 = str(entry["sha256"]).lower()
+              parsed = urlsplit(str(url))
+              repository = os.environ["GITHUB_REPOSITORY"]
+              asset_name = os.environ["ASSET_NAME"]
+              if (
+                  parsed.scheme != "https"
+                  or parsed.hostname != "github.com"
+                  or parsed.username is not None
+                  or parsed.password is not None
+                  or parsed.port is not None
+                  or parsed.query
+                  or parsed.fragment
+              ):
+                  raise SystemExit("previous Feature asset URL must use the public GitHub Release origin")
+              prefix = f"/{repository}/releases/download/"
+              if not parsed.path.startswith(prefix):
+                  raise SystemExit("previous Feature asset URL repository path mismatch")
+              release_path = parsed.path[len(prefix):].split("/")
+              if (
+                  len(release_path) != 2
+                  or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", release_path[0])
+                  or release_path[1] != asset_name
+              ):
+                  raise SystemExit("previous Feature asset URL release path mismatch")
+              if not re.fullmatch(r"[0-9a-f]{64}", sha256):
+                  raise SystemExit("previous Feature asset digest is invalid")
+              pathlib.Path("prior-catalog/reuse.yaml").write_text(
+                  yaml.safe_dump({"url": url, "sha256": sha256}, sort_keys=True)
+              )
+          PY
+          fi
+
+          if [[ -f prior-catalog/reuse.yaml ]]; then
+            REUSE_URL=$(python -c 'import yaml; print(yaml.safe_load(open("prior-catalog/reuse.yaml"))["url"])')
+            EXPECTED_SHA256=$(python -c 'import yaml; print(yaml.safe_load(open("prior-catalog/reuse.yaml"))["sha256"])')
+            export EXPECTED_SHA256
+            curl --fail --location --show-error --proto '=https' --tlsv1.2 \
+              --output "dist/$ASSET_NAME" \
+              "$REUSE_URL"
+            python - "dist/$ASSET_NAME" <<'PY'
+          import os
+          import sys
+          from app.runtime.plugin_artifact import verify_tpx
+
+          artifact = verify_tpx(sys.argv[1], expected_sha256=os.environ["EXPECTED_SHA256"])
+          manifest = artifact.manifest
+          expected = (
+              os.environ["PLUGIN_ID"],
+              os.environ["VERSION"],
+              os.environ["FEATURE_BRANCH"],
+              os.environ["FEATURE_COMMIT"],
+          )
+          actual = (manifest.plugin_id, manifest.version, manifest.source.branch, manifest.source.commit)
+          if actual != expected:
+              raise SystemExit("previous catalog artifact identity mismatch")
+          PY
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build new Feature artifact
+        if: steps.release.outputs.exists == 'false' && steps.prior.outputs.found != 'true'
+        env:
+          PLUGIN_ID: ${{ steps.feature.outputs.plugin_id }}
+          VERSION: ${{ steps.feature.outputs.version }}
+          FEATURE_BRANCH: ${{ steps.feature.outputs.branch }}
+          FEATURE_DIR: ${{ steps.feature.outputs.source_dir }}
+          ASSET_NAME: ${{ steps.feature.outputs.asset }}
+          PYTHONPATH: .:sdk/src
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import yaml
+
+          manifest_path = pathlib.Path(os.environ["FEATURE_DIR"]) / "manifest.yaml"
+          manifest = yaml.safe_load(manifest_path.read_text())
+          if manifest.get("plugin_id") != os.environ["PLUGIN_ID"]:
+              raise SystemExit("Feature manifest plugin ID does not match release tag")
+          if manifest.get("version") != os.environ["VERSION"]:
+              raise SystemExit("Feature manifest version does not match release tag")
+          if (manifest.get("source") or {}).get("branch") != os.environ["FEATURE_BRANCH"]:
+              raise SystemExit("Feature manifest source branch does not match release tag")
+          PY
+          mkdir -p dist
+          python tools/build_feature.py "$FEATURE_DIR" "dist/$ASSET_NAME" \
+            --repository "$GITHUB_REPOSITORY" \
+            --branch "$FEATURE_BRANCH" \
+            --commit "$GITHUB_SHA"
+
+      - name: Download existing Feature artifact
+        if: steps.release.outputs.exists == 'true'
+        env:
+          ASSET_NAME: ${{ steps.feature.outputs.asset }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist
+          ASSET_URL=$(python - "$ASSET_NAME" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path("release-metadata/release.json").read_text())
+          expected = sys.argv[1]
+          tpx_assets = [asset for asset in release.get("assets", []) if str(asset.get("name", "")).endswith(".tpx")]
+          if [asset.get("name") for asset in tpx_assets] != [expected]:
+              raise SystemExit("existing Feature Release must contain exactly the expected .tpx asset")
+          url = tpx_assets[0].get("browser_download_url")
+          if not str(url).startswith("https://"):
+              raise SystemExit("existing Feature Release asset URL must use HTTPS")
+          print(url)
+          PY
+          )
+          curl --fail --location --show-error --proto '=https' --tlsv1.2 \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --output "dist/$ASSET_NAME" \
+            "$ASSET_URL"
+
+      - name: Verify immutable Feature artifact
+        id: artifact
+        env:
+          PLUGIN_ID: ${{ steps.feature.outputs.plugin_id }}
+          VERSION: ${{ steps.feature.outputs.version }}
+          FEATURE_BRANCH: ${{ steps.feature.outputs.branch }}
+          ASSET_NAME: ${{ steps.feature.outputs.asset }}
+          PYTHONPATH: .:sdk/src
+        run: |
+          python - "dist/$ASSET_NAME" >> "$GITHUB_OUTPUT" <<'PY'
+          import re
+          import sys
+          from app.runtime.plugin_artifact import verify_tpx
+
+          artifact = verify_tpx(sys.argv[1])
+          manifest = artifact.manifest
+          expected = {
+              "plugin ID": (manifest.plugin_id, __import__("os").environ["PLUGIN_ID"]),
+              "version": (manifest.version, __import__("os").environ["VERSION"]),
+              "source branch": (manifest.source.branch, __import__("os").environ["FEATURE_BRANCH"]),
+          }
+          for label, (actual, wanted) in expected.items():
+              if actual != wanted:
+                  raise SystemExit(f"verified artifact {label} mismatch")
+          if not re.fullmatch(r"[0-9a-f]{40}", manifest.source.commit):
+              raise SystemExit("verified artifact source commit is invalid")
+          print(f"source_commit={manifest.source.commit}")
+          print(f"sha256={artifact.sha256}")
+          PY
+
+      - name: Upload verified Feature artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.feature.outputs.artifact_name }}
+          path: dist/${{ steps.feature.outputs.asset }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-feature:
+    needs: build-feature
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Telepiplex release infrastructure
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install catalog dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Download verified Feature artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.build-feature.outputs.artifact_name }}
+          path: dist
+
+      - name: Verify publication artifact identity
+        env:
+          PLUGIN_ID: ${{ needs.build-feature.outputs.plugin_id }}
+          VERSION: ${{ needs.build-feature.outputs.version }}
+          FEATURE_BRANCH: ${{ needs.build-feature.outputs.branch }}
+          SOURCE_COMMIT: ${{ needs.build-feature.outputs.source_commit }}
+          ASSET_NAME: ${{ needs.build-feature.outputs.asset }}
+          PYTHONPATH: .:sdk/src
+        run: |
+          python - "dist/$ASSET_NAME" <<'PY'
+          import os
+          import sys
+          from app.runtime.plugin_artifact import verify_tpx
+
+          manifest = verify_tpx(sys.argv[1]).manifest
+          actual = (manifest.plugin_id, manifest.version, manifest.source.branch, manifest.source.commit)
+          expected = (os.environ["PLUGIN_ID"], os.environ["VERSION"], os.environ["FEATURE_BRANCH"], os.environ["SOURCE_COMMIT"])
+          if actual != expected:
+              raise SystemExit("publication artifact identity changed between jobs")
+          PY
+
+      - name: Load bootstrap catalog snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rm -rf bootstrap
+          mkdir -p bootstrap
+          set +e
+          git ls-remote --exit-code --heads origin refs/heads/catalog >/dev/null 2>&1
+          LS_REMOTE_STATUS=$?
+          set -e
+          case "$LS_REMOTE_STATUS" in
+            0)
+              git fetch --force --no-tags origin refs/heads/catalog:refs/remotes/origin/catalog
+              git show refs/remotes/origin/catalog:catalog.yaml > bootstrap/catalog.yaml
+              ;;
+            2)
+              CATALOG_URL="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/catalog.yaml"
+              HTTP_CODE=$(curl --silent --show-error --location \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --output bootstrap/catalog.yaml.tmp \
+                --write-out '%{http_code}' \
+                "$CATALOG_URL")
+              case "$HTTP_CODE" in
+                200) mv bootstrap/catalog.yaml.tmp bootstrap/catalog.yaml ;;
+                404)
+                  rm -f bootstrap/catalog.yaml.tmp
+                  echo "No catalog branch or compatible Release catalog exists; bootstrap catalog is empty."
+                  ;;
+                *)
+                  rm -f bootstrap/catalog.yaml.tmp
+                  echo "Bootstrap catalog download failed: HTTP $HTTP_CODE" >&2
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *)
+              echo "Catalog branch probe failed operationally with status $LS_REMOTE_STATUS" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Write provisional catalog snapshot
+        env:
+          ASSET_NAME: ${{ needs.build-feature.outputs.asset }}
+          PYTHONPATH: .:sdk/src
+        run: |
+          mkdir -p release
+          python - "$GITHUB_REPOSITORY" "$RELEASE_TAG" "dist/$ASSET_NAME" <<'PY'
+          import pathlib
+          import sys
+          import yaml
+          from tools.update_feature_catalog import write_feature_catalog
+
+          previous_path = pathlib.Path("bootstrap/catalog.yaml")
+          previous = yaml.safe_load(previous_path.read_text()) if previous_path.is_file() else None
+          write_feature_catalog(previous, sys.argv[3], sys.argv[1], sys.argv[2], "release/catalog.yaml")
+          PY
+          cd release
+          sha256sum -c catalog.yaml.sha256
+
+      - name: Ensure immutable Feature Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET_NAME: ${{ needs.build-feature.outputs.asset }}
+        run: |
+          rm -rf release-check
+          mkdir -p release-check
+          RELEASE_API="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
+          HTTP_CODE=$(curl --silent --show-error --location \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --output release-check/release.json \
+            --write-out '%{http_code}' \
+            "$RELEASE_API")
+          case "$HTTP_CODE" in
+            200)
+              ASSET_URL=$(python - "$ASSET_NAME" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path("release-check/release.json").read_text())
+          if release.get("draft") is not False or release.get("prerelease") is not False:
+              raise SystemExit("existing Feature Release is not publicly published")
+          expected = sys.argv[1]
+          assets = [asset for asset in release.get("assets", []) if str(asset.get("name", "")).endswith(".tpx")]
+          if [asset.get("name") for asset in assets] != [expected]:
+              raise SystemExit("existing Feature Release .tpx identity differs")
+          print(assets[0]["browser_download_url"])
+          PY
+              )
+              curl --fail --location --show-error --proto '=https' --tlsv1.2 \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --output "release-check/$ASSET_NAME" \
+                "$ASSET_URL"
+              cmp "dist/$ASSET_NAME" "release-check/$ASSET_NAME"
+              ;;
+            404)
+              gh release create "$RELEASE_TAG" "dist/$ASSET_NAME" release/catalog.yaml release/catalog.yaml.sha256 \
+                --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$RELEASE_TAG" \
+                --latest=false \
+                --notes "Immutable Telepiplex Feature release for $RELEASE_TAG."
+              ;;
+            *)
+              echo "Feature Release publication probe failed: HTTP $HTTP_CODE" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Merge and publish catalog with optimistic retry
+        env:
+          ASSET_NAME: ${{ needs.build-feature.outputs.asset }}
+          PYTHONPATH: .:sdk/src
+        run: |
+          PUBLISHED=false
+          for ATTEMPT in 1 2 3 4 5; do
+            git worktree remove --force catalog-publish >/dev/null 2>&1 || true
+            git worktree prune
+            rm -rf catalog-publish retry-base
+            mkdir -p retry-base release
+
+            set +e
+            git ls-remote --exit-code --heads origin refs/heads/catalog >/dev/null 2>&1
+            LS_REMOTE_STATUS=$?
+            set -e
+            case "$LS_REMOTE_STATUS" in
+              0)
+                git fetch --force --no-tags origin refs/heads/catalog:refs/remotes/origin/catalog
+                git show refs/remotes/origin/catalog:catalog.yaml > retry-base/catalog.yaml
+                git worktree add --detach catalog-publish refs/remotes/origin/catalog
+                ;;
+              2)
+                if [[ -f bootstrap/catalog.yaml ]]; then
+                  cp bootstrap/catalog.yaml retry-base/catalog.yaml
+                fi
+                git worktree add --detach catalog-publish "$GITHUB_SHA"
+                git -C catalog-publish checkout --orphan catalog
+                ;;
+              *)
+                echo "Catalog branch probe failed operationally with status $LS_REMOTE_STATUS" >&2
+                exit 1
+                ;;
+            esac
+
+            PREVIOUS_PATH="retry-base/catalog.yaml"
+            export PREVIOUS_PATH
+            python - "$GITHUB_REPOSITORY" "$RELEASE_TAG" "dist/$ASSET_NAME" <<'PY'
+          import os
+          import pathlib
+          import sys
+          import yaml
+          from tools.update_feature_catalog import write_feature_catalog
+
+          previous_path = pathlib.Path(os.environ["PREVIOUS_PATH"])
+          previous = yaml.safe_load(previous_path.read_text()) if previous_path.is_file() else None
+          write_feature_catalog(previous, sys.argv[3], sys.argv[1], sys.argv[2], "release/catalog.yaml")
+          PY
+            (cd release && sha256sum -c catalog.yaml.sha256)
+
+            find catalog-publish -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+            cp release/catalog.yaml release/catalog.yaml.sha256 catalog-publish/
+            cat > catalog-publish/README.md <<'EOF'
+          # Telepiplex Feature catalog
+
+          This branch is maintained by optimistic Feature release merges.
+          `catalog.yaml` points only to immutable published Feature Release assets.
+          EOF
+            git -C catalog-publish config user.name github-actions[bot]
+            git -C catalog-publish config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git -C catalog-publish add --all
+            if ! git -C catalog-publish diff --cached --quiet; then
+              git -C catalog-publish commit -m "catalog: publish $RELEASE_TAG"
+            fi
+
+            set +e
+            PUSH_OUTPUT=$(cd catalog-publish && git push --porcelain origin HEAD:catalog 2>&1)
+            PUSH_STATUS=$?
+            set -e
+            if [[ "$PUSH_STATUS" -eq 0 ]]; then
+              PUBLISHED=true
+              break
+            fi
+            if grep -Fq '[rejected]' <<< "$PUSH_OUTPUT" && grep -Eiq 'fetch first|non-fast-forward' <<< "$PUSH_OUTPUT"; then
+              echo "Catalog changed concurrently; retrying optimistic merge ($ATTEMPT/5)."
+              continue
+            fi
+            echo "Catalog push failed operationally; refusing to retry blindly." >&2
+            printf '%s\n' "$PUSH_OUTPUT" >&2
+            exit 1
+          done
+          if [[ "$PUBLISHED" != true ]]; then
+            echo "Catalog changed during all optimistic merge attempts." >&2
+            exit 1
+          fi
+
+      - name: Synchronize Feature Release catalog assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SYNCHRONIZED=false
+          for SYNC_ATTEMPT in 1 2 3 4 5; do
+            rm -rf compatibility
+            mkdir -p compatibility/before compatibility/after
+            git fetch --force --no-tags origin refs/heads/catalog:refs/remotes/origin/catalog
+            git show refs/remotes/origin/catalog:catalog.yaml > compatibility/before/catalog.yaml
+            git show refs/remotes/origin/catalog:catalog.yaml.sha256 > compatibility/before/catalog.yaml.sha256
+            (cd compatibility/before && sha256sum -c catalog.yaml.sha256)
+
+            gh release upload "$RELEASE_TAG" compatibility/before/catalog.yaml compatibility/before/catalog.yaml.sha256 \
+              --repo "$GITHUB_REPOSITORY" --clobber
+
+            git fetch --force --no-tags origin refs/heads/catalog:refs/remotes/origin/catalog
+            git show refs/remotes/origin/catalog:catalog.yaml > compatibility/after/catalog.yaml
+            git show refs/remotes/origin/catalog:catalog.yaml.sha256 > compatibility/after/catalog.yaml.sha256
+            if cmp compatibility/before/catalog.yaml compatibility/after/catalog.yaml && \
+               cmp compatibility/before/catalog.yaml.sha256 compatibility/after/catalog.yaml.sha256; then
+              SYNCHRONIZED=true
+              break
+            fi
+            echo "Catalog advanced during compatibility upload; synchronizing the newer snapshot."
+          done
+          if [[ "$SYNCHRONIZED" != true ]]; then
+            echo "Unable to stabilize Release compatibility assets after five attempts." >&2
+            exit 1
+          fi

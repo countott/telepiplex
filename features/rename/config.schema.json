@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "x-telepiplex-config-command": "rename_config",
+  "properties": {
+    "unorganized_path": {"type": "string", "pattern": "^/"},
+    "storage_timeout": {"type": "number", "minimum": 1, "maximum": 600},
+    "metadata_timeout": {"type": "number", "minimum": 1, "maximum": 600},
+    "selection": {
+      "type": "object",
+      "properties": {
+        "movie_size_fallback_ratio": {"type": "number", "minimum": 1},
+        "unmatched_large_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+        "unmatched_large_min_bytes": {"type": "integer", "minimum": 0}
+      },
+      "required": ["movie_size_fallback_ratio", "unmatched_large_ratio", "unmatched_large_min_bytes"],
+      "additionalProperties": false
+    },
+    "metadata": {
+      "type": "object",
+      "title": "元数据",
+      "properties": {
+        "tvdb": {
+          "type": "object",
+          "title": "TVDB",
+          "properties": {
+            "enable": {"type": "boolean", "title": "启用"},
+            "api_key": {"type": "string", "title": "API Key", "writeOnly": true},
+            "base_url": {"type": "string", "title": "API 地址"},
+            "subscriber_pin": {"type": "string", "title": "Subscriber PIN", "writeOnly": true},
+            "timeout": {"type": "number", "minimum": 1, "maximum": 300, "title": "超时（秒）"}
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "ai": {
+      "type": "object",
+      "title": "AI",
+      "properties": {
+        "enable": {"type": "boolean", "title": "启用"},
+        "api_url": {"type": "string", "title": "API 地址"},
+        "api_key": {"type": "string", "title": "API Key", "writeOnly": true},
+        "model": {"type": "string", "title": "模型"},
+        "timeout": {"type": "number", "minimum": 1, "maximum": 600, "title": "超时（秒）"}
+      },
+      "additionalProperties": true
+    }
+  },
+  "required": ["unorganized_path", "storage_timeout", "metadata_timeout", "selection", "metadata", "ai"],
+  "additionalProperties": false
+}

@@ -1,0 +1,12 @@
+version: '3.8'
+services:
+  telepiplex:
+    container_name: telepiplex
+    image: telepiplex:latest
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - /to/your/path/config:/config
+    tmpfs:
+      - /tmp/telepiplex

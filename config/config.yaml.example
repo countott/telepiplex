@@ -1,0 +1,20 @@
+# Telepiplex 配置模板；运行时配置路径为 /config/config.yaml。
+
+log_level: info
+
+bot_token: "your_bot_token"
+allowed_user: 123456789
+
+# Feature 完整模板位于 /config/plugins/<plugin_id>/config.yaml.example，实际值写入同目录 config.yaml。
+plugins:
+  root: /config/plugins
+  catalog: https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml
+  catalog_refresh_interval: 21600
+  install_timeout: 300
+  startup_timeout: 30
+  drain_timeout: 120
+  stabilize_seconds: 10
+  restart_limit: 3
+  # rename waits for storage operations before ACK; keep delivery durable.
+  event_delivery_timeout: 1800
+  event_max_attempts: 5

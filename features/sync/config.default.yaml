@@ -1,0 +1,19 @@
+category_folder: []
+plex:
+  base_url: ""
+  token: ""
+  timeout: 15
+  scan_poll_interval: 5
+  scan_timeout: 300
+tmdb:
+  api_key: ""
+  timeout: 15
+fanart:
+  api_key: ""
+  timeout: 15
+mcp:
+  enabled: false
+  host: 127.0.0.1
+  port: 8765
+  path: /mcp
+  auth_token: ""

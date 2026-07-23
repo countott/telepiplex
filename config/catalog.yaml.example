@@ -1,0 +1,7 @@
+# Copy to /config/plugins/catalog.yaml and replace the example values.
+plugins:
+  echo:
+    versions:
+      "1.0.0":
+        path: /config/plugins/artifacts/echo-1.0.0.tpx
+        sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef

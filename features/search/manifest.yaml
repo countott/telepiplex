@@ -1,0 +1,27 @@
+plugin_id: search
+name: search
+version: 1.0.0
+host_api: ">=1.2,<2.0"
+entry_point: telepiplex_search.runtime:main
+provides:
+  - name: media.search
+    exclusive: true
+requires:
+  - download.provider
+subscribes: []
+publishes: []
+commands:
+  - name: search
+    description: 搜索片源
+  - name: s
+    description: 搜索片源
+  - name: search_config
+    description: 配置媒体搜索
+callbacks:
+  - search
+config_schema_version: 1
+state_schema_version: 1
+source:
+  repository: origin
+  branch: main
+  commit: "0000000000000000000000000000000000000000"

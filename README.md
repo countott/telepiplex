@@ -1,0 +1,133 @@
+# Telepiplex
+
+`main` 中的 Telepiplex 是唯一常驻 Docker 运行层。容器内只有 Telepiplex 主进程；115、媒体搜索、重命名和 Plex 管理等业务能力均来自 `features/` 下的独立源码目录，并以隔离的 Feature 子进程运行。
+
+每个 Feature 使用自己的 Python 虚拟环境、配置、状态和版本目录。Telepiplex 通过 Unix Domain Socket 调用 Feature 声明的 capability，并负责命令路由、事件投递、健康检查、排空、切换和回滚。正常安装、升级、启用、停用和回滚不重启 Telepiplex；只有 Host API 合同本身升级时，才允许升级镜像并重启一次。
+
+## 运行
+
+```bash
+docker compose up -d
+```
+
+持久化目录只有 `/config`。Feature 运行数据位于 `/config/plugins`，进程 socket 位于容器内临时目录 `/tmp/telepiplex`。
+
+Telepiplex 配置示例：
+
+```yaml
+log_level: info
+bot_token: "your_bot_token"
+allowed_user: 123456789
+plugins:
+  root: /config/plugins
+  catalog: https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml
+  catalog_refresh_interval: 21600
+  install_timeout: 300
+  startup_timeout: 30
+  drain_timeout: 120
+  stabilize_seconds: 10
+  restart_limit: 3
+```
+
+## Host API 1.2 与 Telegram 交互
+
+Host API 1.2 保持对 API 1.0/1.1 Feature 的启动兼容，在 1.1 的持久化任务状态、显式退出/取消/回滚控制、跨 Feature 任务交接和进程重启恢复之上，新增安全的 `send_photo` / `edit_photo` 海报交互动作。使用这些海报动作的 Feature 必须声明 `host_api: ">=1.2,<2.0"`。`/start` 与 Telegram 原生命令列表都从当前已启用且依赖可路由的 Feature `manifest.yaml` 动态生成；停用、被依赖阻塞或声明 Telepiplex 保留命令的 Feature 不会被错误展示。
+
+同一用户同一时间只允许一个活动交互。等待输入时，只接受当前状态消息实际展示的按钮或普通文本；任务运行、取消或回滚期间，其他命令和过期按钮会被拦截。按钮含义如下：
+
+- **退出**：执行前结束交互，不产生业务变更。
+- **取消任务**：停止后续轮询和管线，并报告实际停止位置；已完成且无法精确反向的远端操作不宣称回滚。
+- **取消并回滚**：只在全部已完成变更都有稳定身份和可验证逆操作时出现；冲突或恢复失败会明确报告部分回滚及剩余对象。
+
+配置保存和 Feature 路由切换由 Telepiplex 作为一个任务管理。取消时 Telepiplex 使用旧配置和旧路由自动恢复；无法完整验证时保留人工检查提示。115 下载取消不会删除已下载内容；只有取得精确 InfoHash 时才删除对应离线任务记录，且使用不删除源文件的模式。
+
+## 日志
+
+`docker logs -f telepiplex` 现在会持续看到 Telepiplex 与各 Feature 子进程转发过来的 runtime 日志；敏感字段（Token、API Key、磁力链接、URL 等）会在写入前脱敏。
+
+持久化日志路径：
+
+- Telepiplex：`/config/logs/telepiplex.log`
+- 每个 Feature：`/config/plugins/<plugin_id>/state/logs/runtime.log`
+
+常用排查命令：
+
+```bash
+docker logs -f telepiplex
+docker exec telepiplex tail -f /config/logs/telepiplex.log
+docker exec telepiplex tail -f /config/plugins/download/state/logs/runtime.log
+docker exec telepiplex tail -f /config/plugins/search/state/logs/runtime.log
+docker exec telepiplex tail -f /config/plugins/rename/state/logs/runtime.log
+docker exec telepiplex tail -f /config/plugins/sync/state/logs/runtime.log
+```
+
+## Feature 安装与升级
+
+`features/<plugin_id>` 是 Feature 开发源码目录；发布物是从 `main` 对应目录构建的、版本不可变的 `.tpx`。运行容器不 checkout Git 分支，也不把业务源码复制进 Telepiplex 镜像。
+
+`plugins.catalog` 可以是远程 HTTPS 地址或本地文件路径。新安装默认读取 `catalog` 分支上的 `https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml`，这也是官方滚动目录入口。旧版默认 catalog 是 `<plugins.root>/catalog.yaml`（按上面的默认配置即 `/config/plugins/catalog.yaml`）；仅当这个 legacy 文件缺失时，Telepiplex 才回退到官方 URL。已存在的 legacy 文件继续使用本地目录；其他显式本地路径即使当前文件缺失，也保持本地配置意图。每个 Feature Release 仍附带发布时的完整 catalog 快照和校验和，供离线或固定版本使用；Telepiplex Release 不携带 catalog。目录将 `name@version` 映射到带 SHA-256 固定值的本地路径或 HTTPS 发布地址：
+
+```yaml
+plugins:
+  search:
+    versions:
+      "1.0.0":
+        url: https://example.invalid/releases/search-1.0.0.tpx
+        sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+首次安装或日常管理时，在 Telegram 发送 `/plugin`。Telepiplex 会列出已安装 Feature 和 catalog 中尚未安装的候选：只有依赖满足的 ready 候选才显示安装按钮；依赖尚未满足的候选会显示“先安装”哪个 provider 或具体缺少的 capability。已安装项发现新版时显示更新按钮。安装按钮和更新按钮都绑定该 Feature 的最新稳定兼容版本，点击后才执行对应事务。Telepiplex 不会自动安装、批量安装或静默更新任何 Feature。
+
+### 高级/离线操作
+
+普通用户只需发送 `/plugin` 并点击按钮。目录不可用、需要固定版本或使用离线包时，仍可使用 `/plugin install <name@version|artifact.tpx>` 和 `/plugin update <name@version|artifact.tpx>` 精确引用入口。
+
+管理命令：
+
+```text
+/plugin install search@1.0.0
+/plugin update search@1.0.0
+/plugin enable search
+/plugin disable search
+/plugin rollback search
+/plugin remove search
+/plugin status search
+/plugin doctor
+```
+
+也可把已存在的绝对 `.tpx` 路径传给 `install` 或 `update`。更新过程先校验和安装新版本，再启动 shadow 子进程、检查健康、排空旧任务并原子切换路由；任何一步失败都保留旧版本。
+
+## Feature 可视化配置
+
+Feature 安装后，在 Telegram 发送 `/config`，或在 `/plugin` 页面点击“配置 Feature”。Telepiplex 会从当前 Feature 随包提供的 `config.schema.json` 动态生成配置区块，例如 search/rename 的 TVDB、AI，以及 search 的 Prowlarr。
+
+选择区块后按提示发送需要修改的 `key=value` 行即可；未发送字段保持不变。API Key、Token、Subscriber PIN 等敏感字段只显示“已配置/未配置”，不会回显真实值，也不会进入日志。配置会先经过完整 schema 校验，再原子写入 `/config/plugins/<plugin_id>/config.yaml`；运行中的 Feature 会完成 drain、shadow 启动和原子切换，失败时恢复旧配置与旧路由。
+
+数组和自由结构暂不通过 Telegram 表单修改。download 的扫码授权与 Access/Refresh Token 两条路线仍由它自己的 `/auth` 入口独立管理。
+
+## GitHub 独立发布通道
+
+Telepiplex、Feature 和 catalog 分开发布。Telepiplex 只由 `telepiplex-v<semver>` tag 构建镜像。Mac 开发目录不创建 tag、提交或连接远程；版本 tag 只在 Syncthing 完成后由 Unraid 的唯一 Git 工作区创建和发布。
+
+该流水线先推送 `linux/amd64` Telepiplex 镜像 `ghcr.io/<owner>/telepiplex:1.1.0` 和 `latest`，随后创建 `telepiplex-v1.1.0` 同名 GitHub Release，并强制设为 **Latest**。Telepiplex Release 不附带 Feature、catalog 或其他资产，也不会改动 Feature。五种 Feature 各自使用 `download-v<semver>`、`search-v<semver>`、`rename-v<semver>`、`sync-v<semver>`、`caption-v<semver>` 独立 tag；首个身份版本分别为 `download-v1.0.0`、`search-v1.0.0`、`rename-v1.0.0`、`sync-v1.0.0` 和占位版 `caption-v0.1.0`。这些 tag 同样只从 Unraid 发布。
+
+发布顺序固定为：先发布并重启满足 Host API 要求的 Telepiplex，再逐个发布新 Feature。Feature 工作流会在每次发布后更新 catalog。
+
+每个 Feature tag 只构建或复用该 Feature 的一个不可变 `.tpx`，创建自己的 GitHub Release，并以乐观合并方式更新 `catalog` 分支。Feature Release 固定使用 `--latest=false`，不会取得仓库的 **Latest** 标签；Latest 永远由最近一次成功的 `telepiplex-v<semver>` Release 持有。这个分支保存完整的 `catalog.yaml` 和 `catalog.yaml.sha256`；catalog 中每个 HTTPS 资产都固定到实际 SHA-256、`main` 来源身份和 commit，并携带从已验证 manifest 提取的 `provides` / `requires` capability 元数据。
+
+每个 Feature Release 都附带完整 catalog 快照；Feature 发布完成后会再次从 `catalog` 分支读取已确认快照并覆盖当前 Feature Release 上的 catalog 资产，处理并发发布造成的目录推进。滚动读取始终使用 `catalog` 分支，Telepiplex Release 与历史 Platform Release 都不参与 catalog 同步。
+
+Feature 的 `manifest.yaml` 中 Feature version 是不可变的 `name@version` 身份。代码、构建字节或来源提交发生变化时必须先提升 version；发布流水线会拒绝同一 version 对应不同 digest 或来源。`search`、`download`、`rename`、`sync` 和 `caption` 是全新技术身份，不兼容旧 `plugin_id`，旧安装不会自动升级；新 catalog 只发布这五个 ID。
+
+Telepiplex 启动后会立即刷新一次远程目录，此后按 `catalog_refresh_interval: 21600`（6 小时）检查已安装 Feature 当前版本对应的最新稳定兼容版本。刷新使用 HTTPS、大小限制、结构校验和原子缓存；网络或目录异常只跳过本轮，并保留上一次有效目录，不影响 Telepiplex 与其他 Feature。
+
+发现更新后，Telepiplex 只向 `allowed_user` 发送一次 Telegram 通知，列出当前版本、目标版本和来源提交，并提供“确认更新”和“暂不更新”按钮。只有授权用户点击“确认更新”才复用既有的校验、shadow 启动、drain、原子切换和失败回滚事务；Telepiplex 不会静默更新 Feature。离线环境仍可把 Release 中的 `catalog.yaml` 保存为 `/config/plugins/catalog.yaml` 并将配置切回该路径。
+
+## 开发与验证
+
+Telepiplex、SDK 和 `.tpx` 构建工具位于同一目录树；各 Feature 源码目录只依赖 Host API/SDK 合同，不 import 其他 Feature。
+
+```bash
+python3 tools/build_tpx.py --help
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -t .
+```
