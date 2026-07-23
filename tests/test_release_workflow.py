@@ -140,6 +140,39 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertNotIn("catalog.yaml", create)
         self.assertNotIn(".tpx", source)
 
+    def test_telepiplex_release_installs_and_tests_workspaces_in_isolation(self):
+        workflow = self._workflow(TELEPIPLEX_WORKFLOW)
+        install = self._step(
+            workflow, "validate-telepiplex", "Install Telepiplex test dependencies"
+        )["run"]
+        for package in (
+            "./sdk",
+            "./features/download",
+            "./features/search",
+            "./features/rename",
+            "./features/sync",
+            "./features/caption",
+        ):
+            self.assertIn(package, install)
+
+        tests = self._step(
+            workflow, "validate-telepiplex", "Run Telepiplex tests"
+        )["run"]
+        self.assertIn(
+            "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:sdk/src", tests
+        )
+        self.assertIn(
+            "python -m pytest -q -p no:cacheprovider tests", tests
+        )
+        self.assertIn(
+            "for module in download search rename sync caption; do", tests
+        )
+        self.assertIn('cd "features/$module"', tests)
+        self.assertIn(
+            "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src", tests
+        )
+        self.assertNotEqual(tests.strip(), "python -m pytest -q")
+
     def test_telepiplex_manifest_probe_fails_closed(self):
         workflow = self._workflow(TELEPIPLEX_WORKFLOW)
         probe = self._step(
