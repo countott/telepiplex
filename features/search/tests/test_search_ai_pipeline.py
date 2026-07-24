@@ -171,6 +171,41 @@ class SearchAiPipelineTest(unittest.TestCase):
 
     @patch("telepiplex_search.ai.check_ai_api_available", return_value=True)
     @patch("telepiplex_search.ai.chat_completion")
+    def test_needs_clarification_preserves_title_hints_and_reason(
+        self,
+        chat_mock,
+        _available,
+    ):
+        chat_mock.return_value = {
+            "choices": [{"message": {"content": json.dumps({
+                "status": "needs_clarification",
+                "title_hints": ["康斯坦汀", "康斯坦丁"],
+                "media_type_hint": "unknown",
+                "scope_hint": "unknown",
+                "season_number": None,
+                "episode_number": None,
+                "numeric_tokens": [],
+                "relation_hint": "unknown",
+                "clarification_reason": "可能指电影或剧集。",
+            })}}],
+        }
+
+        result = infer_search_hypotheses_with_ai({
+            "raw_query": "康斯坦汀",
+        })
+
+        self.assertEqual(result["status"], "needs_clarification")
+        self.assertEqual(
+            result["source_queries"]["douban"],
+            ["康斯坦汀", "康斯坦丁"],
+        )
+        self.assertEqual(
+            result["clarification_reason"],
+            "可能指电影或剧集。",
+        )
+
+    @patch("telepiplex_search.ai.check_ai_api_available", return_value=True)
+    @patch("telepiplex_search.ai.chat_completion")
     def test_intent_hint_rejects_stable_ids_and_final_contracts(
         self, chat_mock, _available
     ):

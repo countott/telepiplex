@@ -678,6 +678,49 @@ class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
             "deterministic_bounded",
         )
 
+    async def test_orchestrator_ambiguous_status_returns_clarification(self):
+        intent = {
+            "title_hints": ["康斯坦丁"],
+            "media_type_hint": "unknown",
+            "year_hint": "",
+            "scope": "work",
+            "season_number": None,
+            "episode_number": None,
+        }
+        decision = VerifiedAiDecision(
+            "ambiguous",
+            intent,
+            (),
+            (),
+            "clarify",
+        )
+
+        async def orchestrate(_raw_query, _gateway):
+            return OrchestrationOutcome(
+                "ambiguous",
+                intent,
+                (),
+                decision,
+                0,
+                "",
+            )
+
+        plan = await build_confirmable_search_plan(
+            "康斯坦丁",
+            "p-orchestrated-clarify",
+            {},
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            source_gateway=object(),
+            source_orchestrator=orchestrate,
+        )
+
+        self.assertEqual(plan["status"], "needs_clarification")
+        self.assertEqual(
+            [option["media_type"] for option in plan["clarification"]["options"]],
+            ["movie", "series"],
+        )
+
     @patch("telepiplex_search.planner.infer_search_hypotheses_with_ai")
     async def test_ai_typo_recovery_runs_after_lexical_candidates_fail_gate(
         self,
@@ -764,6 +807,163 @@ class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             plan["candidates"][0]["media_metadata"]["identity"]["english_title"],
             "Constantine",
+        )
+
+    @patch("telepiplex_search.planner.infer_search_hypotheses_with_ai")
+    async def test_ai_clarification_returns_movie_and_series_options(
+        self,
+        infer_hypotheses,
+    ):
+        infer_hypotheses.return_value = {
+            "status": "needs_clarification",
+            "hypotheses": [{
+                "title": title,
+                "year": "",
+                "content_identity": "unknown",
+                "scope": "movie_or_series",
+                "season_number": None,
+                "episode_number": None,
+                "possible_related_series": [],
+                "explicit_facts": [],
+                "inferred_facts": ["ai_intent_hint"],
+            } for title in ("康斯坦汀", "康斯坦丁")],
+            "source_queries": {
+                provider: ["康斯坦汀", "康斯坦丁"]
+                for provider in ("wikipedia", "douban", "tvdb")
+            },
+            "warnings": ["ai_intent_hint_requires_source_verification"],
+            "intent_hint": {
+                "title_hints": ["康斯坦汀", "康斯坦丁"],
+                "media_type_hint": "unknown",
+            },
+            "clarification_reason": "可能指电影或剧集。",
+        }
+
+        plan = await build_confirmable_search_plan(
+            "康斯坦汀",
+            "p-ai-clarify",
+            {
+                "wikipedia": _provider(
+                    "wikipedia", 1, title="康斯坦汀"
+                ),
+                "douban": lambda _hypotheses: {
+                    "source": "douban",
+                    "status": "not_found",
+                    "facts": [],
+                },
+                "tvdb": lambda _hypotheses: {
+                    "source": "tvdb",
+                    "status": "not_found",
+                    "facts": [],
+                },
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertEqual(plan["status"], "needs_clarification")
+        self.assertEqual(
+            [option["query"] for option in plan["clarification"]["options"]],
+            ["康斯坦丁（电影）", "康斯坦丁（电视剧）"],
+        )
+        self.assertEqual(
+            plan["clarification"]["reason"],
+            "可能指电影或剧集。",
+        )
+
+    @patch("telepiplex_search.planner.infer_search_hypotheses_with_ai")
+    async def test_explicit_movie_constraint_consumes_ai_title_hints(
+        self,
+        infer_hypotheses,
+    ):
+        infer_hypotheses.return_value = {
+            "status": "needs_clarification",
+            "hypotheses": [{
+                "title": "康斯坦丁",
+                "year": "",
+                "content_identity": "movie",
+                "scope": "movie_or_series",
+                "season_number": None,
+                "episode_number": None,
+                "possible_related_series": [],
+                "explicit_facts": [],
+                "inferred_facts": ["ai_intent_hint"],
+            }],
+            "source_queries": {
+                provider: ["康斯坦丁"]
+                for provider in ("wikipedia", "douban", "tvdb")
+            },
+            "warnings": ["ai_intent_hint_requires_source_verification"],
+            "intent_hint": {
+                "title_hints": ["康斯坦丁"],
+                "media_type_hint": "unknown",
+            },
+            "clarification_reason": "可能指电影或剧集。",
+        }
+
+        def provider(name):
+            def provide(hypotheses):
+                queries = (
+                    (hypotheses.get("source_queries") or {}).get(name)
+                    or []
+                )
+                if "康斯坦丁" not in queries:
+                    return {
+                        "source": name,
+                        "status": "not_found",
+                        "facts": [],
+                    }
+                if name == "tvdb":
+                    return {
+                        "source": name,
+                        "status": "ok",
+                        "facts": [{
+                            "movies": [{
+                                "tvdb_movie_id": "855",
+                                "name": "康斯坦丁",
+                                "english_title": "Constantine",
+                                "year": "2005",
+                            }],
+                            "series": [],
+                        }],
+                    }
+                key = (
+                    "subject_id"
+                    if name == "douban"
+                    else "wikibase_item"
+                )
+                return {
+                    "source": name,
+                    "status": "ok",
+                    "facts": [{
+                        key: f"{name}-constantine",
+                        "title": "康斯坦丁",
+                        "chinese_title": "康斯坦丁",
+                        "english_title": "Constantine",
+                        "official_english_title": "Constantine",
+                        "year": "2005",
+                        "media_type": "movie",
+                    }],
+                }
+
+            return provide
+
+        plan = await build_confirmable_search_plan(
+            "康斯坦汀（电影）",
+            "p-ai-clarified-movie",
+            {
+                provider_name: provider(provider_name)
+                for provider_name in ("wikipedia", "douban", "tvdb")
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertNotIn("clarification", plan)
+        self.assertEqual(len(plan["candidates"]), 1)
+        self.assertEqual(
+            plan["candidates"][0]["media_metadata"]["retrieval"]["media_type"],
+            "movie",
         )
 
     async def test_direct_anchor_never_calls_source_orchestrator(self):

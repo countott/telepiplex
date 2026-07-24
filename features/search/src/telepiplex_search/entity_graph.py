@@ -290,6 +290,12 @@ def _facts_from_source(source: dict) -> list[EvidenceFact]:
 
 
 def _stable_id_match(left: EvidenceFact, right: EvidenceFact) -> bool:
+    if (
+        left.media_type
+        and right.media_type
+        and left.media_type != right.media_type
+    ):
+        return False
     return any(
         key in right.external_ids
         and value

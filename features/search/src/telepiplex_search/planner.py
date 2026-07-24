@@ -405,6 +405,66 @@ def _verified_ai_title(
     return ""
 
 
+def _ai_clarification_plan(
+    *,
+    plan_id: str,
+    raw_query: str,
+    rule_intent: dict,
+    payload: dict | None,
+) -> dict | None:
+    if (payload or {}).get("status") != "needs_clarification":
+        return None
+    hint = (payload.get("intent_hint") or {}).get("media_type_hint")
+    if _text(hint).casefold() != "unknown":
+        return None
+    if _explicit_media_type(raw_query, rule_intent):
+        return None
+    title_hints = [
+        _text(item)
+        for item in ((payload.get("intent_hint") or {}).get("title_hints") or [])
+        if _text(item)
+    ]
+    raw_title = _text(rule_intent.get("title")) or _text(raw_query)
+    raw_target = normalize_title(raw_title)
+    title = next(
+        (
+            item
+            for item in title_hints
+            if normalize_title(item)
+            and normalize_title(item) != raw_target
+        ),
+        next(iter(title_hints), raw_title),
+    )
+    if not title:
+        return None
+    year = _text(rule_intent.get("year"))
+    query_title = " ".join(item for item in (title, year) if item)
+    options = [{
+        "label": f"电影《{query_title}》",
+        "query": f"{query_title}（电影）",
+        "media_type": "movie",
+        "year": year,
+    }, {
+        "label": f"剧集《{query_title}》",
+        "query": f"{query_title}（电视剧）",
+        "media_type": "series",
+        "year": year,
+    }]
+    return {
+        "plan_id": plan_id,
+        "raw_query": raw_query,
+        "status": "needs_clarification",
+        "clarification": {
+            "reason": (
+                _text(payload.get("clarification_reason"))
+                or "存在多个媒体类型，请选择后继续验证。"
+            ),
+            "options": options[:6],
+        },
+        "candidates": [],
+    }
+
+
 def _finalize_draft(
     draft: dict,
     *,
@@ -1152,6 +1212,24 @@ async def build_confirmable_search_plan(
                 rule_hypotheses.get("intent") or {},
                 raw_query,
             )
+            if getattr(orchestration, "status", "") == "ambiguous":
+                clarification = _ai_clarification_plan(
+                    plan_id=plan_id,
+                    raw_query=raw_query,
+                    rule_intent=rule_hypotheses.get("intent") or {},
+                    payload={
+                        "status": "needs_clarification",
+                        "intent_hint": (
+                            getattr(orchestration, "intent", {}) or {}
+                        ),
+                        "clarification_reason": (
+                            "来源证据对应多个媒体类型，"
+                            "请选择后继续验证。"
+                        ),
+                    },
+                )
+                if clarification is not None:
+                    return clarification
             intent, episode_parent_key = _resolve_episode_title_intent(
                 raw_query,
                 intent,
@@ -1239,6 +1317,14 @@ async def build_confirmable_search_plan(
                 None,
             )
             if ai_hypotheses:
+                clarification = _ai_clarification_plan(
+                    plan_id=plan_id,
+                    raw_query=raw_query,
+                    rule_intent=rule_intent,
+                    payload=ai_hypotheses,
+                )
+                if clarification is not None:
+                    return clarification
                 retry_sources = await _optional_budgeted(
                     "candidate_finalize",
                     budget,
@@ -1407,6 +1493,14 @@ async def build_confirmable_search_plan(
             None,
         )
         if ai_hypotheses:
+            clarification = _ai_clarification_plan(
+                plan_id=plan_id,
+                raw_query=raw_query,
+                rule_intent=intent,
+                payload=ai_hypotheses,
+            )
+            if clarification is not None:
+                return clarification
             retry_sources = await _optional_budgeted(
                 "candidate_finalize",
                 budget,

@@ -46,6 +46,29 @@ def search_plan():
     }
 
 
+def clarification_plan(plan_id="clarify-1"):
+    return {
+        "plan_id": plan_id,
+        "raw_query": "康斯坦汀",
+        "status": "needs_clarification",
+        "clarification": {
+            "reason": "可能指电影或剧集。",
+            "options": [{
+                "label": "电影《康斯坦丁》",
+                "query": "康斯坦丁（电影）",
+                "media_type": "movie",
+                "year": "",
+            }, {
+                "label": "剧集《康斯坦丁》",
+                "query": "康斯坦丁（电视剧）",
+                "media_type": "series",
+                "year": "",
+            }],
+        },
+        "candidates": [],
+    }
+
+
 def ranked_search_plan():
     result = search_plan()
     candidates = []
@@ -815,6 +838,72 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["details"]["photo_url"], "https://image.example/top.jpg")
         self.assertIn("92/100", report["status_text"])
 
+    async def test_clarification_plan_renders_options(self):
+        async def planner(_raw_query, plan_id):
+            return clarification_plan(plan_id)
+
+        self.feature.plan_builder = planner
+        command = await self.feature.command({
+            "command": "s",
+            "args": ["康斯坦汀"],
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-plan-")
+
+        report = self.host.reports[-1]
+        self.assertEqual(report["stage"], "clarification")
+        self.assertEqual(report["operation_id"], command["operation"]["operation_id"])
+        self.assertIn("可能指电影或剧集", report["status_text"])
+        self.assertEqual(
+            [
+                row[0]["text"]
+                for row in report["details"]["keyboard"][:-1]
+            ],
+            ["电影《康斯坦丁》", "剧集《康斯坦丁》"],
+        )
+
+    async def test_clarification_choice_replans_in_same_operation(self):
+        queries = []
+
+        async def planner(raw_query, plan_id):
+            queries.append(raw_query)
+            if len(queries) == 1:
+                return clarification_plan(plan_id)
+            result = ranked_search_plan()
+            result["plan_id"] = plan_id
+            return result
+
+        self.feature.plan_builder = planner
+        command = await self.feature.command({
+            "command": "s",
+            "args": ["康斯坦汀"],
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        operation_id = command["operation"]["operation_id"]
+        await self.runtime.run("search-plan-")
+        callback_data = (
+            self.host.reports[-1]["details"]["keyboard"][0][0]
+            ["callback_data"]
+        )
+        old_plan_id = callback_data.split(":")[2]
+
+        restarted = await self.feature.callback({
+            "payload": callback_data.removeprefix("search:"),
+            "user_id": 1,
+            "chat_id": 10,
+        })
+
+        self.assertEqual(restarted["operation"]["operation_id"], operation_id)
+        self.assertEqual(restarted["operation"]["stage"], "planning")
+        self.assertEqual(restarted["actions"][0]["kind"], "edit_message")
+        self.assertNotIn(old_plan_id, self.feature.plans)
+        await self.runtime.run("search-plan-")
+        self.assertEqual(queries, ["康斯坦汀", "康斯坦丁（电影）"])
+        self.assertEqual(self.host.reports[-1]["operation_id"], operation_id)
+        self.assertEqual(self.host.reports[-1]["stage"], "plan_confirmation")
+
     async def test_browse_and_select_keep_only_request_scoped_state(self):
         async def planner(_raw_query, plan_id):
             result = ranked_search_plan()
@@ -1077,9 +1166,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.0.2")
+        self.assertEqual(manifest["version"], "1.0.3")
         self.assertEqual(manifest["host_api"], ">=1.2,<2.0")
-        self.assertIn('version = "1.0.2"', project)
+        self.assertIn('version = "1.0.3"', project)
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
@@ -1110,12 +1199,12 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.0.2.tpx", source)
+        self.assertIn("/tmp/search-1.0.3.tpx", source)
         self.assertIn("search_media_sources", source)
         self.assertIn("最多两轮", source)
         self.assertIn("不会交给 AI", source)
         self.assertIn("rename", source)
-        self.assertNotIn("dist/search-1.0.2.tpx", source)
+        self.assertNotIn("dist/search-1.0.3.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

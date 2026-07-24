@@ -39,6 +39,32 @@ class SearchEntityGraphTest(unittest.TestCase):
             {"movie", "series"},
         )
 
+    def test_same_tvdb_numeric_id_never_merges_movie_and_series(self):
+        graph = build_search_graph([{
+            "source": "tvdb",
+            "status": "ok",
+            "facts": [{
+                "movies": [{
+                    "tvdb_movie_id": "855",
+                    "name": "康斯坦丁",
+                    "english_title": "Constantine",
+                    "year": "2005",
+                }],
+                "series": [{
+                    "tvdb_series_id": "855",
+                    "name": "康斯坦丁",
+                    "english_title": "Constantine",
+                    "year": "2014",
+                }],
+            }],
+        }])
+
+        self.assertEqual(len(graph.candidates), 2)
+        self.assertEqual(
+            {candidate.media_types for candidate in graph.candidates},
+            {frozenset({"movie"}), frozenset({"series"})},
+        )
+
     def test_title_year_and_type_merge_independent_sources(self):
         graph = build_search_graph([
             {

@@ -327,6 +327,8 @@ class SearchFeature:
             return result
         if action == "confirm":
             return self._start_release_search_task(plan_id, stored)
+        if action == "clarify" and len(parts) == 3:
+            return self._clarify_choice(plan_id, stored, parts[2], request)
         if action == "browse" and len(parts) == 3:
             return self._browse_candidate(plan_id, stored, parts[2])
         if action == "select" and len(parts) == 3:
@@ -363,6 +365,7 @@ class SearchFeature:
                 stage="planning",
                 status_text="正在规划媒体证据。",
                 control="cancel",
+                details={},
             )
         plan_id = uuid.uuid4().hex[:10]
         task_id = f"search-plan-{operation['operation_id']}"
@@ -397,10 +400,17 @@ class SearchFeature:
             )
             action = (result.get("actions") or [{}])[0]
             if plan_id in self.plans:
+                clarification = (
+                    self.plans[plan_id].get("kind") == "clarification"
+                )
                 await self._report_operation(
                     operation_id,
                     state="awaiting_input",
-                    stage="plan_confirmation",
+                    stage=(
+                        "clarification"
+                        if clarification
+                        else "plan_confirmation"
+                    ),
                     status_text=str(action.get("text") or "媒体方案已生成。"),
                     control="exit",
                     details=deepcopy(action.get("data") or {}),
@@ -583,6 +593,60 @@ class SearchFeature:
             return self._closed(f"❌ 无法生成媒体元数据：{message}")
         except Exception as exc:
             return self._closed(f"❌ 媒体规划失败：{type(exc).__name__}")
+        clarification = (
+            plan.get("clarification")
+            if isinstance(plan.get("clarification"), dict)
+            else None
+        )
+        if (
+            plan.get("status") == "needs_clarification"
+            and clarification is not None
+        ):
+            options = [
+                {
+                    "label": " ".join(
+                        str(item.get("label") or "").split()
+                    ),
+                    "query": " ".join(
+                        str(item.get("query") or "").split()
+                    ),
+                    "media_type": str(
+                        item.get("media_type") or ""
+                    ).strip(),
+                    "year": str(item.get("year") or "").strip(),
+                }
+                for item in (clarification.get("options") or [])[:6]
+                if isinstance(item, dict)
+                and str(item.get("label") or "").strip()
+                and str(item.get("query") or "").strip()
+            ]
+            if not options:
+                return self._closed(
+                    "❌ 无法生成媒体元数据：澄清选项无效。"
+                )
+            self.plans[plan_id] = {
+                "kind": "clarification",
+                "owner": self._owner_key(request),
+                "created_at": time.time(),
+                "plan": plan,
+                "clarification_reason": " ".join(
+                    str(clarification.get("reason") or "").split()
+                ),
+                "clarification_options": tuple(options),
+                "candidates": (),
+                "selected_path": "",
+                "results": [],
+                "operation_id": operation_id,
+            }
+            return {
+                "actions": [
+                    self._clarification_action(
+                        self.plans[plan_id],
+                        edit=False,
+                    )
+                ],
+                "session": {"state": "close"},
+            }
         candidates = plan.get("candidates") if isinstance(plan.get("candidates"), list) else []
         if not candidates:
             candidates = [{
@@ -620,6 +684,65 @@ class SearchFeature:
             "actions": [action],
             "session": {"state": "close"},
         }
+
+    def _clarification_action(self, stored: dict, *, edit: bool) -> dict:
+        plan_id = str((stored.get("plan") or {}).get("plan_id") or "")
+        reason = (
+            str(stored.get("clarification_reason") or "").strip()
+            or "存在多个可能目标，请选择后继续验证。"
+        )
+        keyboard = [[{
+            "text": option["label"],
+            "callback_data": f"search:clarify:{plan_id}:{index}",
+        }] for index, option in enumerate(
+            stored.get("clarification_options") or ()
+        )]
+        keyboard.append([{
+            "text": "退出",
+            "callback_data": f"search:cancel:{plan_id}",
+        }])
+        return {
+            "kind": "edit_message" if edit else "send_message",
+            "text": f"需要确认搜索目标\n{reason}",
+            "data": {
+                "keyboard": keyboard,
+                "clarification": True,
+            },
+        }
+
+    def _clarify_choice(
+        self,
+        plan_id: str,
+        stored: dict,
+        raw_index: str,
+        request: dict,
+    ) -> dict:
+        try:
+            option = stored["clarification_options"][int(raw_index)]
+        except (KeyError, ValueError, IndexError):
+            raise FeatureError(
+                "invalid_callback",
+                "search clarification option is invalid",
+            ) from None
+        operation_id = str(stored.get("operation_id") or "")
+        refined_query = str(option.get("query") or "").strip()
+        label = str(option.get("label") or refined_query).strip()
+        self._release_plan(plan_id)
+        result = self._start_plan_task(
+            refined_query,
+            request,
+            reuse_owner=True,
+        )
+        action = (result.get("actions") or [{}])[0]
+        action.update({
+            "kind": "edit_message",
+            "text": f"⏳ 已选择{label}，正在重新验证媒体证据...",
+        })
+        if operation_id:
+            result["operation"] = self._operation_view(
+                self.operations[operation_id]
+            )
+        return result
 
     def _candidate_action(self, stored: dict, index: int, *, edit: bool) -> dict:
         candidates = stored["candidates"]

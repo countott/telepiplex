@@ -152,6 +152,7 @@ JSON结构：
 SEARCH_HYPOTHESIS_PROMPT = """你是影视搜索意图解释器。只返回JSON。
 只在规则无法理解非标准自然语言或首轮零候选时使用。你的输出只是待外部来源验证的意图提示。
 不得输出豆瓣/TVDB/IMDb/TMDB稳定ID、用户未提供的年份、官方英文名结论、罗马字结论、TVDB库存、Prowlarr query、路径、media_metadata或Season 00编号。
+title_hints 按建议检索优先级排列：纠正或规范化标题优先，用户原文最后。
 JSON结构：
 {"status":"parsed|needs_clarification|unsupported","title_hints":["string"],"media_type_hint":"movie|series|unknown","scope_hint":"work|whole_series|season|episode|latest_aired|unknown","season_number":null,"episode_number":null,"numeric_tokens":[{"value":1,"role":"year|official_title_part|season|episode|ambiguous"}],"relation_hint":"none|prequel|sequel|special|movie_version|unknown","clarification_reason":"string"}
 用户输入：
@@ -538,7 +539,7 @@ def infer_search_hypotheses_with_ai(context):
         for item in titles[:3]
         if " ".join(item.split())
     ]
-    if parsed["status"] != "parsed" or not titles:
+    if parsed["status"] == "unsupported" or not titles:
         return None
     media_type = parsed.get("media_type_hint")
     scope = parsed.get("scope_hint")
@@ -583,13 +584,22 @@ def infer_search_hypotheses_with_ai(context):
         "inferred_facts": ["ai_intent_hint"],
     } for title in titles]
     return {
-        "status": "ok",
+        "status": (
+            "needs_clarification"
+            if parsed["status"] == "needs_clarification"
+            else "ok"
+        ),
         "hypotheses": hypotheses,
         "source_queries": {
             name: list(titles) for name in ("wikipedia", "douban", "tvdb")
         },
         "warnings": ["ai_intent_hint_requires_source_verification"],
         "intent_hint": parsed,
+        "clarification_reason": (
+            str(parsed.get("clarification_reason") or "").strip()
+            if parsed["status"] == "needs_clarification"
+            else ""
+        ),
     }
 
 
