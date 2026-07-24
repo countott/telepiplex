@@ -27,7 +27,7 @@ class TitlePolicyTest(unittest.TestCase):
         self.assertEqual(titles.canonical_search_title, "The Grand Budapest Hotel")
         self.assertEqual(titles.canonical_latin_title, "The Grand Budapest Hotel")
         self.assertEqual(titles.search_title_policy, "official_english")
-        self.assertEqual(titles.chinese_title, "布达佩斯大饭店")
+        self.assertEqual(titles.chinese_title, "")
 
     def test_japanese_uses_romaji_not_english_translation(self):
         candidate = CandidateEntity("tvdb:series:2", (fact(
@@ -74,6 +74,73 @@ class TitlePolicyTest(unittest.TestCase):
 
         with self.assertRaisesRegex(TitlePolicyError, "canonical_title_unavailable"):
             resolve_title_policy(candidate)
+
+    def test_verified_user_chinese_alias_beats_taiwan_wikipedia_title(self):
+        candidate = CandidateEntity("tvdb:movie:855", (
+            fact(
+                fact_id="wikipedia:Q219150",
+                provider="wikipedia",
+                titles=("魔間行者", "Constantine (film)"),
+                official_english_title="Constantine (film)",
+            ),
+            fact(
+                fact_id="tvdb:855",
+                provider="tvdb",
+                titles=("Constantine", "地狱神探", "康斯坦丁"),
+                official_english_title="Constantine",
+            ),
+        ))
+
+        titles = resolve_title_policy(
+            candidate,
+            preferred_chinese_title="康斯坦丁",
+        )
+
+        self.assertEqual(titles.chinese_title, "康斯坦丁")
+
+    def test_wikipedia_taiwan_title_is_not_mainland_chinese_fallback(self):
+        candidate = CandidateEntity("wikipedia:movie:Q219150", (fact(
+            fact_id="wikipedia:Q219150",
+            provider="wikipedia",
+            titles=("魔間行者", "Constantine (film)"),
+            official_english_title="Constantine",
+        ),))
+
+        titles = resolve_title_policy(candidate)
+
+        self.assertEqual(titles.chinese_title, "")
+
+    def test_tvdb_taiwan_title_is_not_mainland_chinese_fallback(self):
+        candidate = CandidateEntity("tvdb:movie:855", (fact(
+            fact_id="tvdb:855",
+            provider="tvdb",
+            titles=("魔間行者", "Constantine"),
+            official_english_title="Constantine",
+        ),))
+
+        titles = resolve_title_policy(candidate)
+
+        self.assertEqual(titles.chinese_title, "")
+
+    def test_douban_chinese_title_beats_wikipedia_title_without_conversion(self):
+        candidate = CandidateEntity("douban:movie:1295644", (
+            fact(
+                fact_id="wikipedia:Q219150",
+                provider="wikipedia",
+                titles=("魔間行者", "Constantine (film)"),
+                official_english_title="Constantine",
+            ),
+            fact(
+                fact_id="douban:1295644",
+                provider="douban",
+                titles=("康斯坦丁", "Constantine"),
+                official_english_title="Constantine",
+            ),
+        ))
+
+        titles = resolve_title_policy(candidate)
+
+        self.assertEqual(titles.chinese_title, "康斯坦丁")
 
 
 if __name__ == "__main__":

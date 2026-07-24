@@ -678,6 +678,94 @@ class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
             "deterministic_bounded",
         )
 
+    @patch("telepiplex_search.planner.infer_search_hypotheses_with_ai")
+    async def test_ai_typo_recovery_runs_after_lexical_candidates_fail_gate(
+        self,
+        infer_hypotheses,
+    ):
+        infer_hypotheses.return_value = {
+            "status": "ok",
+            "hypotheses": [{
+                "title": "康斯坦丁",
+                "year": "",
+                "content_identity": "movie",
+                "scope": "movie_or_series",
+                "season_number": None,
+                "episode_number": None,
+                "possible_related_series": [],
+                "explicit_facts": [],
+                "inferred_facts": ["ai_intent_hint"],
+            }],
+            "source_queries": {
+                "wikipedia": ["康斯坦丁"],
+                "douban": ["康斯坦丁"],
+                "tvdb": ["康斯坦丁"],
+            },
+            "warnings": ["ai_intent_hint_requires_source_verification"],
+            "intent_hint": {
+                "title_hints": ["康斯坦丁"],
+                "media_type_hint": "movie",
+            },
+        }
+
+        def provider(name):
+            def provide(hypotheses):
+                queries = (
+                    (hypotheses.get("source_queries") or {}).get(name)
+                    or []
+                )
+                corrected = "康斯坦丁" in queries
+                if not corrected and name != "wikipedia":
+                    return {
+                        "source": name,
+                        "status": "not_found",
+                        "facts": [],
+                    }
+                title = "康斯坦丁" if corrected else "康斯坦汀"
+                key = (
+                    "subject_id"
+                    if name == "douban"
+                    else "wikibase_item"
+                )
+                return {
+                    "source": name,
+                    "status": "ok",
+                    "facts": [{
+                        key: f"{name}-constantine",
+                        "title": title,
+                        "chinese_title": title,
+                        "english_title": "Constantine",
+                        "official_english_title": "Constantine",
+                        "year": "2005",
+                        "media_type": "movie",
+                    }],
+                }
+
+            return provide
+
+        plan = await build_confirmable_search_plan(
+            "康斯坦汀",
+            "p-post-gate-typo",
+            {
+                "wikipedia": provider("wikipedia"),
+                "douban": provider("douban"),
+                "tvdb": provider("tvdb"),
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        infer_hypotheses.assert_called_once()
+        self.assertEqual(len(plan["candidates"]), 1)
+        self.assertEqual(
+            plan["candidates"][0]["media_metadata"]["identity"]["chinese_title"],
+            "康斯坦丁",
+        )
+        self.assertEqual(
+            plan["candidates"][0]["media_metadata"]["identity"]["english_title"],
+            "Constantine",
+        )
+
     async def test_direct_anchor_never_calls_source_orchestrator(self):
         async def forbidden(_raw_query, _gateway):
             raise AssertionError("direct links must bypass AI orchestration")

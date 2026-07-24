@@ -316,6 +316,37 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("找到 1 个", self.host.reports[-1]["status_text"])
         self.assertEqual(self.host.reports[-1]["state"], "awaiting_input")
 
+    async def test_prowlarr_failure_keeps_reason_and_removes_candidate_buttons(self):
+        from telepiplex_search.adapters.prowlarr import ProwlarrRequestError
+
+        def fail_search(_query, _media_type):
+            raise ProwlarrRequestError(
+                "Prowlarr 查询超时（已等待 200 秒）。",
+                kind="timeout",
+                retryable=True,
+            )
+
+        self.feature.release_search = fail_search
+        plan_id = await self._prepare_search()
+        self.assertIn("keyboard", self.host.reports[-1]["details"])
+
+        started = await self.feature.callback({
+            "namespace": "search",
+            "payload": f"confirm:{plan_id}",
+            "user_id": 1,
+            "chat_id": 10,
+        })
+
+        self.assertNotIn("keyboard", started["operation"]["details"])
+        await self.runtime.run("search-releases-")
+
+        failed = self.host.reports[-1]
+        self.assertEqual(failed["state"], "failed")
+        self.assertEqual(failed["control"], "")
+        self.assertNotIn("keyboard", failed["details"])
+        self.assertIn("已等待 200 秒", failed["status_text"])
+        self.assertNotIn(plan_id, self.feature.plans)
+
     async def test_wrong_scope_never_enters_release_rank(self):
         from telepiplex_search.series_scope import apply_series_scope
 
@@ -1046,9 +1077,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.0.1")
+        self.assertEqual(manifest["version"], "1.0.2")
         self.assertEqual(manifest["host_api"], ">=1.2,<2.0")
-        self.assertIn('version = "1.0.1"', project)
+        self.assertIn('version = "1.0.2"', project)
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
@@ -1079,12 +1110,12 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.0.1.tpx", source)
+        self.assertIn("/tmp/search-1.0.2.tpx", source)
         self.assertIn("search_media_sources", source)
         self.assertIn("最多两轮", source)
         self.assertIn("不会交给 AI", source)
         self.assertIn("rename", source)
-        self.assertNotIn("dist/search-1.0.1.tpx", source)
+        self.assertNotIn("dist/search-1.0.2.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

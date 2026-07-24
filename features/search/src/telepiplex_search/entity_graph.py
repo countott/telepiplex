@@ -48,6 +48,21 @@ def _mapping(values: dict | None) -> Mapping[str, str]:
     return MappingProxyType(normalized)
 
 
+def normalize_language(value) -> str:
+    value = _text(value).casefold().replace("_", "-")
+    primary = value.split("-", 1)[0]
+    return {
+        "eng": "en",
+        "jpn": "ja",
+        "kor": "ko",
+        "zho": "zh",
+        "chi": "zh",
+        "cmn": "zh",
+        "und": "",
+        "zxx": "",
+    }.get(primary, primary)
+
+
 @dataclass(frozen=True)
 class EvidenceFact:
     fact_id: str
@@ -62,6 +77,8 @@ class EvidenceFact:
     original_language: str = ""
     official_english_title: str = ""
     romanized_original_title: str = ""
+    chinese_title: str = ""
+    poster_language: str = ""
     genres: tuple[str, ...] = ()
     episodes: tuple[dict, ...] = ()
     complex_signals: tuple[str, ...] = ()
@@ -117,9 +134,31 @@ class CandidateEntity:
 
     @property
     def poster_url(self) -> str:
+        original_language = next(
+            (
+                fact.original_language
+                for provider in ("tvdb", "douban", "wikipedia")
+                for fact in self.facts
+                if fact.provider == provider and fact.original_language
+            ),
+            "",
+        )
+        if original_language:
+            for provider in ("tvdb", "douban", "wikipedia"):
+                for fact in self.facts:
+                    if (
+                        fact.provider == provider
+                        and fact.poster_url
+                        and fact.poster_language == original_language
+                    ):
+                        return fact.poster_url
         for provider in ("tvdb", "douban", "wikipedia"):
             for fact in self.facts:
-                if fact.provider == provider and fact.poster_url:
+                if (
+                    fact.provider == provider
+                    and fact.poster_url
+                    and not fact.poster_language
+                ):
                     return fact.poster_url
         return ""
 
@@ -202,11 +241,13 @@ def _fact(
         source_url=_text(raw.get("url")),
         poster_url=_text(raw.get("cover_url") or raw.get("poster_url")),
         original_title=_text(raw.get("original_title")),
-        original_language=_text(raw.get("original_language")).casefold(),
+        original_language=normalize_language(raw.get("original_language")),
         official_english_title=_text(
             raw.get("official_english_title") or raw.get("english_title")
         ),
         romanized_original_title=_text(raw.get("romanized_original_title")),
+        chinese_title=_text(raw.get("chinese_title")),
+        poster_language=normalize_language(raw.get("poster_language")),
         genres=_unique_text(raw.get("genres") or []),
         episodes=tuple(dict(item) for item in (episodes or []) if isinstance(item, dict)),
         complex_signals=_unique_text(signals),

@@ -253,29 +253,100 @@ def _original_language(item: dict, original_title: str) -> str:
     ).strip().casefold()
     if value in {"ja", "jpn", "japanese", "日语", "日語"}:
         return "ja"
+    if value in {"en", "eng", "english", "英语", "英語"}:
+        return "en"
+    if value in {"ko", "kor", "korean", "韩语", "韓語"}:
+        return "ko"
+    if value in {"zh", "zho", "chi", "cmn", "chinese", "中文"}:
+        return "zh"
     if re.search(r"[\u3040-\u30ff]", original_title):
         return "ja"
+    official_english = str(
+        item.get("official_english_title")
+        or item.get("officialEnglishTitle")
+        or _preferred_english_title(item)
+        or ""
+    ).strip()
+    if (
+        original_title
+        and official_english
+        and _strip_alias_qualifiers(original_title).casefold()
+        == _strip_alias_qualifiers(official_english).casefold()
+    ):
+        return "en"
     return value
 
 
-def _search_cover_url(item: dict) -> str:
-    for key in ("image_url", "poster"):
-        value = str(item.get(key) or "").strip()
-        if value:
-            return value
+def _artwork_language(item: dict) -> str:
+    value = str(
+        item.get("language")
+        or item.get("languageCode")
+        or item.get("language_code")
+        or ""
+    ).strip().casefold().replace("_", "-")
+    primary = value.split("-", 1)[0]
+    return {
+        "eng": "en",
+        "jpn": "ja",
+        "kor": "ko",
+        "zho": "zh",
+        "chi": "zh",
+        "cmn": "zh",
+        "und": "",
+        "zxx": "",
+    }.get(primary, primary)
 
+
+def _search_cover_url(
+    item: dict,
+    original_language: str,
+) -> tuple[str, str]:
+    structured = []
     posters = item.get("posters")
     if isinstance(posters, list):
         for poster in posters:
-            value = _artwork_url(poster) if isinstance(poster, dict) else str(poster or "").strip()
+            if isinstance(poster, dict):
+                value = _artwork_url(poster)
+                language = _artwork_language(poster)
+            else:
+                value = str(poster or "").strip()
+                language = ""
             if value:
-                return value
+                structured.append((value, language))
+
+    if original_language:
+        exact = next(
+            (
+                (value, language)
+                for value, language in structured
+                if language == original_language
+            ),
+            None,
+        )
+        if exact:
+            return exact
+
+    for key in ("image_url", "poster"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value, ""
+
+    neutral = next(
+        (
+            (value, language)
+            for value, language in structured
+            if not language
+        ),
+        None,
+    )
+    if neutral:
+        return neutral
 
     for key in ("thumbnail", "image"):
         value = str(item.get(key) or "").strip()
         if value:
-            return value
-    return ""
+            return value, ""
+    return "", ""
 
 
 def _normalize_search_item(item: dict, media_type: str) -> dict:
@@ -294,13 +365,18 @@ def _normalize_search_item(item: dict, media_type: str) -> dict:
         or item.get("officialEnglishTitle")
         or _preferred_english_title(item)
     ).strip()
+    original_language = _original_language(item, original_title)
+    cover_url, poster_language = _search_cover_url(
+        item,
+        original_language,
+    )
     normalized = {
         "tvdb_id": entity_id,
         "media_type": entity_type,
         "name": str(item.get("name") or "").strip(),
         "english_title": official_english_title,
         "original_title": original_title,
-        "original_language": _original_language(item, original_title),
+        "original_language": original_language,
         "official_english_title": official_english_title,
         "romanized_original_title": str(
             item.get("romanized_original_title")
@@ -313,7 +389,8 @@ def _normalize_search_item(item: dict, media_type: str) -> dict:
         "type": str(item.get("type") or entity_type).strip(),
         "overview": str(item.get("overview") or "").strip(),
         "aliases": _search_alias_values(item),
-        "cover_url": _search_cover_url(item),
+        "cover_url": cover_url,
+        "poster_language": poster_language,
         "slug": str(item.get("slug") or "").strip(),
     }
     normalized[f"tvdb_{entity_type}_id"] = entity_id

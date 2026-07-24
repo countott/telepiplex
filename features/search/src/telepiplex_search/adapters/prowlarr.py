@@ -15,7 +15,7 @@ import requests
 from ..context import runtime_context
 
 
-DEFAULT_PROWLARR_SEARCH_TIMEOUT = 150
+DEFAULT_PROWLARR_SEARCH_TIMEOUT = 200
 PROWLARR_STATUS_TIMEOUT = 15
 
 
@@ -25,6 +25,27 @@ class ProwlarrConfigError(Exception):
 
 class ProwlarrRequestError(Exception):
     """Raised when Prowlarr cannot be reached or returns invalid data."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str = "request_failed",
+        http_status: int = 0,
+        retryable: bool = False,
+    ):
+        self.kind = str(kind or "request_failed")
+        self.http_status = int(http_status or 0)
+        self.retryable = bool(retryable)
+        super().__init__(str(message or "Prowlarr 请求失败"))
+
+    def as_dict(self) -> dict:
+        return {
+            "kind": self.kind,
+            "http_status": self.http_status,
+            "message": str(self),
+            "retryable": self.retryable,
+        }
 
 
 MAGNET_PATTERN = re.compile(r"^magnet:\?xt=urn:btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})(?:&.*)?$")
@@ -63,8 +84,14 @@ def _status_timeout(prowlarr_config: dict):
 
 def _warn(message: str):
     logger = runtime_context.logger
-    if logger:
-        logger.warn(message)
+    warning = (
+        getattr(logger, "warning", None)
+        or getattr(logger, "warn", None)
+        if logger is not None
+        else None
+    )
+    if warning is not None:
+        warning(message)
 
 
 def _is_magnet_url(url: str) -> bool:
@@ -130,17 +157,55 @@ def search_prowlarr(query: str, media_type: str = "movie") -> list[dict]:
     try:
         response = requests.get(url, headers=headers, params=params, timeout=timeout)
         response.raise_for_status()
-        data = response.json()
     except requests.exceptions.Timeout as e:
         raise ProwlarrRequestError(
             f"Prowlarr 查询超时（已等待 {int(timeout)} 秒）。"
-            "部分索引器需要 Cloudflare 解析，建议稍后重试或减少启用的慢索引器。"
+            "部分索引器可能响应过慢，请检查 Prowlarr 索引器日志。",
+            kind="timeout",
+            retryable=True,
         ) from e
-    except Exception as e:
-        raise ProwlarrRequestError(f"Prowlarr 请求失败: {e}") from e
+    except requests.HTTPError as e:
+        status = int(getattr(getattr(e, "response", None), "status_code", 0) or 0)
+        kind = (
+            "authentication_failed"
+            if status in {401, 403}
+            else "rate_limited"
+            if status == 429
+            else "server_error"
+            if status >= 500
+            else "http_error"
+        )
+        raise ProwlarrRequestError(
+            f"Prowlarr HTTP 请求失败（{status or '未知状态'}）：{e}",
+            kind=kind,
+            http_status=status,
+            retryable=status == 429 or status >= 500,
+        ) from e
+    except requests.ConnectionError as e:
+        raise ProwlarrRequestError(
+            f"Prowlarr 连接失败：{e}",
+            kind="connection_failed",
+            retryable=True,
+        ) from e
+    except requests.RequestException as e:
+        raise ProwlarrRequestError(
+            f"Prowlarr 请求失败：{e}",
+            kind="request_failed",
+        ) from e
+
+    try:
+        data = response.json()
+    except (TypeError, ValueError) as e:
+        raise ProwlarrRequestError(
+            f"Prowlarr 返回的 JSON 无法解析：{e}",
+            kind="invalid_response",
+        ) from e
 
     if not isinstance(data, list):
-        raise ProwlarrRequestError("Prowlarr 返回数据格式异常")
+        raise ProwlarrRequestError(
+            "Prowlarr 返回数据格式异常",
+            kind="invalid_response",
+        )
 
     return [_normalize_result(item) for item in data if isinstance(item, dict)]
 

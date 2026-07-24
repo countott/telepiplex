@@ -382,6 +382,29 @@ def _merge_evidence_passes(
     return list(merged.values())
 
 
+def _verified_ai_title(
+    payload: dict | None,
+    candidates: list[CandidateEntity],
+) -> str:
+    for hypothesis in (payload or {}).get("hypotheses") or []:
+        if not isinstance(hypothesis, dict):
+            continue
+        value = _text(hypothesis.get("title"))
+        target = normalize_title(value)
+        if not target:
+            continue
+        if any(
+            target in candidate.normalized_titles
+            or any(
+                title.startswith(target) or target.startswith(title)
+                for title in candidate.normalized_titles
+            )
+            for candidate in candidates
+        ):
+            return value
+    return ""
+
+
 def _finalize_draft(
     draft: dict,
     *,
@@ -1095,6 +1118,8 @@ async def build_confirmable_search_plan(
     all_candidates = []
     intent = {}
     orchestration = None
+    intent_fallback_attempted = False
+    verified_ai_title = ""
     if source_gateway is not None and locked_identity is None:
         orchestration = await _optional_budgeted(
             "source_orchestration",
@@ -1200,6 +1225,7 @@ async def build_confirmable_search_plan(
         if has_ambiguous_bare_number(raw_query, parsed_input) and not exact:
             raise SearchPlanningError("ambiguous_numeric_role")
         if not candidates:
+            intent_fallback_attempted = True
             ai_hypotheses = await _optional_budgeted(
                 "intent_fallback",
                 budget,
@@ -1240,7 +1266,13 @@ async def build_confirmable_search_plan(
                         )
                     ]
                     candidates = matches
+                    verified_ai_title = _verified_ai_title(
+                        ai_hypotheses,
+                        candidates,
+                    )
         intent = dict(rule_hypotheses.get("intent") or {})
+        if verified_ai_title:
+            intent["title"] = verified_ai_title
         intent["media_type"] = _explicit_media_type(raw_query, intent)
 
     if not candidates:
@@ -1261,7 +1293,10 @@ async def build_confirmable_search_plan(
             rejected[reason] += 1
             continue
         try:
-            title_values[candidate.candidate_key] = resolve_title_policy(candidate)
+            title_values[candidate.candidate_key] = resolve_title_policy(
+                candidate,
+                preferred_chinese_title=intent.get("title") or "",
+            )
         except TitlePolicyError:
             rejected["title_policy"] += 1
             continue
@@ -1308,7 +1343,10 @@ async def build_confirmable_search_plan(
                     rejected[reason] += 1
                     continue
                 try:
-                    resolved_titles = resolve_title_policy(candidate)
+                    resolved_titles = resolve_title_policy(
+                        candidate,
+                        preferred_chinese_title=intent.get("title") or "",
+                    )
                 except TitlePolicyError:
                     rejected["title_policy"] += 1
                     continue
@@ -1338,12 +1376,119 @@ async def build_confirmable_search_plan(
                     for item in ranked_scores
                 ):
                     title_values[candidate.candidate_key] = (
-                        resolve_title_policy(candidate)
+                        resolve_title_policy(
+                            candidate,
+                            preferred_chinese_title=intent.get("title") or "",
+                        )
                     )
             _log_info(
                 f"search_stage status=expanded stage=candidate_finalize "
                 f"candidates={len(candidates)}"
             )
+
+    if (
+        not ranked_scores
+        and not orchestrated
+        and not locked_identity
+        and not intent_fallback_attempted
+    ):
+        intent_fallback_attempted = True
+        ai_hypotheses = await _optional_budgeted(
+            "intent_fallback",
+            budget,
+            asyncio.to_thread(
+                infer_search_hypotheses_with_ai,
+                {
+                    "raw_query": raw_query,
+                    "intent": dict(intent),
+                    "failure": "lexical_candidates_failed_qualification",
+                },
+            ),
+            None,
+        )
+        if ai_hypotheses:
+            retry_sources = await _optional_budgeted(
+                "candidate_finalize",
+                budget,
+                collect_evidence(ai_hypotheses, providers),
+                [],
+            )
+            if retry_sources:
+                sources = _merge_evidence_passes(sources, retry_sources)
+                recovered_graph = build_search_graph(sources)
+                all_candidates = list(recovered_graph.candidates)
+                retry_targets = {
+                    normalize_title(item.get("title"))
+                    for item in ai_hypotheses.get("hypotheses") or []
+                    if isinstance(item, dict)
+                    and normalize_title(item.get("title"))
+                }
+                candidates = [
+                    candidate
+                    for candidate in recovered_graph.candidates
+                    if any(
+                        title.startswith(retry_target)
+                        or retry_target.startswith(title)
+                        for retry_target in retry_targets
+                        for title in candidate.normalized_titles
+                    )
+                ]
+                verified_ai_title = _verified_ai_title(
+                    ai_hypotheses,
+                    candidates,
+                )
+                if verified_ai_title:
+                    intent["title"] = verified_ai_title
+                combined = []
+                title_values = {}
+                rejected = _candidate_rejection_counts()
+                for candidate in candidates:
+                    reason = _candidate_qualification_reason(
+                        candidate,
+                        intent,
+                        direct_anchor=False,
+                    )
+                    if reason:
+                        rejected[reason] += 1
+                        continue
+                    try:
+                        title_values[candidate.candidate_key] = (
+                            resolve_title_policy(
+                                candidate,
+                                preferred_chinese_title=(
+                                    intent.get("title") or ""
+                                ),
+                            )
+                        )
+                    except TitlePolicyError:
+                        rejected["title_policy"] += 1
+                        continue
+                    combined.append(
+                        combine_score(
+                            candidate.candidate_key,
+                            program_score(
+                                candidate,
+                                intent,
+                                verified_relations.get(
+                                    candidate.candidate_key
+                                ),
+                            ),
+                        )
+                    )
+                _log_candidate_funnel(
+                    phase="ai_typo_recovery",
+                    raw_count=len(recovered_graph.candidates),
+                    title_matched=len(candidates),
+                    qualified=len(combined),
+                    rejected=rejected,
+                )
+                ranked_scores = apply_thresholds(combined)
+                if ranked_scores:
+                    _log_info(
+                        "search_stage status=recovered "
+                        "stage=ai_typo_recovery "
+                        f"candidates={len(candidates)}"
+                    )
 
     if not orchestrated:
         candidates_by_key = {

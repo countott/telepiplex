@@ -136,6 +136,13 @@ class ConfigSchemaContractTest(unittest.TestCase):
         self.assertEqual(default["search"]["prowlarr"]["result_limit"], 12)
         self.assertEqual(result_limit["maximum"], 12)
 
+    def test_prowlarr_search_timeout_defaults_to_two_hundred_seconds(self):
+        default = yaml.safe_load(
+            (ROOT / "config.default.yaml").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(default["search"]["prowlarr"]["timeout"], 200)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 import uuid
@@ -15,6 +16,7 @@ from .adapters.douban import (
     lookup_douban_subject,
 )
 from .adapters.prowlarr import (
+    ProwlarrRequestError,
     get_prowlarr_indexer_summary,
     resolve_prowlarr_download_url,
     search_prowlarr,
@@ -438,6 +440,7 @@ class SearchFeature:
             stage="prowlarr_search",
             status_text="正在搜索并排序 Prowlarr 片源。",
             control="cancel",
+            details=self._prowlarr_status_details(operation_id),
         )
         task_id = f"search-releases-{operation_id}"
         task = self.runtime.spawn(
@@ -473,6 +476,7 @@ class SearchFeature:
                     stage="prowlarr_search",
                     status_text=str(action.get("text") or "Prowlarr 搜索失败。"),
                     control="",
+                    details=self._prowlarr_status_details(operation_id),
                 )
         except asyncio.CancelledError:
             self._release_plan(plan_id)
@@ -482,6 +486,7 @@ class SearchFeature:
                 stage="prowlarr_search",
                 status_text="Prowlarr 搜索已取消。",
                 control="",
+                details=self._prowlarr_status_details(operation_id),
             )
         except Exception as exc:
             self._release_plan(plan_id)
@@ -491,6 +496,7 @@ class SearchFeature:
                 stage="prowlarr_search",
                 status_text=f"Prowlarr 搜索失败：{type(exc).__name__}",
                 control="",
+                details=self._prowlarr_status_details(operation_id),
             )
 
     def _start_submission_task(self, plan_id, stored, raw_index):
@@ -1211,8 +1217,26 @@ class SearchFeature:
                 media_type,
             )
         except Exception as exc:
+            error = (
+                exc.as_dict()
+                if isinstance(exc, ProwlarrRequestError)
+                else {
+                    "kind": "unexpected_error",
+                    "http_status": 0,
+                    "message": f"{type(exc).__name__}: {exc}",
+                    "retryable": False,
+                }
+            )
+            if runtime_context.logger:
+                runtime_context.logger.warning(
+                    "prowlarr_search_failed "
+                    f"query={query!r} media_type={media_type} "
+                    f"error={json.dumps(error, ensure_ascii=False)}"
+                )
             self._release_plan(plan_id)
-            return self._closed(f"❌ Prowlarr 搜索失败：{type(exc).__name__}")
+            return self._closed(
+                f"❌ Prowlarr 搜索失败：{error['message']}"
+            )
         try:
             indexer_summary = await asyncio.to_thread(
                 self.indexer_summary,
@@ -1735,6 +1759,11 @@ class SearchFeature:
             if str(pending.get("plan_id") or "") == plan_id:
                 self.awaiting_scope_inputs.pop(owner, None)
         self.allocator.release(plan_id)
+
+    def _prowlarr_status_details(self, operation_id: str) -> dict:
+        details = (self.operations.get(operation_id) or {}).get("details") or {}
+        photo_url = str(details.get("photo_url") or "")
+        return {"photo_url": photo_url} if photo_url.startswith("https://") else {}
 
     async def operation_control(self, request: dict) -> dict:
         operation_id = str(request.get("operation_id") or "")

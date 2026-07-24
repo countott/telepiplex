@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .entity_graph import CandidateEntity
+from .entity_graph import CandidateEntity, normalize_title
 
 
 _CJK = re.compile(r"[\u3400-\u9fff]")
@@ -55,22 +55,46 @@ def _preferred_fact_values(candidate: CandidateEntity, field: str) -> list[str]:
     return result
 
 
-def _chinese_title(candidate: CandidateEntity) -> str:
+def _chinese_values(candidate: CandidateEntity, provider: str) -> list[str]:
+    result = []
+    for fact in candidate.facts:
+        if fact.provider != provider:
+            continue
+        for value in (fact.chinese_title, *fact.titles):
+            value = _text(value)
+            if value and _CJK.search(value) and value not in result:
+                result.append(value)
+    return result
+
+
+def _chinese_title(
+    candidate: CandidateEntity,
+    preferred_chinese_title: str = "",
+) -> str:
     original_titles = {
         _text(fact.original_title) for fact in candidate.facts if fact.original_title
     }
-    for title in candidate.titles:
-        title = _text(title)
-        if title and _CJK.search(title) and title not in original_titles:
+    preferred = _text(preferred_chinese_title)
+    if (
+        preferred
+        and _CJK.search(preferred)
+        and preferred not in original_titles
+        and normalize_title(preferred) in candidate.normalized_titles
+    ):
+        return preferred
+    for title in _chinese_values(candidate, "douban"):
+        if title not in original_titles:
             return title
-    for title in candidate.titles:
-        title = _text(title)
-        if title and _CJK.search(title):
-            return title
+    for title in _chinese_values(candidate, "douban"):
+        return title
     return ""
 
 
-def resolve_title_policy(candidate: CandidateEntity) -> CanonicalTitles:
+def resolve_title_policy(
+    candidate: CandidateEntity,
+    *,
+    preferred_chinese_title: str = "",
+) -> CanonicalTitles:
     language_values = _preferred_fact_values(candidate, "original_language")
     original_language = "ja" if "ja" in language_values else next(
         iter(language_values), ""
@@ -97,7 +121,7 @@ def resolve_title_policy(candidate: CandidateEntity) -> CanonicalTitles:
         policy = "official_english"
 
     return CanonicalTitles(
-        chinese_title=_chinese_title(candidate),
+        chinese_title=_chinese_title(candidate, preferred_chinese_title),
         original_title=original_title,
         original_language=original_language,
         official_english_title=official_english_title,

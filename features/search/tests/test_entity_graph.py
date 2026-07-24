@@ -137,6 +137,46 @@ class SearchEntityGraphTest(unittest.TestCase):
         )
         self.assertNotIn("下一站，幸福", exact[0].titles)
 
+    def test_poster_prefers_original_language_over_provider_priority(self):
+        graph = build_search_graph([
+            {
+                "source": "tvdb",
+                "status": "ok",
+                "facts": [{
+                    "movies": [{
+                        "tvdb_movie_id": "855",
+                        "name": "Constantine",
+                        "english_title": "Constantine",
+                        "year": "2005",
+                        "original_language": "en",
+                        "cover_url": "https://art.example/zh-poster.jpg",
+                        "poster_language": "zh",
+                    }],
+                    "series": [],
+                }],
+            },
+            {
+                "source": "douban",
+                "status": "ok",
+                "facts": [{
+                    "subject_id": "1295644",
+                    "title": "Constantine",
+                    "english_title": "Constantine",
+                    "year": "2005",
+                    "media_type": "movie",
+                    "original_language": "en",
+                    "cover_url": "https://art.example/en-poster.jpg",
+                    "poster_language": "en",
+                }],
+            },
+        ])
+
+        self.assertEqual(len(graph.candidates), 1)
+        self.assertEqual(
+            graph.candidates[0].poster_url,
+            "https://art.example/en-poster.jpg",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

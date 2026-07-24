@@ -133,6 +133,41 @@ class TvdbAdapterTest(unittest.TestCase):
             "image.jpg",
         )
 
+    def test_search_poster_prefers_original_language_artwork(self):
+        item = tvdb._normalize_search_item(
+            {
+                "tvdb_id": "855",
+                "name": "Constantine",
+                "original_language": "eng",
+                "posters": [
+                    {
+                        "image": "https://art.example/zh.jpg",
+                        "language": "zho",
+                    },
+                    {
+                        "image": "https://art.example/en.jpg",
+                        "language": "eng",
+                    },
+                ],
+            },
+            "movie",
+        )
+
+        self.assertEqual(item["cover_url"], "https://art.example/en.jpg")
+        self.assertEqual(item["poster_language"], "en")
+
+    def test_latin_original_title_infers_english_source_language(self):
+        item = tvdb._normalize_search_item(
+            {
+                "tvdb_id": "855",
+                "name": "Constantine",
+                "official_english_title": "Constantine",
+            },
+            "movie",
+        )
+
+        self.assertEqual(item["original_language"], "en")
+
     def test_non_english_translations_are_preserved_as_match_aliases(self):
         item = tvdb._normalize_search_item(
             {

@@ -20,7 +20,7 @@ search:
   prowlarr:
     base_url: http://127.0.0.1:9696
     api_key: ""
-    timeout: 150
+    timeout: 200
     status_timeout: 15
     indexer_ids: "-2"
     categories:
