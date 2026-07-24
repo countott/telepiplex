@@ -67,6 +67,8 @@ class ConfigSchemaContractTest(unittest.TestCase):
                 "max_targeted_rounds": 2,
                 "max_tools_per_round": 3,
                 "protocol": "openai_tools_v1",
+                "thinking_mode": "enabled",
+                "tool_choice_mode": "omit",
             },
         )
         orchestration = (
@@ -79,6 +81,14 @@ class ConfigSchemaContractTest(unittest.TestCase):
         self.assertEqual(
             orchestration["properties"]["max_tools_per_round"]["maximum"],
             3,
+        )
+        self.assertEqual(
+            orchestration["properties"]["thinking_mode"]["enum"],
+            ["enabled", "disabled"],
+        )
+        self.assertEqual(
+            orchestration["properties"]["tool_choice_mode"]["enum"],
+            ["omit", "forced"],
         )
 
     def test_search_scoring_is_part_of_public_config_contract(self):

@@ -32,6 +32,9 @@ SOURCE_ORCHESTRATOR_SYSTEM_PROMPT = """你是媒体来源查询编排器。
 你只能根据本次工具返回的 fact_id、来源字段和当前请求图判断。
 你可以提出标题纠错、简称、跨语言别名和同实体关联假设。
 不得凭自身知识生成稳定 ID、官方标题、年份、海报、TVDB inventory、media_metadata 或 Prowlarr query。
+如果 raw query 只有单集标题，先把可能的父剧集名称作为待验证查询假设；
+父剧集取得 TVDB Series ID 后必须调用 lookup_tvdb_episodes 获取 TVDB episode inventory，
+最终季集编号只能来自该 inventory，不能凭模型记忆填写。
 不得请求任意 URL、Header、API Key、Token、Cookie 或 Base URL。
 存在多个合格候选时不得自动选择。
 证据充分、达到查询上限或继续查询不会增加可验证信息时必须停止。
@@ -58,11 +61,23 @@ def _config(value: dict | None) -> dict:
     else:
         ai = ((runtime_context.config or {}).get("ai") or {})
         config = dict(ai.get("source_orchestration") or {})
+    thinking_mode = _text(
+        config.get("thinking_mode") or "enabled"
+    ).casefold()
+    if thinking_mode not in {"enabled", "disabled"}:
+        thinking_mode = "enabled"
+    tool_choice_mode = _text(
+        config.get("tool_choice_mode") or "omit"
+    ).casefold()
+    if tool_choice_mode not in {"omit", "forced"}:
+        tool_choice_mode = "omit"
     return {
         "enable": bool(config.get("enable", True)),
         "protocol": _text(
             config.get("protocol") or "openai_tools_v1"
         ),
+        "thinking_mode": thinking_mode,
+        "tool_choice_mode": tool_choice_mode,
         "max_targeted_rounds": min(
             2,
             max(0, int(config.get("max_targeted_rounds", 2))),
@@ -97,10 +112,75 @@ async def _call_ai(ai_call, messages, **kwargs):
     return await asyncio.to_thread(ai_call, messages, **kwargs)
 
 
+def _provider_error(result) -> dict:
+    if not isinstance(result, dict):
+        return {}
+    error = result.get("error")
+    return dict(error) if isinstance(error, dict) else {}
+
+
+def _thinking_tool_choice_error(result) -> bool:
+    error = _provider_error(result)
+    param = _text(error.get("param")).casefold()
+    message = _text(error.get("message")).casefold()
+    return bool(
+        param in {"", "tool_choice"}
+        and "thinking" in message
+        and "tool_choice" in message
+    )
+
+
+def _provider_fallback_reason(result) -> str:
+    error = _provider_error(result)
+    if not error:
+        return ""
+    if _thinking_tool_choice_error(result):
+        return "thinking_tool_choice_unsupported"
+    if _unsupported_result(result):
+        return "tooling_unsupported"
+    return _text(error.get("kind")).casefold() or "provider_error"
+
+
+async def _call_ai_with_compat(
+    ai_call,
+    messages,
+    *,
+    tools,
+    tool_choice,
+    thinking_mode: str,
+    max_tokens: int,
+):
+    kwargs = {
+        "tools": tools,
+        "thinking_mode": thinking_mode,
+        "max_tokens": max_tokens,
+    }
+    if tool_choice is not None:
+        kwargs["tool_choice"] = tool_choice
+    result = await _call_ai(ai_call, messages, **kwargs)
+    if tool_choice is None or not _thinking_tool_choice_error(result):
+        return result
+    if runtime_context.logger:
+        runtime_context.logger.info(
+            "source_orchestration "
+            "compat_retry=omit_tool_choice "
+            "reason=thinking_tool_choice_unsupported"
+        )
+    kwargs.pop("tool_choice", None)
+    return await _call_ai(ai_call, messages, **kwargs)
+
+
 def _assistant_message(result) -> dict | None:
     if isinstance(result, dict) and result.get("role") == "assistant":
         return dict(result)
     return extract_ai_message(result)
+
+
+def _assistant_history_message(message: dict) -> dict:
+    result = dict(message or {})
+    if _tool_calls(result) and result.get("content") is None:
+        result["content"] = ""
+    return result
 
 
 def _unsupported_result(result) -> bool:
@@ -300,21 +380,28 @@ async def orchestrate_sources(
         "type": "function",
         "function": {"name": "search_media_sources"},
     }
+    first_choice = (
+        forced_choice
+        if settings["tool_choice_mode"] == "forced"
+        else None
+    )
     first_result = None
     first_message = None
     first_call = None
     for attempt in range(2):
-        result = await _call_ai(
+        result = await _call_ai_with_compat(
             ai_call,
             messages,
             tools=[FIRST_ROUND_TOOL],
-            tool_choice=forced_choice,
+            tool_choice=first_choice,
+            thinking_mode=settings["thinking_mode"],
             max_tokens=3000,
         )
         if result is None:
             return _fallback("ai_unavailable")
-        if _unsupported_result(result):
-            return _fallback("tooling_unsupported")
+        provider_reason = _provider_fallback_reason(result)
+        if provider_reason:
+            return _fallback(provider_reason)
         message = _assistant_message(result)
         calls = _tool_calls(message)
         try:
@@ -330,7 +417,7 @@ async def orchestrate_sources(
         except ToolValidationError:
             if attempt == 0:
                 if message:
-                    messages.append(message)
+                    messages.append(_assistant_history_message(message))
                 messages.append({
                     "role": "user",
                     "content": (
@@ -346,7 +433,7 @@ async def orchestrate_sources(
     if first_result is None or first_message is None or first_call is None:
         return _fallback("tool_protocol_invalid")
 
-    messages.append(first_message)
+    messages.append(_assistant_history_message(first_message))
     messages.append(_tool_message(
         first_call[0],
         first_call[1],
@@ -375,11 +462,17 @@ async def orchestrate_sources(
                 separators=(",", ":"),
             ),
         })
-        result = await _call_ai(
+        targeted_choice = (
+            "auto"
+            if settings["tool_choice_mode"] == "forced"
+            else None
+        )
+        result = await _call_ai_with_compat(
             ai_call,
             messages,
             tools=TARGETED_TOOLS,
-            tool_choice="auto",
+            tool_choice=targeted_choice,
+            thinking_mode=settings["thinking_mode"],
             max_tokens=4000,
         )
         if result is None:
@@ -389,9 +482,10 @@ async def orchestrate_sources(
                 sources=sources,
                 targeted_rounds=targeted_rounds,
             )
-        if _unsupported_result(result):
+        provider_reason = _provider_fallback_reason(result)
+        if provider_reason:
             return _fallback(
-                "tooling_unsupported",
+                provider_reason,
                 intent=intent,
                 sources=sources,
                 targeted_rounds=targeted_rounds,
@@ -462,7 +556,7 @@ async def orchestrate_sources(
                 sources=sources,
                 targeted_rounds=targeted_rounds,
             )
-        messages.append(message)
+        messages.append(_assistant_history_message(message))
         known_facts = _known_facts(graph)
         try:
             tool_results = await asyncio.gather(*[

@@ -71,8 +71,18 @@ class SearchUtilsTest(unittest.TestCase):
 
     def test_parse_search_intent_recognizes_chinese_episode(self):
         intent = parse_search_intent("瑞克和莫蒂 第九季第七集")
+        self.assertEqual(intent["title"], "瑞克和莫蒂")
+        self.assertEqual(intent["scope"], "episode")
         self.assertEqual(intent["season_number"], 9)
         self.assertEqual(intent["episode_number"], 7)
+
+    def test_parse_search_intent_keeps_base_title_for_english_episode(self):
+        intent = parse_search_intent("Rick and Morty S09E08")
+
+        self.assertEqual(intent["title"], "Rick and Morty")
+        self.assertEqual(intent["scope"], "episode")
+        self.assertEqual(intent["season_number"], 9)
+        self.assertEqual(intent["episode_number"], 8)
 
     def test_parse_douban_page_title_rejects_site_brand_only(self):
         self.assertEqual(parse_douban_page_title("<html><title>豆瓣</title></html>"), "")

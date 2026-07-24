@@ -148,7 +148,9 @@
             "enable": {"type": "boolean", "title": "启用"},
             "max_targeted_rounds": {"type": "integer", "minimum": 0, "maximum": 2, "title": "最多定向查询轮数"},
             "max_tools_per_round": {"type": "integer", "minimum": 1, "maximum": 3, "title": "每轮最多工具数"},
-            "protocol": {"type": "string", "enum": ["openai_tools_v1"], "title": "工具协议"}
+            "protocol": {"type": "string", "enum": ["openai_tools_v1"], "title": "工具协议"},
+            "thinking_mode": {"type": "string", "enum": ["enabled", "disabled"], "title": "思考模式"},
+            "tool_choice_mode": {"type": "string", "enum": ["omit", "forced"], "title": "工具选择模式"}
           },
           "additionalProperties": false
         }

@@ -49,9 +49,6 @@ class SearchPlanningError(RuntimeError):
         super().__init__(self.code)
 
 
-MAX_DISPLAY_CANDIDATES = 7
-
-
 def _log_info(message: str):
     if runtime_context.logger:
         runtime_context.logger.info(message)
@@ -565,9 +562,51 @@ def _candidate_items(candidate: CandidateEntity, intent: dict) -> list[dict]:
     return sorted(items, key=lambda item: (item["season_number"], item["episode_number"]))
 
 
-def _expanded_hypotheses(candidates: list[CandidateEntity]) -> dict:
+def _ordered_expansion_candidates(
+    candidates: list[CandidateEntity],
+    intent: dict,
+) -> list[CandidateEntity]:
+    target = normalize_title(intent.get("title"))
+    requested_year = _text(intent.get("year"))
+    requested_type = _text(intent.get("media_type")).casefold()
+
+    def rank(candidate: CandidateEntity) -> tuple:
+        titles = candidate.normalized_titles
+        exact = bool(target and target in titles)
+        prefix_lengths = [
+            len(title) - len(target)
+            for title in titles
+            if target and title.startswith(target)
+        ]
+        prefix_length = min(prefix_lengths, default=10**6)
+        year_conflict = bool(
+            requested_year
+            and candidate.years
+            and requested_year not in candidate.years
+        )
+        type_conflict = bool(
+            requested_type in {"movie", "series"}
+            and candidate.media_types
+            and requested_type not in candidate.media_types
+        )
+        return (
+            0 if exact else 1,
+            1 if year_conflict else 0,
+            1 if type_conflict else 0,
+            prefix_length,
+            -len(candidate.providers),
+            candidate.candidate_key,
+        )
+
+    return sorted(candidates, key=rank)
+
+
+def _expanded_hypotheses(
+    candidates: list[CandidateEntity],
+    intent: dict,
+) -> dict:
     queries = []
-    for candidate in candidates[:3]:
+    for candidate in _ordered_expansion_candidates(candidates, intent)[:3]:
         try:
             titles = resolve_title_policy(candidate)
         except TitlePolicyError:
@@ -686,23 +725,63 @@ def _validated_candidate_ai_scores(
     return result
 
 
-def _candidate_is_qualified(
+def _candidate_qualification_reason(
     candidate: CandidateEntity,
     intent: dict,
     *,
     direct_anchor: bool,
-) -> bool:
+) -> str:
     if not candidate.facts or len(candidate.media_types) != 1:
-        return False
+        return "media_type"
     if len(candidate.years) != 1:
-        return False
+        return "year"
     requested_year = _text(intent.get("year"))
     if requested_year and requested_year not in candidate.years:
-        return False
+        return "year"
     media_type = next(iter(candidate.media_types))
     if media_type == "series" and not _text(candidate.external_ids.get("tvdb")):
-        return False
-    return direct_anchor or len(candidate.providers) >= 2
+        return "missing_tvdb"
+    if (
+        media_type == "series"
+        and _text(intent.get("scope")).casefold() in {"season", "episode"}
+        and not _candidate_items(candidate, intent)
+    ):
+        return "missing_scope"
+    if not direct_anchor and len(candidate.providers) < 2:
+        return "single_source"
+    return ""
+
+
+def _candidate_rejection_counts() -> dict[str, int]:
+    return {
+        "single_source": 0,
+        "missing_tvdb": 0,
+        "missing_scope": 0,
+        "media_type": 0,
+        "year": 0,
+        "title_policy": 0,
+    }
+
+
+def _log_candidate_funnel(
+    *,
+    phase: str,
+    raw_count: int,
+    title_matched: int,
+    qualified: int,
+    rejected: dict[str, int],
+) -> None:
+    _log_info(
+        "search_stage status=filtered stage=candidate_funnel "
+        f"phase={phase} raw={raw_count} "
+        f"title_matched={title_matched} qualified={qualified} "
+        f"rejected_single_source={rejected['single_source']} "
+        f"rejected_missing_tvdb={rejected['missing_tvdb']} "
+        f"rejected_missing_scope={rejected['missing_scope']} "
+        f"rejected_media_type={rejected['media_type']} "
+        f"rejected_year={rejected['year']} "
+        f"rejected_title_policy={rejected['title_policy']}"
+    )
 
 
 def _orchestrated_intent(
@@ -753,6 +832,64 @@ def _orchestrated_intent(
             or ai_intent.get("episode_number")
         ),
     }
+
+
+def _resolve_episode_title_intent(
+    raw_query: str,
+    intent: dict,
+    candidates: list[CandidateEntity],
+) -> tuple[dict, str]:
+    resolved = dict(intent or {})
+    if (
+        _text(resolved.get("scope")).casefold() != "episode"
+        or (
+            _integer(resolved.get("season_number")) is not None
+            and _integer(resolved.get("episode_number")) is not None
+        )
+    ):
+        return resolved, ""
+
+    target = normalize_title(raw_query)
+    matches = {}
+    for candidate in candidates:
+        for fact in candidate.facts:
+            for episode in fact.episodes:
+                episode_title = normalize_title(
+                    episode.get("name") or episode.get("title")
+                )
+                season_number = _integer(episode.get("season_number"))
+                episode_number = _integer(episode.get("episode_number"))
+                if (
+                    not target
+                    or episode_title != target
+                    or season_number is None
+                    or season_number < 0
+                    or episode_number is None
+                    or episode_number < 1
+                ):
+                    continue
+                key = (
+                    candidate.candidate_key,
+                    season_number,
+                    episode_number,
+                )
+                matches[key] = candidate.candidate_key
+
+    if not matches:
+        raise SearchPlanningError("tvdb_scope_not_verified")
+    if len(matches) > 1:
+        raise SearchPlanningError("ambiguous_candidates")
+
+    (candidate_key, season_number, episode_number), _ = next(
+        iter(matches.items())
+    )
+    resolved.update({
+        "media_type": "series",
+        "scope": "episode",
+        "season_number": season_number,
+        "episode_number": episode_number,
+    })
+    return resolved, candidate_key
 
 
 def _actual_source_queries(sources: list[dict]) -> dict:
@@ -990,6 +1127,17 @@ async def build_confirmable_search_plan(
                 rule_hypotheses.get("intent") or {},
                 raw_query,
             )
+            intent, episode_parent_key = _resolve_episode_title_intent(
+                raw_query,
+                intent,
+                candidates,
+            )
+            if episode_parent_key:
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if candidate.candidate_key == episode_parent_key
+                ]
             orchestrated = True
             _log_info(
                 "search_stage status=orchestrated "
@@ -1035,8 +1183,18 @@ async def build_confirmable_search_plan(
                 for title in item.normalized_titles
             )
         ]
-        if title_matches:
-            candidates = title_matches
+        rule_intent = dict(rule_hypotheses.get("intent") or {})
+        prefer_exact = bool(
+            exact
+            and (
+                _text(rule_intent.get("scope")).casefold()
+                in {"whole_series", "season", "episode"}
+                or _text(rule_intent.get("year"))
+                or _explicit_media_type(raw_query, rule_intent)
+            )
+        )
+        if exact or title_matches:
+            candidates = exact if prefer_exact else title_matches
         else:
             candidates = []
         if has_ambiguous_bare_number(raw_query, parsed_input) and not exact:
@@ -1092,16 +1250,20 @@ async def build_confirmable_search_plan(
 
     combined = []
     title_values = {}
+    rejected = _candidate_rejection_counts()
     for candidate in candidates:
-        if not _candidate_is_qualified(
+        reason = _candidate_qualification_reason(
             candidate,
             intent,
             direct_anchor=bool(locked_identity),
-        ):
+        )
+        if reason:
+            rejected[reason] += 1
             continue
         try:
             title_values[candidate.candidate_key] = resolve_title_policy(candidate)
         except TitlePolicyError:
+            rejected["title_policy"] += 1
             continue
         program = program_score(
             candidate,
@@ -1109,12 +1271,22 @@ async def build_confirmable_search_plan(
             verified_relations.get(candidate.candidate_key),
         )
         combined.append(combine_score(candidate.candidate_key, program))
+    _log_candidate_funnel(
+        phase="initial",
+        raw_count=len(all_candidates),
+        title_matched=len(candidates),
+        qualified=len(combined),
+        rejected=rejected,
+    )
     ranked_scores = apply_thresholds(combined)
     if not ranked_scores and not orchestrated:
         expansion_sources = await _optional_budgeted(
             "candidate_finalize",
             budget,
-            collect_evidence(_expanded_hypotheses(candidates), providers),
+            collect_evidence(
+                _expanded_hypotheses(candidates, intent),
+                providers,
+            ),
             [],
         )
         if expansion_sources:
@@ -1125,21 +1297,39 @@ async def build_confirmable_search_plan(
                 for candidate in candidates
             ]
             combined = []
+            rejected = _candidate_rejection_counts()
             for candidate in candidates:
-                if not _candidate_is_qualified(
+                reason = _candidate_qualification_reason(
                     candidate,
                     intent,
                     direct_anchor=bool(locked_identity),
-                ):
+                )
+                if reason:
+                    rejected[reason] += 1
                     continue
-                combined.append(combine_score(
-                    candidate.candidate_key,
-                    program_score(
-                        candidate,
-                        intent,
-                        verified_relations.get(candidate.candidate_key),
-                    ),
-                ))
+                try:
+                    resolved_titles = resolve_title_policy(candidate)
+                except TitlePolicyError:
+                    rejected["title_policy"] += 1
+                    continue
+                title_values[candidate.candidate_key] = resolved_titles
+                combined.append(
+                    combine_score(
+                        candidate.candidate_key,
+                        program_score(
+                            candidate,
+                            intent,
+                            verified_relations.get(candidate.candidate_key),
+                        ),
+                    )
+                )
+            _log_candidate_funnel(
+                phase="expanded",
+                raw_count=len(expanded_graph.candidates),
+                title_matched=len(candidates),
+                qualified=len(combined),
+                rejected=rejected,
+            )
             ranked_scores = apply_thresholds(combined)
             title_values = {}
             for candidate in candidates:
@@ -1187,9 +1377,9 @@ async def build_confirmable_search_plan(
         ])
     ranked_scores = [item for item in ranked_scores if item.selectable]
     if not ranked_scores:
+        if rejected["missing_scope"]:
+            raise SearchPlanningError("tvdb_scope_not_verified")
         raise SearchPlanningError("insufficient_independent_support")
-    if len(ranked_scores) > MAX_DISPLAY_CANDIDATES:
-        raise SearchPlanningError("too_many_candidates")
 
     by_key = {item.candidate_key: item for item in candidates}
     ranked = []

@@ -233,6 +233,89 @@ def _chat_completion_url() -> str:
     return url
 
 
+def _provider_error_kind(http_status: int) -> tuple[str, bool]:
+    if http_status == 400:
+        return "provider_invalid_request", False
+    if http_status == 401:
+        return "authentication_failed", False
+    if http_status == 403:
+        return "permission_denied", False
+    if http_status == 404:
+        return "model_or_endpoint_not_found", False
+    if http_status == 408:
+        return "provider_timeout", True
+    if http_status == 429:
+        return "rate_limited", True
+    if http_status >= 500:
+        return "provider_unavailable", True
+    return "provider_client_error", False
+
+
+def _provider_error_result(
+    *,
+    kind: str,
+    http_status: int = 0,
+    code="",
+    error_type="",
+    param="",
+    message="",
+    retryable: bool = False,
+    request_id="",
+) -> dict:
+    return {
+        "error": {
+            "kind": str(kind or "provider_client_error"),
+            "http_status": int(http_status or 0),
+            "code": str(code or ""),
+            "type": str(error_type or ""),
+            "param": str(param or ""),
+            "message": sanitize_log_value(message, max_chars=1000),
+            "retryable": bool(retryable),
+            "request_id": str(request_id or ""),
+        },
+    }
+
+
+def _response_request_id(response) -> str:
+    headers = getattr(response, "headers", None)
+    if not hasattr(headers, "get"):
+        return ""
+    return str(
+        headers.get("x-request-id")
+        or headers.get("request-id")
+        or ""
+    )
+
+
+def _response_error_result(response) -> dict:
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {}
+    raw_error = (
+        payload.get("error")
+        if isinstance(payload, dict) and isinstance(payload.get("error"), dict)
+        else {}
+    )
+    http_status = int(getattr(response, "status_code", 0) or 0)
+    kind, retryable = _provider_error_kind(http_status)
+    message = (
+        raw_error.get("message")
+        or getattr(response, "text", "")
+        or f"HTTP {http_status}"
+    )
+    return _provider_error_result(
+        kind=kind,
+        http_status=http_status,
+        code=raw_error.get("code"),
+        error_type=raw_error.get("type"),
+        param=raw_error.get("param"),
+        message=message,
+        retryable=retryable,
+        request_id=_response_request_id(response),
+    )
+
+
 def _post_chat_completion(payload: dict):
     config = _ai_config()
     headers = {
@@ -248,20 +331,54 @@ def _post_chat_completion(payload: dict):
             timeout=_ai_request_timeout(),
         )
         if response.status_code != 200:
+            result = _response_error_result(response)
             logger = runtime_context.logger
             if logger:
                 logger.warning(
-                    "AI API请求失败: "
-                    f"{sanitize_log_value(response.text)}"
+                    "AI provider request failed "
+                    f"error={sanitize_log_value(result)}"
                 )
-            return None
+            return result
 
         return response.json()
-    except Exception as e:
+    except requests.Timeout as exc:
+        result = _provider_error_result(
+            kind="provider_timeout",
+            message=str(exc),
+            retryable=True,
+        )
         logger = runtime_context.logger
         if logger:
-            logger.error(f"调用AI接口出错: {type(e).__name__}: {e}")
-        return None
+            logger.warning(
+                "AI provider request failed "
+                f"error={sanitize_log_value(result)}"
+            )
+        return result
+    except requests.RequestException as exc:
+        result = _provider_error_result(
+            kind="provider_unavailable",
+            message=str(exc),
+            retryable=True,
+        )
+        logger = runtime_context.logger
+        if logger:
+            logger.warning(
+                "AI provider request failed "
+                f"error={sanitize_log_value(result)}"
+            )
+        return result
+    except Exception as exc:
+        result = _provider_error_result(
+            kind="provider_client_error",
+            message=f"{type(exc).__name__}: {exc}",
+        )
+        logger = runtime_context.logger
+        if logger:
+            logger.error(
+                "AI provider client error "
+                f"error={sanitize_log_value(result)}"
+            )
+        return result
 
 
 def chat_completion_messages(
@@ -269,6 +386,7 @@ def chat_completion_messages(
     *,
     tools: list[dict] | None = None,
     tool_choice=None,
+    thinking_mode: str | None = None,
     max_tokens: int = 4096,
 ):
     """Send one OpenAI-compatible chat request without exposing credentials."""
@@ -282,6 +400,11 @@ def chat_completion_messages(
         payload["tools"] = tools
     if tool_choice is not None:
         payload["tool_choice"] = tool_choice
+    if thinking_mode is not None:
+        thinking_mode = str(thinking_mode).strip().casefold()
+        if thinking_mode not in {"enabled", "disabled"}:
+            raise ValueError("invalid thinking mode")
+        payload["thinking"] = {"type": thinking_mode}
     return _post_chat_completion(payload)
 
 
@@ -511,7 +634,7 @@ def infer_candidate_scorecard_with_ai(context: dict):
         not isinstance(item, dict) for item in scores
     ):
         return None
-    return {"scores": scores[:7]}
+    return {"scores": scores}
 
 
 def normalize_search_query_with_ai(raw_query: str):

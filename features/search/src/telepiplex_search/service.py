@@ -73,7 +73,6 @@ _PLANNING_ERROR_MESSAGES = {
     "ai_unavailable_after_gate_failure": "规则证据不足，且 AI 当前不可用；请补充年份、媒体类型或稍后重试。",
     "ai_invalid_after_gate_failure": "规则证据不足，且 AI 未能生成有效计划；请补充信息后重试。",
     "ambiguous_numeric_role": "片名末尾数字无法证明是正式标题的一部分，请补充年份、完整片名或条目链接。",
-    "too_many_candidates": "合格候选超过 7 个，请补充年份、完整片名、电影/剧集类型，或提供豆瓣/TVDB 链接。",
     "unsupported_metadata_link": "链接不是可识别的豆瓣/TVDB作品、季或单集地址。",
     "unsupported_scope_syntax": "不支持范围、1x02 或英文数字单词写法；请使用作品名、S01、S01E01 或数字季/集。",
     "unsupported_special_scope": "暂不支持 Special、Season 0、OVA、OAD 或附加内容下载。",

@@ -2,6 +2,8 @@ import json
 import unittest
 from unittest.mock import patch
 
+import requests
+
 from telepiplex_search.ai import (
     chat_completion_messages,
     extract_ai_message,
@@ -53,6 +55,7 @@ class SearchAiPipelineTest(unittest.TestCase):
                 "type": "function",
                 "function": {"name": "search_media_sources"},
             },
+            thinking_mode="enabled",
             max_tokens=2048,
         )
 
@@ -67,6 +70,7 @@ class SearchAiPipelineTest(unittest.TestCase):
             payload["tool_choice"]["function"]["name"],
             "search_media_sources",
         )
+        self.assertEqual(payload["thinking"], {"type": "enabled"})
         self.assertEqual(payload["max_tokens"], 2048)
         self.assertEqual(
             extract_ai_message(result),
@@ -88,6 +92,62 @@ class SearchAiPipelineTest(unittest.TestCase):
         payload = post.call_args.kwargs["json"]
         self.assertNotIn("tools", payload)
         self.assertNotIn("tool_choice", payload)
+        self.assertNotIn("thinking", payload)
+
+    @patch("telepiplex_search.ai.requests.post")
+    def test_non_200_preserves_structured_provider_error(self, post):
+        post.return_value.status_code = 400
+        post.return_value.headers = {"x-request-id": "req-123"}
+        post.return_value.json.return_value = {
+            "error": {
+                "message": "Thinking mode does not support this tool_choice",
+                "type": "invalid_request_error",
+                "param": "tool_choice",
+                "code": "invalid_request_error",
+            },
+        }
+
+        result = chat_completion_messages([
+            {"role": "user", "content": "query"},
+        ])
+
+        self.assertEqual(result, {
+            "error": {
+                "kind": "provider_invalid_request",
+                "http_status": 400,
+                "code": "invalid_request_error",
+                "type": "invalid_request_error",
+                "param": "tool_choice",
+                "message": "Thinking mode does not support this tool_choice",
+                "retryable": False,
+                "request_id": "req-123",
+            },
+        })
+
+    @patch("telepiplex_search.ai.requests.post")
+    def test_timeout_preserves_retryable_provider_kind(self, post):
+        post.side_effect = requests.Timeout("provider took too long")
+
+        result = chat_completion_messages([
+            {"role": "user", "content": "query"},
+        ])
+
+        self.assertEqual(result["error"]["kind"], "provider_timeout")
+        self.assertTrue(result["error"]["retryable"])
+        self.assertEqual(result["error"]["http_status"], 0)
+        self.assertEqual(result["error"]["message"], "provider took too long")
+
+    @patch("telepiplex_search.ai.requests.post")
+    def test_connection_error_preserves_provider_unavailable_kind(self, post):
+        post.side_effect = requests.ConnectionError("provider offline")
+
+        result = chat_completion_messages([
+            {"role": "user", "content": "query"},
+        ])
+
+        self.assertEqual(result["error"]["kind"], "provider_unavailable")
+        self.assertTrue(result["error"]["retryable"])
+        self.assertEqual(result["error"]["message"], "provider offline")
 
     @patch("telepiplex_search.ai.check_ai_api_available", return_value=True)
     @patch("telepiplex_search.ai.chat_completion")
@@ -181,6 +241,37 @@ class SearchAiPipelineTest(unittest.TestCase):
         prompt = chat_mock.call_args.args[0]
         self.assertIn("只能引用输入中的 candidate_key 和 fact_id", prompt)
         self.assertIn("不得输出或修改标题、年份", prompt)
+
+    @patch("telepiplex_search.ai.check_ai_api_available", return_value=True)
+    @patch("telepiplex_search.ai.chat_completion")
+    def test_candidate_scorecard_preserves_more_than_seven_scores(
+        self,
+        chat_mock,
+        _available,
+    ):
+        scores = [{
+            "candidate_key": f"candidate:{index}",
+            "title_equivalence": 10,
+            "intent_relevance": 5,
+            "relation_consistency": 5,
+            "fact_ids": [f"fact:{index}"],
+        } for index in range(8)]
+        chat_mock.return_value = {
+            "choices": [{
+                "message": {
+                    "content": json.dumps({"scores": scores}),
+                },
+            }],
+        }
+
+        result = infer_candidate_scorecard_with_ai({
+            "candidates": [
+                {"candidate_key": item["candidate_key"]}
+                for item in scores
+            ],
+        })
+
+        self.assertEqual(result["scores"], scores)
 
 if __name__ == "__main__":
     unittest.main()

@@ -49,12 +49,21 @@ def _final_payload():
     }
 
 
-def _assistant_tool(name, arguments, number=1):
-    return _response({
+def _assistant_tool(
+    name,
+    arguments,
+    number=1,
+    *,
+    reasoning_content=None,
+):
+    message = {
         "role": "assistant",
         "content": None,
         "tool_calls": [_tool_call(name, arguments, number)],
-    })
+    }
+    if reasoning_content is not None:
+        message["reasoning_content"] = reasoning_content
+    return _response(message)
 
 
 def _assistant_final():
@@ -62,6 +71,30 @@ def _assistant_final():
         "role": "assistant",
         "content": json.dumps(_final_payload(), ensure_ascii=False),
     })
+
+
+def _provider_error(
+    *,
+    kind="provider_invalid_request",
+    status=400,
+    code="invalid_request_error",
+    error_type="invalid_request_error",
+    param="tool_choice",
+    message="Thinking mode does not support this tool_choice",
+    retryable=False,
+):
+    return {
+        "error": {
+            "kind": kind,
+            "http_status": status,
+            "code": code,
+            "type": error_type,
+            "param": param,
+            "message": message,
+            "retryable": retryable,
+            "request_id": "req-test",
+        },
+    }
 
 
 class ScriptedAi:
@@ -113,7 +146,25 @@ def _gateway():
 
 
 class SourceOrchestratorTest(unittest.IsolatedAsyncioTestCase):
-    async def test_first_action_is_forced_to_search_media_sources(self):
+    async def test_prompt_routes_standalone_episode_titles_through_parent_series(self):
+        ai = ScriptedAi([
+            _assistant_tool("search_media_sources", _first_arguments()),
+            _assistant_final(),
+        ])
+
+        await orchestrate_sources(
+            "Rickmurai Jack",
+            _gateway(),
+            ai_call=ai,
+            config={"protocol": "openai_tools_v1"},
+        )
+
+        system_prompt = ai.calls[0][0][0]["content"]
+        self.assertIn("单集标题", system_prompt)
+        self.assertIn("父剧集", system_prompt)
+        self.assertIn("TVDB episode inventory", system_prompt)
+
+    async def test_default_thinking_mode_omits_first_tool_choice(self):
         ai = ScriptedAi([
             _assistant_tool("search_media_sources", _first_arguments()),
             _assistant_final(),
@@ -127,16 +178,141 @@ class SourceOrchestratorTest(unittest.IsolatedAsyncioTestCase):
         )
 
         first_kwargs = ai.calls[0][1]
-        self.assertEqual(
-            first_kwargs["tool_choice"]["function"]["name"],
-            "search_media_sources",
-        )
+        self.assertNotIn("tool_choice", first_kwargs)
+        self.assertEqual(first_kwargs["thinking_mode"], "enabled")
         self.assertEqual(
             [item["function"]["name"] for item in first_kwargs["tools"]],
             ["search_media_sources"],
         )
         self.assertEqual(outcome.status, "insufficient_evidence")
         self.assertEqual(outcome.targeted_rounds, 0)
+
+    async def test_forced_mode_keeps_explicit_first_and_targeted_choices(self):
+        ai = ScriptedAi([
+            _assistant_tool("search_media_sources", _first_arguments()),
+            _assistant_final(),
+        ])
+
+        outcome = await orchestrate_sources(
+            "Batman",
+            _gateway(),
+            ai_call=ai,
+            config={
+                "protocol": "openai_tools_v1",
+                "thinking_mode": "disabled",
+                "tool_choice_mode": "forced",
+            },
+        )
+
+        self.assertEqual(
+            ai.calls[0][1]["tool_choice"]["function"]["name"],
+            "search_media_sources",
+        )
+        self.assertEqual(ai.calls[0][1]["thinking_mode"], "disabled")
+        self.assertEqual(ai.calls[1][1]["tool_choice"], "auto")
+        self.assertEqual(outcome.status, "insufficient_evidence")
+
+    async def test_forced_first_round_retries_once_without_tool_choice(self):
+        ai = ScriptedAi([
+            _provider_error(param=""),
+            _assistant_tool("search_media_sources", _first_arguments()),
+            _assistant_final(),
+        ])
+
+        outcome = await orchestrate_sources(
+            "Batman",
+            _gateway(),
+            ai_call=ai,
+            config={
+                "protocol": "openai_tools_v1",
+                "thinking_mode": "enabled",
+                "tool_choice_mode": "forced",
+            },
+        )
+
+        self.assertIn("tool_choice", ai.calls[0][1])
+        self.assertNotIn("tool_choice", ai.calls[1][1])
+        self.assertEqual(len(ai.calls), 3)
+        self.assertEqual(outcome.status, "insufficient_evidence")
+
+    async def test_forced_targeted_round_retries_once_without_tool_choice(self):
+        ai = ScriptedAi([
+            _assistant_tool("search_media_sources", _first_arguments()),
+            _provider_error(),
+            _assistant_final(),
+        ])
+
+        outcome = await orchestrate_sources(
+            "Batman",
+            _gateway(),
+            ai_call=ai,
+            config={
+                "protocol": "openai_tools_v1",
+                "thinking_mode": "enabled",
+                "tool_choice_mode": "forced",
+            },
+        )
+
+        self.assertEqual(ai.calls[1][1]["tool_choice"], "auto")
+        self.assertNotIn("tool_choice", ai.calls[2][1])
+        self.assertEqual(len(ai.calls), 3)
+        self.assertEqual(outcome.status, "insufficient_evidence")
+
+    async def test_unrelated_provider_400_does_not_retry(self):
+        ai = ScriptedAi([
+            _provider_error(
+                param="temperature",
+                message="invalid temperature",
+            ),
+        ])
+
+        outcome = await orchestrate_sources(
+            "Batman",
+            _gateway(),
+            ai_call=ai,
+            config={
+                "protocol": "openai_tools_v1",
+                "thinking_mode": "enabled",
+                "tool_choice_mode": "forced",
+            },
+        )
+
+        self.assertEqual(len(ai.calls), 1)
+        self.assertEqual(outcome.status, "fallback")
+        self.assertEqual(
+            outcome.fallback_reason,
+            "provider_invalid_request",
+        )
+
+    async def test_tool_history_preserves_reasoning_and_normalizes_content(self):
+        ai = ScriptedAi([
+            _assistant_tool(
+                "search_media_sources",
+                _first_arguments(),
+                reasoning_content="verified intent before tool call",
+            ),
+            _assistant_final(),
+        ])
+
+        outcome = await orchestrate_sources(
+            "Batman",
+            _gateway(),
+            ai_call=ai,
+            config={"protocol": "openai_tools_v1"},
+        )
+
+        second_messages = ai.calls[1][0]
+        assistant = next(
+            item
+            for item in second_messages
+            if item.get("role") == "assistant" and item.get("tool_calls")
+        )
+        self.assertEqual(assistant["content"], "")
+        self.assertEqual(
+            assistant["reasoning_content"],
+            "verified intent before tool call",
+        )
+        self.assertEqual(outcome.status, "insufficient_evidence")
 
     async def test_one_first_action_correction_then_protocol_fallback(self):
         invalid = _response({
@@ -186,6 +362,14 @@ class SourceOrchestratorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.status, "insufficient_evidence")
         self.assertEqual(outcome.targeted_rounds, 2)
         self.assertEqual(len(ai.calls), 4)
+        self.assertTrue(all(
+            "tool_choice" not in kwargs
+            for _messages, kwargs in ai.calls
+        ))
+        self.assertTrue(all(
+            kwargs["thinking_mode"] == "enabled"
+            for _messages, kwargs in ai.calls
+        ))
 
     async def test_third_targeted_round_is_rejected(self):
         targeted = {
