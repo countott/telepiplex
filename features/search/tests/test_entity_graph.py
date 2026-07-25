@@ -65,6 +65,52 @@ class SearchEntityGraphTest(unittest.TestCase):
             {frozenset({"movie"}), frozenset({"series"})},
         )
 
+    def test_untyped_fact_cannot_bridge_movie_and_series_by_different_ids(self):
+        graph = build_search_graph([
+            {
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [{
+                    "wikibase_item": "Q-constantine",
+                    "title": "Constantine",
+                    "year": "2005",
+                    "external_ids": {
+                        "imdb": "tt0360486",
+                        "tvdb": "273690",
+                    },
+                }],
+            },
+            {
+                "source": "douban",
+                "status": "ok",
+                "facts": [{
+                    "subject_id": "1295644",
+                    "title": "Constantine",
+                    "year": "2005",
+                    "media_type": "movie",
+                    "external_ids": {"imdb": "tt0360486"},
+                }],
+            },
+            {
+                "source": "tvdb",
+                "status": "ok",
+                "facts": [{
+                    "movies": [],
+                    "series": [{
+                        "tvdb_series_id": "273690",
+                        "name": "Constantine",
+                        "year": "2014",
+                    }],
+                }],
+            },
+        ])
+
+        self.assertEqual(len(graph.candidates), 2)
+        self.assertNotIn(
+            frozenset({"movie", "series"}),
+            {candidate.media_types for candidate in graph.candidates},
+        )
+
     def test_title_year_and_type_merge_independent_sources(self):
         graph = build_search_graph([
             {

@@ -206,6 +206,37 @@ class SearchAiPipelineTest(unittest.TestCase):
 
     @patch("telepiplex_search.ai.check_ai_api_available", return_value=True)
     @patch("telepiplex_search.ai.chat_completion")
+    def test_intent_prompt_requires_clarification_for_multiple_plausible_works(
+        self,
+        chat_mock,
+        _available,
+    ):
+        chat_mock.return_value = {
+            "choices": [{"message": {"content": json.dumps({
+                "status": "needs_clarification",
+                "title_hints": ["康斯坦丁", "康斯坦汀"],
+                "media_type_hint": "unknown",
+                "scope_hint": "work",
+                "season_number": None,
+                "episode_number": None,
+                "numeric_tokens": [],
+                "relation_hint": "none",
+                "clarification_reason": "可能同时指电影和剧集。",
+            })}}],
+        }
+
+        infer_search_hypotheses_with_ai({"raw_query": "康斯坦汀"})
+
+        prompt = chat_mock.call_args.args[0]
+        self.assertIn(
+            "存在两个或以上合理的作品解释时，必须返回 needs_clarification",
+            prompt,
+        )
+        self.assertIn("康斯坦汀 → needs_clarification", prompt)
+        self.assertIn("康斯坦汀 电影 → parsed", prompt)
+
+    @patch("telepiplex_search.ai.check_ai_api_available", return_value=True)
+    @patch("telepiplex_search.ai.chat_completion")
     def test_intent_hint_rejects_stable_ids_and_final_contracts(
         self, chat_mock, _available
     ):

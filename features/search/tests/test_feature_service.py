@@ -336,7 +336,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         await self.runtime.run("search-releases-")
 
         self.assertEqual(self.search_queries, [("English Title", "movie")])
-        self.assertIn("找到 1 个", self.host.reports[-1]["status_text"])
+        self.assertIn("搜索结果 1", self.host.reports[-1]["status_text"])
         self.assertEqual(self.host.reports[-1]["state"], "awaiting_input")
 
     async def test_prowlarr_failure_keeps_reason_and_removes_candidate_buttons(self):
@@ -446,7 +446,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         result = await self.feature._confirm_and_search(plan_id, stored)
         action = result["actions"][0]
 
-        self.assertIn("未自动展示其他范围", action["text"])
+        self.assertIn("没有同身份、同范围的可用片源", action["text"])
         self.assertNotIn("keyboard", action.get("data") or {})
         self.assertNotIn(plan_id, self.feature.plans)
 
@@ -488,6 +488,153 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             [3, 3, 3, 3],
         )
         self.assertEqual(len(stored["results"]), 12)
+
+    async def test_indexers_stream_independently_and_old_button_keeps_release(self):
+        import time
+
+        from telepiplex_search.adapters.prowlarr import ProwlarrRequestError
+
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        stored["selected_path"] = "/Movies"
+        self.feature.indexer_loader = lambda: [
+            {"id": 1, "name": "Fast"},
+            {"id": 2, "name": "Slow"},
+            {"id": 3, "name": "Broken"},
+        ]
+
+        def search_indexer(_query, _media_type, indexer_id):
+            if indexer_id == 1:
+                return [{
+                    "title": "English.Title.2024.1080p.WEB-DL.Fast",
+                    "magnet_url": "magnet:?xt=urn:btih:" + "a" * 40,
+                    "seeders": 1,
+                    "size": 5 * 1024 ** 3,
+                    "indexer": "Fast",
+                }]
+            if indexer_id == 2:
+                time.sleep(0.15)
+                return [{
+                    "title": "English.Title.2024.2160p.REMUX.Slow",
+                    "magnet_url": "magnet:?xt=urn:btih:" + "b" * 40,
+                    "seeders": 100,
+                    "size": 35 * 1024 ** 3,
+                    "indexer": "Slow",
+                }]
+            raise ProwlarrRequestError(
+                "FlareSolverr challenge failed",
+                kind="server_error",
+                http_status=500,
+                retryable=True,
+            )
+
+        self.feature.indexer_search = search_indexer
+        self.feature.release_rank = lambda items, limit: sorted(
+            items,
+            key=lambda item: int(item.get("seeders") or 0),
+            reverse=True,
+        )[:limit]
+
+        task = asyncio.create_task(
+            self.feature._confirm_and_search(plan_id, stored)
+        )
+        await asyncio.sleep(0.05)
+
+        partial = [
+            report for report in self.host.reports
+            if report["stage"] == "prowlarr_search"
+            and "Fast" in report["status_text"]
+        ]
+        self.assertTrue(partial)
+        first_callback = partial[-1]["details"]["keyboard"][0][0][
+            "callback_data"
+        ]
+        first_release_id = first_callback.rsplit(":", 1)[-1]
+
+        result = await task
+
+        self.assertEqual(
+            [item["indexer"] for item in stored["results"]],
+            ["Slow", "Fast"],
+        )
+        self.assertEqual(
+            stored["indexer_summary"]["down_indexers"],
+            [{
+                "source": "Broken",
+                "message": "FlareSolverr challenge failed",
+                "kind": "server_error",
+                "http_status": 500,
+                "retryable": True,
+            }],
+        )
+        self.assertIn(
+            first_release_id,
+            stored["release_by_id"],
+        )
+        self.assertIn("Slow", result["actions"][0]["text"])
+
+        await self.feature._submit_release(
+            plan_id,
+            stored,
+            first_release_id,
+            stored["operation_id"],
+        )
+        _capability, _method, payload, kwargs = self.host.calls[-1]
+        self.assertEqual(
+            payload["release"]["title"],
+            "English.Title.2024.1080p.WEB-DL.Fast",
+        )
+        self.assertEqual(
+            kwargs["idempotency_key"],
+            f"{plan_id}:release:{first_release_id}",
+        )
+
+    async def test_selecting_partial_release_freezes_and_cancels_search(self):
+        from telepiplex_search.release_identity import stable_release_id
+
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        item = {
+            "title": "English.Title.2024.1080p.WEB-DL",
+            "magnet_url": "magnet:?xt=urn:btih:" + "c" * 40,
+            "indexer": "Fast",
+        }
+        release_id = stable_release_id(item)
+        stored["release_by_id"] = {release_id: item}
+        search_task = asyncio.create_task(asyncio.Event().wait())
+        operation = self.feature.operations[stored["operation_id"]]
+        operation["task"] = search_task
+
+        result = self.feature._start_submission_task(
+            plan_id,
+            stored,
+            release_id,
+        )
+        await asyncio.sleep(0)
+
+        self.assertTrue(stored["selection_frozen"])
+        self.assertEqual(stored["selected_release_id"], release_id)
+        self.assertTrue(search_task.cancelled())
+        self.assertEqual(result["operation"]["stage"], "resolving_release")
+
+    async def test_exiting_partial_results_cancels_background_search(self):
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        search_task = asyncio.create_task(asyncio.Event().wait())
+        operation = self.feature.operations[stored["operation_id"]]
+        operation["task"] = search_task
+
+        result = await self.feature.callback({
+            "namespace": "search",
+            "payload": f"cancel:{plan_id}",
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await asyncio.sleep(0)
+
+        self.assertTrue(search_task.cancelled())
+        self.assertEqual(result["operation"]["state"], "cancelled")
+        self.assertNotIn(plan_id, self.feature.plans)
 
     async def test_planning_failure_uses_safe_specific_reason(self):
         from telepiplex_search.planner import SearchPlanningError
@@ -637,8 +784,13 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "user_id": 1, "chat_id": 10,
         })
         await self.runtime.run("search-releases-")
+        release_callback = self.host.reports[-1]["details"]["keyboard"][0][0][
+            "callback_data"
+        ]
+        release_id = release_callback.rsplit(":", 1)[-1]
         result = await self.feature.callback({
-            "namespace": "search", "payload": f"release:{plan_id}:0",
+            "namespace": "search",
+            "payload": release_callback.removeprefix("search:"),
             "user_id": 1, "chat_id": 10,
         })
         self.assertEqual(result["operation"]["stage"], "resolving_release")
@@ -674,7 +826,10 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["operation_id"], self.host.reports[-1]["operation_id"])
         self.assertEqual(payload["operation_revision"], self.host.reports[-1]["revision"])
         self.assertEqual(self.host.reports[-1]["state"], "handed_off")
-        self.assertEqual(kwargs["idempotency_key"], f"{plan_id}:release:0")
+        self.assertEqual(
+            kwargs["idempotency_key"],
+            f"{plan_id}:release:{release_id}",
+        )
 
     async def test_rejected_handoff_never_calls_download_provider(self):
         original_report = self.host.report_operation
@@ -695,8 +850,12 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "user_id": 1, "chat_id": 10,
         })
         await self.runtime.run("search-releases-")
+        release_callback = self.host.reports[-1]["details"]["keyboard"][0][0][
+            "callback_data"
+        ]
         submission = await self.feature.callback({
-            "namespace": "search", "payload": f"release:{plan_id}:0",
+            "namespace": "search",
+            "payload": release_callback.removeprefix("search:"),
             "user_id": 1, "chat_id": 10,
         })
         await self.runtime.run("search-submit-")
@@ -718,6 +877,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         await self.runtime.run("search-releases-")
         stored = self.feature.plans[plan_id]
         operation_id = stored["operation_id"]
+        release_id = next(iter(stored["release_by_id"]))
         original_report = self.host.report_operation
         handoff_revisions = []
         lost = False
@@ -736,10 +896,10 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(RuntimeError):
             await self.feature._submit_release(
-                plan_id, stored, "0", operation_id
+                plan_id, stored, release_id, operation_id
             )
         result = await self.feature._submit_release(
-            plan_id, stored, "0", operation_id
+            plan_id, stored, release_id, operation_id
         )
 
         self.assertEqual(handoff_revisions, [
@@ -1166,9 +1326,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.0.3")
+        self.assertEqual(manifest["version"], "1.0.5")
         self.assertEqual(manifest["host_api"], ">=1.2,<2.0")
-        self.assertIn('version = "1.0.3"', project)
+        self.assertIn('version = "1.0.5"', project)
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
@@ -1199,12 +1359,12 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.0.3.tpx", source)
+        self.assertIn("/tmp/search-1.0.5.tpx", source)
         self.assertIn("search_media_sources", source)
         self.assertIn("最多两轮", source)
         self.assertIn("不会交给 AI", source)
         self.assertIn("rename", source)
-        self.assertNotIn("dist/search-1.0.3.tpx", source)
+        self.assertNotIn("dist/search-1.0.5.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

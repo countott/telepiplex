@@ -111,6 +111,100 @@ def _provider_with_titles(provider, titles, *, media_type="series", episodes=Non
     return provide
 
 
+def _dual_media_provider(
+    provider,
+    *,
+    title,
+    movie_year,
+    series_year,
+    movie_english,
+    series_english,
+):
+    def provide(hypotheses):
+        queries = (
+            (hypotheses.get("source_queries") or {}).get(provider)
+            or []
+        )
+        if not any(title in str(query) for query in queries):
+            return {
+                "source": provider,
+                "status": "not_found",
+                "facts": [],
+            }
+        if provider == "tvdb":
+            return {
+                "source": provider,
+                "status": "ok",
+                "facts": [{
+                    "movies": [{
+                        "tvdb_movie_id": "855",
+                        "name": title,
+                        "english_title": movie_english,
+                        "official_english_title": movie_english,
+                        "year": movie_year,
+                    }],
+                    "series": [{
+                        "tvdb_series_id": "273690",
+                        "name": title,
+                        "english_title": series_english,
+                        "official_english_title": series_english,
+                        "year": series_year,
+                    }],
+                }],
+            }
+        key = "subject_id" if provider == "douban" else "wikibase_item"
+        return {
+            "source": provider,
+            "status": "ok",
+            "facts": [{
+                key: f"{provider}-movie-{movie_year}",
+                "title": title,
+                "chinese_title": title,
+                "english_title": movie_english,
+                "official_english_title": movie_english,
+                "year": movie_year,
+                "media_type": "movie",
+            }, {
+                key: f"{provider}-series-{series_year}",
+                "title": title,
+                "chinese_title": title,
+                "english_title": series_english,
+                "official_english_title": series_english,
+                "year": series_year,
+                "media_type": "series",
+            }],
+        }
+
+    return provide
+
+
+def _parsed_ai_hypotheses(title):
+    return {
+        "status": "ok",
+        "hypotheses": [{
+            "title": title,
+            "year": "",
+            "content_identity": "unknown",
+            "scope": "movie_or_series",
+            "season_number": None,
+            "episode_number": None,
+            "possible_related_series": [],
+            "explicit_facts": [],
+            "inferred_facts": ["ai_intent_hint"],
+        }],
+        "source_queries": {
+            provider: [title]
+            for provider in ("wikipedia", "douban", "tvdb")
+        },
+        "warnings": ["ai_intent_hint_requires_source_verification"],
+        "intent_hint": {
+            "title_hints": [title],
+            "media_type_hint": "unknown",
+        },
+        "clarification_reason": "",
+    }
+
+
 def _orchestrated_movie_outcome(
     *,
     chinese_title,
@@ -280,6 +374,295 @@ def _orchestrated_series_outcome(series_items):
 
 
 class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
+    @patch(
+        "telepiplex_search.planner.infer_candidate_scorecard_with_ai",
+        return_value=None,
+    )
+    @patch("telepiplex_search.planner.infer_search_hypotheses_with_ai")
+    async def test_ai_parsed_typo_with_movie_and_series_evidence_asks_user(
+        self,
+        infer_hypotheses,
+        _scorecard,
+    ):
+        infer_hypotheses.return_value = _parsed_ai_hypotheses("康斯坦丁")
+        providers = {
+            name: _dual_media_provider(
+                name,
+                title="康斯坦丁",
+                movie_year="2005",
+                series_year="2014",
+                movie_english="Constantine",
+                series_english="Constantine",
+            )
+            for name in ("wikipedia", "douban", "tvdb")
+        }
+
+        plan = await build_confirmable_search_plan(
+            "康斯坦汀",
+            "p-constantine-typo-evidence-clarify",
+            providers,
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertEqual(plan.get("status"), "needs_clarification")
+        self.assertEqual(
+            [option["media_type"] for option in plan["clarification"]["options"]],
+            ["movie", "series"],
+        )
+
+    @patch(
+        "telepiplex_search.planner.infer_candidate_scorecard_with_ai",
+        return_value=None,
+    )
+    @patch("telepiplex_search.planner.infer_search_hypotheses_with_ai")
+    async def test_post_gate_typo_recovery_with_type_conflict_asks_user(
+        self,
+        infer_hypotheses,
+        _scorecard,
+    ):
+        infer_hypotheses.return_value = _parsed_ai_hypotheses("康斯坦丁")
+
+        def provider(name):
+            corrected_provider = _dual_media_provider(
+                name,
+                title="康斯坦丁",
+                movie_year="2005",
+                series_year="2014",
+                movie_english="Constantine",
+                series_english="Constantine",
+            )
+
+            def provide(hypotheses):
+                corrected = corrected_provider(hypotheses)
+                if corrected["status"] == "ok":
+                    return corrected
+                if name == "wikipedia":
+                    return {
+                        "source": name,
+                        "status": "ok",
+                        "facts": [{
+                            "wikibase_item": "Q-typo-only",
+                            "title": "康斯坦汀",
+                            "chinese_title": "康斯坦汀",
+                            "year": "2005",
+                            "media_type": "movie",
+                        }],
+                    }
+                return {
+                    "source": name,
+                    "status": "not_found",
+                    "facts": [],
+                }
+
+            return provide
+
+        plan = await build_confirmable_search_plan(
+            "康斯坦汀",
+            "p-post-gate-type-conflict",
+            {
+                name: provider(name)
+                for name in ("wikipedia", "douban", "tvdb")
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertEqual(plan.get("status"), "needs_clarification")
+        self.assertEqual(
+            plan["clarification"]["reason"],
+            "来源证据同时匹配电影和剧集，请选择后继续验证。",
+        )
+
+    @patch(
+        "telepiplex_search.planner.infer_candidate_scorecard_with_ai",
+        return_value=None,
+    )
+    async def test_exact_constantine_movie_and_series_evidence_asks_user(
+        self,
+        _scorecard,
+    ):
+        providers = {
+            name: _dual_media_provider(
+                name,
+                title="康斯坦丁",
+                movie_year="2005",
+                series_year="2014",
+                movie_english="Constantine",
+                series_english="Constantine",
+            )
+            for name in ("wikipedia", "douban", "tvdb")
+        }
+
+        plan = await build_confirmable_search_plan(
+            "康斯坦丁",
+            "p-constantine-exact-evidence-clarify",
+            providers,
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertEqual(plan.get("status"), "needs_clarification")
+
+    @patch(
+        "telepiplex_search.planner.infer_candidate_scorecard_with_ai",
+        return_value=None,
+    )
+    async def test_same_title_movie_and_series_evidence_asks_user(
+        self,
+        _scorecard,
+    ):
+        providers = {
+            name: _dual_media_provider(
+                name,
+                title="想见你",
+                movie_year="2022",
+                series_year="2019",
+                movie_english="Someday or One Day",
+                series_english="Someday or One Day",
+            )
+            for name in ("wikipedia", "douban", "tvdb")
+        }
+
+        plan = await build_confirmable_search_plan(
+            "想见你",
+            "p-someday-evidence-clarify",
+            providers,
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertEqual(plan.get("status"), "needs_clarification")
+
+    @patch(
+        "telepiplex_search.planner.infer_candidate_scorecard_with_ai",
+        return_value=None,
+    )
+    async def test_explicit_movie_bypasses_source_media_type_clarification(
+        self,
+        _scorecard,
+    ):
+        providers = {
+            name: _dual_media_provider(
+                name,
+                title="康斯坦丁",
+                movie_year="2005",
+                series_year="2014",
+                movie_english="Constantine",
+                series_english="Constantine",
+            )
+            for name in ("wikipedia", "douban", "tvdb")
+        }
+
+        plan = await build_confirmable_search_plan(
+            "康斯坦丁（电影）",
+            "p-constantine-explicit-movie",
+            providers,
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertNotIn("clarification", plan)
+        self.assertEqual(len(plan["candidates"]), 1)
+        self.assertEqual(
+            plan["candidates"][0]["media_metadata"]["retrieval"]["media_type"],
+            "movie",
+        )
+
+    @patch(
+        "telepiplex_search.planner.infer_candidate_scorecard_with_ai",
+        return_value=None,
+    )
+    @patch("telepiplex_search.planner.infer_search_hypotheses_with_ai")
+    async def test_explicit_year_resolves_ai_media_type_clarification(
+        self,
+        infer_hypotheses,
+        _scorecard,
+    ):
+        ai_result = _parsed_ai_hypotheses("康斯坦丁")
+        ai_result["status"] = "needs_clarification"
+        ai_result["clarification_reason"] = "可能指电影或剧集。"
+        infer_hypotheses.return_value = ai_result
+        providers = {
+            name: _dual_media_provider(
+                name,
+                title="康斯坦丁",
+                movie_year="2005",
+                series_year="2014",
+                movie_english="Constantine",
+                series_english="Constantine",
+            )
+            for name in ("wikipedia", "douban", "tvdb")
+        }
+
+        plan = await build_confirmable_search_plan(
+            "康斯坦汀 2005",
+            "p-constantine-explicit-year",
+            providers,
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertNotIn("clarification", plan)
+        self.assertEqual(len(plan["candidates"]), 1)
+        self.assertEqual(
+            plan["candidates"][0]["media_metadata"]["identity"]["year"],
+            "2005",
+        )
+
+    @patch(
+        "telepiplex_search.planner.infer_candidate_scorecard_with_ai",
+        return_value=None,
+    )
+    async def test_single_verified_movie_does_not_ask_for_media_type(
+        self,
+        _scorecard,
+    ):
+        providers = {
+            name: _provider(name, 1, title="布达佩斯大饭店")
+            for name in ("wikipedia", "douban", "tvdb")
+        }
+
+        plan = await build_confirmable_search_plan(
+            "布达佩斯大饭店",
+            "p-grand-budapest-single",
+            providers,
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertNotIn("clarification", plan)
+        self.assertEqual(len(plan["candidates"]), 1)
+
+    @patch("telepiplex_search.planner.infer_candidate_scorecard_with_ai")
+    @patch(
+        "telepiplex_search.planner.infer_search_hypotheses_with_ai",
+        return_value=None,
+    )
+    async def test_empty_ranked_candidates_skip_ai_scorecard(
+        self,
+        _infer_hypotheses,
+        scorecard,
+    ):
+        with self.assertRaises(SearchPlanningError) as raised:
+            await build_confirmable_search_plan(
+                "只有单一来源的剧集",
+                "p-empty-scorecard",
+                {
+                    "douban": _provider(
+                        "douban",
+                        1,
+                        title="只有单一来源的剧集",
+                        media_type="series",
+                    ),
+                },
+                lambda _contract: set(),
+                TemporarySpecialAllocator(),
+            )
+
+        self.assertEqual(raised.exception.code, "insufficient_independent_support")
+        scorecard.assert_not_called()
+
     async def test_candidate_funnel_logs_qualification_reasons(self):
         def douban(_hypotheses):
             return {
@@ -716,6 +1099,63 @@ class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(plan["status"], "needs_clarification")
+        self.assertEqual(
+            [option["media_type"] for option in plan["clarification"]["options"]],
+            ["movie", "series"],
+        )
+
+    async def test_orchestrator_resolved_status_cannot_hide_source_type_conflict(
+        self,
+    ):
+        intent = {
+            "title_hints": ["康斯坦丁"],
+            "media_type_hint": "unknown",
+            "year_hint": "",
+            "scope": "work",
+            "season_number": None,
+            "episode_number": None,
+        }
+        decision = VerifiedAiDecision(
+            "resolved",
+            intent,
+            (),
+            (),
+            "confirm",
+        )
+        hypotheses = _parsed_ai_hypotheses("康斯坦丁")
+        sources = tuple(
+            _dual_media_provider(
+                name,
+                title="康斯坦丁",
+                movie_year="2005",
+                series_year="2014",
+                movie_english="Constantine",
+                series_english="Constantine",
+            )(hypotheses)
+            for name in ("wikipedia", "douban", "tvdb")
+        )
+
+        async def orchestrate(_raw_query, _gateway):
+            return OrchestrationOutcome(
+                "resolved",
+                intent,
+                sources,
+                decision,
+                0,
+                "",
+            )
+
+        plan = await build_confirmable_search_plan(
+            "康斯坦丁",
+            "p-orchestrated-resolved-conflict",
+            {},
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            source_gateway=object(),
+            source_orchestrator=orchestrate,
+        )
+
+        self.assertEqual(plan.get("status"), "needs_clarification")
         self.assertEqual(
             [option["media_type"] for option in plan["clarification"]["options"]],
             ["movie", "series"],

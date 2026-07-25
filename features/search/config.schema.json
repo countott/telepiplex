@@ -30,6 +30,7 @@
             "base_url": {"type": "string", "title": "服务地址"},
             "api_key": {"type": "string", "title": "API Key", "writeOnly": true},
             "timeout": {"type": "number", "minimum": 1, "maximum": 600, "title": "搜索超时（秒）"},
+            "indexer_timeout": {"type": "number", "minimum": 1, "maximum": 600, "title": "单 Indexer 超时（秒）"},
             "status_timeout": {"type": "number", "minimum": 1, "maximum": 300, "title": "状态超时（秒）"},
             "indexer_ids": {"type": "string", "title": "Indexer IDs"},
             "categories": {

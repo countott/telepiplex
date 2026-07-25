@@ -142,6 +142,10 @@ class ConfigSchemaContractTest(unittest.TestCase):
         )
 
         self.assertEqual(default["search"]["prowlarr"]["timeout"], 200)
+        self.assertEqual(
+            default["search"]["prowlarr"]["indexer_timeout"],
+            75,
+        )
 
 
 if __name__ == "__main__":

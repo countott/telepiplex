@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 import json
 import re
 import time
@@ -18,8 +19,10 @@ from .adapters.douban import (
 from .adapters.prowlarr import (
     ProwlarrRequestError,
     get_prowlarr_indexer_summary,
+    list_prowlarr_indexers,
     resolve_prowlarr_download_url,
     search_prowlarr,
+    search_prowlarr_indexer,
 )
 from .adapters.tvdb import (
     TvdbAuthenticationError,
@@ -39,6 +42,7 @@ from .input_contract import classify_search_input
 from .planner import SearchPlanningError, build_confirmable_search_plan
 from .prowlarr_query import build_prowlarr_query
 from .release_gate import gate_releases
+from .release_identity import deduplicate_releases, stable_release_id
 from .release_report import format_release_report, release_keyboard
 from .release_score import rank_releases
 from .search_plan import (
@@ -94,6 +98,8 @@ class SearchFeature:
         release_rank=None,
         release_resolver=None,
         indexer_summary=None,
+        indexer_loader=None,
+        indexer_search=None,
     ):
         self.config = config
         self.host = host
@@ -105,6 +111,8 @@ class SearchFeature:
         self.indexer_summary = (
             indexer_summary or get_prowlarr_indexer_summary
         )
+        self.indexer_loader = indexer_loader or list_prowlarr_indexers
+        self.indexer_search = indexer_search or search_prowlarr_indexer
         self.plans = {}
         self.awaiting_queries = set()
         self.awaiting_scope_inputs = {}
@@ -314,6 +322,7 @@ class SearchFeature:
             return self._closed("⚠️ 搜索任务已过期，请重新搜索。")
         if action == "cancel":
             operation_id = stored.get("operation_id")
+            self._cancel_release_tasks(stored)
             self._release_plan(plan_id)
             result = self._closed("已退出本次搜索。")
             if operation_id:
@@ -469,6 +478,8 @@ class SearchFeature:
     async def _release_search_task(self, plan_id, stored, operation_id):
         try:
             result = await self._confirm_and_search(plan_id, stored)
+            if stored.get("selection_frozen"):
+                return
             action = (result.get("actions") or [{}])[0]
             if plan_id in self.plans and stored.get("results"):
                 await self._report_operation(
@@ -489,6 +500,8 @@ class SearchFeature:
                     details=self._prowlarr_status_details(operation_id),
                 )
         except asyncio.CancelledError:
+            if stored.get("selection_frozen"):
+                return
             self._release_plan(plan_id)
             await self._report_operation(
                 operation_id,
@@ -509,18 +522,29 @@ class SearchFeature:
                 details=self._prowlarr_status_details(operation_id),
             )
 
-    def _start_submission_task(self, plan_id, stored, raw_index):
+    def _start_submission_task(self, plan_id, stored, release_id):
         operation_id = stored["operation_id"]
+        release_id = str(release_id or "")
+        release_by_id = stored.get("release_by_id") or {}
+        if release_id not in release_by_id:
+            raise FeatureError(
+                "invalid_release",
+                "selected release is invalid",
+            )
+        stored["selection_frozen"] = True
+        stored["selected_release_id"] = release_id
+        self._cancel_release_tasks(stored)
         operation_view = self._advance_operation(
             operation_id,
             state="running",
             stage="resolving_release",
             status_text="正在解析片源下载链接。",
             control="cancel",
+            details={},
         )
         task_id = f"search-submit-{operation_id}"
         task = self.runtime.spawn(
-            self._submission_task(plan_id, stored, raw_index, operation_id),
+            self._submission_task(plan_id, stored, release_id, operation_id),
             task_id=task_id,
         )
         self.operations[operation_id].update({"task": task, "task_id": task_id})
@@ -531,6 +555,19 @@ class SearchFeature:
             }],
             "operation": operation_view,
         }
+
+    def _cancel_release_tasks(self, stored: dict):
+        operation = self.operations.get(stored.get("operation_id")) or {}
+        search_task = operation.get("task")
+        if (
+            search_task is not None
+            and hasattr(search_task, "cancel")
+            and not search_task.done()
+        ):
+            search_task.cancel()
+        for task in stored.get("indexer_tasks") or ():
+            if hasattr(task, "cancel") and not task.done():
+                task.cancel()
 
     async def _submission_task(self, plan_id, stored, raw_index, operation_id):
         try:
@@ -1333,6 +1370,42 @@ class SearchFeature:
             or (contract.get("placement") or {}).get("library_type")
             or ""
         )
+        stored["confirmed_contract"] = contract
+        try:
+            indexers = await asyncio.to_thread(self.indexer_loader)
+        except Exception as exc:
+            indexers = []
+            indexer_list_error = f"{type(exc).__name__}: {exc}"
+        else:
+            indexer_list_error = ""
+        if indexers:
+            return await self._confirm_and_search_indexers(
+                plan_id,
+                stored,
+                query,
+                media_type,
+                contract,
+                indexers,
+            )
+        return await self._confirm_and_search_aggregate(
+            plan_id,
+            stored,
+            query,
+            media_type,
+            contract,
+            indexer_list_error=indexer_list_error,
+        )
+
+    async def _confirm_and_search_aggregate(
+        self,
+        plan_id: str,
+        stored: dict,
+        query: str,
+        media_type: str,
+        contract: dict,
+        *,
+        indexer_list_error: str = "",
+    ) -> dict:
         try:
             raw_items = await asyncio.to_thread(
                 self.release_search,
@@ -1372,7 +1445,35 @@ class SearchFeature:
                 "down_indexers": [],
                 "error": f"{type(exc).__name__}: {exc}",
             }
-        gate = gate_releases(raw_items, contract)
+        if indexer_list_error:
+            existing_error = str(indexer_summary.get("error") or "")
+            indexer_summary["error"] = "；".join(
+                value
+                for value in (indexer_list_error, existing_error)
+                if value
+            )
+        indexer_summary["final"] = True
+        return self._finalize_release_results(
+            plan_id,
+            stored,
+            query,
+            contract,
+            raw_items,
+            indexer_summary,
+        )
+
+    @staticmethod
+    def _prowlarr_error(exc: Exception) -> dict:
+        if isinstance(exc, ProwlarrRequestError):
+            return exc.as_dict()
+        return {
+            "kind": "unexpected_error",
+            "http_status": 0,
+            "message": f"{type(exc).__name__}: {exc}",
+            "retryable": False,
+        }
+
+    def _release_limit(self) -> int:
         try:
             configured_limit = int(
                 (((self.config.get("search") or {}).get("prowlarr") or {})
@@ -1380,8 +1481,51 @@ class SearchFeature:
             )
         except (TypeError, ValueError):
             configured_limit = 12
-        limit = min(12, max(1, configured_limit))
-        results = self.release_rank(list(gate.eligible), limit)
+        return min(12, max(1, configured_limit))
+
+    def _global_prowlarr_timeout(self) -> float:
+        value = (
+            ((self.config.get("search") or {}).get("prowlarr") or {})
+            .get("timeout", 200)
+        )
+        try:
+            return max(1, float(value))
+        except (TypeError, ValueError):
+            return 200
+
+    def _update_release_results(
+        self,
+        stored: dict,
+        raw_items,
+        contract: dict,
+    ):
+        deduplicated = deduplicate_releases(raw_items)
+        gate = gate_releases(deduplicated, contract)
+        results = self.release_rank(
+            list(gate.eligible),
+            self._release_limit(),
+        )
+        release_by_id = stored.setdefault("release_by_id", {})
+        for item in results:
+            release_by_id[stable_release_id(item)] = item
+        stored["results"] = results
+        stored["gate_report"] = gate
+        return gate, results
+
+    def _finalize_release_results(
+        self,
+        plan_id: str,
+        stored: dict,
+        query: str,
+        contract: dict,
+        raw_items,
+        indexer_summary: dict,
+    ) -> dict:
+        gate, results = self._update_release_results(
+            stored,
+            raw_items,
+            contract,
+        )
         text = format_release_report(
             query,
             gate,
@@ -1391,11 +1535,8 @@ class SearchFeature:
         if not results:
             self._release_plan(plan_id)
             return self._closed(text)
-        stored["confirmed_contract"] = contract
-        stored["results"] = results
-        stored["gate_report"] = gate
         stored["indexer_summary"] = indexer_summary
-        keyboard = release_keyboard(plan_id, len(results))
+        keyboard = release_keyboard(plan_id, results)
         return {
             "actions": [{
                 "kind": "edit_message",
@@ -1404,17 +1545,213 @@ class SearchFeature:
             }]
         }
 
+    async def _confirm_and_search_indexers(
+        self,
+        plan_id: str,
+        stored: dict,
+        query: str,
+        media_type: str,
+        contract: dict,
+        indexers,
+    ) -> dict:
+        normalized_indexers = [
+            {
+                "id": int(item["id"]),
+                "name": str(item.get("name") or item["id"]),
+            }
+            for item in indexers
+            if isinstance(item, dict) and item.get("id") is not None
+        ]
+        enabled_names = [item["name"] for item in normalized_indexers]
+        raw_items = []
+        down_indexers = []
+        completed = 0
+        started = time.monotonic()
+        timeout = self._global_prowlarr_timeout()
+        tasks = {
+            asyncio.create_task(
+                asyncio.to_thread(
+                    self.indexer_search,
+                    query,
+                    media_type,
+                    item["id"],
+                )
+            ): item
+            for item in normalized_indexers
+        }
+        pending = set(tasks)
+        stored["indexer_tasks"] = list(tasks)
+        stored["selection_frozen"] = False
+        stored["last_incremental_report"] = 0.0
+        try:
+            while pending and not stored.get("selection_frozen"):
+                remaining = timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    done = set()
+                else:
+                    done, pending = await asyncio.wait(
+                        pending,
+                        timeout=remaining,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                if not done:
+                    for task in pending:
+                        item = tasks[task]
+                        down_indexers.append({
+                            "source": item["name"],
+                            "message": (
+                                "超过 Prowlarr 全局搜索超时"
+                                f"（{int(timeout)} 秒）"
+                            ),
+                            "kind": "timeout",
+                            "http_status": 0,
+                            "retryable": True,
+                        })
+                        task.cancel()
+                    completed += len(pending)
+                    pending = set()
+                    break
+                for task in done:
+                    item = tasks[task]
+                    completed += 1
+                    try:
+                        batch = task.result()
+                    except Exception as exc:
+                        error = self._prowlarr_error(exc)
+                        down_indexers.append({
+                            "source": item["name"],
+                            **error,
+                        })
+                        if runtime_context.logger:
+                            runtime_context.logger.warning(
+                                "prowlarr_indexer_search_failed "
+                                f"query={query!r} media_type={media_type} "
+                                f"indexer={item['name']!r} "
+                                f"error={json.dumps(error, ensure_ascii=False)}"
+                            )
+                        continue
+                    for raw_item in batch or []:
+                        if not isinstance(raw_item, dict):
+                            continue
+                        normalized = dict(raw_item)
+                        normalized["indexer"] = (
+                            str(normalized.get("indexer") or "").strip()
+                            or item["name"]
+                        )
+                        raw_items.append(normalized)
+                summary = self._incremental_indexer_summary(
+                    enabled_names,
+                    raw_items,
+                    down_indexers,
+                    completed,
+                    final=not pending,
+                )
+                gate, results = self._update_release_results(
+                    stored,
+                    raw_items,
+                    contract,
+                )
+                stored["indexer_summary"] = summary
+                if results and pending:
+                    await self._report_incremental_releases(
+                        plan_id,
+                        stored,
+                        query,
+                        gate,
+                        results,
+                        summary,
+                    )
+            last_report = float(stored.get("last_incremental_report") or 0)
+            if last_report:
+                delay = 1.25 - (time.monotonic() - last_report)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+        finally:
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            stored["indexer_tasks"] = []
+
+        summary = self._incremental_indexer_summary(
+            enabled_names,
+            raw_items,
+            down_indexers,
+            len(normalized_indexers),
+            final=True,
+        )
+        return self._finalize_release_results(
+            plan_id,
+            stored,
+            query,
+            contract,
+            raw_items,
+            summary,
+        )
+
+    @staticmethod
+    def _incremental_indexer_summary(
+        enabled_names,
+        raw_items,
+        down_indexers,
+        completed,
+        *,
+        final,
+    ) -> dict:
+        result_sources = Counter(
+            str(item.get("indexer") or "未知").strip() or "未知"
+            for item in raw_items
+            if isinstance(item, dict)
+        )
+        return {
+            "enabled_indexers": list(enabled_names),
+            "result_sources": dict(result_sources),
+            "down_indexers": deepcopy(down_indexers),
+            "error": "",
+            "completed_indexers": int(completed),
+            "total_indexers": len(enabled_names),
+            "final": bool(final),
+        }
+
+    async def _report_incremental_releases(
+        self,
+        plan_id,
+        stored,
+        query,
+        gate,
+        results,
+        indexer_summary,
+    ):
+        now = time.monotonic()
+        last_report = float(stored.get("last_incremental_report") or 0)
+        if last_report and now - last_report < 1.25:
+            return
+        text = format_release_report(
+            query,
+            gate,
+            results,
+            indexer_summary,
+        )
+        await self._report_operation(
+            stored["operation_id"],
+            state="running",
+            stage="prowlarr_search",
+            status_text=text,
+            control="cancel",
+            details={"keyboard": release_keyboard(plan_id, results)},
+        )
+        stored["last_incremental_report"] = time.monotonic()
+
     async def _submit_release(
         self,
         plan_id: str,
         stored: dict,
-        raw_index: str,
+        release_id: str,
         operation_id: str,
     ) -> dict:
         try:
-            index = int(raw_index)
-            item = stored["results"][index]
-        except (ValueError, IndexError):
+            item = (stored.get("release_by_id") or {})[release_id]
+        except KeyError:
             raise FeatureError("invalid_release", "selected release is invalid") from None
         try:
             link = await asyncio.to_thread(self.release_resolver, item)
@@ -1480,7 +1817,7 @@ class SearchFeature:
                     },
                 },
                 deadline=30,
-                idempotency_key=f"{plan_id}:release:{index}",
+                idempotency_key=f"{plan_id}:release:{release_id}",
             )
         except Exception as exc:
             await self._report_operation(

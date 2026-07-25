@@ -315,6 +315,17 @@ def _title_year_type_match(left: EvidenceFact, right: EvidenceFact) -> bool:
 
 
 def _matches_candidate(candidate: list[EvidenceFact], fact: EvidenceFact) -> bool:
+    candidate_types = {
+        existing.media_type
+        for existing in candidate
+        if existing.media_type
+    }
+    if (
+        fact.media_type
+        and candidate_types
+        and fact.media_type not in candidate_types
+    ):
+        return False
     return any(
         _stable_id_match(existing, fact)
         or _title_year_type_match(existing, fact)

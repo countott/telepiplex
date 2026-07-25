@@ -15,6 +15,7 @@ class ProwlarrAdapterTest(unittest.TestCase):
                     "base_url": "http://prowlarr:9696",
                     "api_key": "configured",
                     "timeout": 200,
+                    "indexer_timeout": 75,
                 },
             },
         })
@@ -53,6 +54,40 @@ class ProwlarrAdapterTest(unittest.TestCase):
         self.assertEqual(raised.exception.http_status, 503)
         self.assertTrue(raised.exception.retryable)
         self.assertIn("upstream unavailable", str(raised.exception))
+
+    @patch.object(prowlarr.requests, "get")
+    def test_enabled_indexers_honor_configured_ids(self, get):
+        runtime_context.config["search"]["prowlarr"]["indexer_ids"] = "1,3"
+        response = get.return_value
+        response.json.return_value = [
+            {"id": 1, "name": "Fast", "enable": True},
+            {"id": 2, "name": "Excluded", "enable": True},
+            {"id": 3, "name": "Disabled", "enable": False},
+        ]
+
+        indexers = prowlarr.list_prowlarr_indexers()
+
+        self.assertEqual(indexers, [{"id": 1, "name": "Fast"}])
+
+    @patch.object(prowlarr.requests, "get")
+    def test_single_indexer_search_uses_its_id_and_short_timeout(self, get):
+        response = get.return_value
+        response.json.return_value = [{
+            "title": "Constantine.2005.1080p",
+            "indexer": "Fast",
+            "infoHash": "a" * 40,
+        }]
+
+        results = prowlarr.search_prowlarr_indexer(
+            "Constantine 2005",
+            "movie",
+            17,
+        )
+
+        self.assertEqual(len(results), 1)
+        _url, kwargs = get.call_args
+        self.assertEqual(kwargs["params"]["indexerIds"], "17")
+        self.assertEqual(kwargs["timeout"], 75)
 
 
 if __name__ == "__main__":

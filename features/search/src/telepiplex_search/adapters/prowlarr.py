@@ -16,6 +16,7 @@ from ..context import runtime_context
 
 
 DEFAULT_PROWLARR_SEARCH_TIMEOUT = 200
+DEFAULT_PROWLARR_INDEXER_TIMEOUT = 75
 PROWLARR_STATUS_TIMEOUT = 15
 
 
@@ -82,6 +83,42 @@ def _status_timeout(prowlarr_config: dict):
     return max(5, min(timeout, 30))
 
 
+def _indexer_timeout(prowlarr_config: dict):
+    try:
+        timeout = float(
+            prowlarr_config.get(
+                "indexer_timeout",
+                DEFAULT_PROWLARR_INDEXER_TIMEOUT,
+            )
+        )
+    except (TypeError, ValueError):
+        timeout = DEFAULT_PROWLARR_INDEXER_TIMEOUT
+    return max(1, timeout)
+
+
+def _configured_indexer_ids(prowlarr_config: dict) -> set[int] | None:
+    raw_ids = prowlarr_config.get("indexer_ids", "-2")
+    if isinstance(raw_ids, (list, tuple, set)):
+        values = [str(value).strip() for value in raw_ids]
+    else:
+        values = [
+            value.strip()
+            for value in str(raw_ids or "").split(",")
+        ]
+    selected = set()
+    for value in values:
+        if not value:
+            continue
+        try:
+            indexer_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if indexer_id < 0:
+            return None
+        selected.add(indexer_id)
+    return selected or None
+
+
 def _warn(message: str):
     logger = runtime_context.logger
     warning = (
@@ -140,26 +177,47 @@ def _normalize_result(item):
     }
 
 
-def search_prowlarr(query: str, media_type: str = "movie") -> list[dict]:
+def search_prowlarr(
+    query: str,
+    media_type: str = "movie",
+    *,
+    indexer_ids=None,
+    timeout: float | None = None,
+) -> list[dict]:
     prowlarr_config, base_url, api_key = _get_prowlarr_config()
     categories = prowlarr_config.get("categories") or {}
 
+    if indexer_ids is None:
+        selected_indexers = prowlarr_config.get("indexer_ids", "-2")
+    elif isinstance(indexer_ids, (list, tuple, set)):
+        selected_indexers = ",".join(str(value) for value in indexer_ids)
+    else:
+        selected_indexers = str(indexer_ids)
     params = {
         "query": query,
-        "indexerIds": prowlarr_config.get("indexer_ids", "-2"),
+        "indexerIds": selected_indexers,
         "categories": categories.get(media_type, 2000 if media_type == "movie" else 5000),
         "type": "search",
     }
     url = f"{base_url}/api/v1/search"
     headers = {"X-Api-Key": api_key}
-    timeout = _search_timeout(prowlarr_config)
+    request_timeout = (
+        _search_timeout(prowlarr_config)
+        if timeout is None
+        else max(1, float(timeout))
+    )
 
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=timeout)
+        response = requests.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=request_timeout,
+        )
         response.raise_for_status()
     except requests.exceptions.Timeout as e:
         raise ProwlarrRequestError(
-            f"Prowlarr 查询超时（已等待 {int(timeout)} 秒）。"
+            f"Prowlarr 查询超时（已等待 {int(request_timeout)} 秒）。"
             "部分索引器可能响应过慢，请检查 Prowlarr 索引器日志。",
             kind="timeout",
             retryable=True,
@@ -210,6 +268,20 @@ def search_prowlarr(query: str, media_type: str = "movie") -> list[dict]:
     return [_normalize_result(item) for item in data if isinstance(item, dict)]
 
 
+def search_prowlarr_indexer(
+    query: str,
+    media_type: str,
+    indexer_id: int,
+) -> list[dict]:
+    prowlarr_config, _, _ = _get_prowlarr_config()
+    return search_prowlarr(
+        query,
+        media_type,
+        indexer_ids=str(int(indexer_id)),
+        timeout=_indexer_timeout(prowlarr_config),
+    )
+
+
 def _prowlarr_get_json(path: str, timeout: float | None = None):
     prowlarr_config, base_url, api_key = _get_prowlarr_config()
     response = requests.get(
@@ -234,6 +306,36 @@ def _normalize_health_entry(item: dict) -> dict | None:
         "source": source or "Prowlarr",
         "message": message,
     }
+
+
+def list_prowlarr_indexers() -> list[dict]:
+    prowlarr_config, _, _ = _get_prowlarr_config()
+    selected_ids = _configured_indexer_ids(prowlarr_config)
+    data = _prowlarr_get_json(
+        "/api/v1/indexer",
+        timeout=_status_timeout(prowlarr_config),
+    )
+    if not isinstance(data, list):
+        raise ProwlarrRequestError(
+            "Prowlarr Indexer 列表格式异常",
+            kind="invalid_response",
+        )
+
+    indexers = []
+    for item in data:
+        if not isinstance(item, dict) or not item.get("enable", True):
+            continue
+        try:
+            indexer_id = int(item.get("id"))
+        except (TypeError, ValueError):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or (
+            selected_ids is not None and indexer_id not in selected_ids
+        ):
+            continue
+        indexers.append({"id": indexer_id, "name": name})
+    return indexers
 
 
 def get_prowlarr_indexer_summary(results: list[dict] | None = None) -> dict:

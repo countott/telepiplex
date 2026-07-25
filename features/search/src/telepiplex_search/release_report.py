@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import re
+
+from .release_identity import stable_release_id
+
 
 _CIRCLED = tuple("①②③④⑤⑥⑦⑧⑨⑩⑪⑫")
+_RESULT_LINE_LIMIT = 245
 
 
 def _clip(value, limit: int) -> str:
@@ -13,72 +18,83 @@ def _clip(value, limit: int) -> str:
     return text[:max(1, limit - 1)].rstrip() + "…"
 
 
-def _signed(value) -> str:
+def _safe_int(value) -> int:
     try:
-        number = int(value)
+        return int(value or 0)
     except (TypeError, ValueError):
-        number = 0
-    return f"{number:+d}"
+        return 0
 
 
-def _size_label(value) -> str:
-    try:
-        size = max(0, int(value or 0))
-    except (TypeError, ValueError):
-        size = 0
+def _approx_size_label(value) -> str:
+    size = max(0, _safe_int(value))
     if not size:
-        return "未知"
+        return "~?G"
     gib = size / 1024 ** 3
-    return f"{gib:.1f} GiB"
+    return f"~{max(1, int(gib + 0.5))}G"
 
 
-def _score_parts(item: dict) -> tuple[str, str, str, str]:
-    details = [
-        detail
-        for detail in item.get("score_details") or []
-        if isinstance(detail, dict)
-    ]
-    keywords = [
-        f"{_clip(detail.get('label'), 18)}({_signed(detail.get('score'))})"
-        for detail in details
-        if detail.get("kind") == "keyword"
-        and int(detail.get("score") or 0) != 0
-    ][:5]
-    indexer = next(
-        (
-            f"{_clip(detail.get('label'), 22)}"
-            f"({_signed(detail.get('score'))})"
-            for detail in details
-            if detail.get("kind") == "indexer"
-        ),
-        _clip(item.get("indexer") or "未知", 22),
+def _specification_label(value) -> str:
+    label = _clip(value, 18)
+    if label.casefold() == "2160p":
+        return "4K"
+    return label
+
+
+def _specifications(item: dict) -> str:
+    labels = []
+    seen = set()
+    for detail in item.get("score_details") or []:
+        if (
+            not isinstance(detail, dict)
+            or detail.get("kind") != "keyword"
+            or _safe_int(detail.get("score")) == 0
+        ):
+            continue
+        label = _specification_label(detail.get("label"))
+        key = label.casefold()
+        if label and key not in seen:
+            seen.add(key)
+            labels.append(label)
+    return " / ".join(labels) or "规格未知"
+
+
+def _compact_scope(value) -> str:
+    scope = _clip(value or "门禁通过", 28)
+    if scope in {"电影", "门禁通过", "movie"}:
+        return "整片"
+    season = re.fullmatch(r"第\s*(\d+)\s*季整季", scope)
+    if season:
+        return f"第{season.group(1)}季整季"
+    return scope
+
+
+def _result_line(index: int, item: dict) -> str:
+    prefix = (
+        f"{_CIRCLED[index]} {_safe_int(item.get('score'))}分"
+        f"｜{_compact_scope(item.get('scope_label'))}"
+        f"｜{_specifications(item)}"
+        f"｜做种{_safe_int(item.get('seeders'))}"
+        f"｜{_approx_size_label(item.get('size'))}"
+        "｜"
     )
-    seeders = next(
-        (
-            f"{detail.get('label')}({_signed(detail.get('score'))})"
-            for detail in details
-            if detail.get("kind") == "seeders"
-        ),
-        str(item.get("seeders") or 0),
+    title_limit = max(1, _RESULT_LINE_LIMIT - len(prefix))
+    return _clip(
+        prefix + _clip(item.get("title"), title_limit),
+        _RESULT_LINE_LIMIT,
     )
-    size = next(
-        (
-            f"{_size_label(detail.get('label'))}"
-            f"({_signed(detail.get('score'))})"
-            for detail in details
-            if detail.get("kind") == "size"
-        ),
-        _size_label(item.get("size")),
-    )
-    return "、".join(keywords) or "无", indexer, seeders, size
 
 
-def release_keyboard(plan_id: str, count: int) -> list[list[dict]]:
-    count = min(12, max(0, int(count or 0)))
+def release_keyboard(plan_id: str, ranked) -> list[list[dict]]:
+    releases = [
+        item for item in (ranked or [])
+        if isinstance(item, dict)
+    ][:12]
     buttons = [{
         "text": _CIRCLED[index],
-        "callback_data": f"search:release:{plan_id}:{index}",
-    } for index in range(count)]
+        "callback_data": (
+            f"search:release:{plan_id}:{stable_release_id(item)}"
+        ),
+    } for index, item in enumerate(releases)]
     keyboard = [
         buttons[index:index + 3]
         for index in range(0, len(buttons), 3)
@@ -90,76 +106,42 @@ def release_keyboard(plan_id: str, count: int) -> list[list[dict]]:
     return keyboard
 
 
-def _indexer_lines(indexer_summary: dict) -> list[str]:
-    summary = indexer_summary if isinstance(indexer_summary, dict) else {}
-    enabled = [
-        _clip(item, 30)
-        for item in summary.get("enabled_indexers") or []
-        if str(item or "").strip()
-    ][:12]
-    counts = summary.get("result_sources") or {}
-    count_text = "、".join(
-        f"{_clip(name, 24)}={int(count)}"
-        for name, count in sorted(counts.items())
-    ) or "无"
-    lines = [
-        "Indexer："
-        f"启用 {('、'.join(enabled) if enabled else '未取得')}；"
-        f"原始返回 {count_text}"
-    ]
-    down = [
-        f"{_clip(item.get('source') or 'Prowlarr', 22)}: "
-        f"{_clip(item.get('message'), 60)}"
-        for item in summary.get("down_indexers") or []
-        if isinstance(item, dict)
-    ][:6]
-    if down:
-        lines.append("Indexer 异常：" + "；".join(down))
-    error = _clip(summary.get("error"), 180)
-    if error:
-        lines.append("Indexer 状态读取失败：" + error)
-    return lines
-
-
 def format_release_report(
     query: str,
     gate,
     ranked: list[dict],
     indexer_summary: dict,
 ) -> str:
-    rejection_counts = getattr(gate, "rejection_counts", {}) or {}
-    rejection_text = "、".join(
-        f"{key}={int(value)}"
-        for key, value in sorted(rejection_counts.items())
-    ) or "无"
-    eligible = len(getattr(gate, "eligible", ()) or ())
-    lines = [
-        f"Prowlarr Query：{_clip(query, 140)}",
-        (
-            "正确性门禁："
-            f"原始 {int(getattr(gate, 'raw_count', 0) or 0)}，"
-            f"合格 {eligible}，拒绝 {rejection_text}"
-        ),
-        f"找到 {len(ranked or [])} 个同身份、同范围片源。",
-        *_indexer_lines(indexer_summary),
+    del gate
+    summary = indexer_summary if isinstance(indexer_summary, dict) else {}
+    enabled = summary.get("enabled_indexers") or []
+    total = _safe_int(summary.get("total_indexers") or len(enabled))
+    completed = _safe_int(
+        summary.get("completed_indexers")
+        if summary.get("completed_indexers") is not None
+        else total
+    )
+    down = [
+        item for item in summary.get("down_indexers") or []
+        if isinstance(item, dict)
     ]
-    if not ranked:
-        lines.append("没有同身份、同范围的可用片源；未自动展示其他范围。")
-    for index, item in enumerate((ranked or [])[:12]):
-        keyword_text, indexer, seeders, size = _score_parts(item)
-        lines.extend([
-            f"{_CIRCLED[index]} {_clip(item.get('title'), 86)}",
-            (
-                f"范围：{_clip(item.get('scope_label') or '已通过门禁', 28)}"
-                f"｜最终得分：{int(item.get('score') or 0)}"
-            ),
-            f"片源匹配关键词：{keyword_text}",
-            (
-                f"Indexer：{indexer}"
-                f"｜做种：{seeders}"
-                f"｜大小：{size}"
-            ),
-        ])
+    abnormal_count = len(down) + bool(str(summary.get("error") or "").strip())
+    displayed = [
+        item for item in (ranked or [])
+        if isinstance(item, dict)
+    ][:12]
+    lines = [
+        f"🔍 {_clip(query, 180)}",
+        (
+            f"搜索结果 {len(displayed)}"
+            f"｜索引器完成 {completed}/{total or '?'}"
+            f"｜异常 {int(abnormal_count)}"
+        ),
+    ]
+    if not displayed:
+        lines.append("没有同身份、同范围的可用片源。")
+    for index, item in enumerate(displayed):
+        lines.append(_result_line(index, item))
     text = "\n".join(lines)
     if len(text) > 4096:
         text = text[:4095].rstrip() + "…"

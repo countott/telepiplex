@@ -153,6 +153,15 @@ SEARCH_HYPOTHESIS_PROMPT = """你是影视搜索意图解释器。只返回JSON�
 只在规则无法理解非标准自然语言或首轮零候选时使用。你的输出只是待外部来源验证的意图提示。
 不得输出豆瓣/TVDB/IMDb/TMDB稳定ID、用户未提供的年份、官方英文名结论、罗马字结论、TVDB库存、Prowlarr query、路径、media_metadata或Season 00编号。
 title_hints 按建议检索优先级排列：纠正或规范化标题优先，用户原文最后。
+决策规则：
+1. 只有恰好一个合理的作品解释，或用户已用媒体类型、年份、季/集范围明确消除歧义时，才能返回 parsed。
+2. 存在两个或以上合理的作品解释时，必须返回 needs_clarification；同名电影和剧集同时合理时也必须如此。
+3. needs_clarification 时 media_type_hint 必须为 unknown，clarification_reason 必须非空并简述需要用户选择的维度；title_hints 只能列出待来源验证的检索提示，不得替用户选中作品。
+4. 不得因为某个解释更知名、排序更靠前或更像用户想要的结果，就把仍然存在的其他合理解释忽略。
+示例：
+- 康斯坦汀 → needs_clarification（可能指电影或剧集）
+- 康斯坦汀 电影 → parsed（用户已明确媒体类型）
+- 康斯坦丁 2014 电视剧 → parsed（用户已明确年份和媒体类型）
 JSON结构：
 {"status":"parsed|needs_clarification|unsupported","title_hints":["string"],"media_type_hint":"movie|series|unknown","scope_hint":"work|whole_series|season|episode|latest_aired|unknown","season_number":null,"episode_number":null,"numeric_tokens":[{"value":1,"role":"year|official_title_part|season|episode|ambiguous"}],"relation_hint":"none|prequel|sequel|special|movie_version|unknown","clarification_reason":"string"}
 用户输入：

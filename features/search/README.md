@@ -14,6 +14,8 @@ Prompt 用于指导模型，工具 Schema、调用预算、凭据隔离和证据
 
 Wikipedia 和豆瓣默认可直接取证，不需要额外 API Key。TVDB 与 AI 默认启用，但仍分别需要填写 TVDB API Key，以及 AI API URL、Key 和模型。所有 TVDB/AI 凭据只由服务端适配器读取，不会进入模型消息或工具结果。任一来源关闭、凭据缺失、鉴权失败、超时、限流、被拦截或服务不可用时都会保留独立状态，其余来源仍可继续工作。
 
+Prowlarr 会按已启用 Indexer 独立并发查询；成功的 Indexer 返回多少就增量门禁、评分和更新多少，单个 FlareSolverr/Indexer 失败不会丢弃其他来源。搜索中和完成后都只显示当前 Top 12：前两行只保留 Query、结果数、Indexer 完成数和异常数，每个片源一行展示总分、范围、纯规格标签、做种、约数大小和标题；真实错误详情仍保留在日志和内部状态。按钮内部绑定稳定片源 ID，后续重排不会改变已经显示过的按钮所指向的片源。`search.prowlarr.timeout` 是全局搜索上限，`search.prowlarr.indexer_timeout` 是单 Indexer 上限（默认 75 秒）。
+
 Prowlarr 结果先经过身份与范围正确性硬门禁，再进行片源质量评分；单集、单季和多季包不会混排，最多展示 12 个结果且不会自动降级范围。公开配置入口是 `search.scoring`：
 - `prefer_resolution`、`prefer_source`、`prefer_codec`、`prefer_audio`、`reject_keywords` 定义默认关键词组
 - `keyword_scores` 用于标题关键词加权
@@ -22,7 +24,7 @@ Prowlarr 结果先经过身份与范围正确性硬门禁，再进行片源质�
 如果不填 `search.scoring`，Feature 会回退到内置默认权重。
 
 ```bash
-python tools/build_feature.py features/search /tmp/search-1.0.3.tpx \
+python tools/build_feature.py features/search /tmp/search-1.0.5.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

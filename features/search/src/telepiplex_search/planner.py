@@ -417,7 +417,10 @@ def _ai_clarification_plan(
     hint = (payload.get("intent_hint") or {}).get("media_type_hint")
     if _text(hint).casefold() != "unknown":
         return None
-    if _explicit_media_type(raw_query, rule_intent):
+    if (
+        _explicit_media_type(raw_query, rule_intent)
+        or _text(rule_intent.get("year"))
+    ):
         return None
     title_hints = [
         _text(item)
@@ -463,6 +466,83 @@ def _ai_clarification_plan(
         },
         "candidates": [],
     }
+
+
+def _source_media_type_clarification_plan(
+    *,
+    plan_id: str,
+    raw_query: str,
+    intent: dict,
+    candidates: list[CandidateEntity],
+    locked_identity: tuple[str, str] | None = None,
+) -> dict | None:
+    if locked_identity or _explicit_media_type(raw_query, intent):
+        return None
+    target = normalize_title(intent.get("title") or raw_query)
+    if not target:
+        return None
+    requested_year = _text(intent.get("year"))
+    bounded = [
+        candidate
+        for candidate in candidates
+        if any(
+            title == target
+            or title.startswith(target)
+            or target.startswith(title)
+            for title in candidate.normalized_titles
+        )
+        and (
+            not requested_year
+            or requested_year in candidate.years
+        )
+    ]
+    movies = [
+        candidate
+        for candidate in bounded
+        if candidate.media_types == frozenset({"movie"})
+    ]
+    series = [
+        candidate
+        for candidate in bounded
+        if candidate.media_types == frozenset({"series"})
+    ]
+    shared_titles = {
+        title
+        for movie in movies
+        for show in series
+        for title in movie.normalized_titles.intersection(
+            show.normalized_titles
+        )
+    }
+    if not shared_titles:
+        return None
+    verified_title = next(
+        (
+            title
+            for candidate in bounded
+            for title in candidate.titles
+            if normalize_title(title) == target
+            or normalize_title(title) in shared_titles
+        ),
+        _text(intent.get("title")) or _text(raw_query),
+    )
+    clarification_intent = dict(intent)
+    clarification_intent["title"] = verified_title
+    return _ai_clarification_plan(
+        plan_id=plan_id,
+        raw_query=raw_query,
+        rule_intent=clarification_intent,
+        payload={
+            "status": "needs_clarification",
+            "intent_hint": {
+                "title_hints": [verified_title],
+                "media_type_hint": "unknown",
+            },
+            "clarification_reason": (
+                "来源证据同时匹配电影和剧集，请选择后继续验证。"
+            ),
+        },
+    )
 
 
 def _finalize_draft(
@@ -1212,6 +1292,14 @@ async def build_confirmable_search_plan(
                 rule_hypotheses.get("intent") or {},
                 raw_query,
             )
+            source_clarification = _source_media_type_clarification_plan(
+                plan_id=plan_id,
+                raw_query=raw_query,
+                intent=intent,
+                candidates=candidates,
+            )
+            if source_clarification is not None:
+                return source_clarification
             if getattr(orchestration, "status", "") == "ambiguous":
                 clarification = _ai_clarification_plan(
                     plan_id=plan_id,
@@ -1360,6 +1448,15 @@ async def build_confirmable_search_plan(
         if verified_ai_title:
             intent["title"] = verified_ai_title
         intent["media_type"] = _explicit_media_type(raw_query, intent)
+        source_clarification = _source_media_type_clarification_plan(
+            plan_id=plan_id,
+            raw_query=raw_query,
+            intent=intent,
+            candidates=candidates,
+            locked_identity=locked_identity,
+        )
+        if source_clarification is not None:
+            return source_clarification
 
     if not candidates:
         raise SearchPlanningError("insufficient_independent_support")
@@ -1533,6 +1630,14 @@ async def build_confirmable_search_plan(
                 )
                 if verified_ai_title:
                     intent["title"] = verified_ai_title
+                source_clarification = _source_media_type_clarification_plan(
+                    plan_id=plan_id,
+                    raw_query=raw_query,
+                    intent=intent,
+                    candidates=candidates,
+                )
+                if source_clarification is not None:
+                    return source_clarification
                 combined = []
                 title_values = {}
                 rejected = _candidate_rejection_counts()
@@ -1584,7 +1689,7 @@ async def build_confirmable_search_plan(
                         f"candidates={len(candidates)}"
                     )
 
-    if not orchestrated:
+    if not orchestrated and ranked_scores:
         candidates_by_key = {
             candidate.candidate_key: candidate for candidate in candidates
         }
