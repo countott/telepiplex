@@ -1400,13 +1400,14 @@ class SearchFeature:
     async def _confirm_and_search(self, plan_id: str, stored: dict) -> dict:
         plan = stored["plan"]
         contract = confirm_media_metadata(plan)
-        query = self._english_prowlarr_query(plan, contract)
+        queries = self._english_prowlarr_queries(plan, contract)
         media_type = str(
             (contract.get("retrieval") or {}).get("media_type")
             or (contract.get("placement") or {}).get("library_type")
             or ""
         )
         stored["confirmed_contract"] = contract
+        stored["active_prowlarr_queries"] = list(queries)
         try:
             indexers = await asyncio.to_thread(self.indexer_loader)
         except Exception as exc:
@@ -1418,7 +1419,7 @@ class SearchFeature:
             return await self._confirm_and_search_indexers(
                 plan_id,
                 stored,
-                query,
+                queries,
                 media_type,
                 contract,
                 indexers,
@@ -1426,7 +1427,7 @@ class SearchFeature:
         return await self._confirm_and_search_aggregate(
             plan_id,
             stored,
-            query,
+            queries,
             media_type,
             contract,
             indexer_list_error=indexer_list_error,
@@ -1436,35 +1437,50 @@ class SearchFeature:
         self,
         plan_id: str,
         stored: dict,
-        query: str,
+        queries: list[str],
         media_type: str,
         contract: dict,
         *,
         indexer_list_error: str = "",
     ) -> dict:
-        try:
-            raw_items = await asyncio.to_thread(
-                self.release_search,
-                query,
-                media_type,
+        tasks = [
+            asyncio.create_task(
+                asyncio.to_thread(
+                    self.release_search,
+                    query,
+                    media_type,
+                )
             )
-        except Exception as exc:
-            error = (
-                exc.as_dict()
-                if isinstance(exc, ProwlarrRequestError)
-                else {
-                    "kind": "unexpected_error",
-                    "http_status": 0,
-                    "message": f"{type(exc).__name__}: {exc}",
-                    "retryable": False,
-                }
+            for query in queries
+        ]
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        raw_items = []
+        errors = {}
+        successful_queries = 0
+        for query, outcome in zip(queries, outcomes):
+            if isinstance(outcome, BaseException):
+                error = self._prowlarr_error(outcome)
+                errors[query] = error
+                if runtime_context.logger:
+                    runtime_context.logger.warning(
+                        "prowlarr_search_failed "
+                        f"query={query!r} media_type={media_type} "
+                        f"error={json.dumps(error, ensure_ascii=False)}"
+                    )
+                continue
+            successful_queries += 1
+            batch = outcome if isinstance(outcome, list) else []
+            raw_items.extend(
+                item for item in batch if isinstance(item, dict)
             )
             if runtime_context.logger:
-                runtime_context.logger.warning(
-                    "prowlarr_search_failed "
+                runtime_context.logger.info(
+                    "prowlarr_search_variant "
                     f"query={query!r} media_type={media_type} "
-                    f"error={json.dumps(error, ensure_ascii=False)}"
+                    f"raw={len(batch)}"
                 )
+        if not successful_queries:
+            error = self._all_query_variants_error(queries, errors)
             self._release_plan(plan_id)
             return self._closed(
                 f"❌ Prowlarr 搜索失败：{error['message']}"
@@ -1492,7 +1508,7 @@ class SearchFeature:
         return self._finalize_release_results(
             plan_id,
             stored,
-            query,
+            " | ".join(queries),
             contract,
             raw_items,
             indexer_summary,
@@ -1507,6 +1523,38 @@ class SearchFeature:
             "http_status": 0,
             "message": f"{type(exc).__name__}: {exc}",
             "retryable": False,
+        }
+
+    @staticmethod
+    def _all_query_variants_error(
+        queries: list[str],
+        errors: dict[str, dict],
+    ) -> dict:
+        ordered = [
+            errors[query]
+            for query in queries
+            if query in errors
+        ]
+        if len(queries) == 1 and ordered:
+            return dict(ordered[0])
+        first = ordered[0] if ordered else {
+            "kind": "unexpected_error",
+            "http_status": 0,
+            "message": "unknown error",
+            "retryable": False,
+        }
+        messages = [
+            str(errors[query].get("message") or "unknown error")
+            for query in queries
+            if query in errors
+        ]
+        return {
+            "kind": str(first.get("kind") or "unexpected_error"),
+            "http_status": int(first.get("http_status") or 0),
+            "message": "all query variants failed: " + "; ".join(messages),
+            "retryable": bool(ordered) and all(
+                bool(error.get("retryable")) for error in ordered
+            ),
         }
 
     def _release_limit(self) -> int:
@@ -1541,6 +1589,15 @@ class SearchFeature:
             list(gate.eligible),
             self._release_limit(),
         )
+        if runtime_context.logger:
+            runtime_context.logger.info(
+                "prowlarr_release_gate "
+                f"queries={json.dumps(stored.get('active_prowlarr_queries') or [], ensure_ascii=False)} "
+                f"raw={len(raw_items or [])} "
+                f"deduplicated={len(deduplicated)} "
+                f"eligible={len(gate.eligible)} "
+                f"rejections={json.dumps(gate.rejection_counts, ensure_ascii=False, sort_keys=True)}"
+            )
         release_by_id = stored.setdefault("release_by_id", {})
         for item in results:
             release_by_id[stable_release_id(item)] = item
@@ -1585,7 +1642,7 @@ class SearchFeature:
         self,
         plan_id: str,
         stored: dict,
-        query: str,
+        queries: list[str],
         media_type: str,
         contract: dict,
         indexers,
@@ -1604,17 +1661,51 @@ class SearchFeature:
         completed = 0
         started = time.monotonic()
         timeout = self._global_prowlarr_timeout()
-        tasks = {
-            asyncio.create_task(
-                asyncio.to_thread(
+        task_count = len(normalized_indexers) * len(queries)
+        semaphore = asyncio.Semaphore(min(12, max(1, task_count)))
+
+        async def search_variant(item: dict, query: str):
+            async with semaphore:
+                return await asyncio.to_thread(
                     self.indexer_search,
                     query,
                     media_type,
                     item["id"],
                 )
-            ): item
+
+        tasks = {
+            asyncio.create_task(search_variant(item, query)): (item, query)
+            for item in normalized_indexers
+            for query in queries
+        }
+        states = {
+            item["id"]: {
+                "item": item,
+                "remaining": len(queries),
+                "successful_queries": 0,
+                "errors": {},
+                "finalized": False,
+            }
             for item in normalized_indexers
         }
+
+        def finalize_indexer(state: dict) -> None:
+            nonlocal completed
+            if state["finalized"] or state["remaining"] > 0:
+                return
+            state["finalized"] = True
+            completed += 1
+            if state["successful_queries"]:
+                return
+            error = self._all_query_variants_error(
+                queries,
+                state["errors"],
+            )
+            down_indexers.append({
+                "source": state["item"]["name"],
+                **error,
+            })
+
         pending = set(tasks)
         stored["indexer_tasks"] = list(tasks)
         stored["selection_frozen"] = False
@@ -1632,9 +1723,10 @@ class SearchFeature:
                     )
                 if not done:
                     for task in pending:
-                        item = tasks[task]
-                        down_indexers.append({
-                            "source": item["name"],
+                        item, query = tasks[task]
+                        state = states[item["id"]]
+                        state["remaining"] -= 1
+                        state["errors"][query] = {
                             "message": (
                                 "超过 Prowlarr 全局搜索超时"
                                 f"（{int(timeout)} 秒）"
@@ -1642,22 +1734,21 @@ class SearchFeature:
                             "kind": "timeout",
                             "http_status": 0,
                             "retryable": True,
-                        })
+                        }
                         task.cancel()
-                    completed += len(pending)
+                    for state in states.values():
+                        finalize_indexer(state)
                     pending = set()
                     break
                 for task in done:
-                    item = tasks[task]
-                    completed += 1
+                    item, query = tasks[task]
+                    state = states[item["id"]]
+                    state["remaining"] -= 1
                     try:
                         batch = task.result()
                     except Exception as exc:
                         error = self._prowlarr_error(exc)
-                        down_indexers.append({
-                            "source": item["name"],
-                            **error,
-                        })
+                        state["errors"][query] = error
                         if runtime_context.logger:
                             runtime_context.logger.warning(
                                 "prowlarr_indexer_search_failed "
@@ -1665,7 +1756,16 @@ class SearchFeature:
                                 f"indexer={item['name']!r} "
                                 f"error={json.dumps(error, ensure_ascii=False)}"
                             )
+                        finalize_indexer(state)
                         continue
+                    state["successful_queries"] += 1
+                    batch = batch if isinstance(batch, list) else []
+                    if runtime_context.logger:
+                        runtime_context.logger.info(
+                            "prowlarr_indexer_search "
+                            f"query={query!r} media_type={media_type} "
+                            f"indexer={item['name']!r} raw={len(batch)}"
+                        )
                     for raw_item in batch or []:
                         if not isinstance(raw_item, dict):
                             continue
@@ -1675,6 +1775,7 @@ class SearchFeature:
                             or item["name"]
                         )
                         raw_items.append(normalized)
+                    finalize_indexer(state)
                 summary = self._incremental_indexer_summary(
                     enabled_names,
                     raw_items,
@@ -1692,7 +1793,7 @@ class SearchFeature:
                     await self._report_incremental_releases(
                         plan_id,
                         stored,
-                        query,
+                        " | ".join(queries),
                         gate,
                         results,
                         summary,
@@ -1719,7 +1820,7 @@ class SearchFeature:
         return self._finalize_release_results(
             plan_id,
             stored,
-            query,
+            " | ".join(queries),
             contract,
             raw_items,
             summary,
@@ -2229,7 +2330,10 @@ class SearchFeature:
         return results
 
     @staticmethod
-    def _english_prowlarr_query(plan: dict, contract: dict) -> str:
+    def _english_prowlarr_queries(
+        plan: dict,
+        contract: dict,
+    ) -> list[str]:
         del plan
         retrieval = contract.get("retrieval") or {}
         identity = contract.get("identity") or {}
@@ -2261,7 +2365,7 @@ class SearchFeature:
             if episode is None:
                 episode = first.get("episode_number")
         try:
-            return build_prowlarr_query(
+            query = build_prowlarr_query(
                 english,
                 scope,
                 season_number=season,
@@ -2272,6 +2376,50 @@ class SearchFeature:
                 "bounded_scope_incomplete",
                 "Prowlarr search scope is incomplete",
             ) from exc
+        if media_type == "series":
+            if scope == "season":
+                return [
+                    query,
+                    build_prowlarr_query(
+                        f"{english} Season {int(season):02d}",
+                        "work",
+                    ),
+                ]
+            if scope == "whole_series":
+                seasons = series_inventory(contract).seasons
+                if seasons == (1,):
+                    return [
+                        build_prowlarr_query(
+                            english,
+                            "season",
+                            season_number=1,
+                        ),
+                        build_prowlarr_query(
+                            f"{english} Season 01",
+                            "work",
+                        ),
+                        build_prowlarr_query(
+                            f"{english} Complete",
+                            "work",
+                        ),
+                    ]
+                if len(seasons) > 1:
+                    base = build_prowlarr_query(english, "work")
+                    return [
+                        f"{base} S{seasons[0]:02d}-S{seasons[-1]:02d}",
+                        build_prowlarr_query(
+                            f"{english} Complete",
+                            "work",
+                        ),
+                    ]
+        return [query]
+
+    @staticmethod
+    def _english_prowlarr_query(plan: dict, contract: dict) -> str:
+        return SearchFeature._english_prowlarr_queries(
+            plan,
+            contract,
+        )[0]
 
     def _release_plan(self, plan_id: str):
         self.plans.pop(plan_id, None)

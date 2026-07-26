@@ -753,10 +753,13 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                     expected,
                 )
 
-    async def test_whole_series_query_uses_locked_canonical_identity(self):
+    async def test_one_season_whole_series_uses_three_bounded_queries(self):
         plan = search_plan()
         contract = plan["media_metadata"]
-        contract["identity"]["content_kind"] = "series"
+        contract["identity"].update({
+            "content_kind": "series",
+            "english_title": "Someday or One Day",
+        })
         contract["placement"].update({
             "library_type": "series",
             "category_kind": "live_action_series",
@@ -773,9 +776,250 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         plan["prowlarr_queries"] = ["The Glory 2022"]
 
         self.assertEqual(
-            self.feature._english_prowlarr_query(plan, contract),
-            "English Title",
+            self.feature._english_prowlarr_queries(plan, contract),
+            [
+                "Someday or One Day S01",
+                "Someday or One Day Season 01",
+                "Someday or One Day Complete",
+            ],
         )
+        self.assertEqual(
+            self.feature._english_prowlarr_query(plan, contract),
+            "Someday or One Day S01",
+        )
+
+    async def test_season_search_uses_only_s_and_season_variants(self):
+        plan = search_plan()
+        contract = plan["media_metadata"]
+        contract["identity"].update({
+            "content_kind": "series",
+            "english_title": "English Title",
+        })
+        contract["placement"].update({
+            "library_type": "series",
+            "category_kind": "live_action_series",
+            "season_number": 2,
+        })
+        contract["evidence"] = {
+            "decision": {"scope": "season", "season_number": 2}
+        }
+        contract["items"] = [
+            {"season_number": 2, "episode_number": 1},
+        ]
+        contract["retrieval"] = {
+            "media_type": "series",
+            "scope": "season",
+            "query": "English Title S02",
+        }
+
+        self.assertEqual(
+            self.feature._english_prowlarr_queries(plan, contract),
+            [
+                "English Title S02",
+                "English Title Season 02",
+            ],
+        )
+
+    async def test_episode_search_does_not_expand_query(self):
+        plan = search_plan()
+        contract = plan["media_metadata"]
+        contract["identity"].update({
+            "content_kind": "series",
+            "english_title": "English Title",
+        })
+        contract["placement"].update({
+            "library_type": "series",
+            "category_kind": "live_action_series",
+            "season_number": 2,
+            "episode_number": 5,
+        })
+        contract["evidence"] = {"decision": {
+            "scope": "episode",
+            "season_number": 2,
+            "episode_number": 5,
+        }}
+        contract["items"] = [
+            {"season_number": 2, "episode_number": 5},
+        ]
+        contract["retrieval"] = {
+            "media_type": "series",
+            "scope": "episode",
+            "query": "English Title S02E05",
+        }
+
+        self.assertEqual(
+            self.feature._english_prowlarr_queries(plan, contract),
+            ["English Title S02E05"],
+        )
+
+    async def test_multi_season_whole_series_uses_range_and_complete_queries(self):
+        plan = search_plan()
+        contract = plan["media_metadata"]
+        contract["identity"].update({
+            "content_kind": "series",
+            "english_title": "English Title",
+        })
+        contract["placement"].update({
+            "library_type": "series",
+            "category_kind": "live_action_series",
+        })
+        contract["evidence"] = {
+            "decision": {"scope": "whole_series"}
+        }
+        contract["items"] = [
+            {"season_number": season, "episode_number": 1}
+            for season in (1, 2, 3)
+        ]
+        contract["retrieval"] = {
+            "media_type": "series",
+            "scope": "whole_series",
+            "query": "English Title",
+        }
+
+        self.assertEqual(
+            self.feature._english_prowlarr_queries(plan, contract),
+            [
+                "English Title S01-S03",
+                "English Title Complete",
+            ],
+        )
+
+    async def test_whole_series_searches_every_indexer_query_pair(self):
+        import threading
+        import time
+
+        from telepiplex_search.adapters.prowlarr import ProwlarrRequestError
+        from telepiplex_search.series_scope import apply_series_scope
+
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        contract = apply_series_scope(
+            series_ranked_search_plan()["candidates"][0]["media_metadata"],
+            "whole_series",
+        )
+        stored["plan"] = {
+            "plan_id": plan_id,
+            "media_metadata": contract,
+            "prowlarr_queries": ["The Glory"],
+        }
+        stored["selected_path"] = "/Series"
+        self.feature.indexer_loader = lambda: [
+            {"id": 1, "name": "Partial"},
+            {"id": 2, "name": "Broken"},
+        ]
+        calls = []
+        lock = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def search_indexer(query, media_type, indexer_id):
+            nonlocal active, max_active
+            with lock:
+                calls.append((indexer_id, query, media_type))
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(0.03)
+                if indexer_id == 2 or query.endswith(" S01"):
+                    raise ProwlarrRequestError(
+                        f"{query} failed",
+                        kind="server_error",
+                        http_status=500,
+                        retryable=True,
+                    )
+                return [{
+                    "title": "The.Glory.S01.1080p.WEB-DL",
+                    "magnet_url": "magnet:?xt=urn:btih:" + "d" * 40,
+                    "indexer": "Partial",
+                }]
+            finally:
+                with lock:
+                    active -= 1
+
+        self.feature.indexer_search = search_indexer
+
+        result = await self.feature._confirm_and_search(plan_id, stored)
+
+        expected_queries = {
+            "The Glory S01",
+            "The Glory Season 01",
+            "The Glory Complete",
+        }
+        self.assertEqual(
+            set(calls),
+            {
+                (indexer_id, query, "series")
+                for indexer_id in (1, 2)
+                for query in expected_queries
+            },
+        )
+        self.assertGreaterEqual(max_active, 2)
+        self.assertEqual(len(stored["results"]), 1)
+        self.assertEqual(
+            stored["indexer_summary"]["down_indexers"],
+            [{
+                "source": "Broken",
+                "message": (
+                    "all query variants failed: "
+                    "The Glory S01 failed; "
+                    "The Glory Season 01 failed; "
+                    "The Glory Complete failed"
+                ),
+                "kind": "server_error",
+                "http_status": 500,
+                "retryable": True,
+            }],
+        )
+        self.assertNotIn("Partial", str(
+            stored["indexer_summary"]["down_indexers"]
+        ))
+        self.assertIn("搜索结果 1", result["actions"][0]["text"])
+
+    async def test_aggregate_whole_series_keeps_successful_variants(self):
+        from telepiplex_search.adapters.prowlarr import ProwlarrRequestError
+        from telepiplex_search.series_scope import apply_series_scope
+
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        contract = apply_series_scope(
+            series_ranked_search_plan()["candidates"][0]["media_metadata"],
+            "whole_series",
+        )
+        stored["plan"] = {
+            "plan_id": plan_id,
+            "media_metadata": contract,
+            "prowlarr_queries": ["The Glory"],
+        }
+        self.feature.indexer_loader = lambda: []
+        calls = []
+
+        def search(query, media_type):
+            calls.append((query, media_type))
+            if query.endswith(" S01"):
+                raise ProwlarrRequestError(
+                    "S01 failed",
+                    kind="server_error",
+                    http_status=500,
+                    retryable=True,
+                )
+            return [{
+                "title": "The.Glory.S01.1080p.WEB-DL",
+                "magnet_url": "magnet:?xt=urn:btih:" + "e" * 40,
+                "indexer": "Aggregate",
+            }]
+
+        self.feature.release_search = search
+        self.feature.indexer_summary = lambda _items: {}
+
+        result = await self.feature._confirm_and_search(plan_id, stored)
+
+        self.assertEqual(calls, [
+            ("The Glory S01", "series"),
+            ("The Glory Season 01", "series"),
+            ("The Glory Complete", "series"),
+        ])
+        self.assertEqual(len(stored["results"]), 1)
+        self.assertIn("搜索结果 1", result["actions"][0]["text"])
 
     async def test_selected_release_calls_download_provider_with_canonical_contract(self):
         plan_id = await self._prepare_search()
@@ -1351,7 +1595,11 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(started["operation"]["stage"], "prowlarr_search")
         await self.runtime.run("search-releases-")
 
-        self.assertEqual(self.search_queries, [("The Glory", "series")])
+        self.assertEqual(self.search_queries, [
+            ("The Glory S01", "series"),
+            ("The Glory Season 01", "series"),
+            ("The Glory Complete", "series"),
+        ])
 
     async def test_metadata_capability_resolves_once_without_registry(self):
         planner_queries = []
@@ -1418,9 +1666,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.0.6")
+        self.assertEqual(manifest["version"], "1.0.8")
         self.assertEqual(manifest["host_api"], ">=1.2,<2.0")
-        self.assertIn('version = "1.0.6"', project)
+        self.assertIn('version = "1.0.8"', project)
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
@@ -1451,12 +1699,12 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.0.6.tpx", source)
+        self.assertIn("/tmp/search-1.0.8.tpx", source)
         self.assertIn("search_media_sources", source)
         self.assertIn("最多两轮", source)
         self.assertIn("不会交给 AI", source)
         self.assertIn("rename", source)
-        self.assertNotIn("dist/search-1.0.6.tpx", source)
+        self.assertNotIn("dist/search-1.0.8.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

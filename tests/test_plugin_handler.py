@@ -496,6 +496,114 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             reply_markup=None
         )
 
+    async def test_callback_send_action_clears_clicked_message_keyboard(self):
+        from app.handlers.plugin_handler import _render_actions
+
+        update, context, _manager = self._request([], user_id=1)
+        update.callback_query = SimpleNamespace(
+            edit_message_reply_markup=AsyncMock(),
+        )
+        update.effective_message.reply_text.return_value = SimpleNamespace(
+            message_id=57
+        )
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+
+        rendered, message_id, message_kind = await _render_actions(
+            update,
+            context,
+            route,
+            {
+                "actions": [{
+                    "kind": "send_message",
+                    "text": "下一步",
+                }],
+            },
+        )
+
+        self.assertTrue(rendered)
+        self.assertEqual((message_id, message_kind), (57, "text"))
+        update.callback_query.edit_message_reply_markup.assert_awaited_once_with(
+            reply_markup=None
+        )
+
+    async def test_callback_edit_without_keyboard_explicitly_clears_it(self):
+        from app.handlers.plugin_handler import _render_actions
+
+        update, context, _manager = self._request([], user_id=1)
+        update.callback_query = SimpleNamespace(
+            edit_message_reply_markup=AsyncMock(),
+        )
+        update.effective_message.edit_text = AsyncMock(
+            return_value=SimpleNamespace(message_id=58)
+        )
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+
+        rendered, message_id, message_kind = await _render_actions(
+            update,
+            context,
+            route,
+            {
+                "actions": [{
+                    "kind": "edit_message",
+                    "text": "正在继续处理",
+                }],
+            },
+        )
+
+        self.assertTrue(rendered)
+        self.assertEqual((message_id, message_kind), (58, "text"))
+        update.callback_query.edit_message_reply_markup.assert_awaited_once_with(
+            reply_markup=None
+        )
+
+    async def test_callback_edit_keeps_the_next_stage_keyboard(self):
+        from app.handlers.plugin_handler import _render_actions
+
+        update, context, _manager = self._request([], user_id=1)
+        update.callback_query = SimpleNamespace(
+            edit_message_reply_markup=AsyncMock(),
+        )
+        update.effective_message.edit_text = AsyncMock(
+            return_value=SimpleNamespace(message_id=59)
+        )
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+
+        rendered, message_id, message_kind = await _render_actions(
+            update,
+            context,
+            route,
+            {
+                "actions": [{
+                    "kind": "edit_message",
+                    "text": "请选择下一步",
+                    "data": {"keyboard": [[{
+                        "text": "继续",
+                        "callback_data": "search:next",
+                    }]]},
+                }],
+            },
+        )
+
+        self.assertTrue(rendered)
+        self.assertEqual((message_id, message_kind), (59, "text"))
+        update.callback_query.edit_message_reply_markup.assert_not_awaited()
+        markup = update.effective_message.edit_text.await_args.kwargs[
+            "reply_markup"
+        ]
+        self.assertEqual(
+            markup.inline_keyboard[0][0].callback_data,
+            "search:next",
+        )
+
     async def test_feature_config_patch_from_callback_updates_original_message(self):
         from app.handlers.plugin_handler import handle_feature_result
 

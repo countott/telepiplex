@@ -186,6 +186,20 @@ def search_prowlarr(
 ) -> list[dict]:
     prowlarr_config, base_url, api_key = _get_prowlarr_config()
     categories = prowlarr_config.get("categories") or {}
+    normalized_media_type = str(media_type or "").strip().casefold()
+    category_key = (
+        "tv"
+        if normalized_media_type in {"series", "tv"}
+        else "movie"
+        if normalized_media_type == "movie"
+        else normalized_media_type
+    )
+    default_category = (
+        2000 if normalized_media_type == "movie" else 5000
+    )
+    category = categories.get(category_key)
+    if category is None:
+        category = categories.get(normalized_media_type, default_category)
 
     if indexer_ids is None:
         selected_indexers = prowlarr_config.get("indexer_ids", "-2")
@@ -196,7 +210,7 @@ def search_prowlarr(
     params = {
         "query": query,
         "indexerIds": selected_indexers,
-        "categories": categories.get(media_type, 2000 if media_type == "movie" else 5000),
+        "categories": category,
         "type": "search",
     }
     url = f"{base_url}/api/v1/search"

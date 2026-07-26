@@ -141,6 +141,33 @@ class ReleaseGateTest(unittest.TestCase):
             ["The.Office.US.S01"],
         )
 
+    def test_textual_season_markers_only_match_the_requested_season(self):
+        result = gate_releases(
+            [
+                release("The.Office.US.Season.02.1080p", "a"),
+                release("The.Office.US.Complete.Season.02.BDRip", "b"),
+                release("The.Office.US.Season.01.1080p", "c"),
+            ],
+            series_contract(
+                scope="season",
+                expected_seasons=(1, 2),
+                season=2,
+            ),
+        )
+
+        self.assertEqual(
+            [item["title"] for item in result.eligible],
+            [
+                "The.Office.US.Season.02.1080p",
+                "The.Office.US.Complete.Season.02.BDRip",
+            ],
+        )
+        self.assertEqual(result.rejection_counts["scope_mismatch"], 1)
+        self.assertTrue(all(
+            item["release_scope"] == "single_season_pack"
+            for item in result.eligible
+        ))
+
     def test_episode_only_accepts_exact_single_episode(self):
         result = gate_releases(
             [

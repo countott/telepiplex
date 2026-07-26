@@ -136,6 +136,10 @@ class ReleaseReportTest(unittest.TestCase):
             ("Movie.5.1.DD+.Atmos-GROUP", "5.1·有损·Atmos"),
             ("Movie.2.0.AAC-GROUP", "2.0·有损"),
             (
+                "Movie.1080p.WEB-DL.x264.AAC.2CH-GROUP",
+                "1080p·WEB-DL·x264·2.0·有损",
+            ),
+            (
                 "Movie.7.1.DTS-HD.MA.DTS:X-GROUP",
                 "7.1·无损·DTS",
             ),

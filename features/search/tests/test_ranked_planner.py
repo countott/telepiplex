@@ -5,9 +5,14 @@ from telepiplex_search.planner import (
     PlanningBudget,
     SearchPlanningError,
     _ordered_expansion_candidates,
+    _source_media_type_clarification_plan,
     build_confirmable_search_plan,
 )
-from telepiplex_search.entity_graph import build_search_graph
+from telepiplex_search.entity_graph import (
+    CandidateEntity,
+    EvidenceFact,
+    build_search_graph,
+)
 from telepiplex_search.evidence_verifier import (
     VerifiedAiDecision,
     VerifiedEquivalenceEdge,
@@ -439,6 +444,98 @@ def _orchestrated_series_outcome(series_items):
 
 
 class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
+    def test_source_clarification_filters_prefix_noise_and_keeps_both_types(
+        self,
+    ):
+        def candidate(
+            key,
+            media_type,
+            year,
+            chinese,
+            english,
+        ):
+            return CandidateEntity(key, (EvidenceFact(
+                fact_id=f"{key}:fact",
+                provider="tvdb",
+                titles=(chinese, english),
+                year=year,
+                media_type=media_type,
+                external_ids={"tvdb": key},
+                official_english_title=english,
+                chinese_title=chinese,
+            ),))
+
+        candidates = [
+            candidate(
+                "movie-related",
+                "movie",
+                "2022",
+                "想見你",
+                "Someday or One Day: The Movie",
+            ),
+            candidate(
+                "movie-related-duplicate",
+                "movie",
+                "2022",
+                "想見你",
+                "Someday or One Day: The Movie",
+            ),
+            *[
+                candidate(
+                    f"movie-noise-{index}",
+                    "movie",
+                    str(2010 + index),
+                    f"想见你以后{index}",
+                    f"Unrelated Movie {index}",
+                )
+                for index in range(5)
+            ],
+            candidate(
+                "series-related",
+                "series",
+                "2019",
+                "想见你",
+                "Someday or One Day",
+            ),
+            candidate(
+                "series-noise",
+                "series",
+                "2024",
+                "想见你父母",
+                "Meet the Parents",
+            ),
+        ]
+
+        plan = _source_media_type_clarification_plan(
+            plan_id="prefix-noise",
+            raw_query="想见你",
+            intent={"title": "想见你"},
+            candidates=candidates,
+        )
+
+        self.assertEqual(
+            plan["clarification"]["options"],
+            [{
+                "label": "电影《想见你》(2022)",
+                "query": "Someday or One Day: The Movie 2022（电影）",
+                "media_type": "movie",
+                "year": "2022",
+                "locked_identity": {
+                    "key": "tvdb",
+                    "value": "movie-related",
+                },
+            }, {
+                "label": "剧集《想见你》(2019)",
+                "query": "Someday or One Day 2019（电视剧）",
+                "media_type": "series",
+                "year": "2019",
+                "locked_identity": {
+                    "key": "tvdb",
+                    "value": "series-related",
+                },
+            }],
+        )
+
     @patch(
         "telepiplex_search.planner.infer_candidate_scorecard_with_ai",
         return_value=None,

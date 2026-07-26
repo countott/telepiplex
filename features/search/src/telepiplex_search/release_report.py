@@ -101,6 +101,8 @@ def _audio(title: str) -> list[str]:
     match = re.search(r"(?<!\d)([257]\.1|[12]\.0)(?!\d)", title)
     if match:
         channel = match.group(1)
+    elif _matches(title, r"(?<![a-z0-9])2[ ._-]?ch(?![a-z0-9])"):
+        channel = "2.0"
     quality = ""
     family = ""
     if "truehd" in compact:

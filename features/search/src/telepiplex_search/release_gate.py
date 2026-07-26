@@ -103,6 +103,7 @@ _SEASON_RANGE = re.compile(
     r"(?i)\bS(\d{1,2})\s*(?:-|~|TO)\s*S?(\d{1,2})\b"
 )
 _SEASON = re.compile(r"(?i)\bS(\d{1,2})(?!E\d)\b")
+_TEXT_SEASON = re.compile(r"(?i)\bSEASON[ ._-]*(\d{1,2})(?!\d)")
 
 
 @dataclass(frozen=True)
@@ -287,6 +288,9 @@ def _classify_scope(
         seasons.update(_expand_range(start, end, maximum=100))
         evidence.append(match.group(0))
     for match in _SEASON.finditer(value):
+        seasons.add(int(match.group(1)))
+        evidence.append(match.group(0))
+    for match in _TEXT_SEASON.finditer(value):
         seasons.add(int(match.group(1)))
         evidence.append(match.group(0))
 

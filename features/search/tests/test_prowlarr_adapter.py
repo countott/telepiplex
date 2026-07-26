@@ -89,6 +89,20 @@ class ProwlarrAdapterTest(unittest.TestCase):
         self.assertEqual(kwargs["params"]["indexerIds"], "17")
         self.assertEqual(kwargs["timeout"], 75)
 
+    @patch.object(prowlarr.requests, "get")
+    def test_series_media_type_uses_configured_tv_category(self, get):
+        runtime_context.config["search"]["prowlarr"]["categories"] = {
+            "movie": 2001,
+            "tv": 5001,
+            "series": 5999,
+        }
+        get.return_value.json.return_value = []
+
+        prowlarr.search_prowlarr("Someday or One Day S01", "series")
+
+        _url, kwargs = get.call_args
+        self.assertEqual(kwargs["params"]["categories"], 5001)
+
 
 if __name__ == "__main__":
     unittest.main()

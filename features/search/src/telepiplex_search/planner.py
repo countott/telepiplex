@@ -598,43 +598,85 @@ def _source_media_type_clarification_plan(
             for anchor in direct
         ):
             bounded.append(candidate)
-    movies = [
+    raw_movies = [
         candidate
         for candidate in bounded
         if candidate.media_types == frozenset({"movie"})
     ]
-    series = [
+    raw_series = [
         candidate
         for candidate in bounded
         if candidate.media_types == frozenset({"series"})
     ]
-    if not any(
-        _candidate_titles_related(movie, show)
-        for movie in movies
-        for show in series
-    ):
+    related_pairs = [
+        (movie, show)
+        for movie in raw_movies
+        for show in raw_series
+        if (
+            _candidate_titles_related(movie, show)
+            and (
+                target in movie.normalized_titles
+                or target in show.normalized_titles
+            )
+        )
+    ]
+    if not related_pairs:
         return None
-    options = [
-        option
-        for media_type, group in (("movie", movies), ("series", series))
+
+    movies = [
+        candidate
+        for candidate in raw_movies
+        if any(candidate is movie for movie, _show in related_pairs)
+    ]
+    series = [
+        candidate
+        for candidate in raw_series
+        if any(candidate is show for _movie, show in related_pairs)
+    ]
+
+    def group_options(media_type: str, group: list[CandidateEntity]) -> list[dict]:
+        options = []
+        seen = set()
         for candidate in sorted(
             group,
             key=lambda item: (
                 next(iter(sorted(item.years)), ""),
                 item.candidate_key,
             ),
-        )
-        if (
-            option := _source_clarification_option(
+        ):
+            option = _source_clarification_option(
                 candidate,
                 media_type=media_type,
                 target=target,
                 preferred_title=_text(intent.get("title")),
             )
-        ) is not None
-    ][:6]
-    if not options:
+            if option is None:
+                continue
+            key = (
+                media_type,
+                normalize_title(option.get("label")),
+                _text(option.get("year")),
+                normalize_title(option.get("query")),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            options.append(option)
+        return options
+
+    movie_options = group_options("movie", movies)
+    series_options = group_options("series", series)
+    if not movie_options or not series_options:
         return None
+    options = []
+    for index in range(max(len(movie_options), len(series_options))):
+        for group in (movie_options, series_options):
+            if index < len(group):
+                options.append(group[index])
+            if len(options) >= 6:
+                break
+        if len(options) >= 6:
+            break
     return {
         "plan_id": plan_id,
         "raw_query": raw_query,

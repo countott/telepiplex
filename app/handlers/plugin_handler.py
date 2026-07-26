@@ -818,6 +818,7 @@ async def _render_actions(
         return False, None, None
     last_message_id = None
     last_message_kind = None
+    source_keyboard_resolved = False
     for index, action in enumerate(actions):
         if not isinstance(action, dict) or action.get("kind") not in _SAFE_ACTIONS:
             await _feature_feedback(
@@ -873,6 +874,7 @@ async def _render_actions(
         if action["kind"] == "send_message":
             sent = await update.effective_message.reply_text(text, **kwargs)
             rendered_kind = "text"
+            edited_source = False
         elif action["kind"] == "edit_message":
             if _message_has_photo(update.effective_message):
                 try:
@@ -882,8 +884,10 @@ async def _render_actions(
                 except Exception:
                     pass
                 sent = await update.effective_message.reply_text(text, **kwargs)
+                edited_source = False
             else:
                 sent = await update.effective_message.edit_text(text, **kwargs)
+                edited_source = True
             rendered_kind = "text"
         else:
             caption = text
@@ -898,6 +902,7 @@ async def _render_actions(
                         caption=caption,
                         **media_kwargs,
                     )
+                    edited_source = False
                 else:
                     sent = await update.effective_message.edit_media(
                         media=InputMediaPhoto(
@@ -907,10 +912,19 @@ async def _render_actions(
                         ),
                         **media_kwargs,
                     )
+                    edited_source = True
                 rendered_kind = "photo"
             except Exception:
                 sent = await update.effective_message.reply_text(text, **kwargs)
                 rendered_kind = "text"
+                edited_source = False
+        if (
+            getattr(update, "callback_query", None) is not None
+            and not source_keyboard_resolved
+        ):
+            if not edited_source or reply_markup is None:
+                await _clear_callback_keyboard(update)
+            source_keyboard_resolved = True
         candidate = getattr(sent, "message_id", None)
         if not isinstance(candidate, int) and action["kind"] in {
             "edit_message", "edit_photo",
@@ -920,6 +934,17 @@ async def _render_actions(
             last_message_id = candidate
             last_message_kind = rendered_kind
     return True, last_message_id, last_message_kind
+
+
+async def _clear_callback_keyboard(update):
+    query = getattr(update, "callback_query", None)
+    editor = getattr(query, "edit_message_reply_markup", None)
+    if not callable(editor):
+        return
+    try:
+        await editor(reply_markup=None)
+    except Exception:
+        pass
 
 
 def _message_has_photo(message) -> bool:
