@@ -11,7 +11,7 @@
 纯本地验证构建（不读取 Git 元数据）：
 
 ```bash
-python tools/build_feature.py features/download /tmp/download-1.0.2.tpx \
+python tools/build_feature.py features/download /tmp/download-1.0.3.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

@@ -57,10 +57,76 @@ class TitlePolicyTest(unittest.TestCase):
             official_english_title="Attack on Titan",
             romanized_original_title="",
             media_type="series",
+            genres=("Animation",),
         ),))
 
         with self.assertRaisesRegex(TitlePolicyError, "canonical_title_unavailable"):
             resolve_title_policy(candidate)
+
+    def test_japanese_animation_derives_romaji_from_canonical_title(self):
+        for media_type in ("series", "movie"):
+            with self.subTest(media_type=media_type):
+                candidate = CandidateEntity(f"tvdb:{media_type}:3", (fact(
+                    fact_id=f"tvdb:{media_type}:3",
+                    titles=("蜂蜜与四叶草", "ハチミツとクローバー"),
+                    original_title="ハチミツとクローバー",
+                    original_language="ja",
+                    official_english_title="Honey and Clover",
+                    romanized_original_title="",
+                    media_type=media_type,
+                    genres=("Animation",),
+                ),))
+
+                titles = resolve_title_policy(candidate)
+
+                self.assertEqual(
+                    titles.romanized_original_title,
+                    "Hachimitsu to Kuroobaa",
+                )
+                self.assertEqual(
+                    titles.canonical_search_title,
+                    "Hachimitsu to Kuroobaa",
+                )
+                self.assertEqual(
+                    titles.search_title_policy,
+                    "romanized_original",
+                )
+
+    def test_japanese_animation_romanization_handles_digraph_sokuon_and_long_vowel(self):
+        candidate = CandidateEntity("tvdb:movie:5", (fact(
+            fact_id="tvdb:movie:5",
+            titles=("キャット・ストーリー",),
+            original_title="キャット・ストーリー",
+            original_language="ja",
+            official_english_title="Cat Story",
+            romanized_original_title="",
+            media_type="movie",
+            genres=("Animation",),
+        ),))
+
+        titles = resolve_title_policy(candidate)
+
+        self.assertEqual(
+            titles.romanized_original_title,
+            "Kyatto Sutoorii",
+        )
+
+    def test_explicit_japanese_romaji_precedes_derived_value(self):
+        candidate = CandidateEntity("tvdb:series:4", (fact(
+            fact_id="tvdb:series:4",
+            titles=("進撃の巨人",),
+            original_title="進撃の巨人",
+            original_language="ja",
+            official_english_title="Attack on Titan",
+            romanized_original_title="Explicit Romaji",
+            media_type="series",
+            genres=("Anime",),
+        ),))
+
+        titles = resolve_title_policy(candidate)
+
+        self.assertEqual(titles.romanized_original_title, "Explicit Romaji")
+        self.assertEqual(titles.canonical_search_title, "Explicit Romaji")
 
     def test_non_japanese_without_official_english_is_not_finalizable(self):
         candidate = CandidateEntity("douban:movie:4", (fact(

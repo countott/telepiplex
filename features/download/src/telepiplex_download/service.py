@@ -9,6 +9,7 @@ import uuid
 
 from telepiplex_plugin_sdk import FeatureError
 
+from .client import Open115Error
 from .context import logger
 from .directories import (
     normalize_save_directories,
@@ -64,6 +65,22 @@ def _ambiguous_host_report_error(exc: Exception) -> bool:
     return not isinstance(exc, FeatureError) or exc.code in {
         "host_unavailable", "deadline_exceeded", "invalid_response",
     }
+
+
+def _offline_task_status(task: dict) -> tuple[int | str, str]:
+    raw_status = task.get("status")
+    try:
+        status = int(raw_status)
+    except (TypeError, ValueError):
+        status = str(raw_status or "unknown")
+    labels = {
+        -1: "失败，等待 115 重试",
+        0: "等待下载",
+        1: "下载中",
+        2: "已完成",
+        4: "正在搜索资源",
+    }
+    return status, labels.get(status, f"未知状态 {status}")
 
 
 class TokenPersistenceCancelled(RuntimeError):
@@ -1282,6 +1299,18 @@ class DownloadFeature:
                     )
                 operation_id = stored_operation_id or requested_operation_id
             operation_id = operation_id or uuid.uuid4().hex
+            if persisted is not None and persisted["state"] in {
+                "cancelled", "completed", "failed", "downloaded",
+                "running", "interrupted",
+            }:
+                return self._persisted_download_duplicate(
+                    persisted, requested_operation_id
+                )
+            if self.active_job_ids and job_id not in self.active_job_ids:
+                raise FeatureError(
+                    "download_busy",
+                    "another download task is active",
+                )
             if persisted is None:
                 durable_payload = payload | {
                     "link": link,
@@ -1289,14 +1318,12 @@ class DownloadFeature:
                     "operation_id": operation_id,
                 }
                 persisted = self.jobs.create_or_get(job_id, durable_payload)
-            if persisted["state"] in {
-                "cancelled", "completed", "failed", "downloaded",
-                "running", "interrupted",
-            }:
-                return self._persisted_download_duplicate(
-                    persisted, requested_operation_id
-                )
         else:
+            if self.active_job_ids and job_id not in self.active_job_ids:
+                raise FeatureError(
+                    "download_busy",
+                    "another download task is active",
+                )
             operation_id = operation_id or uuid.uuid4().hex
         if job_id in self.active_job_ids:
             operation = next((
@@ -1450,35 +1477,91 @@ class DownloadFeature:
             self._raise_if_cancelled(operation)
             await self._confirm_download_ownership(operation)
             self._raise_if_cancelled(operation)
-            await asyncio.to_thread(self.client.add_offline_task, link, selected_path)
+            existing_task = None
+            try:
+                await asyncio.to_thread(
+                    self.client.add_offline_task,
+                    link,
+                    selected_path,
+                )
+            except Open115Error as exc:
+                if exc.code != "10008" or exc.operation != "add_offline_task":
+                    raise
+                existing_task = await asyncio.to_thread(
+                    self.client.find_offline_task,
+                    link,
+                    selected_path,
+                )
+                if existing_task is None:
+                    raise exc
+                provider_status, provider_status_text = _offline_task_status(
+                    existing_task
+                )
+                progress_value = float(
+                    existing_task.get("percentDone") or 0
+                )
+                info_hash = str(existing_task.get("info_hash") or "")
+                if info_hash:
+                    operation["info_hash"] = info_hash
+                reattached_text = (
+                    "检测到已有 115 离线任务，已重新接入。"
+                    f"当前状态：{provider_status_text}"
+                    f"（{progress_value:.1f}%）。"
+                )
+                await self._report_operation(
+                    operation_id,
+                    state="running",
+                    stage="downloading",
+                    status_text=reattached_text,
+                    control="cancel",
+                    details={
+                        "reattached": True,
+                        "provider_status": provider_status,
+                        "progress": progress_value,
+                    },
+                )
+                if user_id:
+                    try:
+                        await self.host.notify_user(
+                            user_id,
+                            reattached_text,
+                            idempotency_key=f"{job_id}:reattached",
+                        )
+                    except Exception:
+                        pass
+            else:
+                self._raise_if_cancelled(operation)
+                await self._report_operation(
+                    operation_id,
+                    state="running",
+                    stage="submitted",
+                    status_text="115 离线任务已提交。",
+                    control="cancel",
+                )
+                self._raise_if_cancelled(operation)
+                await self._report_operation(
+                    operation_id,
+                    state="running",
+                    stage="downloading",
+                    status_text="115 正在下载，等待任务完成。",
+                    control="cancel",
+                )
             self._raise_if_cancelled(operation)
-            await self._report_operation(
-                operation_id,
-                state="running",
-                stage="submitted",
-                status_text="115 离线任务已提交。",
-                control="cancel",
-            )
-            self._raise_if_cancelled(operation)
-            await self._report_operation(
-                operation_id,
-                state="running",
-                stage="downloading",
-                status_text="115 正在下载，等待任务完成。",
-                control="cancel",
-            )
 
             def progress(value):
                 current_hash = str(value.get("info_hash") or "")
                 if current_hash:
                     operation["info_hash"] = current_hash
-                operation["details"] = {
-                    "progress": float(value.get("progress") or 0),
-                }
+                details = dict(operation.get("details") or {})
+                details["progress"] = float(value.get("progress") or 0)
+                if "task_status" in value:
+                    details["provider_status"] = value["task_status"]
+                operation["details"] = details
 
             completed = await asyncio.to_thread(
                 self.client.wait_for_download,
                 link,
+                existing_task=existing_task,
                 timeout=float(self.config.get("download_timeout") or 1800),
                 poll_interval=float(self.config.get("poll_interval") or 10),
                 cancel_event=cancel_event,

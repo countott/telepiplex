@@ -1,5 +1,6 @@
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -12,6 +13,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DeploymentContractTest(unittest.TestCase):
+    def _docker_instructions(self):
+        instructions = []
+        pending = ""
+        for raw_line in (ROOT / "Dockerfile").read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            pending += line.rstrip("\\").rstrip() + " "
+            if line.endswith("\\"):
+                continue
+            instruction, value = pending.strip().split(None, 1)
+            instructions.append((instruction.upper(), value))
+            pending = ""
+        self.assertEqual(pending, "")
+        return instructions
+
     def _advanced_section(self, source, heading):
         match = re.search(
             rf"(?ms)^{re.escape(heading)}\s*$\n(?P<body>.*?)(?=^#{{2,3}}\s|\Z)",
@@ -29,6 +46,38 @@ class DeploymentContractTest(unittest.TestCase):
         self.assertIn('VOLUME ["/config"]', source)
         self.assertNotIn("ADD ./app .", source)
         self.assertNotIn("COPY ./examples", source)
+
+    def test_release_image_receives_and_exports_the_release_commit(self):
+        instructions = self._docker_instructions()
+        arguments = {}
+        environment = {}
+        for instruction, value in instructions:
+            if instruction == "ARG":
+                key, default = value.split("=", 1)
+                arguments[key] = default
+            elif instruction == "ENV":
+                environment.update(
+                    token.split("=", 1) for token in shlex.split(value) if "=" in token
+                )
+
+        self.assertEqual(arguments["TELEPIPLEX_COMMIT"], "unknown")
+        self.assertEqual(environment["TELEPIPLEX_COMMIT"], "${TELEPIPLEX_COMMIT}")
+
+        workflow = yaml.load(
+            (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"),
+            Loader=yaml.BaseLoader,
+        )
+        steps = workflow["jobs"]["build-telepiplex-image"]["steps"]
+        build = next(
+            step for step in steps
+            if step.get("uses") == "docker/build-push-action@v7"
+        )
+        build_args = dict(
+            line.strip().split("=", 1)
+            for line in build["with"]["build-args"].splitlines()
+            if line.strip()
+        )
+        self.assertEqual(build_args["TELEPIPLEX_COMMIT"], "${{ github.sha }}")
 
     def test_compose_runs_one_host_service_with_persistent_config_only(self):
         compose = yaml.safe_load((ROOT / "docker-compose.yaml").read_text(encoding="utf-8"))

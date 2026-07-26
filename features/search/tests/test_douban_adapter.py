@@ -24,6 +24,13 @@ class DoubanAdapterTest(unittest.TestCase):
             "open_until": 0.0,
         })
 
+    def test_empty_expanded_queries_are_unavailable_not_not_found(self):
+        result = douban.lookup_douban_evidence([])
+
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["facts"], [])
+        self.assertEqual(result["error"], "source_queries_empty")
+
     @patch("telepiplex_search.adapters.douban.requests.get")
     def test_lookup_returns_normalized_subject_fact(self, get_mock):
         get_mock.side_effect = [

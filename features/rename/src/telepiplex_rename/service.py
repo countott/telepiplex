@@ -57,6 +57,29 @@ def _plain_notification(value) -> str:
     return str(value or "").replace("`", "")
 
 
+def _safe_error_detail(exc: Exception) -> str:
+    detail = str(getattr(exc, "message", "") or str(exc) or type(exc).__name__)
+    return _plain_notification(detail).replace("\n", " ")[:300]
+
+
+def _retryable_error(code: str) -> bool:
+    code = str(code or "")
+    return (
+        code in {
+            "busy",
+            "capability_unavailable",
+            "deadline_exceeded",
+            "dependent_capability_lost",
+            "host_unavailable",
+            "metadata_source_unavailable",
+            "notification_unavailable",
+            "unavailable",
+        }
+        or code.endswith("_unavailable")
+        or code.endswith("_timeout")
+    )
+
+
 class StorageProxy:
     def __init__(
         self,
@@ -437,7 +460,7 @@ class RenameFeature:
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    resolved = {}
+                    raise
                 if isinstance(resolved.get("media_metadata"), dict):
                     try:
                         metadata = attach_media_metadata(
@@ -588,17 +611,37 @@ class RenameFeature:
                 (self.operations.get(operation_id) or {}).get("stage")
                 or "organizing"
             )
+            error_code = str(
+                getattr(exc, "code", "") or type(exc).__name__
+            )
+            error_detail = _safe_error_detail(exc)
+            retryable = _retryable_error(error_code)
+            error_details = {
+                "error_code": error_code,
+                "error_stage": stopped_at,
+                "error_detail": error_detail,
+                "retryable": retryable,
+                "stopped_at": stopped_at,
+            }
+            if stopped_at == "metadata_resolution":
+                error_message = (
+                    "⚠️ 元数据解析失败，未移动媒体文件："
+                    f"{error_code}（{error_detail}）"
+                )
+            else:
+                error_message = (
+                    "⚠️ 整理执行异常，已停止自动重试，请人工检查："
+                    f"{error_code}（{error_detail}）"
+                )
             outcome = {
                 "organized": False,
                 "final_path": event.final_path if event else str(
                     payload.get("final_path") or ""
                 ),
-                "message": (
-                    "⚠️ 整理执行异常，已停止自动重试，请人工检查："
-                    f"{type(exc).__name__}"
-                ),
+                "message": error_message,
                 "user_id": user_id,
                 "job_id": job_id,
+                "error": error_details,
             }
             if self.jobs:
                 self.jobs.update(job_id, "failed", outcome)
@@ -608,7 +651,7 @@ class RenameFeature:
                 stage=stopped_at,
                 status_text=outcome["message"],
                 control="",
-                details={"stopped_at": stopped_at},
+                details=error_details,
             )
             if user_id:
                 try:
@@ -1141,13 +1184,30 @@ class RenameFeature:
         leaf = str(event.final_path).rstrip("/").rsplit("/", 1)[-1]
         if not event.storage.create_dir_recursive(root):
             raise RuntimeError(f"cannot create unorganized path: {root}")
-        if event.storage.move_file(event.final_path, root) is not True:
-            raise RuntimeError(f"cannot move release to unorganized path: {event.final_path}")
-        target = f"{root}/{leaf}"
+        move = event.storage.move_file_detailed(event.final_path, root)
+        state = str(
+            move.get("state") if isinstance(move, dict) else ""
+        )
+        if state not in {"moved", "copied_source_retained"}:
+            raise RuntimeError(
+                "cannot move release to unorganized path: "
+                f"{event.final_path} ({state or 'invalid_result'})"
+            )
+        target = str(
+            move.get("target_path") if isinstance(move, dict) else ""
+        ) or f"{root}/{leaf}"
+        if state == "copied_source_retained":
+            message = (
+                "⚠️ 无法确定整理规则，已复制到未整理；"
+                "源文件仍保留，请人工检查后清理。"
+                f"\n保存目录：{target}"
+            )
+        else:
+            message = f"⚠️ 无法确定整理规则，已移入未整理。\n保存目录：{target}"
         return PostDownloadResult(
             True,
             final_path=target,
-            message=f"⚠️ 无法确定整理规则，已移入未整理。\n保存目录：{target}",
+            message=message,
             should_stop=True,
             metadata=event.metadata,
         )

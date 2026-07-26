@@ -312,6 +312,295 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
             "add_offline_task",
         )
 
+    def test_existing_offline_task_matches_only_the_magnet_task_identity(self):
+        from telepiplex_download.client import Open115Client
+
+        requested_hash = "b" * 40
+        client = Open115Client({})
+        client.get_offline_tasks = lambda: [
+            {
+                "url": "magnet:?xt=urn:btih:" + "c" * 40,
+                "info_hash": "c" * 40,
+                "name": "renamed-to-look-like-requested-task",
+                "file_id": "moved-file-1",
+                "status": 1,
+                "percentDone": 25,
+            },
+            {
+                "url": (
+                    "magnet:?xt=urn:btih:"
+                    + requested_hash.upper()
+                    + "&dn=Original.Name"
+                ),
+                "info_hash": requested_hash.upper(),
+                "name": "Original.Name",
+                "file_id": "task-file-1",
+                "status": 1,
+                "percentDone": 50,
+            },
+        ]
+
+        matched = client.find_offline_task(
+            "magnet:?xt=urn:btih:" + requested_hash + "&dn=New.Name"
+        )
+
+        self.assertEqual(matched["info_hash"], requested_hash.upper())
+        self.assertEqual(matched["file_id"], "task-file-1")
+
+    def test_existing_failed_task_is_polled_by_bound_identity_until_retry_succeeds(self):
+        from telepiplex_download.client import Open115Client
+
+        info_hash = "d" * 40
+        link = "magnet:?xt=urn:btih:" + info_hash
+        client = Open115Client({})
+        snapshots = iter([
+            [{
+                "url": link,
+                "info_hash": info_hash,
+                "name": "Retry.Show",
+                "status": -1,
+                "percentDone": 12,
+            }],
+            [{
+                "url": link,
+                "info_hash": info_hash,
+                "name": "Retry.Show",
+                "status": 1,
+                "percentDone": 40,
+            }],
+            [{
+                "url": link,
+                "info_hash": info_hash,
+                "name": "Retry.Show",
+                "status": 2,
+                "percentDone": 100,
+            }],
+        ])
+        client.get_offline_tasks = lambda: next(snapshots)
+        progress = []
+
+        completed = client.wait_for_download(
+            link,
+            existing_task={
+                "url": link,
+                "info_hash": info_hash,
+                "status": -1,
+                "percentDone": 12,
+            },
+            timeout=1,
+            poll_interval=0.01,
+            progress_callback=progress.append,
+        )
+
+        self.assertEqual(completed["info_hash"], info_hash)
+        self.assertEqual(completed["resource_name"], "Retry.Show")
+        self.assertEqual(
+            [item["task_status"] for item in progress],
+            [-1, 1, 2],
+        )
+
+    def test_completed_existing_task_is_not_reattached_after_output_was_moved(self):
+        from telepiplex_download.client import Open115Client
+
+        info_hash = "f" * 40
+        link = "magnet:?xt=urn:btih:" + info_hash
+        client = Open115Client({})
+        client.get_offline_tasks = lambda: [{
+            "url": link,
+            "info_hash": info_hash,
+            "name": "Already.Moved.Show",
+            "status": 2,
+            "percentDone": 100,
+        }]
+        client.get_file_info = lambda _path: None
+
+        matched = client.find_offline_task(link, "/Downloads")
+
+        self.assertIsNone(matched)
+
+    async def test_10008_reattaches_running_failed_and_completed_tasks(self):
+        from telepiplex_download.client import Open115Error
+        from telepiplex_download.service import DownloadFeature
+
+        cases = (
+            (1, 45, "下载中"),
+            (-1, 12, "失败，等待 115 重试"),
+            (2, 100, "已完成"),
+        )
+        for status, percent, status_text in cases:
+            with self.subTest(status=status):
+                link = "magnet:?xt=urn:btih:" + str(abs(status) + 4) * 40
+                existing_task = {
+                    "url": link,
+                    "info_hash": str(abs(status) + 4) * 40,
+                    "name": "Existing.Show",
+                    "status": status,
+                    "percentDone": percent,
+                    "wp_path_id": "folder-1",
+                }
+
+                class ExistingTaskClient(FakeClient):
+                    def __init__(self):
+                        super().__init__()
+                        self.wait_existing_task = None
+
+                    def add_offline_task(self, _link, _selected_path):
+                        raise Open115Error(
+                            "该任务已存在",
+                            code="10008",
+                            operation="add_offline_task",
+                        )
+
+                    def find_offline_task(self, _link, _selected_path=""):
+                        return dict(existing_task)
+
+                    def wait_for_download(self, _link, **kwargs):
+                        self.wait_existing_task = kwargs.get("existing_task")
+                        kwargs["progress_callback"]({
+                            "resource_name": "Existing.Show",
+                            "info_hash": existing_task["info_hash"],
+                            "progress": 100,
+                            "task_status": 2,
+                        })
+                        return {
+                            "resource_name": "Existing.Show",
+                            "info_hash": existing_task["info_hash"],
+                            "progress": 100,
+                        }
+
+                host = FakeHost()
+                runtime = FakeRuntime()
+                client = ExistingTaskClient()
+                feature = DownloadFeature(
+                    config={"download_timeout": 30, "poll_interval": 0.01},
+                    host=host,
+                    client=client,
+                )
+                feature.bind_runtime(runtime)
+
+                accepted = await feature.download_capability({
+                    "method": "submit",
+                    "payload": {
+                        "link": link,
+                        "selected_path": "/Downloads",
+                        "operation_id": f"op-existing-{status}",
+                        "chat_id": 10,
+                        "user_id": 1,
+                    },
+                    "context": {"idempotency_key": f"existing-{status}"},
+                })
+                await runtime.tasks.pop(accepted["job_id"])
+
+                reattached = [
+                    report for report in host.reports
+                    if "重新接入" in report["status_text"]
+                ]
+                self.assertEqual(len(reattached), 1)
+                self.assertIn(status_text, reattached[0]["status_text"])
+                self.assertTrue(reattached[0]["details"]["reattached"])
+                self.assertEqual(
+                    reattached[0]["details"]["provider_status"],
+                    status,
+                )
+                self.assertIn("重新接入", host.notifications[0][1])
+                self.assertIn(status_text, host.notifications[0][1])
+                self.assertEqual(client.wait_existing_task, existing_task)
+                self.assertEqual(host.events[0][0], "download.completed")
+                self.assertEqual(
+                    host.events[0][1]["download_root"],
+                    "/Downloads/Existing.Show",
+                )
+                self.assertFalse(any(
+                    event_type == "download.failed"
+                    for event_type, _payload, _kwargs in host.events
+                ))
+
+    async def test_10008_without_matching_external_task_keeps_stable_failure(self):
+        from telepiplex_download.client import Open115Error
+
+        class MissingTaskClient(FakeClient):
+            def add_offline_task(self, _link, _selected_path):
+                raise Open115Error(
+                    "该任务已存在",
+                    code="10008",
+                    operation="add_offline_task",
+                )
+
+            def find_offline_task(self, _link, _selected_path=""):
+                return None
+
+        self.feature.client = MissingTaskClient()
+        result = await self.feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "e" * 40,
+                "selected_path": "/Downloads",
+                "operation_id": "op-existing-missing",
+                "chat_id": 10,
+                "user_id": 1,
+            },
+            "context": {"idempotency_key": "existing-missing"},
+        })
+
+        await self.runtime.tasks.pop(result["job_id"])
+
+        event_type, payload, _kwargs = self.host.events[-1]
+        self.assertEqual(event_type, "download.failed")
+        self.assertEqual(payload["error_code"], "open115_submit_rejected")
+        self.assertEqual(payload["provider_code"], "10008")
+        self.assertEqual(
+            self.host.reports[-1]["details"]["error_code"],
+            "open115_submit_rejected",
+        )
+
+    async def test_different_download_is_rejected_while_one_task_is_active(self):
+        class BlockingClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.wait_started = threading.Event()
+
+            def wait_for_download(self, _link, **kwargs):
+                self.wait_started.set()
+                kwargs["cancel_event"].wait(1)
+                raise RuntimeError("cancelled")
+
+        client = BlockingClient()
+        self.feature.client = client
+        first = await self.feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "1" * 40,
+                "selected_path": "/Downloads",
+                "operation_id": "op-active-one",
+                "chat_id": 10,
+                "user_id": 1,
+            },
+            "context": {"idempotency_key": "active-one"},
+        })
+        running = asyncio.create_task(self.runtime.tasks.pop(first["job_id"]))
+        self.assertTrue(await asyncio.to_thread(client.wait_started.wait, 1))
+
+        with self.assertRaisesRegex(Exception, "active"):
+            await self.feature.download_capability({
+                "method": "submit",
+                "payload": {
+                    "link": "magnet:?xt=urn:btih:" + "2" * 40,
+                    "selected_path": "/Downloads",
+                    "operation_id": "op-active-two",
+                    "chat_id": 10,
+                    "user_id": 1,
+                },
+                "context": {"idempotency_key": "active-two"},
+            })
+
+        await self.feature.operation_control({
+            "operation_id": "op-active-one",
+            "action": "cancel",
+            "revision": self.host.reports[-1]["revision"],
+        })
+        await running
+        self.assertNotIn("active-two", self.runtime.tasks)
+
     async def test_open115_auth_failure_is_actionable_on_every_failure_surface(self):
         from telepiplex_download.client import Open115Error
         from telepiplex_download.jobs import DownloadJobStore
@@ -1815,7 +2104,7 @@ class RuntimeStartupTest(unittest.TestCase):
     @staticmethod
     def _context(root: Path):
         return SimpleNamespace(
-            manifest={"plugin_id": "download", "version": "1.0.2"},
+            manifest={"plugin_id": "download", "version": "1.0.3"},
             token="runtime-token",
             socket_path=root / "runtime.sock",
             host_socket_path=root / "host.sock",
@@ -1889,17 +2178,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.0.2")
+        self.assertEqual(manifest["version"], "1.0.3")
         self.assertEqual(manifest["host_api"], ">=1.1,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.0.2")
+        self.assertEqual(project["project"]["version"], "1.0.3")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.1.0",
         )
-        self.assertIn("/tmp/download-1.0.2.tpx", readme)
-        self.assertNotIn("dist/download-1.0.2.tpx", readme)
+        self.assertIn("/tmp/download-1.0.3.tpx", readme)
+        self.assertNotIn("dist/download-1.0.3.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)

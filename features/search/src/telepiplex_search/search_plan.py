@@ -9,7 +9,12 @@ from telepiplex_plugin_sdk.media_metadata import series_scope_key, validate_medi
 
 TEMPORARY_MAPPING_KIND = "temporary_related_special"
 KNOWN_EVIDENCE_PROVIDERS = {"wikipedia", "douban", "tvdb"}
-SOFT_FAILURE_STATUSES = {"server_down", "not_found", "disabled"}
+SOFT_FAILURE_STATUSES = {
+    "server_down",
+    "not_found",
+    "disabled",
+    "unavailable",
+}
 
 
 def _text(value) -> str:

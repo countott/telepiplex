@@ -10,6 +10,7 @@ import unicodedata
 _VIDEO = re.compile(r"(?i)\.(?:mkv|mp4|avi|mov|m4v|ts|m2ts|wmv)$")
 _EPISODE = re.compile(r"(?i)\bS(\d{1,2})E(\d{1,3})\b")
 _X_EPISODE = re.compile(r"(?i)\b(\d{1,2})x(\d{1,3})\b")
+_UNSCOPED_EPISODE = re.compile(r"(?i)(?<![A-Z0-9])E(\d{1,3})(?!\d)")
 _SEASON_RANGE = re.compile(
     r"(?i)\bS(\d{1,2})\s*(?:-|~|TO)\s*S?(\d{1,2})\b"
 )
@@ -18,6 +19,7 @@ _IDENTITY_MARKERS = (
     re.compile(r"(?i)\bS\d{1,2}(?:E\d{1,3})?(?:\s*(?:-|~)\s*S?\d{1,2})?\b"),
     re.compile(r"(?i)\bSeason\s+\d{1,2}\b"),
     re.compile(r"(?i)\bEpisode\s+\d{1,3}\b"),
+    re.compile(r"(?i)(?<![A-Z0-9])E\d{1,3}(?!\d)"),
     re.compile(r"(?i)\b(?:2160p|1080p|720p|576p|480p|4K|8K)\b"),
     re.compile(
         r"(?i)\b(?:WEB\s*DL|WEBRip|BluRay|BDRip|REMUX|HDTV|"
@@ -71,9 +73,12 @@ def _identity_query(payload: dict) -> str:
     return " ".join(value.split()).strip(" -")
 
 
-def _observed_markers(values: list[str]) -> tuple[set[int], set[tuple[int, int]]]:
+def _observed_markers(
+    values: list[str],
+) -> tuple[set[int], set[tuple[int, int]], set[int]]:
     seasons: set[int] = set()
     episodes: set[tuple[int, int]] = set()
+    unscoped_episodes: set[int] = set()
     for value in values:
         value = _text(value)
         for pattern in (_EPISODE, _X_EPISODE):
@@ -81,6 +86,11 @@ def _observed_markers(values: list[str]) -> tuple[set[int], set[tuple[int, int]]
                 season, episode = int(match.group(1)), int(match.group(2))
                 seasons.add(season)
                 episodes.add((season, episode))
+        if not _EPISODE.search(value):
+            unscoped_episodes.update(
+                int(match.group(1))
+                for match in _UNSCOPED_EPISODE.finditer(value)
+            )
         for match in _SEASON_RANGE.finditer(value):
             start, end = int(match.group(1)), int(match.group(2))
             if 0 <= start <= end and end - start <= 100:
@@ -89,7 +99,7 @@ def _observed_markers(values: list[str]) -> tuple[set[int], set[tuple[int, int]]
             season = match.group(1) or match.group(2)
             if season is not None:
                 seasons.add(int(season))
-    return seasons, episodes
+    return seasons, episodes, unscoped_episodes
 
 
 def build_metadata_probe(payload: dict) -> dict:
@@ -116,13 +126,17 @@ def build_metadata_probe(payload: dict) -> dict:
             (payload.get("release") or {}).get("title") or ""
         ) if isinstance(payload.get("release"), dict) else "",
     ]
-    seasons, episodes = _observed_markers(marker_values)
+    seasons, episodes, unscoped_episodes = _observed_markers(marker_values)
     if len(seasons) > 1:
         shape = "multi_season_pack"
     elif len(episodes) > 1:
         shape = "season_pack"
     elif len(episodes) == 1:
         shape = "single_episode"
+    elif len(unscoped_episodes) > 1:
+        shape = "episode_pack_unscoped"
+    elif len(unscoped_episodes) == 1:
+        shape = "single_episode_unscoped"
     elif len(seasons) == 1:
         shape = "season_pack"
     elif len(video_paths) == 1:
@@ -139,6 +153,9 @@ def build_metadata_probe(payload: dict) -> dict:
         "observed_episodes": [{
             "season_number": season,
             "episode_number": episode,
-        } for season, episode in sorted(episodes)],
+        } for season, episode in sorted(episodes)] + [{
+            "season_number": None,
+            "episode_number": episode,
+        } for episode in sorted(unscoped_episodes)],
         "video_count": len(video_paths),
     }

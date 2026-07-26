@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -10,6 +11,7 @@ from telepiplex_search.ai import (
     infer_candidate_scorecard_with_ai,
     infer_relation_hypotheses_with_ai,
     infer_search_hypotheses_with_ai,
+    parse_ai_json_response,
 )
 from telepiplex_search.context import runtime_context
 
@@ -93,6 +95,41 @@ class SearchAiPipelineTest(unittest.TestCase):
         self.assertNotIn("tools", payload)
         self.assertNotIn("tool_choice", payload)
         self.assertNotIn("thinking", payload)
+
+    def test_json_content_normalizes_dict_object_string_and_content_parts(self):
+        expected = {"status": "ok", "items": [1]}
+        responses = (
+            {"choices": [{"message": {"content": expected}}]},
+            {"choices": [{"message": {
+                "content": SimpleNamespace(status="ok", items=[1]),
+            }}]},
+            {"choices": [{"message": {
+                "content": json.dumps(expected),
+            }}]},
+            {"choices": [{"message": {
+                "content": [
+                    {"type": "text", "text": '{"status":"ok",'},
+                    {"type": "text", "text": '"items":[1]}'},
+                ],
+            }}]},
+        )
+
+        for response in responses:
+            with self.subTest(content=repr(response)):
+                self.assertEqual(parse_ai_json_response(response), expected)
+
+    def test_extract_ai_message_supports_openai_object_response(self):
+        result = SimpleNamespace(choices=[
+            SimpleNamespace(message=SimpleNamespace(
+                role="assistant",
+                content={"status": "ok"},
+            )),
+        ])
+
+        self.assertEqual(
+            extract_ai_message(result),
+            {"role": "assistant", "content": {"status": "ok"}},
+        )
 
     @patch("telepiplex_search.ai.requests.post")
     def test_non_200_preserves_structured_provider_error(self, post):

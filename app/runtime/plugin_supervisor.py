@@ -17,6 +17,12 @@ from app.utils.log_sanitizer import sanitize_log_text
 from app.utils.logger import configure_named_file_logger, feature_runtime_log_path
 
 
+_FEATURE_LOG_LEVEL = re.compile(
+    r"^\[[^\]\r\n]+\]\s+\[(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)\]\s+"
+    r"\[[^\]\r\n]+\](?:\s|$)"
+)
+
+
 class SupervisorError(RuntimeError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -253,10 +259,19 @@ class PluginSupervisor:
             if len(process.logs) > self.max_log_lines:
                 del process.logs[:-self.max_log_lines]
             feature_logger = self._feature_logger(process)
-            if label == "stderr":
-                feature_logger.warning("[%s] %s", label, text)
-            else:
-                feature_logger.info("[%s] %s", label, text)
+            feature_logger.log(
+                self._captured_log_level(text, label),
+                "[%s] %s",
+                label,
+                text,
+            )
+
+    @staticmethod
+    def _captured_log_level(text: str, label: str) -> int:
+        match = _FEATURE_LOG_LEVEL.match(text)
+        if match is not None:
+            return logging.getLevelName(match.group("level"))
+        return logging.WARNING if label == "stderr" else logging.INFO
 
     async def _monitor(self, process: PluginProcess, child):
         return_code = await child.wait()

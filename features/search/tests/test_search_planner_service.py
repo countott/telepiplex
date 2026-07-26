@@ -7,6 +7,7 @@ from telepiplex_search.planner import (
     collect_evidence,
 )
 from telepiplex_search.search_plan import TemporarySpecialAllocator
+from telepiplex_search.service import SearchFeature
 
 
 class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
@@ -109,6 +110,28 @@ class SearchPlannerServiceTest(unittest.IsolatedAsyncioTestCase):
             support["wikipedia"]["source_urls"],
             ["https://zh.wikipedia.org/wiki/Test"],
         )
+
+    def test_partial_wikipedia_outage_is_not_collapsed_to_not_found(self):
+        for unavailable in ("timeout", "server_down"):
+            with self.subTest(unavailable=unavailable):
+                merged = SearchFeature._merge_source_results(
+                    "wikipedia",
+                    [{
+                        "source": "wikipedia",
+                        "status": "not_found",
+                        "facts": [],
+                        "source_urls": [],
+                    }, {
+                        "source": "wikipedia",
+                        "status": unavailable,
+                        "facts": [],
+                        "source_urls": [],
+                        "error": f"{unavailable} error",
+                    }],
+                )
+
+                self.assertEqual(merged["status"], unavailable)
+                self.assertIn(f"{unavailable} error", merged["error"])
 
 
 if __name__ == "__main__":

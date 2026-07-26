@@ -23,6 +23,7 @@ SOURCE_STATUSES = {
     "rate_limited",
     "blocked",
     "server_down",
+    "unavailable",
 }
 
 _SENSITIVE_ARGUMENT_KEYS = {
@@ -390,6 +391,7 @@ def _error_code(status: str, result: dict) -> str:
         "rate_limited": "source_rate_limited",
         "blocked": "source_blocked",
         "server_down": "source_server_down",
+        "unavailable": "source_unavailable",
     }.get(status, "")
 
 

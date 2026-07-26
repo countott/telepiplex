@@ -10,6 +10,16 @@ class FakeClient:
         return {"provider": params["capability"], "payload": params["payload"]}
 
 
+class FailingClient:
+    async def request(self, method, params, *, deadline, idempotency_key=""):
+        from app.runtime.plugin_contract import ContractError
+
+        raise ContractError(
+            "metadata_source_unavailable",
+            "metadata providers are temporarily unavailable",
+        )
+
+
 class CapabilityRouterTest(unittest.IsolatedAsyncioTestCase):
     def _manifest(
         self,
@@ -93,6 +103,36 @@ class CapabilityRouterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.code, "missing_capability")
         self.assertEqual(router.plugin_status("search")["state"], "absent")
         self.assertEqual(router.snapshot.plugin_ids, ())
+
+    async def test_provider_contract_error_preserves_code_across_capability_route(self):
+        from app.runtime.capability_router import CapabilityRouter, RoutingError
+
+        router = CapabilityRouter()
+        router.activate(
+            "search",
+            self._manifest(
+                "search",
+                provides=(("media.search", True),),
+            ),
+            FailingClient(),
+        )
+
+        with self.assertRaises(RoutingError) as raised:
+            await router.call(
+                "media.search",
+                "resolve_metadata",
+                {"query": "Honey and Clover"},
+                {"deadline": 2},
+            )
+
+        self.assertEqual(
+            raised.exception.code,
+            "metadata_source_unavailable",
+        )
+        self.assertEqual(
+            raised.exception.message,
+            "metadata providers are temporarily unavailable",
+        )
 
     async def test_exclusive_capability_and_command_conflicts_are_atomic(self):
         from app.runtime.capability_router import CapabilityRouter, RoutingError

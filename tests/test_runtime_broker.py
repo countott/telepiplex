@@ -13,6 +13,16 @@ class ProviderClient:
         return {"provider": "download", "payload": params["payload"]}
 
 
+class FailingProviderClient:
+    async def request(self, method, params, *, deadline, idempotency_key=""):
+        from app.runtime.plugin_contract import ContractError
+
+        raise ContractError(
+            "metadata_source_unavailable",
+            "metadata providers are temporarily unavailable",
+        )
+
+
 def manifest(plugin_id, *, provides=(), requires=(), publishes=(), subscribes=()):
     from app.runtime.plugin_manifest import PluginManifest
 
@@ -93,6 +103,40 @@ class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
                 "download.provider", "submit", {}, deadline=1
             )
         self.assertEqual(raised.exception.code, "capability_not_declared")
+
+    async def test_provider_error_code_survives_the_full_feature_to_feature_route(self):
+        from telepiplex_plugin_sdk import HostClient, FeatureError
+
+        self.router.activate(
+            "search",
+            manifest("search", provides=("media.search",)),
+            FailingProviderClient(),
+        )
+        self.broker.register(
+            "rename",
+            "rename-token",
+            manifest("rename", requires=("media.search",)),
+        )
+
+        with self.assertRaises(FeatureError) as raised:
+            await HostClient(
+                self.broker.socket_path,
+                "rename-token",
+            ).call_capability(
+                "media.search",
+                "resolve_metadata",
+                {"query": "Honey and Clover"},
+                deadline=1,
+            )
+
+        self.assertEqual(
+            raised.exception.code,
+            "metadata_source_unavailable",
+        )
+        self.assertEqual(
+            raised.exception.message,
+            "metadata providers are temporarily unavailable",
+        )
 
     async def test_feature_publishes_only_declared_event_and_token_is_revocable(self):
         from telepiplex_plugin_sdk import HostClient, FeatureError

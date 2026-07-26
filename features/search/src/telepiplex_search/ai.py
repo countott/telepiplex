@@ -4,6 +4,7 @@
 import json
 import re
 import unicodedata
+from collections.abc import Mapping
 
 import requests
 from .context import runtime_context
@@ -454,16 +455,38 @@ def chat_completion(tip_words, max_tokens=8192):
     )
 
 
+def _object_mapping(value) -> dict | None:
+    if isinstance(value, Mapping):
+        return dict(value)
+    for method_name in ("model_dump", "dict"):
+        method = getattr(value, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            mapped = method()
+        except Exception:
+            continue
+        if isinstance(mapped, Mapping):
+            return dict(mapped)
+    attributes = getattr(value, "__dict__", None)
+    return dict(attributes) if isinstance(attributes, dict) else None
+
+
+def _field(value, name: str):
+    mapped = _object_mapping(value)
+    if mapped is not None:
+        return mapped.get(name)
+    return None
+
+
 def extract_ai_message(result) -> dict | None:
     """Return the first assistant message from an OpenAI-compatible response."""
 
-    if not isinstance(result, dict):
+    choices = _field(result, "choices")
+    if not isinstance(choices, (list, tuple)) or not choices:
         return None
-    choices = result.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return None
-    message = choices[0].get("message")
-    return dict(message) if isinstance(message, dict) else None
+    message = _field(choices[0], "message")
+    return _object_mapping(message)
 
 
 def _strip_json_markdown(text: str) -> str:
@@ -473,28 +496,56 @@ def _strip_json_markdown(text: str) -> str:
     return text
 
 
-def parse_ai_json_response(result):
-    if not isinstance(result, dict):
-        return None
-
-    text_content = ""
-    if isinstance(result.get("content"), list) and result["content"]:
-        text_content = result["content"][0].get("text", "")
-    elif isinstance(result.get("choices"), list) and result["choices"]:
-        message = result["choices"][0].get("message") or {}
-        text_content = message.get("content", "")
-
-    text_content = _strip_json_markdown(text_content)
-    if not text_content:
-        return None
-
+def extract_ai_json_content(content) -> tuple[dict | None, str]:
+    mapped = _object_mapping(content)
+    if mapped is not None:
+        return mapped, ""
+    if isinstance(content, (list, tuple)):
+        text_parts = []
+        for part in content:
+            mapped_part = _object_mapping(part)
+            text = (
+                mapped_part.get("text")
+                if mapped_part is not None
+                else None
+            )
+            if not isinstance(text, str):
+                return None, "ai_content_parts_invalid"
+            text_parts.append(text)
+        if not text_parts:
+            return None, "ai_content_missing"
+        content = "".join(text_parts)
+    if not isinstance(content, str):
+        return None, "ai_content_shape_invalid"
+    text = _strip_json_markdown(content)
+    if not text:
+        return None, "ai_content_missing"
     try:
-        return json.loads(text_content)
+        payload = json.loads(text)
     except json.JSONDecodeError:
-        logger = runtime_context.logger
-        if logger:
-            logger.warn(f"AI返回的不是有效的JSON格式: {text_content}")
+        return None, "ai_content_json_invalid"
+    if not isinstance(payload, dict):
+        return None, "ai_content_payload_invalid"
+    return payload, ""
+
+
+def parse_ai_json_response(result):
+    direct_content = _field(result, "content")
+    message = extract_ai_message(result)
+    content = (
+        direct_content
+        if direct_content is not None
+        else _field(message, "content")
+    )
+    payload, reason = extract_ai_json_content(content)
+    if payload is not None:
+        return payload
+    if reason == "ai_content_missing":
         return None
+    logger = runtime_context.logger
+    if logger:
+        logger.warning(f"AI响应内容无法解析: reason={reason}")
+    return None
 
 
 def infer_tvdb_episode_plan_with_ai(context: dict):

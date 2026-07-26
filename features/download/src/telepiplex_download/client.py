@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import secrets
 import threading
 import time
@@ -19,6 +20,10 @@ class Open115Error(RuntimeError):
 
 class Open115Client:
     TOKEN_EXPIRED_CODES = {40140125, 40140126}
+    _MAGNET_HASH = re.compile(
+        r"(?:^|[?&])xt=urn:btih:([^&]+)",
+        re.IGNORECASE,
+    )
 
     def __init__(self, config: dict, *, session=None, on_tokens_changed=None):
         self.config = config
@@ -330,10 +335,81 @@ class Open115Client:
                 tasks.extend(result["data"].get("tasks") or [])
         return tasks
 
+    @staticmethod
+    def _normalize_info_hash(value):
+        value = str(value or "").strip()
+        if re.fullmatch(r"[A-Fa-f0-9]{40}", value):
+            return value.lower()
+        if re.fullmatch(r"[A-Za-z2-7]{32}", value):
+            try:
+                return base64.b32decode(value.upper()).hex()
+            except ValueError:
+                return ""
+        return ""
+
+    @classmethod
+    def _magnet_info_hash(cls, link):
+        matched = cls._MAGNET_HASH.search(str(link or "").strip())
+        if not matched:
+            return ""
+        return cls._normalize_info_hash(matched.group(1))
+
+    @classmethod
+    def _offline_task_matches(cls, task, link):
+        if not isinstance(task, dict):
+            return False
+        requested_hash = cls._magnet_info_hash(link)
+        if not requested_hash:
+            return str(task.get("url") or "").strip() == str(link or "").strip()
+        task_hashes = {
+            cls._normalize_info_hash(task.get("info_hash")),
+            cls._magnet_info_hash(task.get("url")),
+        }
+        task_hashes.discard("")
+        return requested_hash in task_hashes
+
+    def _offline_task_output_available(self, task, save_path):
+        save_path = str(save_path or "").rstrip("/")
+        if not save_path:
+            return True
+        try:
+            status = int(task.get("status"))
+        except (TypeError, ValueError):
+            status = task.get("status")
+        try:
+            progress = float(task.get("percentDone") or 0)
+        except (TypeError, ValueError):
+            progress = 0
+        if status != 2 and progress < 100:
+            return True
+        resource_name = str(task.get("name") or "").strip("/")
+        if not resource_name:
+            return False
+        return self.get_file_info(f"{save_path}/{resource_name}") is not None
+
+    def find_offline_task(self, link: str, save_path=""):
+        tasks = self.get_offline_tasks()
+        exact_link = str(link or "").strip()
+        for task in tasks:
+            if (
+                isinstance(task, dict)
+                and str(task.get("url") or "").strip() == exact_link
+                and self._offline_task_output_available(task, save_path)
+            ):
+                return task
+        for task in tasks:
+            if (
+                self._offline_task_matches(task, link)
+                and self._offline_task_output_available(task, save_path)
+            ):
+                return task
+        return None
+
     def wait_for_download(
         self,
         link: str,
         *,
+        existing_task=None,
         timeout: float,
         poll_interval: float,
         cancel_event=None,
@@ -341,21 +417,41 @@ class Open115Client:
     ):
         deadline = time.monotonic() + float(timeout)
         last = {"name": "", "info_hash": "", "percentDone": 0}
+        bound_hash = ""
+        if isinstance(existing_task, dict):
+            bound_hash = (
+                self._normalize_info_hash(existing_task.get("info_hash"))
+                or self._magnet_info_hash(existing_task.get("url"))
+            )
         while time.monotonic() < deadline:
             if cancel_event is not None and cancel_event.is_set():
                 raise Open115Error("115 download cancelled")
             for task in self.get_offline_tasks():
-                if task.get("url") != link:
+                if bound_hash:
+                    task_hashes = {
+                        self._normalize_info_hash(task.get("info_hash")),
+                        self._magnet_info_hash(task.get("url")),
+                    }
+                    task_hashes.discard("")
+                    matched = bound_hash in task_hashes
+                else:
+                    matched = self._offline_task_matches(task, link)
+                if not matched:
                     continue
                 last = task
                 progress = float(task.get("percentDone") or 0)
+                try:
+                    task_status = int(task.get("status"))
+                except (TypeError, ValueError):
+                    task_status = task.get("status")
                 if progress_callback is not None:
                     progress_callback({
                         "resource_name": str(task.get("name") or ""),
                         "info_hash": str(task.get("info_hash") or ""),
                         "progress": progress,
+                        "task_status": task_status,
                     })
-                if task.get("status") == 2 or progress >= 100:
+                if task_status == 2 or progress >= 100:
                     return {
                         "resource_name": str(task.get("name") or ""),
                         "info_hash": str(task.get("info_hash") or ""),

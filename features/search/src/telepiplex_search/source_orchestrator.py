@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from .ai import (
     chat_completion_messages,
     check_ai_api_available,
+    extract_ai_json_content,
     extract_ai_message,
 )
 from .context import runtime_context
@@ -238,6 +239,18 @@ def _tool_message(call_id: str, name: str, result: dict) -> dict:
 
 
 def _merge_sources(existing: list[dict], incoming: list[dict]) -> list[dict]:
+    status_priority = {
+        "not_found": 0,
+        "disabled": 1,
+        "unavailable": 2,
+        "server_down": 3,
+        "timeout": 4,
+        "blocked": 5,
+        "rate_limited": 6,
+        "credential_missing": 7,
+        "authentication_failed": 8,
+        "ok": 9,
+    }
     by_source: dict[str, dict] = {}
     order = []
     for item in [*(existing or []), *(incoming or [])]:
@@ -260,7 +273,10 @@ def _merge_sources(existing: list[dict], incoming: list[dict]) -> list[dict]:
             }
         target = by_source[source]
         status = _text(item.get("status")).casefold() or "server_down"
-        if status == "ok" or target["status"] != "ok":
+        if status_priority.get(status, 3) > status_priority.get(
+            target["status"],
+            3,
+        ):
             target["status"] = status
         for field in ("query_summaries", "facts", "source_urls"):
             values = item.get(field)
@@ -321,18 +337,8 @@ def _known_facts(graph: SearchGraph) -> dict:
     }
 
 
-def _parse_final_content(message: dict) -> dict | None:
-    content = message.get("content")
-    if not isinstance(content, str):
-        return None
-    content = content.strip()
-    if content.startswith("```"):
-        content = content.replace("```json", "", 1).replace("```", "").strip()
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError:
-        return None
-    return payload if isinstance(payload, dict) else None
+def _parse_final_content(message: dict) -> tuple[dict | None, str]:
+    return extract_ai_json_content(message.get("content"))
 
 
 def _source_family(tool_name: str) -> str:
@@ -500,10 +506,10 @@ async def orchestrate_sources(
             )
         calls = _tool_calls(message)
         if not calls:
-            payload = _parse_final_content(message)
+            payload, content_error = _parse_final_content(message)
             if payload is None:
                 return _fallback(
-                    "tool_protocol_invalid",
+                    content_error or "tool_protocol_invalid",
                     intent=intent,
                     sources=sources,
                     targeted_rounds=targeted_rounds,

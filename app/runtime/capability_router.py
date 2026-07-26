@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from threading import RLock
 from types import MappingProxyType
 
+from app.runtime.plugin_contract import ContractError
 from app.runtime.plugin_manifest import PluginManifest
 
 
@@ -200,17 +201,20 @@ class CapabilityRouter:
         context = dict(context or {})
         deadline = float(context.get("deadline") or 30)
         idempotency_key = str(context.get("idempotency_key") or "")
-        return await route.client.request(
-            "capability.call",
-            {
-                "capability": str(capability),
-                "method": str(method),
-                "payload": payload,
-                "context": context,
-            },
-            deadline=deadline,
-            idempotency_key=idempotency_key,
-        )
+        try:
+            return await route.client.request(
+                "capability.call",
+                {
+                    "capability": str(capability),
+                    "method": str(method),
+                    "payload": payload,
+                    "context": context,
+                },
+                deadline=deadline,
+                idempotency_key=idempotency_key,
+            )
+        except ContractError as exc:
+            raise RoutingError(exc.code, exc.message) from None
 
     def command_route(self, command: str) -> PluginRoute | None:
         return self._snapshot.commands.get(str(command))

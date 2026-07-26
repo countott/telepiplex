@@ -353,7 +353,7 @@ def lookup_douban_evidence(
         if item and item not in cleaned:
             cleaned.append(item)
     if not cleaned:
-        return _result("not_found")
+        return _result("unavailable", error="source_queries_empty")
     if _circuit_is_open():
         return _result("blocked", error="douban circuit open")
     cache_key = tuple(item.casefold() for item in cleaned)

@@ -57,6 +57,18 @@ class FakeStorage:
         return True
 
 
+class CopiedSourceRetainedStorage(FakeStorage):
+    def move_file_detailed(self, source, target):
+        self.moved.append((source, target))
+        return {
+            "state": "copied_source_retained",
+            "copied": True,
+            "source_deleted": False,
+            "source_path": source,
+            "target_path": f"{target}/{source.rsplit('/', 1)[-1]}",
+        }
+
+
 class CleanupFailureStorage(FakeStorage):
     def delete_single_file(self, path):
         self.deleted.append(path)
@@ -187,6 +199,33 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertEqual(probe["identity_query"], "Movie 2024")
         self.assertEqual(probe["year_hint"], "2024")
         self.assertEqual(probe["content_shape"], "movie")
+
+    def test_probe_preserves_bare_episode_pack_without_inventing_season(self):
+        probe = build_metadata_probe({
+            "resource_name": "Honey.and.Clover",
+            "file_tree": [
+                {
+                    "relative_path": f"Honey.and.Clover.E{number:02d}.mkv",
+                    "is_dir": False,
+                }
+                for number in range(1, 14)
+            ] + [{
+                "relative_path": "Honey.and.Clover.Special.mp4",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "Honey and Clover")
+        self.assertEqual(probe["content_shape"], "episode_pack_unscoped")
+        self.assertEqual(probe["observed_seasons"], [])
+        self.assertEqual(
+            probe["observed_episodes"],
+            [
+                {"season_number": None, "episode_number": number}
+                for number in range(1, 14)
+            ],
+        )
+        self.assertEqual(probe["video_count"], 14)
 
     def test_ordinary_movie_keeps_largest_video_and_deletes_everything_else(self):
         storage = FakeStorage([
@@ -612,6 +651,82 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             [("/Downloads/Unknown.Release", "/Unorganized")],
         )
         self.assertIn("无法确定整理规则", host.notifications[-1][1])
+
+    async def test_media_search_failure_stops_before_storage_and_reports_envelope(self):
+        from telepiplex_plugin_sdk import FeatureError
+
+        class FailedSearchHost(FakeHost):
+            async def call_capability(self, capability, method, payload, **kwargs):
+                if capability == "media.search":
+                    raise FeatureError(
+                        "metadata_source_unavailable",
+                        "metadata providers are temporarily unavailable",
+                    )
+                return await super().call_capability(
+                    capability, method, payload, **kwargs
+                )
+
+        host = FailedSearchHost()
+        feature = RenameFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            host=host,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+
+        await feature.download_completed({
+            "event_id": "event-metadata-failure",
+            "payload": {
+                "job_id": "job-metadata-failure",
+                "selected_path": "/Series",
+                "user_id": 123,
+                "chat_id": 10,
+                "final_path": "/Downloads/Honey.and.Clover",
+                "resource_name": "Honey.and.Clover",
+                "operation_id": "op-metadata-failure",
+                "operation_revision": 2,
+            },
+        })
+        await runtime.wait()
+
+        self.assertEqual(host.storage.moved, [])
+        self.assertEqual(host.storage.renamed, [])
+        self.assertEqual(host.reports[-1]["state"], "failed")
+        self.assertEqual(
+            host.reports[-1]["details"],
+            {
+                "error_code": "metadata_source_unavailable",
+                "error_stage": "metadata_resolution",
+                "error_detail": "metadata providers are temporarily unavailable",
+                "retryable": True,
+                "stopped_at": "metadata_resolution",
+            },
+        )
+        self.assertIn("元数据解析失败", host.notifications[-1][1])
+        self.assertIn("metadata_source_unavailable", host.notifications[-1][1])
+
+    async def test_unorganized_fallback_reports_copied_source_retained(self):
+        host = FakeHost(CopiedSourceRetainedStorage([]))
+        feature = RenameFeature(
+            config={"unorganized_path": "/Unorganized"},
+            host=host,
+        )
+        event = DownloadCompletedEvent(
+            link="magnet:?x",
+            selected_path="/Series",
+            user_id=123,
+            final_path="/Downloads/Unknown.Release",
+            resource_name="Unknown.Release",
+            metadata={},
+            storage=host.storage,
+        )
+
+        result = feature._fallback_unorganized(event)
+
+        self.assertTrue(result.handled)
+        self.assertEqual(result.final_path, "/Unorganized/Unknown.Release")
+        self.assertIn("复制到未整理", result.message)
+        self.assertIn("源文件仍保留", result.message)
 
     async def test_rollback_is_reported_and_compensation_runs_once(self):
         entered = asyncio.Event()
@@ -1352,14 +1467,14 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.0.1")
+        self.assertEqual(manifest["version"], "1.0.2")
         self.assertEqual(manifest["host_api"], ">=1.1,<2.0")
-        self.assertIn('version = "1.0.1"', project)
+        self.assertIn('version = "1.0.2"', project)
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.0.1.tpx", source)
-        self.assertNotIn("dist/rename-1.0.1.tpx", source)
+        self.assertIn("/tmp/rename-1.0.2.tpx", source)
+        self.assertNotIn("dist/rename-1.0.2.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

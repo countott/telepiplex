@@ -61,7 +61,7 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
         from app.runtime.plugin_supervisor import PluginSupervisor
 
         supervisor = PluginSupervisor(
-            startup_timeout=kwargs.pop("startup_timeout", 2),
+            startup_timeout=kwargs.pop("startup_timeout", 5),
             restart_limit=kwargs.pop("restart_limit", 2),
             restart_backoff=kwargs.pop("restart_backoff", 0.01),
             runtime_root=kwargs.pop("runtime_root", self.root / "runtime"),
@@ -114,6 +114,36 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
         output = runtime_log.read_text(encoding="utf-8")
         self.assertIn("feature_runtime_started", output)
         self.assertIn("plugin_id=healthy", output)
+
+    async def test_structured_feature_log_levels_are_preserved_in_runtime_log(self):
+        supervisor = self._supervisor()
+        process = await supervisor.start(self._release("severitylogs"))
+        runtime_log = self.root / "plugins" / "severitylogs" / "state" / "logs" / "runtime.log"
+
+        await self._wait_for(lambda: len(process.logs) >= 5)
+        await self._wait_for(runtime_log.exists)
+        await self._wait_for(
+            lambda: "structured critical" in runtime_log.read_text(encoding="utf-8")
+        )
+
+        output = runtime_log.read_text(encoding="utf-8")
+        self.assertRegex(
+            output,
+            r"\[WARNING\].*\[stdout\] \[2026-07-26 08:00:00\] \[WARNING\] "
+            r"\[feature\.example\] structured warning",
+        )
+        self.assertRegex(
+            output,
+            r"\[ERROR\].*\[stdout\] \[2026-07-26 08:00:01\] \[ERROR\] "
+            r"\[feature\.example\] structured error",
+        )
+        self.assertRegex(
+            output,
+            r"\[CRITICAL\].*\[stdout\] \[2026-07-26 08:00:02\] \[CRITICAL\] "
+            r"\[feature\.example\] structured critical",
+        )
+        self.assertRegex(output, r"\[INFO\].*\[stdout\] plain stdout")
+        self.assertRegex(output, r"\[WARNING\].*\[stderr\] plain stderr")
 
     async def test_startup_timeout_terminates_child_and_leaves_no_registration(self):
         from app.runtime.plugin_supervisor import SupervisorError

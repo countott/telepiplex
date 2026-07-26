@@ -48,7 +48,7 @@ def lookup_wikipedia_evidence(
     cleaned_queries = [" ".join(str(item or "").split()) for item in queries]
     cleaned_queries = [item for item in cleaned_queries if item]
     if not cleaned_queries:
-        return _empty("not_found")
+        return _empty("unavailable", "source_queries_empty")
 
     facts = []
     urls = []

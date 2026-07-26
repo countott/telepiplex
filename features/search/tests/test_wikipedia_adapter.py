@@ -5,6 +5,13 @@ from telepiplex_search.adapters.wikipedia import lookup_wikipedia_evidence
 
 
 class WikipediaAdapterTest(unittest.TestCase):
+    def test_empty_expanded_queries_are_unavailable_not_not_found(self):
+        result = lookup_wikipedia_evidence([], languages=("zh",))
+
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["facts"], [])
+        self.assertEqual(result["error"], "source_queries_empty")
+
     @patch("telepiplex_search.adapters.wikipedia.requests.get")
     def test_returns_extract_and_findable_page_url(self, get_mock):
         zh_response = Mock()

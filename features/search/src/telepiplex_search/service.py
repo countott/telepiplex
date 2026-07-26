@@ -62,6 +62,71 @@ from .source_tools import SourceToolGateway
 _LATIN = re.compile(r"[A-Za-z]")
 
 
+def _positive_integer(value) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _probe_scope(contract: dict, probe: dict) -> tuple[str, int | None, int | None]:
+    if not isinstance(probe, dict):
+        return "", None, None
+    shape = str(probe.get("content_shape") or "").strip().casefold()
+    observed_episodes = [
+        item
+        for item in (probe.get("observed_episodes") or [])
+        if isinstance(item, dict)
+    ]
+    observed_seasons = set()
+    for item in probe.get("observed_seasons") or []:
+        value = (
+            item.get("season_number")
+            if isinstance(item, dict)
+            else item
+        )
+        if (season := _positive_integer(value)) is not None:
+            observed_seasons.add(season)
+    observed_seasons.update(
+        season
+        for item in observed_episodes
+        if (
+            season := _positive_integer(item.get("season_number"))
+        ) is not None
+    )
+    if len(observed_seasons) > 1:
+        return "whole_series", None, None
+    if len(observed_seasons) == 1:
+        return "season", next(iter(observed_seasons)), None
+    if shape not in {
+        "episode_pack_unscoped",
+        "single_episode_unscoped",
+    }:
+        return "", None, None
+    episode_numbers = {
+        episode
+        for item in observed_episodes
+        if (
+            episode := _positive_integer(item.get("episode_number"))
+        ) is not None
+    }
+    if not episode_numbers:
+        return "", None, None
+    inventory = series_inventory(contract)
+    matching_seasons = [
+        season
+        for season, episodes in inventory.all_by_season.items()
+        if episode_numbers.issubset(set(episodes))
+    ]
+    if len(matching_seasons) != 1:
+        return "", None, None
+    season_number = matching_seasons[0]
+    if shape == "single_episode_unscoped" and len(episode_numbers) == 1:
+        return "episode", season_number, next(iter(episode_numbers))
+    return "season", season_number, None
+
+
 def _ambiguous_host_report_error(exc: Exception) -> bool:
     return not isinstance(exc, FeatureError) or exc.code in {
         "host_unavailable", "deadline_exceeded", "invalid_response",
@@ -192,18 +257,24 @@ class SearchFeature:
         elif placement.get("library_type") == "series":
             decision = ((contract.get("evidence") or {}).get("decision") or {})
             scope = str(decision.get("scope") or "movie_or_series")
+            season_number = decision.get("season_number")
+            episode_number = decision.get("episode_number")
+            if scope not in {"whole_series", "season", "episode"}:
+                derived_scope = _probe_scope(contract, probe)
+                if derived_scope[0]:
+                    scope, season_number, episode_number = derived_scope
             if scope == "episode":
                 contract = apply_series_scope(
                     contract,
                     "episode",
-                    season_number=decision.get("season_number"),
-                    episode_number=decision.get("episode_number"),
+                    season_number=season_number,
+                    episode_number=episode_number,
                 )
             elif scope == "season":
                 contract = apply_series_scope(
                     contract,
                     "season",
-                    season_number=decision.get("season_number"),
+                    season_number=season_number,
                 )
             elif scope == "whole_series":
                 contract = apply_series_scope(contract, "whole_series")
@@ -2153,10 +2224,25 @@ class SearchFeature:
                 errors.append(str(result["error"]))
         if facts:
             status = "ok"
-        elif "not_found" in statuses:
-            status = "not_found"
         else:
-            status = next(iter(statuses), "server_down")
+            status = next(
+                (
+                    candidate
+                    for candidate in (
+                        "authentication_failed",
+                        "credential_missing",
+                        "rate_limited",
+                        "blocked",
+                        "timeout",
+                        "server_down",
+                        "unavailable",
+                        "disabled",
+                        "not_found",
+                    )
+                    if candidate in statuses
+                ),
+                "server_down",
+            )
         return {
             "source": source,
             "status": status,

@@ -3,6 +3,7 @@ import asyncio
 import hmac
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -19,6 +20,12 @@ async def main():
         return
     if PLUGIN_ID == "secretlog":
         print(f"startup token={TOKEN}", flush=True)
+    if PLUGIN_ID == "severitylogs":
+        print("[2026-07-26 08:00:00] [WARNING] [feature.example] structured warning", flush=True)
+        print("[2026-07-26 08:00:01] [ERROR] [feature.example] structured error", flush=True)
+        print("[2026-07-26 08:00:02] [CRITICAL] [feature.example] structured critical", flush=True)
+        print("plain stdout", flush=True)
+        print("plain stderr", file=sys.stderr, flush=True)
 
     stop = asyncio.Event()
     state = {"value": "healthy", "drain_started": 0.0}

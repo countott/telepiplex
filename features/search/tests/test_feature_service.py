@@ -1658,6 +1658,154 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             })
         self.assertEqual(raised.exception.code, "metadata_unresolved")
 
+    async def test_metadata_capability_derives_series_scope_from_probe(self):
+        async def live_planner(_raw_query, plan_id):
+            result = series_ranked_search_plan()
+            result["plan_id"] = plan_id
+            candidate = result["candidates"][0]
+            candidate["media_metadata"]["metadata_id"] = plan_id
+            candidate["media_metadata"]["items"].extend({
+                "item_id": f"s2e{number}",
+                "content_role": "main_episode",
+                "season_number": 2,
+                "episode_number": number,
+                "aired": "2023-03-10",
+            } for number in range(1, 9))
+            result["candidates"] = [candidate]
+            return result
+
+        self.feature.plan_builder = live_planner
+        cases = (
+            (
+                {
+                    "content_shape": "single_season_episode_pack",
+                    "observed_seasons": [2],
+                    "observed_episodes": [
+                        {"season_number": 2, "episode_number": 1},
+                        {"season_number": 2, "episode_number": 2},
+                    ],
+                    "video_count": 2,
+                },
+                ("season", 2, None),
+            ),
+            (
+                {
+                    "content_shape": "multi_season_episode_pack",
+                    "observed_seasons": [1, 2],
+                    "observed_episodes": [
+                        {"season_number": 1, "episode_number": 1},
+                        {"season_number": 2, "episode_number": 1},
+                    ],
+                    "video_count": 2,
+                },
+                ("whole_series", None, None),
+            ),
+        )
+
+        for probe, expected in cases:
+            with self.subTest(shape=probe["content_shape"]):
+                resolved = await self.feature.metadata_capability({
+                    "method": "resolve_metadata",
+                    "payload": {"query": "黑暗荣耀", "probe": probe},
+                })
+                decision = resolved["media_metadata"]["evidence"]["decision"]
+                self.assertEqual(
+                    (
+                        decision["scope"],
+                        decision["season_number"],
+                        decision["episode_number"],
+                    ),
+                    expected,
+                )
+
+    async def test_metadata_capability_maps_unscoped_episode_probe_only_with_unique_inventory(self):
+        async def live_planner(_raw_query, plan_id):
+            result = series_ranked_search_plan()
+            result["plan_id"] = plan_id
+            candidate = result["candidates"][0]
+            candidate["media_metadata"]["metadata_id"] = plan_id
+            result["candidates"] = [candidate]
+            return result
+
+        self.feature.plan_builder = live_planner
+        pack = await self.feature.metadata_capability({
+            "method": "resolve_metadata",
+            "payload": {
+                "query": "黑暗荣耀",
+                "probe": {
+                    "content_shape": "episode_pack_unscoped",
+                    "observed_seasons": [],
+                    "observed_episodes": [
+                        {"season_number": None, "episode_number": 1},
+                        {"season_number": None, "episode_number": 2},
+                    ],
+                    "video_count": 2,
+                },
+            },
+        })
+        pack_decision = pack["media_metadata"]["evidence"]["decision"]
+        self.assertEqual(pack_decision["scope"], "season")
+        self.assertEqual(pack_decision["season_number"], 1)
+
+        episode = await self.feature.metadata_capability({
+            "method": "resolve_metadata",
+            "payload": {
+                "query": "黑暗荣耀",
+                "probe": {
+                    "content_shape": "single_episode_unscoped",
+                    "observed_seasons": [],
+                    "observed_episodes": [{
+                        "season_number": None,
+                        "episode_number": 3,
+                    }],
+                    "video_count": 1,
+                },
+            },
+        })
+        episode_decision = episode["media_metadata"]["evidence"]["decision"]
+        self.assertEqual(episode_decision["scope"], "episode")
+        self.assertEqual(episode_decision["season_number"], 1)
+        self.assertEqual(episode_decision["episode_number"], 3)
+
+    async def test_metadata_capability_keeps_ambiguous_unscoped_episode_probe_unresolved(self):
+        async def live_planner(_raw_query, plan_id):
+            result = series_ranked_search_plan()
+            result["plan_id"] = plan_id
+            candidate = result["candidates"][0]
+            candidate["media_metadata"]["metadata_id"] = plan_id
+            candidate["media_metadata"]["items"].extend({
+                "item_id": f"s2e{number}",
+                "content_role": "main_episode",
+                "season_number": 2,
+                "episode_number": number,
+                "aired": "2023-03-10",
+            } for number in range(1, 9))
+            result["candidates"] = [candidate]
+            return result
+
+        self.feature.plan_builder = live_planner
+        from telepiplex_plugin_sdk import FeatureError
+
+        with self.assertRaises(FeatureError) as raised:
+            await self.feature.metadata_capability({
+                "method": "resolve_metadata",
+                "payload": {
+                    "query": "黑暗荣耀",
+                    "probe": {
+                        "content_shape": "episode_pack_unscoped",
+                        "observed_seasons": [],
+                        "observed_episodes": [
+                            {"season_number": None, "episode_number": 1},
+                            {"season_number": None, "episode_number": 2},
+                        ],
+                        "video_count": 2,
+                    },
+                },
+            })
+
+        self.assertEqual(raised.exception.code, "metadata_unresolved")
+        self.assertIn("explicit scope", str(raised.exception))
+
 
 class FeatureSourceContractTest(unittest.TestCase):
     def test_release_identity_requires_host_photo_action_contract(self):
@@ -1666,9 +1814,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.0.8")
+        self.assertEqual(manifest["version"], "1.0.9")
         self.assertEqual(manifest["host_api"], ">=1.2,<2.0")
-        self.assertIn('version = "1.0.8"', project)
+        self.assertIn('version = "1.0.9"', project)
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
@@ -1699,12 +1847,12 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.0.8.tpx", source)
+        self.assertIn("/tmp/search-1.0.9.tpx", source)
         self.assertIn("search_media_sources", source)
         self.assertIn("最多两轮", source)
         self.assertIn("不会交给 AI", source)
         self.assertIn("rename", source)
-        self.assertNotIn("dist/search-1.0.8.tpx", source)
+        self.assertNotIn("dist/search-1.0.9.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

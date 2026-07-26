@@ -24,7 +24,7 @@ Prowlarr 结果先经过身份与范围正确性硬门禁，再进行片源质�
 如果不填 `search.scoring`，Feature 会回退到内置默认权重。
 
 ```bash
-python tools/build_feature.py features/search /tmp/search-1.0.8.tpx \
+python tools/build_feature.py features/search /tmp/search-1.0.9.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

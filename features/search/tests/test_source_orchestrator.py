@@ -72,6 +72,12 @@ def _assistant_final():
         "content": json.dumps(_final_payload(), ensure_ascii=False),
     })
 
+def _assistant_final_with_content(content):
+    return _response({
+        "role": "assistant",
+        "content": content,
+    })
+
 
 def _provider_error(
     *,
@@ -186,6 +192,51 @@ class SourceOrchestratorTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(outcome.status, "insufficient_evidence")
         self.assertEqual(outcome.targeted_rounds, 0)
+
+    async def test_final_content_accepts_json_object_and_content_part_array(self):
+        for content in (
+            _final_payload(),
+            [{
+                "type": "text",
+                "text": json.dumps(_final_payload(), ensure_ascii=False),
+            }],
+        ):
+            with self.subTest(content=repr(content)):
+                ai = ScriptedAi([
+                    _assistant_tool("search_media_sources", _first_arguments()),
+                    _assistant_final_with_content(content),
+                ])
+
+                outcome = await orchestrate_sources(
+                    "Batman",
+                    _gateway(),
+                    ai_call=ai,
+                    config={"protocol": "openai_tools_v1"},
+                )
+
+                self.assertEqual(outcome.status, "insufficient_evidence")
+
+    async def test_invalid_final_content_reports_specific_protocol_reason(self):
+        ai = ScriptedAi([
+            _assistant_tool("search_media_sources", _first_arguments()),
+            _assistant_final_with_content([{
+                "type": "image",
+                "image_url": "https://example.invalid/image.png",
+            }]),
+        ])
+
+        outcome = await orchestrate_sources(
+            "Batman",
+            _gateway(),
+            ai_call=ai,
+            config={"protocol": "openai_tools_v1"},
+        )
+
+        self.assertEqual(outcome.status, "fallback")
+        self.assertEqual(
+            outcome.fallback_reason,
+            "ai_content_parts_invalid",
+        )
 
     async def test_forced_mode_keeps_explicit_first_and_targeted_choices(self):
         ai = ScriptedAi([
