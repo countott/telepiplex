@@ -65,6 +65,14 @@ path and cannot affect the qualified GHCR tag.
 Feature publication keeps its existing tag behavior and does not gain a
 separate `main` ancestry gate in this change.
 
+## Core runtime patch version
+
+The accumulated main-as-Core and default-deployment changes advance the
+user-visible Core/Host runtime version from `v3.4.5-host` to
+`v3.4.6-host`. Feature manifests and the SDK retain their independent
+versions. The immutable GHCR version remains selected by the
+`telepiplex-v<semver>` release tag created from Unraid.
+
 ## Legacy Core archive
 
 Read-only GitHub inspection on 2026-07-26 found:

@@ -170,3 +170,28 @@ override in both README files. Do not change Feature release validation.
 
 Run the deployment contract, all root tests, all five Feature suites, and the
 workspace boundary checks from `AGENTS.md`.
+
+### Task 6: Advance the Core runtime patch version
+
+**Files:**
+- Modify: `app/115bot.py`
+- Modify: `tests/test_bot_runtime_startup.py`
+
+**Interfaces:**
+- Consumes: current user-visible Core version `v3.4.5-host`.
+- Produces: user-visible Core version `v3.4.6-host`.
+
+- [x] **Step 1: Add and run the failing Core version contract**
+
+Load the real bot entry module and require `get_version()` to return
+`v3.4.6-host`. Run the focused test and observe the old version failure.
+
+- [x] **Step 2: Apply the minimal patch bump**
+
+Change only the `get_version()` literal from `v3.4.5-host` to
+`v3.4.6-host`. Do not change Feature manifests or SDK package versions.
+
+- [x] **Step 3: Run focused and complete verification**
+
+Run the version test, all root tests, all five Feature suites, and the
+workspace boundary checks from `AGENTS.md`.
