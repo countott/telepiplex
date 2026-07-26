@@ -1,6 +1,6 @@
 # Telepiplex
 
-`main` 中的 Telepiplex 是唯一常驻 Docker 运行层。容器内只有 Telepiplex 主进程；115、媒体搜索、重命名和 Plex 管理等业务能力均来自 `features/` 下的独立源码目录，并以隔离的 Feature 子进程运行。
+`main` 是 Telepiplex Core/Host 唯一有效的源码与发布分支，其中的 Telepiplex 是唯一常驻 Docker 运行层；已退役的 `feature/telepiplex-core` 不再用于开发或发布。容器内只有 Telepiplex 主进程；115、媒体搜索、重命名和 Plex 管理等业务能力均来自 `features/` 下的独立源码目录，并以隔离的 Feature 子进程运行。
 
 每个 Feature 使用自己的 Python 虚拟环境、配置、状态和版本目录。Telepiplex 通过 Unix Domain Socket 调用 Feature 声明的 capability，并负责命令路由、事件投递、健康检查、排空、切换和回滚。正常安装、升级、启用、停用和回滚不重启 Telepiplex；只有 Host API 合同本身升级时，才允许升级镜像并重启一次。
 
@@ -9,6 +9,21 @@
 ```bash
 docker compose up -d
 ```
+
+默认 Compose 会拉取并运行正式发布镜像
+`ghcr.io/countott/telepiplex:latest`。Mac 或 Unraid 需要基于同步后的源码额外
+构建时，`build.sh` 仍保持原有的本地 `telepiplex:latest` 身份；显式运行该
+本地镜像时使用：
+
+```bash
+./build.sh
+TELEPIPLEX_IMAGE=telepiplex:latest \
+TELEPIPLEX_PULL_POLICY=never \
+docker compose up -d
+```
+
+本地镜像和带 `ghcr.io/countott/` 前缀的正式镜像是两个独立身份；本地构建
+不会改变 GitHub Actions 发布的版本标签或 GHCR `latest`。
 
 持久化目录只有 `/config`。Feature 运行数据位于 `/config/plugins`，进程 socket 位于容器内临时目录 `/tmp/telepiplex`。
 
@@ -107,9 +122,11 @@ Feature 安装后，在 Telegram 发送 `/config`，或在 `/plugin` 页面点�
 
 ## GitHub 独立发布通道
 
-Telepiplex、Feature 和 catalog 分开发布。Telepiplex 只由 `telepiplex-v<semver>` tag 构建镜像。Mac 开发目录不创建 tag、提交或连接远程；版本 tag 只在 Syncthing 完成后由 Unraid 的唯一 Git 工作区创建和发布。
+Telepiplex、Feature 和 catalog 分开发布。Telepiplex 只由 `telepiplex-v<semver>` tag 构建镜像；发布流水线会先验证该 tag 指向的提交已经包含在远端 `main` 中，其他分支上的提交不能发布为 Core/Host。Mac 开发目录不创建 tag、提交或连接远程；版本 tag 只在 Syncthing 完成后由 Unraid 的唯一 Git 工作区创建和发布。
 
-该流水线先推送 `linux/amd64` Telepiplex 镜像 `ghcr.io/<owner>/telepiplex:1.1.0` 和 `latest`，随后创建 `telepiplex-v1.1.0` 同名 GitHub Release，并强制设为 **Latest**。Telepiplex Release 不附带 Feature、catalog 或其他资产，也不会改动 Feature。五种 Feature 各自使用 `download-v<semver>`、`search-v<semver>`、`rename-v<semver>`、`sync-v<semver>`、`caption-v<semver>` 独立 tag；首个身份版本分别为 `download-v1.0.0`、`search-v1.0.0`、`rename-v1.0.0`、`sync-v1.0.0` 和占位版 `caption-v0.1.0`。这些 tag 同样只从 Unraid 发布。
+正式发布成功后，该流水线同时推送 `linux/amd64` Telepiplex 镜像 `ghcr.io/<owner>/telepiplex:<semver>` 和默认标签 `latest`，随后创建 `telepiplex-v<semver>` 同名 GitHub Release，并强制设为 **Latest**。普通 `main` push 不会触发正式发布，也不会更新任何 `latest`。Telepiplex Release 不附带 Feature、catalog 或其他资产，也不会改动 Feature。五种 Feature 各自使用 `download-v<semver>`、`search-v<semver>`、`rename-v<semver>`、`sync-v<semver>`、`caption-v<semver>` 独立 tag；首个身份版本分别为 `download-v1.0.0`、`search-v1.0.0`、`rename-v1.0.0`、`sync-v1.0.0` 和占位版 `caption-v0.1.0`。这些 tag 同样只从 Unraid 发布。
+
+旧 `feature/telepiplex-core` 分支只保留一次性归档价值；固定归档点和安全删除步骤见 [`docs/archive/2026-07-26-feature-telepiplex-core.md`](docs/archive/2026-07-26-feature-telepiplex-core.md)。
 
 发布顺序固定为：先发布并重启满足 Host API 要求的 Telepiplex，再逐个发布新 Feature。Feature 工作流会在每次发布后更新 catalog。
 

@@ -84,6 +84,76 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertNotIn("workflow_dispatch", triggers)
         self.assertIn("concurrency", workflow)
 
+    def test_telepiplex_release_commit_must_belong_to_main(self):
+        workflow = self._workflow(TELEPIPLEX_WORKFLOW)
+        steps = workflow["jobs"]["validate-telepiplex"]["steps"]
+        step_names = [step.get("name") for step in steps]
+        gate_name = "Verify Telepiplex release commit belongs to main"
+
+        self.assertIn(gate_name, step_names)
+        self.assertLess(
+            step_names.index(gate_name),
+            step_names.index("Run Telepiplex tests"),
+        )
+
+        gate = self._step(
+            workflow,
+            "validate-telepiplex",
+            gate_name,
+        )["run"]
+        fake_git = r"""
+            case "$1" in
+              fetch)
+                if [[ "$*" != "fetch --force --no-tags origin refs/heads/main:refs/remotes/origin/main" ]]; then
+                  printf 'unexpected fetch: %s\n' "$*" >&2
+                  exit 40
+                fi
+                ;;
+              rev-parse)
+                case "$2" in
+                  "${GITHUB_SHA}^{commit}")
+                    printf '%s\n' "release-commit"
+                    ;;
+                  "refs/remotes/origin/main^{commit}")
+                    printf '%s\n' "main-commit"
+                    ;;
+                  *)
+                    printf 'unexpected rev-parse: %s\n' "$2" >&2
+                    exit 41
+                    ;;
+                esac
+                ;;
+              merge-base)
+                if [[ "$2" != "--is-ancestor" \
+                  || "$3" != "release-commit" \
+                  || "$4" != "main-commit" ]]; then
+                  printf 'unexpected ancestry check: %s\n' "$*" >&2
+                  exit 42
+                fi
+                exit "$FAKE_ANCESTRY_STATUS"
+                ;;
+              *)
+                printf 'unexpected git command: %s\n' "$*" >&2
+                exit 43
+                ;;
+            esac
+        """
+
+        for contained, status in ((True, "0"), (False, "1")):
+            with self.subTest(contained=contained):
+                temporary, _, result = self._run_script(
+                    gate,
+                    env={
+                        "GITHUB_SHA": "tag-sha",
+                        "FAKE_ANCESTRY_STATUS": status,
+                    },
+                    commands={"git": fake_git},
+                )
+                self.addCleanup(temporary.cleanup)
+                self.assertEqual(result.returncode == 0, contained, result.stderr)
+                if not contained:
+                    self.assertIn("not contained in main", result.stderr)
+
     def test_telepiplex_release_tests_pushes_image_and_publishes_latest_release(self):
         workflow = self._workflow(TELEPIPLEX_WORKFLOW)
         jobs = workflow["jobs"]

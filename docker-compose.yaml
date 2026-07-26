@@ -2,7 +2,8 @@ version: '3.8'
 services:
   telepiplex:
     container_name: telepiplex
-    image: telepiplex:latest
+    image: ${TELEPIPLEX_IMAGE:-ghcr.io/countott/telepiplex:latest}
+    pull_policy: ${TELEPIPLEX_PULL_POLICY:-always}
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai

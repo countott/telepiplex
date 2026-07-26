@@ -7,6 +7,8 @@
 - 私人 Mac 上的 `/Users/young/Documents/telepiplex` 是唯一开发工作区。
 - 在此目录中只进行源码读取、创建、修改、删除、重命名和本地测试。
 - 可以修改包括 `.github/workflows/`、`Dockerfile`、配置模板、脚本和项目文档在内的项目文件。
+- `main` 是 Telepiplex Core/Host 唯一有效的源码与发布分支；`features/` 下的五个 Feature 仍在 `main` 内保持独立版本和独立发布。
+- `feature/telepiplex-core` 已退役，不得作为开发、同步或发布来源，也不得重新创建同名活动分支。
 - Unraid 不承担开发工作，只接收 Syncthing 同步内容，并作为唯一 Git 工作区。
 - GitHub 只承担版本管理、GitHub Actions 构建和 Release 发布。
 
@@ -101,5 +103,6 @@ git push origin main
 
 版本标签和 Release 也只能由用户在 Unraid 手动操作，或由用户主动运行 Unraid User Scripts 中的 `Telepiplex Publish` 脚本。Mac 本地不得代替执行。
 
-Unraid 推送至 GitHub 后，由现有 GitHub Actions 自动完成构建和发布。
+Core/Host 的 `telepiplex-v<semver>` tag 必须指向已经包含在远端 `main` 中的提交。正式发布成功后，GitHub Actions 同时更新版本镜像、容器默认标签 `latest` 和 GitHub **Latest** Release；普通 `main` push 不更新这些默认发布入口。
 
+旧 `feature/telepiplex-core` 的归档和远端删除只允许按 [`docs/archive/2026-07-26-feature-telepiplex-core.md`](docs/archive/2026-07-26-feature-telepiplex-core.md) 在 Unraid 执行。Unraid 推送至 GitHub 后，由现有 GitHub Actions 自动完成构建和发布。

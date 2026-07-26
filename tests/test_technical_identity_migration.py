@@ -142,7 +142,12 @@ def test_root_release_identity_is_telepiplex():
     assert "telepiplex-core" not in workflow
     assert list(compose["services"]) == ["telepiplex"]
     assert compose["services"]["telepiplex"]["container_name"] == "telepiplex"
-    assert compose["services"]["telepiplex"]["image"] == "telepiplex:latest"
+    assert compose["services"]["telepiplex"]["image"] == (
+        "${TELEPIPLEX_IMAGE:-ghcr.io/countott/telepiplex:latest}"
+    )
+    assert compose["services"]["telepiplex"]["pull_policy"] == (
+        "${TELEPIPLEX_PULL_POLICY:-always}"
+    )
 
 
 def test_runtime_protocol_uses_host_not_legacy_name():

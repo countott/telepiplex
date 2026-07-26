@@ -50,6 +50,19 @@ jobs:
             exit 1
           fi
 
+      - name: Verify Telepiplex release commit belongs to main
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin \
+            refs/heads/main:refs/remotes/origin/main
+          RELEASE_COMMIT=$(git rev-parse "${GITHUB_SHA}^{commit}")
+          MAIN_COMMIT=$(git rev-parse "refs/remotes/origin/main^{commit}")
+          if ! git merge-base --is-ancestor "$RELEASE_COMMIT" "$MAIN_COMMIT"; then
+            echo "Telepiplex release commit is not contained in main: $RELEASE_COMMIT" >&2
+            exit 1
+          fi
+          echo "Confirmed Telepiplex release commit belongs to main: $RELEASE_COMMIT"
+
       - name: Run Telepiplex tests
         run: |
           set -euo pipefail

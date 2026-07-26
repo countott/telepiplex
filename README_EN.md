@@ -1,6 +1,6 @@
 # Telepiplex
 
-Telepiplex in `main` is the only long-running Docker runtime. The container has one permanent Telepiplex process; business capabilities such as 115, media search, rename, and Plex management come from standalone source directories below `features/` and run as isolated Feature child processes.
+`main` is the only valid Telepiplex Core/Host source and release branch. Telepiplex in `main` is the only long-running Docker runtime; the retired `feature/telepiplex-core` branch is no longer used for development or publication. The container has one permanent Telepiplex process; business capabilities such as 115, media search, rename, and Plex management come from standalone source directories below `features/` and run as isolated Feature child processes.
 
 Each Feature owns its Python virtual environment, configuration, state, and versioned release directory. Telepiplex talks to declared capabilities over Unix Domain Sockets and owns command routing, event delivery, health checks, draining, switching, and rollback. Installing, updating, enabling, disabling, or rolling back a Feature does not restart Telepiplex. A single restart is allowed only when the Host API contract itself changes.
 
@@ -9,6 +9,22 @@ Each Feature owns its Python virtual environment, configuration, state, and vers
 ```bash
 docker compose up -d
 ```
+
+By default, Compose pulls and runs the formal
+`ghcr.io/countott/telepiplex:latest` release. When Mac or Unraid needs an
+extra build from the synchronized source, `build.sh` keeps its existing local
+`telepiplex:latest` identity. Run that local image explicitly with:
+
+```bash
+./build.sh
+TELEPIPLEX_IMAGE=telepiplex:latest \
+TELEPIPLEX_PULL_POLICY=never \
+docker compose up -d
+```
+
+The local image and the qualified `ghcr.io/countott/` release image are
+separate identities. A local build cannot change the versioned image or GHCR
+`latest` published by GitHub Actions.
 
 Only `/config` is persistent. Feature data lives under `/config/plugins`; process sockets live in the container's ephemeral `/tmp/telepiplex` directory.
 
@@ -77,9 +93,11 @@ An existing absolute `.tpx` path is also accepted by `install` and `update`. Tel
 
 ## Independent GitHub release channels
 
-Telepiplex, Features, and the catalog publish independently. Only a `telepiplex-v<semver>` tag builds Telepiplex. The Mac development directory never creates tags or commits and never connects to a remote; release tags are created and published only from the sole Git workspace on Unraid after Syncthing is current.
+Telepiplex, Features, and the catalog publish independently. Only a `telepiplex-v<semver>` tag builds Telepiplex. Before publication, the workflow verifies that the tagged commit is contained in remote `main`; commits from other branches cannot be published as Core/Host. The Mac development directory never creates tags or commits and never connects to a remote; release tags are created and published only from the sole Git workspace on Unraid after Syncthing is current.
 
-That workflow first pushes the `linux/amd64` Telepiplex image `ghcr.io/<owner>/telepiplex:1.1.0` and `latest`, then creates the `telepiplex-v1.1.0` same-tag GitHub Release explicitly marked **Latest**. A Telepiplex Release has no Feature, catalog, or other assets and does not change a Feature. The five Feature tag families are `download-v<semver>`, `search-v<semver>`, `rename-v<semver>`, `sync-v<semver>`, and `caption-v<semver>`. Their first identity releases are `download-v1.0.0`, `search-v1.0.0`, `rename-v1.0.0`, `sync-v1.0.0`, and the placeholder `caption-v0.1.0`. These tags are also published only from Unraid.
+After a successful formal release, that workflow pushes both the `linux/amd64` Telepiplex image `ghcr.io/<owner>/telepiplex:<semver>` and the default `latest` tag, then creates the `telepiplex-v<semver>` same-tag GitHub Release explicitly marked **Latest**. An ordinary `main` push does not publish a formal release or update any `latest` entry. A Telepiplex Release has no Feature, catalog, or other assets and does not change a Feature. The five Feature tag families are `download-v<semver>`, `search-v<semver>`, `rename-v<semver>`, `sync-v<semver>`, and `caption-v<semver>`. Their first identity releases are `download-v1.0.0`, `search-v1.0.0`, `rename-v1.0.0`, `sync-v1.0.0`, and the placeholder `caption-v0.1.0`. These tags are also published only from Unraid.
+
+The old `feature/telepiplex-core` branch has archive value only. Its pinned archive point and safe deletion procedure are documented in [`docs/archive/2026-07-26-feature-telepiplex-core.md`](docs/archive/2026-07-26-feature-telepiplex-core.md).
 
 The release order is fixed: publish and restart a Telepiplex version satisfying the Host API requirement first, then publish the new Features one at a time. The Feature workflow updates the catalog after each publication.
 

@@ -1,4 +1,7 @@
+import os
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -31,9 +34,21 @@ class DeploymentContractTest(unittest.TestCase):
         compose = yaml.safe_load((ROOT / "docker-compose.yaml").read_text(encoding="utf-8"))
         self.assertEqual(list(compose["services"]), ["telepiplex"])
         service = compose["services"]["telepiplex"]
-        self.assertEqual(service["image"], "telepiplex:latest")
         self.assertEqual(service["volumes"], ["/to/your/path/config:/config"])
         self.assertNotIn("ports", service)
+
+    def test_compose_defaults_to_the_official_latest_release(self):
+        compose = yaml.safe_load((ROOT / "docker-compose.yaml").read_text(encoding="utf-8"))
+        service = compose["services"]["telepiplex"]
+
+        self.assertEqual(
+            service["image"],
+            "${TELEPIPLEX_IMAGE:-ghcr.io/countott/telepiplex:latest}",
+        )
+        self.assertEqual(
+            service["pull_policy"],
+            "${TELEPIPLEX_PULL_POLICY:-always}",
+        )
 
     def test_host_documentation_describes_runtime_feature_contract(self):
         for name in ("README.md", "README_EN.md"):
@@ -68,19 +83,49 @@ class DeploymentContractTest(unittest.TestCase):
         for dockerfile in dockerfiles:
             self.assertTrue((ROOT / dockerfile).is_file(), dockerfile)
 
-    def test_build_script_outputs_the_compose_image(self):
-        source = (ROOT / "build.sh").read_text(encoding="utf-8")
-        compose = yaml.safe_load((ROOT / "docker-compose.yaml").read_text(encoding="utf-8"))
-        service = next(iter(compose["services"].values()))
-        image = service["image"]
+    def test_build_script_preserves_the_local_unraid_image(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fakebin = root / "bin"
+            fakebin.mkdir()
+            docker = fakebin / "docker"
+            docker.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$*\" >> \"$DOCKER_LOG\"\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            log = root / "docker.log"
+            env = os.environ.copy()
+            env["PATH"] = f"{fakebin}:{env['PATH']}"
+            env["DOCKER_LOG"] = str(log)
 
-        self.assertIn(f"-t {image}", source)
-        self.assertIn(f"docker image inspect {image}", source)
+            result = subprocess.run(
+                ["bash", str(ROOT / "build.sh")],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                log.read_text(encoding="utf-8").splitlines(),
+                [
+                    "build -f Dockerfile -t telepiplex:latest .",
+                    (
+                        "image inspect telepiplex:latest --format "
+                        "Image: {{.RepoTags}} Size: {{.Size}} bytes"
+                    ),
+                ],
+            )
 
     def test_documentation_describes_independent_release_contract(self):
         chinese_required = (
             "ghcr.io/<owner>/telepiplex",
-            "telepiplex-v1.1.0",
+            "telepiplex-v<semver>",
+            "远端 `main`",
+            "普通 `main` push",
             "同名 GitHub Release",
             "强制设为 **Latest**",
             "download-v1.0.0",
@@ -101,7 +146,9 @@ class DeploymentContractTest(unittest.TestCase):
         english = (ROOT / "README_EN.md").read_text(encoding="utf-8")
         for term in (
             "ghcr.io/<owner>/telepiplex",
-            "telepiplex-v1.1.0",
+            "telepiplex-v<semver>",
+            "remote `main`",
+            "ordinary `main` push",
             "same-tag GitHub Release",
             "explicitly marked **Latest**",
             "download-v1.0.0",
