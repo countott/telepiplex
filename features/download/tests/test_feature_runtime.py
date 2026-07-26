@@ -228,6 +228,179 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.moved, [])
         self.assertEqual(self.client.deleted_tasks, [("hash-1", 0)])
 
+    def test_open115_error_preserves_provider_context(self):
+        from telepiplex_download.client import Open115Error
+
+        error = Open115Error(
+            "登录状态已失效",
+            code="40140125",
+            operation="add_offline_task",
+        )
+
+        self.assertEqual(error.code, "40140125")
+        self.assertEqual(error.operation, "add_offline_task")
+        self.assertEqual(str(error), "登录状态已失效")
+
+    def test_open115_failure_classifier_covers_actionable_categories(self):
+        from telepiplex_download.client import Open115Error
+        from telepiplex_download.failure import classify_download_failure
+
+        cases = (
+            (
+                Open115Error(
+                    "cannot create 115 directory: /Downloads",
+                    operation="create_directory",
+                ),
+                "open115_directory_failed",
+                "/config",
+            ),
+            (
+                Open115Error(
+                    "该任务已存在",
+                    code="10008",
+                    operation="add_offline_task",
+                ),
+                "open115_submit_rejected",
+                "更换候选",
+            ),
+            (
+                Open115Error(
+                    "115 request failed: ReadTimeout",
+                    operation="/open/offline/get_task_list",
+                ),
+                "open115_request_failed",
+                "网络",
+            ),
+            (
+                OSError("unexpected local failure"),
+                "download_failed",
+                "Download 日志",
+            ),
+        )
+
+        for error, expected_code, remedy_fragment in cases:
+            with self.subTest(expected_code=expected_code):
+                failure = classify_download_failure(
+                    error,
+                    stage="preparing_submission",
+                )
+                self.assertEqual(failure.code, expected_code)
+                self.assertIn(remedy_fragment, failure.remedy)
+                self.assertIn(str(error), failure.detail)
+
+    def test_offline_submit_rejection_preserves_provider_response(self):
+        from telepiplex_download.client import Open115Client, Open115Error
+
+        client = Open115Client({})
+        client.create_dir_recursive = lambda _path: {"file_id": "folder-1"}
+        client._request = lambda *_args, **_kwargs: {
+            "state": False,
+            "code": 10008,
+            "message": "该任务已存在",
+        }
+
+        with self.assertRaises(Open115Error) as raised:
+            client.add_offline_task(
+                "magnet:?xt=urn:btih:" + "b" * 40,
+                "/Downloads",
+            )
+
+        self.assertEqual(str(raised.exception), "该任务已存在")
+        self.assertEqual(raised.exception.code, "10008")
+        self.assertEqual(
+            raised.exception.operation,
+            "add_offline_task",
+        )
+
+    async def test_open115_auth_failure_is_actionable_on_every_failure_surface(self):
+        from telepiplex_download.client import Open115Error
+        from telepiplex_download.jobs import DownloadJobStore
+        from telepiplex_download.service import DownloadFeature
+
+        class ExpiredAuthClient(FakeClient):
+            def add_offline_task(self, link, selected_path):
+                raise Open115Error(
+                    "登录状态已失效 access_token=secret-value",
+                    code="40140125",
+                    operation="add_offline_task",
+                )
+
+        path = Path(self._testMethodName + ".db")
+        self.addCleanup(path.unlink, missing_ok=True)
+        jobs = DownloadJobStore(path)
+        feature = DownloadFeature(
+            config={"download_timeout": 30, "poll_interval": 0.01},
+            host=self.host,
+            client=ExpiredAuthClient(),
+            jobs=jobs,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+
+        with self.assertLogs("telepiplex.download", level="ERROR") as captured:
+            result = await feature.download_capability({
+                "method": "submit",
+                "payload": {
+                    "link": "magnet:?xt=urn:btih:" + "a" * 40,
+                    "selected_path": "/Downloads",
+                    "operation_id": "op-auth-expired",
+                    "chat_id": 10,
+                    "user_id": 1,
+                },
+                "context": {"idempotency_key": "auth-expired"},
+            })
+            await runtime.tasks.pop(result["job_id"])
+
+        job = jobs.get("auth-expired")
+        self.assertEqual(job["state"], "failed")
+        self.assertEqual(job["error"], "open115_auth_failed")
+
+        event_type, failure, kwargs = self.host.events[-1]
+        self.assertEqual(event_type, "download.failed")
+        self.assertEqual(failure["error"], "open115_auth_failed")
+        self.assertEqual(failure["error_code"], "open115_auth_failed")
+        self.assertEqual(failure["provider_code"], "40140125")
+        self.assertEqual(failure["provider_operation"], "add_offline_task")
+        self.assertEqual(failure["stage"], "preparing_submission")
+        self.assertIn("登录状态已失效", failure["error_message"])
+        self.assertIn("/auth", failure["remedy"])
+        self.assertEqual(kwargs["idempotency_key"], "auth-expired:failed")
+
+        notification = self.host.notifications[-1][1]
+        self.assertIn("115 授权已失效", notification)
+        self.assertIn("登录状态已失效", notification)
+        self.assertIn("/auth", notification)
+
+        report = self.host.reports[-1]
+        self.assertEqual(report["state"], "failed")
+        self.assertEqual(report["stage"], "preparing_submission")
+        self.assertIn("115 授权已失效", report["status_text"])
+        self.assertIn("/auth", report["status_text"])
+        self.assertEqual(
+            report["details"]["error_code"],
+            "open115_auth_failed",
+        )
+        self.assertEqual(report["details"]["provider_code"], "40140125")
+        self.assertEqual(
+            report["details"]["provider_operation"],
+            "add_offline_task",
+        )
+
+        output = "\n".join(captured.output)
+        self.assertIn("error_code=open115_auth_failed", output)
+        self.assertIn("detail=登录状态已失效", output)
+        self.assertIn("provider_code=40140125", output)
+        self.assertIn("operation=add_offline_task", output)
+        for surface in (
+            failure["error_message"],
+            failure["remedy"],
+            notification,
+            report["status_text"],
+            str(report["details"]),
+            output,
+        ):
+            self.assertNotIn("secret-value", surface)
+
     async def test_download_reports_stages_and_hands_same_operation_to_rename(self):
         result = await self.feature.download_capability({
             "method": "submit",
@@ -1642,7 +1815,7 @@ class RuntimeStartupTest(unittest.TestCase):
     @staticmethod
     def _context(root: Path):
         return SimpleNamespace(
-            manifest={"plugin_id": "download", "version": "1.0.1"},
+            manifest={"plugin_id": "download", "version": "1.0.2"},
             token="runtime-token",
             socket_path=root / "runtime.sock",
             host_socket_path=root / "host.sock",
@@ -1716,17 +1889,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.0.1")
+        self.assertEqual(manifest["version"], "1.0.2")
         self.assertEqual(manifest["host_api"], ">=1.1,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.0.1")
+        self.assertEqual(project["project"]["version"], "1.0.2")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.1.0",
         )
-        self.assertIn("/tmp/download-1.0.1.tpx", readme)
-        self.assertNotIn("dist/download-1.0.1.tpx", readme)
+        self.assertIn("/tmp/download-1.0.2.tpx", readme)
+        self.assertNotIn("dist/download-1.0.2.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)

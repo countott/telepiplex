@@ -4,14 +4,14 @@
 
 配置位于 `/config/plugins/download/config.yaml`。Telepiplex `/config` 选择 download 后，可进入“授权配置”或“保存目录”：授权支持分步录入 Access/Refresh Token 与 115 扫码，保存目录支持逐条新增、编辑和删除，并在“保存并完成”后统一原子写入、立即生效。新增目录分两步：第一步填写只用于按钮展示的名称；第二步填写实际保存路径。单级目录可依次输入显示名称 `真人电影`、保存路径 `真人电影`；多级路径可填写 `series/live action`。路径末尾 `/` 可省略，但不要以 / 开头，因为 Telegram 会将它识别为命令。直接发送 `/auth` 仍会进入授权方式选择。两种授权路线及自动刷新只原子写回该 Feature 私有配置，Token 不进入消息与日志。
 
-下载完成发布 `download.completed`；失败发布 `download.failed`。完成事件中的 `download_root`/`final_path` 是 115 上未经业务改名的真实文件或目录，并附完整 `file_tree` 与下载片源证据。Feature 不创建业务目录、不执行媒体清理；命名、筛选和冲突处理全部由 rename Feature 完成。
+下载完成发布 `download.completed`；失败发布 `download.failed`。失败事件、operation 状态和 Telegram 通知会同时给出稳定错误码、115 返回的脱敏原因与可执行处理建议，例如授权失效时提示重新发送 `/auth`。完成事件中的 `download_root`/`final_path` 是 115 上未经业务改名的真实文件或目录，并附完整 `file_tree` 与下载片源证据。Feature 不创建业务目录、不执行媒体清理；命名、筛选和冲突处理全部由 rename Feature 完成。
 
 如果 Host 在交接前确认 rename 未安装或未启用，download 会把下载本身收敛为成功终态，明确通知保存目录和“已跳过自动整理”，且不会发布无人消费的 `download.completed`。
 
 纯本地验证构建（不读取 Git 元数据）：
 
 ```bash
-python tools/build_feature.py features/download /tmp/download-1.0.1.tpx \
+python tools/build_feature.py features/download /tmp/download-1.0.2.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

@@ -14,6 +14,7 @@ from .directories import (
     normalize_save_directories,
     normalize_save_directory_path,
 )
+from .failure import classify_download_failure
 
 
 _MAGNET = re.compile(r"^magnet:\?xt=urn:btih:(?:[A-Fa-f0-9]{40}|[A-Za-z2-7]{32})(?:&.*)?$")
@@ -1541,13 +1542,23 @@ class DownloadFeature:
                 return
             if self.jobs and (self.jobs.get(job_id) or {}).get("state") == "downloaded":
                 return
+            stopped_at = str(operation.get("stage") or "download")
+            failure_detail = classify_download_failure(exc, stage=stopped_at)
             if self.jobs:
-                self.jobs.update(job_id, "failed", error=type(exc).__name__)
+                self.jobs.update(
+                    job_id,
+                    "failed",
+                    error=failure_detail.code,
+                )
             logger.error(
                 "download_download_failed "
                 f"job_id={job_id} "
                 f"selected_path={selected_path} "
-                f"error={type(exc).__name__} "
+                f"error_code={failure_detail.code} "
+                f"stage={failure_detail.stage} "
+                f"provider_code={failure_detail.provider_code or '-'} "
+                f"operation={failure_detail.provider_operation or '-'} "
+                f"detail={failure_detail.detail} "
                 f"link_sha1={_link_fingerprint(link)}"
             )
             failure = {
@@ -1555,7 +1566,13 @@ class DownloadFeature:
                 "provider": "download",
                 "user_id": user_id,
                 "link": link,
-                "error": type(exc).__name__,
+                "error": failure_detail.code,
+                "error_code": failure_detail.code,
+                "error_message": failure_detail.detail,
+                "remedy": failure_detail.remedy,
+                "stage": failure_detail.stage,
+                "provider_code": failure_detail.provider_code,
+                "provider_operation": failure_detail.provider_operation,
             }
             try:
                 await self.host.publish_event(
@@ -1565,16 +1582,20 @@ class DownloadFeature:
                 pass
             if user_id:
                 try:
-                    await self.host.notify_user(user_id, f"❌ 115 下载任务失败：{type(exc).__name__}", idempotency_key=f"{job_id}:failed-notice")
+                    await self.host.notify_user(
+                        user_id,
+                        failure_detail.user_text(),
+                        idempotency_key=f"{job_id}:failed-notice",
+                    )
                 except Exception:
                     pass
             await self._report_operation(
                 operation_id,
                 state="failed",
-                stage=operation.get("stage") or "download",
-                status_text=f"115 下载任务失败：{type(exc).__name__}",
+                stage=failure_detail.stage,
+                status_text=failure_detail.user_text(),
                 control="",
-                details={"stopped_at": operation.get("stage") or "download"},
+                details=failure_detail.details(),
             )
         finally:
             if info_hash and not cancel_event.is_set():

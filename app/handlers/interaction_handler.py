@@ -14,12 +14,14 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - package-imported test/runtime fallback
     from app import init
 from app.runtime.interaction_coordinator import TERMINAL_STATES, OperationRecord
+from app.utils.log_sanitizer import sanitize_log_text
 
 
 COORDINATOR_KEY = "telepiplex_interaction_coordinator"
 ROUTER_KEY = "telepiplex_plugin_router"
 OPERATION_RECOVERY_TASK_KEY = "telepiplex_operation_recovery_task"
 CONFIG_OPERATION_TASKS_KEY = "telepisync_config_operation_tasks"
+OPERATION_RENDER_LOCKS_KEY = "telepiplex_operation_render_locks"
 CONTROL_CALLBACK_PREFIX = "host-operation:"
 CONTROL_CALLBACK_PATTERN = r"^host-operation:"
 _CONTROL_RE = re.compile(
@@ -41,6 +43,19 @@ def _log(level: str, message: str):
     method = getattr(logger, level, None) or getattr(logger, "info", None)
     if method is not None:
         method(message)
+
+
+def operation_render_lock(application, operation_id: str) -> asyncio.Lock:
+    bot_data = getattr(application, "bot_data", None)
+    if not isinstance(bot_data, dict):
+        raise RuntimeError("application bot_data is unavailable")
+    locks = bot_data.setdefault(OPERATION_RENDER_LOCKS_KEY, {})
+    key = str(operation_id or "")
+    lock = locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[key] = lock
+    return lock
 
 
 class OperationReportSink:
@@ -425,6 +440,11 @@ def _feature_status_rows(record: OperationRecord, router):
 
 
 async def render_operation(application, _router, record: OperationRecord):
+    async with operation_render_lock(application, record.operation_id):
+        return await _render_operation_locked(application, _router, record)
+
+
+async def _render_operation_locked(application, _router, record: OperationRecord):
     coordinator = application.bot_data.get(COORDINATOR_KEY)
     if coordinator is None:
         return None
@@ -458,7 +478,9 @@ async def render_operation(application, _router, record: OperationRecord):
                         "warn",
                         "任务候选海报编辑失败，改发新消息："
                         f"operation_id={record.operation_id}, "
-                        f"error={type(exc).__name__}",
+                        f"message_id={record.message_id}, "
+                        f"message_kind={record.message_kind}, "
+                        f"error={_render_error(exc)}",
                     )
                     await _clear_message_keyboard(application, record)
             else:
@@ -475,7 +497,9 @@ async def render_operation(application, _router, record: OperationRecord):
                 "warn",
                 "任务候选海报发送失败，降级为文本："
                 f"operation_id={record.operation_id}, "
-                f"error={type(exc).__name__}",
+                f"message_id={record.message_id}, "
+                f"message_kind={record.message_kind}, "
+                f"error={_render_error(exc)}",
             )
         else:
             message_id = getattr(message, "message_id", None)
@@ -500,7 +524,10 @@ async def render_operation(application, _router, record: OperationRecord):
                 _log(
                     "warn",
                     "任务状态消息编辑失败，改发新消息："
-                    f"operation_id={record.operation_id}, error={type(exc).__name__}",
+                    f"operation_id={record.operation_id}, "
+                    f"message_id={record.message_id}, "
+                    f"message_kind={record.message_kind}, "
+                    f"error={_render_error(exc)}",
                 )
                 await _clear_message_keyboard(application, record)
         else:
@@ -515,7 +542,10 @@ async def render_operation(application, _router, record: OperationRecord):
         _log(
             "error",
             "任务状态消息发送失败："
-            f"operation_id={record.operation_id}, error={type(exc).__name__}",
+            f"operation_id={record.operation_id}, "
+            f"message_id={record.message_id}, "
+            f"message_kind={record.message_kind}, "
+            f"error={_render_error(exc)}",
         )
         return None
     message_id = getattr(message, "message_id", None)
@@ -523,6 +553,13 @@ async def render_operation(application, _router, record: OperationRecord):
         coordinator.set_message_id(record.operation_id, message_id, "text")
         return message_id
     return None
+
+
+def _render_error(exc: Exception) -> str:
+    return sanitize_log_text(
+        f"{type(exc).__name__}: {exc}",
+        max_chars=500,
+    )
 
 
 def _message_not_modified(exc: Exception) -> bool:

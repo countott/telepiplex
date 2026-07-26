@@ -3,7 +3,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from telegram.error import BadRequest
 from telegram.ext import ApplicationHandlerStop
@@ -463,19 +463,30 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_failed_status_edit_sends_replacement_and_persists_message_id(self):
+        from app.handlers import interaction_handler
         from app.handlers.interaction_handler import render_operation
 
         record = self.coordinator.report("search", self.report())
         record = self.coordinator.set_message_id(record.operation_id, 12)
         context = self.context()
-        context.application.bot.edit_message_text.side_effect = BadRequest("message missing")
+        context.application.bot.edit_message_text.side_effect = BadRequest(
+            "message missing access_token=should-not-leak"
+        )
         context.application.bot.send_message.return_value = SimpleNamespace(message_id=34)
+        logger = Mock()
 
-        await render_operation(context.application, Mock(), record)
+        with patch.object(interaction_handler.init, "logger", logger):
+            await render_operation(context.application, Mock(), record)
 
         context.application.bot.edit_message_text.assert_awaited_once()
         context.application.bot.send_message.assert_awaited_once()
         self.assertEqual(self.coordinator.get("op-1").message_id, 34)
+        warning = logger.warn.call_args.args[0]
+        self.assertIn("message missing", warning)
+        self.assertIn("message_id=12", warning)
+        self.assertIn("message_kind=text", warning)
+        self.assertIn("access_token=***redacted***", warning)
+        self.assertNotIn("should-not-leak", warning)
 
     async def test_unchanged_status_edit_does_not_send_duplicate_message(self):
         from app.handlers.interaction_handler import render_operation

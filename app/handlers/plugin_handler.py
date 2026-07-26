@@ -15,6 +15,7 @@ from app.handlers.interaction_handler import (
     CONFIG_OPERATION_TASKS_KEY,
     COORDINATOR_KEY,
     operation_markup,
+    operation_render_lock,
     render_operation,
 )
 
@@ -501,19 +502,33 @@ async def handle_feature_result(update, context, route, result: dict):
     if isinstance(result, dict) and "config_patch" in result:
         await _apply_feature_config_patch(update, context, route, result)
         return
-    rendered, message_id, message_kind = await _render_actions(
-        update,
-        context,
-        route,
-        result,
-        operation_record=operation_record,
-    )
+    if operation_record is not None:
+        async with operation_render_lock(
+            context.application,
+            operation_record.operation_id,
+        ):
+            rendered, message_id, message_kind = await _render_actions(
+                update,
+                context,
+                route,
+                result,
+                operation_record=operation_record,
+            )
+            if rendered and message_id is not None:
+                operation_record = coordinator.set_message_id(
+                    operation_record.operation_id,
+                    message_id,
+                    message_kind,
+                )
+    else:
+        rendered, message_id, message_kind = await _render_actions(
+            update,
+            context,
+            route,
+            result,
+        )
     if not rendered:
         return
-    if operation_record is not None and message_id is not None:
-        operation_record = coordinator.set_message_id(
-            operation_record.operation_id, message_id, message_kind
-        )
     session = result.get("session") if isinstance(result, dict) else None
     if session is None:
         if operation_record is not None and message_id is None:

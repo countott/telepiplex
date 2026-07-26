@@ -604,6 +604,101 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             "search:next",
         )
 
+    async def test_callback_render_persists_message_before_background_status_render(self):
+        from app.handlers.interaction_handler import (
+            COORDINATOR_KEY,
+            ROUTER_KEY,
+            render_operation,
+        )
+        from app.handlers.plugin_handler import handle_feature_result
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "host.db")
+            self.addCleanup(coordinator.close)
+            update, context, _manager = self._request([], user_id=1)
+            callback_started = asyncio.Event()
+            release_callback = asyncio.Event()
+
+            async def blocked_edit(*_args, **_kwargs):
+                callback_started.set()
+                await release_callback.wait()
+                return SimpleNamespace(message_id=55)
+
+            update.callback_query = SimpleNamespace(
+                edit_message_reply_markup=AsyncMock(),
+            )
+            update.effective_message.edit_text = AsyncMock(
+                side_effect=blocked_edit
+            )
+            route = SimpleNamespace(
+                plugin_id="search",
+                manifest=SimpleNamespace(callbacks=("search",)),
+            )
+            router = Mock()
+            router.plugin_route.return_value = route
+            context.application.bot_data.update({
+                COORDINATOR_KEY: coordinator,
+                ROUTER_KEY: router,
+            })
+            context.application.bot = SimpleNamespace(
+                edit_message_text=AsyncMock(),
+                edit_message_reply_markup=AsyncMock(),
+                send_message=AsyncMock(
+                    return_value=SimpleNamespace(message_id=56)
+                ),
+            )
+            result = {
+                "actions": [{
+                    "kind": "edit_message",
+                    "text": "⏳ 正在搜索片源...",
+                }],
+                "operation": {
+                    "operation_id": "op-render-lock",
+                    "chat_id": 10,
+                    "user_id": 1,
+                    "state": "running",
+                    "stage": "prowlarr_search",
+                    "status_text": "正在搜索片源。",
+                    "control": "cancel",
+                    "revision": 1,
+                    "details": {},
+                },
+            }
+
+            callback_task = asyncio.create_task(
+                handle_feature_result(update, context, route, result)
+            )
+            await callback_started.wait()
+            latest = coordinator.report("search", {
+                **result["operation"],
+                "status_text": "搜索结果 3 条",
+                "revision": 2,
+            })
+            status_task = asyncio.create_task(
+                render_operation(context.application, router, latest)
+            )
+            await asyncio.sleep(0)
+
+            context.application.bot.send_message.assert_not_awaited()
+            context.application.bot.edit_message_text.assert_not_awaited()
+
+            release_callback.set()
+            await asyncio.gather(callback_task, status_task)
+
+            context.application.bot.send_message.assert_not_awaited()
+            context.application.bot.edit_message_text.assert_awaited_once()
+            self.assertEqual(
+                context.application.bot.edit_message_text.await_args.kwargs[
+                    "message_id"
+                ],
+                55,
+            )
+            self.assertEqual(
+                coordinator.get("op-render-lock").message_id,
+                55,
+            )
+
     async def test_feature_config_patch_from_callback_updates_original_message(self):
         from app.handlers.plugin_handler import handle_feature_result
 

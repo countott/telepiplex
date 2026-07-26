@@ -11,7 +11,10 @@ import requests
 
 
 class Open115Error(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code="", operation=""):
+        super().__init__(message)
+        self.code = str(code or "")
+        self.operation = str(operation or "")
 
 
 class Open115Client:
@@ -35,13 +38,21 @@ class Open115Client:
         access_token = str(access_token or "").strip()
         refresh_token = str(refresh_token or "").strip()
         if not access_token or not refresh_token:
-            raise Open115Error("115 access_token and refresh_token are required")
+            raise Open115Error(
+                "115 access_token and refresh_token are required",
+                code="missing_token",
+                operation="set_tokens",
+            )
         self.access_token = access_token
         self.refresh_token = refresh_token
 
     def _headers(self):
         if not self.access_token:
-            raise Open115Error("115 access_token is not configured")
+            raise Open115Error(
+                "115 access_token is not configured",
+                code="missing_access_token",
+                operation="request",
+            )
         return {
             "Authorization": f"Bearer {self.access_token}",
             "User-Agent": "Telepiplex-Feature/1.0",
@@ -65,9 +76,16 @@ class Open115Client:
             response.raise_for_status()
             result = response.json()
         except (requests.RequestException, ValueError) as exc:
-            raise Open115Error(f"115 request failed: {type(exc).__name__}") from exc
+            raise Open115Error(
+                f"115 request failed: {type(exc).__name__}",
+                operation=path,
+            ) from exc
         if not isinstance(result, dict):
-            raise Open115Error("115 returned a non-object response")
+            raise Open115Error(
+                "115 returned a non-object response",
+                code="invalid_response",
+                operation=path,
+            )
         if retry and result.get("code") in self.TOKEN_EXPIRED_CODES:
             self.refresh_access_token()
             return self._request(method, path, params=params, data=data, retry=False)
@@ -75,7 +93,11 @@ class Open115Client:
 
     def refresh_access_token(self):
         if not self.refresh_token:
-            raise Open115Error("115 refresh_token is not configured")
+            raise Open115Error(
+                "115 refresh_token is not configured",
+                code="missing_refresh_token",
+                operation="refresh_access_token",
+            )
         try:
             response = self.session.post(
                 f"{self.passport_url}/open/refreshToken",
@@ -86,10 +108,17 @@ class Open115Client:
             response.raise_for_status()
             result = response.json()
         except (requests.RequestException, ValueError) as exc:
-            raise Open115Error(f"115 token refresh failed: {type(exc).__name__}") from exc
+            raise Open115Error(
+                f"115 token refresh failed: {type(exc).__name__}",
+                operation="refresh_access_token",
+            ) from exc
         data = result.get("data") if isinstance(result, dict) else None
         if not isinstance(data, dict) or not data.get("access_token"):
-            raise Open115Error("115 token refresh returned invalid data")
+            raise Open115Error(
+                "115 token refresh returned invalid data",
+                code=str(result.get("code") or "") if isinstance(result, dict) else "",
+                operation="refresh_access_token",
+            )
         self.access_token = str(data["access_token"])
         self.refresh_token = str(data.get("refresh_token") or self.refresh_token)
         if self.on_tokens_changed:
@@ -267,7 +296,10 @@ class Open115Client:
             if not info and isinstance(created, dict):
                 info = created
             if not info:
-                raise Open115Error(f"cannot create 115 directory: {current_path}")
+                raise Open115Error(
+                    f"cannot create 115 directory: {current_path}",
+                    operation="create_directory",
+                )
             current_info = info
         return current_info
 
@@ -279,7 +311,11 @@ class Open115Client:
             data={"urls": link, "wp_path_id": directory["file_id"]},
         )
         if not self._successful(result):
-            raise Open115Error(str(result.get("message") or "cannot add offline task"))
+            raise Open115Error(
+                str(result.get("message") or "cannot add offline task"),
+                code=str(result.get("code") or ""),
+                operation="add_offline_task",
+            )
         return True
 
     def get_offline_tasks(self):
