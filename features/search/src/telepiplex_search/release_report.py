@@ -8,7 +8,14 @@ from .release_identity import stable_release_id
 
 
 _CIRCLED = tuple("①②③④⑤⑥⑦⑧⑨⑩⑪⑫")
-_RESULT_LINE_LIMIT = 245
+_RESULT_LINE_LIMIT = 180
+_GROUP_TOKEN = re.compile(r"(?i)(?:-|[ ._])([a-z][a-z0-9]{1,19})$")
+_KNOWN_TRAILING_TOKENS = {
+    "aac", "ac3", "atmos", "av1", "avc", "bluray", "dd", "ddp",
+    "dts", "dtsma", "dtsx", "dv", "dovi", "eac3", "flac", "h264",
+    "h265", "hdr", "hdr10", "hevc", "remastered", "remux", "truehd",
+    "uhd", "web", "webdl", "webrip", "x264", "x265",
+}
 
 
 def _clip(value, limit: int) -> str:
@@ -28,34 +35,150 @@ def _safe_int(value) -> int:
 def _approx_size_label(value) -> str:
     size = max(0, _safe_int(value))
     if not size:
-        return "~?G"
+        return "?G"
     gib = size / 1024 ** 3
-    return f"~{max(1, int(gib + 0.5))}G"
+    return f"{max(1, int(gib + 0.5))}G"
 
 
-def _specification_label(value) -> str:
-    label = _clip(value, 18)
-    if label.casefold() == "2160p":
-        return "4K"
-    return label
+def _matches(title: str, pattern: str) -> bool:
+    return re.search(pattern, title, re.IGNORECASE) is not None
+
+
+def _resolution(title: str) -> str:
+    for pattern, label in (
+        (r"(?<!\w)(?:2160p|4k|uhd)(?!\w)", "4K"),
+        (r"(?<!\w)1080p(?!\w)", "1080p"),
+        (r"(?<!\w)1080i(?!\w)", "1080i"),
+        (r"(?<!\w)720p(?!\w)", "720p"),
+    ):
+        if _matches(title, pattern):
+            return label
+    return ""
+
+
+def _source(title: str) -> str:
+    for pattern, label in (
+        (r"(?<!\w)remux(?!\w)", "REMUX"),
+        (r"(?<!\w)web[ ._-]?dl(?!\w)", "WEB-DL"),
+        (r"(?<!\w)webrip(?!\w)", "WEBRip"),
+        (r"(?<!\w)blu[ ._-]?ray(?!\w)|(?<!\w)b[dr]rip(?!\w)", "BluRay"),
+        (r"(?<!\w)hdtv(?!\w)", "HDTV"),
+    ):
+        if _matches(title, pattern):
+            return label
+    return ""
+
+
+def _codec(title: str) -> str:
+    for pattern, label in (
+        (r"(?<!\w)x265(?!\w)", "x265"),
+        (r"(?<!\w)(?:h[ ._-]?265|hevc)(?!\w)", "HEVC"),
+        (r"(?<!\w)av1(?!\w)", "AV1"),
+        (r"(?<!\w)x264(?!\w)", "x264"),
+        (r"(?<!\w)(?:h[ ._-]?264|avc)(?!\w)", "AVC"),
+    ):
+        if _matches(title, pattern):
+            return label
+    return ""
+
+
+def _dynamic_range(title: str) -> list[str]:
+    labels = []
+    if _matches(title, r"(?<!\w)(?:dv|dovi)(?!\w)|dolby[ ._-]?vision"):
+        labels.append("DV")
+    if _matches(title, r"(?<!\w)hdr10[+](?!\w)"):
+        labels.append("HDR10+")
+    elif _matches(title, r"(?<!\w)hdr10(?!\w)"):
+        labels.append("HDR10")
+    elif _matches(title, r"(?<!\w)hdr(?!\w)"):
+        labels.append("HDR")
+    return labels
+
+
+def _audio(title: str) -> list[str]:
+    compact = re.sub(r"[^a-z0-9]+", "", title.casefold())
+    channel = ""
+    match = re.search(r"(?<!\d)([257]\.1|[12]\.0)(?!\d)", title)
+    if match:
+        channel = match.group(1)
+    quality = ""
+    family = ""
+    if "truehd" in compact:
+        quality = "无损"
+    elif any(token in compact for token in (
+        "dtshdmasteraudio", "dtshdma", "dtsma",
+    )):
+        quality = "无损"
+        family = "DTS"
+    elif "flac" in compact:
+        quality = "无损"
+        family = "FLAC"
+    elif "alac" in compact:
+        quality = "无损"
+    elif any(token in compact for token in ("lpcm", "linearpcm")):
+        quality = "无损"
+    elif any(token in compact for token in (
+        "dtshdhighresolution", "dtshdhra",
+    )):
+        quality = "高码有损"
+        family = "DTS"
+    elif "dtshd" in compact:
+        family = "DTS"
+    elif "dts" in compact and "dtsx" not in compact:
+        quality = "高码有损"
+        family = "DTS"
+    elif any(token in compact for token in (
+        "eac3", "ddp", "dolbydigitalplus",
+    )) or _matches(title, r"(?<!\w)dd[+](?!\w)"):
+        quality = "有损"
+    elif any(token in compact for token in ("ac3", "dolbydigital")):
+        quality = "有损"
+    elif "aac" in compact:
+        quality = "有损"
+    if "dtsx" in compact and not family:
+        family = "DTS"
+    experience = "Atmos" if "atmos" in compact else family
+    labels = []
+    if channel:
+        labels.append(channel)
+    if quality:
+        labels.append(quality)
+    if experience:
+        labels.append(experience)
+    return labels
+
+
+def _editions(title: str) -> list[str]:
+    labels = []
+    for pattern, label in (
+        (r"(?<!\w)hybrid(?!\w)", "Hybrid"),
+        (r"(?<!\w)remastered(?!\w)", "Remastered"),
+        (r"(?<!\w)imax(?!\w)", "IMAX"),
+        (r"(?<!\w)extended(?!\w)", "Extended"),
+        (r"(?<!\w)criterion(?!\w)", "Criterion"),
+        (r"director(?:'s)?[ ._-]?cut", "Director's Cut"),
+        (r"(?<!\w)unrated(?!\w)", "Unrated"),
+    ):
+        if _matches(title, pattern):
+            labels.append(label)
+    return labels
 
 
 def _specifications(item: dict) -> str:
+    title = str(item.get("title") or "")
+    scope = _compact_scope(item.get("scope_label"))
     labels = []
-    seen = set()
-    for detail in item.get("score_details") or []:
-        if (
-            not isinstance(detail, dict)
-            or detail.get("kind") != "keyword"
-            or _safe_int(detail.get("score")) == 0
-        ):
-            continue
-        label = _specification_label(detail.get("label"))
-        key = label.casefold()
-        if label and key not in seen:
-            seen.add(key)
-            labels.append(label)
-    return " / ".join(labels) or "规格未知"
+    if scope != "整片":
+        labels.append(scope)
+    labels.extend(filter(None, (
+        _resolution(title),
+        _source(title),
+        _codec(title),
+    )))
+    labels.extend(_dynamic_range(title))
+    labels.extend(_audio(title))
+    labels.extend(_editions(title))
+    return "·".join(labels) or "规格未知"
 
 
 def _compact_scope(value) -> str:
@@ -68,27 +191,62 @@ def _compact_scope(value) -> str:
     return scope
 
 
+def _release_group(title: str) -> str:
+    match = _GROUP_TOKEN.search(str(title or "").strip())
+    if match is None:
+        return ""
+    candidate = match.group(1)
+    key = candidate.casefold().replace("+", "")
+    if (
+        key in _KNOWN_TRAILING_TOKENS
+        or re.fullmatch(
+            r"(?:19|20)\d{2}|\d{3,4}p|s\d{1,2}(?:e\d{1,3})?|"
+            r"\d+(?:\.\d+)?",
+            key,
+        )
+    ):
+        return ""
+    return candidate
+
+
+def _display_versions(ranked) -> list[dict]:
+    versions = []
+    by_fingerprint = {}
+    for item in ranked or []:
+        if not isinstance(item, dict):
+            continue
+        title = re.sub(
+            r"[\s._-]+", " ", str(item.get("title") or "").casefold()
+        ).strip()
+        size = _safe_int(item.get("size"))
+        fingerprint = (title, size) if title and size else (
+            stable_release_id(item),
+        )
+        existing = by_fingerprint.get(fingerprint)
+        if existing is None:
+            representative = dict(item)
+            representative["_source_count"] = 1
+            versions.append(representative)
+            by_fingerprint[fingerprint] = representative
+        else:
+            existing["_source_count"] += 1
+    return versions[:12]
+
+
 def _result_line(index: int, item: dict) -> str:
-    prefix = (
-        f"{_CIRCLED[index]} {_safe_int(item.get('score'))}分"
-        f"｜{_compact_scope(item.get('scope_label'))}"
-        f"｜{_specifications(item)}"
-        f"｜做种{_safe_int(item.get('seeders'))}"
+    line = (
+        f"{_CIRCLED[index]} {_specifications(item)}"
         f"｜{_approx_size_label(item.get('size'))}"
-        "｜"
+        f"·{_safe_int(item.get('seeders'))}种"
     )
-    title_limit = max(1, _RESULT_LINE_LIMIT - len(prefix))
-    return _clip(
-        prefix + _clip(item.get("title"), title_limit),
-        _RESULT_LINE_LIMIT,
-    )
+    group = _release_group(item.get("title"))
+    if group:
+        line += f"｜{group}"
+    return _clip(line, _RESULT_LINE_LIMIT)
 
 
 def release_keyboard(plan_id: str, ranked) -> list[list[dict]]:
-    releases = [
-        item for item in (ranked or [])
-        if isinstance(item, dict)
-    ][:12]
+    releases = _display_versions(ranked)
     buttons = [{
         "text": _CIRCLED[index],
         "callback_data": (
@@ -112,7 +270,7 @@ def format_release_report(
     ranked: list[dict],
     indexer_summary: dict,
 ) -> str:
-    del gate
+    del query, gate
     summary = indexer_summary if isinstance(indexer_summary, dict) else {}
     enabled = summary.get("enabled_indexers") or []
     total = _safe_int(summary.get("total_indexers") or len(enabled))
@@ -126,18 +284,17 @@ def format_release_report(
         if isinstance(item, dict)
     ]
     abnormal_count = len(down) + bool(str(summary.get("error") or "").strip())
-    displayed = [
+    releases = [
         item for item in (ranked or [])
         if isinstance(item, dict)
     ][:12]
-    lines = [
-        f"🔍 {_clip(query, 180)}",
-        (
-            f"搜索结果 {len(displayed)}"
-            f"｜索引器完成 {completed}/{total or '?'}"
-            f"｜异常 {int(abnormal_count)}"
-        ),
-    ]
+    displayed = _display_versions(releases)
+    count_label = f"搜索结果 {len(displayed)}条"
+    lines = [(
+        f"🔍 {count_label}"
+        f"｜索引器 {completed}/{total or '?'}"
+        f"｜异常{int(abnormal_count)}"
+    )]
     if not displayed:
         lines.append("没有同身份、同范围的可用片源。")
     for index, item in enumerate(displayed):

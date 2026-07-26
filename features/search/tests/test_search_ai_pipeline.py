@@ -206,6 +206,33 @@ class SearchAiPipelineTest(unittest.TestCase):
 
     @patch("telepiplex_search.ai.check_ai_api_available", return_value=True)
     @patch("telepiplex_search.ai.chat_completion")
+    def test_intent_hint_rejects_unrequested_year_and_type_pollution(
+        self,
+        chat_mock,
+        _available,
+    ):
+        chat_mock.return_value = {
+            "choices": [{"message": {"content": json.dumps({
+                "status": "parsed",
+                "title_hints": ["想见你 想見你\u200e (2022)（电视剧）"],
+                "media_type_hint": "series",
+                "scope_hint": "work",
+                "season_number": None,
+                "episode_number": None,
+                "numeric_tokens": [],
+                "relation_hint": "none",
+                "clarification_reason": "",
+            })}}],
+        }
+
+        result = infer_search_hypotheses_with_ai({
+            "raw_query": "想见你",
+        })
+
+        self.assertIsNone(result)
+
+    @patch("telepiplex_search.ai.check_ai_api_available", return_value=True)
+    @patch("telepiplex_search.ai.chat_completion")
     def test_intent_prompt_requires_clarification_for_multiple_plausible_works(
         self,
         chat_mock,

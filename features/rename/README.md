@@ -4,8 +4,10 @@
 
 普通电影按计划文件名、唯一候选、AI 证据、可解释大小兜底的固定顺序选择主视频；剧集的未匹配大视频必须由 AI 明确判定。所有目标冲突在第一次写操作前预检，映射冲突或证据不足时整个下载根进入 `/未整理`，不执行部分业务移动。完成整理后只保留已确认目标视频；字幕、NFO、海报及其他下载附属文件随源下载根清理。
 
+如果 Host 在交接前确认 sync/Plex 管理未安装或未启用，rename 会保留已经完成的整理结果并收敛为成功终态，明确通知“已跳过后续处理”，且不会发布无人消费的 `media.organized`。用户通知使用纯文本，文件名和路径不会依赖 Telegram Markdown 转义。
+
 ```bash
-python tools/build_feature.py features/rename /tmp/rename-1.0.0.tpx \
+python tools/build_feature.py features/rename /tmp/rename-1.0.1.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

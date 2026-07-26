@@ -439,6 +439,63 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             "https://image.example/poster.jpg",
         )
 
+    async def test_running_action_drops_keyboard_from_previous_prompt(self):
+        from app.handlers.plugin_handler import _with_rendered_keyboard
+
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        operation = {
+            "state": "running",
+            "details": {"keyboard": [[{
+                "text": "旧选项",
+                "callback_data": "search:select:old",
+            }]]},
+        }
+        result = {
+            "actions": [{
+                "kind": "edit_message",
+                "text": "正在继续处理",
+            }],
+        }
+
+        normalized = _with_rendered_keyboard(route, result, operation)
+
+        self.assertNotIn("keyboard", normalized["details"])
+
+    async def test_photo_to_text_action_clears_old_photo_buttons(self):
+        from app.handlers.plugin_handler import _render_actions
+
+        update, context, _manager = self._request([], user_id=1)
+        update.effective_message.photo = [object()]
+        update.effective_message.edit_reply_markup = AsyncMock()
+        update.effective_message.reply_text.return_value = SimpleNamespace(
+            message_id=56
+        )
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+
+        rendered, message_id, message_kind = await _render_actions(
+            update,
+            context,
+            route,
+            {
+                "actions": [{
+                    "kind": "edit_message",
+                    "text": "正在搜索片源",
+                }],
+            },
+        )
+
+        self.assertTrue(rendered)
+        self.assertEqual((message_id, message_kind), (56, "text"))
+        update.effective_message.edit_reply_markup.assert_awaited_once_with(
+            reply_markup=None
+        )
+
     async def test_feature_config_patch_from_callback_updates_original_message(self):
         from app.handlers.plugin_handler import handle_feature_result
 
@@ -500,6 +557,49 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             "invalid_config_patch",
             update.effective_message.reply_text.await_args.args[0],
         )
+
+    async def test_config_patch_without_manager_returns_terminal_feedback(self):
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+        from app.handlers.plugin_handler import handle_feature_result
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "host.db")
+            self.addCleanup(coordinator.close)
+            update, context, _manager = self._request([], user_id=1)
+            context.application.bot_data.pop(
+                "telepiplex_plugin_manager", None
+            )
+            context.application.bot_data[
+                "telepiplex_interaction_coordinator"
+            ] = coordinator
+            route = SimpleNamespace(
+                plugin_id="search",
+                manifest=SimpleNamespace(callbacks=("search",)),
+            )
+
+            await handle_feature_result(update, context, route, {
+                "actions": [],
+                "config_patch": {"ai": {"model": "new-model"}},
+                "operation": {
+                    "operation_id": "op-no-config-manager",
+                    "chat_id": 10,
+                    "user_id": 1,
+                    "state": "running",
+                    "stage": "config_apply",
+                    "status_text": "正在保存配置",
+                    "control": "cancel",
+                    "revision": 1,
+                },
+            })
+
+            self.assertIn(
+                "config_manager_unavailable",
+                update.effective_message.reply_text.await_args.args[0],
+            )
+            self.assertEqual(
+                coordinator.get("op-no-config-manager").state,
+                "failed",
+            )
 
     async def test_invalid_feature_config_patch_from_callback_updates_original_message(self):
         from app.handlers.plugin_handler import handle_feature_result
@@ -918,6 +1018,60 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         sessions = context.application.bot_data["telepiplex_plugin_sessions"]
         self.assertEqual(list(sessions.values())[0]["plugin_id"], "other")
+
+    async def test_disabling_feature_interrupts_its_operation_and_clears_buttons(self):
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+        from app.handlers.plugin_handler import plugin_command
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "host.db")
+            self.addCleanup(coordinator.close)
+            record = coordinator.report("echo", {
+                "operation_id": "op-disabled",
+                "chat_id": 10,
+                "user_id": 1,
+                "state": "awaiting_input",
+                "stage": "selection",
+                "status_text": "等待选择",
+                "control": "exit",
+                "revision": 1,
+                "details": {"keyboard": [[{
+                    "text": "旧选项",
+                    "callback_data": "echo:select:1",
+                }]]},
+            })
+            coordinator.set_message_id(record.operation_id, 55)
+            update, context, manager = self._request(
+                ["disable", "echo"], user_id=1
+            )
+            manager.router.snapshot.plugin_ids = ("other",)
+            context.application.bot_data[
+                "telepiplex_interaction_coordinator"
+            ] = coordinator
+            context.application.bot_data[
+                "telepiplex_plugin_router"
+            ] = manager.router
+            context.application.bot = SimpleNamespace(
+                edit_message_text=AsyncMock(),
+                edit_message_reply_markup=AsyncMock(),
+                send_message=AsyncMock(),
+                set_my_commands=AsyncMock(),
+            )
+
+            with patch(
+                "app.handlers.plugin_handler.init.check_user",
+                return_value=True,
+            ):
+                await plugin_command(update, context)
+
+            current = coordinator.get("op-disabled")
+            self.assertEqual(current.state, "interrupted")
+            context.application.bot.edit_message_text.assert_awaited_once()
+            self.assertIsNone(
+                context.application.bot.edit_message_text.await_args.kwargs[
+                    "reply_markup"
+                ]
+            )
 
     async def test_manual_update_clears_stale_host_config_state(self):
         from app.handlers.plugin_handler import plugin_command

@@ -105,6 +105,8 @@ async def plugin_command(update, context):
             }:
                 _clear_plugin_sessions(context.application.bot_data, result.plugin_id)
                 _clear_config_user_data(context.user_data)
+            if command in {"disable", "remove"}:
+                await _interrupt_unowned_operations(context)
             menu_suffix = await _sync_command_menu(context)
             kwargs = {}
             if command in {"install", "update", "enable", "rollback"}:
@@ -348,6 +350,23 @@ async def _sync_command_menu(context) -> str:
     )
 
 
+async def _interrupt_unowned_operations(context):
+    bot_data = context.application.bot_data
+    coordinator = bot_data.get(COORDINATOR_KEY)
+    router = bot_data.get(ROUTER_KEY)
+    if coordinator is None or router is None:
+        return
+    snapshot = getattr(router, "snapshot", None)
+    plugin_ids = getattr(snapshot, "plugin_ids", ())
+    active_plugin_ids = {
+        str(plugin_id)
+        for plugin_id in plugin_ids
+        if str(plugin_id).strip()
+    }
+    for record in coordinator.interrupt_unowned(active_plugin_ids):
+        await render_operation(context.application, router, record)
+
+
 async def dynamic_command_gateway(update, context):
     if not init.check_user(update.effective_user.id):
         return
@@ -551,6 +570,8 @@ def _with_rendered_keyboard(route, result: dict, operation: dict) -> dict:
             if _keyboard_markup(route, data) is False:
                 return normalized
             details["keyboard"] = deepcopy(data["keyboard"])
+        else:
+            details.pop("keyboard", None)
         if action.get("kind") in {"send_photo", "edit_photo"}:
             photo_url = _photo_url(data)
             if photo_url is False:
@@ -854,6 +875,12 @@ async def _render_actions(
             rendered_kind = "text"
         elif action["kind"] == "edit_message":
             if _message_has_photo(update.effective_message):
+                try:
+                    await update.effective_message.edit_reply_markup(
+                        reply_markup=None
+                    )
+                except Exception:
+                    pass
                 sent = await update.effective_message.reply_text(text, **kwargs)
             else:
                 sent = await update.effective_message.edit_text(text, **kwargs)

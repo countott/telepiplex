@@ -44,8 +44,9 @@ def _log(level: str, message: str):
 
 
 class OperationReportSink:
-    def __init__(self, coordinator):
+    def __init__(self, coordinator, router=None):
         self.coordinator = coordinator
+        self.router = router
         self._listener = None
         self._tasks: set[asyncio.Task] = set()
         self._locks: dict[str, asyncio.Lock] = {}
@@ -54,6 +55,9 @@ class OperationReportSink:
         self._listener = listener
 
     def __call__(self, plugin_id: str, report: dict) -> dict:
+        unavailable = self._unavailable_handoff(report)
+        if unavailable is not None:
+            return unavailable
         record = self.coordinator.report(plugin_id, report)
         if self._listener is not None:
             try:
@@ -83,6 +87,32 @@ class OperationReportSink:
             "operation_id": record.operation_id,
             "state": record.state,
             "revision": record.revision,
+        }
+
+    def _unavailable_handoff(self, report: dict) -> dict | None:
+        if (
+            self.router is None
+            or not isinstance(report, dict)
+            or str(report.get("state") or "") != "handed_off"
+        ):
+            return None
+        target = str(report.get("next_plugin_id") or "").strip()
+        if not target:
+            return None
+        current = self.coordinator.get(
+            str(report.get("operation_id") or "")
+        )
+        if current is not None and current.state in TERMINAL_STATES:
+            return None
+        if self.router.plugin_route(target) is not None:
+            return None
+        return {
+            "accepted": False,
+            "operation_id": str(report.get("operation_id") or ""),
+            "state": current.state if current is not None else "",
+            "revision": current.revision if current is not None else 0,
+            "error_code": "handoff_target_unavailable",
+            "target_plugin_id": target,
         }
 
     async def _notify(self, record: OperationRecord):
@@ -341,6 +371,8 @@ def _normalize_control_result(record: OperationRecord, result: dict) -> dict:
 
 
 def operation_markup(record: OperationRecord, router=None):
+    if record.state in TERMINAL_STATES:
+        return None
     rows = _feature_status_rows(record, router)
     explicit_control = any(
         button.text in set(_CONTROL_LABELS.values()) | {"取消"}
@@ -420,12 +452,17 @@ async def render_operation(application, _router, record: OperationRecord):
                     )
                     return record.message_id
                 except Exception as exc:
+                    if _message_not_modified(exc):
+                        return record.message_id
                     _log(
                         "warn",
                         "任务候选海报编辑失败，改发新消息："
                         f"operation_id={record.operation_id}, "
                         f"error={type(exc).__name__}",
                     )
+                    await _clear_message_keyboard(application, record)
+            else:
+                await _clear_message_keyboard(application, record)
         try:
             message = await application.bot.send_photo(
                 chat_id=record.chat_id,
@@ -458,11 +495,16 @@ async def render_operation(application, _router, record: OperationRecord):
                 )
                 return record.message_id
             except Exception as exc:
+                if _message_not_modified(exc):
+                    return record.message_id
                 _log(
                     "warn",
                     "任务状态消息编辑失败，改发新消息："
                     f"operation_id={record.operation_id}, error={type(exc).__name__}",
                 )
+                await _clear_message_keyboard(application, record)
+        else:
+            await _clear_message_keyboard(application, record)
     try:
         message = await application.bot.send_message(
             chat_id=record.chat_id,
@@ -481,6 +523,23 @@ async def render_operation(application, _router, record: OperationRecord):
         coordinator.set_message_id(record.operation_id, message_id, "text")
         return message_id
     return None
+
+
+def _message_not_modified(exc: Exception) -> bool:
+    return "message is not modified" in str(exc).casefold()
+
+
+async def _clear_message_keyboard(application, record: OperationRecord):
+    if record.message_id is None:
+        return
+    try:
+        await application.bot.edit_message_reply_markup(
+            chat_id=record.chat_id,
+            message_id=record.message_id,
+            reply_markup=None,
+        )
+    except Exception:
+        pass
 
 
 def _operation_photo_url(details) -> str:

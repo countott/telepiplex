@@ -351,7 +351,12 @@ class SearchFeature:
         raise FeatureError("invalid_callback", "search callback action is invalid")
 
     def _start_plan_task(
-        self, raw_query: str, request: dict, *, reuse_owner: bool = False
+        self,
+        raw_query: str,
+        request: dict,
+        *,
+        reuse_owner: bool = False,
+        locked_identity: tuple[str, str] | None = None,
     ) -> dict:
         if self.runtime is None:
             raise FeatureError("not_ready", "search runtime is not ready")
@@ -384,6 +389,7 @@ class SearchFeature:
                 dict(request),
                 plan_id,
                 operation["operation_id"],
+                locked_identity,
             ),
             task_id=task_id,
         )
@@ -398,7 +404,12 @@ class SearchFeature:
         }
 
     async def _prepare_plan_task(
-        self, raw_query, request, plan_id, operation_id
+        self,
+        raw_query,
+        request,
+        plan_id,
+        operation_id,
+        locked_identity=None,
     ):
         try:
             result = await self._prepare_plan(
@@ -406,6 +417,7 @@ class SearchFeature:
                 request,
                 plan_id=plan_id,
                 operation_id=operation_id,
+                locked_identity=locked_identity,
             )
             action = (result.get("actions") or [{}])[0]
             if plan_id in self.plans:
@@ -610,11 +622,19 @@ class SearchFeature:
         *,
         plan_id: str,
         operation_id: str,
+        locked_identity: tuple[str, str] | None = None,
     ) -> dict:
         if not raw_query:
             return self._closed("⚠️ 搜索内容不能为空。")
         try:
-            plan = await self.plan_builder(raw_query, plan_id)
+            if locked_identity:
+                plan = await self.plan_builder(
+                    raw_query,
+                    plan_id,
+                    locked_identity=locked_identity,
+                )
+            else:
+                plan = await self.plan_builder(raw_query, plan_id)
         except SearchPlanningError as exc:
             code = getattr(exc, "code", str(exc))
             message = _PLANNING_ERROR_MESSAGES.get(
@@ -639,8 +659,15 @@ class SearchFeature:
             plan.get("status") == "needs_clarification"
             and clarification is not None
         ):
-            options = [
-                {
+            options = []
+            for item in (clarification.get("options") or [])[:6]:
+                if not (
+                    isinstance(item, dict)
+                    and str(item.get("label") or "").strip()
+                    and str(item.get("query") or "").strip()
+                ):
+                    continue
+                option = {
                     "label": " ".join(
                         str(item.get("label") or "").split()
                     ),
@@ -652,11 +679,18 @@ class SearchFeature:
                     ).strip(),
                     "year": str(item.get("year") or "").strip(),
                 }
-                for item in (clarification.get("options") or [])[:6]
-                if isinstance(item, dict)
-                and str(item.get("label") or "").strip()
-                and str(item.get("query") or "").strip()
-            ]
+                raw_lock = item.get("locked_identity")
+                if (
+                    isinstance(raw_lock, dict)
+                    and str(raw_lock.get("key") or "").strip()
+                    in {"tvdb", "douban_subject", "wikipedia"}
+                    and str(raw_lock.get("value") or "").strip()
+                ):
+                    option["locked_identity"] = (
+                        str(raw_lock["key"]).strip(),
+                        str(raw_lock["value"]).strip(),
+                    )
+                options.append(option)
             if not options:
                 return self._closed(
                     "❌ 无法生成媒体元数据：澄清选项无效。"
@@ -764,11 +798,13 @@ class SearchFeature:
         operation_id = str(stored.get("operation_id") or "")
         refined_query = str(option.get("query") or "").strip()
         label = str(option.get("label") or refined_query).strip()
+        locked_identity = option.get("locked_identity")
         self._release_plan(plan_id)
         result = self._start_plan_task(
             refined_query,
             request,
             reuse_owner=True,
+            locked_identity=locked_identity,
         )
         action = (result.get("actions") or [{}])[0]
         action.update({
@@ -1780,6 +1816,24 @@ class SearchFeature:
                 operation["handoff_pending"] = True
             raise
         if not isinstance(response, dict) or response.get("accepted") is not True:
+            if (
+                isinstance(response, dict)
+                and response.get("error_code")
+                == "handoff_target_unavailable"
+                and response.get("target_plugin_id") == "download"
+            ):
+                operation.pop("handoff_operation", None)
+                await self._report_operation(
+                    operation_id,
+                    state="failed",
+                    stage="submitting_download",
+                    status_text="115 下载未安装，无法提交片源。",
+                    control="",
+                )
+                raise FeatureError(
+                    "handoff_target_unavailable",
+                    "download Feature is not active",
+                )
             operation.update({
                 "state": "interrupted",
                 "status_text": "Host 已结束协调任务，未提交 115 下载。",
@@ -1836,7 +1890,13 @@ class SearchFeature:
             }]
         }
 
-    async def _build_plan(self, raw_query: str, plan_id: str):
+    async def _build_plan(
+        self,
+        raw_query: str,
+        plan_id: str,
+        *,
+        locked_identity: tuple[str, str] | None = None,
+    ):
         providers = {
             "wikipedia": self._wikipedia_provider,
             "douban": self._douban_provider,
@@ -1845,7 +1905,7 @@ class SearchFeature:
         parsed = classify_search_input(raw_query)
         if parsed.kind in {"invalid_link", "unsupported_text"}:
             raise SearchPlanningError(parsed.reason)
-        locked_identity = None
+        resolved_identity = locked_identity
         planning_query = raw_query
         source_gateway = self._source_tool_gateway()
         if parsed.kind == "link":
@@ -1854,7 +1914,7 @@ class SearchFeature:
             except DirectLinkError as exc:
                 raise SearchPlanningError(str(exc)) from exc
             planning_query = direct.query
-            locked_identity = direct.stable_identity
+            resolved_identity = direct.stable_identity
             providers[direct.provider] = lambda _hypotheses: direct.evidence
             source_gateway = None
         return await build_confirmable_search_plan(
@@ -1863,7 +1923,7 @@ class SearchFeature:
             providers,
             lambda contract: set((contract.get("evidence") or {}).get("occupied_special_numbers") or []),
             self.allocator,
-            locked_identity=locked_identity,
+            locked_identity=resolved_identity,
             source_gateway=source_gateway,
         )
 

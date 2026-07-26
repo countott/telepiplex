@@ -9,6 +9,164 @@ from telepiplex_search.release_identity import stable_release_id
 
 
 class ReleaseReportTest(unittest.TestCase):
+    def test_report_hides_title_and_score_and_merges_identical_release_sources(self):
+        mirrored = [{
+            "title": (
+                "Constantine 2005 REMASTERED 1080p "
+                "BluRay HEVC x265 AC3 5.1 BONE"
+            ),
+            "scope_label": "电影",
+            "score": 10568 - index,
+            "score_details": [],
+            "seeders": 302 - index,
+            "size": 2 * 1024 ** 3,
+            "magnet_url": (
+                "magnet:?xt=urn:btih:"
+                f"{index + 1:040x}"
+            ),
+        } for index in range(3)]
+        distinct = {
+            "title": (
+                "Constantine.2005.2160p.UHD.BluRay.Remux."
+                "HEVC.TrueHD.Atmos.7.1-HexDrift"
+            ),
+            "scope_label": "电影",
+            "score": 3057,
+            "score_details": [],
+            "seeders": 4,
+            "size": 57 * 1024 ** 3,
+            "magnet_url": "magnet:?xt=urn:btih:" + "a" * 40,
+        }
+        ranked = mirrored + [distinct]
+
+        text = format_release_report(
+            "A title long enough that it must not be repeated",
+            ReleaseGateResult(
+                raw_count=4,
+                eligible=tuple(ranked),
+                rejection_counts={},
+                classifications=(),
+            ),
+            ranked,
+            {
+                "enabled_indexers": ["A", "B", "C"],
+                "down_indexers": [],
+                "completed_indexers": 3,
+                "total_indexers": 3,
+                "error": "",
+            },
+        )
+        keyboard = release_keyboard("plan", ranked)
+
+        self.assertEqual(
+            text.splitlines(),
+            [
+                "🔍 搜索结果 2条｜索引器 3/3｜异常0",
+                (
+                    "① 1080p·BluRay·x265·5.1·有损·Remastered"
+                    "｜2G·302种｜BONE"
+                ),
+                (
+                    "② 4K·REMUX·HEVC·7.1·无损·Atmos"
+                    "｜57G·4种｜HexDrift"
+                ),
+            ],
+        )
+        self.assertNotIn("10568", text)
+        self.assertNotIn("Constantine", text)
+        self.assertEqual(
+            [len(row) for row in keyboard],
+            [2, 1],
+        )
+
+    def test_specifications_collapse_video_and_audio_aliases_by_dimension(self):
+        item = {
+            "title": (
+                "Movie.2026.2160p.DV.DoVi.DV.HDR.HDR10+."
+                "DDP.EAC3.Atmos.7.1.x265-GROUP"
+            ),
+            "scope_label": "电影",
+            "score": 9999,
+            "score_details": [
+                {"kind": "keyword", "label": "2160p", "score": 35},
+                {"kind": "keyword", "label": "HEVC", "score": 18},
+                {"kind": "keyword", "label": "x265", "score": 18},
+                {"kind": "keyword", "label": "Atmos", "score": 16},
+            ],
+            "seeders": 8,
+            "size": 18 * 1024 ** 3,
+            "magnet_url": "magnet:?xt=urn:btih:" + "b" * 40,
+        }
+
+        text = format_release_report(
+            "Movie",
+            ReleaseGateResult(
+                raw_count=1,
+                eligible=(item,),
+                rejection_counts={},
+                classifications=(),
+            ),
+            [item],
+            {
+                "enabled_indexers": ["A"],
+                "down_indexers": [],
+                "completed_indexers": 1,
+                "total_indexers": 1,
+            },
+        )
+
+        row = text.splitlines()[1]
+        self.assertIn("4K·x265·DV·HDR10+·7.1·有损·Atmos", row)
+        self.assertEqual(row.count("DV"), 1)
+        self.assertNotIn("HEVC·x265", row)
+
+    def test_audio_labels_keep_only_quality_and_useful_format_family(self):
+        cases = (
+            ("Movie.2.0.FLAC-GROUP", "2.0·无损·FLAC"),
+            ("Movie.5.1.DTS-GROUP", "5.1·高码有损·DTS"),
+            ("Movie.7.1.DTS-HD.MA-GROUP", "7.1·无损·DTS"),
+            (
+                "Movie.7.1.DTS-HD.HRA-GROUP",
+                "7.1·高码有损·DTS",
+            ),
+            ("Movie.7.1.DTS-HD-GROUP", "7.1·DTS"),
+            ("Movie.7.1.TrueHD.Atmos-GROUP", "7.1·无损·Atmos"),
+            ("Movie.5.1.AC3-GROUP", "5.1·有损"),
+            ("Movie.5.1.EAC3-GROUP", "5.1·有损"),
+            ("Movie.5.1.DD+.Atmos-GROUP", "5.1·有损·Atmos"),
+            ("Movie.2.0.AAC-GROUP", "2.0·有损"),
+            (
+                "Movie.7.1.DTS-HD.MA.DTS:X-GROUP",
+                "7.1·无损·DTS",
+            ),
+        )
+
+        for title, expected in cases:
+            with self.subTest(title=title):
+                item = {
+                    "title": title,
+                    "scope_label": "电影",
+                    "seeders": 1,
+                    "size": 1024 ** 3,
+                }
+                text = format_release_report(
+                    "Movie",
+                    ReleaseGateResult(
+                        raw_count=1,
+                        eligible=(item,),
+                        rejection_counts={},
+                        classifications=(),
+                    ),
+                    [item],
+                    {
+                        "enabled_indexers": ["A"],
+                        "completed_indexers": 1,
+                        "total_indexers": 1,
+                    },
+                )
+
+                self.assertIn(f"① {expected}｜", text)
+
     def test_keyboard_has_twelve_circled_buttons_in_three_columns(self):
         ranked = [{
             "title": f"Title {index}",
@@ -35,7 +193,7 @@ class ReleaseReportTest(unittest.TestCase):
             64,
         )
 
-    def test_report_uses_two_line_summary_and_compact_release_rows(self):
+    def test_report_uses_one_summary_line_and_compact_release_rows(self):
         gate = ReleaseGateResult(
             raw_count=18,
             eligible=tuple({"title": f"Title {index}"} for index in range(12)),
@@ -85,18 +243,10 @@ class ReleaseReportTest(unittest.TestCase):
         )
 
         lines = text.splitlines()
-        self.assertEqual(lines[0], "🔍 Constantine 2005")
+        self.assertEqual(lines[0], "🔍 搜索结果 12条｜索引器 1/3｜异常2")
         self.assertEqual(
             lines[1],
-            "搜索结果 12｜索引器完成 1/3｜异常 2",
-        )
-        self.assertEqual(
-            lines[2],
-            (
-                "① 128分｜整片｜4K / REMUX / HEVC"
-                "｜做种46｜~35G｜"
-                "Constantine.2005.2160p.REMUX.HEVC.Group0"
-            ),
+            "① 4K·REMUX·HEVC｜35G·46种｜Group0",
         )
         result_lines = [
             line for line in text.splitlines()
@@ -104,6 +254,8 @@ class ReleaseReportTest(unittest.TestCase):
         ]
         self.assertEqual(len(result_lines), 12)
         for hidden_detail in (
+            "Constantine",
+            "128分",
             "Prowlarr",
             "门禁",
             "来源",
@@ -117,7 +269,10 @@ class ReleaseReportTest(unittest.TestCase):
 
     def test_long_titles_keep_all_twelve_compact_rows_under_telegram_limit(self):
         ranked = [{
-            "title": f"Title-{index}-" + "very-long-release-name." * 40,
+            "title": (
+                f"Title-{index}.2160p.REMUX.HEVC.Atmos."
+                + "very-long-release-name." * 40
+            ),
             "scope_label": "第 1 季整季",
             "score": 100 - index,
             "score_details": [
@@ -175,11 +330,10 @@ class ReleaseReportTest(unittest.TestCase):
             ]),
             12,
         )
-        self.assertIn("4K / REMUX / HEVC / Atmos", text)
+        self.assertIn("4K·REMUX·HEVC·Atmos", text)
         self.assertNotIn("M-Team", text)
         self.assertNotIn("(+", text)
-        self.assertIn("做种46", text)
-        self.assertIn("~35G", text)
+        self.assertIn("35G·46种", text)
 
     def test_zero_eligible_report_keeps_one_short_reason_line(self):
         text = format_release_report(
@@ -200,8 +354,7 @@ class ReleaseReportTest(unittest.TestCase):
         )
 
         self.assertEqual(text.splitlines(), [
-            "🔍 Title S01",
-            "搜索结果 0｜索引器完成 0/?｜异常 1",
+            "🔍 搜索结果 0条｜索引器 0/?｜异常1",
             "没有同身份、同范围的可用片源。",
         ])
 
@@ -223,8 +376,7 @@ class ReleaseReportTest(unittest.TestCase):
                     "size": int(1.4 * 1024 ** 3),
                 },
                 "expected": (
-                    "① 88分｜整片｜4K｜做种2｜~1G"
-                    "｜Constantine.2005.2160p"
+                    "① 4K｜1G·2种"
                 ),
             },
             {
@@ -243,8 +395,7 @@ class ReleaseReportTest(unittest.TestCase):
                     "size": int(10.6 * 1024 ** 3),
                 },
                 "expected": (
-                    "① 77分｜第2季整季｜1080p / WEB-DL / Atmos"
-                    "｜做种13｜~11G｜The.Glory.S02.1080p.WEB-DL.Atmos"
+                    "① 第2季整季·1080p·WEB-DL·Atmos｜11G·13种"
                 ),
             },
             {
@@ -259,8 +410,7 @@ class ReleaseReportTest(unittest.TestCase):
                     "size": None,
                 },
                 "expected": (
-                    "① -8分｜S01E02｜规格未知｜做种0｜~?G"
-                    "｜The.Glory.S01E02"
+                    "① S01E02｜?G·0种"
                 ),
             },
         ]
@@ -286,8 +436,7 @@ class ReleaseReportTest(unittest.TestCase):
                 )
 
                 self.assertEqual(text.splitlines(), [
-                    f"🔍 {case['query']}",
-                    "搜索结果 1｜索引器完成 2/2｜异常 0",
+                    "🔍 搜索结果 1条｜索引器 2/2｜异常0",
                     case["expected"],
                 ])
 

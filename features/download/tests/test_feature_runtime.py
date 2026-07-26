@@ -259,6 +259,51 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host.events[0][1]["operation_id"], "op-download-1")
         self.assertEqual(self.host.events[0][1]["chat_id"], 10)
 
+    async def test_download_completes_and_skips_organization_when_rename_is_inactive(self):
+        async def reject_missing_target(report, **_kwargs):
+            self.host.reports.append(dict(report))
+            if (
+                report.get("state") == "handed_off"
+                and report.get("next_plugin_id") == "rename"
+            ):
+                return {
+                    "accepted": False,
+                    "operation_id": report["operation_id"],
+                    "state": "running",
+                    "revision": report["revision"] - 1,
+                    "error_code": "handoff_target_unavailable",
+                    "target_plugin_id": "rename",
+                }
+            return {
+                "accepted": True,
+                "operation_id": report["operation_id"],
+                "state": report["state"],
+                "revision": report["revision"],
+            }
+
+        self.host.report_operation = reject_missing_target
+        result = await self.feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "4" * 40,
+                "selected_path": "/Downloads",
+                "operation_id": "op-no-rename",
+                "operation_revision": 0,
+                "chat_id": 10,
+                "user_id": 1,
+            },
+            "context": {"idempotency_key": "download-no-rename"},
+        })
+
+        await self.runtime.tasks.pop("download-no-rename")
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(self.host.events, [])
+        self.assertIn("媒体整理未安装", self.host.notifications[-1][1])
+        self.assertIn("/Downloads/Show.S01E01.mkv", self.host.notifications[-1][1])
+        self.assertEqual(self.host.reports[-1]["state"], "completed")
+        self.assertNotIn("next_plugin_id", self.host.reports[-1])
+
     async def test_cancelled_download_deletes_known_offline_record_once_not_media(self):
         class BlockingClient(FakeClient):
             def __init__(self):
@@ -1597,7 +1642,7 @@ class RuntimeStartupTest(unittest.TestCase):
     @staticmethod
     def _context(root: Path):
         return SimpleNamespace(
-            manifest={"plugin_id": "download", "version": "1.0.0"},
+            manifest={"plugin_id": "download", "version": "1.0.1"},
             token="runtime-token",
             socket_path=root / "runtime.sock",
             host_socket_path=root / "host.sock",
@@ -1671,17 +1716,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.0.0")
+        self.assertEqual(manifest["version"], "1.0.1")
         self.assertEqual(manifest["host_api"], ">=1.1,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.0.0")
+        self.assertEqual(project["project"]["version"], "1.0.1")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.1.0",
         )
-        self.assertIn("/tmp/download-1.0.0.tpx", readme)
-        self.assertNotIn("dist/download-1.0.0.tpx", readme)
+        self.assertIn("/tmp/download-1.0.1.tpx", readme)
+        self.assertNotIn("dist/download-1.0.1.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)

@@ -33,7 +33,9 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
             retry_interval=0.01,
             operation_coordinator=self.coordinator,
         )
-        self.operation_sink = OperationReportSink(self.coordinator)
+        self.operation_sink = OperationReportSink(
+            self.coordinator, self.router
+        )
         self.ownership = []
         self.operation_sink.attach(
             lambda record: self.ownership.append(record.plugin_id)
@@ -416,6 +418,52 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.coordinator.active(10, 1))
         self.assertEqual(self.journal.pending("rename"), [])
         self.assertEqual(self.journal.pending("sync"), [])
+
+    async def test_real_rpc_rejects_handoff_to_uninstalled_feature_without_mutation(self):
+        from telepiplex_plugin_sdk.host_client import HostClient
+
+        manifest = self._manifest(
+            "search",
+            commands=("search",),
+            callbacks=("search",),
+        )
+        client = HostClient(self.broker.socket_path, "search-token")
+        await self._start_runtime(
+            manifest,
+            "search-token",
+            commands={"search": lambda _request: {"actions": []}},
+        )
+        initial = {
+            "operation_id": "op-missing-download",
+            "chat_id": 10,
+            "user_id": 1,
+            "state": "running",
+            "stage": "release_selection",
+            "status_text": "等待选择片源。",
+            "control": "cancel",
+            "revision": 1,
+        }
+        accepted = await client.report_operation(initial)
+        rejected = await client.report_operation({
+            **initial,
+            "state": "handed_off",
+            "stage": "submitting_download",
+            "status_text": "正在交给下载模块。",
+            "revision": 2,
+            "next_plugin_id": "download",
+        })
+
+        self.assertTrue(accepted["accepted"])
+        self.assertFalse(rejected["accepted"])
+        self.assertEqual(
+            rejected["error_code"], "handoff_target_unavailable"
+        )
+        self.assertEqual(rejected["target_plugin_id"], "download")
+        current = self.coordinator.get("op-missing-download")
+        self.assertEqual(
+            (current.plugin_id, current.state, current.revision),
+            ("search", "running", 1),
+        )
 
 
 if __name__ == "__main__":

@@ -178,6 +178,71 @@ def _dual_media_provider(
     return provide
 
 
+def _someday_provider(provider):
+    def provide(_hypotheses):
+        if provider == "tvdb":
+            return {
+                "source": provider,
+                "status": "ok",
+                "facts": [{
+                    "movies": [{
+                        "tvdb_movie_id": "342532",
+                        "name": "想見你",
+                        "english_title": "Someday or One Day: The Movie",
+                        "official_english_title": (
+                            "Someday or One Day: The Movie"
+                        ),
+                        "year": "2022",
+                    }],
+                    "series": [{
+                        "tvdb_series_id": "someday-2019",
+                        "name": "想见你",
+                        "english_title": "Someday or One Day",
+                        "official_english_title": "Someday or One Day",
+                        "year": "2019",
+                    }],
+                    "episodes_by_series": {
+                        "someday-2019": [{
+                            "tvdb_episode_id": "episode-1",
+                            "name": "Episode 1",
+                            "season_number": 1,
+                            "episode_number": 1,
+                        }],
+                    },
+                }],
+            }
+        key = "subject_id" if provider == "douban" else "wikibase_item"
+        return {
+            "source": provider,
+            "status": "ok",
+            "facts": [{
+                key: f"{provider}-movie-2022",
+                "title": "想見你",
+                "chinese_title": "想見你",
+                "english_title": "Someday or One Day: The Movie",
+                "official_english_title": "Someday or One Day: The Movie",
+                "year": "2022",
+                "media_type": "movie",
+            }, {
+                key: f"{provider}-series-2019",
+                "title": "想见你",
+                "chinese_title": "想见你",
+                "english_title": "Someday or One Day",
+                "official_english_title": "Someday or One Day",
+                "year": "2019",
+                "media_type": "series",
+                "episodes": [{
+                    "tvdb_episode_id": "episode-1",
+                    "name": "Episode 1",
+                    "season_number": 1,
+                    "episode_number": 1,
+                }],
+            }],
+        }
+
+    return provide
+
+
 def _parsed_ai_hypotheses(title):
     return {
         "status": "ok",
@@ -538,6 +603,124 @@ class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
         "telepiplex_search.planner.infer_candidate_scorecard_with_ai",
         return_value=None,
     )
+    async def test_simplified_and_traditional_related_works_get_verified_options(
+        self,
+        _scorecard,
+    ):
+        plan = await build_confirmable_search_plan(
+            "想见你",
+            "p-someday-verified-options",
+            {
+                name: _someday_provider(name)
+                for name in ("wikipedia", "douban", "tvdb")
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertEqual(plan.get("status"), "needs_clarification")
+        self.assertEqual(
+            plan["clarification"]["options"],
+            [{
+                "label": "电影《想见你》(2022)",
+                "query": "Someday or One Day: The Movie 2022（电影）",
+                "media_type": "movie",
+                "year": "2022",
+                "locked_identity": {
+                    "key": "tvdb",
+                    "value": "342532",
+                },
+            }, {
+                "label": "剧集《想见你》(2019)",
+                "query": "Someday or One Day 2019（电视剧）",
+                "media_type": "series",
+                "year": "2019",
+                "locked_identity": {
+                    "key": "tvdb",
+                    "value": "someday-2019",
+                },
+            }],
+        )
+
+    @patch(
+        "telepiplex_search.planner.infer_candidate_scorecard_with_ai",
+        return_value=None,
+    )
+    async def test_traditional_user_title_is_not_converted_for_display(
+        self,
+        _scorecard,
+    ):
+        plan = await build_confirmable_search_plan(
+            "想見你",
+            "p-someday-traditional-display",
+            {
+                name: _someday_provider(name)
+                for name in ("wikipedia", "douban", "tvdb")
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+        )
+
+        self.assertEqual(
+            [
+                option["label"]
+                for option in plan["clarification"]["options"]
+            ],
+            [
+                "电影《想見你》(2022)",
+                "剧集《想見你》(2019)",
+            ],
+        )
+
+    @patch(
+        "telepiplex_search.planner.infer_candidate_scorecard_with_ai",
+        return_value=None,
+    )
+    async def test_verified_someday_identity_lock_resolves_selected_work(
+        self,
+        _scorecard,
+    ):
+        cases = (
+            (
+                "Someday or One Day: The Movie 2022（电影）",
+                ("tvdb", "342532"),
+                "movie",
+                "2022",
+            ),
+            (
+                "Someday or One Day 2019（电视剧）",
+                ("tvdb", "someday-2019"),
+                "series",
+                "2019",
+            ),
+        )
+        for index, (query, identity, media_type, year) in enumerate(cases):
+            with self.subTest(media_type=media_type):
+                plan = await build_confirmable_search_plan(
+                    query,
+                    f"p-someday-locked-{index}",
+                    {
+                        name: _someday_provider(name)
+                        for name in ("wikipedia", "douban", "tvdb")
+                    },
+                    lambda _contract: set(),
+                    TemporarySpecialAllocator(),
+                    locked_identity=identity,
+                )
+
+                self.assertNotIn("clarification", plan)
+                self.assertEqual(len(plan["candidates"]), 1)
+                contract = plan["candidates"][0]["media_metadata"]
+                self.assertEqual(
+                    contract["retrieval"]["media_type"],
+                    media_type,
+                )
+                self.assertEqual(contract["identity"]["year"], year)
+
+    @patch(
+        "telepiplex_search.planner.infer_candidate_scorecard_with_ai",
+        return_value=None,
+    )
     async def test_explicit_movie_bypasses_source_media_type_clarification(
         self,
         _scorecard,
@@ -661,6 +844,39 @@ class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(raised.exception.code, "insufficient_independent_support")
+        scorecard.assert_not_called()
+
+    @patch("telepiplex_search.planner.infer_candidate_scorecard_with_ai")
+    @patch(
+        "telepiplex_search.planner.infer_search_hypotheses_with_ai",
+        return_value=None,
+    )
+    async def test_explicit_series_rejects_movie_before_ai_scorecard(
+        self,
+        _infer_hypotheses,
+        scorecard,
+    ):
+        with self.assertRaises(SearchPlanningError) as raised:
+            await build_confirmable_search_plan(
+                "想见你 2024（电视剧）",
+                "p-explicit-series-movie-only",
+                {
+                    name: _provider(
+                        name,
+                        1,
+                        title="想见你",
+                        media_type="movie",
+                    )
+                    for name in ("wikipedia", "douban", "tvdb")
+                },
+                lambda _contract: set(),
+                TemporarySpecialAllocator(),
+            )
+
+        self.assertEqual(
+            raised.exception.code,
+            "insufficient_independent_support",
+        )
         scorecard.assert_not_called()
 
     async def test_candidate_funnel_logs_qualification_reasons(self):
@@ -1304,7 +1520,7 @@ class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["status"], "needs_clarification")
         self.assertEqual(
             [option["query"] for option in plan["clarification"]["options"]],
-            ["康斯坦丁（电影）", "康斯坦丁（电视剧）"],
+            ["康斯坦汀（电影）", "康斯坦汀（电视剧）"],
         )
         self.assertEqual(
             plan["clarification"]["reason"],

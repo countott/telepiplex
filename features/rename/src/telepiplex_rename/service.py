@@ -53,6 +53,10 @@ def _ambiguous_host_report_error(exc: Exception) -> bool:
     }
 
 
+def _plain_notification(value) -> str:
+    return str(value or "").replace("`", "")
+
+
 class StorageProxy:
     def __init__(
         self,
@@ -640,6 +644,36 @@ class RenameFeature:
                     not isinstance(response, dict)
                     or response.get("accepted") is not True
                 ):
+                    if (
+                        isinstance(response, dict)
+                        and response.get("error_code")
+                        == "handoff_target_unavailable"
+                        and response.get("target_plugin_id") == "sync"
+                    ):
+                        outcome.pop("handoff_operation", None)
+                        outcome["downstream_skipped"] = "sync"
+                        outcome["message"] = (
+                            str(outcome.get("message") or "").rstrip()
+                            + "\nPlex 管理未安装，已跳过后续处理。"
+                        ).lstrip()
+                        await self._report_operation(
+                            operation_id,
+                            state="completed",
+                            stage="completed",
+                            status_text=(
+                                "媒体整理完成；Plex 管理未安装，"
+                                "已跳过后续处理。"
+                            ),
+                            control="",
+                            details={"downstream_skipped": "sync"},
+                        )
+                        if self.jobs:
+                            self.jobs.update(
+                                job_id, "published", outcome
+                            )
+                        return await self._complete_published_job(
+                            job_id, outcome
+                        )
                     raise FeatureError(
                         "operation_rejected",
                         "Host rejected rename handoff ownership",
@@ -685,7 +719,7 @@ class RenameFeature:
         if outcome.get("user_id") and outcome.get("message"):
             await self.host.notify_user(
                 int(outcome["user_id"]),
-                outcome["message"],
+                _plain_notification(outcome["message"]),
                 idempotency_key=f"{job_id}:rename-notice",
             )
         if self.jobs:

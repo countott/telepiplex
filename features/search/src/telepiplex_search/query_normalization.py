@@ -39,7 +39,14 @@ _UNSUPPORTED_PATTERNS = (
 
 
 def _nfkc(value: str) -> str:
-    return unicodedata.normalize("NFKC", str(value or "")).replace("\xa0", " ")
+    normalized = unicodedata.normalize(
+        "NFKC", str(value or "")
+    ).replace("\xa0", " ")
+    return "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) != "Cf"
+    )
 
 
 def normalize_query_text(value: str) -> str:

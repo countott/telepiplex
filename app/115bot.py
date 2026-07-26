@@ -89,7 +89,7 @@ DEFAULT_PLUGIN_CATALOG_URL = (
 
 
 def get_version(md_format=False):
-    version = "v3.4.3-host"
+    version = "v3.4.4-host"
     if md_format:
         return escape_markdown(version, version=2)
     return version
@@ -154,7 +154,7 @@ def build_plugin_manager(config=None, host_database=None):
     router = CapabilityRouter()
     journal = EventJournal(Path(host_database))
     coordinator = InteractionCoordinator(Path(host_database))
-    operation_sink = OperationReportSink(coordinator)
+    operation_sink = OperationReportSink(coordinator, router=router)
     runtime_root = Path(str(plugin_config.get("runtime_root") or "/tmp/telepiplex"))
     dispatcher = EventDispatcher(
         router,

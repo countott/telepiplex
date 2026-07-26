@@ -39,6 +39,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(
             send_message=AsyncMock(return_value=SimpleNamespace(message_id=90)),
             edit_message_text=AsyncMock(),
+            edit_message_reply_markup=AsyncMock(),
         )
         application = SimpleNamespace(
             bot=bot,
@@ -112,6 +113,33 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(response["accepted"])
         self.assertEqual(response["state"], "cancelled")
+
+    async def test_operation_sink_rejects_handoff_to_inactive_feature_without_mutation(self):
+        from app.handlers.interaction_handler import OperationReportSink
+
+        router = Mock()
+        router.plugin_route.return_value = None
+        sink = OperationReportSink(self.coordinator, router=router)
+        self.assertTrue(sink("rename", self.report())["accepted"])
+
+        response = sink("rename", self.report(
+            state="handed_off",
+            stage="handoff_plex",
+            status_text="已交给 Plex",
+            control="cancel",
+            revision=2,
+            next_plugin_id="sync",
+        ))
+
+        self.assertFalse(response["accepted"])
+        self.assertEqual(
+            response["error_code"], "handoff_target_unavailable"
+        )
+        self.assertEqual(response["target_plugin_id"], "sync")
+        current = self.coordinator.get("op-1")
+        self.assertEqual((current.plugin_id, current.state, current.revision), (
+            "rename", "running", 1,
+        ))
 
     async def test_running_operation_rejects_unrelated_callback_with_toast(self):
         from app.handlers.interaction_handler import operation_gate
@@ -449,6 +477,23 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         context.application.bot.send_message.assert_awaited_once()
         self.assertEqual(self.coordinator.get("op-1").message_id, 34)
 
+    async def test_unchanged_status_edit_does_not_send_duplicate_message(self):
+        from app.handlers.interaction_handler import render_operation
+
+        record = self.coordinator.report("search", self.report())
+        record = self.coordinator.set_message_id(record.operation_id, 12)
+        context = self.context()
+        context.application.bot.edit_message_text.side_effect = BadRequest(
+            "Message is not modified"
+        )
+
+        message_id = await render_operation(
+            context.application, Mock(), record
+        )
+
+        self.assertEqual(message_id, 12)
+        context.application.bot.send_message.assert_not_awaited()
+
     async def test_status_renderer_sends_candidate_photo(self):
         from app.handlers.interaction_handler import render_operation
 
@@ -531,10 +576,37 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(message_id, 56)
+        context.application.bot.edit_message_reply_markup.assert_awaited_once_with(
+            chat_id=10,
+            message_id=55,
+            reply_markup=None,
+        )
         context.application.bot.edit_message_text.assert_not_awaited()
         context.application.bot.send_message.assert_awaited_once()
         current = self.coordinator.get(record.operation_id)
         self.assertEqual((current.message_id, current.message_kind), (56, "text"))
+
+    async def test_terminal_operation_never_renders_stale_feature_keyboard(self):
+        from app.handlers.interaction_handler import operation_markup
+
+        record = self.coordinator.report("search", self.report(
+            state="completed",
+            stage="completed",
+            status_text="已完成",
+            control="",
+            details={"keyboard": [[{
+                "text": "旧选项",
+                "callback_data": "search:release:stale",
+            }]]},
+        ))
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        router = Mock()
+        router.plugin_route.return_value = route
+
+        self.assertIsNone(operation_markup(record, router))
 
     async def test_status_photo_failure_falls_back_to_text(self):
         from app.handlers.interaction_handler import render_operation

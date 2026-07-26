@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """OpenAI-compatible planning client configured by this Feature."""
 
-import requests
 import json
+import re
+import unicodedata
+
+import requests
 from .context import runtime_context
 from .log_sanitizer import sanitize_log_value
 
@@ -158,6 +161,7 @@ title_hints 按建议检索优先级排列：纠正或规范化标题优先，�
 2. 存在两个或以上合理的作品解释时，必须返回 needs_clarification；同名电影和剧集同时合理时也必须如此。
 3. needs_clarification 时 media_type_hint 必须为 unknown，clarification_reason 必须非空并简述需要用户选择的维度；title_hints 只能列出待来源验证的检索提示，不得替用户选中作品。
 4. 不得因为某个解释更知名、排序更靠前或更像用户想要的结果，就把仍然存在的其他合理解释忽略。
+5. 每个 title_hint 只能包含一个独立片名；不得把简繁体、别名或多个作品名拼接在同一个字符串中，不得附加用户未提供的年份或“电影/电视剧”等媒体类型括注。
 示例：
 - 康斯坦汀 → needs_clarification（可能指电影或剧集）
 - 康斯坦汀 电影 → parsed（用户已明确媒体类型）
@@ -173,6 +177,31 @@ RELATION_SCOUT_PROMPT = """你是影视作品关系审查员。只返回 JSON，
 结构：{"hypotheses":[{"candidate_key":"string","relation_type":"standalone|prequel|sequel|spin_off|special|extension_movie","target_candidate_key":"string","fact_ids":["string"],"reason":"string"}]}
 输入事实：
 """
+
+
+_AI_TITLE_YEAR = re.compile(r"(?<!\d)(?:19\d{2}|20\d{2})(?!\d)")
+_AI_TITLE_TYPE_SUFFIX = re.compile(
+    r"(?i)[\(（]\s*"
+    r"(?:电影|電影|film|movie|电视剧|電視劇|剧集|劇集|series|tv\s*show)"
+    r"\s*[\)）]\s*$"
+)
+
+
+def _clean_ai_title_hint(value, raw_query: str) -> str:
+    title = unicodedata.normalize("NFKC", str(value or ""))
+    title = "".join(
+        character
+        for character in title
+        if unicodedata.category(character) != "Cf"
+    )
+    title = " ".join(title.split())
+    if not title or _AI_TITLE_TYPE_SUFFIX.search(title):
+        return ""
+    raw_years = set(_AI_TITLE_YEAR.findall(str(raw_query or "")))
+    hint_years = set(_AI_TITLE_YEAR.findall(title))
+    if hint_years - raw_years:
+        return ""
+    return title
 
 CANDIDATE_SCORECARD_PROMPT = """你是影视候选评分员。只返回 JSON，不要返回 Markdown。
 你不是数据库，也不能补全事实。你只能引用输入中的 candidate_key 和 fact_id。
@@ -543,13 +572,24 @@ def infer_search_hypotheses_with_ai(context):
         or any(not isinstance(item, str) for item in titles)
     ):
         return None
+    raw_query = (
+        context.get("raw_query")
+        if isinstance(context, dict)
+        else ""
+    )
+    if not raw_query and isinstance(context, dict):
+        intent = context.get("intent")
+        if isinstance(intent, dict):
+            raw_query = intent.get("raw_query") or ""
     titles = [
-        " ".join(item.split())
+        cleaned
         for item in titles[:3]
-        if " ".join(item.split())
+        if (cleaned := _clean_ai_title_hint(item, str(raw_query or "")))
     ]
     if parsed["status"] == "unsupported" or not titles:
         return None
+    parsed = dict(parsed)
+    parsed["title_hints"] = list(titles)
     media_type = parsed.get("media_type_hint")
     scope = parsed.get("scope_hint")
     if media_type not in {"movie", "series", "unknown"}:

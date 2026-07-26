@@ -1623,14 +1623,46 @@ class DownloadFeature:
             if current.get("state") == "handed_off":
                 operation = self._operation_view(current)
             else:
-                operation = await self._report_operation(
-                    operation_id,
-                    state="handed_off",
-                    stage="handoff_rename",
-                    status_text="115 下载完成，已交给媒体整理。",
-                    control="cancel",
-                    next_plugin_id="rename",
-                )
+                try:
+                    operation = await self._report_operation(
+                        operation_id,
+                        state="handed_off",
+                        stage="handoff_rename",
+                        status_text="115 下载完成，正在交给媒体整理。",
+                        control="cancel",
+                        next_plugin_id="rename",
+                    )
+                except FeatureError as exc:
+                    if exc.code != "handoff_target_unavailable":
+                        raise
+                    payload["downstream_skipped"] = "rename"
+                    await self._report_operation(
+                        operation_id,
+                        state="completed",
+                        stage="completed",
+                        status_text=(
+                            "115 下载完成；媒体整理未安装，"
+                            "已跳过自动整理。"
+                        ),
+                        control="",
+                        details={"downstream_skipped": "rename"},
+                    )
+                    if self.jobs:
+                        self.jobs.update(
+                            job_id, "completed", result=payload
+                        )
+                    user_id = int(payload.get("user_id") or 0)
+                    if user_id:
+                        await self.host.notify_user(
+                            user_id,
+                            (
+                                "✅ 115 下载完成\n"
+                                "媒体整理未安装，已跳过自动整理。\n"
+                                f"保存目录：{payload.get('final_path')}"
+                            ),
+                            idempotency_key=f"{job_id}:download-notice",
+                        )
+                    return
             payload["operation_revision"] = operation["revision"]
             if self.jobs:
                 self.jobs.update(job_id, "downloaded", result=payload)
@@ -2005,6 +2037,16 @@ class DownloadFeature:
             response = await self.host.report_operation(operation)
             if not isinstance(response, dict) or response.get("accepted") is not True:
                 current = self.operations[operation_id]
+                error_code = (
+                    str(response.get("error_code") or "")
+                    if isinstance(response, dict)
+                    else ""
+                )
+                if error_code == "handoff_target_unavailable":
+                    raise FeatureError(
+                        error_code,
+                        "Target Feature is not active",
+                    )
                 current.update({
                     "state": "interrupted",
                     "status_text": "Host 未接受当前 Feature 的任务所有权。",

@@ -868,6 +868,49 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "failed",
         )
 
+    async def test_missing_download_feature_ends_with_actionable_terminal_status(self):
+        original_report = self.host.report_operation
+
+        async def reject_missing_target(operation):
+            if operation["state"] == "handed_off":
+                return {
+                    "accepted": False,
+                    "state": "running",
+                    "revision": operation["revision"] - 1,
+                    "error_code": "handoff_target_unavailable",
+                    "target_plugin_id": "download",
+                }
+            return await original_report(operation)
+
+        self.host.report_operation = reject_missing_target
+        plan_id = await self._prepare_search()
+        await self.feature.callback({
+            "namespace": "search", "payload": f"confirm:{plan_id}",
+            "user_id": 1, "chat_id": 10,
+        })
+        await self.runtime.run("search-releases-")
+        release_callback = self.host.reports[-1]["details"]["keyboard"][0][0][
+            "callback_data"
+        ]
+        submission = await self.feature.callback({
+            "namespace": "search",
+            "payload": release_callback.removeprefix("search:"),
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-submit-")
+
+        current = self.feature.operations[
+            submission["operation"]["operation_id"]
+        ]
+        self.assertEqual(current["state"], "failed")
+        self.assertEqual(
+            current["status_text"],
+            "115 下载未安装，无法提交片源。",
+        )
+        self.assertEqual(current["control"], "")
+        self.assertEqual(self.host.calls, [])
+
     async def test_lost_handoff_response_reuses_exact_revision(self):
         plan_id = await self._prepare_search()
         await self.feature.callback({
@@ -1063,6 +1106,55 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queries, ["康斯坦汀", "康斯坦丁（电影）"])
         self.assertEqual(self.host.reports[-1]["operation_id"], operation_id)
         self.assertEqual(self.host.reports[-1]["stage"], "plan_confirmation")
+
+    async def test_verified_clarification_choice_preserves_locked_identity(self):
+        calls = []
+
+        async def planner(raw_query, plan_id, *, locked_identity=None):
+            calls.append((raw_query, locked_identity))
+            if len(calls) == 1:
+                result = clarification_plan(plan_id)
+                result["clarification"]["options"][0].update({
+                    "label": "电影《想見你》(2022)",
+                    "query": "Someday or One Day: The Movie 2022（电影）",
+                    "year": "2022",
+                    "locked_identity": {
+                        "key": "tvdb",
+                        "value": "342532",
+                    },
+                })
+                return result
+            result = ranked_search_plan()
+            result["plan_id"] = plan_id
+            return result
+
+        self.feature.plan_builder = planner
+        await self.feature.command({
+            "command": "s",
+            "args": ["想见你"],
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-plan-")
+        callback_data = (
+            self.host.reports[-1]["details"]["keyboard"][0][0]
+            ["callback_data"]
+        )
+
+        await self.feature.callback({
+            "payload": callback_data.removeprefix("search:"),
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-plan-")
+
+        self.assertEqual(calls, [
+            ("想见你", None),
+            (
+                "Someday or One Day: The Movie 2022（电影）",
+                ("tvdb", "342532"),
+            ),
+        ])
 
     async def test_browse_and_select_keep_only_request_scoped_state(self):
         async def planner(_raw_query, plan_id):
@@ -1326,9 +1418,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.0.5")
+        self.assertEqual(manifest["version"], "1.0.6")
         self.assertEqual(manifest["host_api"], ">=1.2,<2.0")
-        self.assertIn('version = "1.0.5"', project)
+        self.assertIn('version = "1.0.6"', project)
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
@@ -1359,12 +1451,12 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.0.5.tpx", source)
+        self.assertIn("/tmp/search-1.0.6.tpx", source)
         self.assertIn("search_media_sources", source)
         self.assertIn("最多两轮", source)
         self.assertIn("不会交给 AI", source)
         self.assertIn("rename", source)
-        self.assertNotIn("dist/search-1.0.5.tpx", source)
+        self.assertNotIn("dist/search-1.0.6.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

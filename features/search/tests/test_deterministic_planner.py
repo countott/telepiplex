@@ -140,6 +140,18 @@ class RuleHypothesesTest(unittest.TestCase):
         self.assertEqual(result["intent"]["title"], "黑暗荣耀")
         self.assertEqual(result["source_queries"]["tvdb"], ["黑暗荣耀 2022"])
 
+    def test_media_type_suffix_is_not_sent_as_part_of_provider_title(self):
+        result = build_rule_hypotheses(
+            "Someday or One Day 2019（电视剧）"
+        )
+
+        self.assertEqual(result["intent"]["title"], "Someday or One Day")
+        self.assertEqual(result["intent"]["year"], "2019")
+        self.assertEqual(
+            result["source_queries"]["tvdb"],
+            ["Someday or One Day 2019"],
+        )
+
 
 class DeterministicPlannerTest(unittest.TestCase):
     def test_two_sources_create_movie_plan(self):

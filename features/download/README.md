@@ -6,10 +6,12 @@
 
 下载完成发布 `download.completed`；失败发布 `download.failed`。完成事件中的 `download_root`/`final_path` 是 115 上未经业务改名的真实文件或目录，并附完整 `file_tree` 与下载片源证据。Feature 不创建业务目录、不执行媒体清理；命名、筛选和冲突处理全部由 rename Feature 完成。
 
+如果 Host 在交接前确认 rename 未安装或未启用，download 会把下载本身收敛为成功终态，明确通知保存目录和“已跳过自动整理”，且不会发布无人消费的 `download.completed`。
+
 纯本地验证构建（不读取 Git 元数据）：
 
 ```bash
-python tools/build_feature.py features/download /tmp/download-1.0.0.tpx \
+python tools/build_feature.py features/download /tmp/download-1.0.1.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

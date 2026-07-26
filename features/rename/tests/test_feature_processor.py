@@ -835,6 +835,52 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cancelled["operation"]["state"], "cancelled")
         self.assertIn("后续 Plex", cancelled["operation"]["status_text"])
 
+    async def test_completed_rename_skips_plex_when_sync_is_inactive(self):
+        host = FakeHost()
+
+        async def reject_missing_target(operation):
+            host.reports.append(operation)
+            if (
+                operation.get("state") == "handed_off"
+                and operation.get("next_plugin_id") == "sync"
+            ):
+                return {
+                    "accepted": False,
+                    "revision": operation["revision"] - 1,
+                    "error_code": "handoff_target_unavailable",
+                    "target_plugin_id": "sync",
+                }
+            return {"accepted": True, "revision": operation["revision"]}
+
+        host.report_operation = reject_missing_target
+        runtime = FakeRuntime()
+        feature = RenameFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            host=host,
+        )
+        feature.bind_runtime(runtime)
+
+        await feature.download_completed({
+            "event_id": "event-no-sync",
+            "payload": {
+                "job_id": "job-no-sync",
+                "selected_path": "/Movies",
+                "user_id": 123,
+                "chat_id": 10,
+                "final_path": "/Downloads/Release",
+                "resource_name": "Movie.2024",
+                "media_metadata": movie_contract(),
+                "operation_id": "op-no-sync",
+                "operation_revision": 8,
+            },
+        })
+        await runtime.wait()
+
+        self.assertEqual(host.events, [])
+        self.assertIn("Plex 管理未安装", host.notifications[-1][1])
+        self.assertEqual(host.reports[-1]["state"], "completed")
+        self.assertNotIn("next_plugin_id", host.reports[-1])
+
     async def test_cancel_during_metadata_stops_later_pipeline(self):
         entered = asyncio.Event()
 
@@ -946,6 +992,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.events[0][1]["job_id"], "job-1")
         self.assertEqual(host.events[0][1]["final_path"], "/Movies/中文电影 (English Movie)")
         self.assertIn("整理完成", host.notifications[0][1])
+        self.assertNotIn("`", host.notifications[0][1])
 
     async def test_incomplete_cleanup_notifies_without_publishing_organized(self):
         host = FakeHost(CleanupFailureStorage([
@@ -1305,14 +1352,14 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.0.0")
+        self.assertEqual(manifest["version"], "1.0.1")
         self.assertEqual(manifest["host_api"], ">=1.1,<2.0")
-        self.assertIn('version = "1.0.0"', project)
+        self.assertIn('version = "1.0.1"', project)
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.0.0.tpx", source)
-        self.assertNotIn("dist/rename-1.0.0.tpx", source)
+        self.assertIn("/tmp/rename-1.0.1.tpx", source)
+        self.assertNotIn("dist/rename-1.0.1.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

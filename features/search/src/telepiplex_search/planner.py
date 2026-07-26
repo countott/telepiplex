@@ -422,26 +422,11 @@ def _ai_clarification_plan(
         or _text(rule_intent.get("year"))
     ):
         return None
-    title_hints = [
-        _text(item)
-        for item in ((payload.get("intent_hint") or {}).get("title_hints") or [])
-        if _text(item)
-    ]
     raw_title = _text(rule_intent.get("title")) or _text(raw_query)
-    raw_target = normalize_title(raw_title)
-    title = next(
-        (
-            item
-            for item in title_hints
-            if normalize_title(item)
-            and normalize_title(item) != raw_target
-        ),
-        next(iter(title_hints), raw_title),
-    )
-    if not title:
+    if not normalize_title(raw_title):
         return None
     year = _text(rule_intent.get("year"))
-    query_title = " ".join(item for item in (title, year) if item)
+    query_title = " ".join(item for item in (raw_title, year) if item)
     options = [{
         "label": f"电影《{query_title}》",
         "query": f"{query_title}（电影）",
@@ -468,6 +453,110 @@ def _ai_clarification_plan(
     }
 
 
+def _candidate_titles_related(
+    left: CandidateEntity,
+    right: CandidateEntity,
+) -> bool:
+    suffixes = (
+        "themovie",
+        "movie",
+        "film",
+        "电影版",
+        "電影版",
+        "电影",
+        "電影",
+        "剧场版",
+        "劇場版",
+    )
+
+    def family(title: str) -> str:
+        for suffix in suffixes:
+            if title.endswith(suffix) and len(title) - len(suffix) >= 4:
+                return title[:-len(suffix)]
+        return title
+
+    for left_title in left.normalized_titles:
+        for right_title in right.normalized_titles:
+            if left_title == right_title or family(left_title) == family(
+                right_title
+            ):
+                return True
+    return False
+
+
+def _candidate_display_title(
+    candidate: CandidateEntity,
+    target: str,
+    preferred_title: str,
+) -> str:
+    exact = next(
+        (
+            title
+            for title in candidate.titles
+            if normalize_title(title) == target
+        ),
+        "",
+    )
+    if exact:
+        return exact
+    preferred = _text(preferred_title)
+    if preferred and re.search(r"[\u3400-\u9fff]", preferred):
+        return preferred
+    for provider in ("douban", "tvdb", "wikipedia"):
+        for fact in candidate.facts:
+            if fact.provider != provider:
+                continue
+            for title in fact.titles:
+                if re.search(r"[\u3400-\u9fff]", title):
+                    return title
+    return next(iter(candidate.titles), "")
+
+
+def _candidate_clarification_lock(
+    candidate: CandidateEntity,
+) -> dict:
+    for key in ("tvdb", "douban_subject", "wikipedia"):
+        value = _text(candidate.external_ids.get(key))
+        if value:
+            return {"key": key, "value": value}
+    return {}
+
+
+def _source_clarification_option(
+    candidate: CandidateEntity,
+    *,
+    media_type: str,
+    target: str,
+    preferred_title: str,
+) -> dict | None:
+    display_title = _candidate_display_title(
+        candidate,
+        target,
+        preferred_title,
+    )
+    year = next(iter(sorted(candidate.years)), "")
+    if not display_title or not year:
+        return None
+    try:
+        query_title = resolve_title_policy(
+            candidate
+        ).canonical_search_title
+    except TitlePolicyError:
+        query_title = display_title
+    suffix = "电影" if media_type == "movie" else "电视剧"
+    type_label = "电影" if media_type == "movie" else "剧集"
+    option = {
+        "label": f"{type_label}《{display_title}》({year})",
+        "query": f"{query_title} {year}（{suffix}）",
+        "media_type": media_type,
+        "year": year,
+    }
+    locked_identity = _candidate_clarification_lock(candidate)
+    if locked_identity:
+        option["locked_identity"] = locked_identity
+    return option
+
+
 def _source_media_type_clarification_plan(
     *,
     plan_id: str,
@@ -482,20 +571,33 @@ def _source_media_type_clarification_plan(
     if not target:
         return None
     requested_year = _text(intent.get("year"))
-    bounded = [
+    year_bounded = [
         candidate
         for candidate in candidates
+        if (
+            not requested_year
+            or requested_year in candidate.years
+        )
+    ]
+    direct = [
+        candidate
+        for candidate in year_bounded
         if any(
             title == target
             or title.startswith(target)
             or target.startswith(title)
             for title in candidate.normalized_titles
         )
-        and (
-            not requested_year
-            or requested_year in candidate.years
-        )
     ]
+    bounded = list(direct)
+    for candidate in year_bounded:
+        if candidate in bounded:
+            continue
+        if any(
+            _candidate_titles_related(candidate, anchor)
+            for anchor in direct
+        ):
+            bounded.append(candidate)
     movies = [
         candidate
         for candidate in bounded
@@ -506,43 +608,45 @@ def _source_media_type_clarification_plan(
         for candidate in bounded
         if candidate.media_types == frozenset({"series"})
     ]
-    shared_titles = {
-        title
+    if not any(
+        _candidate_titles_related(movie, show)
         for movie in movies
         for show in series
-        for title in movie.normalized_titles.intersection(
-            show.normalized_titles
-        )
-    }
-    if not shared_titles:
+    ):
         return None
-    verified_title = next(
-        (
-            title
-            for candidate in bounded
-            for title in candidate.titles
-            if normalize_title(title) == target
-            or normalize_title(title) in shared_titles
-        ),
-        _text(intent.get("title")) or _text(raw_query),
-    )
-    clarification_intent = dict(intent)
-    clarification_intent["title"] = verified_title
-    return _ai_clarification_plan(
-        plan_id=plan_id,
-        raw_query=raw_query,
-        rule_intent=clarification_intent,
-        payload={
-            "status": "needs_clarification",
-            "intent_hint": {
-                "title_hints": [verified_title],
-                "media_type_hint": "unknown",
-            },
-            "clarification_reason": (
+    options = [
+        option
+        for media_type, group in (("movie", movies), ("series", series))
+        for candidate in sorted(
+            group,
+            key=lambda item: (
+                next(iter(sorted(item.years)), ""),
+                item.candidate_key,
+            ),
+        )
+        if (
+            option := _source_clarification_option(
+                candidate,
+                media_type=media_type,
+                target=target,
+                preferred_title=_text(intent.get("title")),
+            )
+        ) is not None
+    ][:6]
+    if not options:
+        return None
+    return {
+        "plan_id": plan_id,
+        "raw_query": raw_query,
+        "status": "needs_clarification",
+        "clarification": {
+            "reason": (
                 "来源证据同时匹配电影和剧集，请选择后继续验证。"
             ),
+            "options": options,
         },
-    )
+        "candidates": [],
+    }
 
 
 def _finalize_draft(
@@ -902,6 +1006,12 @@ def _candidate_qualification_reason(
     if requested_year and requested_year not in candidate.years:
         return "year"
     media_type = next(iter(candidate.media_types))
+    requested_type = _text(intent.get("media_type")).casefold()
+    if (
+        requested_type in {"movie", "series"}
+        and media_type != requested_type
+    ):
+        return "media_type"
     if media_type == "series" and not _text(candidate.external_ids.get("tvdb")):
         return "missing_tvdb"
     if (
@@ -913,6 +1023,14 @@ def _candidate_qualification_reason(
     if not direct_anchor and len(candidate.providers) < 2:
         return "single_source"
     return ""
+
+
+def _selectable_thresholds(scores):
+    return [
+        item
+        for item in apply_thresholds(scores)
+        if item.selectable
+    ]
 
 
 def _candidate_rejection_counts() -> dict[str, int]:
@@ -1287,6 +1405,13 @@ async def build_confirmable_search_plan(
             )
             all_candidates = list(graph.candidates)
             candidates = list(all_candidates)
+            if locked_identity:
+                key, value = locked_identity
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if _text(candidate.external_ids.get(key)) == _text(value)
+                ]
             intent = _orchestrated_intent(
                 getattr(orchestration, "intent", {}) or {},
                 rule_hypotheses.get("intent") or {},
@@ -1424,7 +1549,9 @@ async def build_confirmable_search_plan(
                         sources,
                         retry_sources,
                     )
-                    candidates = list(build_search_graph(sources).candidates)
+                    retry_graph = build_search_graph(sources)
+                    all_candidates = list(retry_graph.candidates)
+                    candidates = list(all_candidates)
                     retry_targets = {
                         normalize_title(item.get("title"))
                         for item in ai_hypotheses.get("hypotheses") or []
@@ -1452,7 +1579,11 @@ async def build_confirmable_search_plan(
             plan_id=plan_id,
             raw_query=raw_query,
             intent=intent,
-            candidates=candidates,
+            candidates=(
+                all_candidates
+                if not locked_identity
+                else candidates
+            ),
             locked_identity=locked_identity,
         )
         if source_clarification is not None:
@@ -1496,7 +1627,7 @@ async def build_confirmable_search_plan(
         qualified=len(combined),
         rejected=rejected,
     )
-    ranked_scores = apply_thresholds(combined)
+    ranked_scores = _selectable_thresholds(combined)
     if not ranked_scores and not orchestrated:
         expansion_sources = await _optional_budgeted(
             "candidate_finalize",
@@ -1551,7 +1682,7 @@ async def build_confirmable_search_plan(
                 qualified=len(combined),
                 rejected=rejected,
             )
-            ranked_scores = apply_thresholds(combined)
+            ranked_scores = _selectable_thresholds(combined)
             title_values = {}
             for candidate in candidates:
                 if any(
@@ -1681,7 +1812,7 @@ async def build_confirmable_search_plan(
                     qualified=len(combined),
                     rejected=rejected,
                 )
-                ranked_scores = apply_thresholds(combined)
+                ranked_scores = _selectable_thresholds(combined)
                 if ranked_scores:
                     _log_info(
                         "search_stage status=recovered "
@@ -1711,7 +1842,7 @@ async def build_confirmable_search_plan(
             ai_payload,
             score_candidates,
         )
-        ranked_scores = apply_thresholds([
+        ranked_scores = _selectable_thresholds([
             combine_score(
                 item.candidate_key,
                 item.program,
@@ -1719,7 +1850,6 @@ async def build_confirmable_search_plan(
             )
             for item in ranked_scores
         ])
-    ranked_scores = [item for item in ranked_scores if item.selectable]
     if not ranked_scores:
         if rejected["missing_scope"]:
             raise SearchPlanningError("tvdb_scope_not_verified")

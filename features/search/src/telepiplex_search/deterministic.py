@@ -47,6 +47,15 @@ def _clean_intent(raw_query: str) -> dict:
     year = _text(intent.get("year"))
     if year:
         title = re.sub(rf"(?<!\d){re.escape(year)}(?!\d)", " ", title)
+    title_without_type = re.sub(
+        r"(?i)[\(（]?\s*"
+        r"(?:电影|電影|film|movie|电视剧|電視劇|剧集|劇集|series|tv\s*show)"
+        r"\s*[\)）]?\s*$",
+        " ",
+        title,
+    )
+    if _text(title_without_type):
+        title = title_without_type
     if intent.get("scope") == "whole_series":
         title = re.sub(r"全集|全季|整季|整剧|整劇", " ", title)
     intent["title"] = _text(title)
