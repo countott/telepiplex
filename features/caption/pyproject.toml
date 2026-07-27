@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "telepiplex-caption"
 version = "0.1.0"
-description = "Reserved Telepiplex caption Feature"
+description = "Reserved telepiplex caption Feature"
 requires-python = ">=3.12"
 dependencies = ["telepiplex-plugin-sdk==1.1.0"]
 

@@ -1,4 +1,4 @@
-# Telepiplex 当前业务决策与 TODO
+# telepiplex 当前业务决策与 TODO
 
 更新时间：2026-07-13
 
@@ -14,25 +14,25 @@
 - `download`、`search`、`rename`、`sync` 是四个独立 Feature。
 - 每个 Feature 使用独立 venv、子进程、配置、状态目录和 Unix Socket。
 - Feature 只能通过 Host SDK、capability 和 event 协作，不得导入或声明依赖另一个 Feature 包。
-- 普通安装、升级、启用、停用、回滚和卸载不重启 Telepiplex。
-- 只有新增全新的 Host API 合同时，才允许升级 Telepiplex 镜像并重启一次。
+- 普通安装、升级、启用、停用、回滚和卸载不重启 telepiplex。
+- 只有新增全新的 Host API 合同时，才允许升级 telepiplex 镜像并重启一次。
 
 ### 2. 安装与故障隔离
 
 - Feature 以不可变 `.tpx` 安装，不从运行容器 checkout Feature branch。
 - `.tpx` 会校验来源 branch/commit、SHA-256、wheel metadata 和 sibling Feature 依赖。
 - Provider 更新不得令现有消费者新增缺失 capability；不兼容更新会在切换前被拒绝。
-- Feature 启动、AI、MCP 或业务初始化失败，不得阻止 Telepiplex 和其他 Feature 启动。
-- Telepiplex 重启后，已启用 Feature 按 capability 依赖顺序恢复。
+- Feature 启动、AI、MCP 或业务初始化失败，不得阻止 telepiplex 和其他 Feature 启动。
+- telepiplex 重启后，已启用 Feature 按 capability 依赖顺序恢复。
 - Feature 安装后自动启用；只有被显式 disable 后才需要 `/plugin enable`。
 - `/config` 按各 Feature 的 `config.schema.json` 生成可视化配置入口；AI、TVDB 等业务字段仍写入 Feature 私有配置，敏感值不回显，运行中的 Feature 在写入后原子热重载。
 
 ### 3. 当前分支与发布状态
 
-- Telepiplex 与四个 Feature 源码分支已经独立推送到远端。
+- telepiplex 与四个 Feature 源码分支已经独立推送到远端。
 - `main` 暂不作为日常开发或部署入口。
-- GitHub 聚合发布流水线已经落地到 Telepiplex Feature 分支，可由 `platform-v<semver>` tag 自动生成 Telepiplex 镜像、四个 Linux `.tpx` 和远程 catalog。
-- Telepiplex 已能安全刷新远程 catalog、比较兼容稳定版本，并在 Telegram 一次确认后更新 Feature；不会静默更新。
+- GitHub 聚合发布流水线已经落地到 telepiplex Feature 分支，可由 `platform-v<semver>` tag 自动生成 telepiplex 镜像、四个 Linux `.tpx` 和远程 catalog。
+- telepiplex 已能安全刷新远程 catalog、比较兼容稳定版本，并在 Telegram 一次确认后更新 Feature；不会静默更新。
 - `/plugin` 已提供依赖感知的 Feature 列表、安装按钮和更新按钮，普通用户无需进入 ttyd 或自行构建 `.tpx`。
 - `platform-v1.0.0` 保留为首轮 CI 依赖缺失的失败记录；修复后的首个完整聚合发布使用 `platform-v1.0.1`，后续发布继续使用新的不可变 semver tag。本地或 Unraid 手工构建只作为发布前验证与故障兜底。
 
@@ -93,7 +93,7 @@ Telegram 搜索请求
 
 | 模块 | 当前责任 | 不应承担 |
 |---|---|---|
-| Telepiplex | 生命周期、路由、事件、隔离、回滚、Telegram 通用入口 | 媒体搜索、文件命名、115 或 Plex 业务规则 |
+| telepiplex | 生命周期、路由、事件、隔离、回滚、Telegram 通用入口 | 媒体搜索、文件命名、115 或 Plex 业务规则 |
 | download | 下载、存储、真实文件树和传输结果 | 媒体身份判断、最终媒体库命名 |
 | search | 证据检索、下载计划、canonical contract | 文件移动、Plex 写操作 |
 | rename | 文件 mapping、最终路径、移动、清理、整理结果 | 重新定义已确认下载计划 |
@@ -104,7 +104,7 @@ Telegram 搜索请求
 ### TODO-01 普通搜索取消 AI 强依赖（已实现）
 
 - Wikipedia 与无需 Key 的豆瓣证据默认启用；TVDB 和 AI 在配置中启用后参与。
-- search 与 rename 的 TVDB/AI API 配置由 Telepiplex `/config` 从 Feature schema 动态生成，Telepiplex 不保存业务字段副本。
+- search 与 rename 的 TVDB/AI API 配置由 telepiplex `/config` 从 Feature schema 动态生成，telepiplex 不保存业务字段副本。
 - 普通条目在多源证据能够严格唯一确认时直接生成 canonical contract，不调用 AI。
 - 只有歧义、复杂关系或规则门禁失败时才调用 AI；AI 不可用不阻止高置信普通电影、整季或单集计划。
 
@@ -169,7 +169,7 @@ Telegram 搜索请求
 
 ### TODO-12 统一失败与 dead-letter 告警（已确认延期）
 
-- 当前继续由各 Feature 报告业务失败，Telepiplex dead-letter 通过 `/plugin doctor` 查看。
+- 当前继续由各 Feature 报告业务失败，telepiplex dead-letter 通过 `/plugin doctor` 查看。
 - 等业务规则稳定后再设计统一失败任务视图、主动 Telegram 告警和恢复入口；本轮不实现。
 
 ## 五、运维与发布 TODO
@@ -177,17 +177,17 @@ Telegram 搜索请求
 ### OPS-TODO-01A GitHub 聚合发布（已实现）
 
 - 已实现：`platform-v<semver>` tag 或显式手动触发聚合发布。
-- 已实现：GitHub Actions 自动测试 Telepiplex、构建并推送 GHCR `linux/amd64` Telepiplex 镜像。
+- 已实现：GitHub Actions 自动测试 telepiplex、构建并推送 GHCR `linux/amd64` telepiplex 镜像。
 - 已实现：从四个独立 Feature branch 构建 Linux `.tpx`，发布 SHA-256 固定的 `catalog.yaml` 和不可变 GitHub Release。
 - 已实现：同一 Feature version 对应不同 digest 时拒绝发布，防止覆盖 `name@version`。
 - 已实现：Feature source commit 未变化时，先按上一版 catalog 校验 digest、plugin/version/branch/commit，再复用上一版不可变 `.tpx`；source commit 变化时不复用，仍由同版本 digest 门禁拒绝未升版改动。
-- Telepiplex 更新：由 Unraid 拉取新镜像并允许重启一次。
-- Feature 更新：Telepiplex 内完成下载、校验、shadow 启动、drain、原子切换和失败回滚，不重启 Telepiplex。
+- telepiplex 更新：由 Unraid 拉取新镜像并允许重启一次。
+- Feature 更新：telepiplex 内完成下载、校验、shadow 启动、drain、原子切换和失败回滚，不重启 telepiplex。
 
 ### OPS-TODO-01B 远程更新发现（已实现）
 
-- 已实现：Telepiplex 启动时及默认每 6 小时安全刷新远程 catalog，以原子缓存保留上一次有效目录，并比较已安装 Feature 当前版本对应的最新稳定兼容版本。
-- 已实现：目录或网络失败只跳过本轮检查，不影响 Telepiplex 与其他 Feature。
+- 已实现：telepiplex 启动时及默认每 6 小时安全刷新远程 catalog，以原子缓存保留上一次有效目录，并比较已安装 Feature 当前版本对应的最新稳定兼容版本。
+- 已实现：目录或网络失败只跳过本轮检查，不影响 telepiplex 与其他 Feature。
 - 已实现：发现更新后只通知 `allowed_user`；用户点击一次“确认更新”才执行既有更新事务，也可选择“暂不更新”。
 - 已实现：默认不静默升级；本地 `/config/plugins/catalog.yaml` 仍作为离线和固定版本入口。
 

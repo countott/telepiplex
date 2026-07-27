@@ -14,7 +14,7 @@ the Search media type to Prowlarr's category namespace, and fan confirmed
 whole-series searches across a bounded `(indexer, query)` task matrix before
 the existing deduplication, release gate, and ranking stages.
 
-**Tech Stack:** Python 3.12, asyncio, unittest, pytest, Telepiplex Feature
+**Tech Stack:** Python 3.12, asyncio, unittest, pytest, telepiplex Feature
 operation API.
 
 ## Global Constraints

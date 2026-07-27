@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close the three verified Telepiplex Feature release blockers while preserving the current Host API and all Feature business behavior.
+**Goal:** Close the three verified telepiplex Feature release blockers while preserving the current Host API and all Feature business behavior.
 
 **Architecture:** Enforce active-consumer compatibility while the router snapshot is still only prepared, classify untyped Feature failures as retryable, and validate dependency isolation at requirements input, plugin wheel metadata, and final wheelhouse boundaries. Each change is protected by a regression test that must fail before production code changes.
 
@@ -235,10 +235,10 @@ git commit -m "fix(runtime): close Feature dependency isolation bypasses"
 - Verify only; no planned production changes.
 
 **Interfaces:**
-- Consumes: current Telepiplex branch and all four clean Feature worktrees.
+- Consumes: current telepiplex branch and all four clean Feature worktrees.
 - Produces: evidence-backed push/no-push verdict.
 
-- [ ] **Step 1: Run full Telepiplex verification**
+- [ ] **Step 1: Run full telepiplex verification**
 
 ```bash
 PYTHONPATH=app:sdk/src python3 -m unittest discover -s tests -t . -q
@@ -257,7 +257,7 @@ Use `tools/build_feature.py` against download, search, rename, and sync. Verify 
 
 - [ ] **Step 4: Run the real runtime matrix**
 
-Install all four artifacts into one fresh Telepiplex manager using a short Unix runtime path. Assert all Features are healthy, capability and command routes exist, download removal is dependency-protected, a second manager restores all Features from persisted state, and Telepiplex PID remains unchanged.
+Install all four artifacts into one fresh telepiplex manager using a short Unix runtime path. Assert all Features are healthy, capability and command routes exist, download removal is dependency-protected, a second manager restores all Features from persisted state, and telepiplex PID remains unchanged.
 
 - [ ] **Step 5: Request independent read-only review**
 

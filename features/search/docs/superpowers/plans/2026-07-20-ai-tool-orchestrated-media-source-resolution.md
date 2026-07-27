@@ -6,7 +6,7 @@
 
 **Architecture:** Add an OpenAI-compatible tool-call client, a source gateway that owns credentials and source resilience, and a request-scoped orchestrator that enforces one fixed first round plus at most two targeted rounds. The planner consumes only normalized facts and verifier-approved semantic edges; direct links and AI/tooling failures retain deterministic paths. The existing confirmed `media_metadata v1` and `naming_metadata` payload remain the only search-to-download-to-rename boundary.
 
-**Tech Stack:** Python 3.12, asyncio, requests, unittest/pytest, PyYAML, JSON Schema, Telepiplex Plugin SDK 1.1.
+**Tech Stack:** Python 3.12, asyncio, requests, unittest/pytest, PyYAML, JSON Schema, telepiplex Plugin SDK 1.1.
 
 ## Global Constraints
 

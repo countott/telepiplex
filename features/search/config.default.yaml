@@ -74,6 +74,9 @@ metadata:
     enable: true
     languages: [zh, en]
     timeout: 10
+    min_interval: 3
+    max_queries: 2
+    rate_limit_cooldown: 30
   douban:
     enable: true
     timeout: 10

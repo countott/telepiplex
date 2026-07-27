@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans. Steps use checkbox syntax.
 
-**Goal:** Expose a dependency-aware Telegram Feature catalog that installs the newest stable Telepiplex-compatible release with one explicit button click.
+**Goal:** Expose a dependency-aware Telegram Feature catalog that installs the newest stable telepiplex-compatible release with one explicit button click.
 
-**Architecture:** The release generator publishes manifest capability metadata. PluginCatalog selects install candidates, PluginManager adds live capability state and cache fallback, and the Telepiplex Telegram handler renders and executes reserved install callbacks through the existing install transaction.
+**Architecture:** The release generator publishes manifest capability metadata. PluginCatalog selects install candidates, PluginManager adds live capability state and cache fallback, and the telepiplex Telegram handler renders and executes reserved install callbacks through the existing install transaction.
 
 **Tech Stack:** Python 3.12, asyncio, PyYAML, packaging, python-telegram-bot, pytest/unittest.
 
@@ -13,8 +13,8 @@
 - Never install silently or in bulk.
 - Preserve exact-version and local `.tpx` command paths.
 - Never bypass PluginManager verification or lifecycle transactions.
-- Keep Telepiplex generic; derive dependency ordering from catalog capabilities.
-- Keep catalog and UI failures isolated from Telepiplex and other Features.
+- Keep telepiplex generic; derive dependency ordering from catalog capabilities.
+- Keep catalog and UI failures isolated from telepiplex and other Features.
 - Work locally on `main` without push.
 
 ---

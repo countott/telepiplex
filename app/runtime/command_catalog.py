@@ -64,9 +64,9 @@ def build_bot_commands(router) -> list[BotCommand]:
 
 def build_start_help(router, host_version: str) -> str:
     lines = [
-        f"<b>Telepiplex {escape(str(host_version))}</b>",
+        f"<b>telepiplex {escape(str(host_version))}</b>",
         "",
-        "<b>Telepiplex</b>",
+        "<b>telepiplex</b>",
     ]
     lines.extend(
         f"<code>/{escape(command)}</code> - {escape(description)}"

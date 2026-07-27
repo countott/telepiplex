@@ -6,7 +6,7 @@
 
 **Architecture:** Keep entity separation in `entity_graph.py`, normalize AI clarification in `ai.py`, return a bounded clarification plan from `planner.py`, and render/restart it in `service.py`. No raw-count threshold or lowered evidence requirement is introduced.
 
-**Tech Stack:** Python 3.12, asyncio, unittest/pytest, Telepiplex Feature operation API.
+**Tech Stack:** Python 3.12, asyncio, unittest/pytest, telepiplex Feature operation API.
 
 ## Global Constraints
 

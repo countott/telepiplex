@@ -6,7 +6,7 @@
 
 **Architecture:** Add a no-key Douban evidence adapter and a focused deterministic planning module. The planner performs a rule-derived first pass, returns a canonical draft when the strict gate passes, and otherwise sends the evidence and reason codes through the existing two-stage AI path.
 
-**Tech Stack:** Python 3.12, `asyncio`, `requests`, `PyYAML`, pytest/unittest, Telepiplex Plugin SDK `media_metadata v1`.
+**Tech Stack:** Python 3.12, `asyncio`, `requests`, `PyYAML`, pytest/unittest, telepiplex Plugin SDK `media_metadata v1`.
 
 ## Global Constraints
 

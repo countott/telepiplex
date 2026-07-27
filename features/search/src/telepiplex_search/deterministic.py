@@ -45,7 +45,7 @@ def _clean_intent(raw_query: str) -> dict:
     intent = parse_search_intent(raw_query)
     title = _text(intent.get("title"))
     year = _text(intent.get("year"))
-    if year:
+    if year and title != year:
         title = re.sub(rf"(?<!\d){re.escape(year)}(?!\d)", " ", title)
     title_without_type = re.sub(
         r"(?i)[\(（]?\s*"
@@ -57,14 +57,21 @@ def _clean_intent(raw_query: str) -> dict:
     if _text(title_without_type):
         title = title_without_type
     if intent.get("scope") == "whole_series":
-        title = re.sub(r"全集|全季|整季|整剧|整劇", " ", title)
+        title = re.sub(
+            r"全集|全季|整季|整剧|整劇|全剧|全劇",
+            " ",
+            title,
+        )
     intent["title"] = _text(title)
     return intent
 
 
 def build_rule_hypotheses(raw_query: str) -> dict:
     intent = _clean_intent(raw_query)
-    query = _text(" ".join(item for item in (intent["title"], intent.get("year", "")) if item))
+    query_parts = [intent["title"]]
+    if intent.get("year") and intent["year"] != intent["title"]:
+        query_parts.append(intent["year"])
+    query = _text(" ".join(item for item in query_parts if item))
     hypothesis = {
         "title": intent["title"],
         "year": intent.get("year") or "",

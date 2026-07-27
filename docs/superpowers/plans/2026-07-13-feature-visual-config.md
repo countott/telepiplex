@@ -4,14 +4,14 @@
 
 **Goal:** Restore a schema-driven Telegram configuration UI for installed Features, including AI and TVDB, without breaking Feature isolation or exposing secrets.
 
-**Architecture:** `PluginStore` owns validated atomic configuration reads and writes. `PluginManager` owns transactional runtime reload. A Telepiplex `ConversationHandler` discovers editable scalar sections from each active Feature schema and applies typed partial patches. Feature schemas provide titles and `writeOnly` metadata.
+**Architecture:** `PluginStore` owns validated atomic configuration reads and writes. `PluginManager` owns transactional runtime reload. A telepiplex `ConversationHandler` discovers editable scalar sections from each active Feature schema and applies typed partial patches. Feature schemas provide titles and `writeOnly` metadata.
 
 **Tech Stack:** Python 3.12, python-telegram-bot, JSON Schema 2020-12, PyYAML, unittest/pytest.
 
 ## Global Constraints
 
 - Feature configuration remains at `/config/plugins/<plugin_id>/config.yaml`.
-- Telepiplex must not hardcode Feature-specific AI or TVDB paths.
+- telepiplex must not hardcode Feature-specific AI or TVDB paths.
 - Secrets must never be echoed or logged.
 - Configuration writes are validated, atomic, and mode `0600`.
 - Running Features reload transactionally; a failed reload restores the prior configuration and route.
@@ -65,7 +65,7 @@
 
 - [ ] **Step 1: Write failing pure-function and handler tests** for nested section discovery, local `$ref`, typed values, unknown fields, secret masking, authorization, callback indexing, save success, and sanitized failure.
 - [ ] **Step 2: Run** `python -m pytest -q tests/test_config_handler.py tests/test_bot_runtime_startup.py` and verify expected failures.
-- [ ] **Step 3: Implement** the conversation, add `/config` to Telepiplex commands, register it before generic Feature callback/message gateways, and add a “配置 Feature” button to `/plugin`.
+- [ ] **Step 3: Implement** the conversation, add `/config` to telepiplex commands, register it before generic Feature callback/message gateways, and add a “配置 Feature” button to `/plugin`.
 - [ ] **Step 4: Re-run** the targeted tests and confirm all pass.
 
 ### Task 4: Feature schema metadata
@@ -78,7 +78,7 @@
 
 **Interfaces:**
 - Consumes: standard JSON Schema `title`, `description`, `writeOnly`, `properties`, and local `$ref`.
-- Produces: editable `metadata.tvdb` and `ai` sections without Telepiplex-specific field tables.
+- Produces: editable `metadata.tvdb` and `ai` sections without telepiplex-specific field tables.
 
 - [ ] **Step 1: Write failing schema contract tests** asserting AI/TVDB properties are declared and secret keys are `writeOnly`.
 - [ ] **Step 2: Run each targeted Feature test** and confirm the metadata assertions fail.
@@ -90,9 +90,9 @@
 **Files:**
 - Modify: `docs/todos/2026-07-12-business-module-decisions.md` only if the visual-config status needs an explicit completion note.
 
-- [ ] **Step 1: Run full Telepiplex and four Feature test suites**, compile tracked Python, and run `git diff --check` in every worktree.
-- [ ] **Step 2: Build and verify all four `.tpx` artifacts** using Telepiplex's release tooling.
+- [ ] **Step 1: Run full telepiplex and four Feature test suites**, compile tracked Python, and run `git diff --check` in every worktree.
+- [ ] **Step 2: Build and verify all four `.tpx` artifacts** using telepiplex's release tooling.
 - [ ] **Step 3: Commit each changed module independently** with module-scoped messages.
 - [ ] **Step 4: Push** `feature/115`, `feature/search`, `feature/rename`, `feature/sync`, and `main`.
-- [ ] **Step 5: Create and push** immutable tag `platform-v1.0.1` from the verified Telepiplex commit; `platform-v1.0.0` remains the immutable failed CI-dependency attempt.
-- [ ] **Step 6: Monitor the GitHub Actions run** through completion and verify the GitHub Release, catalog, artifacts, and Telepiplex image metadata.
+- [ ] **Step 5: Create and push** immutable tag `platform-v1.0.1` from the verified telepiplex commit; `platform-v1.0.0` remains the immutable failed CI-dependency attempt.
+- [ ] **Step 6: Monitor the GitHub Actions run** through completion and verify the GitHub Release, catalog, artifacts, and telepiplex image metadata.

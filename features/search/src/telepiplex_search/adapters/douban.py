@@ -12,7 +12,7 @@ from urllib.parse import unquote, unquote_plus
 import requests
 
 
-USER_AGENT = "Telepiplex/1.0 (media metadata lookup)"
+USER_AGENT = "telepiplex/1.0 (media metadata lookup)"
 _SUBJECT_PATTERN = re.compile(
     r"(?:https?:)?//movie\.douban\.com/subject/(\d+)/?|(?<![\w/])/subject/(\d+)/?"
 )
@@ -21,6 +21,12 @@ _SUBJECT_CACHE: dict[str, tuple[float, dict]] = {}
 _CIRCUIT_STATE = {"failures": 0, "open_until": 0.0}
 _SEMAPHORES: dict[int, threading.BoundedSemaphore] = {}
 _STATE_LOCK = threading.Lock()
+
+
+class DoubanSubjectLookupError(RuntimeError):
+    def __init__(self, code: str):
+        self.code = str(code or "server_down")
+        super().__init__(self.code)
 
 
 def _text(value) -> str:
@@ -106,6 +112,8 @@ def _exception_status(exc: Exception) -> str:
         return "timeout"
     response = getattr(exc, "response", None)
     status_code = getattr(response, "status_code", None)
+    if status_code == 404:
+        return "not_found"
     if status_code == 403:
         return "blocked"
     if status_code == 429:
@@ -115,7 +123,13 @@ def _exception_status(exc: Exception) -> str:
 
 def _failure_status(errors: list[tuple[str, str]]) -> str:
     statuses = {status for status, _error in errors}
-    for status in ("rate_limited", "blocked", "timeout", "server_down"):
+    for status in (
+        "rate_limited",
+        "blocked",
+        "timeout",
+        "server_down",
+        "not_found",
+    ):
         if status in statuses:
             return status
     return "server_down"
@@ -326,15 +340,20 @@ def lookup_douban_subject(
     if cached is not None:
         return cached
     if _circuit_is_open():
-        return None
+        raise DoubanSubjectLookupError("blocked")
+    errors = []
     with _semaphore(max_concurrency):
         result = _fetch_subject(
             f"https://movie.douban.com/subject/{subject_id}/",
             timeout,
-            [],
+            errors,
         )
     if result:
         _cache_put(_SUBJECT_CACHE, subject_id, result)
+    elif errors:
+        status = _failure_status(errors)
+        if status != "not_found":
+            raise DoubanSubjectLookupError(status)
     return result
 
 

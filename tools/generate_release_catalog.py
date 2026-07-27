@@ -240,7 +240,7 @@ def write_catalog(
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="Generate a verified Telepiplex release catalog"
+        description="Generate a verified telepiplex release catalog"
     )
     parser.add_argument("--repository", required=True)
     parser.add_argument("--tag", required=True)

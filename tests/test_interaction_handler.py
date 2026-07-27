@@ -532,6 +532,88 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         )
         context.application.bot.send_message.assert_not_awaited()
 
+    @patch("app.handlers.interaction_handler.build_poster_grid")
+    async def test_status_renderer_sends_candidate_poster_grid(
+        self,
+        build_grid,
+    ):
+        from io import BytesIO
+        from app.handlers.interaction_handler import render_operation
+
+        grid = BytesIO(b"grid")
+        grid.name = "grid.jpg"
+        build_grid.return_value = grid
+        record = self.coordinator.report("search", self.report(
+            state="awaiting_input",
+            stage="candidate_selection",
+            status_text="候选",
+            control="exit",
+            details={
+                "poster_items": [{
+                    "number": 1,
+                    "title": "候选一",
+                    "poster_url": "https://image.example/one.jpg",
+                }],
+                "parse_mode": "HTML",
+            },
+        ))
+        context = self.context()
+        context.application.bot.send_photo = AsyncMock(
+            return_value=SimpleNamespace(message_id=56)
+        )
+
+        message_id = await render_operation(
+            context.application,
+            Mock(),
+            record,
+        )
+
+        self.assertEqual(message_id, 56)
+        self.assertIs(
+            context.application.bot.send_photo.await_args.kwargs["photo"],
+            grid,
+        )
+        self.assertEqual(
+            context.application.bot.send_photo.await_args.kwargs["parse_mode"],
+            "HTML",
+        )
+
+    @patch("app.handlers.interaction_handler.build_poster_grid")
+    async def test_status_renderer_bounds_long_html_photo_caption(
+        self, build_grid
+    ):
+        from io import BytesIO
+        from app.handlers.interaction_handler import render_operation
+
+        grid = BytesIO(b"grid")
+        grid.name = "grid.jpg"
+        build_grid.return_value = grid
+        record = self.coordinator.report("search", self.report(
+            state="awaiting_input",
+            stage="candidate_selection",
+            status_text="<b>" + ("候选内容" * 400) + "</b>",
+            control="exit",
+            details={
+                "poster_items": [{
+                    "number": 1,
+                    "title": "候选一",
+                    "poster_url": "https://image.example/one.jpg",
+                }],
+                "parse_mode": "HTML",
+            },
+        ))
+        context = self.context()
+        context.application.bot.send_photo = AsyncMock(
+            return_value=SimpleNamespace(message_id=57)
+        )
+
+        await render_operation(context.application, Mock(), record)
+
+        kwargs = context.application.bot.send_photo.await_args.kwargs
+        self.assertLessEqual(len(kwargs["caption"]), 1024)
+        self.assertNotIn("<b>", kwargs["caption"])
+        self.assertNotIn("parse_mode", kwargs)
+
     async def test_status_renderer_edits_existing_candidate_photo(self):
         from app.handlers.interaction_handler import render_operation
 

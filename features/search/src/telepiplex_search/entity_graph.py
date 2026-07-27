@@ -213,6 +213,18 @@ def _fact(
         )
         if tvdb_id:
             external_ids["tvdb"] = tvdb_id
+    source_url = _text(raw.get("url"))
+    if (
+        provider == "tvdb"
+        and not source_url
+        and _text(external_ids.get("tvdb"))
+        and resolved_type in {"movie", "series"}
+    ):
+        source_url = (
+            "https://thetvdb.com/"
+            f"{'movies' if resolved_type == 'movie' else 'series'}/"
+            f"{external_ids['tvdb']}"
+        )
     titles = _unique_text((
         raw.get("title"),
         raw.get("name"),
@@ -238,7 +250,7 @@ def _fact(
         year=_text(raw.get("year"))[:4],
         media_type=resolved_type,
         external_ids=_mapping(external_ids),
-        source_url=_text(raw.get("url")),
+        source_url=source_url,
         poster_url=_text(raw.get("cover_url") or raw.get("poster_url")),
         original_title=_text(raw.get("original_title")),
         original_language=normalize_language(raw.get("original_language")),

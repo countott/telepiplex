@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "telepiplex-echo"
 version = "1.0.0"
-description = "Reference Telepiplex runtime Feature"
+description = "Reference telepiplex runtime Feature"
 requires-python = ">=3.12"
 dependencies = ["telepiplex-plugin-sdk==1.1.0"]
 

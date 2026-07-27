@@ -4,7 +4,7 @@ plex-mcp-server
 Source repository: https://github.com/vladimir-tutin/plex-mcp-server
 Source commit: 0723c720498c4ab1eaf3a22ffc7b5a451985f0c0
 License declared by the upstream project: MIT
-Modified for Telepiplex.
+Modified for telepiplex.
 
 Copyright (c) 2025 Vladimir Tutin
 

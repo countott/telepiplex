@@ -1,4 +1,4 @@
-# Telepiplex 远程 Feature 更新发现设计
+# telepiplex 远程 Feature 更新发现设计
 
 日期：2026-07-13
 
@@ -10,9 +10,9 @@
 
 ## 1. 目标
 
-Telepiplex 能够安全读取 GitHub Release 的远程 catalog，比较已安装 Feature 与兼容的最新稳定版本，通过 Telegram 主动通知 allowed_user，并在用户点击一次确认按钮后调用现有 PluginManager.update 流程。
+telepiplex 能够安全读取 GitHub Release 的远程 catalog，比较已安装 Feature 与兼容的最新稳定版本，通过 Telegram 主动通知 allowed_user，并在用户点击一次确认按钮后调用现有 PluginManager.update 流程。
 
-默认行为只发现和通知，不静默下载、不静默更新。Telepiplex 镜像更新仍由 Unraid 拉取并允许重启一次，不属于本子项目。
+默认行为只发现和通知，不静默下载、不静默更新。telepiplex 镜像更新仍由 Unraid 拉取并允许重启一次，不属于本子项目。
 
 ## 2. Catalog 来源与缓存
 
@@ -40,7 +40,7 @@ PluginManager 暴露 async available_updates，负责从 PluginStore 取得 acti
 
 ## 4. 轮询与通知
 
-Telepiplex 启动并恢复 Feature 后立即执行一次更新检查，再按 plugins.catalog_refresh_interval 秒轮询；默认 21600 秒，最小 300 秒。
+telepiplex 启动并恢复 Feature 后立即执行一次更新检查，再按 plugins.catalog_refresh_interval 秒轮询；默认 21600 秒，最小 300 秒。
 
 每次检查：
 
@@ -50,11 +50,11 @@ Telepiplex 启动并恢复 Feature 后立即执行一次更新检查，再按 pl
 4. 消息列出当前版本、目标版本和 source commit。
 5. 提供确认更新与暂不处理两个按钮。
 
-内存中记录本进程已通知键，避免轮询重复轰炸。Telepiplex 重启后可以再次提醒尚未安装的更新。catalog 或 Telegram 暂时失败只记录警告，不阻止 Telepiplex、Bot 或 Feature 运行。
+内存中记录本进程已通知键，避免轮询重复轰炸。telepiplex 重启后可以再次提醒尚未安装的更新。catalog 或 Telegram 暂时失败只记录警告，不阻止 telepiplex、Bot 或 Feature 运行。
 
 ## 5. 一次确认
 
-Telepiplex 专用 callback namespace 为 host-plugin-update，先于通用 Feature callback gateway 注册。
+telepiplex 专用 callback namespace 为 host-plugin-update，先于通用 Feature callback gateway 注册。
 
 确认 payload 只接受严格的 plugin_id@semver。处理步骤：
 
@@ -91,7 +91,7 @@ Telepiplex 专用 callback namespace 为 host-plugin-update，先于通用 Featu
 - 未点击按钮不调用 manager.update。
 - 未授权 callback 不更新。
 - 确认 callback 精确调用 manager.update(plugin@version)，成功和脱敏失败均有测试。
-- monitor failure 不阻止 Telepiplex startup；shutdown 会取消 task。
+- monitor failure 不阻止 telepiplex startup；shutdown 会取消 task。
 - app/config.yaml.example 与 config/config.yaml.example 字节一致。
-- Telepiplex 完整测试、compileall、YAML 解析和 git diff check 通过。
+- telepiplex 完整测试、compileall、YAML 解析和 git diff check 通过。
 - 本轮只提交本地 main，不推送。

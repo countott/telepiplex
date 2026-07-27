@@ -2,7 +2,7 @@
 
 ## 目的
 
-`main` 已成为 Telepiplex Core/Host 唯一有效的源码与发布分支。旧
+`main` 已成为 telepiplex Core/Host 唯一有效的源码与发布分支。旧
 `feature/telepiplex-core` 与 `main` 已经分叉，不能直接删除后丢失历史；
 本手册先把已核对的旧分支尖端保存为不可变的 annotated tag，再删除远端
 活动分支。

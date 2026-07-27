@@ -13,7 +13,7 @@ stable identity through the Search callback, and filter excluded candidates
 before AI scoring. AI title-hint validation rejects hallucinated query
 dimensions.
 
-**Tech Stack:** Python 3.12, asyncio, unittest, pytest, Telepiplex Feature
+**Tech Stack:** Python 3.12, asyncio, unittest, pytest, telepiplex Feature
 operation API.
 
 ## Global Constraints

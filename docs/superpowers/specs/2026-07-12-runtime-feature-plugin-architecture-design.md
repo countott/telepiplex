@@ -1,4 +1,4 @@
-# Telepiplex Runtime Feature Plugin Architecture
+# telepiplex Runtime Feature Plugin Architecture
 
 **Date:** 2026-07-12
 
@@ -10,7 +10,7 @@ branch per business Feature.
 
 ## 1. Goal
 
-Turn Telepiplex into a host-hosted plugin runtime in which one Docker container
+Turn telepiplex into a host-hosted plugin runtime in which one Docker container
 runs a permanent host process and each installed Feature runs as an isolated
 child process. Installing, upgrading, enabling, disabling, rolling back, or
 removing a Feature must not restart host.
@@ -22,9 +22,9 @@ as a validated release aggregation.
 ## 2. Confirmed Constraints
 
 - One Docker container contains host and all installed Feature processes.
-- Telepiplex and Features do not share one Python process.
+- telepiplex and Features do not share one Python process.
 - Every Feature has its own virtual environment and subprocess.
-- Telepiplex-to-Feature communication uses Unix domain sockets.
+- telepiplex-to-Feature communication uses Unix domain sockets.
 - Feature branches remain source branches in the same local and remote Git
   repository.
 - Runtime installation uses immutable, versioned `.tpx` artifacts built from a
@@ -47,7 +47,7 @@ journal, configuration service, and user-facing response rendering.
 
 Each Feature subprocess owns only its business behavior. It never imports
 `app.init`, Telegram objects, another Feature, or a live host implementation.
-It communicates through the versioned Telepiplex Plugin Contract.
+It communicates through the versioned telepiplex Plugin Contract.
 
 ```text
 telepiplex container
@@ -135,7 +135,7 @@ The package includes its complete wheelhouse so installation uses
 administrator, artifact repositories, supervisor policy, and logging.
 
 Each Feature owns its `config.yaml`, schema, migrations, and state directory.
-Telepiplex validates Feature configuration against the installed schema and exposes a
+telepiplex validates Feature configuration against the installed schema and exposes a
 generic Telegram configuration flow. A Feature never reads another Feature's
 configuration. Shared values are exposed as explicit host configuration
 capabilities or included in event/request envelopes.
@@ -146,7 +146,7 @@ the platform `AF_UNIX` path limit.
 
 ## 7. Process and RPC Contract
 
-Telepiplex launches a Feature with its private venv Python, entry point, socket path,
+telepiplex launches a Feature with its private venv Python, entry point, socket path,
 config path, state path, and one-time startup token. The Feature creates the
 Unix socket and performs a handshake containing its manifest identity,
 contract version, capabilities, command declarations, and health status.
@@ -163,7 +163,7 @@ The first API version supports:
 - configuration validation and reload;
 - task inspection and interruption reporting.
 
-Telepiplex validates every envelope before routing it. Unknown methods, contract
+telepiplex validates every envelope before routing it. Unknown methods, contract
 versions, capabilities, or event schemas fail closed without terminating host.
 
 ## 8. Capability and Event Model
@@ -191,7 +191,7 @@ sync
 ```
 
 Exclusive provider capabilities have exactly one active provider. Events may
-have multiple subscribers. Telepiplex refuses activation when a required capability
+have multiple subscribers. telepiplex refuses activation when a required capability
 is missing or ambiguous and reports the unresolved dependency through
 `/plugin status`.
 
@@ -201,16 +201,16 @@ use the event ID or domain idempotency key to prevent duplicate effects.
 
 ## 9. Telegram Interaction
 
-Telepiplex is the only Telegram client. It permanently registers generic command,
+telepiplex is the only Telegram client. It permanently registers generic command,
 callback, and conversation gateways, allowing route tables to change without
 restarting the Application.
 
 Feature manifests declare commands, but Features receive normalized command
 envelopes rather than Telegram objects. They return typed response actions such
-as message text, edit, keyboard, document, or progress update. Telepiplex validates
+as message text, edit, keyboard, document, or progress update. telepiplex validates
 and renders those actions.
 
-Telepiplex provides administrator commands:
+telepiplex provides administrator commands:
 
 ```text
 /plugin install <plugin>@<version>
@@ -245,7 +245,7 @@ Any failure removes staging and leaves the old active version untouched.
 
 ## 11. Upgrade, Drain, and Rollback
 
-Updates are never automatic. Telepiplex may notify that a compatible version exists.
+Updates are never automatic. telepiplex may notify that a compatible version exists.
 On `/plugin update`:
 
 1. Stage and validate the new version while the old version serves traffic.
@@ -279,7 +279,7 @@ When a provider disappears:
 - durable events remain pending until a compatible subscriber returns or an
   administrator resolves them.
 
-Telepiplex startup loads only releases recorded in `active.json`. A corrupt or
+telepiplex startup loads only releases recorded in `active.json`. A corrupt or
 incompatible Feature is quarantined and cannot stop the Telegram bot.
 
 ## 13. Security and Integrity
@@ -301,7 +301,7 @@ Artifact signing may be added later without changing the package identity
 model. The design does not claim same-container subprocesses are hostile-code
 sandboxes.
 
-## 14. Telepiplex Contract Evolution
+## 14. telepiplex Contract Evolution
 
 Host API uses semantic major/minor versions. Additive methods and fields raise
 the minor version; breaking changes raise the major version. Features declare a
@@ -316,7 +316,7 @@ restart host.
 
 This architecture is implemented in bounded phases:
 
-1. Telepiplex contract, artifact verifier/builder, plugin store, supervisor, Unix RPC,
+1. telepiplex contract, artifact verifier/builder, plugin store, supervisor, Unix RPC,
    capability router, event journal, and `/plugin` commands.
 2. A reference echo Feature proves install/enable/update/drain/rollback/remove
    without restarting host.
@@ -328,7 +328,7 @@ This architecture is implemented in bounded phases:
    tasks.
 7. Build an end-to-end artifact matrix and Docker runtime test.
 
-The old in-process `ModuleRegistry` and its loader were removed when the Telepiplex
+The old in-process `ModuleRegistry` and its loader were removed when the telepiplex
 host became executable. There is no compatibility layer for the old Python
 import contract: every business capability must cross the versioned Feature
 RPC/event boundary.

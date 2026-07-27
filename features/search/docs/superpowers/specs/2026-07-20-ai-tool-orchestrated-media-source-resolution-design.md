@@ -1,4 +1,6 @@
-# Telepiplex AI 工具编排式媒体来源解析设计
+# telepiplex AI 工具编排式媒体来源解析设计
+
+> 历史设计：Search 1.1.0 已由 `2026-07-27-unified-anchored-search-design.md` 取代 1–7 候选与确定性回退规则；本文仅保留用于追溯。
 
 日期：2026-07-20
 

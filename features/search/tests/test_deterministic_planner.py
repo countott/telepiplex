@@ -134,11 +134,18 @@ class RuleHypothesesTest(unittest.TestCase):
         self.assertEqual(result["source_queries"]["douban"], ["黑暗荣耀 2022"])
 
     def test_whole_series_words_are_removed_from_provider_query(self):
-        result = build_rule_hypotheses("黑暗荣耀 全季 2022")
+        for scope_word in ("全季", "整剧", "整劇", "全剧", "全劇"):
+            with self.subTest(scope_word=scope_word):
+                result = build_rule_hypotheses(
+                    f"黑暗荣耀 {scope_word} 2022"
+                )
 
-        self.assertEqual(result["intent"]["scope"], "whole_series")
-        self.assertEqual(result["intent"]["title"], "黑暗荣耀")
-        self.assertEqual(result["source_queries"]["tvdb"], ["黑暗荣耀 2022"])
+                self.assertEqual(result["intent"]["scope"], "whole_series")
+                self.assertEqual(result["intent"]["title"], "黑暗荣耀")
+                self.assertEqual(
+                    result["source_queries"]["tvdb"],
+                    ["黑暗荣耀 2022"],
+                )
 
     def test_media_type_suffix_is_not_sent_as_part_of_provider_title(self):
         result = build_rule_hypotheses(

@@ -2010,16 +2010,20 @@ class RankedPlannerTest(unittest.IsolatedAsyncioTestCase):
         })
         self.assertTrue(confirmed["confirmed"])
 
-    async def test_exhausted_total_budget_fails_structurally(self):
-        with self.assertRaisesRegex(SearchPlanningError, "planning_timed_out"):
-            await build_confirmable_search_plan(
-                "Movie",
-                "p-budget",
-                {"douban": _provider("douban", 1)},
-                lambda _contract: set(),
-                TemporarySpecialAllocator(),
-                budget=PlanningBudget(total=0),
-            )
+    async def test_legacy_budget_argument_no_longer_stops_planning(self):
+        plan = await build_confirmable_search_plan(
+            "Movie",
+            "p-budget",
+            {
+                "douban": _provider("douban", 1),
+                "wikipedia": _provider("wikipedia", 1),
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            budget=PlanningBudget(total=0),
+        )
+
+        self.assertEqual(len(plan["candidates"]), 1)
 
 
 if __name__ == "__main__":

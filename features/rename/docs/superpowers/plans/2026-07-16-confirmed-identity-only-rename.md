@@ -6,7 +6,7 @@
 
 **Architecture:** The service may request metadata from `media.search`, but a failed or non-confirmed response is a terminal identity result and moves the release to `/未整理`. Processor code deletes the legacy TVDB+AI identity fallback. Existing deterministic and constrained AI file mapping remain unchanged.
 
-**Tech Stack:** Python 3.12, unittest, Telepiplex plugin SDK.
+**Tech Stack:** Python 3.12, unittest, telepiplex plugin SDK.
 
 ## Global Constraints
 

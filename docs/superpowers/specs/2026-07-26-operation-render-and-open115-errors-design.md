@@ -8,7 +8,7 @@ provider URLs.
 
 ## Approved scope
 
-This change affects Telepiplex Core and the download Feature. Search query,
+This change affects telepiplex Core and the download Feature. Search query,
 candidate, release-gate, and ranking behavior remain unchanged.
 
 Core moves every render that can mutate an operation's Telegram message under
@@ -77,7 +77,7 @@ remain redacted.
 
 ## Release identity
 
-- Telepiplex Host display version becomes `v3.4.5-host`.
+- telepiplex Host display version becomes `v3.4.5-host`.
 - download Feature becomes `1.0.2`.
 - Search remains `1.0.8`.
 

@@ -88,12 +88,12 @@ class ReleaseWorkflowTest(unittest.TestCase):
         workflow = self._workflow(TELEPIPLEX_WORKFLOW)
         steps = workflow["jobs"]["validate-telepiplex"]["steps"]
         step_names = [step.get("name") for step in steps]
-        gate_name = "Verify Telepiplex release commit belongs to main"
+        gate_name = "Verify telepiplex release commit belongs to main"
 
         self.assertIn(gate_name, step_names)
         self.assertLess(
             step_names.index(gate_name),
-            step_names.index("Run Telepiplex tests"),
+            step_names.index("Run telepiplex tests"),
         )
 
         gate = self._step(
@@ -167,11 +167,11 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertEqual(workflow["permissions"], {"contents": "read"})
 
         validate = self._step(
-            workflow, "validate-telepiplex", "Validate immutable Telepiplex tag"
+            workflow, "validate-telepiplex", "Validate immutable telepiplex tag"
         )["run"]
         self.assertIn("^telepiplex-v", validate)
         self.assertNotIn("platform-v", validate)
-        self._step(workflow, "validate-telepiplex", "Run Telepiplex tests")
+        self._step(workflow, "validate-telepiplex", "Run telepiplex tests")
         self._step(workflow, "validate-telepiplex", "Compile tracked Python")
 
         build = jobs["build-telepiplex-image"]
@@ -180,7 +180,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
             build["permissions"], {"contents": "read", "packages": "write"}
         )
         image = self._step(
-            workflow, "build-telepiplex-image", "Build and push Telepiplex image"
+            workflow, "build-telepiplex-image", "Build and push telepiplex image"
         )["with"]
         self.assertEqual(image["platforms"], "linux/amd64")
         self.assertTrue(image["push"])
@@ -198,7 +198,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         )
         self.assertEqual(release["permissions"], {"contents": "write"})
         self._step(
-            workflow, "publish-telepiplex-release", "Refuse an existing Telepiplex Release"
+            workflow, "publish-telepiplex-release", "Refuse an existing telepiplex Release"
         )
         create = self._step(
             workflow, "publish-telepiplex-release", "Create GitHub Latest Release"
@@ -213,7 +213,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
     def test_telepiplex_release_installs_and_tests_workspaces_in_isolation(self):
         workflow = self._workflow(TELEPIPLEX_WORKFLOW)
         install = self._step(
-            workflow, "validate-telepiplex", "Install Telepiplex test dependencies"
+            workflow, "validate-telepiplex", "Install telepiplex test dependencies"
         )["run"]
         for package in (
             "./sdk",
@@ -226,7 +226,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
             self.assertIn(package, install)
 
         tests = self._step(
-            workflow, "validate-telepiplex", "Run Telepiplex tests"
+            workflow, "validate-telepiplex", "Run telepiplex tests"
         )["run"]
         self.assertIn(
             "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:sdk/src", tests
@@ -317,7 +317,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         checkout = self._step(
             workflow,
             "build-feature",
-            "Checkout Telepiplex release infrastructure",
+            "Checkout telepiplex release infrastructure",
         )
         self.assertIs(checkout["with"]["persist-credentials"], False)
 
@@ -715,7 +715,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         host = self._workflow(TELEPIPLEX_WORKFLOW)
         feature = self._workflow(FEATURE_WORKFLOW)
         host_install = self._step(
-            host, "validate-telepiplex", "Install Telepiplex test dependencies"
+            host, "validate-telepiplex", "Install telepiplex test dependencies"
         )["run"]
         feature_install = self._step(
             feature, "build-feature", "Install Feature build dependencies"

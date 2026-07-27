@@ -1,6 +1,8 @@
 import ast
 import asyncio
 from copy import deepcopy
+import html
+import re
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -339,7 +341,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("搜索结果 1", self.host.reports[-1]["status_text"])
         self.assertEqual(self.host.reports[-1]["state"], "awaiting_input")
 
-    async def test_prowlarr_failure_keeps_reason_and_removes_candidate_buttons(self):
+    async def test_prowlarr_failure_keeps_plan_and_offers_retry_exit(self):
         from telepiplex_search.adapters.prowlarr import ProwlarrRequestError
 
         def fail_search(_query, _media_type):
@@ -364,11 +366,16 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         await self.runtime.run("search-releases-")
 
         failed = self.host.reports[-1]
-        self.assertEqual(failed["state"], "failed")
-        self.assertEqual(failed["control"], "")
-        self.assertNotIn("keyboard", failed["details"])
+        self.assertEqual(failed["state"], "awaiting_input")
+        self.assertEqual(failed["stage"], "prowlarr_recovery")
+        keyboard = failed["details"]["keyboard"]
+        self.assertEqual(keyboard[0][0]["text"], "重试 Prowlarr")
+        self.assertEqual(
+            keyboard[0][0]["callback_data"],
+            f"search:confirm:{plan_id}",
+        )
         self.assertIn("已等待 200 秒", failed["status_text"])
-        self.assertNotIn(plan_id, self.feature.plans)
+        self.assertIn(plan_id, self.feature.plans)
 
     async def test_wrong_scope_never_enters_release_rank(self):
         from telepiplex_search.series_scope import apply_series_scope
@@ -660,6 +667,128 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host.reports[-1]["state"], "failed")
         self.assertEqual(self.feature.plans, {})
         self.assertEqual(self.search_queries, [])
+
+    async def test_recoverable_planning_errors_have_retry_cancel_exit_ui(self):
+        from telepiplex_search.planner import SearchPlanningError
+
+        for code in (
+            "source_failure",
+            "source_rate_limited",
+            "ai_candidate_failure",
+            "candidate_binding_failed",
+            "fixed_link_read_failed",
+            "metadata_conflict",
+            "metadata_incomplete",
+        ):
+            with self.subTest(code=code):
+                async def blocked(_raw_query, _plan_id, code=code):
+                    raise SearchPlanningError(
+                        code,
+                        ("wikipedia:server_down",),
+                    )
+
+                self.feature.plan_builder = blocked
+                result = await self.feature.command({
+                    "command": "search",
+                    "args": ["同名条目"],
+                    "user_id": 1,
+                    "chat_id": 10,
+                })
+                await self.runtime.run("search-plan-")
+                report = self.host.reports[-1]
+                keyboard = report["details"]["keyboard"]
+                self.assertEqual(report["state"], "awaiting_input")
+                self.assertEqual(keyboard[0][0]["text"], "重试")
+                self.assertEqual(keyboard[1][0]["text"], "取消")
+                self.assertEqual(keyboard[1][1]["text"], "退出")
+                plan_id = result["operation"]["details"].get("plan_id")
+                for stored_plan_id in list(self.feature.plans):
+                    self.feature._release_plan(stored_plan_id)
+
+    @patch("telepiplex_search.service.get_tvdb_series_episodes")
+    @patch("telepiplex_search.service.search_tvdb_series")
+    @patch("telepiplex_search.service.search_tvdb_movies")
+    def test_tvdb_discovery_defers_episode_inventory(
+        self, movies, series, episodes
+    ):
+        movies.return_value = []
+        series.return_value = [{
+            "tvdb_series_id": "900",
+            "name": "Honey and Clover",
+            "year": "2005",
+        }]
+
+        result = self.feature._tvdb_provider({
+            "hypotheses": [{
+                "title": "蜂蜜与四叶草",
+                "year": "",
+            }],
+        })
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            result["facts"][0]["episodes_by_series"],
+            {},
+        )
+        episodes.assert_not_called()
+
+    @patch("telepiplex_search.service.search_tvdb_series")
+    @patch("telepiplex_search.service.search_tvdb_movies")
+    def test_tvdb_partial_search_failure_preserves_successful_movies(
+        self, movies, series
+    ):
+        from telepiplex_search.adapters.tvdb import TvdbRequestError
+
+        movies.return_value = [{
+            "tvdb_movie_id": "77",
+            "name": "Movie",
+            "year": "2024",
+        }]
+        series.side_effect = TvdbRequestError(
+            "series endpoint down",
+            "server_down",
+        )
+
+        result = self.feature._tvdb_provider({
+            "hypotheses": [{"title": "Movie", "year": "2024"}],
+        })
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            result["facts"][0]["movies"][0]["tvdb_movie_id"],
+            "77",
+        )
+        self.assertIn("series endpoint down", result["error"])
+
+    @patch("telepiplex_search.service.lookup_wikipedia_evidence")
+    def test_wikipedia_provider_caps_each_targeted_query_batch(
+        self, lookup
+    ):
+        lookup.return_value = {
+            "source": "wikipedia",
+            "status": "not_found",
+            "facts": [],
+            "source_urls": [],
+            "error": "",
+        }
+        self.feature.config["metadata"] = {
+            "wikipedia": {
+                "enable": True,
+                "languages": ["zh", "en"],
+                "max_queries": 2,
+            },
+        }
+
+        self.feature._wikipedia_provider({
+            "source_queries": {
+                "wikipedia": ["one", "two", "three"],
+            },
+        })
+
+        self.assertEqual(
+            lookup.call_args.args[0],
+            ["one", "two"],
+        )
 
     async def test_config_wizard_refuses_to_replace_active_search_session(self):
         owner = (10, 1)
@@ -1285,6 +1414,188 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["details"]["photo_url"], "https://image.example/top.jpg")
         self.assertIn("92/100", report["status_text"])
 
+    async def test_unified_candidates_render_one_numbered_photo_grid(self):
+        async def planner(_raw_query, plan_id):
+            result = ranked_search_plan()
+            result["plan_id"] = plan_id
+            result["raw_query"] = "候选"
+            result["links_frozen"] = True
+            for index, candidate in enumerate(result["candidates"], 1):
+                candidate.update({
+                    "candidate_id": candidate["candidate_key"],
+                    "identity_role": "movie",
+                    "intended_scope": "movie",
+                    "ai_confidence": 0.9 - index / 100,
+                    "ai_reason": f"候选 {index} 与来源事实匹配。",
+                    "source_links": [{
+                        "provider": "douban",
+                        "url": (
+                            f"https://movie.douban.com/subject/{index}/"
+                        ),
+                    }],
+                    "poster_assets": [],
+                    "links_frozen": True,
+                })
+            return result
+
+        self.feature.plan_builder = planner
+        await self.feature.command({
+            "command": "s",
+            "args": ["候选"],
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-plan-")
+
+        report = self.host.reports[-1]
+        self.assertEqual(report["stage"], "candidate_selection")
+        self.assertEqual(len(report["details"]["poster_items"]), 2)
+        self.assertEqual(
+            [
+                row[0]["callback_data"]
+                for row in report["details"]["keyboard"][:2]
+            ],
+            [
+                f"search:select:{next(iter(self.feature.plans))}:0",
+                f"search:select:{next(iter(self.feature.plans))}:1",
+            ],
+        )
+        self.assertIn("AI 89%", report["status_text"])
+        self.assertIn("https://movie.douban.com/subject/1/", report["status_text"])
+
+    def test_six_candidate_html_grid_stays_within_telegram_caption_limit(self):
+        candidates = []
+        for index in range(6):
+            contract = deepcopy(search_plan()["media_metadata"])
+            contract["identity"].update({
+                "chinese_title": f"候选标题 {index + 1}",
+                "year": str(2000 + index),
+            })
+            candidates.append({
+                "candidate_id": f"candidate-{index + 1}",
+                "candidate_key": f"candidate-{index + 1}",
+                "identity_role": "movie",
+                "candidate_version": "v0",
+                "media_metadata": contract,
+                "ai_confidence": 0.91,
+                "ai_reason": (
+                    "候选与用户意图相符，但仍有来源暂时不可用，"
+                    "保留现有证据供用户选择。"
+                ),
+                "source_links": [{
+                    "provider": provider,
+                    "url": (
+                        f"https://example.com/{provider}/{index}"
+                    ),
+                } for provider in ("wikipedia", "douban", "tvdb")],
+                "unresolved_sources": ["wikipedia:server_down"],
+                "poster_url": "https://image.example/poster.jpg",
+            })
+
+        action = self.feature._candidate_grid_action({
+            "candidates": candidates,
+            "plan": {"plan_id": "caption-limit"},
+        })
+
+        self.assertEqual(action["kind"], "send_photo_grid")
+        visible = html.unescape(
+            re.sub(r"<[^>]+>", "", action["text"])
+        )
+        self.assertLessEqual(len(visible), 1024)
+        self.assertEqual(action["text"].count("<a "), 18)
+        self.assertEqual(
+            action["text"].count("<a "),
+            action["text"].count("</a>"),
+        )
+        self.assertIn("wikipedia:server_down", action["text"])
+
+    async def test_unified_single_candidate_skips_candidate_selection(self):
+        async def planner(_raw_query, plan_id):
+            result = ranked_search_plan()
+            result["plan_id"] = plan_id
+            result["raw_query"] = "唯一候选"
+            result["links_frozen"] = True
+            result["candidates"] = result["candidates"][:1]
+            return result
+
+        self.feature.plan_builder = planner
+        await self.feature.command({
+            "command": "s",
+            "args": ["唯一候选"],
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-plan-")
+
+        report = self.host.reports[-1]
+        self.assertEqual(report["stage"], "prowlarr_search")
+        self.assertEqual(report["state"], "running")
+        self.assertNotIn("candidate_selection", report["stage"])
+
+    async def test_multi_candidate_exact_read_retry_keeps_selected_index(self):
+        from telepiplex_search.direct_link import DirectLinkError
+
+        plan_id = "exact-retry"
+        plan = ranked_search_plan()
+        plan.update({
+            "plan_id": plan_id,
+            "raw_query": "候选",
+            "entry_kind": "text",
+            "links_frozen": True,
+        })
+        for index, candidate in enumerate(plan["candidates"], 1):
+            candidate.update({
+                "candidate_id": candidate["candidate_key"],
+                "identity_role": "movie",
+                "intended_scope": "movie",
+                "links_frozen": True,
+                "source_links": [{
+                    "provider": "douban",
+                    "fact_id": f"douban:{index}",
+                    "url": (
+                        "https://movie.douban.com/subject/"
+                        f"{index}/"
+                    ),
+                    "external_ids": {
+                        "douban_subject": str(index),
+                    },
+                    "role": "movie",
+                    "season_number": None,
+                    "episode_number": None,
+                    "verification": "fact_verified",
+                }],
+            })
+
+        def fail_exact_read(_link):
+            raise DirectLinkError(
+                "fixed_link_read_failed",
+                ("douban:timeout",),
+            )
+
+        self.feature.exact_link_resolver = fail_exact_read
+        result = await self.feature._select_candidate(
+            plan_id,
+            {
+                "plan": plan,
+                "candidates": tuple(plan["candidates"]),
+                "selected_path": "",
+                "operation_id": "",
+            },
+            "1",
+        )
+
+        keyboard = result["actions"][0]["data"]["keyboard"]
+        retry = next(
+            button
+            for row in keyboard
+            for button in row
+            if button["text"] == "重试精确读取"
+        )
+        self.assertEqual(
+            retry["callback_data"],
+            f"search:select:{plan_id}:1",
+        )
+
     async def test_clarification_plan_renders_options(self):
         async def planner(_raw_query, plan_id):
             return clarification_plan(plan_id)
@@ -1394,6 +1705,76 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls, [
             ("想见你", None),
+            (
+                "Someday or One Day: The Movie 2022（电影）",
+                ("tvdb", "342532"),
+            ),
+        ])
+
+    async def test_retry_after_locked_clarification_failure_keeps_identity(self):
+        from telepiplex_search.planner import SearchPlanningError
+
+        calls = []
+
+        async def planner(raw_query, plan_id, *, locked_identity=None):
+            calls.append((raw_query, locked_identity))
+            if len(calls) == 1:
+                result = clarification_plan(plan_id)
+                result["clarification"]["options"][0].update({
+                    "label": "电影《想見你》(2022)",
+                    "query": "Someday or One Day: The Movie 2022（电影）",
+                    "locked_identity": {
+                        "key": "tvdb",
+                        "value": "342532",
+                    },
+                })
+                return result
+            if len(calls) == 2:
+                raise SearchPlanningError(
+                    "source_failure",
+                    ("tvdb:server_down",),
+                )
+            result = ranked_search_plan()
+            result["plan_id"] = plan_id
+            return result
+
+        self.feature.plan_builder = planner
+        await self.feature.command({
+            "command": "s",
+            "args": ["想见你"],
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-plan-")
+        clarify_callback = (
+            self.host.reports[-1]["details"]["keyboard"][0][0]
+            ["callback_data"]
+        )
+
+        await self.feature.callback({
+            "payload": clarify_callback.removeprefix("search:"),
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-plan-")
+        retry_callback = (
+            self.host.reports[-1]["details"]["keyboard"][0][0]
+            ["callback_data"]
+        )
+
+        await self.feature.callback({
+            "payload": retry_callback.removeprefix("search:"),
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-plan-")
+
+        self.assertEqual(calls, [
+            ("想见你", None),
+            (
+                "Someday or One Day: The Movie 2022（电影）",
+                ("tvdb", "342532"),
+            ),
             (
                 "Someday or One Day: The Movie 2022（电影）",
                 ("tvdb", "342532"),
@@ -1658,6 +2039,58 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             })
         self.assertEqual(raised.exception.code, "metadata_unresolved")
 
+    async def test_metadata_capability_exact_reads_a_frozen_candidate(self):
+        async def live_planner(_raw_query, plan_id):
+            result = ranked_search_plan()
+            result["plan_id"] = plan_id
+            result["raw_query"] = "布达佩斯大饭店"
+            result["entry_kind"] = "text"
+            result["links_frozen"] = True
+            candidate = result["candidates"][0]
+            candidate.update({
+                "links_frozen": True,
+                "source_links": [{
+                    "provider": "douban",
+                    "fact_id": "douban:11",
+                    "url": "https://movie.douban.com/subject/11/",
+                    "external_ids": {"douban_subject": "11"},
+                    "role": "movie",
+                    "season_number": None,
+                    "episode_number": None,
+                    "verification": "fact_verified",
+                }],
+            })
+            candidate["media_metadata"]["identity"][
+                "english_title"
+            ] = "Discovery Summary"
+            result["candidates"] = [candidate]
+            return result
+
+        self.feature.plan_builder = live_planner
+
+        def exact_hydration(candidate, **_kwargs):
+            hydrated = deepcopy(candidate)
+            hydrated["media_metadata"]["identity"][
+                "english_title"
+            ] = "Hydrated Exact Title"
+            hydrated["metadata_hydrated"] = True
+            return hydrated
+
+        with patch(
+            "telepiplex_search.service.hydrate_frozen_candidate",
+            side_effect=exact_hydration,
+        ) as hydrate:
+            resolved = await self.feature.metadata_capability({
+                "method": "resolve_metadata",
+                "payload": {"query": "布达佩斯大饭店"},
+            })
+
+        hydrate.assert_called_once()
+        self.assertEqual(
+            resolved["media_metadata"]["identity"]["english_title"],
+            "Hydrated Exact Title",
+        )
+
     async def test_metadata_capability_derives_series_scope_from_probe(self):
         async def live_planner(_raw_query, plan_id):
             result = series_ranked_search_plan()
@@ -1814,9 +2247,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.0.9")
-        self.assertEqual(manifest["host_api"], ">=1.2,<2.0")
-        self.assertIn('version = "1.0.9"', project)
+        self.assertEqual(manifest["version"], "1.1.0")
+        self.assertEqual(manifest["host_api"], ">=1.3,<2.0")
+        self.assertIn('version = "1.1.0"', project)
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
@@ -1847,12 +2280,12 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.0.9.tpx", source)
+        self.assertIn("/tmp/search-1.1.0.tpx", source)
         self.assertIn("search_media_sources", source)
         self.assertIn("最多两轮", source)
         self.assertIn("不会交给 AI", source)
         self.assertIn("rename", source)
-        self.assertNotIn("dist/search-1.0.9.tpx", source)
+        self.assertNotIn("dist/search-1.1.0.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

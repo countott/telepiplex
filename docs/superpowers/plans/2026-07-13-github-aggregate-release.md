@@ -2,17 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.
 
-**Goal:** Publish a linux/amd64 Telepiplex image, four Linux Feature artifacts, and a digest-pinned remote catalog from one immutable GitHub Release.
+**Goal:** Publish a linux/amd64 telepiplex image, four Linux Feature artifacts, and a digest-pinned remote catalog from one immutable GitHub Release.
 
-**Architecture:** A tested Python generator verifies tpx manifests and emits deterministic catalog metadata. A tag-only GitHub Actions workflow validates Telepiplex, builds each Feature branch on Ubuntu, pushes Telepiplex to GHCR, generates the catalog, and creates a non-overwriting GitHub Release.
+**Architecture:** A tested Python generator verifies tpx manifests and emits deterministic catalog metadata. A tag-only GitHub Actions workflow validates telepiplex, builds each Feature branch on Ubuntu, pushes telepiplex to GHCR, generates the catalog, and creates a non-overwriting GitHub Release.
 
-**Tech Stack:** Python 3.12, PyYAML, Telepiplex artifact verifier, GitHub Actions, Docker Buildx, GHCR, GitHub CLI.
+**Tech Stack:** Python 3.12, PyYAML, telepiplex artifact verifier, GitHub Actions, Docker Buildx, GHCR, GitHub CLI.
 
 ## Global Constraints
 
 - Work only in main.
 - Keep all Feature branches independent.
-- Build Telepiplex only for linux/amd64.
+- Build telepiplex only for linux/amd64.
 - Do not publish from pull requests or ordinary branch pushes.
 - Do not overwrite an existing Release or reuse a plugin name@version for changed bytes.
 - Catalog URLs use HTTPS and every entry pins a lowercase SHA-256.
@@ -52,7 +52,7 @@
 
 - [ ] Step 1: Write failing static workflow tests. Parse YAML with BaseLoader and assert only tag/dispatch triggers, permissions, concurrency, linux/amd64, GHCR, four branch refs, no PR publish path, no Docker Hub secrets, and publish-release needs validation, image, and Feature jobs.
 - [ ] Step 2: Run the focused test and confirm RED against the old unsafe workflow.
-- [ ] Step 3: Implement release.yml. Validate tag and non-existing Release, run Telepiplex tests, build Feature matrix on Ubuntu with tools/build_feature.py, upload artifacts, build/push GHCR image, generate catalog, verify digests, and create the Release once.
+- [ ] Step 3: Implement release.yml. Validate tag and non-existing Release, run telepiplex tests, build Feature matrix on Ubuntu with tools/build_feature.py, upload artifacts, build/push GHCR image, generate catalog, verify digests, and create the Release once.
 - [ ] Step 4: Run workflow tests, YAML parsing, and deployment contract tests; confirm GREEN.
 - [ ] Step 5: Commit as ci(runtime): publish aggregate platform releases.
 

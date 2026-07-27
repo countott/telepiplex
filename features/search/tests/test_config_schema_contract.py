@@ -61,6 +61,32 @@ class ConfigSchemaContractTest(unittest.TestCase):
             },
         )
         self.assertEqual(
+            default["metadata"]["wikipedia"],
+            {
+                "enable": True,
+                "languages": ["zh", "en"],
+                "timeout": 10,
+                "min_interval": 3,
+                "max_queries": 2,
+                "rate_limit_cooldown": 30,
+            },
+        )
+        self.assertEqual(
+            set(
+                schema["properties"]["metadata"]["properties"][
+                    "wikipedia"
+                ]["properties"]
+            ),
+            {
+                "enable",
+                "languages",
+                "timeout",
+                "min_interval",
+                "max_queries",
+                "rate_limit_cooldown",
+            },
+        )
+        self.assertEqual(
             default["ai"]["source_orchestration"],
             {
                 "enable": True,

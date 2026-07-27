@@ -1,4 +1,4 @@
-"""Test helpers shared by Telepiplex feature branches."""
+"""Test helpers shared by telepiplex feature branches."""
 
 import json
 import sys

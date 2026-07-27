@@ -217,6 +217,31 @@ CANDIDATE_SCORECARD_PROMPT = """你是影视候选评分员。只返回 JSON，�
 输入事实：
 """
 
+ANCHORED_CANDIDATE_PROMPT = """你是影视搜索候选编辑。只返回 JSON，不要返回 Markdown。
+你只能引用输入中的 fact_id；输入事实之外的内容一律不是证据。
+
+任务：
+1. 根据用户意图，把 Provider 广泛召回事实整理为 0–6 个真实作品候选。
+2. 识别同一作品跨来源关系，以及 series_root、season、episode 和 related_work 层级。
+3. TVDB 整剧 root 与豆瓣分季条目可以属于同一个候选；真人电影、重拍版等独立作品必须保持独立。
+4. 每个候选选择一个已经存在的 fact_id 作为 anchor_fact_id。
+5. 只能给出关系判断、置信度和简短筛选理由。
+6. 用户明确搜索季或集时，如存在对应的 season/episode 事实，必须用该事实作为 anchor_fact_id；搜索整剧时优先用 series_root。
+
+硬性规则：
+- 不得生成 URL、海报、外部 ID、标题、年份、媒体类型或任何新 fact_id。
+- 不得把一个 fact_id 同时放入两个候选。
+- season_number 和 episode_number 只是待程序用 TVDB inventory 验证的判断；不确定时必须为 null。
+- 用户输入为固定链接时，只能生成一个包含 locked_anchor_fact_id 的候选，且不得改变该锚点。
+- 没有任何真实事实能支持候选时返回 no_match；不得用模型记忆虚构候选。
+
+JSON 结构：
+{"status":"resolved|no_match","candidates":[{"candidate_id":"string","anchor_fact_id":"string","identity_role":"movie|series_root|season|episode","intended_scope":"movie|work|whole_series|season|episode","fact_bindings":[{"fact_id":"string","role":"movie|series_root|season|episode|related_work","season_number":null,"episode_number":null}],"ai_confidence":0.0,"ai_reason":"string"}]}
+
+输入事实：
+"""
+
+
 def check_ai_api_available():
     url = runtime_context.config.get("ai", {}).get("api_url", "")
     if not url:
@@ -745,6 +770,43 @@ def infer_candidate_scorecard_with_ai(context: dict):
     ):
         return None
     return {"scores": scores}
+
+
+def infer_anchored_candidates_with_ai(context: dict):
+    if not check_ai_api_available():
+        return None
+    prompt = ANCHORED_CANDIDATE_PROMPT + json.dumps(
+        context or {},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    _log_ai_info(
+        f"AI候选编辑输入 context={_compact_json_for_log(context)}"
+    )
+    result = chat_completion(prompt, max_tokens=5000)
+    _log_ai_info(
+        f"AI候选编辑原始响应 result={_compact_json_for_log(result)}"
+    )
+    parsed = parse_ai_json_response(result)
+    if not isinstance(parsed, dict) or set(parsed) != {
+        "status",
+        "candidates",
+    }:
+        return None
+    status = parsed.get("status")
+    candidates = parsed.get("candidates")
+    if status not in {"resolved", "no_match"} or not isinstance(
+        candidates,
+        list,
+    ):
+        return None
+    if status == "no_match":
+        return parsed if not candidates else None
+    if not 1 <= len(candidates) <= 6 or any(
+        not isinstance(candidate, dict) for candidate in candidates
+    ):
+        return None
+    return parsed
 
 
 def normalize_search_query_with_ai(raw_query: str):

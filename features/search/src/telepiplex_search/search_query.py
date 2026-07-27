@@ -199,7 +199,8 @@ def _useful_douban_title(title: str) -> str:
 
 def extract_douban_subject_id(raw_url: str) -> str:
     parsed = urlparse(str(raw_url or "").strip())
-    if "douban.com" not in parsed.netloc.lower():
+    host = str(parsed.hostname or "").casefold()
+    if not (host == "douban.com" or host.endswith(".douban.com")):
         return ""
 
     match = re.search(r"/subject/(\d+)/?", parsed.path)
@@ -250,9 +251,11 @@ def parse_douban_page_title(html_text: str) -> str:
 
 
 def is_supported_metadata_url(raw_url: str) -> bool:
-    host = urlparse(str(raw_url or "").strip()).netloc.lower()
+    host = str(
+        urlparse(str(raw_url or "").strip()).hostname or ""
+    ).casefold()
     return any(
-        domain in host
+        host == domain or host.endswith(f".{domain}")
         for domain in [
             "douban.com",
             "imdb.com",
@@ -260,5 +263,6 @@ def is_supported_metadata_url(raw_url: str) -> bool:
             "tvdb.com",
             "themoviedb.org",
             "tmdb.org",
+            "wikipedia.org",
         ]
     )

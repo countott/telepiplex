@@ -1,4 +1,4 @@
-# Telepiplex Feature Interaction Coordination Design
+# telepiplex Feature Interaction Coordination Design
 
 **Date:** 2026-07-15
 
@@ -6,7 +6,7 @@
 
 ## Purpose
 
-Telepiplex Telepiplex and every current Feature must present one coherent Telegram interaction model:
+telepiplex telepiplex and every current Feature must present one coherent Telegram interaction model:
 
 - `/start` and Telegram's command menu expose commands from active Feature manifests.
 - Every non-terminal interaction step has one explicit way to leave.
@@ -27,22 +27,22 @@ It does not add `/mag` or `/scan`. Existing command names remain authoritative.
 ## Current Constraints
 
 - `main` is intentionally empty and is not the implementation target.
-- Telepiplex owns Telegram update routing and Feature process supervision.
-- Features run as isolated child processes through the Telepiplex Feature SDK.
+- telepiplex owns Telegram update routing and Feature process supervision.
+- Features run as isolated child processes through the telepiplex Feature SDK.
 - Feature branches remain independently releasable.
 - The existing Host API is `1.0`; the coordinated task protocol requires Host API `1.1`.
-- Older API 1.0 Features must continue to start on Telepiplex 1.1.
+- Older API 1.0 Features must continue to start on telepiplex 1.1.
 - Newly released coordinated Features require Host API `>=1.1,<2.0`.
 
 ## Chosen Architecture
 
-Telepiplex owns coordination. Features own domain execution and compensation.
+telepiplex owns coordination. Features own domain execution and compensation.
 
 Feature-local coordination was rejected because it cannot stop a user from starting work in one Feature while another Feature owns that user. Process-level cancellation was rejected because it affects unrelated work in the same Feature and cannot perform domain-specific rollback.
 
 The implementation introduces three cooperating units:
 
-1. `InteractionCoordinator` in Telepiplex stores the single active operation for each `(chat_id, user_id)` and validates all state transitions.
+1. `InteractionCoordinator` in telepiplex stores the single active operation for each `(chat_id, user_id)` and validates all state transitions.
 2. The Host API/Feature SDK 1.1 operation protocol lets Features open interactions, report task progress, hand tasks to another Feature, and receive exit/cancel/rollback controls.
 3. Each Feature implements its own interaction cleanup, cancellation checkpoints, and exact compensation where supported.
 
@@ -62,13 +62,13 @@ An operation covers both an input-driven interaction and any long task that foll
 - `rolled_back`: execution stopped and all recorded reversible changes were restored.
 - `partially_rolled_back`: execution stopped but one or more recorded changes could not be restored.
 - `failed`: execution stopped because of an error.
-- `interrupted`: no active executor can be confirmed after a process or Telepiplex restart.
+- `interrupted`: no active executor can be confirmed after a process or telepiplex restart.
 
 Only the last six states are terminal. A terminal state releases the user's input gate.
 
 ### Controls
 
-Telepiplex renders one control appropriate for the current stage:
+telepiplex renders one control appropriate for the current stage:
 
 - `exit` renders **退出** for an input or confirmation step that has not started work.
 - `cancel` renders **取消任务** when future work can stop but completed effects cannot be precisely reversed.
@@ -76,7 +76,7 @@ Telepiplex renders one control appropriate for the current stage:
 
 The control may change at any state transition. In particular, it must downgrade from `rollback` to `cancel` before an irreversible delete, a Plex scan, a remote refresh, or any operation whose affected object identity cannot be proven.
 
-Existing Feature-local cancel buttons are not duplicated. During migration, each Feature returns a single explicit control descriptor; Telepiplex either uses the Feature-rendered control or injects the Telepiplex control when the response has none.
+Existing Feature-local cancel buttons are not duplicated. During migration, each Feature returns a single explicit control descriptor; telepiplex either uses the Feature-rendered control or injects the telepiplex control when the response has none.
 
 ### Global Input Gate
 
@@ -95,9 +95,9 @@ The gate is keyed by both chat and user so a user cannot accidentally collide wi
 
 Host API 1.1 adds optional operation methods while retaining every 1.0 method.
 
-### Feature-to-Telepiplex reports
+### Feature-to-telepiplex reports
 
-The SDK Telepiplex client exposes an operation report method with these fields:
+The SDK telepiplex client exposes an operation report method with these fields:
 
 - `operation_id`
 - `chat_id`
@@ -110,15 +110,15 @@ The SDK Telepiplex client exposes an operation report method with these fields:
 - optional `next_plugin_id` for a handoff
 - optional structured `details` containing only non-secret status data
 
-Telepiplex authenticates the reporting Feature and rejects reports for an operation it neither owns nor is the declared handoff target for. Revisions increase monotonically. A report at or below the current revision is ignored so a late progress update cannot overwrite a cancellation or later Feature stage.
+telepiplex authenticates the reporting Feature and rejects reports for an operation it neither owns nor is the declared handoff target for. Revisions increase monotonically. A report at or below the current revision is ignored so a late progress update cannot overwrite a cancellation or later Feature stage.
 
-### Telepiplex-to-Feature controls
+### telepiplex-to-Feature controls
 
 The Feature runtime exposes an operation control handler receiving:
 
 - `operation_id`
 - `action`: `exit`, `cancel`, or `rollback`
-- the last accepted Telepiplex revision
+- the last accepted telepiplex revision
 
 The handler returns the accepted operation state and next revision. Control handling is idempotent.
 
@@ -126,7 +126,7 @@ The handler returns the accepted operation state and next revision. Control hand
 
 Long handlers must return an operation descriptor promptly, then run through the Feature runtime's managed background-task facility. A Telegram-facing command or callback must not remain blocked on a long network request, download poll, filesystem pipeline, or Plex scan.
 
-Managed work has a stable task ID and reports checkpoints through Telepiplex. Cancellation sets a cooperative cancellation flag. A blocking atomic call is allowed to finish; the Feature checks the flag before starting the next operation.
+Managed work has a stable task ID and reports checkpoints through telepiplex. Cancellation sets a cooperative cancellation flag. A blocking atomic call is allowed to finish; the Feature checks the flag before starting the next operation.
 
 ### Cross-Feature handoff
 
@@ -137,19 +137,19 @@ The same `operation_id` is propagated in capability payloads and events:
 3. rename reports ownership when it accepts that event and passes the ID through `media.organized`.
 4. sync reports ownership when it accepts that event.
 
-Telepiplex changes the owner atomically only when the target Feature has accepted the operation. A handed-off operation remains active and never briefly releases the user's gate.
+telepiplex changes the owner atomically only when the target Feature has accepted the operation. A handed-off operation remains active and never briefly releases the user's gate.
 
 ## Status Delivery
 
-Telepiplex stores the Telegram chat ID and status message ID for the active operation. Feature reports update the same status message and replace its control button.
+telepiplex stores the Telegram chat ID and status message ID for the active operation. Feature reports update the same status message and replace its control button.
 
-If an edit fails because the message no longer exists or Telegram rejects the edit, Telepiplex sends a replacement status message and stores its ID. If a report arrives before the initial status message has been stored, Telepiplex retains only the newest revision and renders it after the initial response completes.
+If an edit fails because the message no longer exists or Telegram rejects the edit, telepiplex sends a replacement status message and stores its ID. If a report arrives before the initial status message has been stored, telepiplex retains only the newest revision and renders it after the initial response completes.
 
 Status is stage-based rather than timer-based. A Feature reports before and after meaningful external calls, at cancellation checkpoints, at handoff, and at terminal outcomes. It does not emit artificial second-by-second progress.
 
 ## Persistent Coordination and Recovery
 
-Telepiplex stores the minimum task record in `/config/host.db`:
+telepiplex stores the minimum task record in `/config/host.db`:
 
 - `operation_id`
 - `chat_id` and `user_id`
@@ -161,7 +161,7 @@ Telepiplex stores the minimum task record in `/config/host.db`:
 
 The table never stores access tokens, refresh tokens, API keys, raw magnet links, cookies, or full media metadata.
 
-On Telepiplex startup, the coordinator loads every non-terminal operation after Feature startup completes. It requests operation snapshots from the declared owner:
+On telepiplex startup, the coordinator loads every non-terminal operation after Feature startup completes. It requests operation snapshots from the declared owner:
 
 - A confirmed running or resumable task remains gated and resumes status reporting.
 - A confirmed terminal task is finalized and releases the gate.
@@ -171,28 +171,28 @@ No stale `running` row may permanently block a user.
 
 ## Dynamic Command Discovery
 
-The active Telepiplex router snapshot is the single source for Feature commands.
+The active telepiplex router snapshot is the single source for Feature commands.
 
 ### `/start`
 
 `/start` renders:
 
-1. Telepiplex commands: `/start`, `/reload`, `/plugin`, and `/config`.
+1. telepiplex commands: `/start`, `/reload`, `/plugin`, and `/config`.
 2. One section per active and routable Feature.
 3. Every non-reserved command and description from that Feature's manifest, in declaration order.
 
-Disabled Features and Features blocked by missing capabilities are not advertised as executable. Telepiplex-reserved commands are shown once under Telepiplex and cannot be overridden by a Feature manifest. The download manifest's legacy `config` declaration is removed from the advertised command surface; `/auth` and Telepiplex `/config` remain the supported configuration entries.
+Disabled Features and Features blocked by missing capabilities are not advertised as executable. telepiplex-reserved commands are shown once under telepiplex and cannot be overridden by a Feature manifest. The download manifest's legacy `config` declaration is removed from the advertised command surface; `/auth` and telepiplex `/config` remain the supported configuration entries.
 
 ### Telegram command menu
 
 The bot command menu uses the same builder as `/start`:
 
-- Telepiplex commands first.
+- telepiplex commands first.
 - Features sorted by `plugin_id`.
 - Commands within a Feature remain in manifest order.
-- Telepiplex-reserved names are deduplicated in favor of Telepiplex.
+- telepiplex-reserved names are deduplicated in favor of telepiplex.
 
-The menu is synchronized after Telepiplex startup and after successful install, update, enable, disable, rollback, or remove operations. A Telegram menu synchronization failure does not roll back the completed Feature lifecycle operation. The user-facing operation result reports the menu failure, Telepiplex logs it, and the next lifecycle change or Telepiplex restart retries synchronization.
+The menu is synchronized after telepiplex startup and after successful install, update, enable, disable, rollback, or remove operations. A Telegram menu synchronization failure does not roll back the completed Feature lifecycle operation. The user-facing operation result reports the menu failure, telepiplex logs it, and the next lifecycle change or telepiplex restart retries synchronization.
 
 No `/mag` or `/scan` alias is introduced.
 
@@ -214,7 +214,7 @@ Interactive controls cover empty-query input, media-plan confirmation, release s
 
 Task stages include evidence planning, provider lookup, Prowlarr search, release ranking, link resolution, and download submission. These stages are read-only until submission, so they use `cancel`. After download accepts the download, search hands off the operation instead of completing the user gate.
 
-Feature configuration application snapshots the old config and active process route through Telepiplex's existing atomic configure flow. During config write and reload, exact restoration uses `rollback`.
+Feature configuration application snapshots the old config and active process route through telepiplex's existing atomic configure flow. During config write and reload, exact restoration uses `rollback`.
 
 ### rename
 
@@ -244,8 +244,8 @@ Every current Feature configuration wizard follows the same rule:
 - Every text-input prompt gains an explicit exit control.
 - Boolean and confirmation screens retain exactly one cancel/exit control.
 - Invalid input re-renders the prompt with the same control.
-- Exit clears both Feature-local session data and Telepiplex's operation record.
-- Saving and Feature reload are reported as a running Telepiplex-owned configuration task.
+- Exit clears both Feature-local session data and telepiplex's operation record.
+- Saving and Feature reload are reported as a running telepiplex-owned configuration task.
 
 Existing secrets remain redacted. Status reports never echo submitted values.
 
@@ -266,14 +266,14 @@ If exact rollback is impossible by design, the UI displays **取消任务** from
 
 - Invalid or unauthorized Feature reports are rejected without changing the operation.
 - A cancellation failure while execution remains active leaves the gate in place and reports `取消失败，任务仍在执行`.
-- A lost Feature process is not treated as cancelled until Telepiplex confirms no active executor remains.
+- A lost Feature process is not treated as cancelled until telepiplex confirms no active executor remains.
 - A terminal Feature error releases the gate only after background work has stopped or been accounted for.
 - Duplicate cancellation, completion, and handoff reports are idempotent.
-- Sensitive exception messages pass through the existing Telepiplex and Feature sanitizers.
+- Sensitive exception messages pass through the existing telepiplex and Feature sanitizers.
 
 ## Compatibility and Release Order
 
-1. Release Telepiplex with Host API 1.1, the optional operation protocol, dynamic command discovery, and compatibility with API 1.0 Features.
+1. Release telepiplex with Host API 1.1, the optional operation protocol, dynamic command discovery, and compatibility with API 1.0 Features.
 2. Release download, search, rename, and sync independently with `host_api: ">=1.1,<2.0"`.
 3. Until a Feature is upgraded, it continues to run but does not claim the complete operation-control contract.
 4. Catalog releases retain their existing dependency relationships and immutable artifact checksums.
@@ -282,15 +282,15 @@ Implementation and verification occur in each existing Feature worktree. `main` 
 
 ## Verification Strategy
 
-### Telepiplex tests
+### telepiplex tests
 
 - `/start` uses the active router snapshot and groups real manifest commands.
 - The Telegram command menu changes after every Feature lifecycle transition.
-- Reserved Telepiplex commands cannot be duplicated or overridden.
+- Reserved telepiplex commands cannot be duplicated or overridden.
 - The global gate drops unrelated text and commands and answers unrelated callbacks without routing them.
 - Operation revisions reject late reports.
 - Repeated controls are idempotent.
-- Persistent active operations reconcile after Telepiplex and Feature restarts.
+- Persistent active operations reconcile after telepiplex and Feature restarts.
 - Status edit failure falls back to a new message.
 
 ### Feature tests
@@ -317,8 +317,8 @@ For each current Feature:
 
 - Run the complete test suite in each of the five worktrees.
 - Run Python compilation checks for all changed Python sources.
-- Build all four `.tpx` artifacts with the updated Telepiplex builder.
-- Install the built artifacts into a temporary Telepiplex plugin root.
+- Build all four `.tpx` artifacts with the updated telepiplex builder.
+- Install the built artifacts into a temporary telepiplex plugin root.
 - Exercise command discovery, operation progress, cancellation, rollback, restart recovery, and the full Feature handoff chain through the real local RPC runtime.
-- Run Telepiplex-aware `git diff --check` independently in each worktree.
+- Run telepiplex-aware `git diff --check` independently in each worktree.
 

@@ -4,7 +4,7 @@
 
 **Goal:** Convert the Mac project from a Git-worktree-dependent checkout into a clean local monorepo that Syncthing can send to the sole Git workspace on Unraid.
 
-**Architecture:** Keep Telepiplex Telepiplex at the project root and place each standalone Feature below `features/<plugin_id>`. Remove all local Git/worktree metadata and generated backup/build debris, while adapting tag-driven GitHub Actions to build Feature source from the single `main` tree.
+**Architecture:** Keep telepiplex telepiplex at the project root and place each standalone Feature below `features/<plugin_id>`. Remove all local Git/worktree metadata and generated backup/build debris, while adapting tag-driven GitHub Actions to build Feature source from the single `main` tree.
 
 **Tech Stack:** Python 3.12, pytest, PyYAML, GitHub Actions YAML, Docker source files, Syncthing ignore patterns.
 
@@ -27,7 +27,7 @@
 
 **Files:**
 - Create: `.stignore`
-- Create or replace from Telepiplex: `.gitignore`
+- Create or replace from telepiplex: `.gitignore`
 
 **Interfaces:**
 - Consumes: Syncthing send-only folder rooted at the project directory.
@@ -49,7 +49,7 @@ rg -n '^\.git$|^\.worktrees$|^\.venv$|__pycache__|\.egg-info|\.DS_Store' .stigno
 
 Expected: every prohibited local-state family is printed.
 
-### Task 2: Migrate clean Telepiplex source to the root
+### Task 2: Migrate clean telepiplex source to the root
 
 **Files:**
 - Create/replace from `.worktrees/telepiplex`: `.dockerignore`, `.github/`,
@@ -59,16 +59,16 @@ Expected: every prohibited local-state family is printed.
 - Merge: `docs/`
 
 **Interfaces:**
-- Consumes: authored Telepiplex files from the old local worktree directory.
-- Produces: a runnable Telepiplex project rooted at the Syncthing folder.
+- Consumes: authored telepiplex files from the old local worktree directory.
+- Produces: a runnable telepiplex project rooted at the Syncthing folder.
 
-- [ ] **Step 1: Copy authored Telepiplex files with explicit exclusions**
+- [ ] **Step 1: Copy authored telepiplex files with explicit exclusions**
 
 Use a local filesystem copy that excludes all metadata and generated-output
 families listed in Task 1. Do not copy `.git`, `.superpowers/sdd`, caches, or IDE
 state.
 
-- [ ] **Step 2: Verify Telepiplex root surface**
+- [ ] **Step 2: Verify telepiplex root surface**
 
 Run:
 
@@ -208,16 +208,16 @@ Expected: exit status 0 and no output.
 
 **Interfaces:**
 - Consumes: completed clean monorepo.
-- Produces: evidence that Telepiplex, Features, manifests, workflows, and packaging work
+- Produces: evidence that telepiplex, Features, manifests, workflows, and packaging work
   without local Git metadata.
 
-- [ ] **Step 1: Run Telepiplex tests**
+- [ ] **Step 1: Run telepiplex tests**
 
 ```bash
 PYTHONPATH=.:sdk/src /Users/young/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m pytest -q tests
 ```
 
-Expected: all Telepiplex tests pass.
+Expected: all telepiplex tests pass.
 
 - [ ] **Step 2: Run Feature tests from each Feature root**
 

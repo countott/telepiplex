@@ -2,7 +2,7 @@
 
 ## 背景与根因
 
-Telepiplex 已有 catalog 驱动的最新版选择和 Telegram callback，但旧部署的
+telepiplex 已有 catalog 驱动的最新版选择和 Telegram callback，但旧部署的
 `/config/config.yaml` 不会被新镜像覆盖。当前容器日志明确显示
 `plugins.catalog: /config/plugins/catalog.yaml`；该本地文件不存在时，`/plugin` 只能
 显示 `catalog_unavailable`，自然无法生成安装按钮。
@@ -30,7 +30,7 @@ GitHub `platform-v1.0.1` Release 的 `catalog.yaml` 当前可以通过
 
 ### 方案 B：兼容旧 catalog 并扩展 `/plugin` 概览（采用）
 
-Telepiplex 将官方 Release catalog 作为缺省来源。若配置恰好指向
+telepiplex 将官方 Release catalog 作为缺省来源。若配置恰好指向
 `<plugins.root>/catalog.yaml` 且文件不存在，则运行时回退官方 URL；文件存在时继续使用
 本地目录，其他显式本地路径也保持原意。
 
@@ -47,7 +47,7 @@ Telepiplex 将官方 Release catalog 作为缺省来源。若配置恰好指向
 
 ### Catalog 来源兼容
 
-Telepiplex 启动装配层集中解析来源：
+telepiplex 启动装配层集中解析来源：
 
 1. 未配置 `plugins.catalog` 时使用官方
    `https://github.com/countott/telepiplex/releases/latest/download/catalog.yaml`。
@@ -107,7 +107,7 @@ Telepiplex 启动装配层集中解析来源：
 
 ### 失败根因
 
-`platform-v1.0.2` 的 Telepiplex 镜像和四个 Feature 构建成功，但 catalog 生成失败。对同一
+`platform-v1.0.2` 的 telepiplex 镜像和四个 Feature 构建成功，但 catalog 生成失败。对同一
 `feature/115` commit 连续构建两次得到不同 `.tpx` SHA-256，证明 wheel/zip 构建时间戳
 使产物不是字节级可复现。catalog 正确地拒绝了“同一 Feature version 对应不同 digest”。
 
@@ -124,5 +124,5 @@ Telepiplex 启动装配层集中解析来源：
 3. catalog 声称存在可复用版本但上一资产缺失、损坏或 digest 不符时立即失败。
 4. 第一次发布或新 Feature version 没有上一条目时使用本轮新构建物。
 
-这样不会放宽不可变版本规则，也不要求没有业务改动的 Feature 为每次 Telepiplex 发布虚增
+这样不会放宽不可变版本规则，也不要求没有业务改动的 Feature 为每次 telepiplex 发布虚增
 版本；新 Release 可以再次附带与上一版完全相同、可校验的 Feature 资产。

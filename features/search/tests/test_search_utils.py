@@ -44,6 +44,14 @@ class SearchUtilsTest(unittest.TestCase):
             ),
             "The Office US S01E02",
         )
+        self.assertEqual(
+            build_prowlarr_query("Dune (2021 film)", "movie"),
+            "Dune",
+        )
+        self.assertEqual(
+            build_prowlarr_query("Joker（2019年电影）", "movie"),
+            "Joker",
+        )
 
     def test_candidate_to_prowlarr_query_preserves_episode_scope(self):
         query = candidate_to_prowlarr_query(

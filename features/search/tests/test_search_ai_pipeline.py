@@ -8,6 +8,7 @@ import requests
 from telepiplex_search.ai import (
     chat_completion_messages,
     extract_ai_message,
+    infer_anchored_candidates_with_ai,
     infer_candidate_scorecard_with_ai,
     infer_relation_hypotheses_with_ai,
     infer_search_hypotheses_with_ai,
@@ -402,6 +403,62 @@ class SearchAiPipelineTest(unittest.TestCase):
         })
 
         self.assertEqual(result["scores"], scores)
+
+    @patch("telepiplex_search.ai.check_ai_api_available", return_value=True)
+    @patch("telepiplex_search.ai.chat_completion")
+    def test_anchored_candidate_ai_only_returns_fact_references(
+        self,
+        chat_mock,
+        _available,
+    ):
+        payload = {
+            "status": "resolved",
+            "candidates": [{
+                "candidate_id": "candidate-1",
+                "anchor_fact_id": "tvdb:900",
+                "identity_role": "series_root",
+                "intended_scope": "whole_series",
+                "fact_bindings": [{
+                    "fact_id": "tvdb:900",
+                    "role": "series_root",
+                    "season_number": None,
+                    "episode_number": None,
+                }],
+                "ai_confidence": 0.93,
+                "ai_reason": "The verified root matches the request.",
+            }],
+        }
+        chat_mock.return_value = {
+            "choices": [{"message": {"content": json.dumps(payload)}}],
+        }
+
+        result = infer_anchored_candidates_with_ai({
+            "raw_query": "蜂蜜与四叶草",
+            "facts": [{"fact_id": "tvdb:900"}],
+        })
+
+        self.assertEqual(result, payload)
+        prompt = chat_mock.call_args.args[0]
+        self.assertIn("只能引用输入中的 fact_id", prompt)
+        self.assertIn("0–6", prompt)
+        self.assertIn("不得生成 URL、海报、外部 ID", prompt)
+
+    @patch("telepiplex_search.ai.check_ai_api_available", return_value=True)
+    @patch("telepiplex_search.ai.chat_completion")
+    def test_anchored_candidate_ai_rejects_extra_generated_fields(
+        self,
+        chat_mock,
+        _available,
+    ):
+        chat_mock.return_value = {
+            "choices": [{"message": {"content": json.dumps({
+                "status": "resolved",
+                "candidates": [],
+                "source_url": "https://invented.example",
+            })}}],
+        }
+
+        self.assertIsNone(infer_anchored_candidates_with_ai({"facts": []}))
 
 if __name__ == "__main__":
     unittest.main()

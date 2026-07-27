@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
+import html
 import json
 import re
 import time
@@ -11,7 +12,10 @@ from copy import deepcopy
 from telepiplex_plugin_sdk import FeatureError
 from telepiplex_plugin_sdk.media_metadata import resolve_category_route
 
-from .ai import infer_relation_hypotheses_with_ai
+from .ai import (
+    infer_anchored_candidates_with_ai,
+    infer_relation_hypotheses_with_ai,
+)
 from .adapters.douban import (
     lookup_douban_evidence,
     lookup_douban_subject,
@@ -37,10 +41,17 @@ from .adapters.tvdb import (
 from .adapters.wikipedia import lookup_wikipedia_evidence
 from .config_wizard import SearchConfigWizard
 from .context import runtime_context
+from .candidate_hydration import (
+    CandidateHydrationError,
+    hydrate_frozen_candidate,
+)
 from .direct_link import DirectLinkError, resolve_direct_link
 from .input_contract import classify_search_input
 from .planner import SearchPlanningError, build_confirmable_search_plan
-from .prowlarr_query import build_prowlarr_query
+from .prowlarr_query import (
+    build_prowlarr_query,
+    build_prowlarr_query_chain,
+)
 from .release_gate import gate_releases
 from .release_identity import deduplicate_releases, stable_release_id
 from .release_report import format_release_report, release_keyboard
@@ -60,6 +71,10 @@ from .source_tools import SourceToolGateway
 
 
 _LATIN = re.compile(r"[A-Za-z]")
+
+
+def _text(value) -> str:
+    return " ".join(str(value or "").replace("\xa0", " ").split())
 
 
 def _positive_integer(value) -> int | None:
@@ -144,11 +159,21 @@ _PLANNING_ERROR_MESSAGES = {
     "ai_unavailable_after_gate_failure": "规则证据不足，且 AI 当前不可用；请补充年份、媒体类型或稍后重试。",
     "ai_invalid_after_gate_failure": "规则证据不足，且 AI 未能生成有效计划；请补充信息后重试。",
     "ambiguous_numeric_role": "片名末尾数字无法证明是正式标题的一部分，请补充年份、完整片名或条目链接。",
-    "unsupported_metadata_link": "链接不是可识别的豆瓣/TVDB作品、季或单集地址。",
+    "unsupported_metadata_link": "链接不是可识别的豆瓣、TVDB 或 Wikipedia 作品、季或单集地址。",
     "unsupported_scope_syntax": "不支持范围、1x02 或英文数字单词写法；请使用作品名、S01、S01E01 或数字季/集。",
     "unsupported_special_scope": "暂不支持 Special、Season 0、OVA、OAD 或附加内容下载。",
     "direct_link_not_found": "无法读取该豆瓣/TVDB条目，请检查链接是否有效。",
     "direct_link_invalid": "链接条目缺少可验证的标题或稳定ID。",
+    "no_match": "所有来源均未找到可由真实事实支持的作品候选。",
+    "source_failure": "来源查询失败，尚未形成可判断的候选。",
+    "source_rate_limited": "来源请求受到限流，请稍后重试。",
+    "ai_candidate_failure": "AI 候选筛选发生技术故障，请重试、取消或退出。",
+    "candidate_binding_failed": "AI 候选无法绑定到本次来源事实，请重试。",
+    "direct_link_anchor_missing": "固定链接锚点在来源事实中丢失，无法继续。",
+    "fixed_link_read_failed": "固定链接读取失败，请重试、取消或退出。",
+    "metadata_conflict": "已选候选的媒体类型事实冲突。",
+    "metadata_incomplete": "已选候选不足以形成严格 media_metadata v1。",
+    "prowlarr_failure": "Prowlarr 搜索失败，请重试、取消或退出。",
 }
 
 
@@ -165,6 +190,7 @@ class SearchFeature:
         indexer_summary=None,
         indexer_loader=None,
         indexer_search=None,
+        exact_link_resolver=None,
     ):
         self.config = config
         self.host = host
@@ -178,6 +204,7 @@ class SearchFeature:
         )
         self.indexer_loader = indexer_loader or list_prowlarr_indexers
         self.indexer_search = indexer_search or search_prowlarr_indexer
+        self.exact_link_resolver = exact_link_resolver or resolve_direct_link
         self.plans = {}
         self.awaiting_queries = set()
         self.awaiting_scope_inputs = {}
@@ -230,7 +257,24 @@ class SearchFeature:
                 "metadata_unresolved",
                 "noninteractive metadata resolution requires exactly one candidate",
             )
-        selected = candidates[0]
+        selected = deepcopy(candidates[0])
+        if selected.get("links_frozen"):
+            try:
+                selected = await asyncio.to_thread(
+                    hydrate_frozen_candidate,
+                    selected,
+                    metadata_id=plan_id,
+                    raw_query=raw_query,
+                    require_anchor=plan.get("entry_kind") == "link",
+                    resolver=self.exact_link_resolver,
+                )
+            except CandidateHydrationError as exc:
+                details = ",".join(exc.details)
+                suffix = f":{details}" if details else ""
+                raise FeatureError(
+                    "metadata_unresolved",
+                    f"exact metadata hydration failed: {exc.code}{suffix}",
+                ) from exc
         selected_plan = {
             "plan_id": plan_id,
             "media_metadata": deepcopy(selected.get("media_metadata") or {}),
@@ -409,6 +453,26 @@ class SearchFeature:
             return self._start_release_search_task(plan_id, stored)
         if action == "clarify" and len(parts) == 3:
             return self._clarify_choice(plan_id, stored, parts[2], request)
+        if action == "retry" and len(parts) == 2:
+            stored_plan = stored.get("plan") or {}
+            raw_query = str(stored_plan.get("raw_query") or "")
+            raw_lock = stored_plan.get("locked_identity")
+            locked_identity = (
+                tuple(raw_lock)
+                if isinstance(raw_lock, (list, tuple))
+                and len(raw_lock) == 2
+                else None
+            )
+            self._release_plan(plan_id)
+            result = self._start_plan_task(
+                raw_query,
+                request,
+                reuse_owner=True,
+                locked_identity=locked_identity,
+            )
+            retry_action = (result.get("actions") or [{}])[0]
+            retry_action["kind"] = "edit_message"
+            return result
         if action == "browse" and len(parts) == 3:
             return self._browse_candidate(plan_id, stored, parts[2])
         if action == "select" and len(parts) == 3:
@@ -491,9 +555,44 @@ class SearchFeature:
                 locked_identity=locked_identity,
             )
             action = (result.get("actions") or [{}])[0]
+            returned_operation = (
+                result.get("operation")
+                if isinstance(result.get("operation"), dict)
+                else None
+            )
+            if returned_operation is not None:
+                await self._report_operation(
+                    operation_id,
+                    state=str(
+                        returned_operation.get("state") or "running"
+                    ),
+                    stage=str(
+                        returned_operation.get("stage") or "planning"
+                    ),
+                    status_text=str(
+                        action.get("text") or "媒体方案已生成。"
+                    ),
+                    control=str(
+                        returned_operation.get("control") or ""
+                    ),
+                    details=deepcopy(action.get("data") or {}),
+                )
+                return
             if plan_id in self.plans:
                 clarification = (
                     self.plans[plan_id].get("kind") == "clarification"
+                )
+                recovery = (
+                    self.plans[plan_id].get("kind")
+                    == "planning_failure"
+                )
+                candidate_selection = bool(
+                    (self.plans[plan_id].get("plan") or {}).get(
+                        "links_frozen"
+                    )
+                    and len(
+                        self.plans[plan_id].get("candidates") or ()
+                    ) > 1
                 )
                 await self._report_operation(
                     operation_id,
@@ -501,6 +600,10 @@ class SearchFeature:
                     stage=(
                         "clarification"
                         if clarification
+                        else "candidate_recovery"
+                        if recovery
+                        else "candidate_selection"
+                        if candidate_selection
                         else "plan_confirmation"
                     ),
                     status_text=str(action.get("text") or "媒体方案已生成。"),
@@ -564,6 +667,7 @@ class SearchFeature:
             if stored.get("selection_frozen"):
                 return
             action = (result.get("actions") or [{}])[0]
+            recovery_details = deepcopy(action.get("data") or {})
             if plan_id in self.plans and stored.get("results"):
                 await self._report_operation(
                     operation_id,
@@ -572,6 +676,20 @@ class SearchFeature:
                     status_text=str(action.get("text") or "请选择片源。"),
                     control="exit",
                     details=deepcopy(action.get("data") or {}),
+                )
+            elif (
+                plan_id in self.plans
+                and recovery_details.get("keyboard")
+            ):
+                await self._report_operation(
+                    operation_id,
+                    state="awaiting_input",
+                    stage="prowlarr_recovery",
+                    status_text=str(
+                        action.get("text") or "Prowlarr 搜索失败。"
+                    ),
+                    control="exit",
+                    details=recovery_details,
                 )
             else:
                 await self._report_operation(
@@ -712,12 +830,69 @@ class SearchFeature:
                 code,
                 "媒体证据无法形成有效计划，请补充信息后重试。",
             )
+            reason_codes = tuple(
+                getattr(exc, "reason_codes", ()) or ()
+            )
+            if code in {
+                "source_failure",
+                "source_rate_limited",
+                "fixed_link_read_failed",
+            } and reason_codes:
+                message = (
+                    f"{message.rstrip('。')}："
+                    f"{'、'.join(reason_codes)}。"
+                )
+            if code == "metadata_incomplete" and reason_codes:
+                message = (
+                    f"{message.rstrip('。')}；缺失字段："
+                    f"{'、'.join(reason_codes)}。"
+                )
             if code.startswith("ai_") and getattr(exc, "reason_codes", ()):
                 gate_message = _PLANNING_ERROR_MESSAGES.get(
                     exc.reason_codes[0],
                     "严格规则无法唯一确认该条目。",
                 )
                 message = f"{gate_message.rstrip('。')}；{message}"
+            if code in {
+                "source_failure",
+                "source_rate_limited",
+                "ai_candidate_failure",
+                "candidate_binding_failed",
+                "fixed_link_read_failed",
+                "metadata_conflict",
+                "metadata_incomplete",
+            }:
+                self.plans[plan_id] = {
+                    "kind": "planning_failure",
+                    "owner": self._owner_key(request),
+                    "created_at": time.time(),
+                    "plan": {
+                        "plan_id": plan_id,
+                        "raw_query": raw_query,
+                        "locked_identity": locked_identity,
+                    },
+                    "candidates": (),
+                    "selected_path": "",
+                    "results": [],
+                    "operation_id": operation_id,
+                }
+                return {
+                    "actions": [{
+                        "kind": "send_message",
+                        "text": f"❌ {message}",
+                        "data": {"keyboard": [[{
+                            "text": "重试",
+                            "callback_data": f"search:retry:{plan_id}",
+                        }], [{
+                            "text": "取消",
+                            "callback_data": f"search:cancel:{plan_id}",
+                        }, {
+                            "text": "退出",
+                            "callback_data": f"search:cancel:{plan_id}",
+                        }]]},
+                    }],
+                    "session": {"state": "close"},
+                }
             return self._closed(f"❌ 无法生成媒体元数据：{message}")
         except Exception as exc:
             return self._closed(f"❌ 媒体规划失败：{type(exc).__name__}")
@@ -805,23 +980,43 @@ class SearchFeature:
         if not selectable:
             self.allocator.release(plan_id)
             return self._closed("❌ 候选最高评分低于 65，受控检索后仍不足以安全确认。")
-        route = resolve_category_route(
-            self.config,
-            (selectable[0].get("media_metadata", {}).get("placement") or {}).get("category_kind"),
-        )
-        if not route:
-            self.allocator.release(plan_id)
-            return self._closed("❌ 媒体分类没有对应保存目录。")
+        route = None
+        if not plan.get("links_frozen"):
+            route = resolve_category_route(
+                self.config,
+                (
+                    selectable[0].get(
+                        "media_metadata", {}
+                    ).get("placement") or {}
+                ).get("category_kind"),
+            )
+            if not route:
+                self.allocator.release(plan_id)
+                return self._closed("❌ 媒体分类没有对应保存目录。")
         self.plans[plan_id] = {
             "owner": self._owner_key(request),
             "created_at": time.time(),
             "plan": plan,
             "candidates": tuple(deepcopy(candidates)),
-            "selected_path": route["path"],
+            "selected_path": route["path"] if route else "",
             "results": [],
             "operation_id": operation_id,
         }
-        action = self._candidate_action(self.plans[plan_id], 0, edit=False)
+        if plan.get("links_frozen") and len(selectable) == 1:
+            return await self._select_candidate(
+                plan_id,
+                self.plans[plan_id],
+                str(candidates.index(selectable[0])),
+            )
+        action = (
+            self._candidate_grid_action(self.plans[plan_id])
+            if plan.get("links_frozen") and 2 <= len(selectable) <= 6
+            else self._candidate_action(
+                self.plans[plan_id],
+                0,
+                edit=False,
+            )
+        )
         return {
             "actions": [action],
             "session": {"state": "close"},
@@ -937,6 +1132,111 @@ class SearchFeature:
             kind = "edit_message" if edit else "send_message"
         return {"kind": kind, "text": text, "data": data}
 
+    def _candidate_grid_action(self, stored: dict) -> dict:
+        candidates = list(stored.get("candidates") or ())[:6]
+        lines = ["请选择作品候选："]
+        poster_items = []
+        keyboard = []
+        has_poster = False
+        plan_id = str((stored.get("plan") or {}).get("plan_id") or "")
+        for index, candidate in enumerate(candidates, 1):
+            contract = candidate.get("media_metadata") or {}
+            identity = contract.get("identity") or {}
+            placement = contract.get("placement") or {}
+            title = _text(
+                identity.get("chinese_title")
+                or identity.get("english_title")
+                or "未知"
+            )[:36]
+            year = _text(identity.get("year")) or "年份未知"
+            role = _text(candidate.get("identity_role")) or "work"
+            confidence = round(
+                float(candidate.get("ai_confidence") or 0) * 100
+            )
+            reason = _text(candidate.get("ai_reason"))[:36]
+            candidate_version = (
+                _text(candidate.get("candidate_version")) or "v0"
+            )
+            source_links = [
+                link for link in candidate.get("source_links") or []
+                if isinstance(link, dict)
+                and str(link.get("url") or "").startswith("https://")
+            ]
+            source_labels = []
+            for link in source_links:
+                provider = html.escape(
+                    (_text(link.get("provider")) or "来源")[:16]
+                )
+                url = html.escape(
+                    _text(link.get("url")),
+                    quote=True,
+                )
+                source_labels.append(f'<a href="{url}">{provider}</a>')
+            lines.extend([
+                (
+                    f"{index}. <b>{html.escape(title)}</b> ({year}) · "
+                    f"{html.escape(_text(placement.get('library_type')) or '未知')}"
+                    f" · {html.escape(role)} · {html.escape(candidate_version)}"
+                ),
+                (
+                    f"来源：{' · '.join(source_labels) or '暂无链接'}"
+                    f" · AI {confidence}%"
+                ),
+                f"理由：{html.escape(reason or '来源事实匹配用户意图')}",
+            ])
+            unresolved = [
+                _text(item)
+                for item in candidate.get("unresolved_sources") or []
+                if _text(item)
+            ]
+            if unresolved:
+                lines.append(
+                    "未补全："
+                    + html.escape("、".join(unresolved[:3]))
+                )
+            poster_url = _text(candidate.get("poster_url"))
+            has_poster = has_poster or poster_url.startswith("https://")
+            poster_items.append({
+                "number": index,
+                "title": title,
+                "poster_url": (
+                    poster_url
+                    if poster_url.startswith("https://")
+                    else ""
+                ),
+            })
+            keyboard.append([{
+                "text": f"{index}. {title[:24]}",
+                "callback_data": f"search:select:{plan_id}:{index - 1}",
+            }])
+        keyboard.append([{
+            "text": "退出",
+            "callback_data": f"search:cancel:{plan_id}",
+        }])
+        data = {
+            "keyboard": keyboard,
+            "parse_mode": "HTML",
+        }
+        kind = "send_message"
+        if has_poster:
+            kind = "send_photo_grid"
+            data["poster_items"] = poster_items
+        caption = "\n".join(lines)
+        visible_caption = html.unescape(
+            re.sub(r"<[^>]+>", "", caption)
+        )
+        if len(visible_caption) > 1024:
+            caption = "\n".join(
+                line for line in lines
+                if not line.startswith("理由：")
+            )
+        return {
+            "kind": kind,
+            "text": caption,
+            "parse_mode": "HTML",
+            "data": data,
+        }
+
     def _browse_candidate(self, plan_id: str, stored: dict, raw_index: str) -> dict:
         try:
             index = int(raw_index)
@@ -964,6 +1264,60 @@ class SearchFeature:
             raise FeatureError("invalid_candidate", "selected candidate is invalid") from None
         if candidate.get("selectable") is False:
             return {"actions": [self._candidate_action(stored, index, edit=True)]}
+        if candidate.get("links_frozen"):
+            try:
+                candidate = await asyncio.to_thread(
+                    hydrate_frozen_candidate,
+                    candidate,
+                    metadata_id=plan_id,
+                    raw_query=str(
+                        (stored.get("plan") or {}).get("raw_query") or ""
+                    ),
+                    require_anchor=(
+                        (stored.get("plan") or {}).get("entry_kind")
+                        == "link"
+                    ),
+                    resolver=self.exact_link_resolver,
+                )
+                stored["candidates"][index].update(deepcopy(candidate))
+            except CandidateHydrationError as exc:
+                action = self._candidate_action(stored, index, edit=True)
+                detail = {
+                    "fixed_link_read_failed": "固定链接读取失败",
+                    "candidate_binding_failed": "来源绑定失败",
+                    "metadata_conflict": "元数据类型冲突",
+                    "metadata_incomplete": "media_metadata v1 不完整",
+                }.get(exc.code, "候选精确读取失败")
+                missing = (
+                    f"（{', '.join(exc.details)}）"
+                    if exc.details
+                    else ""
+                )
+                action["text"] += (
+                    f"\n❌ {detail}{missing}。可重试或退出。"
+                )
+                keyboard = (action.get("data") or {}).get("keyboard") or []
+                retry_callback = (
+                    f"search:select:{plan_id}:{index}"
+                )
+                retry_button = next(
+                    (
+                        button
+                        for row in keyboard
+                        for button in row
+                        if button.get("callback_data")
+                        == retry_callback
+                    ),
+                    None,
+                )
+                if retry_button is None:
+                    keyboard.insert(0, [{
+                        "text": "重试精确读取",
+                        "callback_data": retry_callback,
+                    }])
+                else:
+                    retry_button["text"] = "重试精确读取"
+                return {"actions": [action]}
         selected_plan = {
             "plan_id": plan_id,
             "media_metadata": candidate["media_metadata"],
@@ -1054,30 +1408,23 @@ class SearchFeature:
         if not selected_signal_facts:
             return
         try:
-            configured_timeout = float(
-                ((self.config.get("ai") or {}).get("relation_timeout") or 5)
-            )
-        except (TypeError, ValueError):
-            configured_timeout = 5
-        try:
-            async with asyncio.timeout(max(1, min(configured_timeout, 15))):
-                payload = await asyncio.to_thread(
-                    infer_relation_hypotheses_with_ai,
-                    {
-                        "raw_query": stored["plan"].get("raw_query") or "",
-                        "selected_candidate_key": selected_key,
-                        "candidates": [
-                            {
-                                key: value
-                                for key, value in item.items()
-                                if key in {
-                                    "candidate_key", "fact_ids", "facts"
-                                }
+            payload = await asyncio.to_thread(
+                infer_relation_hypotheses_with_ai,
+                {
+                    "raw_query": stored["plan"].get("raw_query") or "",
+                    "selected_candidate_key": selected_key,
+                    "candidates": [
+                        {
+                            key: value
+                            for key, value in item.items()
+                            if key in {
+                                "candidate_key", "fact_ids", "facts"
                             }
-                            for item in (selected, *targets)
-                        ],
-                    },
-                )
+                        }
+                        for item in (selected, *targets)
+                    ],
+                },
+            )
         except Exception:
             return
         hypotheses = (
@@ -1471,7 +1818,14 @@ class SearchFeature:
     async def _confirm_and_search(self, plan_id: str, stored: dict) -> dict:
         plan = stored["plan"]
         contract = confirm_media_metadata(plan)
-        queries = self._english_prowlarr_queries(plan, contract)
+        evidence = contract.get("evidence") or {}
+        if isinstance(evidence.get("source_links"), list):
+            queries = build_prowlarr_query_chain(
+                contract,
+                str(plan.get("raw_query") or ""),
+            )
+        else:
+            queries = self._english_prowlarr_queries(plan, contract)
         media_type = str(
             (contract.get("retrieval") or {}).get("media_type")
             or (contract.get("placement") or {}).get("library_type")
@@ -1552,10 +1906,26 @@ class SearchFeature:
                 )
         if not successful_queries:
             error = self._all_query_variants_error(queries, errors)
-            self._release_plan(plan_id)
-            return self._closed(
-                f"❌ Prowlarr 搜索失败：{error['message']}"
-            )
+            return {
+                "actions": [{
+                    "kind": "edit_message",
+                    "text": (
+                        "❌ Prowlarr 搜索失败："
+                        f"{error['message']}"
+                    ),
+                    "data": {"keyboard": [[{
+                        "text": "重试 Prowlarr",
+                        "callback_data": f"search:confirm:{plan_id}",
+                    }], [{
+                        "text": "取消",
+                        "callback_data": f"search:cancel:{plan_id}",
+                    }, {
+                        "text": "退出",
+                        "callback_data": f"search:cancel:{plan_id}",
+                    }]]},
+                }],
+                "session": {"state": "close"},
+            }
         try:
             indexer_summary = await asyncio.to_thread(
                 self.indexer_summary,
@@ -2084,7 +2454,10 @@ class SearchFeature:
             try:
                 direct = await asyncio.to_thread(resolve_direct_link, parsed.link)
             except DirectLinkError as exc:
-                raise SearchPlanningError(str(exc)) from exc
+                raise SearchPlanningError(
+                    getattr(exc, "code", str(exc)),
+                    getattr(exc, "details", ()),
+                ) from exc
             planning_query = direct.query
             resolved_identity = direct.stable_identity
             providers[direct.provider] = lambda _hypotheses: direct.evidence
@@ -2097,6 +2470,7 @@ class SearchFeature:
             self.allocator,
             locked_identity=resolved_identity,
             source_gateway=source_gateway,
+            candidate_editor=infer_anchored_candidates_with_ai,
         )
 
     def _wikipedia_provider(self, hypotheses: dict):
@@ -2107,7 +2481,13 @@ class SearchFeature:
         zh_queries = source_queries.get("wikipedia_zh")
         en_queries = source_queries.get("wikipedia_en")
         timeout = float(config.get("timeout") or 10)
+        max_queries = max(
+            1,
+            min(int(config.get("max_queries") or 2), 6),
+        )
         if isinstance(zh_queries, list) or isinstance(en_queries, list):
+            zh_queries = list(zh_queries or [])[:max_queries]
+            en_queries = list(en_queries or [])[:max_queries]
             results = []
             configured = tuple(config.get("languages") or ["zh", "en"])
             if "zh" in configured and zh_queries:
@@ -2115,20 +2495,38 @@ class SearchFeature:
                     zh_queries,
                     languages=("zh",),
                     timeout=timeout,
+                    min_interval=float(
+                        config.get("min_interval") or 0
+                    ),
+                    rate_limit_cooldown=float(
+                        config.get("rate_limit_cooldown") or 0
+                    ),
                 ))
             if "en" in configured and en_queries:
                 results.append(lookup_wikipedia_evidence(
                     en_queries,
                     languages=("en",),
                     timeout=timeout,
+                    min_interval=float(
+                        config.get("min_interval") or 0
+                    ),
+                    rate_limit_cooldown=float(
+                        config.get("rate_limit_cooldown") or 0
+                    ),
                 ))
             if results:
                 return self._merge_source_results("wikipedia", results)
-        queries = source_queries.get("wikipedia") or []
+        queries = list(
+            source_queries.get("wikipedia") or []
+        )[:max_queries]
         return lookup_wikipedia_evidence(
             queries,
             languages=tuple(config.get("languages") or ["zh", "en"]),
             timeout=timeout,
+            min_interval=float(config.get("min_interval") or 0),
+            rate_limit_cooldown=float(
+                config.get("rate_limit_cooldown") or 0
+            ),
         )
 
     def _douban_provider(self, hypotheses: dict):
@@ -2157,50 +2555,75 @@ class SearchFeature:
 
     def _tvdb_provider(self, hypotheses: dict):
         facts = []
-        try:
-            for hypothesis in hypotheses.get("hypotheses") or []:
-                title = hypothesis.get("title") or ""
-                year = hypothesis.get("year") or ""
+        errors = []
+        statuses = []
+        for hypothesis in hypotheses.get("hypotheses") or []:
+            title = hypothesis.get("title") or ""
+            year = hypothesis.get("year") or ""
+            movies = []
+            series = []
+            try:
                 movies = search_tvdb_movies(title, year=year)[:5]
+            except TvdbConfigError as exc:
+                statuses.append(exc.code)
+                errors.append(str(exc))
+            except TvdbAuthenticationError as exc:
+                statuses.append("authentication_failed")
+                errors.append(str(exc))
+            except TvdbRequestError as exc:
+                statuses.append(exc.code)
+                errors.append(str(exc))
+            except OSError as exc:
+                statuses.append("server_down")
+                errors.append(str(exc))
+            try:
                 series = search_tvdb_series(title, year=year)[:5]
-                episodes = {
-                    str(item.get("tvdb_series_id")): get_tvdb_series_episodes(str(item.get("tvdb_series_id")))
-                    for item in series if item.get("tvdb_series_id")
-                }
-                if movies or series or any(episodes.values()):
-                    facts.append({
-                        "hypothesis": hypothesis,
-                        "movies": movies,
-                        "series": series,
-                        "episodes_by_series": episodes,
-                    })
-        except TvdbConfigError as exc:
-            return {
-                "source": "tvdb",
-                "status": exc.code,
-                "facts": [],
-                "source_urls": [],
-                "error": str(exc),
-            }
-        except TvdbAuthenticationError as exc:
-            return {
-                "source": "tvdb",
-                "status": "authentication_failed",
-                "facts": [],
-                "source_urls": [],
-                "error": str(exc),
-            }
-        except TvdbRequestError as exc:
-            return {
-                "source": "tvdb",
-                "status": exc.code,
-                "facts": [],
-                "source_urls": [],
-                "error": str(exc),
-            }
-        except OSError as exc:
-            return {"source": "tvdb", "status": "server_down", "facts": [], "source_urls": [], "error": str(exc)}
-        return {"source": "tvdb", "status": "ok" if facts else "not_found", "facts": facts, "source_urls": [], "error": ""}
+            except TvdbConfigError as exc:
+                statuses.append(exc.code)
+                errors.append(str(exc))
+            except TvdbAuthenticationError as exc:
+                statuses.append("authentication_failed")
+                errors.append(str(exc))
+            except TvdbRequestError as exc:
+                statuses.append(exc.code)
+                errors.append(str(exc))
+            except OSError as exc:
+                statuses.append("server_down")
+                errors.append(str(exc))
+            if movies or series:
+                facts.append({
+                    "hypothesis": hypothesis,
+                    "movies": movies,
+                    "series": series,
+                    "episodes_by_series": {},
+                })
+        if facts:
+            status = "ok"
+        elif statuses:
+            status = next(
+                (
+                    candidate
+                    for candidate in (
+                        "authentication_failed",
+                        "credential_missing",
+                        "rate_limited",
+                        "timeout",
+                        "server_down",
+                        "disabled",
+                    )
+                    if candidate in statuses
+                ),
+                statuses[0],
+            )
+        else:
+            status = "not_found"
+        return {
+            "source": "tvdb",
+            "status": status,
+            "facts": facts,
+            "source_urls": [],
+            "error": "; ".join(dict.fromkeys(errors)),
+        }
 
     @staticmethod
     def _merge_source_results(source: str, results: list[dict]) -> dict:

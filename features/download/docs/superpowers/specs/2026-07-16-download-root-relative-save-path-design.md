@@ -2,9 +2,9 @@
 
 ## 背景与范围
 
-Open115 1.2.0 的 Telegram 保存目录配置要求用户发送以 `/` 开头的 115 绝对路径。Telepiplex 在 Feature 会话等待文本输入时会拦截所有以 `/` 开头的消息，避免把 Telegram 命令误交给会话，因此 `/Series` 一类合法目录输入无法到达 Open115。
+Open115 1.2.0 的 Telegram 保存目录配置要求用户发送以 `/` 开头的 115 绝对路径。telepiplex 在 Feature 会话等待文本输入时会拦截所有以 `/` 开头的消息，避免把 Telegram 命令误交给会话，因此 `/Series` 一类合法目录输入无法到达 Open115。
 
-本次只修改 `feature/download` 的保存目录路径合同、交互文案、配置 Schema、测试和版本。Telepiplex 的命令路由规则保持不变；当前 `save_directories` 为空，不增加旧绝对路径兼容或迁移逻辑。
+本次只修改 `feature/download` 的保存目录路径合同、交互文案、配置 Schema、测试和版本。telepiplex 的命令路由规则保持不变；当前 `save_directories` 为空，不增加旧绝对路径兼容或迁移逻辑。
 
 ## 路径合同
 
@@ -59,4 +59,4 @@ series/live action
 - 选择相对目录后，下载边界仍向 115 客户端传递绝对路径；
 - Open115 全量测试、编译和差异检查通过。
 
-初始实现曾发布不可变版本 `1.2.1`。发布后代码审查发现重复尾斜杠和启动时未规范化磁盘配置两个边界问题，因此最终修正版提升为 `1.2.2`。完成验证后提交并推送 `feature/download`，在 Telepiplex 发布基础设施提交上创建并推送 `download-v1.2.2`，等待 GitHub Actions 完成，再验证公开 Release、Linux `.tpx`、SHA-256、来源提交和 `catalog` 分支条目。
+初始实现曾发布不可变版本 `1.2.1`。发布后代码审查发现重复尾斜杠和启动时未规范化磁盘配置两个边界问题，因此最终修正版提升为 `1.2.2`。完成验证后提交并推送 `feature/download`，在 telepiplex 发布基础设施提交上创建并推送 `download-v1.2.2`，等待 GitHub Actions 完成，再验证公开 Release、Linux `.tpx`、SHA-256、来源提交和 `catalog` 分支条目。

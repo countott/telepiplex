@@ -6,11 +6,11 @@
 
 **Architecture:** Keep the existing `name` and `path` fields and the existing root-relative validator. Change only the Telegram copy so the first step is unmistakably a display label and the second step documents both single-level and multi-level paths, then lock the complete single-level workflow with an end-to-end test.
 
-**Tech Stack:** Python 3.12, `unittest`, YAML, Telepiplex Feature SDK, GitHub Actions Feature release workflow.
+**Tech Stack:** Python 3.12, `unittest`, YAML, telepiplex Feature SDK, GitHub Actions Feature release workflow.
 
 ## Global Constraints
 
-- Modify only `feature/download`; do not change Telepiplex routing.
+- Modify only `feature/download`; do not change telepiplex routing.
 - Keep `save_directories` entries shaped as `{name: str, path: str}`.
 - Accept `真人电影` and `真人电影/`; store both as `真人电影`.
 - Keep leading `/`, unsafe segments, repeated separators, and duplicates invalid.
@@ -124,6 +124,6 @@ Expected: all tests pass, compilation and diff checks exit zero, and the release
 
 - [ ] **Step 5: Build, push, tag and verify the immutable release**
 
-Build with Telepiplex `tools/build_feature.py`, verify the local artifact identifies Open115 1.0.0 and the final `feature/download` source commit, push `feature/download`, then create and push annotated tag `download-v1.0.0` on the current synchronized `main` release-infrastructure commit.
+Build with telepiplex `tools/build_feature.py`, verify the local artifact identifies Open115 1.0.0 and the final `feature/download` source commit, push `feature/download`, then create and push annotated tag `download-v1.0.0` on the current synchronized `main` release-infrastructure commit.
 
-Wait for `Publish one Telepiplex Feature` to succeed. Verify the public release is neither draft nor prerelease and contains exactly `download-1.0.0.tpx`, `catalog.yaml`, and `catalog.yaml.sha256`. Download the Linux artifact, verify its checksum and manifest, and confirm `origin/catalog` contains Open115 1.0.0 with the same SHA-256, URL, branch and source commit.
+Wait for `Publish one telepiplex Feature` to succeed. Verify the public release is neither draft nor prerelease and contains exactly `download-1.0.0.tpx`, `catalog.yaml`, and `catalog.yaml.sha256`. Download the Linux artifact, verify its checksum and manifest, and confirm `origin/catalog` contains Open115 1.0.0 with the same SHA-256, URL, branch and source commit.

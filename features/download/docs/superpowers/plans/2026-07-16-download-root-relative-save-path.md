@@ -6,11 +6,11 @@
 
 **Architecture:** Centralize path validation and canonicalization in `directories.py`, then reuse it from both persistent configuration normalization and the Telegram directory editor. Keep stored paths root-relative while preserving the existing download boundary that prepends `/` before calling the 115 API.
 
-**Tech Stack:** Python 3.12, `unittest`, JSON Schema, YAML, Telepiplex Feature SDK, GitHub Actions Feature release workflow.
+**Tech Stack:** Python 3.12, `unittest`, JSON Schema, YAML, telepiplex Feature SDK, GitHub Actions Feature release workflow.
 
 ## Global Constraints
 
-- Modify only `feature/download`; do not change Telepiplex command routing.
+- Modify only `feature/download`; do not change telepiplex command routing.
 - Accept `series/live action` and `series/live action/`; store both as `series/live action`.
 - Reject leading `/`, empty segments, `.` segments, `..` segments, multiline values, and canonical duplicates.
 - Preserve case and spaces inside path segments.
@@ -256,7 +256,7 @@ git commit -m "fix(download): accept Telegram-safe directory paths"
 - Modify: `manifest.yaml`
 - Modify: `pyproject.toml`
 - Modify: `README.md`
-- Create: `dist/download-1.2.2.tpx` outside the Feature branch worktree using the Telepiplex builder.
+- Create: `dist/download-1.2.2.tpx` outside the Feature branch worktree using the telepiplex builder.
 
 **Interfaces:**
 - Consumes: canonical root-relative path behavior from Tasks 1 and 2.
@@ -304,7 +304,7 @@ git commit -m "chore(download): prepare 1.2.2"
 
 - [ ] **Step 5: Build, push, tag, and verify the remote release**
 
-Build from the Telepiplex worktree using the verified source commit after the release commit:
+Build from the telepiplex worktree using the verified source commit after the release commit:
 
 ```bash
 PYTHONPATH=.:sdk/src /Users/young/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 tools/build_tpx.py \
@@ -318,7 +318,7 @@ Expected: all tests pass, compilation and diff checks exit zero, and `verify_tpx
 git push origin feature/download
 ```
 
-Create annotated tag `download-v1.2.2` on the current `main` release-infrastructure commit and push it. Wait for `Publish one Telepiplex Feature` to finish successfully. Verify the public Release contains `download-1.2.2.tpx`, `catalog.yaml`, and `catalog.yaml.sha256`; download and run Telepiplex `verify_tpx`; confirm its source commit equals remote `feature/download`; finally confirm `origin/catalog` contains Open115 1.2.2 with the same SHA-256 and source commit.
+Create annotated tag `download-v1.2.2` on the current `main` release-infrastructure commit and push it. Wait for `Publish one telepiplex Feature` to finish successfully. Verify the public Release contains `download-1.2.2.tpx`, `catalog.yaml`, and `catalog.yaml.sha256`; download and run telepiplex `verify_tpx`; confirm its source commit equals remote `feature/download`; finally confirm `origin/catalog` contains Open115 1.2.2 with the same SHA-256 and source commit.
 
 ### Code-review follow-up included in 1.2.2
 

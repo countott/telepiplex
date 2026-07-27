@@ -4,14 +4,14 @@
 
 **Goal:** Refresh a remote digest-pinned catalog, detect compatible Feature updates, notify Telegram once, and update only after one explicit callback.
 
-**Architecture:** PluginCatalog owns HTTPS refresh, atomic cache, release parsing, and semver compatibility. PluginManager exposes active-release update candidates. The Telegram runtime owns a cancellable monitor task, deduplicated notifications, and a Telepiplex callback that invokes the existing update transaction.
+**Architecture:** PluginCatalog owns HTTPS refresh, atomic cache, release parsing, and semver compatibility. PluginManager exposes active-release update candidates. The Telegram runtime owns a cancellable monitor task, deduplicated notifications, and a telepiplex callback that invokes the existing update transaction.
 
 **Tech Stack:** Python 3.12, asyncio, urllib, PyYAML, packaging, python-telegram-bot, pytest/unittest.
 
 ## Global Constraints
 
 - Never silently update.
-- Never let catalog or notification failure stop Telepiplex or another Feature.
+- Never let catalog or notification failure stop telepiplex or another Feature.
 - Preserve local catalog path support.
 - Require HTTPS and pinned lowercase SHA-256.
 - Reuse PluginManager.update for shadow, drain, switch, and rollback.
@@ -56,7 +56,7 @@
 
 - [ ] Write failing tests for one notification, deduplication, no update before click, authorized confirm, unauthorized rejection, decline, sanitized error, startup tolerance, and shutdown cancellation.
 - [ ] Run focused tests and verify RED.
-- [ ] Implement monitor run_once/run loop, Telepiplex callback, handler ordering, task startup, and cancellation.
+- [ ] Implement monitor run_once/run loop, telepiplex callback, handler ordering, task startup, and cancellation.
 - [ ] Run focused tests and verify GREEN.
 - [ ] Commit feat(runtime): notify and confirm Feature updates.
 

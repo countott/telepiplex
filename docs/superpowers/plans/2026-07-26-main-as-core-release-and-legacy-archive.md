@@ -26,7 +26,7 @@
 
 **Interfaces:**
 - Consumes: GitHub tag-event `GITHUB_SHA` and remote `refs/heads/main`.
-- Produces: validation step `Verify Telepiplex release commit belongs to main`.
+- Produces: validation step `Verify telepiplex release commit belongs to main`.
 
 - [x] **Step 1: Write the failing workflow behavior test**
 

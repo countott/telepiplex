@@ -25,22 +25,22 @@ run only after the user reviews and publishes the synchronized files from Unraid
 ```text
 telepiplex/
 ├── .github/workflows/          # GitHub-side release automation
-├── app/                        # Telepiplex runtime
-├── config/                     # Telepiplex configuration templates
-├── examples/                   # Telepiplex Feature examples
+├── app/                        # telepiplex runtime
+├── config/                     # telepiplex configuration templates
+├── examples/                   # telepiplex Feature examples
 ├── features/
 │   ├── search/
 │   ├── download/
 │   ├── sync/
 │   └── rename/
 ├── sdk/                        # Feature SDK
-├── tests/                      # Telepiplex tests
+├── tests/                      # telepiplex tests
 ├── tools/                      # Build/catalog tooling
 ├── Dockerfile
 └── requirements.txt
 ```
 
-Telepiplex stays at the repository root because its Dockerfile, runtime imports, and
+telepiplex stays at the repository root because its Dockerfile, runtime imports, and
 test paths already assume that layout. Feature projects keep their internal
 standalone package layout under `features/<plugin_id>/`, so their manifests,
 tests, and build inputs remain self-contained.
@@ -50,9 +50,9 @@ tests, and build inputs remain self-contained.
 1. Keep the hidden `.worktrees/` directories and only remove their `.git`
    pointer files. Rejected because the project would remain hidden, confusing,
    and coupled to obsolete branch-shaped directories.
-2. Put Telepiplex under `host/` next to `features/`. Rejected because it would require
+2. Put telepiplex under `host/` next to `features/`. Rejected because it would require
    unnecessary Docker, import, test, and tooling path changes.
-3. Keep each module in a separate top-level directory. Rejected because Telepiplex is
+3. Keep each module in a separate top-level directory. Rejected because telepiplex is
    the application root and the resulting layout would add a redundant wrapper.
 
 ## Source Migration
@@ -76,7 +76,7 @@ single checked-out `main` tree instead of checking out a feature branch.
 
 Feature manifests and generated catalog entries use `source.branch: main`.
 `source.commit` remains the immutable GitHub commit used by Actions. This keeps
-Telepiplex update verification compatible with the existing artifact identity model
+telepiplex update verification compatible with the existing artifact identity model
 without retaining branch-specific source locations.
 
 ## Syncthing Boundary
@@ -95,7 +95,7 @@ Verification is filesystem- and Python-based only:
   no longer exist in the project source tree;
 - assert no local SSH remote or GitHub publishing command remains outside
   historical documentation and GitHub Actions;
-- run Telepiplex and all four Feature test suites from their new paths;
+- run telepiplex and all four Feature test suites from their new paths;
 - parse manifests and workflow YAML;
 - build the dependency-free echo Feature end to end, then build each product
   Feature from a temporary source copy without third-party dependency downloads

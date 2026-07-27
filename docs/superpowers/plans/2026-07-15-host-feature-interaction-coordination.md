@@ -1,18 +1,18 @@
-# Telepiplex Feature Interaction Coordination Implementation Plan
+# telepiplex Feature Interaction Coordination Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make Telepiplex dynamically advertise active Feature commands and coordinate one cancellable, status-reporting Telegram operation per user across every current Feature.
+**Goal:** Make telepiplex dynamically advertise active Feature commands and coordinate one cancellable, status-reporting Telegram operation per user across every current Feature.
 
-**Architecture:** Host API 1.1 adds a persistent `InteractionCoordinator`, an authenticated operation report/control protocol, a global Telegram input gate, and a shared dynamic command catalog. Each Feature keeps domain execution and compensation local, reports stage changes to Telepiplex, propagates one `operation_id` through capability/event handoffs, and exposes exactly one appropriate exit/cancel control at every non-terminal interaction step.
+**Architecture:** Host API 1.1 adds a persistent `InteractionCoordinator`, an authenticated operation report/control protocol, a global Telegram input gate, and a shared dynamic command catalog. Each Feature keeps domain execution and compensation local, reports stage changes to telepiplex, propagates one `operation_id` through capability/event handoffs, and exposes exactly one appropriate exit/cancel control at every non-terminal interaction step.
 
-**Tech Stack:** Python 3.12, python-telegram-bot, asyncio Unix-socket RPC, SQLite, PyYAML, unittest/pytest, Telepiplex `.tpx` builder.
+**Tech Stack:** Python 3.12, python-telegram-bot, asyncio Unix-socket RPC, SQLite, PyYAML, unittest/pytest, telepiplex `.tpx` builder.
 
 ## Global Constraints
 
 - Implement only in `main`, `feature/download`, `feature/search`, `feature/rename`, and `feature/sync`; leave empty `main` untouched.
 - Do not add `/mag` or `/scan`.
-- Telepiplex 1.1 remains compatible with Host API 1.0 Features.
+- telepiplex 1.1 remains compatible with Host API 1.0 Features.
 - Coordinated Feature releases declare `host_api: ">=1.1,<2.0"` and depend on `telepiplex-plugin-sdk==1.1.0`.
 - Ordinary text and commands received during running/cancelling/rolling-back states are dropped, never queued.
 - Never delete downloaded media as rollback.
@@ -36,7 +36,7 @@
 
 **Interfaces:**
 - Produces: `HOST_API_VERSION = "1.1"`.
-- Produces: `HostClient.report_operation(report: dict, *, deadline: float = 10) -> dict` via Telepiplex RPC `operation.report`.
+- Produces: `HostClient.report_operation(report: dict, *, deadline: float = 10) -> dict` via telepiplex RPC `operation.report`.
 - Produces: `FeatureRuntime(..., operation_control: Handler | None = None, operation_snapshot: Handler | None = None)`.
 - Produces: Feature RPC methods `operation.control` and `operation.snapshot`.
 - Consumes later: `operation_sink(plugin_id: str, report: dict) -> dict | Awaitable[dict]` in `RuntimeBroker`.
@@ -106,7 +106,7 @@ git commit -m "feat(runtime): add Feature operation protocol"
 
 ---
 
-### Task 2: Persistent Telepiplex interaction coordinator
+### Task 2: Persistent telepiplex interaction coordinator
 
 **Files:**
 - Create: `app/runtime/interaction_coordinator.py`
@@ -267,7 +267,7 @@ git commit -m "feat(runtime): coordinate Telegram Feature tasks"
 
 - [ ] **Step 1: Write failing catalog tests**
 
-Use parsed manifests to assert Telepiplex-first ordering, Feature sorting, manifest order, inactive/blocked exclusion, reserved-name suppression, and HTML-safe help:
+Use parsed manifests to assert telepiplex-first ordering, Feature sorting, manifest order, inactive/blocked exclusion, reserved-name suppression, and HTML-safe help:
 
 ```python
 def test_combines_host_and_active_feature_commands(self):
@@ -289,7 +289,7 @@ Expected: missing command catalog and static help/menu failures.
 
 - [ ] **Step 3: Implement live command builders and sync hooks**
 
-Build only from active router registrations. Escape Feature names and descriptions for HTML. Suppress `start`, `reload`, `plugin`, and `config` from Feature sections. Change `/start` to use the live router. Synchronize after Telepiplex startup and after successful install, update, enable, disable, rollback, and remove. Report menu-sync failure without reverting the completed lifecycle operation.
+Build only from active router registrations. Escape Feature names and descriptions for HTML. Suppress `start`, `reload`, `plugin`, and `config` from Feature sections. Change `/start` to use the live router. Synchronize after telepiplex startup and after successful install, update, enable, disable, rollback, and remove. Report menu-sync failure without reverting the completed lifecycle operation.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -358,7 +358,7 @@ Keep one session `operation_id` through authorization or path selection. Add an 
 
 Track each download with a thread-safe cancellation event, current InfoHash, chat/user IDs, and revision. Extend the polling client to check the cancellation event and call a progress callback. Check cancellation before each external stage. Never invoke `delete_single_file()` from cancellation. If an unambiguous InfoHash exists, attempt `del_offline_task(info_hash, 0)` once and report whether the record remains.
 
-Update Feature/package version to `1.1.0`, SDK to `1.1.0`, Telepiplex range to `>=1.1,<2.0`, and remove the reserved `config` manifest command while retaining `/auth` and Telepiplex `/config`.
+Update Feature/package version to `1.1.0`, SDK to `1.1.0`, telepiplex range to `>=1.1,<2.0`, and remove the reserved `config` manifest command while retaining `/auth` and telepiplex `/config`.
 
 - [ ] **Step 4: Verify GREEN and the full worktree**
 
@@ -418,9 +418,9 @@ Expected: failures for missing controls and synchronous task behavior.
 
 Bind runtime to the service. Spawn stable tasks for planning, Prowlarr lookup, and release submission. Report `planning`, `evidence_lookup`, `prowlarr_search`, `resolving_release`, and `submitting_download`. Report `awaiting_input` with current namespaced keyboards for user selection.
 
-Cancellation stops the managed coroutine, releases the temporary-special allocator, removes plan/session data, and reports `cancelled`. Configuration application remains Telepiplex-owned and uses its existing atomic restore path.
+Cancellation stops the managed coroutine, releases the temporary-special allocator, removes plan/session data, and reports `cancelled`. Configuration application remains telepiplex-owned and uses its existing atomic restore path.
 
-Update Feature/package version, SDK dependency, and Telepiplex range to 1.1.
+Update Feature/package version, SDK dependency, and telepiplex range to 1.1.
 
 - [ ] **Step 4: Verify GREEN and the full worktree**
 
@@ -486,9 +486,9 @@ Expected: missing operation module and status/control failures.
 
 Bind runtime to `RenameFeature`. Claim the durable job, report `metadata`, `planning`, `conflict_check`, `rename`, `moving`, `cleanup`, and `handoff_plex`, and spawn processing rather than holding event delivery open.
 
-Use an operation-aware storage wrapper that checks cancellation before mutations. Record rename inverses only after stable ID verification. Switch Telepiplex control to `cancel` before directory creation with unknown provenance, copy-plus-delete moves, cleanup, or `delete_single_file`. Run valid inverses in reverse order and report `rolled_back` or `partially_rolled_back`.
+Use an operation-aware storage wrapper that checks cancellation before mutations. Record rename inverses only after stable ID verification. Switch telepiplex control to `cancel` before directory creation with unknown provenance, copy-plus-delete moves, cleanup, or `delete_single_file`. Run valid inverses in reverse order and report `rolled_back` or `partially_rolled_back`.
 
-Update Feature/package version, SDK dependency, and Telepiplex range to 1.1.
+Update Feature/package version, SDK dependency, and telepiplex range to 1.1.
 
 - [ ] **Step 4: Verify GREEN and the full worktree**
 
@@ -555,7 +555,7 @@ Expected: failures for operation controls and cancellable service hooks.
 
 Bind each Telegram AI/write task and organized-event batch to an `operation_id`. Report `ai_planning`, `scan_preparing`, `scanning`, `locating`, `matching`, `localizing`, `artwork`, and `streams`. Automatic Plex jobs use `cancel` because the pipeline begins with an irreversible scan. Stop only between safe service steps and list effects already accepted by Plex.
 
-Keep no-argument `/plex` as a terminal read. Update Feature/package version, SDK dependency, and Telepiplex range to 1.1. Do not add `/scan`.
+Keep no-argument `/plex` as a terminal read. Update Feature/package version, SDK dependency, and telepiplex range to 1.1. Do not add `/scan`.
 
 - [ ] **Step 4: Verify GREEN and the full worktree**
 
@@ -578,7 +578,7 @@ git commit -m "feat(plex): expose cancellable management stages"
 
 ### Task 9: Cross-Feature runtime and artifact verification
 
-**Files (Telepiplex worktree):**
+**Files (telepiplex worktree):**
 - Create: `tests/test_operation_pipeline_e2e.py`
 - Modify: `tests/test_feature_builder.py`
 - Modify: `README.md`
@@ -622,13 +622,13 @@ python3 tools/build_feature.py ../sync ../sync/dist/sync-1.1.0.tpx
 
 Expected: four validated artifacts are created.
 
-- [ ] **Step 4: Update Telepiplex documentation**
+- [ ] **Step 4: Update telepiplex documentation**
 
-Document live command discovery, operation controls/status, cancellation semantics, and Telepiplex-first upgrade order. Do not document `/mag` or `/scan`.
+Document live command discovery, operation controls/status, cancellation semantics, and telepiplex-first upgrade order. Do not document `/mag` or `/scan`.
 
 - [ ] **Step 5: Run fresh full verification**
 
-Telepiplex:
+telepiplex:
 
 ```bash
 python3 -m unittest discover -s tests -t . -v
@@ -649,7 +649,7 @@ git diff --check
 
 Expected: every command exits zero with no failures.
 
-- [ ] **Step 6: Commit Telepiplex integration**
+- [ ] **Step 6: Commit telepiplex integration**
 
 ```bash
 git add tests/test_operation_pipeline_e2e.py tests/test_feature_builder.py README.md README_EN.md

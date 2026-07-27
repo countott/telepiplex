@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from .query_normalization import (
     has_unsupported_range_syntax,
     normalize_query_text,
 )
 from .search_query import extract_douban_subject_id, is_supported_metadata_url
-from .search_resolution import parse_search_intent
+from .search_resolution import parse_search_intent, quoted_numeric_title
 
 
 @dataclass(frozen=True)
@@ -49,7 +49,13 @@ _TRAILING_BARE_NUMBER = re.compile(r"(?<!\d)(\d{1,3})\s*$")
 
 def _tvdb_link(raw_query: str) -> MetadataLink | None:
     parsed = urlparse(raw_query)
-    if "tvdb.com" not in parsed.netloc.casefold():
+    host = str(parsed.hostname or "").casefold()
+    if host not in {
+        "tvdb.com",
+        "www.tvdb.com",
+        "thetvdb.com",
+        "www.thetvdb.com",
+    }:
         return None
     match = re.fullmatch(
         r"/(?:[a-z]{2}/)?(movies|series|seasons|episodes)/([^/?#]+)/?",
@@ -74,6 +80,29 @@ def _tvdb_link(raw_query: str) -> MetadataLink | None:
     )
 
 
+def _wikipedia_link(raw_query: str) -> MetadataLink | None:
+    parsed = urlparse(raw_query)
+    match = re.fullmatch(
+        r"([a-z][a-z0-9-]*)\.wikipedia\.org",
+        parsed.netloc.casefold(),
+    )
+    if not match:
+        return None
+    path_match = re.fullmatch(r"/wiki/([^/?#]+)", parsed.path)
+    if not path_match:
+        return None
+    title = unquote(path_match.group(1)).replace("_", " ").strip()
+    if not title:
+        return None
+    return MetadataLink(
+        provider="wikipedia",
+        media_type="",
+        entity_id=f"{match.group(1)}:{title}",
+        scope="work",
+        url=raw_query,
+    )
+
+
 def _metadata_link(raw_query: str) -> MetadataLink | None:
     subject_id = extract_douban_subject_id(raw_query)
     if subject_id:
@@ -84,7 +113,7 @@ def _metadata_link(raw_query: str) -> MetadataLink | None:
             scope="work",
             url=raw_query,
         )
-    return _tvdb_link(raw_query)
+    return _tvdb_link(raw_query) or _wikipedia_link(raw_query)
 
 
 def classify_search_input(raw_query: str) -> ParsedInput:
@@ -111,8 +140,14 @@ def classify_search_input(raw_query: str) -> ParsedInput:
             reason="unsupported_scope_syntax",
         )
 
-    raw_query = normalize_query_text(collapsed_query)
-    intent = parse_search_intent(raw_query)
+    explicit_numeric_title = quoted_numeric_title(collapsed_query)
+    raw_query = (
+        explicit_numeric_title
+        or normalize_query_text(collapsed_query)
+    )
+    intent = parse_search_intent(
+        collapsed_query if explicit_numeric_title else raw_query
+    )
     scope = str(intent.get("scope") or "movie_or_series")
     if scope == "movie_or_series":
         scope = "work"

@@ -111,16 +111,16 @@ class DeploymentContractTest(unittest.TestCase):
             ):
                 self.assertIn(term, source, f"{name}: {term}")
 
-    def test_photo_actions_are_declared_as_host_api_1_2(self):
+    def test_photo_grid_action_is_declared_as_host_api_1_3(self):
         from app.runtime.plugin_contract import HOST_API_VERSION
 
-        self.assertEqual(HOST_API_VERSION, "1.2")
+        self.assertEqual(HOST_API_VERSION, "1.3")
         self.assertIn(
-            "Host API 1.2",
+            "Host API 1.3",
             (ROOT / "README.md").read_text(encoding="utf-8"),
         )
         self.assertIn(
-            "Host API 1.2",
+            "Host API 1.3",
             (ROOT / "README_EN.md").read_text(encoding="utf-8"),
         )
 
@@ -255,7 +255,7 @@ class DeploymentContractTest(unittest.TestCase):
             "安装按钮和更新按钮都绑定该 Feature 的最新稳定兼容版本",
             "只有依赖满足的 ready 候选才显示安装按钮",
             "旧版默认 catalog 是 `<plugins.root>/catalog.yaml`",
-            "仅当这个 legacy 文件缺失时，Telepiplex 才回退到官方 URL",
+            "仅当这个 legacy 文件缺失时，telepiplex 才回退到官方 URL",
             "已存在的 legacy 文件继续使用本地目录",
             "其他显式本地路径即使当前文件缺失，也保持本地配置意图",
             "不会自动安装",
@@ -287,7 +287,7 @@ class DeploymentContractTest(unittest.TestCase):
             "Install and Update buttons target that Feature's newest stable, Host-compatible release",
             "Only dependency-satisfied, ready candidates receive an Install button",
             "The legacy default catalog is `<plugins.root>/catalog.yaml`",
-            "Telepiplex falls back to the official URL only when that legacy file is missing",
+            "telepiplex falls back to the official URL only when that legacy file is missing",
             "An existing legacy file remains local",
             "every other explicit local path preserves its local configuration intent even when its file is missing",
             "never installs automatically",

@@ -31,7 +31,7 @@
 
 ## 实现边界
 
-只修改 Open115 Feature 的交互文案、回归测试、README 和版本。`directories.py`、`config.schema.json`、Telepiplex 消息路由及下载 API 边界保持不变，因为这些层已经正确接受单级相对路径。
+只修改 Open115 Feature 的交互文案、回归测试、README 和版本。`directories.py`、`config.schema.json`、telepiplex 消息路由及下载 API 边界保持不变，因为这些层已经正确接受单级相对路径。
 
 ## 测试与发布
 

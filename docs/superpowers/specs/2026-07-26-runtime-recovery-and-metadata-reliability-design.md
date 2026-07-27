@@ -13,9 +13,9 @@ preserving the user's intentional workflow boundaries.
   enough episode-pack evidence for Search to choose a safe series scope.
 - Prowlarr indexer HTTP 400 responses remain visible provider diagnostics and
   are not disabled or hidden by this change.
-- Telepiplex still owns at most one active download pipeline. Reattaching an
+- telepiplex still owns at most one active download pipeline. Reattaching an
   already-existing 115 task observes that external task; it does not create a
-  second Telepiplex task.
+  second telepiplex task.
 
 ## Metadata probe and series scope
 
@@ -49,7 +49,7 @@ The download Feature treats it as a recoverable attach signal:
 
 1. query the external offline task list and identify the task by the submitted
    link's info-hash/task identity;
-2. report that Telepiplex has reattached and show the current external state;
+2. report that telepiplex has reattached and show the current external state;
 3. if the task is running, resume normal progress polling;
 4. if it is in a retry/failed state, notify the user and continue through the
    existing retry polling path;

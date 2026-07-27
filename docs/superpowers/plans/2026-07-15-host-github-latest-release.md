@@ -1,25 +1,25 @@
-# Telepiplex GitHub Latest Release Implementation Plan
+# telepiplex GitHub Latest Release Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make every successful `telepiplex-v<semver>` image publication create the same-tag GitHub Release and explicitly mark it Latest, without attaching catalog assets.
 
-**Architecture:** Extend the tag-only Telepiplex workflow with a write-scoped Release job that runs after validation and GHCR publication. Keep the rolling Feature catalog on the `catalog` branch, and remove the Feature workflow's obsolete dependency on a Latest Platform Release while retaining catalog snapshots on each Feature Release.
+**Architecture:** Extend the tag-only telepiplex workflow with a write-scoped Release job that runs after validation and GHCR publication. Keep the rolling Feature catalog on the `catalog` branch, and remove the Feature workflow's obsolete dependency on a Latest Platform Release while retaining catalog snapshots on each Feature Release.
 
 **Tech Stack:** GitHub Actions YAML, GitHub CLI, Python 3.12 `unittest`, PyYAML, GHCR OCI registry.
 
 ## Global Constraints
 
-- `telepiplex-v*` is the only Telepiplex release trigger.
-- Telepiplex publishes `ghcr.io/<owner>/telepiplex:<semver>` and `:latest` before creating the GitHub Release.
+- `telepiplex-v*` is the only telepiplex release trigger.
+- telepiplex publishes `ghcr.io/<owner>/telepiplex:<semver>` and `:latest` before creating the GitHub Release.
 - The GitHub Release tag and title equal `telepiplex-v<semver>` and use `--latest` explicitly.
-- Telepiplex Releases contain no `catalog.yaml`, `.tpx`, or other assets.
+- telepiplex Releases contain no `catalog.yaml`, `.tpx`, or other assets.
 - Feature Releases continue using `--latest=false`.
 - The first publication under this contract is immutable `telepiplex-v1.0.7`; do not move `telepiplex-v1.0.6`.
 
 ---
 
-### Task 1: Publish a same-tag Latest Telepiplex Release
+### Task 1: Publish a same-tag Latest telepiplex Release
 
 **Files:**
 - Modify: `tests/test_release_workflow.py`
@@ -49,7 +49,7 @@ def test_telepiplex_release_tests_pushes_image_and_publishes_latest_release(self
         build["permissions"], {"contents": "read", "packages": "write"}
     )
     image = self._step(
-        workflow, "build-telepiplex-image", "Build and push Telepiplex image"
+        workflow, "build-telepiplex-image", "Build and push telepiplex image"
     )["with"]
     self.assertEqual(
         set(image["tags"].splitlines()),
@@ -64,7 +64,7 @@ def test_telepiplex_release_tests_pushes_image_and_publishes_latest_release(self
         release["needs"], ["validate-telepiplex", "build-telepiplex-image"]
     )
     self.assertEqual(release["permissions"], {"contents": "write"})
-    self._step(workflow, "publish-telepiplex-release", "Refuse an existing Telepiplex Release")
+    self._step(workflow, "publish-telepiplex-release", "Refuse an existing telepiplex Release")
     create = self._step(
         workflow, "publish-telepiplex-release", "Create GitHub Latest Release"
     )["run"]
@@ -103,20 +103,20 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
-      - name: Refuse an existing Telepiplex Release
+      - name: Refuse an existing telepiplex Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Telepiplex Release already exists: $RELEASE_TAG" >&2
+            echo "telepiplex Release already exists: $RELEASE_TAG" >&2
             exit 1
           fi
 
-      - name: Write Telepiplex release notes
+      - name: Write telepiplex release notes
         run: |
           VERSION="${RELEASE_TAG#telepiplex-v}"
           {
-            echo "# Telepiplex Telepiplex $VERSION"
+            echo "# telepiplex telepiplex $VERSION"
             echo
             echo "- Image: \`$TELEPIPLEX_IMAGE:$VERSION\`"
             echo "- Commit: \`$GITHUB_SHA\`"
@@ -154,7 +154,7 @@ Expected: PASS.
 
 **Interfaces:**
 - Consumes: the confirmed `catalog` branch snapshot after optimistic publication.
-- Produces: refreshed catalog assets on the current Feature Release only; Telepiplex Latest remains asset-free and Feature publication no longer assumes a `platform-v*` Latest Release.
+- Produces: refreshed catalog assets on the current Feature Release only; telepiplex Latest remains asset-free and Feature publication no longer assumes a `platform-v*` Latest Release.
 
 - [x] **Step 1: Replace the Platform compatibility test with a failing Feature-only synchronization contract**
 
@@ -176,7 +176,7 @@ def test_feature_release_catalog_assets_converge_after_catalog_push(self):
     self.assertNotIn("platform-v", sync)
 ```
 
-Update the deployment documentation contract to require `telepiplex-v1.0.7`, the raw `catalog` branch URL, and language stating that every Telepiplex Release is Latest. Remove the requirement for `releases/latest/download/catalog.yaml`.
+Update the deployment documentation contract to require `telepiplex-v1.0.7`, the raw `catalog` branch URL, and language stating that every telepiplex Release is Latest. Remove the requirement for `releases/latest/download/catalog.yaml`.
 
 - [x] **Step 2: Run the focused tests and verify RED**
 
@@ -197,7 +197,7 @@ Delete the `releases/latest` API request, `platform-v*` validator, `LATEST_TAG`,
 
 - [x] **Step 4: Update the operator documentation**
 
-Document `telepiplex-v1.0.7`, state that Telepiplex publishes both GHCR tags and a same-tag GitHub Release explicitly marked Latest, and state that Telepiplex Releases carry no Feature/catalog assets. Explain that `https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml` is the rolling catalog endpoint and that Feature Releases remain `--latest=false`.
+Document `telepiplex-v1.0.7`, state that telepiplex publishes both GHCR tags and a same-tag GitHub Release explicitly marked Latest, and state that telepiplex Releases carry no Feature/catalog assets. Explain that `https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml` is the rolling catalog endpoint and that Feature Releases remain `--latest=false`.
 
 - [x] **Step 5: Run focused workflow and documentation tests and verify GREEN**
 
@@ -209,15 +209,15 @@ Expected: PASS.
 
 ```bash
 git add .github/workflows/release.yml .github/workflows/release-feature.yml tests/test_release_workflow.py tests/test_deployment_contract.py README.md README_EN.md docs/superpowers/plans/2026-07-15-host-github-latest-release.md
-git commit -m "feat(release): publish Telepiplex as GitHub Latest"
+git commit -m "feat(release): publish telepiplex as GitHub Latest"
 ```
 
 ---
 
-### Task 3: Verify and publish Telepiplex 1.0.7
+### Task 3: Verify and publish telepiplex 1.0.7
 
 **Files:**
-- Verify only: the complete Telepiplex worktree and remote release surfaces.
+- Verify only: the complete telepiplex worktree and remote release surfaces.
 
 **Interfaces:**
 - Consumes: the verified `main` head, including `7cbe5b6`.
@@ -233,7 +233,7 @@ Run: `git diff --check`
 
 Expected: all commands exit 0 and pytest reports zero failures.
 
-- [ ] **Step 2: Push the Telepiplex branch**
+- [ ] **Step 2: Push the telepiplex branch**
 
 Run: `git push origin main`
 
@@ -245,10 +245,10 @@ Run: `git tag -a telepiplex-v1.0.7 -m "telepiplex 1.0.7"`
 
 Run: `git push origin refs/tags/telepiplex-v1.0.7`
 
-Expected: GitHub starts `Publish Telepiplex Telepiplex image` for `telepiplex-v1.0.7`.
+Expected: GitHub starts `Publish telepiplex telepiplex image` for `telepiplex-v1.0.7`.
 
 - [ ] **Step 4: Verify all remote outcomes**
 
-Use the GitHub Actions API to require a completed successful `telepiplex-v1.0.7` run. Use the GHCR v2 API to require identical `Docker-Content-Digest` values for `1.0.7` and `latest`. Use the GitHub Releases API to require `releases/latest.tag_name == telepiplex-v1.0.7`, no release assets, and `target_commitish` resolving to the tagged Telepiplex commit.
+Use the GitHub Actions API to require a completed successful `telepiplex-v1.0.7` run. Use the GHCR v2 API to require identical `Docker-Content-Digest` values for `1.0.7` and `latest`. Use the GitHub Releases API to require `releases/latest.tag_name == telepiplex-v1.0.7`, no release assets, and `target_commitish` resolving to the tagged telepiplex commit.
 
 Expected: every remote assertion passes.

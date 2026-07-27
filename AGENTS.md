@@ -1,13 +1,19 @@
-# Telepiplex 项目工作指引
+# telepiplex 项目工作指引
 
 本文件适用于 `/Users/young/Documents/telepiplex` 及其所有子目录。除非用户在当前任务中明确改变流程，否则后续开发严格遵守以下边界。
+
+## 0. 产品名称口径
+
+- 产品名称在所有新增或修改的用户文案、文档、日志、工作流标题、包描述和生成元数据中必须写作小写 `telepiplex`。
+- 全大写 `TELEPIPLEX_*` 仅用于环境变量和技术常量；不得为了品牌口径改写既有技术身份。
+- 包名、模块名、路径、镜像名、tag、callback、capability 和 `plugin_id` 继续使用其既有小写技术身份。
 
 ## 1. 工作区职责
 
 - 私人 Mac 上的 `/Users/young/Documents/telepiplex` 是唯一开发工作区。
 - 在此目录中只进行源码读取、创建、修改、删除、重命名和本地测试。
 - 可以修改包括 `.github/workflows/`、`Dockerfile`、配置模板、脚本和项目文档在内的项目文件。
-- `main` 是 Telepiplex Core/Host 唯一有效的源码与发布分支；`features/` 下的五个 Feature 仍在 `main` 内保持独立版本和独立发布。
+- `main` 是 telepiplex Core/Host 唯一有效的源码与发布分支；`features/` 下的五个 Feature 仍在 `main` 内保持独立版本和独立发布。
 - `feature/telepiplex-core` 已退役，不得作为开发、同步或发布来源，也不得重新创建同名活动分支。
 - Unraid 不承担开发工作，只接收 Syncthing 同步内容，并作为唯一 Git 工作区。
 - GitHub 只承担版本管理、GitHub Actions 构建和 Release 发布。
@@ -29,7 +35,7 @@ Mac 本地项目彻底不使用 Git。不要在此工作区执行任何 `git` �
 - 创建、切换或重命名分支
 - 创建 Pull Request
 - 创建、修改或推送标签
-- 从本地连接 Telepiplex 的 GitHub 仓库
+- 从本地连接 telepiplex 的 GitHub 仓库
 
 `.git` 和 `.worktrees` 不应存在于 Mac 项目目录。不要为了检查修改而创建它们。
 
@@ -101,7 +107,7 @@ git commit -m "..."
 git push origin main
 ```
 
-版本标签和 Release 也只能由用户在 Unraid 手动操作，或由用户主动运行 Unraid User Scripts 中的 `Telepiplex Publish` 脚本。Mac 本地不得代替执行。
+版本标签和 Release 也只能由用户在 Unraid 手动操作，或由用户主动运行 Unraid User Scripts 中的 `telepiplex Publish` 脚本。该脚本的受控源文件是 [`scripts/unraid/telepiplex-publish.sh`](scripts/unraid/telepiplex-publish.sh)；修改后需要由用户同步替换 Unraid User Scripts 中的实际脚本。Mac 本地不得代替执行。
 
 Core/Host 的 `telepiplex-v<semver>` tag 必须指向已经包含在远端 `main` 中的提交。正式发布成功后，GitHub Actions 同时更新版本镜像、容器默认标签 `latest` 和 GitHub **Latest** Release；普通 `main` push 不更新这些默认发布入口。
 

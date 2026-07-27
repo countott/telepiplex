@@ -4,19 +4,32 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .adapters.douban import lookup_douban_subject
+from .adapters.douban import (
+    DoubanSubjectLookupError,
+    lookup_douban_subject,
+)
 from .adapters.tvdb import (
+    TvdbAuthenticationError,
+    TvdbConfigError,
+    TvdbRequestError,
     get_tvdb_episode,
     get_tvdb_movie,
     get_tvdb_season,
     get_tvdb_series,
+)
+from .adapters.wikipedia import (
+    WikipediaPageLookupError,
+    lookup_wikipedia_page,
 )
 from .input_contract import MetadataLink
 from .prowlarr_query import build_prowlarr_query
 
 
 class DirectLinkError(ValueError):
-    pass
+    def __init__(self, code: str, details=()):
+        self.code = str(code or "direct_link_invalid")
+        self.details = tuple(str(item) for item in details or ())
+        super().__init__(self.code)
 
 
 @dataclass(frozen=True)
@@ -75,8 +88,55 @@ def _tvdb_series_entity(link: MetadataLink):
 
 
 def resolve_direct_link(link: MetadataLink) -> DirectEntity:
+    if link.provider == "wikipedia":
+        language, separator, title_hint = link.entity_id.partition(":")
+        if not separator:
+            raise DirectLinkError("direct_link_invalid")
+        try:
+            fact = lookup_wikipedia_page(language, title_hint)
+        except WikipediaPageLookupError as exc:
+            raise DirectLinkError(
+                "fixed_link_read_failed",
+                (f"wikipedia:{exc.code}",),
+            ) from exc
+        if not isinstance(fact, dict):
+            raise DirectLinkError("direct_link_not_found")
+        stable_id = _text(fact.get("wikibase_item"))
+        title = _text(
+            fact.get("official_english_title")
+            or fact.get("title")
+            or fact.get("chinese_title")
+        )
+        media_type = _text(fact.get("media_type"))
+        if (
+            not stable_id
+            or not title
+            or media_type not in {"movie", "series"}
+        ):
+            raise DirectLinkError("direct_link_invalid")
+        return DirectEntity(
+            provider="wikipedia",
+            evidence={
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [fact],
+                "source_urls": [fact.get("url") or link.url],
+                "error": "",
+            },
+            stable_identity=("wikipedia", stable_id),
+            title=title,
+            year=_text(fact.get("year")),
+            media_type=media_type,
+            scope="work",
+        )
     if link.provider == "douban":
-        fact = lookup_douban_subject(link.entity_id)
+        try:
+            fact = lookup_douban_subject(link.entity_id)
+        except DoubanSubjectLookupError as exc:
+            raise DirectLinkError(
+                "fixed_link_read_failed",
+                (f"douban:{exc.code}",),
+            ) from exc
         if not isinstance(fact, dict):
             raise DirectLinkError("direct_link_not_found")
         title = _text(
@@ -107,31 +167,71 @@ def resolve_direct_link(link: MetadataLink) -> DirectEntity:
     if link.provider != "tvdb":
         raise DirectLinkError("direct_link_provider_unsupported")
 
-    if link.media_type == "movie":
-        movie = get_tvdb_movie(link.entity_id)
-        if not isinstance(movie, dict):
-            raise DirectLinkError("direct_link_not_found")
-        title = _text(movie.get("english_title") or movie.get("name"))
-        entity_id = _text(movie.get("tvdb_movie_id") or movie.get("tvdb_id"))
-        fact = {"movies": [movie], "series": [], "episodes_by_series": {}}
-        media_type = "movie"
-        season_number = episode_number = None
-    else:
-        series, season_number, episode_number = _tvdb_series_entity(link)
-        if not isinstance(series, dict):
-            raise DirectLinkError("direct_link_not_found")
-        if link.scope in {"season", "episode"} and season_number == 0:
-            raise DirectLinkError("unsupported_special_scope")
-        title = _text(series.get("english_title") or series.get("name"))
-        entity_id = _text(series.get("tvdb_series_id") or series.get("tvdb_id"))
-        fact = {
-            "movies": [],
-            "series": [series],
-            "episodes_by_series": {
-                entity_id: list(series.get("episodes") or [])
-            },
-        }
-        media_type = "series"
+    try:
+        if link.media_type == "movie":
+            movie = get_tvdb_movie(link.entity_id)
+            if not isinstance(movie, dict):
+                raise DirectLinkError("direct_link_not_found")
+            movie = dict(movie)
+            movie.setdefault("url", link.url)
+            title = _text(movie.get("english_title") or movie.get("name"))
+            entity_id = _text(
+                movie.get("tvdb_movie_id") or movie.get("tvdb_id")
+            )
+            fact = {
+                "movies": [movie],
+                "series": [],
+                "episodes_by_series": {},
+            }
+            media_type = "movie"
+            season_number = episode_number = None
+        else:
+            series, season_number, episode_number = _tvdb_series_entity(
+                link
+            )
+            if not isinstance(series, dict):
+                raise DirectLinkError("direct_link_not_found")
+            series = dict(series)
+            series.setdefault("url", link.url)
+            if (
+                link.scope in {"season", "episode"}
+                and season_number == 0
+            ):
+                raise DirectLinkError("unsupported_special_scope")
+            title = _text(
+                series.get("english_title") or series.get("name")
+            )
+            entity_id = _text(
+                series.get("tvdb_series_id") or series.get("tvdb_id")
+            )
+            fact = {
+                "movies": [],
+                "series": [series],
+                "episodes_by_series": {
+                    entity_id: list(series.get("episodes") or [])
+                },
+            }
+            media_type = "series"
+    except DirectLinkError:
+        raise
+    except (
+        TvdbAuthenticationError,
+        TvdbConfigError,
+        TvdbRequestError,
+        OSError,
+    ) as exc:
+        detail = str(
+            getattr(exc, "code", "")
+            or (
+                "server_down"
+                if isinstance(exc, OSError)
+                else "unavailable"
+            )
+        )
+        raise DirectLinkError(
+            "fixed_link_read_failed",
+            (f"tvdb:{detail}",),
+        ) from exc
     if not title or not entity_id:
         raise DirectLinkError("direct_link_invalid")
     return DirectEntity(

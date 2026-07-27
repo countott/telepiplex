@@ -6,7 +6,7 @@
 
 **Architecture:** Provider responses become immutable facts in a request-scoped graph. Deterministic code performs exact entity clustering, HardGate checks, and 60 points of scoring; AI may return relation hypotheses and a fact-referenced 40-point scorecard but never `media_metadata`. The service renders ranked candidates, persists only the selected canonical entity, then builds the existing confirmed v1 handoff.
 
-**Tech Stack:** Python 3.12, asyncio, sqlite3, requests, unittest, Telepiplex plugin SDK.
+**Tech Stack:** Python 3.12, asyncio, sqlite3, requests, unittest, telepiplex plugin SDK.
 
 ## Global Constraints
 

@@ -4,7 +4,7 @@
 
 **Goal:** Make `/plugin` recover from the missing legacy default catalog and expose newest-compatible install and update actions as Telegram buttons.
 
-**Architecture:** Resolve the default catalog source once while constructing the Telepiplex manager, preserving explicit custom local catalogs. Build the `/plugin` view from `available_plugins()` and `available_updates()` and reuse the existing exact-reference callbacks and manager transactions.
+**Architecture:** Resolve the default catalog source once while constructing the telepiplex manager, preserving explicit custom local catalogs. Build the `/plugin` view from `available_plugins()` and `available_updates()` and reuse the existing exact-reference callbacks and manager transactions.
 
 **Tech Stack:** Python 3.12, python-telegram-bot 22.3, unittest/pytest, YAML-backed Feature catalog.
 
@@ -158,7 +158,7 @@ Expected: the warning contains `CatalogError` instead of `catalog_unavailable`.
 ```python
 error_code = str(getattr(exc, "code", type(exc).__name__))[:100]
 self._warn(
-    "Feature 更新目录检查失败；本轮已跳过，Telepiplex 将继续运行："
+    "Feature 更新目录检查失败；本轮已跳过，telepiplex 将继续运行："
     f"{error_code}"
 )
 ```

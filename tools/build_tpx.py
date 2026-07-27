@@ -15,7 +15,7 @@ from app.runtime.plugin_artifact import build_tpx, verify_tpx
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="Build a deterministic Telepiplex Feature artifact."
+        description="Build a deterministic telepiplex Feature artifact."
     )
     parser.add_argument("SOURCE_DIR", type=Path)
     parser.add_argument("OUTPUT.tpx", type=Path)

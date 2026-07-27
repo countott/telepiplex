@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the existing download custom command and operation model. Add shared directory normalization in a focused module, extend `FeatureConfigStore` with a field-scoped atomic writer, and extend `DownloadFeature` with a staged paginated directory editor whose working copy is committed only on explicit confirmation. Existing `/auth`, download, and Token persistence behavior remains independent.
 
-**Tech Stack:** Python 3.9+, `asyncio`, PyYAML, `unittest`, Telepiplex Plugin SDK, Telepiplex `tools/build_feature.py`.
+**Tech Stack:** Python 3.9+, `asyncio`, PyYAML, `unittest`, telepiplex Plugin SDK, telepiplex `tools/build_feature.py`.
 
 ## Global Constraints
 

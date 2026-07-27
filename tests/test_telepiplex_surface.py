@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class TelepiplexHostSurfaceTest(unittest.TestCase):
+class HostSurfaceTest(unittest.TestCase):
     def test_host_bot_delegates_command_menu_to_dynamic_catalog(self):
         source = (ROOT / "app" / "115bot.py").read_text(encoding="utf-8")
         self.assertIn("from app.runtime.command_catalog import (", source)

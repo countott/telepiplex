@@ -439,6 +439,41 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             "https://image.example/poster.jpg",
         )
 
+    async def test_feature_result_persists_candidate_poster_grid(self):
+        from app.handlers.plugin_handler import _with_rendered_keyboard
+
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        operation = {"details": {}}
+        result = {"actions": [{
+            "kind": "send_photo_grid",
+            "text": "候选",
+            "data": {
+                "poster_items": [{
+                    "number": 1,
+                    "title": "候选一",
+                    "poster_url": "https://image.example/one.jpg",
+                }, {
+                    "number": 2,
+                    "title": "候选二",
+                    "poster_url": "",
+                }],
+                "parse_mode": "HTML",
+                "keyboard": [[{
+                    "text": "1",
+                    "callback_data": "search:select:p1:0",
+                }]],
+            },
+        }]}
+
+        normalized = _with_rendered_keyboard(route, result, operation)
+
+        self.assertEqual(len(normalized["details"]["poster_items"]), 2)
+        self.assertEqual(normalized["details"]["parse_mode"], "HTML")
+        self.assertNotIn("photo_url", normalized["details"])
+
     async def test_running_action_drops_keyboard_from_previous_prompt(self):
         from app.handlers.plugin_handler import _with_rendered_keyboard
 
@@ -1023,6 +1058,91 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             kwargs["reply_markup"].inline_keyboard[0][0].callback_data,
             "search:select:p1:0",
         )
+
+    @patch("app.handlers.plugin_handler.build_poster_grid")
+    async def test_feature_send_photo_grid_action(self, build_grid):
+        from io import BytesIO
+        from app.handlers.plugin_handler import _render_actions
+
+        grid = BytesIO(b"grid")
+        grid.name = "grid.jpg"
+        build_grid.return_value = grid
+        update, context, _manager = self._request([], user_id=1)
+        update.effective_message.reply_photo = AsyncMock(
+            return_value=SimpleNamespace(message_id=83)
+        )
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        result = {"actions": [{
+            "kind": "send_photo_grid",
+            "text": "候选",
+            "parse_mode": "HTML",
+            "data": {
+                "poster_items": [{
+                    "number": 1,
+                    "title": "候选一",
+                    "poster_url": "https://image.example/one.jpg",
+                }],
+                "keyboard": [[{
+                    "text": "1",
+                    "callback_data": "search:select:p1:0",
+                }]],
+            },
+        }]}
+
+        rendered, message_id, message_kind = await _render_actions(
+            update,
+            context,
+            route,
+            result,
+        )
+
+        self.assertTrue(rendered)
+        self.assertEqual((message_id, message_kind), (83, "photo"))
+        self.assertIs(
+            update.effective_message.reply_photo.await_args.kwargs["photo"],
+            grid,
+        )
+
+    @patch("app.handlers.plugin_handler.build_poster_grid")
+    async def test_long_html_photo_caption_falls_back_to_bounded_plain_text(
+        self, build_grid
+    ):
+        from io import BytesIO
+        from app.handlers.plugin_handler import _render_actions
+
+        grid = BytesIO(b"grid")
+        grid.name = "grid.jpg"
+        build_grid.return_value = grid
+        update, context, _manager = self._request([], user_id=1)
+        update.effective_message.reply_photo = AsyncMock(
+            return_value=SimpleNamespace(message_id=84)
+        )
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        result = {"actions": [{
+            "kind": "send_photo_grid",
+            "text": "<b>" + ("候选内容" * 400) + "</b>",
+            "parse_mode": "HTML",
+            "data": {
+                "poster_items": [{
+                    "number": 1,
+                    "title": "候选一",
+                    "poster_url": "https://image.example/one.jpg",
+                }],
+            },
+        }]}
+
+        await _render_actions(update, context, route, result)
+
+        kwargs = update.effective_message.reply_photo.await_args.kwargs
+        self.assertLessEqual(len(kwargs["caption"]), 1024)
+        self.assertNotIn("<b>", kwargs["caption"])
+        self.assertNotIn("parse_mode", kwargs)
 
     async def test_feature_photo_failure_falls_back_to_same_text_card(self):
         from app.handlers.plugin_handler import _render_actions

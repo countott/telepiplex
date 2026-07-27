@@ -1,4 +1,4 @@
-# Telepiplex 有界查询、Prowlarr 正确性门禁与结构化重命名设计
+# telepiplex 有界查询、Prowlarr 正确性门禁与结构化重命名设计
 
 日期：2026-07-17
 
@@ -89,7 +89,7 @@ Query 清洗
 - 消息编辑失败后的新消息降级；
 - Feature RPC 生命周期和截止时间。
 
-Telepiplex 不理解媒体身份、范围或片源评分。
+telepiplex 不理解媒体身份、范围或片源评分。
 
 ### 4.3 rename
 

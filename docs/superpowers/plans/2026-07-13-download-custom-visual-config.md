@@ -4,22 +4,22 @@
 
 **Goal:** Restore Telegram `/config → download → Access/Refresh Token` with sequential token entry and immediate runtime activation while retaining independent scan authorization.
 
-**Architecture:** Telepiplex recognizes a generic `x-telepiplex-config-command` JSON Schema annotation, validates it against the active Feature manifest, dispatches it through the current route, and reuses the existing Feature action/session gateway. The download Feature owns the two-step secret input state machine, atomic private-config persistence, in-memory client activation, scan flow, and secret expiry.
+**Architecture:** telepiplex recognizes a generic `x-telepiplex-config-command` JSON Schema annotation, validates it against the active Feature manifest, dispatches it through the current route, and reuses the existing Feature action/session gateway. The download Feature owns the two-step secret input state machine, atomic private-config persistence, in-memory client activation, scan flow, and secret expiry.
 
 **Tech Stack:** Python 3.12, python-telegram-bot 22.3, JSON Schema 2020-12 annotations, asyncio, PyYAML, unittest/pytest.
 
 ## Global Constraints
 
 - Feature configuration remains at `/config/plugins/download/config.yaml` with mode `0600`.
-- Telepiplex must not contain download token field names or download-specific conditionals.
-- Access/Refresh token values must not appear in Telegram output, logs, callback data, exception text, or durable Telepiplex state.
+- telepiplex must not contain download token field names or download-specific conditionals.
+- Access/Refresh token values must not appear in Telegram output, logs, callback data, exception text, or durable telepiplex state.
 - The download Access token may exist only in process memory while waiting for Refresh token and must expire after 30 minutes.
 - Scan authorization and automatic token refresh remain independent and keep `auth_mode: scan`.
 - `main` and `feature/115` remain independent branches; do not modify other Feature branches or push remote refs.
 
 ---
 
-### Task 1: Add the generic Telepiplex custom-config handoff
+### Task 1: Add the generic telepiplex custom-config handoff
 
 **Files:**
 - Modify: `app/handlers/plugin_handler.py`
@@ -31,7 +31,7 @@
 - Consumes: active `PluginRoute` objects from `router.plugin_route(plugin_id)` and the schema annotation `x-telepiplex-config-command`.
 - Produces: `custom_config_command(schema, route) -> str | None` and public `handle_feature_result(update, context, route, result) -> None`.
 
-- [ ] **Step 1: Write failing Telepiplex tests**
+- [ ] **Step 1: Write failing telepiplex tests**
 
 Add a custom-only Feature view and route fixture, then assert `/config` lists it and selecting it dispatches `command.dispatch`, renders its keyboard, and creates the normal Feature session:
 
@@ -95,7 +95,7 @@ async def test_custom_config_feature_is_listed_and_handed_to_feature_session(sel
 
 Add a second test where the schema names `config` but the active manifest does not declare it. Assert the Feature is omitted when it has no generic nested sections, no RPC request is issued, and no secret value is rendered. Add a third test where the RPC raises `RuntimeError("token=secret-value")`; assert the reply contains `custom_config_failed` and excludes `secret-value`.
 
-- [ ] **Step 2: Run the Telepiplex red tests**
+- [ ] **Step 2: Run the telepiplex red tests**
 
 Run:
 
@@ -172,7 +172,7 @@ return ConversationHandler.END
 
 Return a sanitized `custom_config_failed` reply and `ConversationHandler.END` if route lookup or RPC dispatch fails. Do not expose exception details.
 
-- [ ] **Step 5: Run Telepiplex tests and commit**
+- [ ] **Step 5: Run telepiplex tests and commit**
 
 Run:
 
@@ -362,10 +362,10 @@ git commit -m "fix(download): restore visual token configuration"
 - Verify only; no planned source changes.
 
 **Interfaces:**
-- Consumes: the Telepiplex custom-config schema contract and the download schema declaration.
+- Consumes: the telepiplex custom-config schema contract and the download schema declaration.
 - Produces: evidence that both independent branches are clean, testable, and compatible.
 
-- [ ] **Step 1: Run complete Telepiplex verification**
+- [ ] **Step 1: Run complete telepiplex verification**
 
 From `main`:
 

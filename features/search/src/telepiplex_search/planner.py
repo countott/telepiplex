@@ -13,8 +13,13 @@ from copy import deepcopy
 from .context import runtime_context
 
 from .ai import (
+    infer_anchored_candidates_with_ai,
     infer_candidate_scorecard_with_ai,
     infer_search_hypotheses_with_ai,
+)
+from .anchored_candidate import (
+    CandidateBindingError,
+    materialize_anchored_candidates,
 )
 from .candidate_score import (
     SCORING_VERSION,
@@ -31,6 +36,7 @@ from .entity_graph import (
     normalize_title,
 )
 from .input_contract import classify_search_input, has_ambiguous_bare_number
+from .media_metadata_v1 import MetadataV1Error, build_media_metadata_v1
 from .prowlarr_query import build_prowlarr_query
 from .search_plan import (
     TEMPORARY_MAPPING_KIND,
@@ -55,14 +61,6 @@ def _log_info(message: str):
 
 
 class PlanningBudget:
-    TOTAL = 90.0
-    STAGES = {
-        "base_evidence": 15.0,
-        "intent_fallback": 20.0,
-        "candidate_finalize": 25.0,
-        "source_orchestration": 65.0,
-    }
-
     def __init__(
         self,
         *,
@@ -70,15 +68,16 @@ class PlanningBudget:
         total: float | None = None,
         stages: dict[str, float] | None = None,
     ):
+        # Kept as a compatibility clock for callers and logs. Search 1.1.0
+        # deliberately has no business-layer planning deadline; provider HTTP
+        # clients retain their independently configurable fault timeouts.
+        del total, stages
         self.clock = clock
         self.started_at = clock()
-        self.total = self.TOTAL if total is None else max(0.0, float(total))
-        self.deadline = self.started_at + self.total
-        self.stages = {**self.STAGES, **(stages or {})}
 
     def remaining_for(self, stage: str) -> float:
-        stage_limit = self.stages[stage]
-        return max(0.0, min(stage_limit, self.deadline - self.clock()))
+        del stage
+        return float("inf")
 
     @property
     def elapsed(self) -> float:
@@ -86,16 +85,8 @@ class PlanningBudget:
 
 
 async def _budgeted(stage: str, budget: PlanningBudget, awaitable):
-    remaining = budget.remaining_for(stage)
-    if remaining <= 0:
-        if hasattr(awaitable, "close"):
-            awaitable.close()
-        raise SearchPlanningError("planning_timed_out", (stage,))
-    try:
-        async with asyncio.timeout(remaining):
-            return await awaitable
-    except TimeoutError as exc:
-        raise SearchPlanningError("planning_timed_out", (stage,)) from exc
+    del stage, budget
+    return await awaitable
 
 
 async def _optional_budgeted(
@@ -107,10 +98,7 @@ async def _optional_budgeted(
     try:
         return await _budgeted(stage, budget, awaitable)
     except SearchPlanningError:
-        if budget.deadline - budget.clock() <= 0:
-            raise
-        _log_info(f"search_stage status=timed_out stage={stage}")
-        return default
+        raise
 
 
 def _provider_failure(name: str, exc: Exception) -> dict:
@@ -345,6 +333,19 @@ def _merge_evidence_passes(
     first: list[dict],
     second: list[dict],
 ) -> list[dict]:
+    status_priority = {
+        "not_found": 0,
+        "disabled": 1,
+        "unavailable": 2,
+        "invalid": 3,
+        "server_down": 4,
+        "timeout": 5,
+        "blocked": 6,
+        "rate_limited": 7,
+        "credential_missing": 8,
+        "authentication_failed": 9,
+        "ok": 10,
+    }
     merged = {}
     for item in [*(first or []), *(second or [])]:
         if not isinstance(item, dict):
@@ -360,7 +361,10 @@ def _merge_evidence_passes(
             "error": "",
         })
         status = _text(item.get("status")).casefold() or "invalid"
-        if status == "ok" or target["status"] != "ok":
+        if status_priority.get(status, 3) > status_priority.get(
+            target["status"],
+            3,
+        ):
             target["status"] = status
         seen_facts = {
             json.dumps(fact, ensure_ascii=False, sort_keys=True, default=str)
@@ -380,6 +384,56 @@ def _merge_evidence_passes(
                 value for value in (target["error"], error) if value
             )
     return list(merged.values())
+
+
+def _no_fact_failure(sources: list[dict]) -> tuple[str, tuple[str, ...]]:
+    source_statuses = [
+        (
+            _text(item.get("source")).casefold(),
+            _text(item.get("status")).casefold(),
+        )
+        for item in sources
+        if isinstance(item, dict)
+        and _text(item.get("source"))
+    ]
+    if source_statuses and all(
+        status == "disabled"
+        for _provider, status in source_statuses
+    ):
+        return (
+            "source_failure",
+            tuple(
+                f"{provider}:{status}"
+                for provider, status in source_statuses
+            ),
+        )
+    hard_failures = [
+        (
+            f"{_text(item.get('source')).casefold()}:"
+            f"{_text(item.get('status')).casefold()}"
+        )
+        for item in sources
+        if _text(item.get("status")).casefold() not in {
+            "ok",
+            "not_found",
+            "disabled",
+        }
+    ]
+    hard_failures = tuple(dict.fromkeys(hard_failures))
+    if not hard_failures:
+        return "", ()
+    statuses = [
+        item.rsplit(":", 1)[-1]
+        for item in hard_failures
+    ]
+    return (
+        (
+            "source_rate_limited"
+            if all(status == "rate_limited" for status in statuses)
+            else "source_failure"
+        ),
+        hard_failures,
+    )
 
 
 def _verified_ai_title(
@@ -1392,6 +1446,551 @@ def _candidate_contract(
     return contract, entity, relation_snapshot
 
 
+def _anchored_fact_payload(graph) -> list[dict]:
+    result = []
+    seen = set()
+    provider_counts = {}
+    for entity in graph.candidates:
+        for fact in entity.facts:
+            if fact.fact_id in seen:
+                continue
+            provider = _text(fact.provider).casefold()
+            if provider_counts.get(provider, 0) >= 20:
+                continue
+            seen.add(fact.fact_id)
+            provider_counts[provider] = provider_counts.get(provider, 0) + 1
+            result.append({
+                "fact_id": fact.fact_id,
+                "provider": fact.provider,
+                "titles": list(fact.titles),
+                "year": fact.year,
+                "media_type": fact.media_type,
+                "external_ids": dict(fact.external_ids),
+                "source_url": fact.source_url,
+                "poster_url": fact.poster_url,
+                "original_title": fact.original_title,
+                "original_language": fact.original_language,
+                "official_english_title": fact.official_english_title,
+                "romanized_original_title": fact.romanized_original_title,
+                "chinese_title": fact.chinese_title,
+                "genres": list(fact.genres),
+                "tvdb_inventory": [],
+            })
+    return result
+
+
+def _locked_anchor_fact_id(graph, locked_identity) -> str:
+    if not locked_identity:
+        return ""
+    key, expected = locked_identity
+    expected = _text(expected)
+    matches = [
+        fact.fact_id
+        for entity in graph.candidates
+        for fact in entity.facts
+        if _text(fact.external_ids.get(key)) == expected
+    ]
+    if len(set(matches)) != 1:
+        raise SearchPlanningError("direct_link_anchor_missing")
+    return matches[0]
+
+
+async def _call_candidate_editor(candidate_editor, context: dict):
+    try:
+        if asyncio.iscoroutinefunction(candidate_editor):
+            return await candidate_editor(context)
+        return await asyncio.to_thread(candidate_editor, context)
+    except Exception as exc:
+        raise SearchPlanningError(
+            "ai_candidate_failure",
+            (type(exc).__name__,),
+        ) from exc
+
+
+def _anchored_editor_context(
+    raw_query: str,
+    graph,
+    *,
+    intent: dict,
+    locked_anchor_fact_id: str,
+    provisional_candidates=(),
+    stage: str,
+) -> dict:
+    return {
+        "raw_query": _text(raw_query),
+        "intent": {
+            "title": _text(intent.get("title")),
+            "year": _text(intent.get("year")),
+            "media_type": _text(intent.get("media_type")),
+            "scope": _text(intent.get("scope")),
+            "season_number": _integer(intent.get("season_number")),
+            "episode_number": _integer(intent.get("episode_number")),
+        },
+        "locked_anchor_fact_id": _text(locked_anchor_fact_id),
+        "stage": stage,
+        "facts": _anchored_fact_payload(graph),
+        "provisional_candidates": [
+            candidate.to_dict() for candidate in provisional_candidates
+        ],
+    }
+
+
+def _supplement_hypotheses(candidates, intent: dict) -> dict:
+    queries = list(dict.fromkeys(
+        cleaned
+        for candidate in candidates
+        for fact in candidate.facts
+        for title in (
+            fact.chinese_title,
+            fact.official_english_title,
+            fact.romanized_original_title,
+            fact.original_title,
+            *fact.titles,
+        )
+        if (cleaned := _text(title))
+    ))[:6]
+    return {
+        "status": "ok",
+        "intent": dict(intent),
+        "hypotheses": [{
+            "title": query,
+            "year": "",
+            "content_identity": "movie_or_series",
+            "scope": intent.get("scope") or "movie_or_series",
+            "season_number": intent.get("season_number"),
+            "episode_number": intent.get("episode_number"),
+            "explicit_facts": [],
+            "inferred_facts": ["candidate_source_supplement"],
+        } for query in queries],
+        "source_queries": {
+            provider: list(queries)
+            for provider in ("wikipedia", "douban", "tvdb")
+        },
+        "warnings": ["candidate_source_supplement"],
+    }
+
+
+def _anchored_fact_snapshot(candidate) -> list[dict]:
+    return [
+        {
+            "fact_id": fact.fact_id,
+            "provider": fact.provider,
+            "titles": list(fact.titles),
+            "year": fact.year,
+            "media_type": fact.media_type,
+            "external_ids": dict(fact.external_ids),
+            "source_url": fact.source_url,
+            "poster_url": fact.poster_url,
+        }
+        for fact in candidate.facts
+    ]
+
+
+_COMPLETE_CANDIDATE_PROVIDERS = frozenset({
+    "wikipedia",
+    "douban",
+    "tvdb",
+})
+
+
+def _candidate_version(candidate) -> str:
+    return (
+        "v1"
+        if _COMPLETE_CANDIDATE_PROVIDERS.issubset(candidate.providers)
+        else "v0"
+    )
+
+
+def _candidate_preview_metadata(
+    candidate,
+    *,
+    metadata_id: str,
+    raw_query: str,
+    metadata_error: MetadataV1Error,
+) -> dict:
+    facts = tuple(candidate.facts)
+    anchor = next(
+        (
+            fact for fact in facts
+            if fact.fact_id == candidate.anchor_fact_id
+        ),
+        facts[0],
+    )
+    media_type = (
+        "movie"
+        if candidate.identity_role == "movie"
+        else "series"
+        if candidate.identity_role in {"series_root", "season", "episode"}
+        else next(
+            (
+                fact.media_type for fact in facts
+                if fact.media_type in {"movie", "series"}
+            ),
+            "",
+        )
+    )
+    chinese_title = next(
+        (
+            fact.chinese_title for fact in facts
+            if fact.chinese_title
+        ),
+        "",
+    )
+    official_english = next(
+        (
+            fact.official_english_title for fact in facts
+            if fact.official_english_title
+        ),
+        "",
+    )
+    original_title = next(
+        (
+            fact.original_title for fact in facts
+            if fact.original_title
+        ),
+        "",
+    )
+    romanized = next(
+        (
+            fact.romanized_original_title for fact in facts
+            if fact.romanized_original_title
+        ),
+        "",
+    )
+    fallback_title = next(
+        (
+            title for fact in facts for title in fact.titles
+            if _text(title)
+        ),
+        _text(raw_query) or "未知",
+    )
+    display_title = (
+        chinese_title
+        or official_english
+        or romanized
+        or original_title
+        or fallback_title
+    )
+    year = anchor.year or next(
+        (fact.year for fact in facts if fact.year),
+        "",
+    )
+    animation = any(
+        signal in _text(genre).casefold()
+        for fact in facts
+        for genre in fact.genres
+        for signal in ("animation", "animated", "anime", "动画", "動畫")
+    )
+    external_ids = {}
+    for fact in facts:
+        external_ids.update(dict(fact.external_ids))
+    provider_statuses = {
+        link.provider: "ok" for link in candidate.source_links
+    }
+    for unresolved in candidate.unresolved_sources:
+        provider, separator, status = unresolved.partition(":")
+        if separator and provider in _COMPLETE_CANDIDATE_PROVIDERS:
+            provider_statuses[provider] = status
+    scope = (
+        "movie"
+        if media_type == "movie"
+        else candidate.intended_scope or "whole_series"
+    )
+    return {
+        "schema_version": 1,
+        "metadata_id": _text(metadata_id),
+        "confirmed": False,
+        "identity": {
+            "chinese_title": chinese_title or display_title,
+            "english_title": official_english or romanized or original_title,
+            "official_english_title": official_english,
+            "romanized_original_title": romanized,
+            "original_title": original_title,
+            "original_language": next(
+                (
+                    fact.original_language for fact in facts
+                    if fact.original_language
+                ),
+                "",
+            ),
+            "aliases": list(dict.fromkeys(
+                title for fact in facts for title in fact.titles
+                if _text(title)
+            )),
+            "year": year,
+            "content_kind": media_type,
+            "poster_url": candidate.primary_poster_url,
+            "external_ids": external_ids,
+            "root_fact_id": anchor.fact_id,
+        },
+        "retrieval": {
+            "media_type": media_type,
+            "scope": scope,
+            "query": "",
+            "queries": [],
+        },
+        "placement": {
+            "library_type": media_type,
+            "category_kind": (
+                f"{'animated' if animation else 'live_action'}_{media_type}"
+                if media_type
+                else ""
+            ),
+            "season_number": None,
+            "episode_number": None,
+            "mapping_kind": "unresolved",
+            "mapping_source": "anchored_candidate_preview",
+            "tvdb_episode_id": "",
+        },
+        "items": [],
+        "evidence": {
+            "anchor_fact_id": candidate.anchor_fact_id,
+            "source_links": [
+                link.to_dict() for link in candidate.source_links
+            ],
+            "poster_assets": [
+                poster.to_dict() for poster in candidate.poster_assets
+            ],
+            "provider_statuses": provider_statuses,
+            "unresolved": list(candidate.unresolved_sources),
+            "ai": {
+                "confidence": candidate.ai_confidence,
+                "reason": candidate.ai_reason,
+            },
+            "decision": {
+                "mode": "ai_fact_binding_preview",
+                "scope": scope,
+                "season_number": None,
+                "episode_number": None,
+            },
+        },
+        "warnings": [
+            "warning:candidate_v0",
+            f"warning:{metadata_error.code}",
+        ],
+    }
+
+
+async def _build_anchored_search_plan(
+    raw_query: str,
+    plan_id: str,
+    providers: dict[str, Callable],
+    *,
+    candidate_editor,
+    locked_identity: tuple[str, str] | None,
+) -> dict:
+    hypotheses = build_rule_hypotheses(raw_query)
+    sources = await collect_evidence(hypotheses, providers)
+    graph = build_search_graph(sources)
+    if not _anchored_fact_payload(graph):
+        failure_code, hard_failures = _no_fact_failure(sources)
+        if failure_code:
+            raise SearchPlanningError(
+                failure_code,
+                hard_failures,
+            )
+        recovery = await asyncio.to_thread(
+            infer_search_hypotheses_with_ai,
+            {
+                "raw_query": raw_query,
+                "intent": hypotheses.get("intent") or {},
+                "failure": "zero_provider_facts",
+            },
+        )
+        if recovery is None:
+            raise SearchPlanningError(
+                "ai_candidate_failure",
+                ("zero_provider_facts",),
+            )
+        sources = _merge_evidence_passes(
+            sources,
+            await collect_evidence(recovery, providers),
+        )
+        graph = build_search_graph(sources)
+        if not _anchored_fact_payload(graph):
+            failure_code, hard_failures = _no_fact_failure(sources)
+            if failure_code:
+                raise SearchPlanningError(
+                    failure_code,
+                    hard_failures,
+                )
+            raise SearchPlanningError("no_match")
+
+    intent = dict(hypotheses.get("intent") or {})
+    intent["media_type"] = _explicit_media_type(raw_query, intent)
+    anchor_fact_id = _locked_anchor_fact_id(graph, locked_identity)
+    statuses, _support = _provider_status_and_support(sources)
+    payload = await _call_candidate_editor(
+        candidate_editor,
+        _anchored_editor_context(
+            raw_query,
+            graph,
+            intent=intent,
+            locked_anchor_fact_id=anchor_fact_id,
+            stage="discovery",
+        ),
+    )
+    if payload is None:
+        raise SearchPlanningError("ai_candidate_failure")
+    try:
+        anchored = materialize_anchored_candidates(
+            graph,
+            payload,
+            provider_statuses=statuses,
+            locked_anchor_fact_id=anchor_fact_id,
+        )
+    except CandidateBindingError as exc:
+        raise SearchPlanningError(
+            "candidate_binding_failed",
+            (exc.code,),
+        ) from exc
+    if not anchored:
+        raise SearchPlanningError("no_match")
+
+    supplementable_providers = {
+        provider
+        for provider, status in statuses.items()
+        if status in {"ok", "not_found"}
+    }
+    missing_providers = {
+        provider
+        for provider in supplementable_providers
+        if any(provider not in candidate.providers for candidate in anchored)
+    }
+    if missing_providers:
+        supplemental = await collect_evidence(
+            _supplement_hypotheses(anchored, intent),
+            {
+                name: handler
+                for name, handler in providers.items()
+                if _text(name).casefold() in missing_providers
+            },
+        )
+        sources = _merge_evidence_passes(sources, supplemental)
+        graph = build_search_graph(sources)
+        statuses, _support = _provider_status_and_support(sources)
+        anchor_fact_id = _locked_anchor_fact_id(graph, locked_identity)
+        payload = await _call_candidate_editor(
+            candidate_editor,
+            _anchored_editor_context(
+                raw_query,
+                graph,
+                intent=intent,
+                locked_anchor_fact_id=anchor_fact_id,
+                provisional_candidates=anchored,
+                stage="source_supplement",
+            ),
+        )
+        if payload is None:
+            raise SearchPlanningError("ai_candidate_failure")
+        try:
+            anchored = materialize_anchored_candidates(
+                graph,
+                payload,
+                provider_statuses=statuses,
+                locked_anchor_fact_id=anchor_fact_id,
+            )
+        except CandidateBindingError as exc:
+            raise SearchPlanningError(
+                "candidate_binding_failed",
+                (exc.code,),
+            ) from exc
+        if not anchored:
+            raise SearchPlanningError("no_match")
+
+    ranked = []
+    for index, candidate in enumerate(anchored):
+        metadata_ready = True
+        metadata_error = {}
+        try:
+            contract = build_media_metadata_v1(
+                candidate,
+                metadata_id=plan_id,
+                raw_query=raw_query,
+            )
+        except MetadataV1Error as exc:
+            metadata_ready = False
+            metadata_error = {
+                "code": exc.code,
+                "missing_fields": list(exc.missing_fields),
+            }
+            contract = _candidate_preview_metadata(
+                candidate,
+                metadata_id=plan_id,
+                raw_query=raw_query,
+                metadata_error=exc,
+            )
+        queries = list(
+            (contract.get("retrieval") or {}).get("queries") or []
+        )
+        confidence_score = round(candidate.ai_confidence * 100)
+        ranked.append({
+            "candidate_key": candidate.candidate_id,
+            "candidate_id": candidate.candidate_id,
+            "anchor_fact_id": candidate.anchor_fact_id,
+            "identity_role": candidate.identity_role,
+            "intended_scope": candidate.intended_scope,
+            "score": {
+                "version": "anchored-candidate-v1",
+                "program_total": 0,
+                "ai_total": confidence_score,
+                "total": confidence_score,
+            },
+            "recommended": index == 0,
+            "selectable": True,
+            "media_metadata": contract,
+            "prowlarr_queries": queries,
+            "poster_url": candidate.primary_poster_url,
+            "poster_assets": [
+                poster.to_dict() for poster in candidate.poster_assets
+            ],
+            "source_links": [
+                link.to_dict() for link in candidate.source_links
+            ],
+            "unresolved_sources": list(candidate.unresolved_sources),
+            "ai_confidence": candidate.ai_confidence,
+            "ai_reason": candidate.ai_reason,
+            "reasons": [candidate.ai_reason],
+            "candidate_version": _candidate_version(candidate),
+            "metadata_ready": metadata_ready,
+            "metadata_error": metadata_error,
+            "links_frozen": True,
+            "fact_snapshot": _anchored_fact_snapshot(candidate),
+            "entity_snapshot": {
+                "entity_key": candidate.candidate_id,
+                "content_kind": (
+                    (contract.get("identity") or {}).get("content_kind")
+                ),
+                "external_ids": dict(
+                    (contract.get("identity") or {}).get(
+                        "external_ids"
+                    ) or {}
+                ),
+            },
+            "relation_snapshot": {
+                "relation_type": "standalone",
+                "mapping_kind": "standalone",
+            },
+        })
+    top = ranked[0]
+    _log_info(
+        f"search_plan status=anchored metadata_id={plan_id} "
+        f"candidates={len(ranked)}"
+    )
+    return {
+        "plan_id": plan_id,
+        "raw_query": raw_query,
+        "entry_kind": "link" if locked_identity else "text",
+        "links_frozen": True,
+        "media_metadata": deepcopy(top["media_metadata"]),
+        "prowlarr_queries": list(top["prowlarr_queries"]),
+        "candidates": ranked,
+        "source_queries": _actual_source_queries(sources),
+        "scoring_version": "anchored-candidate-v1",
+        "relation_pool": [],
+    }
+
+
 async def build_confirmable_search_plan(
     raw_query: str,
     plan_id: str,
@@ -1403,10 +2002,19 @@ async def build_confirmable_search_plan(
     locked_identity: tuple[str, str] | None = None,
     source_gateway=None,
     source_orchestrator=orchestrate_sources,
+    candidate_editor=None,
 ) -> dict:
     # occupied_loader/allocator are applied only after an interactive selection;
     # no unselected candidate may reserve a persistent or logical episode slot.
     del occupied_loader, allocator
+    if candidate_editor is not None:
+        return await _build_anchored_search_plan(
+            raw_query,
+            plan_id,
+            providers,
+            candidate_editor=candidate_editor,
+            locked_identity=locked_identity,
+        )
     budget = budget or PlanningBudget()
     parsed_input = classify_search_input(raw_query)
     if parsed_input.kind in {"invalid_link", "unsupported_text"}:
@@ -1899,8 +2507,6 @@ async def build_confirmable_search_plan(
 
     by_key = {item.candidate_key: item for item in candidates}
     ranked = []
-    if budget.remaining_for("candidate_finalize") <= 0:
-        raise SearchPlanningError("planning_timed_out", ("candidate_finalize",))
     for score in ranked_scores:
         candidate = by_key[score.candidate_key]
         contract, entity, relation = _candidate_contract(

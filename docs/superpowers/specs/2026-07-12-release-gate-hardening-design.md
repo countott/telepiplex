@@ -2,11 +2,11 @@
 
 ## Goal
 
-Close the three verified release blockers in the Telepiplex Feature platform without changing the Host API version or any Feature business behavior:
+Close the three verified release blockers in the telepiplex Feature platform without changing the Host API version or any Feature business behavior:
 
 1. A Provider update must not make an already active consumer newly blocked.
 2. An unspecified Feature `internal_error` must remain retryable instead of consuming the dead-letter poison budget.
-3. A Feature artifact must not contain or declare another Telepiplex Feature dependency through any supported packaging surface.
+3. A Feature artifact must not contain or declare another telepiplex Feature dependency through any supported packaging surface.
 
 ## Scope
 
@@ -24,7 +24,7 @@ This invariant applies equally to future Providers and is not special-cased for 
 
 ## Event Failure Classification
 
-Telepiplex only consumes the poison-attempt budget for explicit, deterministic terminal errors. `internal_error` is removed from that set because the SDK uses it as the safe envelope for every otherwise unclassified exception, including temporary database, filesystem, and adapter failures.
+telepiplex only consumes the poison-attempt budget for explicit, deterministic terminal errors. `internal_error` is removed from that set because the SDK uses it as the safe envelope for every otherwise unclassified exception, including temporary database, filesystem, and adapter failures.
 
 The existing explicit deterministic codes remain terminal. Transport errors, availability errors, timeouts, and `internal_error` leave the delivery pending and do not increment the poison budget. This does not change the event payload or RPC protocol.
 
@@ -36,13 +36,13 @@ The source builder adopts a fail-closed dependency policy.
 
 ### Requirements input
 
-`requirements-feature.txt` accepts only normalized named PEP 508 distribution requirements. The builder uses `packaging.requirements.Requirement` and accepts only successfully parsed requirements whose `url` is empty. It rejects pip directives and indirections such as `-r`, `-c`, `-e`, index/find-links options, local paths, bare VCS links, and named URL requirements. This prevents dependency content from escaping the file that Telepiplex validates. Telepiplex declares `packaging>=24,<27` explicitly so the same parser is available in Docker and release environments.
+`requirements-feature.txt` accepts only normalized named PEP 508 distribution requirements. The builder uses `packaging.requirements.Requirement` and accepts only successfully parsed requirements whose `url` is empty. It rejects pip directives and indirections such as `-r`, `-c`, `-e`, index/find-links options, local paths, bare VCS links, and named URL requirements. This prevents dependency content from escaping the file that telepiplex validates. telepiplex declares `packaging>=24,<27` explicitly so the same parser is available in Docker and release environments.
 
 Every accepted named requirement is normalized. Any `telepiplex-*` distribution other than `telepiplex-plugin-sdk` is rejected.
 
 ### Plugin metadata
 
-After building `plugin.whl`, the builder reads its `.dist-info/METADATA` and validates every `Requires-Dist` entry with the same Telepiplex distribution rule. This closes dependencies declared in `pyproject.toml` rather than `requirements-feature.txt`.
+After building `plugin.whl`, the builder reads its `.dist-info/METADATA` and validates every `Requires-Dist` entry with the same telepiplex distribution rule. This closes dependencies declared in `pyproject.toml` rather than `requirements-feature.txt`.
 
 ### Final wheelhouse
 
@@ -65,7 +65,7 @@ TDD covers each release blocker:
 2. Deliver an event through a client that returns transient `internal_error` before succeeding, assert the event remains pending without dead-letter attempt consumption and later succeeds.
 3. Assert requirements indirection and URL/path forms are rejected; assert sibling `Requires-Dist` metadata and sibling wheelhouse contents are rejected; retain a positive build test for ordinary dependencies and the SDK.
 
-After targeted tests pass, verification includes the full Telepiplex unittest and pytest suites, `pip check`, fresh `.tpx` builds for all four Features, artifact verification, same-process installation, dependency protection, shutdown/restore, unchanged Telepiplex PID, and clean Git worktrees.
+After targeted tests pass, verification includes the full telepiplex unittest and pytest suites, `pip check`, fresh `.tpx` builds for all four Features, artifact verification, same-process installation, dependency protection, shutdown/restore, unchanged telepiplex PID, and clean Git worktrees.
 
 ## Non-Goals
 

@@ -260,6 +260,66 @@ class TvdbAdapterTest(unittest.TestCase):
         self.assertEqual(result[0]["season_number"], 0)
         self.assertEqual(result[0]["episode_number"], 5)
 
+    @patch.object(tvdb, "_tvdb_get")
+    def test_series_episodes_follow_all_tvdb_pages(self, get_mock):
+        get_mock.side_effect = [{
+            "data": {
+                "episodes": [{
+                    "id": 100,
+                    "seasonNumber": 1,
+                    "number": 1,
+                }]
+            },
+            "links": {
+                "next": (
+                    "https://api4.thetvdb.com/v4/series/series-1/"
+                    "episodes/default?page=1"
+                ),
+            },
+        }, {
+            "data": {
+                "episodes": [{
+                    "id": 101,
+                    "seasonNumber": 1,
+                    "number": 2,
+                }]
+            },
+            "links": {"next": None},
+        }]
+
+        result = tvdb.get_tvdb_series_episodes("series-1")
+
+        self.assertEqual(
+            [item["tvdb_episode_id"] for item in result],
+            [100, 101],
+        )
+        self.assertEqual(
+            [call.kwargs["params"]["page"] for call in get_mock.call_args_list],
+            [0, 1],
+        )
+
+    @patch.object(tvdb, "_tvdb_get")
+    def test_series_episode_pagination_rejects_repeated_next_link(
+        self,
+        get_mock,
+    ):
+        repeated = (
+            "https://api4.thetvdb.com/v4/series/series-1/"
+            "episodes/default?page=1"
+        )
+        get_mock.side_effect = [{
+            "data": {"episodes": []},
+            "links": {"next": repeated},
+        }, {
+            "data": {"episodes": []},
+            "links": {"next": repeated},
+        }]
+
+        with self.assertRaises(tvdb.TvdbRequestError) as raised:
+            tvdb.get_tvdb_series_episodes("series-1")
+
+        self.assertEqual(raised.exception.code, "server_down")
+
 
 if __name__ == "__main__":
     unittest.main()

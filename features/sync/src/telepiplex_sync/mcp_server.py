@@ -43,7 +43,7 @@ def _prepare_or_apply(service, action, payload, confirmation_token=""):
 def create_plex_mcp(service, config):
     normalized = validate_mcp_config(config)
     mcp = FastMCP(
-        "Telepiplex Plex",
+        "telepiplex Plex",
         stateless_http=True,
         json_response=True,
         streamable_http_path=normalized["path"],

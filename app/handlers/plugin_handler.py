@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 import re
 import threading
 import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
-import init
+try:
+    import init
+except ModuleNotFoundError:  # pragma: no cover - package-imported test/runtime fallback
+    from app import init
 
 from app.runtime.plugin_manager import PluginOperationError
 from app.runtime.interaction_coordinator import TERMINAL_STATES
 from app.runtime.command_catalog import sync_bot_commands
+from app.runtime.poster_grid import build_poster_grid
+from app.runtime.telegram_text import bounded_photo_caption
 from app.handlers.interaction_handler import (
     CONFIG_OPERATION_TASKS_KEY,
     COORDINATOR_KEY,
@@ -35,7 +41,13 @@ _USAGE = (
     "/plugin status <plugin_id>\n"
     "/plugin doctor"
 )
-_SAFE_ACTIONS = {"send_message", "edit_message", "send_photo", "edit_photo"}
+_SAFE_ACTIONS = {
+    "send_message",
+    "edit_message",
+    "send_photo",
+    "edit_photo",
+    "send_photo_grid",
+}
 _HOST_UPDATE_CALLBACK_RE = re.compile(
     r"^host-plugin-update:(?P<action>confirm|decline):"
     r"(?P<reference>[a-z][a-z0-9-]{0,63}@\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$"
@@ -592,8 +604,25 @@ def _with_rendered_keyboard(route, result: dict, operation: dict) -> dict:
             if photo_url is False:
                 return normalized
             details["photo_url"] = photo_url
+            details.pop("poster_items", None)
+        elif action.get("kind") == "send_photo_grid":
+            poster_items = _poster_items(data)
+            if poster_items is False:
+                return normalized
+            details["poster_items"] = poster_items
+            details.pop("photo_url", None)
         else:
             details.pop("photo_url", None)
+            details.pop("poster_items", None)
+        parse_mode = (
+            data.get("parse_mode")
+            if isinstance(data, dict)
+            else None
+        )
+        if parse_mode in {"HTML", "MarkdownV2"}:
+            details["parse_mode"] = parse_mode
+        else:
+            details.pop("parse_mode", None)
         normalized["details"] = details
         return normalized
     return normalized
@@ -874,11 +903,25 @@ async def _render_actions(
         if reply_markup is not None:
             kwargs["reply_markup"] = reply_markup
         photo_action = action["kind"] in {"send_photo", "edit_photo"}
+        grid_action = action["kind"] == "send_photo_grid"
         photo_url = _photo_url(action_data) if photo_action else None
+        poster_items = _poster_items(action_data) if grid_action else None
         if photo_url is False or (
             not photo_action
+            and not grid_action
             and isinstance(action_data, dict)
             and "photo_url" in action_data
+        ) or poster_items is False:
+            await _feature_feedback(
+                update,
+                "❌ Feature 返回了无效响应。",
+                prefer_edit=bool(getattr(update, "callback_query", None)),
+            )
+            return False, None, None
+        if (
+            not grid_action
+            and isinstance(action_data, dict)
+            and "poster_items" in action_data
         ):
             await _feature_feedback(
                 update,
@@ -905,13 +948,29 @@ async def _render_actions(
                 edited_source = True
             rendered_kind = "text"
         else:
-            caption = text
-            if len(caption) > 1024:
-                caption = caption[:1003].rstrip() + "\n…内容已截断"
+            caption, caption_parse_mode = bounded_photo_caption(
+                text,
+                parse_mode,
+            )
             media_kwargs = dict(kwargs)
-            parse_mode = media_kwargs.pop("parse_mode", None)
+            media_kwargs.pop("parse_mode", None)
             try:
-                if action["kind"] == "send_photo":
+                if grid_action:
+                    photo_grid = await asyncio.to_thread(
+                        build_poster_grid,
+                        poster_items,
+                    )
+                    if caption_parse_mode:
+                        media_kwargs["parse_mode"] = caption_parse_mode
+                    sent = await update.effective_message.reply_photo(
+                        photo=photo_grid,
+                        caption=caption,
+                        **media_kwargs,
+                    )
+                    edited_source = False
+                elif action["kind"] == "send_photo":
+                    if caption_parse_mode:
+                        media_kwargs["parse_mode"] = caption_parse_mode
                     sent = await update.effective_message.reply_photo(
                         photo=photo_url,
                         caption=caption,
@@ -923,7 +982,7 @@ async def _render_actions(
                         media=InputMediaPhoto(
                             media=photo_url,
                             caption=caption,
-                            parse_mode=parse_mode,
+                            parse_mode=caption_parse_mode,
                         ),
                         **media_kwargs,
                     )
@@ -982,7 +1041,12 @@ def _has_explicit_control(data) -> bool:
 def _keyboard_markup(route, data):
     if data is None:
         return None
-    if not isinstance(data, dict) or set(data) - {"keyboard", "photo_url"}:
+    if not isinstance(data, dict) or set(data) - {
+        "keyboard",
+        "photo_url",
+        "poster_items",
+        "parse_mode",
+    }:
         return False
     keyboard = data.get("keyboard")
     if keyboard is None:
@@ -1024,6 +1088,47 @@ def _photo_url(data):
     ):
         return False
     return photo_url
+
+
+def _poster_items(data):
+    if not isinstance(data, dict):
+        return False
+    raw_items = data.get("poster_items")
+    if not isinstance(raw_items, list) or not 1 <= len(raw_items) <= 6:
+        return False
+    result = []
+    for index, item in enumerate(raw_items, 1):
+        if not isinstance(item, dict):
+            return False
+        try:
+            number = int(item.get("number"))
+        except (TypeError, ValueError):
+            return False
+        title = " ".join(str(item.get("title") or "").split())
+        poster_url = str(item.get("poster_url") or "").strip()
+        if (
+            number != index
+            or not title
+            or len(title) > 200
+            or (
+                poster_url
+                and (
+                    not poster_url.startswith("https://")
+                    or len(poster_url) > 2048
+                    or any(
+                        character.isspace()
+                        for character in poster_url
+                    )
+                )
+            )
+        ):
+            return False
+        result.append({
+            "number": number,
+            "title": title,
+            "poster_url": poster_url,
+        })
+    return result
 
 
 async def _feature_feedback(update, text: str, *, prefer_edit: bool = False):

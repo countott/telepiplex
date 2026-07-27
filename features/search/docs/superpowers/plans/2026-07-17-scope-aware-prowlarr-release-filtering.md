@@ -6,7 +6,7 @@
 
 **Architecture:** `search` keeps input parsing, canonical identity resolution, release correctness, and release quality as separate units. A new `release_gate.py` classifies every Prowlarr result against confirmed `media_metadata`; only eligible results enter the existing configurable quality scorer. `rename` adds a focused `content_probe.py` that derives one identity query from the download root and carries file-tree shape separately.
 
-**Tech Stack:** Python 3.12.13, stdlib `unittest`, Telepiplex plugin SDK 1.1.0, requests, PyYAML.
+**Tech Stack:** Python 3.12.13, stdlib `unittest`, telepiplex plugin SDK 1.1.0, requests, PyYAML.
 
 ## Global Constraints
 
@@ -1126,7 +1126,7 @@ git -C /Users/young/Documents/telepiplex/features/rename push origin feature/ren
 
 Expected: both pushes succeed.
 
-- [ ] **Step 3: Create annotated release tags on the current Telepiplex release-infrastructure commit**
+- [ ] **Step 3: Create annotated release tags on the current telepiplex release-infrastructure commit**
 
 ```bash
 git -C /Users/young/Documents/telepiplex tag -a search-v1.4.0 -m "Release search 1.4.0"

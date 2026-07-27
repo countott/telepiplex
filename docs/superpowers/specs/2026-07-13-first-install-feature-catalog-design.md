@@ -12,21 +12,21 @@ Let a normal Telegram user discover and install released Features without openin
 
 - `/plugin` without arguments becomes the Feature overview instead of printing only syntax.
 - The overview lists installed Features with version and state.
-- For every catalog Feature that is not installed, Telepiplex selects the newest stable version compatible with the current Host API.
+- For every catalog Feature that is not installed, telepiplex selects the newest stable version compatible with the current Host API.
 - Installable candidates receive an `安装 <plugin> <version>` button.
 - Candidates whose required capabilities are not yet available remain visible, but their button is withheld and the prerequisite Feature or missing capability is explained.
-- Clicking an install button is the explicit authorization point. Telepiplex never installs a Feature merely because it appears in the catalog.
+- Clicking an install button is the explicit authorization point. telepiplex never installs a Feature merely because it appears in the catalog.
 - Existing `/plugin install name@version` and absolute `.tpx` paths remain supported as operator fallbacks.
 
 ## Catalog contract
 
-The release catalog continues to pin every artifact URL and SHA-256. Each release entry additionally publishes the manifest-derived `provides` and `requires` capability lists. Telepiplex does not trust UI labels for activation; the existing `.tpx` verification and PluginManager install transaction remain authoritative.
+The release catalog continues to pin every artifact URL and SHA-256. Each release entry additionally publishes the manifest-derived `provides` and `requires` capability lists. telepiplex does not trust UI labels for activation; the existing `.tpx` verification and PluginManager install transaction remain authoritative.
 
 Catalog discovery ignores prereleases, incompatible Host API ranges, malformed versions, invalid digests, and invalid capability metadata. If several compatible stable versions exist, the highest semantic version is selected.
 
 ## Dependency-aware choices
 
-Telepiplex compares a candidate's `requires` list with the currently routed capabilities. For each missing capability it looks for another selected catalog candidate that provides it. This produces two groups:
+telepiplex compares a candidate's `requires` list with the currently routed capabilities. For each missing capability it looks for another selected catalog candidate that provides it. This produces two groups:
 
 - ready candidates with install buttons;
 - blocked candidates with prerequisite Feature names or missing capability names.
@@ -35,7 +35,7 @@ There is no bulk install button. The user installs a ready provider first, then 
 
 ## Failure and cache behavior
 
-Opening `/plugin` attempts a remote refresh. If refresh fails but a previously validated catalog exists, the overview uses that cache and states no false success. If neither remote data nor a valid cache is available, Telepiplex returns a stable catalog-unavailable message plus the manual install syntax. Telepiplex and installed Features continue running.
+Opening `/plugin` attempts a remote refresh. If refresh fails but a previously validated catalog exists, the overview uses that cache and states no false success. If neither remote data nor a valid cache is available, telepiplex returns a stable catalog-unavailable message plus the manual install syntax. telepiplex and installed Features continue running.
 
 Install callbacks are reserved under `host-plugin-install:` and are handled before dynamic Feature callbacks. They require `allowed_user`, validate the complete `name@version` reference, show progress, call `PluginManager.install`, and render only sanitized errors.
 

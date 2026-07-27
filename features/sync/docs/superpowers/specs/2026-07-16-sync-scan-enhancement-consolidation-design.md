@@ -206,7 +206,7 @@ MCP 继续使用 Streamable HTTP。非 loopback 监听必须配置 Bearer Token�
 - TMDB 或 Fanart.tv 不可用只影响对应增强，不能阻止扫描和其余增强。
 - Job claim 保持原子性，完成态 Job 不重新打开。
 - 进程停止时运行中的新 Job 标记为 `interrupted`。
-- 有 Telepiplex `operation_id` 的协调任务保持现有所有权语义：重启后报告中断，不静默重放远端 Plex 写操作。
+- 有 telepiplex `operation_id` 的协调任务保持现有所有权语义：重启后报告中断，不静默重放远端 Plex 写操作。
 - 无协调身份的历史 Job 可以由显式重试继续。
 - 重试复用已完成步骤和 target 结果，从第一个未完成增强继续。
 

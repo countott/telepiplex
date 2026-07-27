@@ -1,6 +1,6 @@
 # Runtime Recovery and Metadata Reliability Implementation Plan
 
-> Mac-local implementation only. The Telepiplex workspace must not use Git;
+> Mac-local implementation only. The telepiplex workspace must not use Git;
 > publication remains a Syncthing-to-Unraid handoff.
 
 ## 1. Lock behavioral contracts with failing tests

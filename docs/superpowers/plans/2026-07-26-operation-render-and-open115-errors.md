@@ -14,7 +14,7 @@ pure module, and reuses one structured failure object across logs, events,
 operation status, job persistence, and notifications.
 
 **Tech Stack:** Python 3.12, asyncio, python-telegram-bot 22.3, SQLite
-InteractionCoordinator, Telepiplex Feature SDK, pytest/unittest.
+InteractionCoordinator, telepiplex Feature SDK, pytest/unittest.
 
 ## Global constraints
 

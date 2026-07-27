@@ -34,6 +34,20 @@ class InputContractTest(unittest.TestCase):
             ("episode", 1, 2),
         )
 
+    def test_whole_series_words_set_scope_without_polluting_title(self):
+        for query in (
+            "黑暗荣耀 全季",
+            "黑暗荣耀 整剧",
+            "黑暗荣耀 整劇",
+            "黑暗荣耀 全剧",
+            "黑暗荣耀 全劇",
+        ):
+            with self.subTest(query=query):
+                parsed = classify_search_input(query)
+
+                self.assertEqual(parsed.scope, "whole_series")
+                self.assertEqual(parsed.title, "黑暗荣耀")
+
     def test_ranges_and_number_words_are_rejected(self):
         for query in (
             "Title S01-S03",
@@ -57,6 +71,15 @@ class InputContractTest(unittest.TestCase):
 
         self.assertEqual(parsed.year, "1989")
         self.assertFalse(has_ambiguous_bare_number("蝙蝠侠 1989", parsed))
+
+    def test_quoted_pure_number_is_an_explicit_title_not_a_year(self):
+        for query in ('"1917"', "“1917”"):
+            with self.subTest(query=query):
+                parsed = classify_search_input(query)
+
+                self.assertEqual(parsed.raw_query, "1917")
+                self.assertEqual(parsed.title, "1917")
+                self.assertEqual(parsed.year, "")
 
     def test_unverified_title_suffix_is_recorded_without_guessing_its_role(self):
         batman = classify_search_input("蝙蝠侠1")
@@ -86,11 +109,37 @@ class InputContractTest(unittest.TestCase):
         self.assertEqual((season.link.media_type, season.link.scope), ("series", "season"))
         self.assertEqual((episode.link.media_type, episode.link.scope), ("series", "episode"))
 
+    def test_wikipedia_article_link_is_a_supported_exact_anchor(self):
+        parsed = classify_search_input(
+            "https://en.wikipedia.org/wiki/The_Grand_Budapest_Hotel"
+        )
+
+        self.assertEqual(parsed.kind, "link")
+        self.assertEqual(parsed.link.provider, "wikipedia")
+        self.assertEqual(
+            parsed.link.entity_id,
+            "en:The Grand Budapest Hotel",
+        )
+        self.assertEqual(parsed.link.scope, "work")
+
     def test_malformed_supported_link_does_not_become_text_search(self):
         parsed = classify_search_input("https://thetvdb.com/search?query=glory")
 
         self.assertEqual(parsed.kind, "invalid_link")
         self.assertEqual(parsed.reason, "unsupported_metadata_link")
+
+    def test_provider_lookalike_domains_are_not_trusted_as_metadata_links(self):
+        for url in (
+            "https://thetvdb.com.evil.example/series/411469",
+            "https://eviltvdb.com/series/411469",
+            "https://movie.douban.com.evil.example/subject/35314632/",
+            "https://fakedouban.com/subject/35314632/",
+        ):
+            with self.subTest(url=url):
+                parsed = classify_search_input(url)
+
+                self.assertNotEqual(parsed.kind, "link")
+                self.assertNotEqual(parsed.kind, "invalid_link")
 
 
 if __name__ == "__main__":

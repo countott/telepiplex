@@ -9,7 +9,7 @@ Owner: `features/search`
 ## Goal
 
 Make ordinary title, explicit season/episode, and standalone episode-title
-queries survive noisy source APIs without weakening Telepiplex's
+queries survive noisy source APIs without weakening telepiplex's
 source-verification requirements.
 
 This design supersedes the earlier rule that rejected a request solely because
@@ -48,7 +48,7 @@ volumes for confirmation.
 ### Standalone episode title
 
 The official TVDB v4 `/search` endpoint searches series, movies, people, and
-companies; it does not provide an episode-title entity search. Telepiplex
+companies; it does not provide an episode-title entity search. telepiplex
 therefore does not invent a direct TVDB episode lookup.
 
 For a standalone episode title:

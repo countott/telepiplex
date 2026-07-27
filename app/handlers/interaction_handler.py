@@ -14,6 +14,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - package-imported test/runtime fallback
     from app import init
 from app.runtime.interaction_coordinator import TERMINAL_STATES, OperationRecord
+from app.runtime.poster_grid import build_poster_grid
+from app.runtime.telegram_text import bounded_photo_caption
 from app.utils.log_sanitizer import sanitize_log_text
 
 
@@ -456,18 +458,38 @@ async def _render_operation_locked(application, _router, record: OperationRecord
         f"任务状态：{record.state}\n阶段：{record.stage or '-'}"
     )
     markup = operation_markup(record, _router)
+    poster_items = _operation_poster_items(record.details)
     photo_url = _operation_photo_url(record.details)
-    if photo_url:
-        caption = text
-        if len(caption) > 1024:
-            caption = caption[:1003].rstrip() + "\n…内容已截断"
+    if poster_items or photo_url:
+        parse_mode = (
+            record.details.get("parse_mode")
+            if record.details.get("parse_mode") in {
+                "HTML",
+                "MarkdownV2",
+            }
+            else None
+        )
+        caption, parse_mode = bounded_photo_caption(text, parse_mode)
+
+        async def photo_media():
+            if poster_items:
+                return await asyncio.to_thread(
+                    build_poster_grid,
+                    poster_items,
+                )
+            return photo_url
+
         if record.message_id is not None:
             if record.message_kind == "photo":
                 try:
                     await application.bot.edit_message_media(
                         chat_id=record.chat_id,
                         message_id=record.message_id,
-                        media=InputMediaPhoto(media=photo_url, caption=caption),
+                        media=InputMediaPhoto(
+                            media=await photo_media(),
+                            caption=caption,
+                            parse_mode=parse_mode,
+                        ),
                         reply_markup=markup,
                     )
                     return record.message_id
@@ -486,11 +508,16 @@ async def _render_operation_locked(application, _router, record: OperationRecord
             else:
                 await _clear_message_keyboard(application, record)
         try:
+            send_photo_kwargs = {
+                "chat_id": record.chat_id,
+                "photo": await photo_media(),
+                "caption": caption,
+                "reply_markup": markup,
+            }
+            if parse_mode:
+                send_photo_kwargs["parse_mode"] = parse_mode
             message = await application.bot.send_photo(
-                chat_id=record.chat_id,
-                photo=photo_url,
-                caption=caption,
-                reply_markup=markup,
+                **send_photo_kwargs,
             )
         except Exception as exc:
             _log(
@@ -590,6 +617,46 @@ def _operation_photo_url(details) -> str:
     ):
         return photo_url
     return ""
+
+
+def _operation_poster_items(details) -> list[dict]:
+    if not isinstance(details, Mapping):
+        return []
+    raw_items = details.get("poster_items")
+    if not isinstance(raw_items, list) or not 1 <= len(raw_items) <= 6:
+        return []
+    result = []
+    for index, item in enumerate(raw_items, 1):
+        if not isinstance(item, Mapping):
+            return []
+        try:
+            number = int(item.get("number"))
+        except (TypeError, ValueError):
+            return []
+        title = " ".join(str(item.get("title") or "").split())
+        poster_url = str(item.get("poster_url") or "").strip()
+        if (
+            number != index
+            or not title
+            or (
+                poster_url
+                and (
+                    not poster_url.startswith("https://")
+                    or len(poster_url) > 2048
+                    or any(
+                        character.isspace()
+                        for character in poster_url
+                    )
+                )
+            )
+        ):
+            return []
+        result.append({
+            "number": number,
+            "title": title[:200],
+            "poster_url": poster_url,
+        })
+    return result
 
 
 async def recover_active_operations(application, router, coordinator):

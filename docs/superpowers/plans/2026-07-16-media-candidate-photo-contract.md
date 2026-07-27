@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Extend Telepiplex so search can safely render poster-backed candidate cards and carry the approved title-language fields through `media_metadata v1`.
+**Goal:** Extend telepiplex so search can safely render poster-backed candidate cards and carry the approved title-language fields through `media_metadata v1`.
 
-**Architecture:** Keep Telegram transport and validation in Telepiplex. Feature responses remain declarative actions; Telepiplex validates HTTPS poster URLs and namespaced keyboards, renders media, and falls back to text without losing operation state. The SDK keeps schema version 1 and validates optional title-policy fields only when present.
+**Architecture:** Keep Telegram transport and validation in telepiplex. Feature responses remain declarative actions; telepiplex validates HTTPS poster URLs and namespaced keyboards, renders media, and falls back to text without losing operation state. The SDK keeps schema version 1 and validates optional title-policy fields only when present.
 
-**Tech Stack:** Python 3.12, python-telegram-bot, unittest, Telepiplex plugin SDK.
+**Tech Stack:** Python 3.12, python-telegram-bot, unittest, telepiplex plugin SDK.
 
 ## Global Constraints
 
@@ -14,7 +14,7 @@
 - Existing `send_message` and `edit_message` behavior must remain unchanged.
 - Only HTTPS poster URLs up to 2048 characters are accepted.
 - A failed poster action must fall back once to a text message with the same keyboard.
-- No media scoring or provider logic belongs in Telepiplex.
+- No media scoring or provider logic belongs in telepiplex.
 
 ---
 
@@ -238,7 +238,7 @@ if photo_url.startswith("https://"):
 
 On any media error, log the exception class and execute the existing text edit/send path. Extend `_with_rendered_keyboard` so the last action copies a validated `photo_url` into operation details.
 
-- [ ] **Step 4: Run Telepiplex handler tests**
+- [ ] **Step 4: Run telepiplex handler tests**
 
 Run: `python3 -m unittest tests.test_interaction_handler tests.test_plugin_handler -v`
 
@@ -251,13 +251,13 @@ git add app/handlers/plugin_handler.py app/handlers/interaction_handler.py tests
 git commit -m "feat(runtime): render poster-backed operations"
 ```
 
-### Task 4: Verify the Telepiplex Branch
+### Task 4: Verify the telepiplex Branch
 
 **Files:**
 - Verify only.
 
 **Interfaces:**
-- Produces: a Telepiplex branch that can be consumed by search without behavior regressions.
+- Produces: a telepiplex branch that can be consumed by search without behavior regressions.
 
 - [ ] **Step 1: Run targeted tests**
 
@@ -265,7 +265,7 @@ Run: `python3 -m unittest tests.test_host_media_metadata tests.test_plugin_handl
 
 Expected: PASS.
 
-- [ ] **Step 2: Run the full Telepiplex suite**
+- [ ] **Step 2: Run the full telepiplex suite**
 
 Run: `python3 -m unittest discover -s tests -t . -v`
 

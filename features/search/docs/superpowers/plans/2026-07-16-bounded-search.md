@@ -6,7 +6,7 @@
 
 **Architecture:** Deterministic parsing and direct metadata links enter one request-scoped entity resolver. AI is optional and may only return a validated intent hint or one selected-candidate relation hypothesis. The service confirms an entity, then runs either the movie path or the TVDB-backed series scope state machine before building a disposable handoff contract.
 
-**Tech Stack:** Python 3.12, asyncio, unittest/pytest, requests, PyYAML, Telegram Feature action contract, GitHub Actions Feature/Telepiplex release workflows.
+**Tech Stack:** Python 3.12, asyncio, unittest/pytest, requests, PyYAML, Telegram Feature action contract, GitHub Actions Feature/telepiplex release workflows.
 
 ## Global Constraints
 
@@ -153,7 +153,7 @@
 - [ ] Remove registry construction, exact rehydration, upserts, and persistence error paths.
 - [ ] Run focused tests.
 
-### Task 8: Fix Telepiplex photo-to-status rendering
+### Task 8: Fix telepiplex photo-to-status rendering
 
 **Files:**
 - Modify: `/Users/young/Documents/telepiplex/app/handlers/plugin_handler.py`
@@ -165,9 +165,9 @@
 - Consumes: existing safe action kinds and operation details.
 
 - [ ] Write a failing regression test reproducing Telegram `BadRequest: There is no text in the message to edit`.
-- [ ] Run focused Telepiplex tests and verify failure.
+- [ ] Run focused telepiplex tests and verify failure.
 - [ ] Preserve media details through operation updates and send a new text message when the current message is photo-backed.
-- [ ] Run focused Telepiplex tests.
+- [ ] Run focused telepiplex tests.
 
 ### Task 9: Version, verify, build, publish
 
@@ -179,12 +179,12 @@
 - Modify: relevant version contract tests.
 
 **Interfaces:**
-- Produces: search `1.3.0`, Telepiplex `1.2.1`, immutable Feature/Telepiplex tags, GitHub Releases, GHCR image, and updated catalog.
+- Produces: search `1.3.0`, telepiplex `1.2.1`, immutable Feature/telepiplex tags, GitHub Releases, GHCR image, and updated catalog.
 
-- [ ] Bump search to `1.3.0` and Telepiplex to `1.2.1`.
+- [ ] Bump search to `1.3.0` and telepiplex to `1.2.1`.
 - [ ] Run search focused tests, full tests, compile, dependency check, and `git diff --check`.
-- [ ] Run Telepiplex focused tests, full tests, compile, dependency check, config-template comparison, and `git diff --check`.
+- [ ] Run telepiplex focused tests, full tests, compile, dependency check, config-template comparison, and `git diff --check`.
 - [ ] Build and verify `search-1.3.0.tpx`.
 - [ ] Commit and push `feature/search` and `main`.
-- [ ] Create and push `telepiplex-v1.2.1` and `search-v1.3.0` tags from the Telepiplex release-infrastructure commit.
+- [ ] Create and push `telepiplex-v1.2.1` and `search-v1.3.0` tags from the telepiplex release-infrastructure commit.
 - [ ] Monitor GitHub Actions until both releases and the catalog update succeed.

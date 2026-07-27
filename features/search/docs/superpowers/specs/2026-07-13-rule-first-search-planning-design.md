@@ -1,4 +1,4 @@
-# Telepiplex Media Search 规则优先规划设计
+# telepiplex Media Search 规则优先规划设计
 
 日期：2026-07-13
 

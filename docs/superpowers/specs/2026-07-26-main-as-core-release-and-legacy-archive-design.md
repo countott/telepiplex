@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make `main` the only active Telepiplex Core/Host source line, guarantee that
+Make `main` the only active telepiplex Core/Host source line, guarantee that
 the default `latest` image is produced from code already contained in `main`,
 and retire the obsolete `feature/telepiplex-core` branch without losing its
 unique history.

@@ -14,7 +14,7 @@ existing scope parser with textual season evidence, and enforce callback
 keyboard cleanup in the Host action renderer.
 
 **Tech Stack:** Python 3.12, asyncio, unittest, pytest, python-telegram-bot
-22.3, Telepiplex Feature operation API.
+22.3, telepiplex Feature operation API.
 
 ## Global constraints
 

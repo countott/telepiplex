@@ -2,33 +2,33 @@
 
 ## Goal
 
-Decouple Telepiplex image releases from Feature releases so a Feature update can be
-discovered and installed through Telegram without moving the Telepiplex `latest`
-image or restarting an unchanged Telepiplex container.
+Decouple telepiplex image releases from Feature releases so a Feature update can be
+discovered and installed through Telegram without moving the telepiplex `latest`
+image or restarting an unchanged telepiplex container.
 
 ## Release identities
 
-Telepiplex uses three independent identities:
+telepiplex uses three independent identities:
 
-- Telepiplex image: `telepiplex-v<semver>`, for example `telepiplex-v1.0.6`.
+- telepiplex image: `telepiplex-v<semver>`, for example `telepiplex-v1.0.6`.
 - Feature artifact: `<plugin-id>-v<semver>`, for example
   `search-v1.0.2`.
 - Catalog revision: the commit at the head of the dedicated `catalog` branch.
 
 The Feature version remains the immutable identity stored in each Feature's
 `manifest.yaml`. Any source or artifact change requires a version bump. The
-catalog revision is not a second Feature version and does not move the Telepiplex
+catalog revision is not a second Feature version and does not move the telepiplex
 image tag.
 
-## Telepiplex release
+## telepiplex release
 
-Pushing `telepiplex-v<semver>` runs Telepiplex tests and builds only:
+Pushing `telepiplex-v<semver>` runs telepiplex tests and builds only:
 
 - `ghcr.io/<owner>/telepiplex:<semver>`
 - `ghcr.io/<owner>/telepiplex:latest`
 
-The Telepiplex workflow does not build Feature artifacts and does not create a
-GitHub Release. Therefore a Telepiplex-only release cannot replace the GitHub
+The telepiplex workflow does not build Feature artifacts and does not create a
+GitHub Release. Therefore a telepiplex-only release cannot replace the GitHub
 `releases/latest/download/catalog.yaml` compatibility endpoint.
 
 Existing `platform-v*` tags and releases remain immutable historical records.
@@ -36,8 +36,8 @@ The workflow no longer accepts new `platform-v*` tags.
 
 ## Feature release
 
-The Telepiplex release-infrastructure commit owns the Feature release workflow.
-Feature release tags point to that Telepiplex commit and use one of these forms:
+The telepiplex release-infrastructure commit owns the Feature release workflow.
+Feature release tags point to that telepiplex commit and use one of these forms:
 
 - `download-v<semver>`
 - `search-v<semver>`
@@ -65,7 +65,7 @@ Each Feature GitHub Release contains:
 - the complete resulting `catalog.yaml`;
 - `catalog.yaml.sha256`.
 
-Including the catalog assets preserves compatibility for deployed Telepiplex
+Including the catalog assets preserves compatibility for deployed telepiplex
 configurations that still use
 `https://github.com/countott/telepiplex/releases/latest/download/catalog.yaml`.
 
@@ -103,16 +103,16 @@ Release available for a safe retry and does not corrupt the previous catalog.
 
 ## Telegram update flow
 
-Telepiplex refreshes the catalog at startup, on the existing interval, and when the
+telepiplex refreshes the catalog at startup, on the existing interval, and when the
 operator opens `/plugin`. It compares the installed Feature semver with the
 newest compatible stable catalog semver.
 
 For a search-only update:
 
 1. bump `search` from `1.0.1` to `1.0.2`;
-2. push `search-v1.0.2` at the release-infrastructure Telepiplex commit;
+2. push `search-v1.0.2` at the release-infrastructure telepiplex commit;
 3. publish `search-1.0.2.tpx` and update the catalog;
-4. leave the Telepiplex `latest` image at `1.0.5`;
+4. leave the telepiplex `latest` image at `1.0.5`;
 5. Telegram offers `search 1.0.1 -> 1.0.2` and updates only after the
    authorized user confirms.
 
@@ -121,9 +121,9 @@ catalog refresh retains the last validated local cache.
 
 ## Initial migration
 
-The existing `platform-v1.0.5` Release and Telepiplex image remain unchanged. After
+The existing `platform-v1.0.5` Release and telepiplex image remain unchanged. After
 the new workflows are pushed, publish these tags sequentially from the same
-Telepiplex release-infrastructure commit:
+telepiplex release-infrastructure commit:
 
 - `download-v1.0.1`
 - `search-v1.0.1`
@@ -139,8 +139,8 @@ do not change during migration, Telegram does not report false updates.
 
 Automated tests cover tag parsing, tag-to-branch mapping, manifest-version
 matching, immutable identity rejection, preservation of unrelated catalog
-entries, deterministic checksum output, Telepiplex-only workflow behavior,
+entries, deterministic checksum output, telepiplex-only workflow behavior,
 read/write job isolation, failure-closed probes, optimistic non-fast-forward
 retry, catalog compatibility assets, and both default catalog URLs. Publication
 verification checks all four GitHub Releases, catalog branch contents, SHA-256
-values, source commits, and unchanged Telepiplex `latest` identity.
+values, source commits, and unchanged telepiplex `latest` identity.

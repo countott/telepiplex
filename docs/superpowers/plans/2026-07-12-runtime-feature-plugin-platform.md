@@ -4,7 +4,7 @@
 
 **Goal:** Deliver a host-only Docker runtime that installs, supervises, routes, upgrades, drains, rolls back, and removes versioned Feature subprocesses without restarting host.
 
-**Architecture:** Telepiplex owns Telegram and a durable plugin control plane. Every Feature is installed from a verified `.tpx` artifact into a private venv, runs as a subprocess, and communicates through bounded NDJSON over a Unix socket. This plan delivers the host platform and a reference echo Feature; the four business Feature migrations each receive a follow-on branch plan after this contract is executable.
+**Architecture:** telepiplex owns Telegram and a durable plugin control plane. Every Feature is installed from a verified `.tpx` artifact into a private venv, runs as a subprocess, and communicates through bounded NDJSON over a Unix socket. This plan delivers the host platform and a reference echo Feature; the four business Feature migrations each receive a follow-on branch plan after this contract is executable.
 
 **Tech Stack:** Python 3.12, python-telegram-bot 22.3, PyYAML, jsonschema, SQLite, Unix domain sockets, `venv`, `pip --no-index`, unittest/pytest, Docker.
 
@@ -566,7 +566,7 @@ git add examples/echo_feature tests/test_plugin_runtime_e2e.py
 git commit -m "test(runtime): prove no-restart Feature lifecycle"
 ```
 
-### Task 10: Telepiplex-only Docker runtime and full verification
+### Task 10: telepiplex-only Docker runtime and full verification
 
 **Files:**
 - Modify: `Dockerfile`
@@ -624,7 +624,7 @@ git commit -m "feat(runtime): ship host-only hot Feature runtime"
 
 ## Follow-on Migration Plans
 
-### Task 11: Feature-to-Telepiplex broker and durable event dispatcher
+### Task 11: Feature-to-telepiplex broker and durable event dispatcher
 
 **Files:**
 - Create: `app/runtime/runtime_broker.py`
@@ -645,7 +645,7 @@ git commit -m "feat(runtime): ship host-only hot Feature runtime"
 - [x] Deliver journaled events at least once and ACK only successful handlers.
 - [x] Keep failed deliveries pending across Feature/process restarts.
 - [x] Start broker before restoring Features and stop it after Features drain.
-- [x] Verify the echo E2E still keeps the Telepiplex PID unchanged.
+- [x] Verify the echo E2E still keeps the telepiplex PID unchanged.
 
 ### Task 12: Typed Telegram session gateway
 
@@ -660,7 +660,7 @@ git commit -m "feat(runtime): ship host-only hot Feature runtime"
 - [x] Route callback namespaces through immutable current routes.
 - [x] Validate inline keyboard actions and reject cross-Feature callback data.
 - [x] Clear sessions on explicit completion, Feature disable, or route loss.
-- [x] Keep Telepiplex commands available while a Feature session is active.
+- [x] Keep telepiplex commands available while a Feature session is active.
 
 ### Task 13: Source-branch artifact builder
 
@@ -671,7 +671,7 @@ git commit -m "feat(runtime): ship host-only hot Feature runtime"
 - [x] Build the Feature wheel and released SDK wheel from source.
 - [x] Bundle all Feature dependencies for offline runtime installation.
 - [x] Record repository, source branch, and exact commit in the manifest.
-- [x] Reject dirty worktrees and forbidden imports of Telepiplex, `init`, or Telegram.
+- [x] Reject dirty worktrees and forbidden imports of telepiplex, `init`, or Telegram.
 - [x] Produce a verified immutable `.tpx` through the same artifact verifier.
 
 After this plan is green, write and execute one plan per source branch in this

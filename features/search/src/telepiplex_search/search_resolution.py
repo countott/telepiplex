@@ -78,6 +78,20 @@ def _parse_number_token(value: str) -> int:
 
 CHINESE_NUMBER_PATTERN = r"\d+|[零〇一二两三四五六七八九十]+"
 SEASON_EPISODE_WORD_PATTERN = r"(?:\d+)"
+_QUOTED_NUMERIC_TITLE = re.compile(
+    r'^(?:"(?P<ascii>(?:19|20)\d{2})"|“(?P<curly>(?:19|20)\d{2})”)$'
+)
+
+
+def quoted_numeric_title(value: str) -> str:
+    match = _QUOTED_NUMERIC_TITLE.fullmatch(
+        _collapse_spaces(value)
+    )
+    return (
+        (match.group("ascii") or match.group("curly"))
+        if match
+        else ""
+    )
 
 
 def _strip_scope_text(text: str) -> str:
@@ -89,6 +103,7 @@ def _strip_scope_text(text: str) -> str:
         rf"第?\s*(?:{CHINESE_NUMBER_PATTERN})\s*季",
         rf"第\s*(?:{CHINESE_NUMBER_PATTERN})\s*[集话話]",
         rf"(?i)\bseason\s*(?:{SEASON_EPISODE_WORD_PATTERN})\b",
+        r"全集|全季|整季|整剧|整劇|全剧|全劇",
     ]
     for pattern in patterns:
         text = re.sub(pattern, " ", text)
@@ -97,6 +112,9 @@ def _strip_scope_text(text: str) -> str:
 
 def parse_search_intent(raw_query: str) -> dict:
     query = _collapse_spaces(raw_query)
+    explicit_numeric_title = quoted_numeric_title(query)
+    if explicit_numeric_title:
+        query = explicit_numeric_title
     intent = {
         "raw_query": query,
         "title": query,
@@ -106,7 +124,11 @@ def parse_search_intent(raw_query: str) -> dict:
         "year": "",
     }
 
-    year_match = re.search(r"\b(19\d{2}|20\d{2})\b", query)
+    year_match = (
+        None
+        if explicit_numeric_title
+        else re.search(r"\b(19\d{2}|20\d{2})\b", query)
+    )
     if year_match:
         intent["year"] = year_match.group(1)
 
@@ -147,7 +169,11 @@ def parse_search_intent(raw_query: str) -> dict:
         )
         return intent
 
-    if re.search(r"全集|全季|整季", query, re.IGNORECASE):
+    if re.search(
+        r"全集|全季|整季|整剧|整劇|全剧|全劇",
+        query,
+        re.IGNORECASE,
+    ):
         intent.update({"scope": "whole_series", "title": _strip_scope_text(query)})
 
     return intent

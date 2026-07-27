@@ -40,7 +40,7 @@
 - [x] Write failing tests proving migrated config is visible to the new shadow process, failed activation restores config/template, and feedback lists only added key paths.
 - [x] Implement activation-time atomic config write and rollback.
 - [x] Add `config_added_keys` to successful update details and Telegram output.
-- [x] Run focused tests, then the full Telepiplex suite and compilation.
+- [x] Run focused tests, then the full telepiplex suite and compilation.
 - [x] Commit locally without pushing.
 
 ### Task 3: Review hardening

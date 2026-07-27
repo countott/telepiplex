@@ -9,7 +9,7 @@ Owner: `features/search`
 ## Goal
 
 Make the OpenAI-compatible source orchestrator work with DeepSeek V4
-thinking-mode tool calls without weakening Telepiplex's local tool validation,
+thinking-mode tool calls without weakening telepiplex's local tool validation,
 and preserve provider error details instead of collapsing every failure into
 `ai_unavailable`.
 
@@ -92,7 +92,7 @@ history with these fields preserved:
 - `reasoning_content`;
 - `tool_calls`.
 
-If a tool-call message has `content: null`, Telepiplex stores an empty string
+If a tool-call message has `content: null`, telepiplex stores an empty string
 in history while preserving `reasoning_content` and `tool_calls`.
 
 ## Provider error contract

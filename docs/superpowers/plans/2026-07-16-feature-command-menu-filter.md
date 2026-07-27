@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Filter Telepiplex `/start` and Telegram command menus down to independent Feature tasks while retaining aliases and callable hidden routes.
+**Goal:** Filter telepiplex `/start` and Telegram command menus down to independent Feature tasks while retaining aliases and callable hidden routes.
 
-**Architecture:** Extend `CommandDeclaration` with an optional `menu_visible` flag, then centralize visibility decisions in `command_catalog.py`. Explicit manifest values win; legacy manifests use the approved name-based compatibility filter so already-published Feature 1.1.0 artifacts work with the new Telepiplex immediately.
+**Architecture:** Extend `CommandDeclaration` with an optional `menu_visible` flag, then centralize visibility decisions in `command_catalog.py`. Explicit manifest values win; legacy manifests use the approved name-based compatibility filter so already-published Feature 1.1.0 artifacts work with the new telepiplex immediately.
 
 **Tech Stack:** Python 3.12, dataclasses, PyYAML manifests, python-telegram-bot, pytest/unittest, GitHub Actions.
 
@@ -15,7 +15,7 @@
 - Hide `*_config`, `/auth`, and `/q` when legacy manifests omit `menu_visible`.
 - Hidden commands remain registered and callable.
 - `/start` and Telegram command menus must share exactly one filter.
-- Publish the next unused Telepiplex patch tag `telepiplex-v1.1.1` only after fresh verification.
+- Publish the next unused telepiplex patch tag `telepiplex-v1.1.1` only after fresh verification.
 
 ---
 
@@ -117,13 +117,13 @@ git add app/runtime/plugin_manifest.py app/runtime/command_catalog.py tests/test
 git commit -m "feat(runtime): filter advertised Feature commands"
 ```
 
-### Task 3: Verify, push, and publish Telepiplex 1.1.1
+### Task 3: Verify, push, and publish telepiplex 1.1.1
 
 **Files:**
 - Verify only.
 
 **Interfaces:**
-- Consumes: committed Telepiplex command filtering.
+- Consumes: committed telepiplex command filtering.
 - Produces: synchronized `origin/main`, GHCR `1.1.1`/`latest`, and public `telepiplex-v1.1.1` Release.
 
 - [ ] **Step 1: Run full local verification**
@@ -139,13 +139,13 @@ python -m pip check
 
 Expected: no failures, compile errors, whitespace errors, or broken requirements.
 
-- [ ] **Step 2: Push the Telepiplex branch and verify equality**
+- [ ] **Step 2: Push the telepiplex branch and verify equality**
 
 Run: `git push origin main`, fetch, then require `origin/main...HEAD` to report `0 0`.
 
 - [ ] **Step 3: Create and push the release tag**
 
-Create annotated tag `telepiplex-v1.1.1` at the verified Telepiplex commit and push it to `origin`.
+Create annotated tag `telepiplex-v1.1.1` at the verified telepiplex commit and push it to `origin`.
 
 - [ ] **Step 4: Monitor and verify publication**
 

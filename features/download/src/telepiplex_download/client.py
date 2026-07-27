@@ -60,7 +60,7 @@ class Open115Client:
             )
         return {
             "Authorization": f"Bearer {self.access_token}",
-            "User-Agent": "Telepiplex-Feature/1.0",
+            "User-Agent": "telepiplex-Feature/1.0",
         }
 
     def _request(self, method: str, path: str, *, params=None, data=None, retry=True):
@@ -106,7 +106,7 @@ class Open115Client:
         try:
             response = self.session.post(
                 f"{self.passport_url}/open/refreshToken",
-                headers={"User-Agent": "Telepiplex-Feature/1.0"},
+                headers={"User-Agent": "telepiplex-Feature/1.0"},
                 data={"refresh_token": self.refresh_token},
                 timeout=self.timeout,
             )
@@ -144,7 +144,7 @@ class Open115Client:
         try:
             response = self.session.post(
                 f"{self.passport_url}/open/authDeviceCode",
-                headers={"User-Agent": "Telepiplex-Feature/1.0"},
+                headers={"User-Agent": "telepiplex-Feature/1.0"},
                 data={
                     "client_id": app_id,
                     "code_challenge": challenge,
@@ -191,7 +191,7 @@ class Open115Client:
             try:
                 response = self.session.get(
                     "https://qrcodeapi.115.com/get/status/",
-                    headers={"User-Agent": "Telepiplex-Feature/1.0"},
+                    headers={"User-Agent": "telepiplex-Feature/1.0"},
                     params=params,
                     timeout=self.timeout,
                 )
@@ -219,7 +219,7 @@ class Open115Client:
         try:
             response = self.session.post(
                 f"{self.passport_url}/open/deviceCodeToToken",
-                headers={"User-Agent": "Telepiplex-Feature/1.0"},
+                headers={"User-Agent": "telepiplex-Feature/1.0"},
                 data={
                     "uid": authorization["uid"],
                     "code_verifier": authorization["code_verifier"],

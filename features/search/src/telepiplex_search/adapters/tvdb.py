@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 import time
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -545,18 +546,65 @@ def _normalize_episode(item: dict) -> dict:
     }
 
 
-def get_tvdb_series_episodes(series_id: str, season_type: str = "default", page: int = 0) -> list[dict]:
+def get_tvdb_series_episodes(
+    series_id: str,
+    season_type: str = "default",
+    page: int = 0,
+) -> list[dict]:
     series_id = str(series_id or "").strip()
     season_type = str(season_type or "default").strip()
     if not series_id:
         return []
 
-    data = _tvdb_get(f"/series/{series_id}/episodes/{season_type}", params={"page": int(page or 0)})
-    payload = data.get("data") if isinstance(data, dict) else {}
-    episodes = payload.get("episodes") if isinstance(payload, dict) else []
-    if not isinstance(episodes, list):
-        return []
-    return [_normalize_episode(item) for item in episodes if isinstance(item, dict)]
+    current_page = int(page or 0)
+    result = []
+    seen_next_links = set()
+    while True:
+        data = _tvdb_get(
+            f"/series/{series_id}/episodes/{season_type}",
+            params={"page": current_page},
+        )
+        payload = data.get("data") if isinstance(data, dict) else {}
+        episodes = (
+            payload.get("episodes")
+            if isinstance(payload, dict)
+            else []
+        )
+        if isinstance(episodes, list):
+            result.extend(
+                _normalize_episode(item)
+                for item in episodes
+                if isinstance(item, dict)
+            )
+
+        links = data.get("links") if isinstance(data, dict) else {}
+        raw_next_link = (
+            links.get("next")
+            if isinstance(links, dict)
+            else ""
+        )
+        next_link = str(raw_next_link or "").strip()
+        if not next_link:
+            return result
+        if next_link in seen_next_links:
+            raise TvdbRequestError(
+                "TVDB 集数分页响应出现循环",
+                "server_down",
+            )
+        seen_next_links.add(next_link)
+        raw_page = (
+            parse_qs(urlparse(next_link).query).get("page") or [""]
+        )[0]
+        try:
+            next_page = int(raw_page)
+        except (TypeError, ValueError):
+            next_page = current_page + 1
+        if next_page <= current_page:
+            raise TvdbRequestError(
+                "TVDB 集数分页没有向前推进",
+                "server_down",
+            )
+        current_page = next_page
 
 
 def _artwork_url(item: dict | None) -> str:

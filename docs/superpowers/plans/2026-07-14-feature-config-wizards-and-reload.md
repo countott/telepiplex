@@ -4,9 +4,9 @@
 
 **Goal:** Restore reliable Feature configuration discovery, give every Feature an independent Telegram wizard, materialize current templates, and make update/reload results reflect the actual running release.
 
-**Architecture:** Telepiplex owns lifecycle transactions, schema validation, private YAML writes, runtime consistency checks, and error reporting. Each Feature owns its wizard copy, allowed fields, input validation, and the opaque nested patch it submits to Telepiplex. download keeps its asynchronous token writer because QR completion occurs after the initiating RPC returns.
+**Architecture:** telepiplex owns lifecycle transactions, schema validation, private YAML writes, runtime consistency checks, and error reporting. Each Feature owns its wizard copy, allowed fields, input validation, and the opaque nested patch it submits to telepiplex. download keeps its asynchronous token writer because QR completion occurs after the initiating RPC returns.
 
-**Tech Stack:** Python 3.12, python-telegram-bot, asyncio, JSON Schema, PyYAML, unittest/pytest, Telepiplex Feature RPC SDK.
+**Tech Stack:** Python 3.12, python-telegram-bot, asyncio, JSON Schema, PyYAML, unittest/pytest, telepiplex Feature RPC SDK.
 
 ## Global Constraints
 
@@ -22,7 +22,7 @@
 
 ## File Structure
 
-### Telepiplex
+### telepiplex
 
 - `app/handlers/config_handler.py`: Feature configuration discovery, status rendering, and delegation only; remove the generic scalar editor.
 - `app/handlers/plugin_handler.py`: apply opaque Feature patches through `PluginManager.configure()` and invalidate stale sessions after update.
@@ -37,13 +37,13 @@
 - `src/<package>/config_wizard.py`: Feature-owned wizard/session/parser and allowed-field map.
 - Existing `service.py` or `feature.py`: route unique internal config command, callback, and message input to the wizard.
 - Existing `runtime.py`: register config command/callback/message surfaces.
-- `config.schema.json`: declare `x-telepiplex-config-command` only; the Telepiplex no longer derives UI fields from arbitrary properties.
+- `config.schema.json`: declare `x-telepiplex-config-command` only; the telepiplex no longer derives UI fields from arbitrary properties.
 - `manifest.yaml`, `pyproject.toml`: register the unique command and bump immutable patch versions.
 - Feature tests: exact buttons, allowed fields, opaque patch, cancellation, invalid input, secret masking, and version alignment.
 
 ---
 
-### Task 1: Telepiplex discovery, opaque patch application, and update consistency
+### Task 1: telepiplex discovery, opaque patch application, and update consistency
 
 **Files:**
 - Modify: `app/handlers/config_handler.py`
@@ -77,9 +77,9 @@ def test_only_explicit_custom_command_is_configurable():
     assert state["command"] == "config"
 ```
 
-Delete expectations for `discover_config_sections()`, scalar coercion, and Telepiplex-owned `key=value` editing.
+Delete expectations for `discover_config_sections()`, scalar coercion, and telepiplex-owned `key=value` editing.
 
-- [ ] **Step 2: Add Telepiplex patch and post-update red tests**
+- [ ] **Step 2: Add telepiplex patch and post-update red tests**
 
 ```python
 async def test_feature_patch_is_merged_and_configured_transactionally():
@@ -103,7 +103,7 @@ async def test_update_success_rechecks_store_process_route_and_schema():
 
 Also assert patch failures are sanitized, do not claim success, and close neither the old process nor unrelated sessions.
 
-- [ ] **Step 3: Run the focused Telepiplex tests and verify RED**
+- [ ] **Step 3: Run the focused telepiplex tests and verify RED**
 
 Run:
 
@@ -116,7 +116,7 @@ PYTHONPATH=.:sdk/src python3.12 -m pytest -q \
 
 Expected: failures because `config_state`, `config_patch`, direct config callbacks, and consistency assertions do not exist, while generic-editor tests describe obsolete behavior.
 
-- [ ] **Step 4: Implement minimal Telepiplex behavior**
+- [ ] **Step 4: Implement minimal telepiplex behavior**
 
 Implement a structural deep merge that never interprets field names:
 
@@ -131,7 +131,7 @@ def merge_nested_patch(current: dict, patch: dict) -> dict:
     return result
 ```
 
-`PluginManager.config_state()` must read schema independently from config so `invalid_config` can still be reported. `config_handler` must render every installed Feature with a stable state, but create buttons only for valid custom commands. `plugin_handler` must detect `config_patch`, merge it into the current config, await `manager.configure()`, clear sessions, and send Telepiplex-owned success/failure copy.
+`PluginManager.config_state()` must read schema independently from config so `invalid_config` can still be reported. `config_handler` must render every installed Feature with a stable state, but create buttons only for valid custom commands. `plugin_handler` must detect `config_patch`, merge it into the current config, await `manager.configure()`, clear sessions, and send telepiplex-owned success/failure copy.
 
 After `install()`, `update()`, `rollback()`, and `configure()`, assert that active record, active process, route manifest/client, readable schema, and version/source identity agree before returning success. Keep the assertion inside the existing rollback transaction.
 
@@ -139,7 +139,7 @@ After `install()`, `update()`, `rollback()`, and `configure()`, assert that acti
 
 Run the Step 3 command. Expected: all selected tests pass with no warning output.
 
-- [ ] **Step 6: Commit Telepiplex task**
+- [ ] **Step 6: Commit telepiplex task**
 
 ```bash
 git add app/handlers/config_handler.py app/handlers/plugin_handler.py \
@@ -172,7 +172,7 @@ def test_activation_materializes_current_example_without_overwriting_live_config
     assert read("echo/config.yaml.example") == {"prefix": "two"}
 ```
 
-Assert both Telepiplex examples are byte-identical and explicitly mention `/config/plugins/<plugin_id>/config.yaml.example`.
+Assert both telepiplex examples are byte-identical and explicitly mention `/config/plugins/<plugin_id>/config.yaml.example`.
 
 - [ ] **Step 2: Run tests and verify RED**
 
@@ -181,19 +181,19 @@ PYTHONPATH=.:sdk/src python3.12 -m pytest -q \
   tests/test_plugin_store.py tests/test_config_template_contract.py
 ```
 
-Expected: missing Feature example file and missing Telepiplex template explanation.
+Expected: missing Feature example file and missing telepiplex template explanation.
 
 - [ ] **Step 3: Implement example materialization**
 
 During `PluginStore.commit()`, parse and validate the release default, then atomically write it to `config.yaml.example` on every release commit. Continue creating `config.yaml` only when absent. Use a public example mode without secrets populated and keep the live config at `0600`.
 
-Update both Telepiplex example files with identical concise comments describing the Telepiplex/Feature split.
+Update both telepiplex example files with identical concise comments describing the telepiplex/Feature split.
 
 - [ ] **Step 4: Run tests and verify GREEN**
 
 Run the Step 2 command, then `cmp -s app/config.yaml.example config/config.yaml.example` and YAML-parse both.
 
-- [ ] **Step 5: Commit Telepiplex task**
+- [ ] **Step 5: Commit telepiplex task**
 
 ```bash
 git add app/runtime/plugin_store.py app/config.yaml.example \
@@ -214,7 +214,7 @@ git commit -m "fix(runtime): refresh installed Feature config examples"
 **Interfaces:**
 - Produces: `init.read_yaml_config(path=None) -> dict`, raising a stable config error without mutating globals.
 - Produces: `PluginManager.reload_config(plugin_id: str) -> PluginOperationResult`
-- Produces: `/reload` summary sections `Telepiplex 已应用`, `Feature 已重载`, `失败`, `需要重启容器`.
+- Produces: `/reload` summary sections `telepiplex 已应用`, `Feature 已重载`, `失败`, `需要重启容器`.
 
 - [ ] **Step 1: Write strict-read and reload red tests**
 
@@ -253,7 +253,7 @@ Expected: missing strict reader, manager reload API, and per-Feature summary.
 
 - [ ] **Step 3: Implement layered reload**
 
-`read_yaml_config()` returns a validated mapping without mutation. `/reload` compares old/new Telepiplex values, updates logger/authorization and safe numeric manager/supervisor/dispatcher fields, then calls `manager.reload_config()` for every enabled Feature. Treat `bot_token`, `plugins.root`, `plugins.catalog`, and `plugins.catalog_refresh_interval` changes as restart-required.
+`read_yaml_config()` returns a validated mapping without mutation. `/reload` compares old/new telepiplex values, updates logger/authorization and safe numeric manager/supervisor/dispatcher fields, then calls `manager.reload_config()` for every enabled Feature. Treat `bot_token`, `plugins.root`, `plugins.catalog`, and `plugins.catalog_refresh_interval` changes as restart-required.
 
 `reload_config()` reuses the configure transaction with the current validated on-disk mapping, so a valid manual edit starts a new shadow process and an invalid file yields `invalid_config` without touching the old process.
 
@@ -261,7 +261,7 @@ Expected: missing strict reader, manager reload API, and per-Feature summary.
 
 Run the Step 2 command and assert no old generic “配置已重新加载” claim remains without a result breakdown.
 
-- [ ] **Step 5: Commit Telepiplex task**
+- [ ] **Step 5: Commit telepiplex task**
 
 ```bash
 git add app/init.py app/115bot.py app/runtime/plugin_manager.py \
@@ -360,7 +360,7 @@ PYTHONPATH=src:../../sdk/src python3.12 -m pytest -q \
 
 - [ ] **Step 3: Implement wizard and immutable version bump**
 
-Register `sync_config`, delegate callback/message input to the local wizard before job/AI routing, emit an opaque patch, and bump manifest/package from `1.0.0` to `1.0.1`. Do not mutate the current `SyncFeature.service`; Telepiplex restart applies the patch safely.
+Register `sync_config`, delegate callback/message input to the local wizard before job/AI routing, emit an opaque patch, and bump manifest/package from `1.0.0` to `1.0.1`. Do not mutate the current `SyncFeature.service`; telepiplex restart applies the patch safely.
 
 - [ ] **Step 4: Run full Plex tests and verify GREEN**
 
@@ -426,7 +426,7 @@ git commit -m "feat(config): add rename setup wizard"
 - Modify only if a failing cross-contract test identifies a real gap.
 - Verify: all files changed by Tasks 1-6.
 
-- [ ] **Step 1: Run Telepiplex full suite**
+- [ ] **Step 1: Run telepiplex full suite**
 
 ```bash
 PYTHONPATH=.:sdk/src python3.12 -m pytest -q
