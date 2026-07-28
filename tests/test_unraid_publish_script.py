@@ -164,10 +164,10 @@ class UnraidPublishScriptTest(unittest.TestCase):
     def test_host_and_multiple_features_are_pushed_as_individual_tag_events(self):
         result, git_log = self._run_script(
             changed_path="app/115bot.py",
-            host_version="3.4.8",
+            host_version="3.4.9",
             remote_tags="\n".join(
                 (
-                    "a refs/tags/telepiplex-v3.4.7",
+                    "a refs/tags/telepiplex-v3.4.8",
                     "b refs/tags/search-v1.1.0",
                 )
             ),
@@ -182,11 +182,11 @@ class UnraidPublishScriptTest(unittest.TestCase):
         self.assertEqual(
             tag_pushes,
             [
-                "push origin refs/tags/telepiplex-v3.4.8",
-                "push origin refs/tags/download-v1.0.4",
-                "push origin refs/tags/rename-v1.0.3",
-                "push origin refs/tags/sync-v1.0.1",
-                "push origin refs/tags/caption-v0.1.1",
+                "push origin refs/tags/telepiplex-v3.4.9",
+                "push origin refs/tags/download-v1.0.5",
+                "push origin refs/tags/rename-v1.0.4",
+                "push origin refs/tags/sync-v1.0.2",
+                "push origin refs/tags/caption-v0.1.2",
             ],
         )
         self.assertTrue(
@@ -201,30 +201,30 @@ class UnraidPublishScriptTest(unittest.TestCase):
             changed_path="features/download/README.md",
             remote_tags="\n".join(
                 (
-                    "a refs/tags/download-v1.0.4",
+                    "a refs/tags/download-v1.0.5",
                     "b refs/tags/search-v1.1.0",
-                    "c refs/tags/rename-v1.0.3",
-                    "d refs/tags/sync-v1.0.1",
-                    "e refs/tags/caption-v0.1.1",
+                    "c refs/tags/rename-v1.0.4",
+                    "d refs/tags/sync-v1.0.2",
+                    "e refs/tags/caption-v0.1.2",
                 )
             ),
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("仅进入 main、不创建标签", result.stdout)
-        self.assertIn("download 1.0.4", result.stdout)
-        self.assertNotIn("refs/tags/download-v1.0.4", git_log.read_text())
+        self.assertIn("download 1.0.5", result.stdout)
+        self.assertNotIn("refs/tags/download-v1.0.5", git_log.read_text())
 
     def test_unpublished_feature_version_is_tagged(self):
         result, git_log = self._run_script(
             changed_path="features/search/manifest.yaml",
             remote_tags="\n".join(
                 (
-                    "a refs/tags/download-v1.0.4",
+                    "a refs/tags/download-v1.0.5",
                     "b refs/tags/search-v1.0.0",
-                    "c refs/tags/rename-v1.0.3",
-                    "d refs/tags/sync-v1.0.1",
-                    "e refs/tags/caption-v0.1.1",
+                    "c refs/tags/rename-v1.0.4",
+                    "d refs/tags/sync-v1.0.2",
+                    "e refs/tags/caption-v0.1.2",
                 )
             ),
         )

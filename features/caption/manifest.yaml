@@ -1,6 +1,6 @@
 plugin_id: caption
 name: caption
-version: 0.1.1
+version: 0.1.2
 host_api: ">=1.2,<2.0"
 entry_point: telepiplex_caption.runtime:main
 provides: []
