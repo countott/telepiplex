@@ -20,6 +20,7 @@ from app.runtime.telegram_text import bounded_photo_caption
 from app.handlers.interaction_handler import (
     CONFIG_OPERATION_TASKS_KEY,
     COORDINATOR_KEY,
+    deduplicate_terminal_controls,
     operation_markup,
     operation_render_lock,
     render_operation,
@@ -1074,7 +1075,9 @@ def _keyboard_markup(route, data):
                 return False
             buttons.append(InlineKeyboardButton(text, callback_data=callback_data))
         rows.append(buttons)
-    return InlineKeyboardMarkup(rows)
+    return InlineKeyboardMarkup(
+        deduplicate_terminal_controls(rows)
+    )
 
 
 def _photo_url(data):

@@ -96,7 +96,7 @@ async def _show_config_menu(update, context, *, edit: bool):
         for index, plugin_id in enumerate(plugin_ids)
     ]
     if rows:
-        rows.append([InlineKeyboardButton("取消", callback_data="host-config-cancel")])
+        rows.append([InlineKeyboardButton("退出", callback_data="host-config-cancel")])
     markup = InlineKeyboardMarkup(rows) if rows else None
     kwargs = {"reply_markup": markup} if markup is not None else {}
     if edit and update.callback_query:
@@ -192,9 +192,9 @@ async def quit_config_conversation(update, context):
     clear_config_session(context.user_data)
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text("已取消 Feature 配置。")
+        await update.callback_query.edit_message_text("已退出 Feature 配置。")
     else:
-        await update.effective_message.reply_text("已取消 Feature 配置。")
+        await update.effective_message.reply_text("已退出 Feature 配置。")
     return ConversationHandler.END
 
 

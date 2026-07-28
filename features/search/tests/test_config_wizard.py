@@ -187,6 +187,10 @@ class SearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("config_patch", cancelled)
         self.assertEqual(cancelled["session"]["state"], "close")
+        self.assertEqual(
+            cancelled["actions"][0]["text"],
+            "已退出 search 配置。",
+        )
 
     async def test_expired_confirmation_cannot_submit_patch(self):
         with patch(

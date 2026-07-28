@@ -83,7 +83,7 @@ class RenameConfigWizard:
         action = payload.split(":", 1)[1]
         if action == "cancel":
             self.sessions.pop(key, None)
-            return self._message("已取消 rename 配置。", "close", edit=True)
+            return self._message("已退出 rename 配置。", "close", edit=True)
         if session.get("stage") == "confirm" and action == "confirm":
             patch = deepcopy(session["patch"])
             self.sessions.pop(key, None)

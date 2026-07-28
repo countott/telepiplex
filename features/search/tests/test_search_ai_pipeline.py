@@ -12,6 +12,7 @@ from telepiplex_search.ai import (
     infer_candidate_scorecard_with_ai,
     infer_relation_hypotheses_with_ai,
     infer_search_hypotheses_with_ai,
+    infer_source_supplement_queries_with_ai,
     parse_ai_json_response,
 )
 from telepiplex_search.context import runtime_context
@@ -459,6 +460,91 @@ class SearchAiPipelineTest(unittest.TestCase):
         }
 
         self.assertIsNone(infer_anchored_candidates_with_ai({"facts": []}))
+
+    @patch("telepiplex_search.ai.check_ai_api_available", return_value=True)
+    @patch("telepiplex_search.ai.chat_completion")
+    def test_source_supplement_ai_only_returns_candidate_bound_title_hints(
+        self,
+        chat_mock,
+        _available,
+    ):
+        chat_mock.return_value = {
+            "choices": [{"message": {"content": json.dumps({
+                "queries": [{
+                    "candidate_id": "hyouka-animation",
+                    "provider": "tvdb",
+                    "title_hints": [
+                        "Hyouka",
+                        "https://thetvdb.com/series/278127",
+                        "tvdb:278127",
+                        "Hyouka 2012",
+                    ],
+                }, {
+                    "candidate_id": "unknown-candidate",
+                    "provider": "tvdb",
+                    "title_hints": ["Invented"],
+                }, {
+                    "candidate_id": "hyouka-animation",
+                    "provider": "imdb",
+                    "title_hints": ["Hyouka"],
+                }, {
+                    "candidate_id": "hyouka-animation",
+                    "provider": "douban",
+                    "title_hints": ["氷菓"],
+                    "year": "2012",
+                }],
+            })}}],
+        }
+
+        result = infer_source_supplement_queries_with_ai({
+            "raw_query": "冰果",
+            "candidates": [{
+                "candidate_id": "hyouka-animation",
+                "missing_providers": ["tvdb"],
+                "titles": ["冰果", "氷菓"],
+                "year": "2012",
+                "media_type": "series",
+            }],
+        })
+
+        self.assertEqual(result, {
+            "queries": [{
+                "candidate_id": "hyouka-animation",
+                "provider": "tvdb",
+                "title_hints": ["Hyouka"],
+            }],
+        })
+        prompt = chat_mock.call_args.args[0]
+        self.assertIn("候选 ID", prompt)
+        self.assertIn("不得输出年份、URL、稳定 ID", prompt)
+
+    @patch("telepiplex_search.ai.requests.post")
+    def test_plain_search_ai_honors_configured_thinking_mode(self, post):
+        runtime_context.configure({
+            "ai": {
+                "enable": True,
+                "api_url": "https://ai.example/v1",
+                "api_key": "secret-key",
+                "model": "tool-model",
+                "timeout": 12,
+                "source_orchestration": {
+                    "thinking_mode": "disabled",
+                },
+            },
+        })
+        post.return_value.status_code = 200
+        post.return_value.json.return_value = {
+            "choices": [{"message": {"role": "assistant", "content": "{}"}}],
+        }
+
+        from telepiplex_search.ai import chat_completion
+
+        chat_completion("query")
+
+        self.assertEqual(
+            post.call_args.kwargs["json"]["thinking"],
+            {"type": "disabled"},
+        )
 
 if __name__ == "__main__":
     unittest.main()

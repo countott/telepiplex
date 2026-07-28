@@ -129,6 +129,36 @@ class ConfigHandlerTest(unittest.IsolatedAsyncioTestCase):
             "download",
         )
 
+    async def test_config_chooser_uses_exit_label_and_copy(self):
+        from app.handlers.config_handler import (
+            config_command,
+            quit_config_conversation,
+        )
+
+        update, context, _manager = self.request(text="/config")
+        context.application.bot_data[
+            "telepiplex_plugin_router"
+        ].plugin_route.return_value = self.custom_route()
+
+        with patch(
+            "app.handlers.config_handler.init.check_user",
+            return_value=True,
+        ):
+            await config_command(update, context)
+
+        button = update.effective_message.reply_text.await_args.kwargs[
+            "reply_markup"
+        ].inline_keyboard[-1][0]
+        self.assertEqual(button.text, "退出")
+        self.assertEqual(button.callback_data, "host-config-cancel")
+
+        await quit_config_conversation(update, context)
+
+        self.assertEqual(
+            update.callback_query.edit_message_text.await_args.args[0],
+            "已退出 Feature 配置。",
+        )
+
     async def test_invalid_config_feature_remains_visible_with_stable_error_code(self):
         from app.runtime.plugin_manager import PluginOperationError
         from app.handlers.config_handler import config_command

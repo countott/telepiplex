@@ -35,6 +35,12 @@ _CONTROL_LABELS = {
     "cancel": "取消任务",
     "rollback": "取消并回滚",
 }
+_TERMINAL_CONTROL_LABELS = frozenset({
+    "退出",
+    "取消",
+    "取消任务",
+    "取消并回滚",
+})
 _CONTROL_IN_PROGRESS_STATES = {"cancelling", "rolling_back"}
 
 
@@ -390,7 +396,9 @@ def _normalize_control_result(record: OperationRecord, result: dict) -> dict:
 def operation_markup(record: OperationRecord, router=None):
     if record.state in TERMINAL_STATES:
         return None
-    rows = _feature_status_rows(record, router)
+    rows = deduplicate_terminal_controls(
+        _feature_status_rows(record, router)
+    )
     explicit_control = any(
         button.text in set(_CONTROL_LABELS.values()) | {"取消"}
         for row in rows
@@ -408,6 +416,23 @@ def operation_markup(record: OperationRecord, router=None):
         if label is not None and len(callback_data.encode("utf-8")) <= 64:
             rows.append([InlineKeyboardButton(label, callback_data=callback_data)])
     return InlineKeyboardMarkup(rows) if rows else None
+
+
+def deduplicate_terminal_controls(rows):
+    seen_callbacks = set()
+    result = []
+    for row in rows:
+        buttons = []
+        for button in row:
+            callback_data = str(button.callback_data or "")
+            if button.text in _TERMINAL_CONTROL_LABELS:
+                if callback_data in seen_callbacks:
+                    continue
+                seen_callbacks.add(callback_data)
+            buttons.append(button)
+        if buttons:
+            result.append(buttons)
+    return result
 
 
 def _feature_status_rows(record: OperationRecord, router):

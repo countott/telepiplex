@@ -136,6 +136,22 @@ class RenameConfigWizardTest(unittest.IsolatedAsyncioTestCase):
                 result = await self._confirm()
                 self.assertEqual(result["config_patch"], expected)
 
+    async def test_exit_closes_without_submitting_patch(self):
+        await self._start()
+
+        result = await self.feature.callback({
+            **self.owner,
+            "namespace": "rename",
+            "payload": "config:cancel",
+        })
+
+        self.assertEqual(result["session"]["state"], "close")
+        self.assertEqual(
+            result["actions"][0]["text"],
+            "已退出 rename 配置。",
+        )
+        self.assertNotIn("config_patch", result)
+
     async def test_expired_confirmation_cannot_submit_patch(self):
         with patch(
             "telepiplex_rename.config_wizard.time.monotonic",

@@ -289,10 +289,14 @@ def resolve_title_policy(
         romanized_original_title = _romanize_japanese_title(original_title)
 
     if original_language == "ja":
-        if not romanized_original_title:
+        if romanized_original_title:
+            canonical = romanized_original_title
+            policy = "romanized_original"
+        elif official_english_title:
+            canonical = official_english_title
+            policy = "official_english_fallback"
+        else:
             raise TitlePolicyError("canonical_title_unavailable")
-        canonical = romanized_original_title
-        policy = "romanized_original"
     else:
         if not official_english_title:
             raise TitlePolicyError("canonical_title_unavailable")

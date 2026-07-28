@@ -411,7 +411,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "callback_data": "plex:scan:all",
         }])
         self.assertIn(
-            {"text": "取消", "callback_data": "plex:scan:cancel"},
+            {"text": "退出", "callback_data": "plex:scan:cancel"},
             keyboard[-1],
         )
         buttons = [button for row in keyboard for button in row]
@@ -441,7 +441,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(
             cancelled["actions"][0]["text"],
-            "已取消 Plex 扫描选择。",
+            "已退出 Plex 扫描选择。",
         )
         self.assertEqual(self.jobs.list(), [])
         self.assertEqual(self.runtime.tasks, {})
@@ -476,7 +476,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             first_buttons,
         )
         self.assertIn(
-            {"text": "取消", "callback_data": "plex:scan:cancel"},
+            {"text": "退出", "callback_data": "plex:scan:cancel"},
             first["actions"][0]["data"]["keyboard"][-1],
         )
         self.assertLessEqual(
@@ -499,7 +499,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             second_buttons,
         )
         self.assertIn(
-            {"text": "取消", "callback_data": "plex:scan:cancel"},
+            {"text": "退出", "callback_data": "plex:scan:cancel"},
             second["actions"][0]["data"]["keyboard"][-1],
         )
         self.assertEqual(self.service.list_library_calls, 2)
@@ -677,7 +677,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     if ":pick:" in button["callback_data"]
                 ))
                 self.assertIn(
-                    {"text": "取消", "callback_data": "plex:cancel"},
+                    {"text": "取消任务", "callback_data": "plex:cancel"},
                     action["data"]["keyboard"][-1],
                 )
 
@@ -774,7 +774,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     first_keyboard[-1],
                 )
                 self.assertIn(
-                    {"text": "取消", "callback_data": "plex:cancel"},
+                    {"text": "取消任务", "callback_data": "plex:cancel"},
                     first_keyboard[-1],
                 )
                 if kind == "audio":
@@ -852,7 +852,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(opened["operation"]["control"], "cancel")
         self.assertIn(
-            {"text": "取消", "callback_data": "plex:cancel"},
+            {"text": "取消任务", "callback_data": "plex:cancel"},
             opened["actions"][0]["data"]["keyboard"][-1],
         )
 

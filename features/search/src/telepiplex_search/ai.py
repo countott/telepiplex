@@ -172,6 +172,23 @@ JSON结构：
 用户输入：
 """
 
+SOURCE_SUPPLEMENT_QUERY_PROMPT = """你是影视来源补查提示生成器。只返回 JSON，不要返回 Markdown。
+输入中的作品候选已经绑定到外部来源事实。你只能为候选缺失的 Provider 提议跨语言片名检索提示。
+
+硬性规则：
+1. 只能复用输入中存在的候选 ID 和该候选列出的 missing_providers。
+2. 每条 query 只能包含 candidate_id、provider、title_hints 三个字段。
+3. 每个 title_hint 只能是一个片名，最多 3 个。
+4. 不得输出年份、URL、稳定 ID、外部 ID、媒体事实、结论、Prowlarr query 或路径。
+5. 片名只是检索提示，程序必须携带候选已有的来源验证年份和媒体类型向 Provider 复查。
+6. 无法提出可靠跨语言片名时返回空 queries。
+
+JSON 结构：
+{"queries":[{"candidate_id":"string","provider":"wikipedia|douban|tvdb","title_hints":["string"]}]}
+
+输入事实：
+"""
+
 RELATION_SCOUT_PROMPT = """你是影视作品关系审查员。只返回 JSON，不要返回 Markdown。
 你只能引用输入中的 candidate_key 和 fact_id，不得编造标题、年份、稳定 ID、集号或来源事实。
 最多输出 3 个关系假设；假设不是事实，后续必须由程序定向复查。
@@ -185,6 +202,13 @@ _AI_TITLE_TYPE_SUFFIX = re.compile(
     r"(?i)[\(（]\s*"
     r"(?:电影|電影|film|movie|电视剧|電視劇|剧集|劇集|series|tv\s*show)"
     r"\s*[\)）]\s*$"
+)
+_AI_SUPPLEMENT_STABLE_ID = re.compile(
+    r"(?i)(?:"
+    r"https?://|www\.|"
+    r"(?:tvdb|douban|imdb|tmdb|moviedb)\s*[:#]\s*[A-Za-z0-9_-]+|"
+    r"^Q\d+$|^tt\d+$"
+    r")"
 )
 
 
@@ -203,6 +227,26 @@ def _clean_ai_title_hint(value, raw_query: str) -> str:
     if hint_years - raw_years:
         return ""
     return title
+
+
+def _clean_ai_supplement_title_hint(value) -> str:
+    title = unicodedata.normalize("NFKC", str(value or ""))
+    title = "".join(
+        character
+        for character in title
+        if unicodedata.category(character) != "Cf"
+    )
+    title = " ".join(title.split())
+    if (
+        not title
+        or len(title) > 160
+        or _AI_TITLE_YEAR.search(title)
+        or _AI_TITLE_TYPE_SUFFIX.search(title)
+        or _AI_SUPPLEMENT_STABLE_ID.search(title)
+    ):
+        return ""
+    return title
+
 
 CANDIDATE_SCORECARD_PROMPT = """你是影视候选评分员。只返回 JSON，不要返回 Markdown。
 你不是数据库，也不能补全事实。你只能引用输入中的 candidate_key 和 fact_id。
@@ -227,6 +271,7 @@ ANCHORED_CANDIDATE_PROMPT = """你是影视搜索候选编辑。只返回 JSON�
 4. 每个候选选择一个已经存在的 fact_id 作为 anchor_fact_id。
 5. 只能给出关系判断、置信度和简短筛选理由。
 6. 用户明确搜索季或集时，如存在对应的 season/episode 事实，必须用该事实作为 anchor_fact_id；搜索整剧时优先用 series_root。
+7. 当 stage=binding_repair 时，binding_error 是上一次结果违反的程序约束；必须根据 invalid_candidates 重建一份完整候选集合，不得只返回局部补丁。
 
 硬性规则：
 - 不得生成 URL、海报、外部 ID、标题、年份、媒体类型或任何新 fact_id。
@@ -474,8 +519,20 @@ def chat_completion_messages(
 
 
 def chat_completion(tip_words, max_tokens=8192):
+    source_orchestration = _ai_config().get("source_orchestration")
+    thinking_mode = None
+    if (
+        isinstance(source_orchestration, dict)
+        and "thinking_mode" in source_orchestration
+    ):
+        configured_mode = str(
+            source_orchestration.get("thinking_mode") or ""
+        ).strip().casefold()
+        if configured_mode in {"enabled", "disabled"}:
+            thinking_mode = configured_mode
     return chat_completion_messages(
         [{"role": "user", "content": tip_words}],
+        thinking_mode=thinking_mode,
         max_tokens=max_tokens,
     )
 
@@ -807,6 +864,89 @@ def infer_anchored_candidates_with_ai(context: dict):
     ):
         return None
     return parsed
+
+
+def infer_source_supplement_queries_with_ai(context: dict):
+    if not check_ai_api_available():
+        return None
+    candidates = (
+        context.get("candidates")
+        if isinstance(context, dict)
+        else None
+    )
+    if not isinstance(candidates, list):
+        return None
+    allowed_targets = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_id = str(candidate.get("candidate_id") or "").strip()
+        missing_providers = candidate.get("missing_providers")
+        if not candidate_id or not isinstance(missing_providers, list):
+            continue
+        allowed_targets[candidate_id] = {
+            str(provider or "").strip().casefold()
+            for provider in missing_providers
+            if str(provider or "").strip().casefold()
+            in {"wikipedia", "douban", "tvdb"}
+        }
+    if not any(allowed_targets.values()):
+        return None
+
+    prompt = SOURCE_SUPPLEMENT_QUERY_PROMPT + json.dumps(
+        context or {},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    _log_ai_info(
+        f"AI来源补查输入 context={_compact_json_for_log(context)}"
+    )
+    result = chat_completion(prompt, max_tokens=2400)
+    _log_ai_info(
+        f"AI来源补查原始响应 result={_compact_json_for_log(result)}"
+    )
+    parsed = parse_ai_json_response(result)
+    if not isinstance(parsed, dict) or set(parsed) != {"queries"}:
+        return None
+    queries = parsed.get("queries")
+    if not isinstance(queries, list):
+        return None
+
+    normalized = []
+    seen = set()
+    for raw_query in queries[:18]:
+        if not isinstance(raw_query, dict) or set(raw_query) != {
+            "candidate_id",
+            "provider",
+            "title_hints",
+        }:
+            continue
+        candidate_id = str(raw_query.get("candidate_id") or "").strip()
+        provider = str(raw_query.get("provider") or "").strip().casefold()
+        title_hints = raw_query.get("title_hints")
+        if (
+            provider not in allowed_targets.get(candidate_id, set())
+            or not isinstance(title_hints, list)
+            or any(not isinstance(item, str) for item in title_hints)
+        ):
+            continue
+        cleaned_hints = []
+        for item in title_hints[:3]:
+            cleaned = _clean_ai_supplement_title_hint(item)
+            if cleaned and cleaned not in cleaned_hints:
+                cleaned_hints.append(cleaned)
+        if not cleaned_hints:
+            continue
+        key = (candidate_id, provider)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append({
+            "candidate_id": candidate_id,
+            "provider": provider,
+            "title_hints": cleaned_hints,
+        })
+    return {"queries": normalized}
 
 
 def normalize_search_query_with_ai(raw_query: str):

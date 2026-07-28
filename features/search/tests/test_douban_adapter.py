@@ -114,6 +114,26 @@ class DoubanAdapterTest(unittest.TestCase):
         self.assertEqual(fact["official_english_title"], "Attack on Titan")
         self.assertEqual(fact["romanized_original_title"], "Shingeki no Kyojin")
 
+    def test_normalize_payload_splits_trailing_year_and_removes_format_controls(self):
+        fact = douban._normalize_payload(
+            {
+                "id": "10001418",
+                "title": "冰果 氷菓\u200e (2012)",
+                "aka": ["冰果\u200e (2012)"],
+                "type": "tv",
+            },
+            "https://movie.douban.com/subject/10001418/",
+        )
+
+        self.assertIsNotNone(fact)
+        self.assertEqual(fact["title"], "冰果 氷菓")
+        self.assertEqual(fact["chinese_title"], "冰果 氷菓")
+        self.assertEqual(fact["year"], "2012")
+        self.assertNotIn("(2012)", fact["title"])
+        self.assertTrue(
+            all("\u200e" not in value and "(2012)" not in value for value in fact["aliases"])
+        )
+
     @patch("telepiplex_search.adapters.douban.requests.get")
     def test_successful_empty_search_is_not_found(self, get_mock):
         get_mock.return_value = response(text="<html>没有影视条目</html>")

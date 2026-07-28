@@ -174,7 +174,10 @@ class DownloadFeature:
             key = self._session_key(request)
             operation = self._close_interaction(key, "已退出当前交互。")
             result = {
-                "actions": [{"kind": "send_message", "text": "已取消。"}],
+                "actions": [{
+                    "kind": "send_message",
+                    "text": "已退出当前交互。",
+                }],
                 "session": {"state": "close"},
             }
             if operation is not None:
@@ -398,7 +401,7 @@ class DownloadFeature:
                 return self._interaction_message(
                     key,
                     "⚠️ 115 Token 写入失败，原配置已恢复；"
-                    "请重新发送 Refresh token 或使用 /q 取消。",
+                    "请重新发送 Refresh token 或使用 /q 退出。",
                     operation=operation,
                 )
             except Exception:
@@ -412,7 +415,7 @@ class DownloadFeature:
                 )
                 return self._interaction_message(
                     key,
-                    "⚠️ 115 Token 写入失败，请重新发送 Refresh token 或使用 /q 取消。",
+                    "⚠️ 115 Token 写入失败，请重新发送 Refresh token 或使用 /q 退出。",
                     operation=operation,
                 )
             self.config.update(updated)

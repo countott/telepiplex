@@ -6,6 +6,7 @@ import html
 import re
 import threading
 import time
+import unicodedata
 from copy import deepcopy
 from urllib.parse import unquote, unquote_plus
 
@@ -31,6 +32,35 @@ class DoubanSubjectLookupError(RuntimeError):
 
 def _text(value) -> str:
     return " ".join(str(value or "").replace("\xa0", " ").split())
+
+
+def _clean_title_text(value) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    visible = "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) != "Cf"
+    )
+    return _text(visible)
+
+
+def _normalize_title_and_year(
+    title: str,
+    year_value: object,
+) -> tuple[str, str]:
+    normalized_title = _clean_title_text(title)
+    normalized_year = _text(year_value)
+    year_match = re.search(r"\b(19\d{2}|20\d{2})\b", normalized_year)
+    trailing_match = re.search(
+        r"\s*[\(\[]\s*((?:19|20)\d{2})\s*[\)\]]\s*$",
+        normalized_title,
+    )
+    if trailing_match:
+        normalized_title = normalized_title[:trailing_match.start()].rstrip()
+        if year_match is None:
+            normalized_year = trailing_match.group(1)
+            year_match = re.search(r"\b(19\d{2}|20\d{2})\b", normalized_year)
+    return normalized_title, year_match.group(1) if year_match else ""
 
 
 def _result(
@@ -232,13 +262,17 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
     if not subject_id or (url_id and subject_id != url_id):
         return None
 
-    title = _text(data.get("title") or data.get("name"))
+    title, normalized_year = _normalize_title_and_year(
+        data.get("title") or data.get("name"),
+        data.get("release_year") or data.get("year"),
+    )
     chinese_title = title if _contains_cjk(title) else ""
-    original_title = _text(
+    original_title, _unused_original_year = _normalize_title_and_year(
         data.get("original_title")
         or data.get("originalTitle")
         or data.get("original_name")
-        or data.get("originalName")
+        or data.get("originalName"),
+        "",
     )
     candidates = [
         original_title,
@@ -258,22 +292,23 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
     )
     aliases = []
     for item in candidates:
-        item = _text(item)
+        item, _unused_alias_year = _normalize_title_and_year(item, "")
         if item and item not in aliases:
             aliases.append(item)
     genres = _list_values(data.get("genres") or data.get("genre"))
-    official_english_title = _text(
+    official_english_title, _unused_official_year = _normalize_title_and_year(
         data.get("official_english_title")
         or data.get("officialEnglishTitle")
-        or english_title
+        or english_title,
+        "",
     )
-    romanized_original_title = _text(
+    romanized_original_title, _unused_romanized_year = _normalize_title_and_year(
         data.get("romanized_original_title")
         or data.get("romanizedOriginalTitle")
         or data.get("romaji_title")
-        or data.get("romajiTitle")
+        or data.get("romajiTitle"),
+        "",
     )
-    year_match = re.search(r"\b(19\d{2}|20\d{2})\b", _text(data.get("release_year") or data.get("year")))
     return {
         "subject_id": subject_id,
         "external_ids": {"douban_subject": subject_id},
@@ -285,7 +320,7 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
         "original_language": _language(data, original_title),
         "official_english_title": official_english_title,
         "romanized_original_title": romanized_original_title,
-        "year": year_match.group(1) if year_match else "",
+        "year": normalized_year,
         "media_type": _media_type(data),
         "aliases": aliases,
         "genres": genres,

@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from telepiplex_search.deterministic import build_rule_hypotheses
 from telepiplex_search.planner import (
@@ -182,6 +182,128 @@ class UnifiedSearchPipelineTest(unittest.IsolatedAsyncioTestCase):
             "v1",
         )
 
+    async def test_missing_tvdb_uses_candidate_bound_cross_language_title_and_year(self):
+        tvdb_payloads = []
+        editor_calls = 0
+
+        wikipedia_fact = {
+            "wikibase_item": "Q1770713",
+            "title": "冰菓",
+            "chinese_title": "冰果",
+            "original_title": "氷菓",
+            "original_language": "ja",
+            "year": "2012",
+            "media_type": "series",
+            "url": "https://zh.wikipedia.org/wiki/冰菓",
+        }
+        douban_fact = {
+            "subject_id": "10001418",
+            "title": "冰果",
+            "chinese_title": "冰果",
+            "original_title": "氷菓",
+            "original_language": "ja",
+            "year": "2012",
+            "media_type": "series",
+            "url": "https://movie.douban.com/subject/10001418/",
+        }
+        tvdb_fact = {
+            "movies": [],
+            "series": [{
+                "tvdb_series_id": "278127",
+                "name": "Hyouka",
+                "official_english_title": "Hyouka",
+                "original_title": "氷菓",
+                "original_language": "ja",
+                "year": "2012",
+                "url": "https://thetvdb.com/series/hyouka",
+            }],
+            "episodes_by_series": {},
+        }
+
+        def tvdb(payload):
+            tvdb_payloads.append(payload)
+            if len(tvdb_payloads) == 1:
+                return {"source": "tvdb", "status": "not_found", "facts": []}
+            return {"source": "tvdb", "status": "ok", "facts": [tvdb_fact]}
+
+        def editor(_context):
+            nonlocal editor_calls
+            editor_calls += 1
+            bindings = [{
+                "fact_id": "wikipedia:Q1770713",
+                "role": "series_root",
+                "season_number": None,
+                "episode_number": None,
+            }, {
+                "fact_id": "douban:10001418",
+                "role": "series_root",
+                "season_number": None,
+                "episode_number": None,
+            }]
+            if editor_calls > 1:
+                bindings.append({
+                    "fact_id": "tvdb:278127",
+                    "role": "series_root",
+                    "season_number": None,
+                    "episode_number": None,
+                })
+            return {
+                "status": "resolved",
+                "candidates": [{
+                    "candidate_id": "hyouka-animation",
+                    "anchor_fact_id": "douban:10001418",
+                    "identity_role": "series_root",
+                    "intended_scope": "whole_series",
+                    "fact_bindings": bindings,
+                    "ai_confidence": 0.96,
+                    "ai_reason": "The verified facts describe the 2012 animation.",
+                }],
+            }
+
+        plan = await build_confirmable_search_plan(
+            "冰果",
+            "unified-hyouka",
+            {
+                "wikipedia": lambda _payload: {
+                    "source": "wikipedia",
+                    "status": "ok",
+                    "facts": [wikipedia_fact],
+                },
+                "douban": lambda _payload: {
+                    "source": "douban",
+                    "status": "ok",
+                    "facts": [douban_fact],
+                },
+                "tvdb": tvdb,
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            candidate_editor=editor,
+            supplement_query_editor=lambda _context: {
+                "queries": [{
+                    "candidate_id": "hyouka-animation",
+                    "provider": "tvdb",
+                    "title_hints": ["Hyouka"],
+                }],
+            },
+        )
+
+        self.assertEqual(len(tvdb_payloads), 2)
+        self.assertIn({
+            "title": "Hyouka",
+            "year": "2012",
+            "content_identity": "series",
+            "scope": "whole_series",
+            "season_number": None,
+            "episode_number": None,
+            "explicit_facts": [],
+            "inferred_facts": ["candidate_source_supplement"],
+        }, tvdb_payloads[1]["hypotheses"])
+        self.assertEqual(
+            plan["candidates"][0]["candidate_version"],
+            "v1",
+        )
+
     async def test_missing_provider_after_supplement_keeps_displayable_v0(self):
         def editor(_context):
             return _binding(include_wikipedia=False)
@@ -355,6 +477,94 @@ class UnifiedSearchPipelineTest(unittest.IsolatedAsyncioTestCase):
                 candidate_editor=lambda _context: None,
             )
         self.assertEqual(failed.exception.code, "ai_candidate_failure")
+
+    async def test_invalid_shared_fact_binding_is_repaired_once_with_diagnostics(self):
+        from telepiplex_search.context import runtime_context
+
+        contexts = []
+        logger = Mock()
+
+        def candidate(fact_id, candidate_id):
+            return {
+                "candidate_id": candidate_id,
+                "anchor_fact_id": fact_id,
+                "identity_role": "movie",
+                "intended_scope": "movie",
+                "fact_bindings": [{
+                    "fact_id": fact_id,
+                    "role": "movie",
+                    "season_number": None,
+                    "episode_number": None,
+                }],
+                "ai_confidence": 0.9,
+                "ai_reason": "The Provider fact supports this candidate.",
+            }
+
+        def editor(context):
+            contexts.append(context)
+            if len(contexts) == 1:
+                return {
+                    "status": "resolved",
+                    "candidates": [
+                        candidate("douban:11", "duplicate-a"),
+                        candidate("douban:11", "duplicate-b"),
+                    ],
+                }
+            return {
+                "status": "resolved",
+                "candidates": [
+                    candidate("douban:11", "grand-budapest"),
+                ],
+            }
+
+        with patch.object(runtime_context, "logger", logger):
+            plan = await build_confirmable_search_plan(
+                "布达佩斯大饭店",
+                "unified-binding-repair",
+                {
+                    "douban": lambda _query: {
+                        "source": "douban",
+                        "status": "ok",
+                        "facts": [_douban_fact()],
+                    },
+                },
+                lambda _contract: set(),
+                TemporarySpecialAllocator(),
+                candidate_editor=editor,
+            )
+
+        self.assertEqual(
+            [context["stage"] for context in contexts],
+            ["discovery", "binding_repair"],
+        )
+        self.assertEqual(
+            contexts[1]["binding_error"],
+            "fact_bound_multiple_times",
+        )
+        self.assertEqual(
+            {
+                item["candidate_id"]
+                for item in contexts[1]["invalid_candidates"]
+            },
+            {"duplicate-a", "duplicate-b"},
+        )
+        self.assertEqual(
+            plan["candidates"][0]["candidate_id"],
+            "grand-budapest",
+        )
+        info_logs = " ".join(
+            call.args[0] for call in logger.info.call_args_list
+        )
+        warning_logs = " ".join(
+            call.args[0] for call in logger.warning.call_args_list
+        )
+        self.assertIn("search_binding status=received", info_logs)
+        self.assertIn("candidate_id=duplicate-a", info_logs)
+        self.assertIn('"fact_id": "douban:11"', info_logs)
+        self.assertIn("search_binding status=ok", info_logs)
+        self.assertIn("search_binding status=invalid", warning_logs)
+        self.assertIn("error=fact_bound_multiple_times", warning_logs)
+        self.assertIn("search_binding status=repairing", warning_logs)
 
     @patch(
         "telepiplex_search.planner.infer_search_hypotheses_with_ai",

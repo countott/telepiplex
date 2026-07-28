@@ -88,6 +88,49 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         router.command_route.assert_not_called()
 
+    def test_terminal_control_dedup_keeps_navigation_duplicates(self):
+        from app.handlers.interaction_handler import operation_markup
+
+        record = self.coordinator.report("search", self.report(
+            state="awaiting_input",
+            control="",
+            details={"keyboard": [[
+                {
+                    "text": "上一项",
+                    "callback_data": "search:browse:p1:1",
+                },
+                {
+                    "text": "下一项",
+                    "callback_data": "search:browse:p1:1",
+                },
+            ], [
+                {
+                    "text": "取消",
+                    "callback_data": "search:cancel:p1",
+                },
+                {
+                    "text": "退出",
+                    "callback_data": "search:cancel:p1",
+                },
+            ]]},
+        ))
+        router = Mock()
+        router.plugin_route.return_value = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+
+        result = operation_markup(record, router).inline_keyboard
+
+        self.assertEqual(
+            [button.text for button in result[0]],
+            ["上一项", "下一项"],
+        )
+        self.assertEqual(
+            [button.text for button in result[1]],
+            ["取消"],
+        )
+
     async def test_operation_sink_rejects_same_revision_terminal_mismatch(self):
         from app.handlers.interaction_handler import OperationReportSink
 

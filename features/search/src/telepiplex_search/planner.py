@@ -60,6 +60,11 @@ def _log_info(message: str):
         runtime_context.logger.info(message)
 
 
+def _log_warning(message: str):
+    if runtime_context.logger:
+        runtime_context.logger.warning(message)
+
+
 class PlanningBudget:
     def __init__(
         self,
@@ -1507,6 +1512,24 @@ async def _call_candidate_editor(candidate_editor, context: dict):
         ) from exc
 
 
+async def _call_supplement_query_editor(
+    supplement_query_editor,
+    context: dict,
+):
+    if supplement_query_editor is None:
+        return None
+    try:
+        if asyncio.iscoroutinefunction(supplement_query_editor):
+            return await supplement_query_editor(context)
+        return await asyncio.to_thread(supplement_query_editor, context)
+    except Exception as exc:
+        _log_info(
+            "search_supplement status=ai_hint_failed "
+            f"error={type(exc).__name__}"
+        )
+        return None
+
+
 def _anchored_editor_context(
     raw_query: str,
     graph,
@@ -1515,8 +1538,10 @@ def _anchored_editor_context(
     locked_anchor_fact_id: str,
     provisional_candidates=(),
     stage: str,
+    binding_error: str = "",
+    invalid_candidates=(),
 ) -> dict:
-    return {
+    context = {
         "raw_query": _text(raw_query),
         "intent": {
             "title": _text(intent.get("title")),
@@ -1533,13 +1558,199 @@ def _anchored_editor_context(
             candidate.to_dict() for candidate in provisional_candidates
         ],
     }
+    if binding_error:
+        context["binding_error"] = _text(binding_error)
+        context["invalid_candidates"] = [
+            dict(candidate)
+            for candidate in list(invalid_candidates or ())[:6]
+            if isinstance(candidate, dict)
+        ]
+    return context
 
 
-def _supplement_hypotheses(candidates, intent: dict) -> dict:
-    queries = list(dict.fromkeys(
+def _log_binding_payload(payload, stage: str) -> None:
+    candidates = (
+        payload.get("candidates")
+        if isinstance(payload, dict)
+        else None
+    )
+    if not isinstance(candidates, list):
+        _log_info(
+            "search_binding status=received "
+            f"stage={stage} candidates=invalid"
+        )
+        return
+    if not candidates:
+        _log_info(
+            "search_binding status=received "
+            f"stage={stage} candidates=0"
+        )
+        return
+    for index, candidate in enumerate(candidates[:6], start=1):
+        if not isinstance(candidate, dict):
+            _log_info(
+                "search_binding status=received "
+                f"stage={stage} candidate_index={index} shape=invalid"
+            )
+            continue
+        bindings = []
+        raw_bindings = candidate.get("fact_bindings")
+        if isinstance(raw_bindings, list):
+            bindings = [{
+                "fact_id": _text(binding.get("fact_id")),
+                "role": _text(binding.get("role")),
+                "season": binding.get("season_number"),
+                "episode": binding.get("episode_number"),
+            } for binding in raw_bindings[:30] if isinstance(binding, dict)]
+        _log_info(
+            "search_binding status=received "
+            f"stage={stage} candidate_index={index} "
+            f"candidate_id={_text(candidate.get('candidate_id'))} "
+            f"anchor_fact_id={_text(candidate.get('anchor_fact_id'))} "
+            f"identity_role={_text(candidate.get('identity_role'))} "
+            f"bindings={json.dumps(bindings, ensure_ascii=False)}"
+        )
+
+
+def _log_binding_result(candidates, stage: str) -> None:
+    if not candidates:
+        _log_info(f"search_binding status=ok stage={stage} candidates=0")
+        return
+    for candidate in candidates:
+        facts = [{
+            "fact_id": fact.fact_id,
+            "provider": fact.provider,
+        } for fact in candidate.facts]
+        _log_info(
+            "search_binding status=ok "
+            f"stage={stage} candidate_id={candidate.candidate_id} "
+            f"anchor_fact_id={candidate.anchor_fact_id} "
+            f"identity_role={candidate.identity_role} "
+            f"facts={json.dumps(facts, ensure_ascii=False)}"
+        )
+
+
+async def _materialize_with_binding_repair(
+    *,
+    candidate_editor,
+    graph,
+    payload,
+    provider_statuses: dict[str, str],
+    locked_anchor_fact_id: str,
+    raw_query: str,
+    intent: dict,
+    provisional_candidates,
+    stage: str,
+    repair_state: dict,
+):
+    _log_binding_payload(payload, stage)
+    try:
+        candidates = materialize_anchored_candidates(
+            graph,
+            payload,
+            provider_statuses=provider_statuses,
+            locked_anchor_fact_id=locked_anchor_fact_id,
+        )
+    except CandidateBindingError as initial_error:
+        _log_warning(
+            "search_binding status=invalid "
+            f"stage={stage} error={initial_error.code}"
+        )
+        if repair_state.get("used"):
+            raise SearchPlanningError(
+                "candidate_binding_failed",
+                (initial_error.code, "binding_repair_already_used"),
+            ) from initial_error
+        repair_state["used"] = True
+        invalid_candidates = (
+            payload.get("candidates")
+            if isinstance(payload, dict)
+            and isinstance(payload.get("candidates"), list)
+            else []
+        )
+        _log_warning(
+            "search_binding status=repairing "
+            f"stage={stage} error={initial_error.code} "
+            f"candidate_ids={json.dumps([_text(item.get('candidate_id')) for item in invalid_candidates[:6] if isinstance(item, dict)], ensure_ascii=False)}"
+        )
+        repaired_payload = await _call_candidate_editor(
+            candidate_editor,
+            _anchored_editor_context(
+                raw_query,
+                graph,
+                intent=intent,
+                locked_anchor_fact_id=locked_anchor_fact_id,
+                provisional_candidates=provisional_candidates,
+                stage="binding_repair",
+                binding_error=initial_error.code,
+                invalid_candidates=invalid_candidates,
+            ),
+        )
+        if repaired_payload is None:
+            raise SearchPlanningError(
+                "candidate_binding_failed",
+                (initial_error.code, "binding_repair_unavailable"),
+            ) from initial_error
+        _log_binding_payload(repaired_payload, "binding_repair")
+        try:
+            candidates = materialize_anchored_candidates(
+                graph,
+                repaired_payload,
+                provider_statuses=provider_statuses,
+                locked_anchor_fact_id=locked_anchor_fact_id,
+            )
+        except CandidateBindingError as repair_error:
+            _log_warning(
+                "search_binding status=invalid "
+                f"stage=binding_repair error={repair_error.code} "
+                f"initial_error={initial_error.code}"
+            )
+            raise SearchPlanningError(
+                "candidate_binding_failed",
+                tuple(dict.fromkeys((
+                    initial_error.code,
+                    repair_error.code,
+                ))),
+            ) from repair_error
+        _log_binding_result(candidates, "binding_repair")
+        return candidates
+    _log_binding_result(candidates, stage)
+    return candidates
+
+
+def _supplement_title(value) -> str:
+    title = unicodedata.normalize("NFKC", str(value or ""))
+    title = "".join(
+        character
+        for character in title
+        if unicodedata.category(character) != "Cf"
+    )
+    title = _text(title)
+    title = re.sub(
+        r"\s*[\(\[]\s*(?:19|20)\d{2}\s*[\)\]]\s*$",
+        "",
+        title,
+    ).strip()
+    if not title or len(title) > 160 or re.search(r"https?://", title, re.I):
+        return ""
+    return title
+
+
+def _candidate_supplement_profile(
+    candidate,
+    missing_providers: set[str],
+) -> dict:
+    facts = tuple(candidate.facts)
+    anchor = next(
+        (
+            fact for fact in facts
+            if fact.fact_id == candidate.anchor_fact_id
+        ),
+        facts[0],
+    )
+    titles = list(dict.fromkeys(
         cleaned
-        for candidate in candidates
-        for fact in candidate.facts
+        for fact in facts
         for title in (
             fact.chinese_title,
             fact.official_english_title,
@@ -1547,25 +1758,132 @@ def _supplement_hypotheses(candidates, intent: dict) -> dict:
             fact.original_title,
             *fact.titles,
         )
-        if (cleaned := _text(title))
-    ))[:6]
+        if (cleaned := _supplement_title(title))
+    ))[:8]
+    media_type = (
+        "movie"
+        if candidate.identity_role == "movie"
+        else "series"
+        if candidate.identity_role in {"series_root", "season", "episode"}
+        else next(
+            (
+                fact.media_type
+                for fact in facts
+                if fact.media_type in {"movie", "series"}
+            ),
+            "movie_or_series",
+        )
+    )
+    return {
+        "candidate_id": candidate.candidate_id,
+        "missing_providers": sorted(missing_providers),
+        "titles": titles,
+        "year": anchor.year or next(
+            (fact.year for fact in facts if fact.year),
+            "",
+        ),
+        "media_type": media_type,
+    }
+
+
+def _supplement_query_context(
+    raw_query: str,
+    candidates,
+    missing_by_candidate: dict[str, set[str]],
+) -> dict:
+    return {
+        "raw_query": _text(raw_query),
+        "candidates": [
+            _candidate_supplement_profile(
+                candidate,
+                missing_by_candidate.get(candidate.candidate_id, set()),
+            )
+            for candidate in candidates
+            if missing_by_candidate.get(candidate.candidate_id)
+        ],
+    }
+
+
+def _supplement_ai_hints(payload) -> dict[tuple[str, str], list[str]]:
+    if not isinstance(payload, dict) or set(payload) != {"queries"}:
+        return {}
+    raw_queries = payload.get("queries")
+    if not isinstance(raw_queries, list):
+        return {}
+    result = {}
+    for item in raw_queries[:18]:
+        if not isinstance(item, dict) or set(item) != {
+            "candidate_id",
+            "provider",
+            "title_hints",
+        }:
+            continue
+        candidate_id = _text(item.get("candidate_id"))
+        provider = _text(item.get("provider")).casefold()
+        title_hints = item.get("title_hints")
+        if (
+            not candidate_id
+            or provider not in _COMPLETE_CANDIDATE_PROVIDERS
+            or not isinstance(title_hints, list)
+        ):
+            continue
+        cleaned_hints = list(dict.fromkeys(
+            cleaned
+            for hint in title_hints[:3]
+            if isinstance(hint, str)
+            if (cleaned := _supplement_title(hint))
+        ))
+        if cleaned_hints:
+            result[(candidate_id, provider)] = cleaned_hints
+    return result
+
+
+def _supplement_hypotheses(
+    candidates,
+    intent: dict,
+    *,
+    provider: str,
+    missing_candidate_ids: set[str],
+    ai_payload=None,
+) -> dict:
+    ai_hints = _supplement_ai_hints(ai_payload)
+    hypotheses = []
+    queries = []
+    for candidate in candidates:
+        if candidate.candidate_id not in missing_candidate_ids:
+            continue
+        profile = _candidate_supplement_profile(candidate, {provider})
+        titles = list(dict.fromkeys([
+            *ai_hints.get((candidate.candidate_id, provider), []),
+            *profile["titles"],
+        ]))[:8]
+        _log_info(
+            "search_supplement status=planned "
+            f"candidate_id={candidate.candidate_id} provider={provider} "
+            f"queries={json.dumps(titles, ensure_ascii=False)} "
+            f"year={profile['year']} media_type={profile['media_type']}"
+        )
+        for title in titles:
+            queries.append(title)
+            hypotheses.append({
+                "title": title,
+                "year": profile["year"],
+                "content_identity": profile["media_type"],
+                "scope": (
+                    candidate.intended_scope
+                    or intent.get("scope")
+                    or "movie_or_series"
+                ),
+                "season_number": intent.get("season_number"),
+                "episode_number": intent.get("episode_number"),
+                "explicit_facts": [],
+                "inferred_facts": ["candidate_source_supplement"],
+            })
     return {
         "status": "ok",
         "intent": dict(intent),
-        "hypotheses": [{
-            "title": query,
-            "year": "",
-            "content_identity": "movie_or_series",
-            "scope": intent.get("scope") or "movie_or_series",
-            "season_number": intent.get("season_number"),
-            "episode_number": intent.get("episode_number"),
-            "explicit_facts": [],
-            "inferred_facts": ["candidate_source_supplement"],
-        } for query in queries],
-        "source_queries": {
-            provider: list(queries)
-            for provider in ("wikipedia", "douban", "tvdb")
-        },
+        "hypotheses": hypotheses,
+        "source_queries": {provider: list(dict.fromkeys(queries))},
         "warnings": ["candidate_source_supplement"],
     }
 
@@ -1777,8 +2095,10 @@ async def _build_anchored_search_plan(
     providers: dict[str, Callable],
     *,
     candidate_editor,
+    supplement_query_editor,
     locked_identity: tuple[str, str] | None,
 ) -> dict:
+    binding_repair_state = {"used": False}
     hypotheses = build_rule_hypotheses(raw_query)
     sources = await collect_evidence(hypotheses, providers)
     graph = build_search_graph(sources)
@@ -1832,18 +2152,18 @@ async def _build_anchored_search_plan(
     )
     if payload is None:
         raise SearchPlanningError("ai_candidate_failure")
-    try:
-        anchored = materialize_anchored_candidates(
-            graph,
-            payload,
-            provider_statuses=statuses,
-            locked_anchor_fact_id=anchor_fact_id,
-        )
-    except CandidateBindingError as exc:
-        raise SearchPlanningError(
-            "candidate_binding_failed",
-            (exc.code,),
-        ) from exc
+    anchored = await _materialize_with_binding_repair(
+        candidate_editor=candidate_editor,
+        graph=graph,
+        payload=payload,
+        provider_statuses=statuses,
+        locked_anchor_fact_id=anchor_fact_id,
+        raw_query=raw_query,
+        intent=intent,
+        provisional_candidates=(),
+        stage="discovery",
+        repair_state=binding_repair_state,
+    )
     if not anchored:
         raise SearchPlanningError("no_match")
 
@@ -1852,21 +2172,46 @@ async def _build_anchored_search_plan(
         for provider, status in statuses.items()
         if status in {"ok", "not_found"}
     }
-    missing_providers = {
-        provider
-        for provider in supplementable_providers
-        if any(provider not in candidate.providers for candidate in anchored)
+    missing_by_candidate = {
+        candidate.candidate_id: {
+            provider
+            for provider in supplementable_providers
+            if provider not in candidate.providers
+        }
+        for candidate in anchored
     }
+    missing_providers = set().union(
+        *missing_by_candidate.values()
+    ) if missing_by_candidate else set()
     if missing_providers:
-        supplemental = await collect_evidence(
-            _supplement_hypotheses(anchored, intent),
-            {
-                name: handler
-                for name, handler in providers.items()
-                if _text(name).casefold() in missing_providers
-            },
+        supplement_context = _supplement_query_context(
+            raw_query,
+            anchored,
+            missing_by_candidate,
         )
-        sources = _merge_evidence_passes(sources, supplemental)
+        ai_query_payload = await _call_supplement_query_editor(
+            supplement_query_editor,
+            supplement_context,
+        )
+        for provider in sorted(missing_providers):
+            handler = providers.get(provider)
+            if handler is None:
+                continue
+            supplemental = await collect_evidence(
+                _supplement_hypotheses(
+                    anchored,
+                    intent,
+                    provider=provider,
+                    missing_candidate_ids={
+                        candidate_id
+                        for candidate_id, missing in missing_by_candidate.items()
+                        if provider in missing
+                    },
+                    ai_payload=ai_query_payload,
+                ),
+                {provider: handler},
+            )
+            sources = _merge_evidence_passes(sources, supplemental)
         graph = build_search_graph(sources)
         statuses, _support = _provider_status_and_support(sources)
         anchor_fact_id = _locked_anchor_fact_id(graph, locked_identity)
@@ -1883,18 +2228,18 @@ async def _build_anchored_search_plan(
         )
         if payload is None:
             raise SearchPlanningError("ai_candidate_failure")
-        try:
-            anchored = materialize_anchored_candidates(
-                graph,
-                payload,
-                provider_statuses=statuses,
-                locked_anchor_fact_id=anchor_fact_id,
-            )
-        except CandidateBindingError as exc:
-            raise SearchPlanningError(
-                "candidate_binding_failed",
-                (exc.code,),
-            ) from exc
+        anchored = await _materialize_with_binding_repair(
+            candidate_editor=candidate_editor,
+            graph=graph,
+            payload=payload,
+            provider_statuses=statuses,
+            locked_anchor_fact_id=anchor_fact_id,
+            raw_query=raw_query,
+            intent=intent,
+            provisional_candidates=anchored,
+            stage="source_supplement",
+            repair_state=binding_repair_state,
+        )
         if not anchored:
             raise SearchPlanningError("no_match")
 
@@ -1914,11 +2259,24 @@ async def _build_anchored_search_plan(
                 "code": exc.code,
                 "missing_fields": list(exc.missing_fields),
             }
+            _log_warning(
+                "search_metadata status=incomplete "
+                f"candidate_id={candidate.candidate_id} "
+                f"code={exc.code} "
+                "missing_fields="
+                f"{json.dumps(list(exc.missing_fields), ensure_ascii=False)}"
+            )
             contract = _candidate_preview_metadata(
                 candidate,
                 metadata_id=plan_id,
                 raw_query=raw_query,
                 metadata_error=exc,
+            )
+        else:
+            _log_info(
+                "search_metadata status=ready "
+                f"candidate_id={candidate.candidate_id} "
+                f"anchor_fact_id={candidate.anchor_fact_id}"
             )
         queries = list(
             (contract.get("retrieval") or {}).get("queries") or []
@@ -2003,6 +2361,7 @@ async def build_confirmable_search_plan(
     source_gateway=None,
     source_orchestrator=orchestrate_sources,
     candidate_editor=None,
+    supplement_query_editor=None,
 ) -> dict:
     # occupied_loader/allocator are applied only after an interactive selection;
     # no unselected candidate may reserve a persistent or logical episode slot.
@@ -2013,6 +2372,7 @@ async def build_confirmable_search_plan(
             plan_id,
             providers,
             candidate_editor=candidate_editor,
+            supplement_query_editor=supplement_query_editor,
             locked_identity=locked_identity,
         )
     budget = budget or PlanningBudget()

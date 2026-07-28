@@ -1705,7 +1705,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["operation"]["state"], "cancelled")
         self.assertNotIn((10, 1), self.feature.sessions)
 
-    async def test_direct_token_wizard_cancel_discards_pending_access(self):
+    async def test_direct_token_wizard_q_exits_and_discards_pending_access(self):
         await self.feature.command({
             "command": "auth", "user_id": 1, "chat_id": 10,
         })
@@ -1721,6 +1721,10 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         })
 
         self.assertEqual(response["session"]["state"], "close")
+        self.assertEqual(
+            response["actions"][0]["text"],
+            "已退出当前交互。",
+        )
         self.assertNotIn((10, 1), self.feature.sessions)
         self.assertEqual(self.feature.config_store.writes, [])
         self.assertNotIn("access-pending", str(response))
@@ -1748,6 +1752,8 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("access-new", str(response))
         self.assertNotIn("refresh-new", str(response))
         self.assertNotIn("secret-value", str(response))
+        self.assertIn("使用 /q 退出", response["actions"][0]["text"])
+        self.assertNotIn("使用 /q 取消", response["actions"][0]["text"])
 
     async def test_partial_token_write_failure_restores_exact_snapshot(self):
         class PartialWriteStore(FakeConfigStore):

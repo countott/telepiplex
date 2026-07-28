@@ -100,6 +100,34 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         context.application.bot_data = {"telepiplex_plugin_manager": manager}
         return update, context, manager
 
+    def test_direct_feature_markup_deduplicates_terminal_controls(self):
+        from app.handlers.plugin_handler import _keyboard_markup
+
+        route = SimpleNamespace(
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        markup = _keyboard_markup(route, {
+            "keyboard": [[
+                {
+                    "text": "取消",
+                    "callback_data": "search:cancel:p1",
+                },
+                {
+                    "text": "退出",
+                    "callback_data": "search:cancel:p1",
+                },
+            ]],
+        })
+
+        self.assertEqual(
+            [
+                (button.text, button.callback_data)
+                for row in markup.inline_keyboard
+                for button in row
+            ],
+            [("取消", "search:cancel:p1")],
+        )
+
     async def test_feature_config_patch_is_merged_and_reloaded_by_host(self):
         from app.handlers.plugin_handler import handle_feature_result
 

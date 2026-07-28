@@ -15,6 +15,7 @@ from telepiplex_plugin_sdk.media_metadata import resolve_category_route
 from .ai import (
     infer_anchored_candidates_with_ai,
     infer_relation_hypotheses_with_ai,
+    infer_source_supplement_queries_with_ai,
 )
 from .adapters.douban import (
     lookup_douban_evidence,
@@ -47,6 +48,7 @@ from .candidate_hydration import (
 )
 from .direct_link import DirectLinkError, resolve_direct_link
 from .input_contract import classify_search_input
+from .log_sanitizer import sanitize_log_value
 from .planner import SearchPlanningError, build_confirmable_search_plan
 from .prowlarr_query import (
     build_prowlarr_query,
@@ -172,9 +174,101 @@ _PLANNING_ERROR_MESSAGES = {
     "direct_link_anchor_missing": "固定链接锚点在来源事实中丢失，无法继续。",
     "fixed_link_read_failed": "固定链接读取失败，请重试、取消或退出。",
     "metadata_conflict": "已选候选的媒体类型事实冲突。",
-    "metadata_incomplete": "已选候选不足以形成严格 media_metadata v1。",
+    "metadata_incomplete": "已选候选不足以形成严格媒体元数据。",
     "prowlarr_failure": "Prowlarr 搜索失败，请重试、取消或退出。",
 }
+
+_PROVIDER_LABELS = {
+    "wikipedia": "维基百科",
+    "douban": "豆瓣",
+    "tvdb": "TVDB",
+}
+_MEDIA_TYPE_LABELS = {
+    "movie": "电影",
+    "series": "剧集",
+    "unknown": "未知",
+}
+_CANDIDATE_ROLE_LABELS = {
+    "movie": "电影",
+    "series_root": "整部剧集",
+    "season": "季度",
+    "episode": "单集",
+    "related_work": "关联作品",
+    "work": "作品",
+}
+_RELATION_LABELS = {
+    "standalone": "独立作品",
+    "prequel": "前传",
+    "sequel": "续作",
+    "spin_off": "衍生作品",
+    "special": "特别篇",
+    "extension_movie": "延伸电影",
+}
+_CANDIDATE_VERSION_LABELS = {
+    "v1": "来源完整",
+    "v0": "来源待补充",
+}
+_METADATA_FIELD_LABELS = {
+    "canonical_latin_title": "规范拉丁标题",
+    "canonical_search_title": "规范检索标题",
+    "chinese_title": "中文标题",
+    "official_english_title": "官方英文标题",
+    "romanized_original_title": "原名罗马字",
+    "year": "发行年份",
+    "media_type": "媒体类型",
+    "source_links": "来源链接",
+    "tvdb_root": "TVDB 剧集根条目",
+    "tvdb_inventory": "TVDB 剧集清单",
+    "verified_scope": "已验证季集范围",
+}
+
+
+def _human_media_type(value) -> str:
+    normalized = _text(value).casefold()
+    return _MEDIA_TYPE_LABELS.get(normalized, "未知")
+
+
+def _human_candidate_role(value) -> str:
+    normalized = _text(value).casefold()
+    return _CANDIDATE_ROLE_LABELS.get(normalized, "作品")
+
+
+def _human_relation(value) -> str:
+    normalized = _text(value).casefold()
+    return _RELATION_LABELS.get(normalized, "关联关系待确认")
+
+
+def _human_metadata_field(value) -> str:
+    normalized = _text(value)
+    return _METADATA_FIELD_LABELS.get(
+        normalized,
+        normalized.replace("_", " ") or "必要字段",
+    )
+
+
+def _human_unresolved_source(value) -> str:
+    normalized = _text(value)
+    if normalized.endswith(":unresolved_scope_link"):
+        return "季集关系尚未通过 TVDB 验证"
+    if normalized.endswith(":source_url_missing"):
+        return "已绑定来源缺少可读取链接"
+    provider, separator, status = normalized.partition(":")
+    if not separator:
+        return normalized
+    provider_label = _PROVIDER_LABELS.get(provider.casefold(), provider)
+    status_label = {
+        "not_bound": "尚未绑定到此候选",
+        "not_found": "未找到匹配条目",
+        "server_down": "暂时不可用",
+        "timeout": "查询超时",
+        "rate_limited": "查询受限",
+        "blocked": "访问受限",
+        "disabled": "未启用",
+        "unavailable": "当前不可用",
+        "authentication_failed": "认证失败",
+        "credential_missing": "缺少凭据",
+    }.get(status.casefold(), "状态待确认")
+    return f"{provider_label}{status_label}"
 
 
 class SearchFeature:
@@ -826,12 +920,21 @@ class SearchFeature:
                 plan = await self.plan_builder(raw_query, plan_id)
         except SearchPlanningError as exc:
             code = getattr(exc, "code", str(exc))
+            reason_codes = tuple(
+                getattr(exc, "reason_codes", ()) or ()
+            )
+            if runtime_context.logger:
+                runtime_context.logger.warning(
+                    "search_planning status=failed "
+                    f"plan_id={sanitize_log_value(plan_id, max_chars=80)} "
+                    f"query={sanitize_log_value(raw_query, max_chars=300)} "
+                    f"code={sanitize_log_value(code, max_chars=120)} "
+                    "reason_codes="
+                    f"{sanitize_log_value(list(reason_codes), max_chars=1000)}"
+                )
             message = _PLANNING_ERROR_MESSAGES.get(
                 code,
                 "媒体证据无法形成有效计划，请补充信息后重试。",
-            )
-            reason_codes = tuple(
-                getattr(exc, "reason_codes", ()) or ()
             )
             if code in {
                 "source_failure",
@@ -881,15 +984,12 @@ class SearchFeature:
                         "kind": "send_message",
                         "text": f"❌ {message}",
                         "data": {"keyboard": [[{
-                            "text": "重试",
-                            "callback_data": f"search:retry:{plan_id}",
-                        }], [{
-                            "text": "取消",
-                            "callback_data": f"search:cancel:{plan_id}",
-                        }, {
-                            "text": "退出",
-                            "callback_data": f"search:cancel:{plan_id}",
-                        }]]},
+                        "text": "重试",
+                        "callback_data": f"search:retry:{plan_id}",
+                    }], [{
+                        "text": "退出",
+                        "callback_data": f"search:cancel:{plan_id}",
+                    }]]},
                     }],
                     "session": {"state": "close"},
                 }
@@ -1096,7 +1196,8 @@ class SearchFeature:
         text = (
             f"候选 {index + 1}/{len(candidates)}{recommended}\n"
             f"{title} ({identity.get('year') or '年份未知'})\n"
-            f"类型：{placement.get('library_type') or '未知'} · 关系：{relation}\n"
+            f"类型：{_human_media_type(placement.get('library_type'))}"
+            f" · 关系：{_human_relation(relation)}\n"
             f"评分：{score.get('total', 0)}/100"
         )
         navigation = []
@@ -1116,7 +1217,7 @@ class SearchFeature:
                 else f"search:select:{stored['plan']['plan_id']}:{index}"
             )
             keyboard.append([{
-                "text": "选择并搜索片源",
+                "text": "选择并验证",
                 "callback_data": callback_data,
             }])
         keyboard.append([{
@@ -1149,13 +1250,17 @@ class SearchFeature:
                 or "未知"
             )[:36]
             year = _text(identity.get("year")) or "年份未知"
-            role = _text(candidate.get("identity_role")) or "work"
+            role = _human_candidate_role(candidate.get("identity_role"))
             confidence = round(
                 float(candidate.get("ai_confidence") or 0) * 100
             )
             reason = _text(candidate.get("ai_reason"))[:36]
             candidate_version = (
                 _text(candidate.get("candidate_version")) or "v0"
+            )
+            candidate_state = _CANDIDATE_VERSION_LABELS.get(
+                candidate_version.casefold(),
+                "来源状态待确认",
             )
             source_links = [
                 link for link in candidate.get("source_links") or []
@@ -1164,8 +1269,9 @@ class SearchFeature:
             ]
             source_labels = []
             for link in source_links:
+                provider_key = _text(link.get("provider")).casefold()
                 provider = html.escape(
-                    (_text(link.get("provider")) or "来源")[:16]
+                    _PROVIDER_LABELS.get(provider_key, "来源")[:16]
                 )
                 url = html.escape(
                     _text(link.get("url")),
@@ -1175,17 +1281,17 @@ class SearchFeature:
             lines.extend([
                 (
                     f"{index}. <b>{html.escape(title)}</b> ({year}) · "
-                    f"{html.escape(_text(placement.get('library_type')) or '未知')}"
-                    f" · {html.escape(role)} · {html.escape(candidate_version)}"
+                    f"{html.escape(_human_media_type(placement.get('library_type')))}"
+                    f" · {html.escape(role)} · {html.escape(candidate_state)}"
                 ),
                 (
                     f"来源：{' · '.join(source_labels) or '暂无链接'}"
-                    f" · AI {confidence}%"
+                    f" · 匹配参考：{confidence}%"
                 ),
                 f"理由：{html.escape(reason or '来源事实匹配用户意图')}",
             ])
             unresolved = [
-                _text(item)
+                _human_unresolved_source(item)
                 for item in candidate.get("unresolved_sources") or []
                 if _text(item)
             ]
@@ -1286,37 +1392,58 @@ class SearchFeature:
                     "fixed_link_read_failed": "固定链接读取失败",
                     "candidate_binding_failed": "来源绑定失败",
                     "metadata_conflict": "元数据类型冲突",
-                    "metadata_incomplete": "media_metadata v1 不完整",
+                    "metadata_incomplete": "严格媒体元数据不完整",
                 }.get(exc.code, "候选精确读取失败")
                 missing = (
-                    f"（{', '.join(exc.details)}）"
+                    "（"
+                    + "、".join(
+                        _human_metadata_field(item)
+                        for item in exc.details
+                    )
+                    + "）"
                     if exc.details
                     else ""
-                )
-                action["text"] += (
-                    f"\n❌ {detail}{missing}。可重试或退出。"
                 )
                 keyboard = (action.get("data") or {}).get("keyboard") or []
                 retry_callback = (
                     f"search:select:{plan_id}:{index}"
                 )
-                retry_button = next(
-                    (
-                        button
-                        for row in keyboard
-                        for button in row
-                        if button.get("callback_data")
-                        == retry_callback
-                    ),
-                    None,
-                )
-                if retry_button is None:
-                    keyboard.insert(0, [{
-                        "text": "重试精确读取",
-                        "callback_data": retry_callback,
-                    }])
+                if exc.code == "fixed_link_read_failed":
+                    action["text"] += (
+                        f"\n❌ {detail}{missing}。可重试精确读取或退出。"
+                    )
+                    retry_button = next(
+                        (
+                            button
+                            for row in keyboard
+                            for button in row
+                            if button.get("callback_data")
+                            == retry_callback
+                        ),
+                        None,
+                    )
+                    if retry_button is None:
+                        keyboard.insert(0, [{
+                            "text": "重试精确读取",
+                            "callback_data": retry_callback,
+                        }])
+                    else:
+                        retry_button["text"] = "重试精确读取"
                 else:
-                    retry_button["text"] = "重试精确读取"
+                    action["text"] += (
+                        f"\n❌ {detail}{missing}。"
+                        "请查看其他候选，或退出。"
+                    )
+                    keyboard[:] = [
+                        [
+                            button
+                            for button in row
+                            if button.get("callback_data")
+                            != retry_callback
+                        ]
+                        for row in keyboard
+                    ]
+                    keyboard[:] = [row for row in keyboard if row]
                 return {"actions": [action]}
         selected_plan = {
             "plan_id": plan_id,
@@ -1917,9 +2044,6 @@ class SearchFeature:
                         "text": "重试 Prowlarr",
                         "callback_data": f"search:confirm:{plan_id}",
                     }], [{
-                        "text": "取消",
-                        "callback_data": f"search:cancel:{plan_id}",
-                    }, {
                         "text": "退出",
                         "callback_data": f"search:cancel:{plan_id}",
                     }]]},
@@ -2471,6 +2595,7 @@ class SearchFeature:
             locked_identity=resolved_identity,
             source_gateway=source_gateway,
             candidate_editor=infer_anchored_candidates_with_ai,
+            supplement_query_editor=infer_source_supplement_queries_with_ai,
         )
 
     def _wikipedia_provider(self, hypotheses: dict):

@@ -320,7 +320,7 @@ class SyncFeature:
                 "callback_data": f"plex:scan:page:{page + 1}",
             })
         navigation.append({
-            "text": "取消",
+            "text": "退出",
             "callback_data": "plex:scan:cancel",
         })
         keyboard.append(navigation)
@@ -342,7 +342,7 @@ class SyncFeature:
             return {
                 "actions": [{
                     "kind": "edit_message",
-                    "text": "已取消 Plex 扫描选择。",
+                    "text": "已退出 Plex 扫描选择。",
                 }]
             }
         if payload.startswith("scan:page:"):
@@ -685,7 +685,7 @@ class SyncFeature:
                 "data": {
                     "photo_url": str(candidates[index].get("url") or ""),
                     "keyboard": keyboard + [[{
-                        "text": "取消",
+                        "text": "取消任务",
                         "callback_data": "plex:cancel",
                     }]],
                 },
@@ -725,7 +725,7 @@ class SyncFeature:
                 ),
             })
         controls.append({
-            "text": "取消",
+            "text": "取消任务",
             "callback_data": "plex:cancel",
         })
         return {

@@ -374,6 +374,18 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             keyboard[0][0]["callback_data"],
             f"search:confirm:{plan_id}",
         )
+        self.assertEqual(
+            [button["text"] for row in keyboard for button in row],
+            ["重试 Prowlarr", "退出"],
+        )
+        self.assertEqual(
+            len({
+                button["callback_data"]
+                for row in keyboard
+                for button in row
+            }),
+            2,
+        )
         self.assertIn("已等待 200 秒", failed["status_text"])
         self.assertIn(plan_id, self.feature.plans)
 
@@ -668,7 +680,39 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.feature.plans, {})
         self.assertEqual(self.search_queries, [])
 
-    async def test_recoverable_planning_errors_have_retry_cancel_exit_ui(self):
+    async def test_candidate_binding_failure_logs_plan_query_and_concrete_reason(self):
+        from telepiplex_search.context import runtime_context
+        from telepiplex_search.planner import SearchPlanningError
+
+        async def blocked(_raw_query, _plan_id):
+            raise SearchPlanningError(
+                "candidate_binding_failed",
+                ("fact_bound_multiple_times", "unknown_fact_id"),
+            )
+
+        logger = Mock()
+        self.feature.plan_builder = blocked
+        with patch.object(runtime_context, "logger", logger):
+            await self.feature.command({
+                "command": "search",
+                "args": ["ODDTAXI"],
+                "user_id": 1,
+                "chat_id": 10,
+            })
+            await self.runtime.run("search-plan-")
+
+        warning = " ".join(
+            call.args[0]
+            for call in logger.warning.call_args_list
+        )
+        self.assertIn("search_planning status=failed", warning)
+        self.assertIn("query=ODDTAXI", warning)
+        self.assertRegex(warning, r"plan_id=[a-f0-9]{10}")
+        self.assertIn("code=candidate_binding_failed", warning)
+        self.assertIn("fact_bound_multiple_times", warning)
+        self.assertIn("unknown_fact_id", warning)
+
+    async def test_recoverable_planning_errors_have_retry_and_single_exit_ui(self):
         from telepiplex_search.planner import SearchPlanningError
 
         for code in (
@@ -698,10 +742,14 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 report = self.host.reports[-1]
                 keyboard = report["details"]["keyboard"]
                 self.assertEqual(report["state"], "awaiting_input")
-                self.assertEqual(keyboard[0][0]["text"], "重试")
-                self.assertEqual(keyboard[1][0]["text"], "取消")
-                self.assertEqual(keyboard[1][1]["text"], "退出")
-                plan_id = result["operation"]["details"].get("plan_id")
+                plan_id = keyboard[0][0]["callback_data"].rsplit(":", 1)[-1]
+                self.assertEqual(keyboard, [[{
+                    "text": "重试",
+                    "callback_data": f"search:retry:{plan_id}",
+                }], [{
+                    "text": "退出",
+                    "callback_data": f"search:cancel:{plan_id}",
+                }]])
                 for stored_plan_id in list(self.feature.plans):
                     self.feature._release_plan(stored_plan_id)
 
@@ -1460,7 +1508,10 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 f"search:select:{next(iter(self.feature.plans))}:1",
             ],
         )
-        self.assertIn("AI 89%", report["status_text"])
+        self.assertIn("匹配参考：89%", report["status_text"])
+        self.assertIn("电影 · 电影 · 来源待补充", report["status_text"])
+        self.assertIn(">豆瓣</a>", report["status_text"])
+        self.assertNotIn(" · movie · ", report["status_text"])
         self.assertIn("https://movie.douban.com/subject/1/", report["status_text"])
 
     def test_six_candidate_html_grid_stays_within_telegram_caption_limit(self):
@@ -1507,7 +1558,36 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             action["text"].count("<a "),
             action["text"].count("</a>"),
         )
-        self.assertIn("wikipedia:server_down", action["text"])
+        self.assertIn("维基百科暂时不可用", action["text"])
+        self.assertNotIn("wikipedia:server_down", action["text"])
+        self.assertNotIn(" · v0", action["text"])
+
+    def test_candidate_detail_uses_human_media_and_relation_labels(self):
+        plan = series_ranked_search_plan()
+        candidate = plan["candidates"][0]
+        candidate.update({
+            "candidate_id": "series-candidate",
+            "identity_role": "series_root",
+            "candidate_version": "v0",
+        })
+
+        action = self.feature._candidate_action(
+            {
+                "candidates": (candidate,),
+                "plan": {"plan_id": "human-detail"},
+            },
+            0,
+            edit=False,
+        )
+
+        self.assertIn("类型：剧集", action["text"])
+        self.assertIn("关系：独立作品", action["text"])
+        self.assertNotIn("standalone", action["text"])
+        self.assertNotIn("series_root", action["text"])
+        self.assertEqual(
+            action["data"]["keyboard"][0][0]["text"],
+            "选择并验证",
+        )
 
     async def test_unified_single_candidate_skips_candidate_selection(self):
         async def planner(_raw_query, plan_id):
@@ -1540,7 +1620,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         plan.update({
             "plan_id": plan_id,
             "raw_query": "候选",
-            "entry_kind": "text",
+            "entry_kind": "link",
             "links_frozen": True,
         })
         for index, candidate in enumerate(plan["candidates"], 1):
@@ -1595,6 +1675,56 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             retry["callback_data"],
             f"search:select:{plan_id}:1",
         )
+
+    @patch("telepiplex_search.service.hydrate_frozen_candidate")
+    async def test_deterministic_hydration_error_removes_same_selection_retry(
+        self,
+        hydrate,
+    ):
+        from telepiplex_search.candidate_hydration import (
+            CandidateHydrationError,
+        )
+
+        hydrate.side_effect = CandidateHydrationError(
+            "metadata_incomplete",
+            ("canonical_latin_title",),
+        )
+        plan_id = "metadata-incomplete"
+        plan = ranked_search_plan()
+        plan.update({
+            "plan_id": plan_id,
+            "raw_query": "冰果",
+            "entry_kind": "text",
+            "links_frozen": True,
+        })
+        for candidate in plan["candidates"]:
+            candidate.update({
+                "links_frozen": True,
+                "identity_role": "series_root",
+            })
+        stored = {
+            "plan": plan,
+            "candidates": tuple(plan["candidates"]),
+            "selected_path": "",
+            "operation_id": "",
+        }
+
+        result = await self.feature._select_candidate(
+            plan_id,
+            stored,
+            "0",
+        )
+
+        action = result["actions"][0]
+        callbacks = {
+            button["callback_data"]
+            for row in action["data"]["keyboard"]
+            for button in row
+        }
+        self.assertNotIn(f"search:select:{plan_id}:0", callbacks)
+        self.assertIn("规范拉丁标题", action["text"])
+        self.assertNotIn("canonical_latin_title", action["text"])
+        self.assertNotIn("可重试", action["text"])
 
     async def test_clarification_plan_renders_options(self):
         async def planner(_raw_query, plan_id):
