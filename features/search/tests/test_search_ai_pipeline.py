@@ -446,6 +446,55 @@ class SearchAiPipelineTest(unittest.TestCase):
 
     @patch("telepiplex_search.ai.check_ai_api_available", return_value=True)
     @patch("telepiplex_search.ai.chat_completion")
+    def test_deepseek_object_content_with_reasoning_is_accepted(
+        self,
+        chat_mock,
+        _available,
+    ):
+        payload = {
+            "status": "resolved",
+            "candidates": [{
+                "candidate_id": "odd-taxi-series",
+                "anchor_fact_id": "tvdb:series:397208",
+                "identity_role": "series_root",
+                "intended_scope": "whole_series",
+                "fact_bindings": [{
+                    "fact_id": "tvdb:series:397208",
+                    "role": "series_root",
+                    "season_number": None,
+                    "episode_number": None,
+                }],
+                "ai_confidence": 0.95,
+                "ai_reason": "2021 年动画系列。",
+            }],
+        }
+        chat_mock.return_value = {
+            "id": "deepseek-real-shape",
+            "object": "chat.completion",
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": payload,
+                    "reasoning_content": (
+                        "The candidate is grounded in the supplied fact."
+                    ),
+                },
+            }],
+        }
+
+        result = infer_anchored_candidates_with_ai({
+            "raw_query": "ODDTAXI",
+            "facts": [{
+                "fact_id": "tvdb:series:397208",
+                "provider": "tvdb",
+            }],
+        })
+
+        self.assertEqual(result, payload)
+
+    @patch("telepiplex_search.ai.check_ai_api_available", return_value=True)
+    @patch("telepiplex_search.ai.chat_completion")
     def test_anchored_candidate_ai_rejects_extra_generated_fields(
         self,
         chat_mock,

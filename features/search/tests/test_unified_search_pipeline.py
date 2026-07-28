@@ -1,4 +1,5 @@
 import unittest
+from types import MappingProxyType
 from unittest.mock import Mock, patch
 
 from telepiplex_search.deterministic import build_rule_hypotheses
@@ -6,9 +7,15 @@ from telepiplex_search.planner import (
     SearchPlanningError,
     _anchored_editor_context,
     _merge_evidence_passes,
+    _materialize_with_binding_repair,
     build_confirmable_search_plan,
 )
-from telepiplex_search.entity_graph import build_search_graph
+from telepiplex_search.entity_graph import (
+    CandidateEntity,
+    EvidenceFact,
+    SearchGraph,
+    build_search_graph,
+)
 from telepiplex_search.search_plan import TemporarySpecialAllocator
 
 
@@ -61,7 +68,7 @@ def _wikipedia_fact():
 
 def _binding(include_wikipedia=True):
     fact_bindings = [{
-        "fact_id": "tvdb:77",
+        "fact_id": "tvdb:movie:77",
         "role": "movie",
         "season_number": None,
         "episode_number": None,
@@ -82,7 +89,7 @@ def _binding(include_wikipedia=True):
         "status": "resolved",
         "candidates": [{
             "candidate_id": "grand-budapest",
-            "anchor_fact_id": "tvdb:77",
+            "anchor_fact_id": "tvdb:movie:77",
             "identity_role": "movie",
             "intended_scope": "movie",
             "fact_bindings": fact_bindings,
@@ -124,7 +131,7 @@ class UnifiedSearchPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ai_contexts), 1)
         self.assertEqual(
             {fact["fact_id"] for fact in ai_contexts[0]["facts"]},
-            {"wikipedia:Q77", "douban:11", "tvdb:77"},
+            {"wikipedia:Q77", "douban:11", "tvdb:movie:77"},
         )
         candidate = plan["candidates"][0]
         self.assertTrue(candidate["links_frozen"])
@@ -136,43 +143,69 @@ class UnifiedSearchPipelineTest(unittest.IsolatedAsyncioTestCase):
             "ai_fact_binding",
         )
 
-    async def test_missing_provider_is_supplemented_then_ai_rebinds(self):
+    async def test_duplicate_supplement_facts_converge_then_ai_rebinds(self):
+        from telepiplex_search.context import runtime_context
+
         wikipedia_calls = 0
-        ai_calls = 0
+        ai_contexts = []
+        logger = Mock()
 
         def wikipedia(_hypotheses):
             nonlocal wikipedia_calls
             wikipedia_calls += 1
             if wikipedia_calls == 1:
                 return {"status": "not_found", "facts": []}
-            return {"status": "ok", "facts": [_wikipedia_fact()]}
+            english = {
+                **_wikipedia_fact(),
+                "query": "The Grand Budapest Hotel",
+                "language": "en",
+            }
+            chinese = {
+                **_wikipedia_fact(),
+                "query": "布达佩斯大饭店",
+                "language": "zh",
+                "title": "布达佩斯大饭店",
+                "chinese_title": "布达佩斯大饭店",
+            }
+            return {"status": "ok", "facts": [english, chinese]}
 
         def editor(context):
-            nonlocal ai_calls
-            ai_calls += 1
-            return _binding(include_wikipedia=ai_calls > 1)
+            ai_contexts.append(context)
+            return _binding(include_wikipedia=len(ai_contexts) > 1)
 
-        plan = await build_confirmable_search_plan(
-            "布达佩斯大饭店",
-            "unified-2",
-            {
-                "wikipedia": wikipedia,
-                "douban": lambda _query: {
-                    "status": "ok",
-                    "facts": [_douban_fact()],
+        with patch.object(runtime_context, "logger", logger):
+            plan = await build_confirmable_search_plan(
+                "布达佩斯大饭店",
+                "unified-2",
+                {
+                    "wikipedia": wikipedia,
+                    "douban": lambda _query: {
+                        "status": "ok",
+                        "facts": [_douban_fact()],
+                    },
+                    "tvdb": lambda _query: {
+                        "status": "ok",
+                        "facts": [_tvdb_fact()],
+                    },
                 },
-                "tvdb": lambda _query: {
-                    "status": "ok",
-                    "facts": [_tvdb_fact()],
-                },
-            },
-            lambda _contract: set(),
-            TemporarySpecialAllocator(),
-            candidate_editor=editor,
-        )
+                lambda _contract: set(),
+                TemporarySpecialAllocator(),
+                candidate_editor=editor,
+            )
 
         self.assertEqual(wikipedia_calls, 2)
-        self.assertEqual(ai_calls, 2)
+        self.assertEqual(
+            [context["stage"] for context in ai_contexts],
+            ["discovery", "source_supplement"],
+        )
+        self.assertEqual(
+            [
+                fact["fact_id"]
+                for fact in ai_contexts[1]["facts"]
+                if fact["provider"] == "wikipedia"
+            ],
+            ["wikipedia:Q77"],
+        )
         self.assertEqual(
             {item["provider"] for item in plan["candidates"][0]["source_links"]},
             {"wikipedia", "douban", "tvdb"},
@@ -181,6 +214,14 @@ class UnifiedSearchPipelineTest(unittest.IsolatedAsyncioTestCase):
             plan["candidates"][0]["candidate_version"],
             "v1",
         )
+        info = " ".join(
+            call.args[0] for call in logger.info.call_args_list
+        )
+        self.assertIn("search_fact_merge status=merged", info)
+        self.assertIn("stage=source_supplement", info)
+        self.assertIn("provider=wikipedia", info)
+        self.assertIn("fact_id=wikipedia:Q77", info)
+        self.assertIn("occurrences=2", info)
 
     async def test_missing_tvdb_uses_candidate_bound_cross_language_title_and_year(self):
         tvdb_payloads = []
@@ -242,7 +283,7 @@ class UnifiedSearchPipelineTest(unittest.IsolatedAsyncioTestCase):
             }]
             if editor_calls > 1:
                 bindings.append({
-                    "fact_id": "tvdb:278127",
+                    "fact_id": "tvdb:series:278127",
                     "role": "series_root",
                     "season_number": None,
                     "episode_number": None,
@@ -302,6 +343,258 @@ class UnifiedSearchPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             plan["candidates"][0]["candidate_version"],
             "v1",
+        )
+
+    async def test_honey_and_clover_four_work_chain_survives_duplicate_supplement_results(self):
+        calls = {"wikipedia": 0, "douban": 0, "tvdb": 0}
+        ai_contexts = []
+
+        works = [{
+            "candidate_id": "honey-anime",
+            "kind": "series",
+            "year": "2005",
+            "douban_id": "anime-2005",
+            "tvdb_id": "79044",
+            "wiki_id": "Q-anime",
+            "chinese": "蜂蜜与四叶草",
+            "original": "ハチミツとクローバー",
+            "english": "Honey and Clover",
+            "language": "ja",
+            "genres": ["Anime"],
+        }, {
+            "candidate_id": "honey-movie",
+            "kind": "movie",
+            "year": "2006",
+            "douban_id": "movie-2006",
+            "tvdb_id": "movie-2006",
+            "wiki_id": "Q-movie",
+            "chinese": "蜂蜜与四叶草",
+            "original": "ハチミツとクローバー",
+            "english": "Honey and Clover",
+            "language": "ja",
+            "genres": [],
+        }, {
+            "candidate_id": "honey-jp-drama",
+            "kind": "series",
+            "year": "2008",
+            "douban_id": "jp-2008",
+            "tvdb_id": "jp-2008",
+            "wiki_id": "Q-jp-drama",
+            "chinese": "蜂蜜与四叶草",
+            "original": "ハチミツとクローバー",
+            "english": "Honey and Clover (JP)",
+            "language": "ja",
+            "genres": ["Drama"],
+        }, {
+            "candidate_id": "honey-tw-drama",
+            "kind": "series",
+            "year": "2008",
+            "douban_id": "tw-2008",
+            "tvdb_id": "tw-2008",
+            "wiki_id": "Q-tw-drama",
+            "chinese": "蜂蜜幸运草",
+            "original": "蜂蜜幸運草",
+            "english": "Honey and Clover (TW)",
+            "language": "zh",
+            "genres": ["Drama"],
+        }]
+
+        def douban_fact(work):
+            return {
+                "subject_id": work["douban_id"],
+                "title": work["chinese"],
+                "chinese_title": work["chinese"],
+                "original_title": work["original"],
+                "original_language": work["language"],
+                "official_english_title": work["english"],
+                "year": work["year"],
+                "media_type": work["kind"],
+                "genres": work["genres"],
+                "url": (
+                    "https://movie.douban.com/subject/"
+                    f"{work['douban_id']}/"
+                ),
+            }
+
+        def tvdb_wrapper(work):
+            item = {
+                f"tvdb_{work['kind']}_id": work["tvdb_id"],
+                "name": work["english"],
+                "chinese_title": work["chinese"],
+                "original_title": work["original"],
+                "original_language": work["language"],
+                "official_english_title": work["english"],
+                "year": work["year"],
+                "genres": work["genres"],
+                "url": (
+                    f"https://thetvdb.com/{'movies' if work['kind'] == 'movie' else 'series'}/"
+                    f"{work['tvdb_id']}"
+                ),
+            }
+            return {
+                "movies": [item] if work["kind"] == "movie" else [],
+                "series": [item] if work["kind"] == "series" else [],
+                "episodes_by_series": (
+                    {
+                        work["tvdb_id"]: [{
+                            "tvdb_episode_id": f"{work['tvdb_id']}-s1e1",
+                            "season_number": 1,
+                            "episode_number": 1,
+                        }],
+                    }
+                    if work["kind"] == "series"
+                    else {}
+                ),
+            }
+
+        def wikipedia_fact(work, *, title=None):
+            return {
+                "wikibase_item": work["wiki_id"],
+                "title": title or work["english"],
+                "chinese_title": work["chinese"],
+                "original_title": work["original"],
+                "original_language": work["language"],
+                "official_english_title": work["english"],
+                "year": work["year"],
+                "media_type": work["kind"],
+                "genres": work["genres"],
+                "url": f"https://en.wikipedia.org/wiki/{work['wiki_id']}",
+            }
+
+        def wikipedia(_hypotheses):
+            calls["wikipedia"] += 1
+            if calls["wikipedia"] == 1:
+                return {
+                    "source": "wikipedia",
+                    "status": "not_found",
+                    "facts": [],
+                }
+            return {
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [
+                    wikipedia_fact(works[0]),
+                    wikipedia_fact(works[0], title=works[0]["chinese"]),
+                    *(wikipedia_fact(work) for work in works[1:]),
+                ],
+            }
+
+        def douban(_hypotheses):
+            calls["douban"] += 1
+            return {
+                "source": "douban",
+                "status": "ok",
+                "facts": [douban_fact(work) for work in works],
+            }
+
+        def tvdb(_hypotheses):
+            calls["tvdb"] += 1
+            facts = (
+                [tvdb_wrapper(works[0])]
+                if calls["tvdb"] == 1
+                else [
+                    tvdb_wrapper(works[0]),
+                    tvdb_wrapper(works[0]),
+                    *(tvdb_wrapper(work) for work in works[1:]),
+                ]
+            )
+            return {
+                "source": "tvdb",
+                "status": "ok",
+                "facts": facts,
+            }
+
+        def candidate_payload(*, supplemented):
+            candidates = []
+            for work in works:
+                role = "movie" if work["kind"] == "movie" else "series_root"
+                bindings = [{
+                    "fact_id": f"douban:{work['douban_id']}",
+                    "role": role,
+                    "season_number": None,
+                    "episode_number": None,
+                }]
+                if work is works[0] or supplemented:
+                    bindings.insert(0, {
+                        "fact_id": (
+                            f"tvdb:{work['kind']}:{work['tvdb_id']}"
+                        ),
+                        "role": role,
+                        "season_number": None,
+                        "episode_number": None,
+                    })
+                if supplemented:
+                    bindings.append({
+                        "fact_id": f"wikipedia:{work['wiki_id']}",
+                        "role": role,
+                        "season_number": None,
+                        "episode_number": None,
+                    })
+                candidates.append({
+                    "candidate_id": work["candidate_id"],
+                    "anchor_fact_id": bindings[0]["fact_id"],
+                    "identity_role": role,
+                    "intended_scope": (
+                        "movie"
+                        if work["kind"] == "movie"
+                        else "whole_series"
+                    ),
+                    "fact_bindings": bindings,
+                    "ai_confidence": 0.95,
+                    "ai_reason": "The bound Provider facts identify one work.",
+                })
+            return {"status": "resolved", "candidates": candidates}
+
+        def editor(context):
+            ai_contexts.append(context)
+            return candidate_payload(
+                supplemented=context["stage"] == "source_supplement",
+            )
+
+        plan = await build_confirmable_search_plan(
+            "蜂蜜与四叶草",
+            "unified-honey-four",
+            {
+                "wikipedia": wikipedia,
+                "douban": douban,
+                "tvdb": tvdb,
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            candidate_editor=editor,
+        )
+
+        self.assertEqual(calls, {"wikipedia": 2, "douban": 1, "tvdb": 2})
+        self.assertEqual(
+            [context["stage"] for context in ai_contexts],
+            ["discovery", "source_supplement"],
+        )
+        self.assertEqual(
+            len({
+                fact["fact_id"] for fact in ai_contexts[-1]["facts"]
+            }),
+            len(ai_contexts[-1]["facts"]),
+        )
+        self.assertEqual(
+            [item["candidate_id"] for item in plan["candidates"]],
+            [work["candidate_id"] for work in works],
+        )
+        self.assertTrue(all(
+            item["candidate_version"] == "v1"
+            and item["metadata_ready"]
+            and len(item["source_links"]) == 3
+            for item in plan["candidates"]
+        ))
+        self.assertEqual(
+            {
+                item["media_metadata"]["placement"]["category_kind"]
+                for item in plan["candidates"]
+            },
+            {
+                "animated_series",
+                "live_action_movie",
+                "live_action_series",
+            },
         )
 
     async def test_missing_provider_after_supplement_keeps_displayable_v0(self):
@@ -565,6 +858,114 @@ class UnifiedSearchPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("search_binding status=invalid", warning_logs)
         self.assertIn("error=fact_bound_multiple_times", warning_logs)
         self.assertIn("search_binding status=repairing", warning_logs)
+
+    async def test_graph_duplicate_is_never_sent_to_ai_binding_repair(self):
+        first = EvidenceFact(
+            fact_id="wikipedia:Q1",
+            provider="wikipedia",
+            titles=("Honey and Clover",),
+            year="2005",
+            media_type="series",
+            external_ids=MappingProxyType({"wikipedia": "Q1"}),
+        )
+        second = EvidenceFact(
+            fact_id="wikipedia:Q1",
+            provider="wikipedia",
+            titles=("Honey and Clover",),
+            year="2005",
+            media_type="series",
+            external_ids=MappingProxyType({"wikipedia": "Q1"}),
+        )
+        editor = Mock()
+
+        with self.assertRaises(SearchPlanningError) as failed:
+            await _materialize_with_binding_repair(
+                candidate_editor=editor,
+                graph=SearchGraph((
+                    CandidateEntity("candidate-a", (first,)),
+                    CandidateEntity("candidate-b", (second,)),
+                )),
+                payload={
+                    "status": "resolved",
+                    "candidates": [{
+                        "candidate_id": "candidate-a",
+                        "anchor_fact_id": "wikipedia:Q1",
+                        "identity_role": "series_root",
+                        "intended_scope": "whole_series",
+                        "fact_bindings": [{
+                            "fact_id": "wikipedia:Q1",
+                            "role": "series_root",
+                            "season_number": None,
+                            "episode_number": None,
+                        }],
+                        "ai_confidence": 0.9,
+                        "ai_reason": "The fact supports this candidate.",
+                    }],
+                },
+                provider_statuses={"wikipedia": "ok"},
+                locked_anchor_fact_id="",
+                raw_query="蜂蜜与四叶草",
+                intent={"title": "蜂蜜与四叶草"},
+                provisional_candidates=(),
+                stage="source_supplement",
+                repair_state={"used": False},
+            )
+
+        self.assertEqual(failed.exception.code, "candidate_binding_failed")
+        self.assertEqual(
+            failed.exception.reason_codes,
+            ("duplicate_fact_id", "fact_id:wikipedia:Q1"),
+        )
+        editor.assert_not_called()
+
+    async def test_conflicting_provider_identity_stops_before_candidate_ai(self):
+        from telepiplex_search.context import runtime_context
+
+        editor = Mock()
+        logger = Mock()
+        with patch.object(runtime_context, "logger", logger):
+            with self.assertRaises(Exception) as raised:
+                await build_confirmable_search_plan(
+                    "冲突作品",
+                    "unified-source-conflict",
+                    {
+                        "wikipedia": lambda _query: {
+                            "source": "wikipedia",
+                            "status": "ok",
+                            "facts": [{
+                                "wikibase_item": "Q-conflict",
+                                "title": "冲突作品",
+                                "year": "2005",
+                                "media_type": "movie",
+                            }, {
+                                "wikibase_item": "Q-conflict",
+                                "title": "冲突作品",
+                                "year": "2006",
+                                "media_type": "movie",
+                            }],
+                        },
+                    },
+                    lambda _contract: set(),
+                    TemporarySpecialAllocator(),
+                    candidate_editor=editor,
+                )
+
+        self.assertEqual(
+            getattr(raised.exception, "code", ""),
+            "source_fact_conflict",
+        )
+        self.assertEqual(
+            getattr(raised.exception, "reason_codes", ()),
+            ("wikipedia:Q-conflict", "field:year"),
+        )
+        editor.assert_not_called()
+        warning = " ".join(
+            call.args[0] for call in logger.warning.call_args_list
+        )
+        self.assertIn("search_fact_merge status=conflict", warning)
+        self.assertIn("stage=discovery", warning)
+        self.assertIn("fact_id=wikipedia:Q-conflict", warning)
+        self.assertIn('fields=["year"]', warning)
 
     @patch(
         "telepiplex_search.planner.infer_search_hypotheses_with_ai",

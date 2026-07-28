@@ -9,7 +9,7 @@ from .anchored_candidate import (
     materialize_anchored_candidates,
 )
 from .direct_link import DirectLinkError, resolve_direct_link
-from .entity_graph import build_search_graph
+from .entity_graph import EvidenceFactConflict, build_search_graph
 from .input_contract import classify_search_input
 from .media_metadata_v1 import MetadataV1Error, build_media_metadata_v1
 
@@ -126,7 +126,19 @@ def hydrate_frozen_candidate(
             tuple(failures),
         )
     sources = _merge_exact_sources(exact_sources)
-    graph = build_search_graph(sources)
+    try:
+        graph = build_search_graph(sources)
+    except EvidenceFactConflict as exc:
+        raise CandidateHydrationError(
+            "source_fact_conflict",
+            (
+                exc.fact_id,
+                *(
+                    f"field:{field}"
+                    for field in exc.conflicting_fields
+                ),
+            ),
+        ) from exc
     known_fact_ids = {
         fact.fact_id
         for entity in graph.candidates

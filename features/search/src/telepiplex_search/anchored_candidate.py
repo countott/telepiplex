@@ -36,8 +36,13 @@ _SCOPES = {"movie", "work", "whole_series", "season", "episode"}
 
 
 class CandidateBindingError(ValueError):
-    def __init__(self, code: str):
+    def __init__(self, code: str, **details):
         self.code = str(code or "ai_output_invalid")
+        self.details = {
+            str(key): str(value)
+            for key, value in details.items()
+            if str(key) and str(value)
+        }
         super().__init__(self.code)
 
 
@@ -158,8 +163,12 @@ def _fact_registry(graph: SearchGraph) -> dict[str, EvidenceFact]:
     for entity in (graph or SearchGraph(())).candidates:
         for fact in entity.facts:
             existing = registry.get(fact.fact_id)
-            if existing is not None and existing != fact:
-                raise CandidateBindingError("duplicate_fact_id")
+            if existing is not None:
+                raise CandidateBindingError(
+                    "duplicate_fact_id",
+                    fact_id=fact.fact_id,
+                    provider=fact.provider,
+                )
             registry[fact.fact_id] = fact
     return registry
 

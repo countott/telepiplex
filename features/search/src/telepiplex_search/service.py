@@ -169,13 +169,14 @@ _PLANNING_ERROR_MESSAGES = {
     "no_match": "所有来源均未找到可由真实事实支持的作品候选。",
     "source_failure": "来源查询失败，尚未形成可判断的候选。",
     "source_rate_limited": "来源请求受到限流，请稍后重试。",
-    "ai_candidate_failure": "AI 候选筛选发生技术故障，请重试、取消或退出。",
+    "source_fact_conflict": "来源事实存在冲突，无法安全确认作品身份，请重试。",
+    "ai_candidate_failure": "AI 候选筛选发生技术故障，请重试或退出。",
     "candidate_binding_failed": "AI 候选无法绑定到本次来源事实，请重试。",
     "direct_link_anchor_missing": "固定链接锚点在来源事实中丢失，无法继续。",
-    "fixed_link_read_failed": "固定链接读取失败，请重试、取消或退出。",
+    "fixed_link_read_failed": "固定链接读取失败，请重试或退出。",
     "metadata_conflict": "已选候选的媒体类型事实冲突。",
     "metadata_incomplete": "已选候选不足以形成严格媒体元数据。",
-    "prowlarr_failure": "Prowlarr 搜索失败，请重试、取消或退出。",
+    "prowlarr_failure": "Prowlarr 搜索失败，请重试或退出。",
 }
 
 _PROVIDER_LABELS = {
@@ -454,7 +455,7 @@ class SearchFeature:
                 item.get("owner") == owner for item in self.plans.values()
             ):
                 return self._closed(
-                    "⚠️ 请先完成或取消当前搜索，再打开 search 配置。"
+                    "⚠️ 请先完成或退出当前搜索，再打开 search 配置。"
                 )
             result = self.config_wizard.start(request)
             operation = self._new_operation(
@@ -959,6 +960,7 @@ class SearchFeature:
             if code in {
                 "source_failure",
                 "source_rate_limited",
+                "source_fact_conflict",
                 "ai_candidate_failure",
                 "candidate_binding_failed",
                 "fixed_link_read_failed",
@@ -1391,6 +1393,7 @@ class SearchFeature:
                 detail = {
                     "fixed_link_read_failed": "固定链接读取失败",
                     "candidate_binding_failed": "来源绑定失败",
+                    "source_fact_conflict": "来源事实存在冲突",
                     "metadata_conflict": "元数据类型冲突",
                     "metadata_incomplete": "严格媒体元数据不完整",
                 }.get(exc.code, "候选精确读取失败")
@@ -1402,6 +1405,7 @@ class SearchFeature:
                     )
                     + "）"
                     if exc.details
+                    and exc.code != "source_fact_conflict"
                     else ""
                 )
                 keyboard = (action.get("data") or {}).get("keyboard") or []

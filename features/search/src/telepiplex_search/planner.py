@@ -31,6 +31,7 @@ from .candidate_score import (
 from .deterministic import build_rule_hypotheses
 from .entity_graph import (
     CandidateEntity,
+    EvidenceFactConflict,
     build_search_graph,
     merge_verified_equivalence_edges,
     normalize_title,
@@ -65,6 +66,38 @@ def _log_warning(message: str):
         runtime_context.logger.warning(message)
 
 
+def _build_logged_search_graph(
+    sources: list[dict],
+    *,
+    stage: str,
+):
+    try:
+        graph = build_search_graph(sources)
+    except EvidenceFactConflict as exc:
+        fields = list(exc.conflicting_fields)
+        _log_warning(
+            "search_fact_merge status=conflict "
+            f"stage={stage} provider={exc.provider} "
+            f"fact_id={exc.fact_id} "
+            f"fields={json.dumps(fields, ensure_ascii=False)}"
+        )
+        raise SearchPlanningError(
+            "source_fact_conflict",
+            (
+                exc.fact_id,
+                *(f"field:{field}" for field in fields),
+            ),
+        ) from exc
+    for diagnostic in graph.fact_merges:
+        _log_info(
+            "search_fact_merge status=merged "
+            f"stage={stage} provider={diagnostic.provider} "
+            f"fact_id={diagnostic.fact_id} "
+            f"occurrences={diagnostic.occurrences}"
+        )
+    return graph
+
+
 class PlanningBudget:
     def __init__(
         self,
@@ -73,7 +106,7 @@ class PlanningBudget:
         total: float | None = None,
         stages: dict[str, float] | None = None,
     ):
-        # Kept as a compatibility clock for callers and logs. Search 1.1.1
+        # Kept as a compatibility clock for callers and logs. Search 1.1.2
         # deliberately has no business-layer planning deadline; provider HTTP
         # clients retain their independently configurable fault timeouts.
         del total, stages
@@ -1652,10 +1685,26 @@ async def _materialize_with_binding_repair(
             locked_anchor_fact_id=locked_anchor_fact_id,
         )
     except CandidateBindingError as initial_error:
+        error_details = dict(initial_error.details)
+        details_text = (
+            " details="
+            + json.dumps(error_details, ensure_ascii=False, sort_keys=True)
+            if error_details
+            else ""
+        )
         _log_warning(
             "search_binding status=invalid "
             f"stage={stage} error={initial_error.code}"
+            f"{details_text}"
         )
+        if initial_error.code == "duplicate_fact_id":
+            reasons = [initial_error.code]
+            if error_details.get("fact_id"):
+                reasons.append(f"fact_id:{error_details['fact_id']}")
+            raise SearchPlanningError(
+                "candidate_binding_failed",
+                tuple(reasons),
+            ) from initial_error
         if repair_state.get("used"):
             raise SearchPlanningError(
                 "candidate_binding_failed",
@@ -2101,7 +2150,7 @@ async def _build_anchored_search_plan(
     binding_repair_state = {"used": False}
     hypotheses = build_rule_hypotheses(raw_query)
     sources = await collect_evidence(hypotheses, providers)
-    graph = build_search_graph(sources)
+    graph = _build_logged_search_graph(sources, stage="discovery")
     if not _anchored_fact_payload(graph):
         failure_code, hard_failures = _no_fact_failure(sources)
         if failure_code:
@@ -2126,7 +2175,7 @@ async def _build_anchored_search_plan(
             sources,
             await collect_evidence(recovery, providers),
         )
-        graph = build_search_graph(sources)
+        graph = _build_logged_search_graph(sources, stage="ai_recovery")
         if not _anchored_fact_payload(graph):
             failure_code, hard_failures = _no_fact_failure(sources)
             if failure_code:
@@ -2212,7 +2261,10 @@ async def _build_anchored_search_plan(
                 {provider: handler},
             )
             sources = _merge_evidence_passes(sources, supplemental)
-        graph = build_search_graph(sources)
+        graph = _build_logged_search_graph(
+            sources,
+            stage="source_supplement",
+        )
         statuses, _support = _provider_status_and_support(sources)
         anchor_fact_id = _locked_anchor_fact_id(graph, locked_identity)
         payload = await _call_candidate_editor(
@@ -2408,7 +2460,10 @@ async def build_confirmable_search_plan(
                 for item in (getattr(orchestration, "sources", ()) or ())
                 if isinstance(item, dict)
             ]
-            graph = build_search_graph(sources)
+            graph = _build_logged_search_graph(
+                sources,
+                stage="source_orchestration",
+            )
             graph = merge_verified_equivalence_edges(
                 graph,
                 orchestration.decision.equivalence_edges,
@@ -2482,7 +2537,7 @@ async def build_confirmable_search_plan(
             budget,
             collect_evidence(rule_hypotheses, providers),
         )
-        graph = build_search_graph(sources)
+        graph = _build_logged_search_graph(sources, stage="base_evidence")
         all_candidates = list(graph.candidates)
         candidates = list(all_candidates)
         if locked_identity:
@@ -2559,7 +2614,10 @@ async def build_confirmable_search_plan(
                         sources,
                         retry_sources,
                     )
-                    retry_graph = build_search_graph(sources)
+                    retry_graph = _build_logged_search_graph(
+                        sources,
+                        stage="intent_fallback",
+                    )
                     all_candidates = list(retry_graph.candidates)
                     candidates = list(all_candidates)
                     retry_targets = {
@@ -2650,7 +2708,10 @@ async def build_confirmable_search_plan(
         )
         if expansion_sources:
             sources = _merge_evidence_passes(sources, expansion_sources)
-            expanded_graph = build_search_graph(sources)
+            expanded_graph = _build_logged_search_graph(
+                sources,
+                stage="candidate_expansion",
+            )
             candidates = [
                 _expanded_candidate(candidate, expanded_graph.candidates)
                 for candidate in candidates
@@ -2747,7 +2808,10 @@ async def build_confirmable_search_plan(
             )
             if retry_sources:
                 sources = _merge_evidence_passes(sources, retry_sources)
-                recovered_graph = build_search_graph(sources)
+                recovered_graph = _build_logged_search_graph(
+                    sources,
+                    stage="qualification_recovery",
+                )
                 all_candidates = list(recovered_graph.candidates)
                 retry_targets = {
                     normalize_title(item.get("title"))

@@ -1,10 +1,12 @@
 # search Feature
 
-该目录只包含媒体搜索 Feature 源码。Search 1.1.1 将普通文本和 Wikipedia、豆瓣、TVDB 直链接入同一条候选、严格元数据与 Prowlarr 管线。
+该目录只包含媒体搜索 Feature 源码。Search 1.1.2 将普通文本和 Wikipedia、豆瓣、TVDB 直链接入同一条候选、严格元数据与 Prowlarr 管线。
 
 普通文本通过 `search_media_sources` 并发广泛召回全部已启用 Provider 的事实，不按标题相似度、年份一致性或来源数量提前淘汰；来源工具仍允许最多两轮定向深查。AI 只负责把真实事实 ID 整理为 0–6 个作品候选，识别跨来源身份以及 root、season、episode、related work 层级；程序随后验证引用并补查缺失 Provider。候选保存全部已确认的来源链接、稳定 ID 和海报，无法确认的来源保留为 `unresolved`。Wikipedia、豆瓣和 TVDB 三个来源均已确认时，候选标记为 `v1`；补全后仍只有一至两个来源时标记为可展示的 `v0`，同时显示具体失败来源，不因来源不全提前丢弃候选。首轮零事实时允许 AI 生成一次纠错或别名查询，但最终候选仍必须来自 Provider 的真实事实。
 
-纯数字片名需要用中文或英文引号明确标记，例如 `/s "1917"` 或 `/s “1917”`；引号只用于声明这是片名，不进入 Provider 查询。未加引号的纯数字仍按普通数字输入处理。
+纯数字片名可用中文或英文引号明确标记，例如 `/s "1917"` 或
+`/s “1917”`；引号只用于声明这是片名，不进入 Provider 查询。未加引号的
+`/s 1917` 仍按完整片名查询，不会把 `1917` 自动改写为年份条件。
 
 直链入口先精确读取稳定 ID 并锁定用户锚点，再用页面事实反查其他 Provider。稳定 ID 可直接证明时由程序绑定；存在多个近似条目时由 AI 选择属于锚点的事实，但不能改变锚定作品或生成第二组候选。文本候选在展示前完成跨来源补全；直链始终形成一个锁定候选。
 
@@ -16,7 +18,7 @@
 
 v1 通过后才由程序生成 Prowlarr Query，最终元数据和查询构造不会交给 AI。日本动画依次优先使用官方罗马字、官方英文名、其他来源拉丁别名、原名和用户原文，其他作品使用同一事实优先级并去重；季集后缀只来自 v1。Prowlarr 不参与作品身份判断。
 
-Search 1.1.1 不设置 30/65/90 秒业务规划预算，也不会把 AI 较慢转换成无候选。Provider、AI 和 Prowlarr 的 HTTP 客户端仍使用可配置故障超时。AI 技术故障不会退化为程序评分候选，交互会明确区分来源失败、来源限流、AI `no_match`、AI 故障、候选绑定失败、固定链接读取失败、Prowlarr 全部失败和 v1 不完整，并在已进入前台链路时提供对应提示以及重试、取消和退出。一个或两个来源成功时仍展示 `v0` 候选；零事实时明确列出失败来源；所有来源均不可用时明确告知当前来源全部不可用。
+Search 1.1.2 不设置 30/65/90 秒业务规划预算，也不会把 AI 较慢转换成无候选。Provider、AI 和 Prowlarr 的 HTTP 客户端仍使用可配置故障超时。AI 技术故障不会退化为程序评分候选，交互会明确区分来源失败、来源限流、来源事实冲突、AI `no_match`、AI 故障、候选绑定失败、固定链接读取失败、Prowlarr 全部失败和 v1 不完整，并在已进入前台链路时提供对应提示以及重试和退出。一个或两个来源成功时仍展示 `v0` 候选；零事实时明确列出失败来源；所有来源均不可用时明确告知当前来源全部不可用。
 
 Feature 同时提供无状态的 `media.search.resolve_metadata`，供 direct magnet 下载后的 rename 实时复用同一套证据门禁。用户确认后的 `media_metadata v1` 与 `naming_metadata` 仍按合同传给 `download.provider`，再由下载完成事件交给 rename；搜索证据与候选仍是当前请求内状态，不创建媒体实体数据库。
 
@@ -33,8 +35,36 @@ Prowlarr 结果先经过身份与范围正确性硬门禁，再进行片源质�
 
 如果不填 `search.scoring`，Feature 会回退到内置默认权重。
 
+Search 的默认测试包含 17 个命名作品家族，其中 12 个是复杂剧集：
+`进击的巨人`、`深夜食堂`、`三体`、`西部世界`、`雪国列车`、
+`汉尼拔`、`东京爱情故事`、`射雕英雄传`、`大奥`、`康斯坦丁`、
+`Fargo` 和 `Watchmen`。矩阵验证真实来源形状、多季条目收敛、重拍版与
+同名电影/剧集隔离、跨地区和动画/真人改编、候选可区分、严格元数据、
+Prowlarr Query 和用户界面文案。
+
+Wikipedia 与豆瓣的无凭据真实网络门禁需要显式启用，避免普通单元测试
+被外部网络波动影响：
+
 ```bash
-python tools/build_feature.py features/search /tmp/search-1.1.1.tpx \
+TELEPIPLEX_SEARCH_PUBLIC_LIVE=1 \
+  PYTHONDONTWRITEBYTECODE=1 \
+  PYTHONPATH=features/search/src:sdk/src \
+  python -m pytest -q -p no:cacheprovider \
+  features/search/tests/test_live_search_usability.py::PublicSourceLiveUsabilityTest
+```
+
+完整 TVDB 与 AI 真实门禁读取实际 Search 配置，但不会输出凭据：
+
+```bash
+TELEPIPLEX_SEARCH_LIVE_CONFIG=/config/plugins/search/config.yaml \
+  PYTHONDONTWRITEBYTECODE=1 \
+  PYTHONPATH=features/search/src:sdk/src \
+  python -m pytest -q -p no:cacheprovider \
+  features/search/tests/test_live_search_usability.py
+```
+
+```bash
+python tools/build_feature.py features/search /tmp/search-1.1.2.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

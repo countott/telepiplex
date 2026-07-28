@@ -1,10 +1,16 @@
 import unittest
+from types import MappingProxyType
 
 from telepiplex_search.anchored_candidate import (
     CandidateBindingError,
     materialize_anchored_candidates,
 )
-from telepiplex_search.entity_graph import build_search_graph
+from telepiplex_search.entity_graph import (
+    CandidateEntity,
+    EvidenceFact,
+    SearchGraph,
+    build_search_graph,
+)
 
 
 def _honey_and_clover_graph():
@@ -82,12 +88,12 @@ def _series_binding_payload(*, season_two=2):
         "status": "resolved",
         "candidates": [{
             "candidate_id": "candidate-1",
-            "anchor_fact_id": "tvdb:900",
+            "anchor_fact_id": "tvdb:series:900",
             "identity_role": "series_root",
             "intended_scope": "whole_series",
             "fact_bindings": [
                 {
-                    "fact_id": "tvdb:900",
+                    "fact_id": "tvdb:series:900",
                     "role": "series_root",
                     "season_number": None,
                     "episode_number": None,
@@ -131,7 +137,7 @@ class AnchoredCandidateTest(unittest.TestCase):
 
         self.assertEqual(len(candidates), 1)
         candidate = candidates[0]
-        self.assertEqual(candidate.anchor_fact_id, "tvdb:900")
+        self.assertEqual(candidate.anchor_fact_id, "tvdb:series:900")
         self.assertEqual(
             [(link.provider, link.role, link.season_number) for link in candidate.source_links],
             [
@@ -169,6 +175,59 @@ class AnchoredCandidateTest(unittest.TestCase):
         payload["candidates"][0]["fact_bindings"][0]["fact_id"] = "tvdb:invented"
         with self.assertRaisesRegex(CandidateBindingError, "unknown_fact_id"):
             materialize_anchored_candidates(graph, payload)
+
+    def test_duplicate_graph_fact_reports_the_conflicting_fact_identity(self):
+        first = EvidenceFact(
+            fact_id="wikipedia:Q1",
+            provider="wikipedia",
+            titles=("Honey and Clover",),
+            year="2005",
+            media_type="series",
+            external_ids=MappingProxyType({"wikipedia": "Q1"}),
+        )
+        second = EvidenceFact(
+            fact_id="wikipedia:Q1",
+            provider="wikipedia",
+            titles=("Honey and Clover",),
+            year="2005",
+            media_type="series",
+            external_ids=MappingProxyType({"wikipedia": "Q1"}),
+        )
+        graph = SearchGraph((
+            CandidateEntity("candidate-a", (first,)),
+            CandidateEntity("candidate-b", (second,)),
+        ))
+
+        with self.assertRaises(CandidateBindingError) as raised:
+            materialize_anchored_candidates(
+                graph,
+                {
+                    "status": "resolved",
+                    "candidates": [{
+                        "candidate_id": "candidate-a",
+                        "anchor_fact_id": "wikipedia:Q1",
+                        "identity_role": "series_root",
+                        "intended_scope": "whole_series",
+                        "fact_bindings": [{
+                            "fact_id": "wikipedia:Q1",
+                            "role": "series_root",
+                            "season_number": None,
+                            "episode_number": None,
+                        }],
+                        "ai_confidence": 0.9,
+                        "ai_reason": "The fact supports this candidate.",
+                    }],
+                },
+            )
+
+        self.assertEqual(raised.exception.code, "duplicate_fact_id")
+        self.assertEqual(
+            getattr(raised.exception, "details", {}),
+            {
+                "fact_id": "wikipedia:Q1",
+                "provider": "wikipedia",
+            },
+        )
 
     def test_invalid_shortlist_item_does_not_discard_a_valid_candidate(self):
         payload = _series_binding_payload()

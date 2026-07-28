@@ -11,7 +11,7 @@ def _candidate():
     return {
         "candidate_key": "film-1",
         "candidate_id": "film-1",
-        "anchor_fact_id": "tvdb:77",
+        "anchor_fact_id": "tvdb:movie:77",
         "identity_role": "movie",
         "intended_scope": "movie",
         "links_frozen": True,
@@ -29,7 +29,7 @@ def _candidate():
             "verification": "fact_verified",
         }, {
             "provider": "tvdb",
-            "fact_id": "tvdb:77",
+            "fact_id": "tvdb:movie:77",
             "url": "https://thetvdb.com/movies/77",
             "external_ids": {"tvdb": "77"},
             "role": "movie",
@@ -186,6 +186,61 @@ class CandidateHydrationTest(unittest.TestCase):
                 resolver=_resolver([], fail={"douban"}),
             )
 
+    def test_conflicting_exact_source_identity_is_a_structured_hydration_error(self):
+        candidate = _candidate()
+        candidate["anchor_fact_id"] = "wikipedia:Q77"
+        candidate["source_links"] = [candidate["source_links"][2]]
+
+        def conflicting(link):
+            return DirectEntity(
+                provider="wikipedia",
+                evidence={
+                    "source": "wikipedia",
+                    "status": "ok",
+                    "facts": [{
+                        "wikibase_item": "Q77",
+                        "title": "The Grand Budapest Hotel",
+                        "year": "2014",
+                        "media_type": "movie",
+                        "url": link.url,
+                    }, {
+                        "wikibase_item": "Q77",
+                        "title": "The Grand Budapest Hotel",
+                        "year": "2015",
+                        "media_type": "movie",
+                        "url": link.url,
+                    }],
+                    "source_urls": [link.url],
+                },
+                stable_identity=("wikipedia", "Q77"),
+                title="The Grand Budapest Hotel",
+                year="2014",
+                media_type="movie",
+                scope="work",
+            )
+
+        with self.assertRaises(Exception) as raised:
+            hydrate_frozen_candidate(
+                candidate,
+                metadata_id="conflicting-exact",
+                raw_query="布达佩斯大饭店",
+                require_anchor=True,
+                resolver=conflicting,
+            )
+
+        self.assertIsInstance(
+            raised.exception,
+            CandidateHydrationError,
+        )
+        self.assertEqual(
+            getattr(raised.exception, "code", ""),
+            "source_fact_conflict",
+        )
+        self.assertEqual(
+            getattr(raised.exception, "details", ()),
+            ("wikipedia:Q77", "field:year"),
+        )
+
     def test_exact_tvdb_inventory_verifies_preserved_season_scope(self):
         candidate = {
             "candidate_key": "honey-and-clover-s2",
@@ -213,7 +268,7 @@ class CandidateHydrationTest(unittest.TestCase):
                 "proposed_episode_number": None,
             }, {
                 "provider": "tvdb",
-                "fact_id": "tvdb:900",
+                "fact_id": "tvdb:series:900",
                 "url": "https://thetvdb.com/series/900",
                 "external_ids": {"tvdb": "900"},
                 "role": "series_root",

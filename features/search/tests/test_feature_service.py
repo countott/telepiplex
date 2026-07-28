@@ -718,6 +718,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         for code in (
             "source_failure",
             "source_rate_limited",
+            "source_fact_conflict",
             "ai_candidate_failure",
             "candidate_binding_failed",
             "fixed_link_read_failed",
@@ -742,6 +743,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 report = self.host.reports[-1]
                 keyboard = report["details"]["keyboard"]
                 self.assertEqual(report["state"], "awaiting_input")
+                self.assertNotIn("取消或退出", report["status_text"])
                 plan_id = keyboard[0][0]["callback_data"].rsplit(":", 1)[-1]
                 self.assertEqual(keyboard, [[{
                     "text": "重试",
@@ -752,6 +754,39 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 }]])
                 for stored_plan_id in list(self.feature.plans):
                     self.feature._release_plan(stored_plan_id)
+
+    async def test_source_fact_conflict_ui_is_human_readable_and_keeps_retry(self):
+        from telepiplex_search.planner import SearchPlanningError
+
+        async def blocked(_raw_query, _plan_id):
+            raise SearchPlanningError(
+                "source_fact_conflict",
+                ("wikipedia:Q-conflict", "field:year"),
+            )
+
+        self.feature.plan_builder = blocked
+        await self.feature.command({
+            "command": "search",
+            "args": ["冲突作品"],
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-plan-")
+
+        report = self.host.reports[-1]
+        self.assertEqual(report["state"], "awaiting_input")
+        self.assertIn("来源事实存在冲突", report["status_text"])
+        self.assertNotIn("source_fact_conflict", report["status_text"])
+        self.assertNotIn("wikipedia:Q-conflict", report["status_text"])
+        self.assertNotIn("field:year", report["status_text"])
+        self.assertEqual(
+            [
+                button["text"]
+                for row in report["details"]["keyboard"]
+                for button in row
+            ],
+            ["重试", "退出"],
+        )
 
     @patch("telepiplex_search.service.get_tvdb_series_episodes")
     @patch("telepiplex_search.service.search_tvdb_series")
@@ -849,7 +884,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "chat_id": owner[0],
         })
 
-        self.assertIn("先完成或取消", result["actions"][0]["text"])
+        self.assertIn("先完成或退出", result["actions"][0]["text"])
         self.assertIn(owner, self.feature.awaiting_queries)
         self.assertFalse(self.feature.config_wizard.has_session({
             "chat_id": owner[0], "user_id": owner[1],
@@ -1726,6 +1761,33 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("canonical_latin_title", action["text"])
         self.assertNotIn("可重试", action["text"])
 
+        hydrate.side_effect = CandidateHydrationError(
+            "source_fact_conflict",
+            ("wikipedia:Q-conflict", "field:year"),
+        )
+        conflict_plan_id = "source-fact-conflict"
+        conflict_plan = deepcopy(plan)
+        conflict_plan["plan_id"] = conflict_plan_id
+        conflict_stored = {
+            "plan": conflict_plan,
+            "candidates": tuple(conflict_plan["candidates"]),
+            "selected_path": "",
+            "operation_id": "",
+        }
+
+        conflict = await self.feature._select_candidate(
+            conflict_plan_id,
+            conflict_stored,
+            "0",
+        )
+
+        conflict_action = conflict["actions"][0]
+        self.assertIn("来源事实存在冲突", conflict_action["text"])
+        self.assertNotIn("source_fact_conflict", conflict_action["text"])
+        self.assertNotIn("wikipedia:Q-conflict", conflict_action["text"])
+        self.assertNotIn("field:year", conflict_action["text"])
+        self.assertNotIn("可重试", conflict_action["text"])
+
     async def test_clarification_plan_renders_options(self):
         async def planner(_raw_query, plan_id):
             return clarification_plan(plan_id)
@@ -2376,10 +2438,14 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "manifest.yaml").read_text(encoding="utf-8")
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        package_metadata = (
+            ROOT / "src" / "telepiplex_search.egg-info" / "PKG-INFO"
+        ).read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.1.1")
+        self.assertEqual(manifest["version"], "1.1.2")
         self.assertEqual(manifest["host_api"], ">=1.3,<2.0")
-        self.assertIn('version = "1.1.1"', project)
+        self.assertIn('version = "1.1.2"', project)
+        self.assertIn("\nVersion: 1.1.2\n", package_metadata)
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
@@ -2410,12 +2476,12 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.1.1.tpx", source)
+        self.assertIn("/tmp/search-1.1.2.tpx", source)
         self.assertIn("search_media_sources", source)
         self.assertIn("最多两轮", source)
         self.assertIn("不会交给 AI", source)
         self.assertIn("rename", source)
-        self.assertNotIn("dist/search-1.1.1.tpx", source)
+        self.assertNotIn("dist/search-1.1.2.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

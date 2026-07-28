@@ -64,6 +64,361 @@ class SearchEntityGraphTest(unittest.TestCase):
             {candidate.media_types for candidate in graph.candidates},
             {frozenset({"movie"}), frozenset({"series"})},
         )
+        self.assertEqual(
+            {
+                fact.fact_id
+                for candidate in graph.candidates
+                for fact in candidate.facts
+            },
+            {"tvdb:movie:855", "tvdb:series:855"},
+        )
+
+    def test_tvdb_generic_id_is_a_typed_stable_fact_id(self):
+        graph = build_search_graph([{
+            "source": "tvdb",
+            "status": "ok",
+            "facts": [{
+                "movies": [{
+                    "id": 855,
+                    "name": "Constantine",
+                    "year": "2005",
+                }],
+                "series": [{
+                    "id": 273690,
+                    "name": "Constantine",
+                    "year": "2014",
+                }],
+            }],
+        }])
+
+        self.assertEqual(
+            {
+                fact.fact_id
+                for candidate in graph.candidates
+                for fact in candidate.facts
+            },
+            {"tvdb:movie:855", "tvdb:series:273690"},
+        )
+
+    def test_missing_provider_id_uses_nonempty_opaque_fallback(self):
+        graph = build_search_graph([{
+            "source": "wikipedia",
+            "status": "ok",
+            "facts": [{
+                "title": "Provider ID missing",
+                "year": "2024",
+                "media_type": "movie",
+                "external_ids": {"imdb": "tt1234567"},
+            }],
+        }])
+
+        fact = graph.candidates[0].facts[0]
+        self.assertRegex(
+            fact.fact_id,
+            r"^wikipedia:request:[0-9a-f]{16}$",
+        )
+        self.assertNotIn("tt1234567", fact.fact_id)
+
+    def test_same_wikipedia_item_from_multiple_languages_becomes_one_fact(self):
+        graph = build_search_graph([{
+            "source": "wikipedia",
+            "status": "ok",
+            "facts": [{
+                "wikibase_item": "Q546916",
+                "query": "蜂蜜与四叶草",
+                "language": "zh",
+                "title": "蜂蜜与四叶草",
+                "chinese_title": "蜂蜜与四叶草",
+                "year": "2005",
+                "media_type": "series",
+                "url": "https://zh.wikipedia.org/wiki/蜂蜜与四叶草",
+            }, {
+                "wikibase_item": "Q546916",
+                "query": "Honey and Clover",
+                "language": "en",
+                "title": "Honey and Clover",
+                "official_english_title": "Honey and Clover",
+                "year": "2005",
+                "media_type": "series",
+                "url": "https://en.wikipedia.org/wiki/Honey_and_Clover",
+            }],
+        }])
+
+        self.assertEqual(len(graph.candidates), 1)
+        self.assertEqual(len(graph.candidates[0].facts), 1)
+        fact = graph.candidates[0].facts[0]
+        self.assertEqual(fact.fact_id, "wikipedia:Q546916")
+        self.assertEqual(
+            set(fact.titles),
+            {"蜂蜜与四叶草", "Honey and Clover"},
+        )
+        self.assertEqual(fact.chinese_title, "蜂蜜与四叶草")
+        self.assertEqual(fact.official_english_title, "Honey and Clover")
+        self.assertEqual(
+            [
+                (item.provider, item.fact_id, item.occurrences)
+                for item in graph.fact_merges
+            ],
+            [("wikipedia", "wikipedia:Q546916", 2)],
+        )
+
+    def test_same_tvdb_series_merges_complementary_episode_inventories(self):
+        graph = build_search_graph([{
+            "source": "tvdb",
+            "status": "ok",
+            "facts": [{
+                "query": "蜂蜜与四叶草",
+                "movies": [],
+                "series": [{
+                    "tvdb_series_id": "79044",
+                    "name": "ハチミツとクローバー",
+                    "year": "2005",
+                }],
+                "episodes_by_series": {
+                    "79044": [{
+                        "tvdb_episode_id": "e1",
+                        "season_number": 1,
+                        "episode_number": 1,
+                        "name": "Episode 1",
+                    }],
+                },
+            }, {
+                "query": "Honey and Clover",
+                "movies": [],
+                "series": [{
+                    "tvdb_series_id": "79044",
+                    "name": "Honey and Clover",
+                    "official_english_title": "Honey and Clover",
+                    "year": "2005",
+                }],
+                "episodes_by_series": {
+                    "79044": [{
+                        "tvdb_episode_id": "e1",
+                        "season_number": 1,
+                        "episode_number": 1,
+                        "name": "Episode 1",
+                    }, {
+                        "tvdb_episode_id": "e2",
+                        "season_number": 1,
+                        "episode_number": 2,
+                        "name": "Episode 2",
+                    }],
+                },
+            }],
+        }])
+
+        self.assertEqual(len(graph.candidates), 1)
+        self.assertEqual(len(graph.candidates[0].facts), 1)
+        fact = graph.candidates[0].facts[0]
+        self.assertEqual(fact.fact_id, "tvdb:series:79044")
+        self.assertEqual(
+            {
+                (
+                    episode["tvdb_episode_id"],
+                    episode["season_number"],
+                    episode["episode_number"],
+                )
+                for episode in fact.episodes
+            },
+            {("e1", 1, 1), ("e2", 1, 2)},
+        )
+
+    def test_idless_episode_merges_into_matching_id_backed_episode(self):
+        graph = build_search_graph([{
+            "source": "tvdb",
+            "status": "ok",
+            "facts": [{
+                "movies": [],
+                "series": [{
+                    "tvdb_series_id": "79044",
+                    "name": "Honey and Clover",
+                    "year": "2005",
+                }],
+                "episodes_by_series": {
+                    "79044": [{
+                        "tvdb_episode_id": "e1",
+                        "season_number": 1,
+                        "episode_number": 1,
+                        "name": "Episode 1",
+                    }],
+                },
+            }, {
+                "movies": [],
+                "series": [{
+                    "tvdb_series_id": "79044",
+                    "name": "Honey and Clover",
+                    "year": "2005",
+                }],
+                "episodes_by_series": {
+                    "79044": [{
+                        "season_number": "1",
+                        "episode_number": "1",
+                        "overview": "The opening episode.",
+                    }],
+                },
+            }],
+        }])
+
+        episodes = graph.candidates[0].facts[0].episodes
+        self.assertEqual(len(episodes), 1)
+        self.assertEqual(episodes[0]["tvdb_episode_id"], "e1")
+        self.assertEqual(episodes[0]["overview"], "The opening episode.")
+
+    def test_same_episode_id_with_conflicting_coordinates_is_rejected(self):
+        with self.assertRaises(ValueError) as raised:
+            build_search_graph([{
+                "source": "tvdb",
+                "status": "ok",
+                "facts": [{
+                    "movies": [],
+                    "series": [{
+                        "tvdb_series_id": "79044",
+                        "name": "Honey and Clover",
+                        "year": "2005",
+                    }],
+                    "episodes_by_series": {
+                        "79044": [{
+                            "tvdb_episode_id": "e1",
+                            "season_number": 1,
+                            "episode_number": 1,
+                        }],
+                    },
+                }, {
+                    "movies": [],
+                    "series": [{
+                        "tvdb_series_id": "79044",
+                        "name": "Honey and Clover",
+                        "year": "2005",
+                    }],
+                    "episodes_by_series": {
+                        "79044": [{
+                            "tvdb_episode_id": "e1",
+                            "season_number": 1,
+                            "episode_number": 2,
+                        }],
+                    },
+                }],
+            }])
+
+        self.assertEqual(
+            getattr(raised.exception, "fact_id", ""),
+            "tvdb:series:79044",
+        )
+        self.assertEqual(
+            getattr(raised.exception, "conflicting_fields", ()),
+            ("episodes.e1.episode_number",),
+        )
+
+    def test_fact_convergence_is_independent_of_provider_result_order(self):
+        facts = [{
+            "wikibase_item": "Q546916",
+            "title": "蜂蜜与四叶草",
+            "chinese_title": "蜂蜜与四叶草",
+            "year": "2005",
+            "media_type": "series",
+            "url": "https://zh.wikipedia.org/wiki/蜂蜜与四叶草",
+        }, {
+            "wikibase_item": "Q546916",
+            "title": "Honey and Clover",
+            "official_english_title": "Honey and Clover",
+            "year": "2005",
+            "media_type": "series",
+            "url": "https://en.wikipedia.org/wiki/Honey_and_Clover",
+        }]
+
+        forward = build_search_graph([{
+            "source": "wikipedia",
+            "status": "ok",
+            "facts": facts,
+        }])
+        reverse = build_search_graph([{
+            "source": "wikipedia",
+            "status": "ok",
+            "facts": list(reversed(facts)),
+        }])
+
+        self.assertEqual(forward, reverse)
+
+    def test_same_stable_fact_with_conflicting_year_is_rejected(self):
+        with self.assertRaises(ValueError) as raised:
+            build_search_graph([{
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [{
+                    "wikibase_item": "Q-conflict",
+                    "title": "Conflicting Work",
+                    "year": "2005",
+                    "media_type": "movie",
+                }, {
+                    "wikibase_item": "Q-conflict",
+                    "title": "Conflicting Work",
+                    "year": "2006",
+                    "media_type": "movie",
+                }],
+            }])
+
+        self.assertEqual(
+            getattr(raised.exception, "fact_id", ""),
+            "wikipedia:Q-conflict",
+        )
+        self.assertEqual(
+            getattr(raised.exception, "conflicting_fields", ()),
+            ("year",),
+        )
+
+    def test_same_stable_fact_with_conflicting_external_id_is_rejected(self):
+        with self.assertRaises(ValueError) as raised:
+            build_search_graph([{
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [{
+                    "wikibase_item": "Q-conflict",
+                    "title": "Conflicting Work",
+                    "year": "2005",
+                    "media_type": "movie",
+                    "external_ids": {"imdb": "tt0000001"},
+                }, {
+                    "wikibase_item": "Q-conflict",
+                    "title": "Conflicting Work",
+                    "year": "2005",
+                    "media_type": "movie",
+                    "external_ids": {"imdb": "tt0000002"},
+                }],
+            }])
+
+        self.assertEqual(
+            getattr(raised.exception, "fact_id", ""),
+            "wikipedia:Q-conflict",
+        )
+        self.assertEqual(
+            getattr(raised.exception, "conflicting_fields", ()),
+            ("external_ids.imdb",),
+        )
+
+    def test_all_identity_conflicts_are_reported_together(self):
+        with self.assertRaises(ValueError) as raised:
+            build_search_graph([{
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [{
+                    "wikibase_item": "Q-multi-conflict",
+                    "title": "Conflicting Work",
+                    "year": "2005",
+                    "media_type": "movie",
+                    "external_ids": {"imdb": "tt0000001"},
+                }, {
+                    "wikibase_item": "Q-multi-conflict",
+                    "title": "Conflicting Work",
+                    "year": "2006",
+                    "media_type": "series",
+                    "external_ids": {"imdb": "tt0000002"},
+                }],
+            }])
+
+        self.assertEqual(
+            getattr(raised.exception, "conflicting_fields", ()),
+            ("external_ids.imdb", "media_type", "year"),
+        )
 
     def test_untyped_fact_cannot_bridge_movie_and_series_by_different_ids(self):
         graph = build_search_graph([

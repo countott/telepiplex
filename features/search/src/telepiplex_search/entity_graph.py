@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -174,19 +176,93 @@ class CandidateEntity:
 @dataclass(frozen=True)
 class SearchGraph:
     candidates: tuple[CandidateEntity, ...]
+    fact_merges: tuple["FactMergeDiagnostic", ...] = ()
+
+
+@dataclass(frozen=True)
+class FactMergeDiagnostic:
+    provider: str
+    fact_id: str
+    occurrences: int
+
+
+class EvidenceFactConflict(ValueError):
+    def __init__(
+        self,
+        fact_id: str,
+        provider: str,
+        conflicting_fields,
+    ):
+        self.fact_id = _text(fact_id)
+        self.provider = _text(provider).casefold()
+        self.conflicting_fields = tuple(sorted({
+            _text(field) for field in conflicting_fields if _text(field)
+        }))
+        super().__init__(
+            f"{self.fact_id}:"
+            f"{','.join(self.conflicting_fields) or 'identity'}"
+        )
+
+
+def _provider_stable_id(
+    provider: str,
+    raw: dict,
+    media_type: str = "",
+) -> str:
+    identifiers = (
+        raw.get("external_ids")
+        if isinstance(raw.get("external_ids"), dict)
+        else {}
+    )
+    if provider == "tvdb":
+        return _text(
+            raw.get(f"tvdb_{media_type}_id")
+            or raw.get("tvdb_id")
+            or raw.get("id")
+            or identifiers.get("tvdb")
+        )
+    if provider == "douban":
+        return _text(
+            raw.get("subject_id")
+            or identifiers.get("douban_subject")
+            or identifiers.get("douban")
+        )
+    if provider == "wikipedia":
+        return _text(
+            raw.get("wikibase_item")
+            or identifiers.get("wikipedia")
+            or identifiers.get("wikibase_item")
+        )
+    return ""
+
+
+def _request_fact_id(provider: str, raw: dict, media_type: str) -> str:
+    serialized = json.dumps(
+        {
+            "provider": provider,
+            "media_type": media_type,
+            "raw": raw,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+    return f"request:{digest}"
 
 
 def _fact_id(provider: str, raw: dict, index: int, media_type: str = "") -> str:
-    identifiers = raw.get("external_ids") if isinstance(raw.get("external_ids"), dict) else {}
+    del index
+    normalized_provider = _text(provider).casefold()
+    normalized_type = _text(media_type).casefold()
     value = (
-        raw.get(f"tvdb_{media_type}_id")
-        or raw.get("tvdb_id")
-        or raw.get("subject_id")
-        or raw.get("wikibase_item")
-        or next((item for item in identifiers.values() if _text(item)), "")
-        or index
+        _provider_stable_id(normalized_provider, raw, normalized_type)
+        or _request_fact_id(normalized_provider, raw, normalized_type)
     )
-    return f"{provider}:{_text(value)}"
+    if normalized_provider == "tvdb" and normalized_type:
+        return f"{normalized_provider}:{normalized_type}:{value}"
+    return f"{normalized_provider}:{value}"
 
 
 def _fact(
@@ -201,18 +277,18 @@ def _fact(
     if resolved_type == "movies":
         resolved_type = "movie"
     external_ids = dict(raw.get("external_ids") or {})
-    if provider == "douban" and _text(raw.get("subject_id")):
-        external_ids["douban_subject"] = _text(raw.get("subject_id"))
-    if provider == "wikipedia" and _text(raw.get("wikibase_item")):
-        external_ids["wikipedia"] = _text(raw.get("wikibase_item"))
+    provider_stable_id = _provider_stable_id(
+        provider,
+        raw,
+        resolved_type,
+    )
+    if provider == "douban" and provider_stable_id:
+        external_ids["douban_subject"] = provider_stable_id
+    if provider == "wikipedia" and provider_stable_id:
+        external_ids["wikipedia"] = provider_stable_id
     if provider == "tvdb":
-        tvdb_id = _text(
-            raw.get(f"tvdb_{resolved_type}_id")
-            or raw.get("tvdb_id")
-            or raw.get("id")
-        )
-        if tvdb_id:
-            external_ids["tvdb"] = tvdb_id
+        if provider_stable_id:
+            external_ids["tvdb"] = provider_stable_id
     source_url = _text(raw.get("url"))
     if (
         provider == "tvdb"
@@ -345,6 +421,331 @@ def _matches_candidate(candidate: list[EvidenceFact], fact: EvidenceFact) -> boo
     )
 
 
+def _sorted_unique_text(values) -> tuple[str, ...]:
+    unique = {_text(value) for value in values if _text(value)}
+    return tuple(sorted(unique, key=lambda value: (value.casefold(), value)))
+
+
+def _preferred_text(values, *, shortest: bool = False) -> str:
+    unique = _sorted_unique_text(values)
+    if not unique:
+        return ""
+    if shortest:
+        return min(unique, key=lambda value: (len(value), value.casefold(), value))
+    return max(unique, key=lambda value: (len(value), value.casefold(), value))
+
+
+def _single_identity_value(
+    facts: list[EvidenceFact],
+    field: str,
+) -> str:
+    values = _sorted_unique_text(getattr(fact, field) for fact in facts)
+    if len(values) > 1:
+        raise EvidenceFactConflict(
+            facts[0].fact_id,
+            facts[0].provider,
+            (field,),
+        )
+    return values[0] if values else ""
+
+
+def _merged_external_ids(
+    facts: list[EvidenceFact],
+) -> Mapping[str, str]:
+    values_by_key = {}
+    for fact in facts:
+        for key, value in fact.external_ids.items():
+            key = _text(key)
+            value = _text(value)
+            if key and value:
+                values_by_key.setdefault(key, set()).add(value)
+    conflicts = [
+        f"external_ids.{key}"
+        for key, values in values_by_key.items()
+        if len(values) > 1
+    ]
+    if conflicts:
+        raise EvidenceFactConflict(
+            facts[0].fact_id,
+            facts[0].provider,
+            conflicts,
+        )
+    return _mapping({
+        key: next(iter(values))
+        for key, values in sorted(values_by_key.items())
+    })
+
+
+def _episode_ids(item: dict) -> tuple[str, ...]:
+    return _sorted_unique_text((
+        item.get("tvdb_episode_id"),
+        item.get("id"),
+        item.get("episode_id"),
+    ))
+
+
+def _episode_coordinate(value) -> str:
+    if value is None or value == "":
+        return ""
+    text = _text(value)
+    try:
+        return str(int(text))
+    except (TypeError, ValueError):
+        return text
+
+
+def _episode_number_key(item: dict) -> tuple[str, str] | None:
+    season = _episode_coordinate(item.get("season_number"))
+    episode = _episode_coordinate(item.get("episode_number"))
+    return (season, episode) if season and episode else None
+
+
+def _episode_identity(item: dict) -> tuple:
+    episode_ids = _episode_ids(item)
+    if episode_ids:
+        return ("id", episode_ids[0])
+    if number_key := _episode_number_key(item):
+        return ("number", *number_key)
+    return (
+        "payload",
+        json.dumps(item, ensure_ascii=False, sort_keys=True, default=str),
+    )
+
+
+def _episode_value_present(value) -> bool:
+    return value is not None and value != "" and value != [] and value != {}
+
+
+def _merge_episode_group(
+    items: list[dict],
+    *,
+    fact: EvidenceFact,
+) -> dict:
+    episode_ids = {
+        episode_id
+        for item in items
+        for episode_id in _episode_ids(item)
+    }
+    identity_label = min(episode_ids) if episode_ids else "numbered"
+    conflicts = []
+    if len(episode_ids) > 1:
+        conflicts.append(f"episodes.{identity_label}.episode_id")
+    for key in ("season_number", "episode_number"):
+        values = {
+            _episode_coordinate(item.get(key))
+            for item in items
+            if _episode_coordinate(item.get(key))
+        }
+        if len(values) > 1:
+            conflicts.append(f"episodes.{identity_label}.{key}")
+    if conflicts:
+        raise EvidenceFactConflict(
+            fact.fact_id,
+            fact.provider,
+            conflicts,
+        )
+
+    ranked = sorted(
+        (dict(item) for item in items),
+        key=lambda item: (
+            -sum(
+                _episode_value_present(value)
+                for value in item.values()
+            ),
+            json.dumps(
+                item,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ),
+        ),
+    )
+    merged = dict(ranked[0])
+    for item in ranked[1:]:
+        for key in sorted(item):
+            if (
+                _episode_value_present(item[key])
+                and not _episode_value_present(merged.get(key))
+            ):
+                merged[key] = item[key]
+    return merged
+
+
+def _merged_episodes(facts: list[EvidenceFact]) -> tuple[dict, ...]:
+    id_groups: dict[str, list[dict]] = {}
+    idless = []
+    for fact in facts:
+        for episode in fact.episodes:
+            item = dict(episode)
+            episode_ids = _episode_ids(item)
+            if episode_ids:
+                id_groups.setdefault(episode_ids[0], []).append(item)
+            else:
+                idless.append(item)
+
+    ids_by_number: dict[tuple[str, str], set[str]] = {}
+    for episode_id, items in id_groups.items():
+        for item in items:
+            if number_key := _episode_number_key(item):
+                ids_by_number.setdefault(number_key, set()).add(episode_id)
+
+    other_groups: dict[tuple, list[dict]] = {}
+    for item in idless:
+        matching_ids = ids_by_number.get(_episode_number_key(item), set())
+        if len(matching_ids) == 1:
+            id_groups[next(iter(matching_ids))].append(item)
+        else:
+            other_groups.setdefault(_episode_identity(item), []).append(item)
+
+    groups = {
+        ("id", episode_id): items
+        for episode_id, items in id_groups.items()
+    }
+    groups.update(other_groups)
+    return tuple(
+        _merge_episode_group(groups[key], fact=facts[0])
+        for key in sorted(groups, key=lambda value: tuple(map(str, value)))
+    )
+
+
+def _poster_fields(facts: list[EvidenceFact], original_language: str) -> tuple[str, str]:
+    posters = sorted({
+        (fact.poster_url, fact.poster_language)
+        for fact in facts
+        if fact.poster_url
+    })
+    if not posters:
+        return "", ""
+    selected = next(
+        (
+            item for item in posters
+            if original_language and item[1] == original_language
+        ),
+        None,
+    )
+    selected = selected or next(
+        (item for item in posters if not item[1]),
+        posters[0],
+    )
+    return selected
+
+
+def _merge_fact_group(facts: list[EvidenceFact]) -> EvidenceFact:
+    facts = sorted(
+        facts,
+        key=lambda fact: json.dumps(
+            {
+                "fact_id": fact.fact_id,
+                "titles": fact.titles,
+                "year": fact.year,
+                "media_type": fact.media_type,
+                "external_ids": dict(fact.external_ids),
+                "source_url": fact.source_url,
+                "poster_url": fact.poster_url,
+                "original_title": fact.original_title,
+                "original_language": fact.original_language,
+                "official_english_title": fact.official_english_title,
+                "romanized_original_title": fact.romanized_original_title,
+                "chinese_title": fact.chinese_title,
+                "poster_language": fact.poster_language,
+                "genres": fact.genres,
+                "episodes": fact.episodes,
+                "complex_signals": fact.complex_signals,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ),
+    )
+    identity_conflicts = []
+    for field in ("year", "media_type"):
+        values = _sorted_unique_text(
+            getattr(fact, field) for fact in facts
+        )
+        if len(values) > 1:
+            identity_conflicts.append(field)
+    external_values = {}
+    for fact in facts:
+        for key, value in fact.external_ids.items():
+            if _text(key) and _text(value):
+                external_values.setdefault(_text(key), set()).add(
+                    _text(value)
+                )
+    identity_conflicts.extend(
+        f"external_ids.{key}"
+        for key, values in external_values.items()
+        if len(values) > 1
+    )
+    if identity_conflicts:
+        raise EvidenceFactConflict(
+            facts[0].fact_id,
+            facts[0].provider,
+            identity_conflicts,
+        )
+
+    year = _single_identity_value(facts, "year")
+    media_type = _single_identity_value(facts, "media_type")
+    original_language = _preferred_text(
+        fact.original_language for fact in facts
+    )
+    poster_url, poster_language = _poster_fields(facts, original_language)
+    return EvidenceFact(
+        fact_id=facts[0].fact_id,
+        provider=facts[0].provider,
+        titles=_sorted_unique_text(
+            title for fact in facts for title in fact.titles
+        ),
+        year=year,
+        media_type=media_type,
+        external_ids=_merged_external_ids(facts),
+        source_url=_preferred_text(
+            (fact.source_url for fact in facts),
+            shortest=True,
+        ),
+        poster_url=poster_url,
+        original_title=_preferred_text(
+            fact.original_title for fact in facts
+        ),
+        original_language=original_language,
+        official_english_title=_preferred_text(
+            fact.official_english_title for fact in facts
+        ),
+        romanized_original_title=_preferred_text(
+            fact.romanized_original_title for fact in facts
+        ),
+        chinese_title=_preferred_text(
+            fact.chinese_title for fact in facts
+        ),
+        poster_language=poster_language,
+        genres=_sorted_unique_text(
+            genre for fact in facts for genre in fact.genres
+        ),
+        episodes=_merged_episodes(facts),
+        complex_signals=_sorted_unique_text(
+            signal for fact in facts for signal in fact.complex_signals
+        ),
+    )
+
+
+def _converged_facts(sources: list[dict]) -> tuple[list[EvidenceFact], tuple[FactMergeDiagnostic, ...]]:
+    groups = {}
+    for source in sources or []:
+        for fact in _facts_from_source(source):
+            groups.setdefault(fact.fact_id, []).append(fact)
+    facts = []
+    diagnostics = []
+    for fact_id in sorted(groups):
+        group = groups[fact_id]
+        facts.append(_merge_fact_group(group))
+        if len(group) > 1:
+            diagnostics.append(FactMergeDiagnostic(
+                provider=group[0].provider,
+                fact_id=fact_id,
+                occurrences=len(group),
+            ))
+    return facts, tuple(diagnostics)
+
+
 def _candidate_key(facts: list[EvidenceFact]) -> str:
     for provider, key in (
         ("tvdb", "tvdb"),
@@ -360,26 +761,52 @@ def _candidate_key(facts: list[EvidenceFact]) -> str:
     return f"title:{title}:{first.year}:{first.media_type or 'media'}"
 
 
+def _safe_cluster_matches(
+    clusters: list[list[EvidenceFact]],
+    fact: EvidenceFact,
+) -> list[list[EvidenceFact]]:
+    matches = [
+        cluster for cluster in clusters if _matches_candidate(cluster, fact)
+    ]
+    matched_types = {
+        existing.media_type
+        for cluster in matches
+        for existing in cluster
+        if existing.media_type
+    }
+    if len(matched_types) <= 1:
+        return matches
+    same_year = [
+        cluster
+        for cluster in matches
+        if fact.year
+        and fact.year in {
+            existing.year for existing in cluster if existing.year
+        }
+    ]
+    return same_year if len(same_year) == 1 else []
+
+
 def build_search_graph(sources: list[dict]) -> SearchGraph:
     clusters: list[list[EvidenceFact]] = []
-    for source in sources or []:
-        for fact in _facts_from_source(source):
-            matches = [cluster for cluster in clusters if _matches_candidate(cluster, fact)]
-            if not matches:
-                clusters.append([fact])
-                continue
-            primary = matches[0]
-            primary.append(fact)
-            for extra in matches[1:]:
-                primary.extend(extra)
-                clusters.remove(extra)
+    facts, diagnostics = _converged_facts(sources)
+    for fact in facts:
+        matches = _safe_cluster_matches(clusters, fact)
+        if not matches:
+            clusters.append([fact])
+            continue
+        primary = matches[0]
+        primary.append(fact)
+        for extra in matches[1:]:
+            primary.extend(extra)
+            clusters.remove(extra)
     candidates = [
         CandidateEntity(_candidate_key(cluster), tuple(cluster))
         for cluster in clusters
         if cluster
     ]
     candidates.sort(key=lambda item: item.candidate_key)
-    return SearchGraph(tuple(candidates))
+    return SearchGraph(tuple(candidates), diagnostics)
 
 
 def merge_verified_equivalence_edges(
@@ -390,7 +817,7 @@ def merge_verified_equivalence_edges(
 
     candidates = list((graph or SearchGraph(())).candidates)
     if not candidates or not edges:
-        return SearchGraph(tuple(candidates))
+        return SearchGraph(tuple(candidates), graph.fact_merges)
     parent = list(range(len(candidates)))
 
     def find(index: int) -> int:
@@ -435,4 +862,4 @@ def merge_verified_equivalence_edges(
         if facts
     ]
     merged.sort(key=lambda item: item.candidate_key)
-    return SearchGraph(tuple(merged))
+    return SearchGraph(tuple(merged), graph.fact_merges)
