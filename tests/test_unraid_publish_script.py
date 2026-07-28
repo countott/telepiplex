@@ -162,30 +162,30 @@ class UnraidPublishScriptTest(unittest.TestCase):
             changed_path="features/download/README.md",
             remote_tags="\n".join(
                 (
-                    "a refs/tags/download-v1.0.3",
+                    "a refs/tags/download-v1.0.4",
                     "b refs/tags/search-v1.1.0",
-                    "c refs/tags/rename-v1.0.2",
-                    "d refs/tags/sync-v1.0.0",
-                    "e refs/tags/caption-v0.1.0",
+                    "c refs/tags/rename-v1.0.3",
+                    "d refs/tags/sync-v1.0.1",
+                    "e refs/tags/caption-v0.1.1",
                 )
             ),
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("仅进入 main、不创建标签", result.stdout)
-        self.assertIn("download 1.0.3", result.stdout)
-        self.assertNotIn("refs/tags/download-v1.0.3", git_log.read_text())
+        self.assertIn("download 1.0.4", result.stdout)
+        self.assertNotIn("refs/tags/download-v1.0.4", git_log.read_text())
 
     def test_unpublished_feature_version_is_tagged(self):
         result, git_log = self._run_script(
             changed_path="features/search/manifest.yaml",
             remote_tags="\n".join(
                 (
-                    "a refs/tags/download-v1.0.3",
+                    "a refs/tags/download-v1.0.4",
                     "b refs/tags/search-v1.0.0",
-                    "c refs/tags/rename-v1.0.2",
-                    "d refs/tags/sync-v1.0.0",
-                    "e refs/tags/caption-v0.1.0",
+                    "c refs/tags/rename-v1.0.3",
+                    "d refs/tags/sync-v1.0.1",
+                    "e refs/tags/caption-v0.1.1",
                 )
             ),
         )

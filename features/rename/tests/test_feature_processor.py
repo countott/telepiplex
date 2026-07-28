@@ -1467,14 +1467,14 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.0.2")
+        self.assertEqual(manifest["version"], "1.0.3")
         self.assertEqual(manifest["host_api"], ">=1.1,<2.0")
-        self.assertIn('version = "1.0.2"', project)
+        self.assertIn('version = "1.0.3"', project)
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.0.2.tpx", source)
-        self.assertNotIn("dist/rename-1.0.2.tpx", source)
+        self.assertIn("/tmp/rename-1.0.3.tpx", source)
+        self.assertNotIn("dist/rename-1.0.3.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []
