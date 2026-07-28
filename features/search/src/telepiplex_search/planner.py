@@ -73,7 +73,7 @@ class PlanningBudget:
         total: float | None = None,
         stages: dict[str, float] | None = None,
     ):
-        # Kept as a compatibility clock for callers and logs. Search 1.1.0
+        # Kept as a compatibility clock for callers and logs. Search 1.1.1
         # deliberately has no business-layer planning deadline; provider HTTP
         # clients retain their independently configurable fault timeouts.
         del total, stages

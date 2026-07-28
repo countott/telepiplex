@@ -2110,7 +2110,7 @@ class RuntimeStartupTest(unittest.TestCase):
     @staticmethod
     def _context(root: Path):
         return SimpleNamespace(
-            manifest={"plugin_id": "download", "version": "1.0.5"},
+            manifest={"plugin_id": "download", "version": "1.0.6"},
             token="runtime-token",
             socket_path=root / "runtime.sock",
             host_socket_path=root / "host.sock",
@@ -2184,17 +2184,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.0.5")
+        self.assertEqual(manifest["version"], "1.0.6")
         self.assertEqual(manifest["host_api"], ">=1.1,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.0.5")
+        self.assertEqual(project["project"]["version"], "1.0.6")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.1.0",
         )
-        self.assertIn("/tmp/download-1.0.5.tpx", readme)
-        self.assertNotIn("dist/download-1.0.5.tpx", readme)
+        self.assertIn("/tmp/download-1.0.6.tpx", readme)
+        self.assertNotIn("dist/download-1.0.6.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)

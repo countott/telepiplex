@@ -1,6 +1,6 @@
 # Search source convergence and diagnostics
 
-本文件补充 Search 1.1.0 unified anchored search 的来源收敛、AI
+本文件定义 Search 1.1.1 unified anchored search 的来源收敛、AI
 兼容、诊断日志和用户交互合同。它不恢复旧的程序评分候选，也不让
 AI 成为媒体事实来源。
 
@@ -31,7 +31,7 @@ AI 成为媒体事实来源。
 5. Provider 返回的事实重新进入实体图和 AI fact binding；未被 Provider
    验证的标题提示不得进入 `media_metadata v1`。
 
-不恢复旧 `source_orchestration` 的多轮工具代理。它会与 Search 1.1.0
+不恢复旧 `source_orchestration` 的多轮工具代理。它会与 Search 1.1.1
 的候选编辑器形成两套并行决策链，增加状态分叉。本次只复用其
 OpenAI-compatible transport 能力。
 
@@ -106,4 +106,3 @@ fact binding 校验。第一次校验失败时：
 - 首次重复 fact binding 可经一次 repair 成功；第二次失败时日志包含
   原阶段和具体 binding 错误码。
 - 候选和错误 UI 不再出现上述内部英文枚举或字段名。
-

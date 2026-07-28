@@ -5,7 +5,7 @@
 > workspace forbids Git, so every Git/commit step from the generic skill is
 > replaced by a local test checkpoint.
 
-**Goal:** Make Search 1.1.0 converge from Chinese/Japanese discovery facts to
+**Goal:** Make Search 1.1.1 converge from Chinese/Japanese discovery facts to
 strict source-backed metadata while producing actionable logs and human-facing
 candidate UI.
 
