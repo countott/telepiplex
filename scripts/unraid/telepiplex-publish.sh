@@ -414,12 +414,13 @@ if ((${#PENDING_TAGS[@]})); then
 fi
 
 if ((${#TAG_REFS[@]})); then
-  echo '[5/5] 原子推送发布标签...'
+  echo '[5/5] 逐个推送发布标签...'
 
-  "${GIT[@]}" push \
-    --atomic \
-    origin \
-    "${TAG_REFS[@]}"
+  for tag_ref in "${TAG_REFS[@]}"; do
+    "${GIT[@]}" push \
+      origin \
+      "$tag_ref"
+  done
 else
   echo '[5/5] 没有待发布标签。'
 fi

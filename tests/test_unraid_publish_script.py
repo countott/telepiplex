@@ -13,7 +13,7 @@ MODULES = ("download", "search", "rename", "sync", "caption")
 
 
 class UnraidPublishScriptTest(unittest.TestCase):
-    def _run_script(self, *, changed_path, remote_tags):
+    def _run_script(self, *, changed_path, remote_tags, host_version="-"):
         self.assertTrue(SCRIPT.is_file(), f"missing script: {SCRIPT}")
 
         temporary = tempfile.TemporaryDirectory()
@@ -116,7 +116,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
                     ;;
                   "tag -a "*)
                     ;;
-                  "push --atomic origin refs/tags/"*)
+                  "push origin refs/tags/"*)
                     ;;
                   "ls-remote --exit-code --tags --refs origin refs/tags/"*)
                     printf '%s\n' \
@@ -149,13 +149,52 @@ class UnraidPublishScriptTest(unittest.TestCase):
             }
         )
         result = subprocess.run(
-            ["bash", str(SCRIPT), "PUBLISH - test publish"],
+            [
+                "bash",
+                str(SCRIPT),
+                f"PUBLISH {host_version} test publish",
+            ],
             cwd=ROOT,
             env=env,
             capture_output=True,
             text=True,
         )
         return result, git_log
+
+    def test_host_and_multiple_features_are_pushed_as_individual_tag_events(self):
+        result, git_log = self._run_script(
+            changed_path="app/115bot.py",
+            host_version="3.4.8",
+            remote_tags="\n".join(
+                (
+                    "a refs/tags/telepiplex-v3.4.7",
+                    "b refs/tags/search-v1.1.0",
+                )
+            ),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        tag_pushes = [
+            line
+            for line in git_log.read_text(encoding="utf-8").splitlines()
+            if line.startswith("push ") and "refs/tags/" in line
+        ]
+        self.assertEqual(
+            tag_pushes,
+            [
+                "push origin refs/tags/telepiplex-v3.4.8",
+                "push origin refs/tags/download-v1.0.4",
+                "push origin refs/tags/rename-v1.0.3",
+                "push origin refs/tags/sync-v1.0.1",
+                "push origin refs/tags/caption-v0.1.1",
+            ],
+        )
+        self.assertTrue(
+            all(line.count("refs/tags/") == 1 for line in tag_pushes)
+        )
+        self.assertFalse(
+            any(line.startswith("push --atomic ") for line in tag_pushes)
+        )
 
     def test_published_feature_changes_can_enter_main_without_a_new_tag(self):
         result, git_log = self._run_script(
@@ -193,7 +232,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("search-v1.1.0", result.stdout)
         self.assertIn(
-            "push --atomic origin refs/tags/search-v1.1.0",
+            "push origin refs/tags/search-v1.1.0",
             git_log.read_text(encoding="utf-8"),
         )
 
