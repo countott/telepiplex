@@ -13,7 +13,20 @@ MODULES = ("download", "search", "rename", "sync", "caption")
 
 
 class UnraidPublishScriptTest(unittest.TestCase):
-    def _run_script(self, *, changed_path, remote_tags, host_version="-"):
+    def _run_script(
+        self,
+        *,
+        changed_path,
+        remote_tags,
+        script_args=(),
+        host_source=textwrap.dedent(
+            '''\
+            def get_version(md_format=False):
+                version = "v3.4.9-host"
+                return version
+            '''
+        ),
+    ):
         self.assertTrue(SCRIPT.is_file(), f"missing script: {SCRIPT}")
 
         temporary = tempfile.TemporaryDirectory()
@@ -25,6 +38,9 @@ class UnraidPublishScriptTest(unittest.TestCase):
         fakebin.mkdir()
         (repository / ".git").mkdir()
         (repository / ".stfolder").mkdir()
+        app = repository / "app"
+        app.mkdir()
+        (app / "115bot.py").write_text(host_source, encoding="utf-8")
 
         for module in MODULES:
             target = repository / "features" / module
@@ -35,6 +51,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
         ssh_key = root / "telepiplex_github"
         ssh_key.write_text("test key\n", encoding="utf-8")
         git_log = root / "git.log"
+        git_log.touch()
         fake_git = fakebin / "git"
         fake_git.write_text(
             textwrap.dedent(
@@ -149,11 +166,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
             }
         )
         result = subprocess.run(
-            [
-                "bash",
-                str(SCRIPT),
-                f"PUBLISH {host_version} test publish",
-            ],
+            ["bash", str(SCRIPT), *script_args],
             cwd=ROOT,
             env=env,
             capture_output=True,
@@ -164,7 +177,6 @@ class UnraidPublishScriptTest(unittest.TestCase):
     def test_host_and_multiple_features_are_pushed_as_individual_tag_events(self):
         result, git_log = self._run_script(
             changed_path="app/115bot.py",
-            host_version="3.4.9",
             remote_tags="\n".join(
                 (
                     "a refs/tags/telepiplex-v3.4.8",
@@ -195,12 +207,17 @@ class UnraidPublishScriptTest(unittest.TestCase):
         self.assertFalse(
             any(line.startswith("push --atomic ") for line in tag_pushes)
         )
+        self.assertIn(
+            "commit -m update telepiplex",
+            git_log.read_text(encoding="utf-8"),
+        )
 
     def test_published_feature_changes_can_enter_main_without_a_new_tag(self):
         result, git_log = self._run_script(
             changed_path="features/download/README.md",
             remote_tags="\n".join(
                 (
+                    "host refs/tags/telepiplex-v3.4.9",
                     "a refs/tags/download-v1.0.5",
                     "b refs/tags/search-v1.1.0",
                     "c refs/tags/rename-v1.0.4",
@@ -220,6 +237,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
             changed_path="features/search/manifest.yaml",
             remote_tags="\n".join(
                 (
+                    "host refs/tags/telepiplex-v3.4.9",
                     "a refs/tags/download-v1.0.5",
                     "b refs/tags/search-v1.0.0",
                     "c refs/tags/rename-v1.0.4",
@@ -235,6 +253,68 @@ class UnraidPublishScriptTest(unittest.TestCase):
             "push origin refs/tags/search-v1.1.0",
             git_log.read_text(encoding="utf-8"),
         )
+
+    def test_user_script_is_zero_argument_and_ignores_legacy_arguments(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("#argumentDescription=", source)
+        self.assertNotIn("#argumentDefault=", source)
+
+        result, git_log = self._run_script(
+            changed_path="",
+            remote_tags="\n".join(
+                (
+                    "host refs/tags/telepiplex-v3.4.9",
+                    "a refs/tags/download-v1.0.5",
+                    "b refs/tags/search-v1.1.0",
+                    "c refs/tags/rename-v1.0.4",
+                    "d refs/tags/sync-v1.0.2",
+                    "e refs/tags/caption-v0.1.2",
+                )
+            ),
+            script_args=("PUBLISH 3.4.9 release telepiplex 3.4.9",),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("已忽略 User Scripts 保留的旧参数", result.stdout)
+        self.assertFalse(
+            any(
+                line.startswith(("commit ", "push "))
+                for line in git_log.read_text(encoding="utf-8").splitlines()
+            )
+        )
+
+    def test_invalid_host_version_source_fails_before_git_mutation(self):
+        cases = {
+            "missing": "def get_version():\n    return 'unknown'\n",
+            "malformed": (
+                "def get_version():\n"
+                '    version = "v3.4-host"\n'
+                "    return version\n"
+            ),
+            "duplicate": (
+                "def get_version():\n"
+                '    version = "v3.4.9-host"\n'
+                '    version = "v3.4.10-host"\n'
+                "    return version\n"
+            ),
+        }
+        for name, host_source in cases.items():
+            with self.subTest(name=name):
+                result, git_log = self._run_script(
+                    changed_path="",
+                    remote_tags="",
+                    host_source=host_source,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Host 版本", result.stderr)
+                self.assertFalse(
+                    any(
+                        line.startswith(("add ", "commit ", "push "))
+                        for line in git_log.read_text(
+                            encoding="utf-8"
+                        ).splitlines()
+                    )
+                )
 
 
 if __name__ == "__main__":

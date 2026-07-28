@@ -4,8 +4,6 @@
 #foregroundOnly=true
 #arrayStarted=true
 #clearLog=true
-#argumentDescription=参数：PUBLISH Host版本 提交说明；Host版本填 - 表示不发布 Host
-#argumentDefault=PUBLISH - update telepiplex
 #noParity=true
 
 set -Eeuo pipefail
@@ -38,6 +36,12 @@ die() {
   exit 1
 }
 
+if (($# > 0)); then
+  echo '提示：已忽略 User Scripts 保留的旧参数；版本将从源码自动读取。'
+fi
+
+COMMIT_MESSAGE='update telepiplex'
+
 # Unraid User Scripts 通常由 root 运行，而 Syncthing 接收目录可能保留其他
 # 所有者。将信任范围限制在本次命令和唯一仓库，不修改全局 Git 配置。
 # 使用数组而不是函数，确保 diff --quiet、show-ref 等正常非零状态仍可被
@@ -47,31 +51,6 @@ GIT=(
   -c "safe.directory=$REPO"
   -C "$REPO"
 )
-
-usage() {
-  cat <<'EOF'
-User Scripts 参数：
-
-  PUBLISH HOST_VERSION 提交说明
-
-示例：
-
-  PUBLISH 1.1.2 release telepiplex 1.1.2
-  PUBLISH - improve search results
-
-说明：
-
-  HOST_VERSION 填 1.2.3：
-    推送 main、发布 Host，并自动发布待发布 Feature。
-
-  HOST_VERSION 填 -：
-    推送 main、不发布 Host，但仍自动发布待发布 Feature。
-
-  已有远端标签且版本未提升的 Feature 变化只进入 main，不重复发布。
-EOF
-
-  exit 2
-}
 
 is_semver() {
   [[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
@@ -139,31 +118,6 @@ assert_newer_than_remote() {
   fi
 }
 
-# 兼容 User Scripts 将参数整行传入 $1，
-# 或将参数按空格拆成多个位置参数的两种情况。
-ARGS=("$@")
-
-if (($# == 1)); then
-  read -r -a ARGS <<<"$1"
-fi
-
-((${#ARGS[@]} >= 3)) || usage
-
-CONFIRM="${ARGS[0]}"
-HOST_VERSION="${ARGS[1]}"
-COMMIT_MESSAGE="${ARGS[*]:2}"
-
-[[ "$CONFIRM" == 'PUBLISH' ]] ||
-  die '第一个参数必须是 PUBLISH'
-
-[[ -n "$COMMIT_MESSAGE" ]] ||
-  die '提交说明不能为空'
-
-if [[ "$HOST_VERSION" != '-' ]]; then
-  is_semver "$HOST_VERSION" ||
-    die 'Host 版本必须是 x.y.z，或填写 - 跳过 Host 发布'
-fi
-
 # 防止重复点击导致两个发布任务同时运行。
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCK_FILE"
@@ -181,6 +135,42 @@ cd "$REPO"
 
 [[ -d .stfolder ]] ||
   die '未发现 .stfolder；请确认这是 Syncthing 接收目录'
+
+HOST_VERSION_SOURCE='app/115bot.py'
+
+[[ -f "$HOST_VERSION_SOURCE" ]] ||
+  die "缺少文件：$HOST_VERSION_SOURCE"
+
+HOST_VERSION_MATCHES="$(
+  awk '
+    /^def get_version\(/ {
+      in_get_version=1
+      next
+    }
+
+    in_get_version && /^[^[:space:]]/ {
+      in_get_version=0
+    }
+
+    in_get_version {
+      print
+    }
+  ' "$HOST_VERSION_SOURCE" |
+    sed -nE \
+      's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))-host"[[:space:]]*$/\1/p'
+)"
+
+HOST_VERSION_COUNT="$(
+  awk 'NF { count++ } END { print count + 0 }' <<<"$HOST_VERSION_MATCHES"
+)"
+
+((HOST_VERSION_COUNT == 1)) ||
+  die '无法从 app/115bot.py 的 get_version() 唯一读取 Host 版本'
+
+HOST_VERSION="$HOST_VERSION_MATCHES"
+
+is_semver "$HOST_VERSION" ||
+  die "Host 版本无效：$HOST_VERSION"
 
 [[ -r "$SSH_KEY" ]] ||
   die "GitHub SSH 私钥不可读：$SSH_KEY"
@@ -264,20 +254,18 @@ CHANGED_FILES="$(
 PENDING_TAGS=()
 MAIN_ONLY_FEATURES=()
 
-if [[ "$HOST_VERSION" != '-' ]]; then
-  HOST_TAG="telepiplex-v$HOST_VERSION"
+HOST_TAG="telepiplex-v$HOST_VERSION"
 
-  remote_tag_exists "$HOST_TAG" &&
-    die "远端标签已经存在：$HOST_TAG"
-
-  assert_newer_than_remote \
-    telepiplex \
-    "$HOST_VERSION"
-
+if remote_tag_exists "$HOST_TAG"; then
+  HOST_RELEASE_STATE='远端标签已存在，不重复发布'
+else
+  assert_newer_than_remote telepiplex "$HOST_VERSION"
   PENDING_TAGS+=("$HOST_TAG")
+  HOST_RELEASE_STATE='待发布'
 fi
 
-echo '[2/5] 检查 Feature 版本...'
+echo '[2/5] 检查 Host 与 Feature 版本...'
+echo "Host：${HOST_VERSION}（${HOST_RELEASE_STATE}）"
 
 for module in "${MODULES[@]}"; do
   manifest="features/$module/manifest.yaml"
