@@ -241,6 +241,81 @@ class CandidateHydrationTest(unittest.TestCase):
             ("wikipedia:Q77", "field:year"),
         )
 
+    def test_discovery_occurrence_anchor_maps_to_exact_stable_fact(self):
+        candidate = _candidate()
+        occurrence_id = "wikipedia:Q77@occurrence:abc123"
+        candidate["anchor_fact_id"] = occurrence_id
+        candidate["source_links"][2]["fact_id"] = occurrence_id
+
+        hydrated = hydrate_frozen_candidate(
+            candidate,
+            metadata_id="occurrence-anchor",
+            raw_query="布达佩斯大饭店",
+            require_anchor=True,
+            resolver=_resolver([]),
+        )
+
+        self.assertEqual(hydrated["anchor_fact_id"], "wikipedia:Q77")
+        self.assertIn(
+            "wikipedia:Q77",
+            {
+                link["fact_id"]
+                for link in hydrated["source_links"]
+            },
+        )
+
+    def test_non_anchor_source_conflict_is_quarantined(self):
+        candidate = _candidate()
+        candidate["candidate_version"] = "v1"
+
+        def resolver(link):
+            if link.provider != "wikipedia":
+                return _resolver([])(link)
+            return DirectEntity(
+                provider="wikipedia",
+                evidence={
+                    "source": "wikipedia",
+                    "status": "ok",
+                    "facts": [{
+                        "wikibase_item": "Q77",
+                        "title": "The Grand Budapest Hotel",
+                        "year": "2014",
+                        "media_type": "movie",
+                        "url": link.url,
+                    }, {
+                        "wikibase_item": "Q77",
+                        "title": "The Grand Budapest Hotel",
+                        "year": "2015",
+                        "media_type": "movie",
+                        "url": link.url,
+                    }],
+                    "source_urls": [link.url],
+                },
+                stable_identity=("wikipedia", "Q77"),
+                title="The Grand Budapest Hotel",
+                year="2014",
+                media_type="movie",
+                scope="work",
+            )
+
+        hydrated = hydrate_frozen_candidate(
+            candidate,
+            metadata_id="non-anchor-conflict",
+            raw_query="布达佩斯大饭店",
+            require_anchor=True,
+            resolver=resolver,
+        )
+
+        self.assertEqual(
+            {link["provider"] for link in hydrated["source_links"]},
+            {"douban", "tvdb"},
+        )
+        self.assertEqual(hydrated["candidate_version"], "v0")
+        self.assertTrue(any(
+            item.startswith("wikipedia:source_fact_conflict:")
+            for item in hydrated["unresolved_sources"]
+        ))
+
     def test_exact_tvdb_inventory_verifies_preserved_season_scope(self):
         candidate = {
             "candidate_key": "honey-and-clover-s2",

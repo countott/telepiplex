@@ -9,6 +9,7 @@ from telepiplex_search.planner import (
     _merge_evidence_passes,
     _materialize_with_binding_repair,
     build_confirmable_search_plan,
+    supplement_selected_candidate,
 )
 from telepiplex_search.entity_graph import (
     CandidateEntity,
@@ -143,85 +144,54 @@ class UnifiedSearchPipelineTest(unittest.IsolatedAsyncioTestCase):
             "ai_fact_binding",
         )
 
-    async def test_duplicate_supplement_facts_converge_then_ai_rebinds(self):
-        from telepiplex_search.context import runtime_context
-
+    async def test_discovery_returns_candidates_before_source_supplement(self):
         wikipedia_calls = 0
         ai_contexts = []
-        logger = Mock()
+        supplement_editor = Mock()
 
         def wikipedia(_hypotheses):
             nonlocal wikipedia_calls
             wikipedia_calls += 1
-            if wikipedia_calls == 1:
-                return {"status": "not_found", "facts": []}
-            english = {
-                **_wikipedia_fact(),
-                "query": "The Grand Budapest Hotel",
-                "language": "en",
-            }
-            chinese = {
-                **_wikipedia_fact(),
-                "query": "布达佩斯大饭店",
-                "language": "zh",
-                "title": "布达佩斯大饭店",
-                "chinese_title": "布达佩斯大饭店",
-            }
-            return {"status": "ok", "facts": [english, chinese]}
+            return {"status": "not_found", "facts": []}
 
         def editor(context):
             ai_contexts.append(context)
-            return _binding(include_wikipedia=len(ai_contexts) > 1)
+            return _binding(include_wikipedia=False)
 
-        with patch.object(runtime_context, "logger", logger):
-            plan = await build_confirmable_search_plan(
-                "布达佩斯大饭店",
-                "unified-2",
-                {
-                    "wikipedia": wikipedia,
-                    "douban": lambda _query: {
-                        "status": "ok",
-                        "facts": [_douban_fact()],
-                    },
-                    "tvdb": lambda _query: {
-                        "status": "ok",
-                        "facts": [_tvdb_fact()],
-                    },
+        plan = await build_confirmable_search_plan(
+            "布达佩斯大饭店",
+            "unified-2",
+            {
+                "wikipedia": wikipedia,
+                "douban": lambda _query: {
+                    "status": "ok",
+                    "facts": [_douban_fact()],
                 },
-                lambda _contract: set(),
-                TemporarySpecialAllocator(),
-                candidate_editor=editor,
-            )
+                "tvdb": lambda _query: {
+                    "status": "ok",
+                    "facts": [_tvdb_fact()],
+                },
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            candidate_editor=editor,
+            supplement_query_editor=supplement_editor,
+        )
 
-        self.assertEqual(wikipedia_calls, 2)
+        self.assertEqual(wikipedia_calls, 1)
         self.assertEqual(
             [context["stage"] for context in ai_contexts],
-            ["discovery", "source_supplement"],
+            ["discovery"],
         )
-        self.assertEqual(
-            [
-                fact["fact_id"]
-                for fact in ai_contexts[1]["facts"]
-                if fact["provider"] == "wikipedia"
-            ],
-            ["wikipedia:Q77"],
-        )
+        supplement_editor.assert_not_called()
         self.assertEqual(
             {item["provider"] for item in plan["candidates"][0]["source_links"]},
-            {"wikipedia", "douban", "tvdb"},
+            {"douban", "tvdb"},
         )
         self.assertEqual(
             plan["candidates"][0]["candidate_version"],
-            "v1",
+            "v0",
         )
-        info = " ".join(
-            call.args[0] for call in logger.info.call_args_list
-        )
-        self.assertIn("search_fact_merge status=merged", info)
-        self.assertIn("stage=source_supplement", info)
-        self.assertIn("provider=wikipedia", info)
-        self.assertIn("fact_id=wikipedia:Q77", info)
-        self.assertIn("occurrences=2", info)
 
     async def test_missing_tvdb_uses_candidate_bound_cross_language_title_and_year(self):
         tvdb_payloads = []
@@ -329,6 +299,38 @@ class UnifiedSearchPipelineTest(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+        self.assertEqual(len(tvdb_payloads), 1)
+        self.assertEqual(
+            plan["candidates"][0]["candidate_version"],
+            "v0",
+        )
+
+        selected = await supplement_selected_candidate(
+            plan["candidates"][0],
+            "冰果",
+            {
+                "wikipedia": lambda _payload: {
+                    "source": "wikipedia",
+                    "status": "ok",
+                    "facts": [wikipedia_fact],
+                },
+                "douban": lambda _payload: {
+                    "source": "douban",
+                    "status": "ok",
+                    "facts": [douban_fact],
+                },
+                "tvdb": tvdb,
+            },
+            candidate_editor=editor,
+            supplement_query_editor=lambda _context: {
+                "queries": [{
+                    "candidate_id": "hyouka-animation",
+                    "provider": "tvdb",
+                    "title_hints": ["Hyouka"],
+                }],
+            },
+        )
+
         self.assertEqual(len(tvdb_payloads), 2)
         self.assertIn({
             "title": "Hyouka",
@@ -340,12 +342,13 @@ class UnifiedSearchPipelineTest(unittest.IsolatedAsyncioTestCase):
             "explicit_facts": [],
             "inferred_facts": ["candidate_source_supplement"],
         }, tvdb_payloads[1]["hypotheses"])
+        self.assertEqual(selected["candidate_version"], "v1")
         self.assertEqual(
-            plan["candidates"][0]["candidate_version"],
-            "v1",
+            {item["provider"] for item in selected["source_links"]},
+            {"wikipedia", "douban", "tvdb"},
         )
 
-    async def test_honey_and_clover_four_work_chain_survives_duplicate_supplement_results(self):
+    async def test_honey_and_clover_four_work_candidates_display_before_supplement(self):
         calls = {"wikipedia": 0, "douban": 0, "tvdb": 0}
         ai_contexts = []
 
@@ -548,7 +551,7 @@ class UnifiedSearchPipelineTest(unittest.IsolatedAsyncioTestCase):
         def editor(context):
             ai_contexts.append(context)
             return candidate_payload(
-                supplemented=context["stage"] == "source_supplement",
+                supplemented=False,
             )
 
         plan = await build_confirmable_search_plan(
@@ -564,25 +567,18 @@ class UnifiedSearchPipelineTest(unittest.IsolatedAsyncioTestCase):
             candidate_editor=editor,
         )
 
-        self.assertEqual(calls, {"wikipedia": 2, "douban": 1, "tvdb": 2})
+        self.assertEqual(calls, {"wikipedia": 1, "douban": 1, "tvdb": 1})
         self.assertEqual(
             [context["stage"] for context in ai_contexts],
-            ["discovery", "source_supplement"],
-        )
-        self.assertEqual(
-            len({
-                fact["fact_id"] for fact in ai_contexts[-1]["facts"]
-            }),
-            len(ai_contexts[-1]["facts"]),
+            ["discovery"],
         )
         self.assertEqual(
             [item["candidate_id"] for item in plan["candidates"]],
             [work["candidate_id"] for work in works],
         )
-        self.assertTrue(all(
-            item["candidate_version"] == "v1"
-            and item["metadata_ready"]
-            and len(item["source_links"]) == 3
+        self.assertTrue(all(item["selectable"] for item in plan["candidates"]))
+        self.assertTrue(any(
+            item["candidate_version"] == "v0"
             for item in plan["candidates"]
         ))
         self.assertEqual(
@@ -637,6 +633,80 @@ class UnifiedSearchPipelineTest(unittest.IsolatedAsyncioTestCase):
             candidate["unresolved_sources"],
         )
         self.assertTrue(candidate["selectable"])
+
+    async def test_selected_supplement_rejects_unrelated_provider_fact(self):
+        plan = await build_confirmable_search_plan(
+            "布达佩斯大饭店",
+            "unified-unrelated-supplement",
+            {
+                "wikipedia": lambda _query: {
+                    "source": "wikipedia",
+                    "status": "not_found",
+                    "facts": [],
+                },
+                "douban": lambda _query: {
+                    "source": "douban",
+                    "status": "ok",
+                    "facts": [_douban_fact()],
+                },
+                "tvdb": lambda _query: {
+                    "source": "tvdb",
+                    "status": "ok",
+                    "facts": [_tvdb_fact()],
+                },
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            candidate_editor=lambda _context: _binding(
+                include_wikipedia=False
+            ),
+        )
+        original = plan["candidates"][0]
+
+        def bind_unrelated(context):
+            wikipedia_fact_id = next(
+                fact["fact_id"]
+                for fact in context["facts"]
+                if fact["provider"] == "wikipedia"
+            )
+            payload = _binding(include_wikipedia=False)
+            payload["candidates"][0]["fact_bindings"].append({
+                "fact_id": wikipedia_fact_id,
+                "role": "movie",
+                "season_number": None,
+                "episode_number": None,
+            })
+            return payload
+
+        selected = await supplement_selected_candidate(
+            original,
+            "布达佩斯大饭店",
+            {
+                "wikipedia": lambda _query: {
+                    "source": "wikipedia",
+                    "status": "ok",
+                    "facts": [{
+                        "wikibase_item": "Q-unrelated",
+                        "title": "An Unrelated Film",
+                        "year": "2020",
+                        "media_type": "movie",
+                        "url": (
+                            "https://en.wikipedia.org/wiki/"
+                            "An_Unrelated_Film"
+                        ),
+                    }],
+                },
+                "douban": Mock(),
+                "tvdb": Mock(),
+            },
+            candidate_editor=bind_unrelated,
+        )
+
+        self.assertEqual(
+            selected["source_links"],
+            original["source_links"],
+        )
+        self.assertEqual(selected["candidate_version"], "v0")
 
     async def test_metadata_incomplete_candidate_does_not_poison_shortlist(self):
         incomplete = {
@@ -918,54 +988,71 @@ class UnifiedSearchPipelineTest(unittest.IsolatedAsyncioTestCase):
         )
         editor.assert_not_called()
 
-    async def test_conflicting_provider_identity_stops_before_candidate_ai(self):
-        from telepiplex_search.context import runtime_context
+    async def test_discovery_conflict_reaches_candidate_editor(self):
+        contexts = []
 
-        editor = Mock()
-        logger = Mock()
-        with patch.object(runtime_context, "logger", logger):
-            with self.assertRaises(Exception) as raised:
-                await build_confirmable_search_plan(
-                    "冲突作品",
-                    "unified-source-conflict",
-                    {
-                        "wikipedia": lambda _query: {
-                            "source": "wikipedia",
-                            "status": "ok",
-                            "facts": [{
-                                "wikibase_item": "Q-conflict",
-                                "title": "冲突作品",
-                                "year": "2005",
-                                "media_type": "movie",
-                            }, {
-                                "wikibase_item": "Q-conflict",
-                                "title": "冲突作品",
-                                "year": "2006",
-                                "media_type": "movie",
-                            }],
-                        },
-                    },
-                    lambda _contract: set(),
-                    TemporarySpecialAllocator(),
-                    candidate_editor=editor,
-                )
+        def editor(context):
+            contexts.append(context)
+            facts = [
+                fact for fact in context["facts"]
+                if fact["provider"] == "wikipedia"
+            ]
+            return {
+                "status": "resolved",
+                "candidates": [{
+                    "candidate_id": "conflicting-work",
+                    "anchor_fact_id": facts[0]["fact_id"],
+                    "identity_role": "movie",
+                    "intended_scope": "movie",
+                    "fact_bindings": [{
+                        "fact_id": facts[0]["fact_id"],
+                        "role": "movie",
+                        "season_number": None,
+                        "episode_number": None,
+                    }],
+                    "ai_confidence": 0.8,
+                    "ai_reason": "用户可选择并继续验证该搜索结果。",
+                }],
+            }
 
+        plan = await build_confirmable_search_plan(
+            "冲突作品",
+            "unified-source-conflict",
+            {
+                "wikipedia": lambda _query: {
+                    "source": "wikipedia",
+                    "status": "ok",
+                    "facts": [{
+                        "wikibase_item": "Q-conflict",
+                        "title": "冲突作品",
+                        "year": "2005",
+                        "media_type": "movie",
+                        "url": "https://zh.wikipedia.org/wiki/Conflict",
+                    }, {
+                        "wikibase_item": "Q-conflict",
+                        "title": "Conflicting Work",
+                        "year": "2006",
+                        "media_type": "movie",
+                        "url": "https://en.wikipedia.org/wiki/Conflict",
+                    }],
+                },
+            },
+            lambda _contract: set(),
+            TemporarySpecialAllocator(),
+            candidate_editor=editor,
+        )
+
+        self.assertEqual(len(contexts), 1)
+        facts = [
+            fact for fact in contexts[0]["facts"]
+            if fact["provider"] == "wikipedia"
+        ]
+        self.assertEqual(len(facts), 2)
+        self.assertEqual(len({fact["fact_id"] for fact in facts}), 2)
         self.assertEqual(
-            getattr(raised.exception, "code", ""),
-            "source_fact_conflict",
+            plan["candidates"][0]["candidate_id"],
+            "conflicting-work",
         )
-        self.assertEqual(
-            getattr(raised.exception, "reason_codes", ()),
-            ("wikipedia:Q-conflict", "field:year"),
-        )
-        editor.assert_not_called()
-        warning = " ".join(
-            call.args[0] for call in logger.warning.call_args_list
-        )
-        self.assertIn("search_fact_merge status=conflict", warning)
-        self.assertIn("stage=discovery", warning)
-        self.assertIn("fact_id=wikipedia:Q-conflict", warning)
-        self.assertIn('fields=["year"]', warning)
 
     @patch(
         "telepiplex_search.planner.infer_search_hypotheses_with_ai",

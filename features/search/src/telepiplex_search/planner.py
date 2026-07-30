@@ -31,7 +31,10 @@ from .candidate_score import (
 from .deterministic import build_rule_hypotheses
 from .entity_graph import (
     CandidateEntity,
+    EvidenceFact,
     EvidenceFactConflict,
+    SearchGraph,
+    build_discovery_graph,
     build_search_graph,
     merge_verified_equivalence_edges,
     normalize_title,
@@ -98,6 +101,32 @@ def _build_logged_search_graph(
     return graph
 
 
+def _build_logged_discovery_graph(
+    sources: list[dict],
+    *,
+    stage: str,
+):
+    graph = build_discovery_graph(sources)
+    for diagnostic in graph.fact_merges:
+        if diagnostic.conflicting_fields:
+            _log_warning(
+                "search_fact_merge status=deferred "
+                f"stage={stage} provider={diagnostic.provider} "
+                f"fact_id={diagnostic.fact_id} "
+                "fields="
+                f"{json.dumps(list(diagnostic.conflicting_fields), ensure_ascii=False)} "
+                f"occurrences={diagnostic.occurrences}"
+            )
+        else:
+            _log_info(
+                "search_fact_merge status=merged "
+                f"stage={stage} provider={diagnostic.provider} "
+                f"fact_id={diagnostic.fact_id} "
+                f"occurrences={diagnostic.occurrences}"
+            )
+    return graph
+
+
 class PlanningBudget:
     def __init__(
         self,
@@ -106,7 +135,7 @@ class PlanningBudget:
         total: float | None = None,
         stages: dict[str, float] | None = None,
     ):
-        # Kept as a compatibility clock for callers and logs. Search 1.1.2
+        # Kept as a compatibility clock for callers and logs. search 1.2.0
         # deliberately has no business-layer planning deadline; provider HTTP
         # clients retain their independently configurable fault timeouts.
         del total, stages
@@ -1941,6 +1970,7 @@ def _anchored_fact_snapshot(candidate) -> list[dict]:
     return [
         {
             "fact_id": fact.fact_id,
+            "stable_fact_id": fact.stable_fact_id or fact.fact_id,
             "provider": fact.provider,
             "titles": list(fact.titles),
             "year": fact.year,
@@ -1948,6 +1978,15 @@ def _anchored_fact_snapshot(candidate) -> list[dict]:
             "external_ids": dict(fact.external_ids),
             "source_url": fact.source_url,
             "poster_url": fact.poster_url,
+            "original_title": fact.original_title,
+            "original_language": fact.original_language,
+            "official_english_title": fact.official_english_title,
+            "romanized_original_title": fact.romanized_original_title,
+            "chinese_title": fact.chinese_title,
+            "poster_language": fact.poster_language,
+            "genres": list(fact.genres),
+            "episodes": [dict(item) for item in fact.episodes],
+            "complex_signals": list(fact.complex_signals),
         }
         for fact in candidate.facts
     ]
@@ -1966,6 +2005,330 @@ def _candidate_version(candidate) -> str:
         if _COMPLETE_CANDIDATE_PROVIDERS.issubset(candidate.providers)
         else "v0"
     )
+
+
+def _fact_from_snapshot(raw: dict) -> EvidenceFact:
+    return EvidenceFact(
+        fact_id=_text(raw.get("fact_id")),
+        stable_fact_id=(
+            _text(raw.get("stable_fact_id"))
+            or _text(raw.get("fact_id"))
+        ),
+        provider=_text(raw.get("provider")).casefold(),
+        titles=tuple(
+            _text(item)
+            for item in (raw.get("titles") or ())
+            if _text(item)
+        ),
+        year=_text(raw.get("year")),
+        media_type=_text(raw.get("media_type")).casefold(),
+        external_ids=dict(raw.get("external_ids") or {}),
+        source_url=_text(raw.get("source_url")),
+        poster_url=_text(raw.get("poster_url")),
+        original_title=_text(raw.get("original_title")),
+        original_language=_text(raw.get("original_language")),
+        official_english_title=_text(raw.get("official_english_title")),
+        romanized_original_title=_text(
+            raw.get("romanized_original_title")
+        ),
+        chinese_title=_text(raw.get("chinese_title")),
+        poster_language=_text(raw.get("poster_language")),
+        genres=tuple(
+            _text(item)
+            for item in (raw.get("genres") or ())
+            if _text(item)
+        ),
+        episodes=tuple(
+            dict(item)
+            for item in (raw.get("episodes") or ())
+            if isinstance(item, dict)
+        ),
+        complex_signals=tuple(
+            _text(item)
+            for item in (raw.get("complex_signals") or ())
+            if _text(item)
+        ),
+    )
+
+
+def _candidate_from_frozen_snapshot(candidate: dict):
+    facts = tuple(
+        _fact_from_snapshot(raw)
+        for raw in (candidate.get("fact_snapshot") or ())
+        if isinstance(raw, dict) and _text(raw.get("fact_id"))
+    )
+    graph = SearchGraph((
+        CandidateEntity(
+            _text(candidate.get("candidate_id")) or "selected-candidate",
+            facts,
+        ),
+    ))
+    bindings = [{
+        "fact_id": _text(link.get("fact_id")),
+        "role": _text(link.get("role")),
+        "season_number": link.get("proposed_season_number")
+        if link.get("verification") == "unresolved_scope_link"
+        else link.get("season_number"),
+        "episode_number": link.get("proposed_episode_number")
+        if link.get("verification") == "unresolved_scope_link"
+        else link.get("episode_number"),
+    } for link in (candidate.get("source_links") or ()) if isinstance(link, dict)]
+    payload = {
+        "status": "resolved",
+        "candidates": [{
+            "candidate_id": _text(candidate.get("candidate_id")),
+            "anchor_fact_id": _text(candidate.get("anchor_fact_id")),
+            "identity_role": _text(candidate.get("identity_role")),
+            "intended_scope": _text(candidate.get("intended_scope")),
+            "fact_bindings": bindings,
+            "ai_confidence": float(candidate.get("ai_confidence") or 0),
+            "ai_reason": (
+                _text(candidate.get("ai_reason"))
+                or "User selected this request-scoped candidate."
+            ),
+        }],
+    }
+    statuses = {
+        _text(link.get("provider")).casefold(): "ok"
+        for link in (candidate.get("source_links") or ())
+        if isinstance(link, dict) and _text(link.get("provider"))
+    }
+    materialized = materialize_anchored_candidates(
+        graph,
+        payload,
+        provider_statuses=statuses,
+        locked_anchor_fact_id=_text(candidate.get("anchor_fact_id")),
+    )
+    return graph, materialized[0]
+
+
+def _selected_candidate_result(candidate: dict, enriched) -> dict:
+    result = deepcopy(candidate)
+    result.update({
+        "anchor_fact_id": enriched.anchor_fact_id,
+        "identity_role": enriched.identity_role,
+        "intended_scope": enriched.intended_scope,
+        "poster_url": enriched.primary_poster_url,
+        "poster_assets": [
+            poster.to_dict() for poster in enriched.poster_assets
+        ],
+        "source_links": [
+            link.to_dict() for link in enriched.source_links
+        ],
+        "unresolved_sources": list(enriched.unresolved_sources),
+        "ai_confidence": enriched.ai_confidence,
+        "ai_reason": enriched.ai_reason,
+        "reasons": [enriched.ai_reason],
+        "candidate_version": _candidate_version(enriched),
+        "fact_snapshot": _anchored_fact_snapshot(enriched),
+    })
+    return result
+
+
+def _supplement_fact_is_compatible(
+    fact: EvidenceFact,
+    selected,
+    *,
+    queried_titles,
+) -> bool:
+    selected_types = {
+        item.media_type for item in selected.facts if item.media_type
+    }
+    if (
+        fact.media_type
+        and selected_types
+        and fact.media_type not in selected_types
+    ):
+        return False
+    selected_years = {
+        item.year for item in selected.facts if item.year
+    }
+    if fact.year and selected_years and fact.year not in selected_years:
+        return False
+    if any(
+        key in other.external_ids
+        and value
+        and value == other.external_ids[key]
+        for other in selected.facts
+        for key, value in fact.external_ids.items()
+    ):
+        return True
+    allowed_titles = {
+        normalized
+        for item in selected.facts
+        for normalized in item.normalized_titles
+    }
+    allowed_titles.update(
+        normalized
+        for title in queried_titles
+        if (normalized := normalize_title(title))
+    )
+    return bool(fact.normalized_titles.intersection(allowed_titles))
+
+
+async def supplement_selected_candidate(
+    candidate: dict,
+    raw_query: str,
+    providers: dict[str, Callable],
+    *,
+    candidate_editor,
+    supplement_query_editor=None,
+) -> dict:
+    """Fill missing sources for one user-selected candidate only."""
+
+    if not candidate.get("links_frozen"):
+        return deepcopy(candidate)
+    try:
+        _base_graph, selected = _candidate_from_frozen_snapshot(candidate)
+    except (CandidateBindingError, TypeError, ValueError) as exc:
+        _log_warning(
+            "search_supplement status=skipped "
+            f"stage=selected_candidate error={type(exc).__name__}"
+        )
+        return deepcopy(candidate)
+
+    missing = {
+        provider
+        for provider in _COMPLETE_CANDIDATE_PROVIDERS - selected.providers
+        if provider in providers
+    }
+    if not missing:
+        return deepcopy(candidate)
+
+    missing_by_candidate = {selected.candidate_id: missing}
+    ai_payload = await _call_supplement_query_editor(
+        supplement_query_editor,
+        _supplement_query_context(
+            raw_query,
+            (selected,),
+            missing_by_candidate,
+        ),
+    )
+    intent = {
+        "title": _text(raw_query),
+        "year": "",
+        "media_type": (
+            "movie"
+            if selected.identity_role == "movie"
+            else "series"
+            if selected.identity_role in {"series_root", "season", "episode"}
+            else ""
+        ),
+        "scope": selected.intended_scope,
+        "season_number": None,
+        "episode_number": None,
+    }
+    supplement_sources = []
+    queried_titles_by_provider = {}
+    for provider in sorted(missing):
+        hypotheses = _supplement_hypotheses(
+            (selected,),
+            intent,
+            provider=provider,
+            missing_candidate_ids={selected.candidate_id},
+            ai_payload=ai_payload,
+        )
+        queried_titles_by_provider[provider] = tuple(
+            (hypotheses.get("source_queries") or {}).get(provider) or ()
+        )
+        supplement_sources.extend(await collect_evidence(
+            hypotheses,
+            {provider: providers[provider]},
+        ))
+
+    supplement_graph = _build_logged_discovery_graph(
+        supplement_sources,
+        stage="selected_supplement",
+    )
+    raw_supplement_facts = tuple(
+        fact
+        for entity in supplement_graph.candidates
+        for fact in entity.facts
+    )
+    supplement_facts = tuple(
+        fact
+        for fact in raw_supplement_facts
+        if _supplement_fact_is_compatible(
+            fact,
+            selected,
+            queried_titles=queried_titles_by_provider.get(
+                fact.provider,
+                (),
+            ),
+        )
+    )
+    for fact in raw_supplement_facts:
+        if fact not in supplement_facts:
+            _log_info(
+                "search_supplement status=rejected "
+                f"stage=selected_candidate "
+                f"candidate_id={selected.candidate_id} "
+                f"provider={fact.provider} "
+                f"fact_id={fact.stable_fact_id or fact.fact_id} "
+                "reason=identity_incompatible"
+            )
+    if not supplement_facts:
+        _log_info(
+            "search_supplement status=no_new_facts "
+            f"stage=selected_candidate candidate_id={selected.candidate_id}"
+        )
+        return deepcopy(candidate)
+
+    combined_graph = SearchGraph(
+        (CandidateEntity(
+            selected.candidate_id,
+            (*selected.facts, *supplement_facts),
+        ),),
+        supplement_graph.fact_merges,
+    )
+    payload = await _call_candidate_editor(
+        candidate_editor,
+        _anchored_editor_context(
+            raw_query,
+            combined_graph,
+            intent=intent,
+            locked_anchor_fact_id=selected.anchor_fact_id,
+            provisional_candidates=(selected,),
+            stage="selected_supplement",
+        ),
+    )
+    statuses = {
+        link.provider: "ok"
+        for link in selected.source_links
+    }
+    supplement_statuses, _support = _provider_status_and_support(
+        supplement_sources
+    )
+    statuses.update(supplement_statuses)
+    try:
+        enriched = materialize_anchored_candidates(
+            combined_graph,
+            payload,
+            provider_statuses=statuses,
+            locked_anchor_fact_id=selected.anchor_fact_id,
+        )
+    except CandidateBindingError as exc:
+        _log_warning(
+            "search_supplement status=binding_failed "
+            f"stage=selected_candidate candidate_id={selected.candidate_id} "
+            f"error={exc.code}"
+        )
+        return deepcopy(candidate)
+    if (
+        len(enriched) != 1
+        or enriched[0].candidate_id != selected.candidate_id
+    ):
+        _log_warning(
+            "search_supplement status=identity_rejected "
+            f"stage=selected_candidate candidate_id={selected.candidate_id}"
+        )
+        return deepcopy(candidate)
+    _log_info(
+        "search_supplement status=accepted "
+        f"stage=selected_candidate candidate_id={selected.candidate_id} "
+        f"providers={json.dumps(sorted(enriched[0].providers))}"
+    )
+    return _selected_candidate_result(candidate, enriched[0])
 
 
 def _candidate_preview_metadata(
@@ -2150,7 +2513,7 @@ async def _build_anchored_search_plan(
     binding_repair_state = {"used": False}
     hypotheses = build_rule_hypotheses(raw_query)
     sources = await collect_evidence(hypotheses, providers)
-    graph = _build_logged_search_graph(sources, stage="discovery")
+    graph = _build_logged_discovery_graph(sources, stage="discovery")
     if not _anchored_fact_payload(graph):
         failure_code, hard_failures = _no_fact_failure(sources)
         if failure_code:
@@ -2175,7 +2538,10 @@ async def _build_anchored_search_plan(
             sources,
             await collect_evidence(recovery, providers),
         )
-        graph = _build_logged_search_graph(sources, stage="ai_recovery")
+        graph = _build_logged_discovery_graph(
+            sources,
+            stage="ai_recovery",
+        )
         if not _anchored_fact_payload(graph):
             failure_code, hard_failures = _no_fact_failure(sources)
             if failure_code:
@@ -2215,85 +2581,6 @@ async def _build_anchored_search_plan(
     )
     if not anchored:
         raise SearchPlanningError("no_match")
-
-    supplementable_providers = {
-        provider
-        for provider, status in statuses.items()
-        if status in {"ok", "not_found"}
-    }
-    missing_by_candidate = {
-        candidate.candidate_id: {
-            provider
-            for provider in supplementable_providers
-            if provider not in candidate.providers
-        }
-        for candidate in anchored
-    }
-    missing_providers = set().union(
-        *missing_by_candidate.values()
-    ) if missing_by_candidate else set()
-    if missing_providers:
-        supplement_context = _supplement_query_context(
-            raw_query,
-            anchored,
-            missing_by_candidate,
-        )
-        ai_query_payload = await _call_supplement_query_editor(
-            supplement_query_editor,
-            supplement_context,
-        )
-        for provider in sorted(missing_providers):
-            handler = providers.get(provider)
-            if handler is None:
-                continue
-            supplemental = await collect_evidence(
-                _supplement_hypotheses(
-                    anchored,
-                    intent,
-                    provider=provider,
-                    missing_candidate_ids={
-                        candidate_id
-                        for candidate_id, missing in missing_by_candidate.items()
-                        if provider in missing
-                    },
-                    ai_payload=ai_query_payload,
-                ),
-                {provider: handler},
-            )
-            sources = _merge_evidence_passes(sources, supplemental)
-        graph = _build_logged_search_graph(
-            sources,
-            stage="source_supplement",
-        )
-        statuses, _support = _provider_status_and_support(sources)
-        anchor_fact_id = _locked_anchor_fact_id(graph, locked_identity)
-        payload = await _call_candidate_editor(
-            candidate_editor,
-            _anchored_editor_context(
-                raw_query,
-                graph,
-                intent=intent,
-                locked_anchor_fact_id=anchor_fact_id,
-                provisional_candidates=anchored,
-                stage="source_supplement",
-            ),
-        )
-        if payload is None:
-            raise SearchPlanningError("ai_candidate_failure")
-        anchored = await _materialize_with_binding_repair(
-            candidate_editor=candidate_editor,
-            graph=graph,
-            payload=payload,
-            provider_statuses=statuses,
-            locked_anchor_fact_id=anchor_fact_id,
-            raw_query=raw_query,
-            intent=intent,
-            provisional_candidates=anchored,
-            stage="source_supplement",
-            repair_state=binding_repair_state,
-        )
-        if not anchored:
-            raise SearchPlanningError("no_match")
 
     ranked = []
     for index, candidate in enumerate(anchored):

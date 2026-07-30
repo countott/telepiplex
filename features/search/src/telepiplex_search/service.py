@@ -49,7 +49,11 @@ from .candidate_hydration import (
 from .direct_link import DirectLinkError, resolve_direct_link
 from .input_contract import classify_search_input
 from .log_sanitizer import sanitize_log_value
-from .planner import SearchPlanningError, build_confirmable_search_plan
+from .planner import (
+    SearchPlanningError,
+    build_confirmable_search_plan,
+    supplement_selected_candidate,
+)
 from .prowlarr_query import (
     build_prowlarr_query,
     build_prowlarr_query_chain,
@@ -286,6 +290,7 @@ class SearchFeature:
         indexer_loader=None,
         indexer_search=None,
         exact_link_resolver=None,
+        selected_candidate_supplementer=None,
     ):
         self.config = config
         self.host = host
@@ -300,6 +305,10 @@ class SearchFeature:
         self.indexer_loader = indexer_loader or list_prowlarr_indexers
         self.indexer_search = indexer_search or search_prowlarr_indexer
         self.exact_link_resolver = exact_link_resolver or resolve_direct_link
+        self.selected_candidate_supplementer = (
+            selected_candidate_supplementer
+            or self._supplement_selected_candidate
+        )
         self.plans = {}
         self.awaiting_queries = set()
         self.awaiting_scope_inputs = {}
@@ -349,11 +358,27 @@ class SearchFeature:
         ]
         if len(candidates) != 1:
             raise FeatureError(
-                "metadata_unresolved",
+                (
+                    "metadata_ambiguous"
+                    if len(candidates) > 1
+                    else "metadata_unresolved"
+                ),
                 "noninteractive metadata resolution requires exactly one candidate",
             )
         selected = deepcopy(candidates[0])
         if selected.get("links_frozen"):
+            try:
+                selected = await self.selected_candidate_supplementer(
+                    selected,
+                    raw_query,
+                )
+            except Exception as exc:
+                if runtime_context.logger:
+                    runtime_context.logger.warning(
+                        "search_supplement status=failed "
+                        "stage=selected_candidate "
+                        f"error={type(exc).__name__}"
+                    )
             try:
                 selected = await asyncio.to_thread(
                     hydrate_frozen_candidate,
@@ -870,6 +895,19 @@ class SearchFeature:
             result = await self._submit_release(
                 plan_id, stored, raw_index, operation_id
             )
+            if result.get("release_resolution_recovered"):
+                action = (result.get("actions") or [{}])[0]
+                await self._report_operation(
+                    operation_id,
+                    state="awaiting_input",
+                    stage="release_selection",
+                    status_text=str(
+                        action.get("text") or "请改选其他片源。"
+                    ),
+                    control="exit",
+                    details=deepcopy(action.get("data") or {}),
+                )
+                return
             if self.operations[operation_id]["state"] != "handed_off":
                 action = (result.get("actions") or [{}])[0]
                 await self._report_operation(
@@ -1373,14 +1411,27 @@ class SearchFeature:
         if candidate.get("selectable") is False:
             return {"actions": [self._candidate_action(stored, index, edit=True)]}
         if candidate.get("links_frozen"):
+            raw_query = str(
+                (stored.get("plan") or {}).get("raw_query") or ""
+            )
+            try:
+                candidate = await self.selected_candidate_supplementer(
+                    candidate,
+                    raw_query,
+                )
+            except Exception as exc:
+                if runtime_context.logger:
+                    runtime_context.logger.warning(
+                        "search_supplement status=failed "
+                        "stage=selected_candidate "
+                        f"error={type(exc).__name__}"
+                    )
             try:
                 candidate = await asyncio.to_thread(
                     hydrate_frozen_candidate,
                     candidate,
                     metadata_id=plan_id,
-                    raw_query=str(
-                        (stored.get("plan") or {}).get("raw_query") or ""
-                    ),
+                    raw_query=raw_query,
                     require_anchor=(
                         (stored.get("plan") or {}).get("entry_kind")
                         == "link"
@@ -2448,6 +2499,63 @@ class SearchFeature:
         )
         stored["last_incremental_report"] = time.monotonic()
 
+    def _remove_unresolvable_release(
+        self,
+        plan_id: str,
+        stored: dict,
+        release_id: str,
+        error_kind: str,
+    ) -> dict:
+        release_by_id = stored.setdefault("release_by_id", {})
+        release_by_id.pop(release_id, None)
+        remaining = [
+            item
+            for item in stored.get("results") or []
+            if stable_release_id(item) != release_id
+        ]
+        stored["results"] = remaining
+        stored["selection_frozen"] = False
+        stored.pop("selected_release_id", None)
+        if runtime_context.logger:
+            runtime_context.logger.warning(
+                "search_release_resolution "
+                "status=removed "
+                f"plan_id={sanitize_log_value(plan_id, max_chars=80)} "
+                f"release_id={sanitize_log_value(release_id, max_chars=80)} "
+                f"error_kind={sanitize_log_value(error_kind, max_chars=120)} "
+                f"remaining={len(remaining)}"
+            )
+        if remaining:
+            report = format_release_report(
+                " | ".join(stored.get("active_prowlarr_queries") or []),
+                stored.get("gate_report"),
+                remaining,
+                stored.get("indexer_summary") or {},
+            )
+            text = (
+                "⚠️ 所选片源的下载内容获取失败，已从结果中移除。"
+                "请改选其他片源。\n\n"
+                f"{report}"
+            )
+            keyboard = release_keyboard(plan_id, remaining)
+        else:
+            text = (
+                "❌ 当前搜索结果均无法取得下载内容。"
+                "请退出后重新搜索。"
+            )
+            keyboard = [[{
+                "text": "退出",
+                "callback_data": f"search:cancel:{plan_id}",
+            }]]
+        return {
+            "actions": [{
+                "kind": "edit_message",
+                "text": text,
+                "data": {"keyboard": keyboard},
+            }],
+            "release_resolution_recovered": True,
+        }
+
     async def _submit_release(
         self,
         plan_id: str,
@@ -2462,9 +2570,19 @@ class SearchFeature:
         try:
             link = await asyncio.to_thread(self.release_resolver, item)
         except Exception as exc:
-            return {"actions": [{"kind": "send_message", "text": f"❌ 无法解析下载链接：{type(exc).__name__}"}]}
+            return self._remove_unresolvable_release(
+                plan_id,
+                stored,
+                release_id,
+                type(exc).__name__,
+            )
         if not str(link).startswith("magnet:?"):
-            return {"actions": [{"kind": "send_message", "text": "❌ 片源没有可用 magnet 链接。"}]}
+            return self._remove_unresolvable_release(
+                plan_id,
+                stored,
+                release_id,
+                "magnet_missing",
+            )
         contract = deepcopy(stored["confirmed_contract"])
         identity = contract["identity"]
         operation = self.operations[operation_id]
@@ -2567,11 +2685,7 @@ class SearchFeature:
         *,
         locked_identity: tuple[str, str] | None = None,
     ):
-        providers = {
-            "wikipedia": self._wikipedia_provider,
-            "douban": self._douban_provider,
-            "tvdb": self._tvdb_provider,
-        }
+        providers = self._source_providers()
         parsed = classify_search_input(raw_query)
         if parsed.kind in {"invalid_link", "unsupported_text"}:
             raise SearchPlanningError(parsed.reason)
@@ -2601,6 +2715,37 @@ class SearchFeature:
             candidate_editor=infer_anchored_candidates_with_ai,
             supplement_query_editor=infer_source_supplement_queries_with_ai,
         )
+
+    def _source_providers(self):
+        return {
+            "wikipedia": self._wikipedia_provider,
+            "douban": self._douban_provider,
+            "tvdb": self._tvdb_provider,
+        }
+
+    async def _supplement_selected_candidate(
+        self,
+        candidate: dict,
+        raw_query: str,
+    ) -> dict:
+        try:
+            return await supplement_selected_candidate(
+                candidate,
+                raw_query,
+                self._source_providers(),
+                candidate_editor=infer_anchored_candidates_with_ai,
+                supplement_query_editor=(
+                    infer_source_supplement_queries_with_ai
+                ),
+            )
+        except SearchPlanningError as exc:
+            if runtime_context.logger:
+                runtime_context.logger.warning(
+                    "search_supplement status=failed "
+                    "stage=selected_candidate "
+                    f"error={exc.code}"
+                )
+            return deepcopy(candidate)
 
     def _wikipedia_provider(self, hypotheses: dict):
         config = (((self.config.get("metadata") or {}).get("wikipedia") or {}))

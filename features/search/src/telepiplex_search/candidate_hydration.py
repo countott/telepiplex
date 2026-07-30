@@ -65,6 +65,93 @@ def _stable_identity_matches(link: dict, direct) -> bool:
     return not expected or expected == _text(value)
 
 
+def _anchor_provider(candidate: dict, frozen_links: list[dict]) -> str:
+    anchor_fact_id = _text(candidate.get("anchor_fact_id"))
+    return next(
+        (
+            _text(link.get("provider")).casefold()
+            for link in frozen_links
+            if isinstance(link, dict)
+            and _text(link.get("fact_id")) == anchor_fact_id
+        ),
+        "",
+    )
+
+
+def _strict_graph_with_quarantine(
+    sources: list[dict],
+    *,
+    anchor_provider: str,
+    failures: list[str],
+):
+    remaining = list(sources)
+    while remaining:
+        try:
+            return build_search_graph(remaining), remaining
+        except EvidenceFactConflict as exc:
+            if exc.provider == anchor_provider:
+                raise CandidateHydrationError(
+                    "source_fact_conflict",
+                    (
+                        exc.fact_id,
+                        *(
+                            f"field:{field}"
+                            for field in exc.conflicting_fields
+                        ),
+                    ),
+                ) from exc
+            failures.append(
+                f"{exc.provider}:source_fact_conflict:{exc.fact_id}:"
+                + ",".join(exc.conflicting_fields)
+            )
+            remaining = [
+                source
+                for source in remaining
+                if _text(source.get("source")).casefold() != exc.provider
+            ]
+    raise CandidateHydrationError(
+        "metadata_incomplete",
+        tuple(failures) or ("all_fixed_links_failed",),
+    )
+
+
+def _exact_fact_id(link: dict, facts) -> str:
+    provider = _text(link.get("provider")).casefold()
+    frozen_ids = (
+        link.get("external_ids")
+        if isinstance(link.get("external_ids"), dict)
+        else {}
+    )
+    frozen_pairs = {
+        (_text(key), _text(value))
+        for key, value in frozen_ids.items()
+        if _text(key) and _text(value)
+    }
+    matches = [
+        fact.fact_id
+        for fact in facts
+        if fact.provider == provider
+        and (
+            frozen_pairs.intersection({
+                (_text(key), _text(value))
+                for key, value in fact.external_ids.items()
+                if _text(key) and _text(value)
+            })
+            or (
+                _text(link.get("fact_id")).split(
+                    "@occurrence:",
+                    1,
+                )[0]
+                in {
+                    fact.fact_id,
+                    fact.stable_fact_id,
+                }
+            )
+        )
+    ]
+    return matches[0] if len(set(matches)) == 1 else ""
+
+
 def hydrate_frozen_candidate(
     candidate: dict,
     *,
@@ -126,27 +213,23 @@ def hydrate_frozen_candidate(
             tuple(failures),
         )
     sources = _merge_exact_sources(exact_sources)
-    try:
-        graph = build_search_graph(sources)
-    except EvidenceFactConflict as exc:
-        raise CandidateHydrationError(
-            "source_fact_conflict",
-            (
-                exc.fact_id,
-                *(
-                    f"field:{field}"
-                    for field in exc.conflicting_fields
-                ),
-            ),
-        ) from exc
-    known_fact_ids = {
-        fact.fact_id
+    graph, sources = _strict_graph_with_quarantine(
+        sources,
+        anchor_provider=_anchor_provider(candidate, frozen_links),
+        failures=failures,
+    )
+    facts = tuple(
+        fact
         for entity in graph.candidates
         for fact in entity.facts
+    )
+    resolved_fact_ids = {
+        _text(link.get("fact_id")): _exact_fact_id(link, facts)
+        for link in frozen_links
+        if isinstance(link, dict)
     }
-    bindings = [
-        {
-            "fact_id": fact_id,
+    bindings = [{
+            "fact_id": resolved_fact_id,
             "role": _text(link.get("role")).casefold(),
             "season_number": (
                 link.get("season_number")
@@ -159,15 +242,25 @@ def hydrate_frozen_candidate(
         }
         for link in frozen_links
         if isinstance(link, dict)
-        and (fact_id := _text(link.get("fact_id"))) in known_fact_ids
+        and (
+            resolved_fact_id := resolved_fact_ids.get(
+                _text(link.get("fact_id")),
+                "",
+            )
+        )
     ]
     if not bindings:
         raise CandidateHydrationError(
             "metadata_incomplete",
             tuple(failures) or ("all_fixed_links_failed",),
         )
-    if anchor_fact_id not in known_fact_ids:
-        anchor_fact_id = bindings[0]["fact_id"]
+    resolved_anchor_fact_id = resolved_fact_ids.get(anchor_fact_id, "")
+    if require_anchor and not resolved_anchor_fact_id:
+        raise CandidateHydrationError(
+            "fixed_link_read_failed",
+            tuple(failures) or (f"{anchor_fact_id}:exact_fact_missing",),
+        )
+    anchor_fact_id = resolved_anchor_fact_id or bindings[0]["fact_id"]
     payload = {
         "status": "resolved",
         "candidates": [{
@@ -214,7 +307,7 @@ def hydrate_frozen_candidate(
             payload,
             provider_statuses=statuses,
             locked_anchor_fact_id=(
-                _text(candidate.get("anchor_fact_id"))
+                anchor_fact_id
                 if require_anchor
                 else ""
             ),
@@ -275,6 +368,13 @@ def hydrate_frozen_candidate(
             link.to_dict() for link in anchored.source_links
         ],
         "unresolved_sources": list(anchored.unresolved_sources),
+        "candidate_version": (
+            "v1"
+            if {"wikipedia", "douban", "tvdb"}.issubset(
+                link.provider for link in anchored.source_links
+            )
+            else "v0"
+        ),
         "metadata_hydrated": True,
     })
     return result

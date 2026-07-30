@@ -1,9 +1,47 @@
 import unittest
 
-from telepiplex_search.entity_graph import build_search_graph
+from telepiplex_search.entity_graph import (
+    build_discovery_graph,
+    build_search_graph,
+)
 
 
 class SearchEntityGraphTest(unittest.TestCase):
+    def test_discovery_graph_preserves_conflicting_same_qid_occurrences(self):
+        graph = build_discovery_graph([{
+            "source": "wikipedia",
+            "status": "ok",
+            "facts": [{
+                "wikibase_item": "Q1",
+                "title": "作品",
+                "year": "2013",
+                "media_type": "series",
+                "url": "https://zh.wikipedia.org/wiki/A",
+            }, {
+                "wikibase_item": "Q1",
+                "title": "Work",
+                "year": "2014",
+                "media_type": "movie",
+                "url": "https://en.wikipedia.org/wiki/A",
+            }],
+        }])
+
+        facts = [
+            fact
+            for candidate in graph.candidates
+            for fact in candidate.facts
+        ]
+        self.assertEqual(len(facts), 2)
+        self.assertEqual(
+            {fact.stable_fact_id for fact in facts},
+            {"wikipedia:Q1"},
+        )
+        self.assertEqual(len({fact.fact_id for fact in facts}), 2)
+        self.assertTrue(all(
+            fact.fact_id.startswith("wikipedia:Q1@occurrence:")
+            for fact in facts
+        ))
+
     def test_same_title_movie_and_series_do_not_merge(self):
         graph = build_search_graph([
             {

@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Mapping
 
@@ -84,6 +84,7 @@ class EvidenceFact:
     genres: tuple[str, ...] = ()
     episodes: tuple[dict, ...] = ()
     complex_signals: tuple[str, ...] = ()
+    stable_fact_id: str = ""
 
     @property
     def normalized_titles(self) -> frozenset[str]:
@@ -184,6 +185,7 @@ class FactMergeDiagnostic:
     provider: str
     fact_id: str
     occurrences: int
+    conflicting_fields: tuple[str, ...] = ()
 
 
 class EvidenceFactConflict(ValueError):
@@ -319,8 +321,9 @@ def _fact(
     signals = list(raw.get("complex_signals") or [])
     if _COMPLEX_PATTERN.search(complex_text):
         signals.append("provider_relation_signal")
+    fact_id = _fact_id(provider, raw, index, resolved_type)
     return EvidenceFact(
-        fact_id=_fact_id(provider, raw, index, resolved_type),
+        fact_id=fact_id,
         provider=provider,
         titles=titles,
         year=_text(raw.get("year"))[:4],
@@ -339,6 +342,7 @@ def _fact(
         genres=_unique_text(raw.get("genres") or []),
         episodes=tuple(dict(item) for item in (episodes or []) if isinstance(item, dict)),
         complex_signals=_unique_text(signals),
+        stable_fact_id=fact_id,
     )
 
 
@@ -724,6 +728,10 @@ def _merge_fact_group(facts: list[EvidenceFact]) -> EvidenceFact:
         complex_signals=_sorted_unique_text(
             signal for fact in facts for signal in fact.complex_signals
         ),
+        stable_fact_id=(
+            facts[0].stable_fact_id
+            or facts[0].fact_id
+        ),
     )
 
 
@@ -742,6 +750,75 @@ def _converged_facts(sources: list[dict]) -> tuple[list[EvidenceFact], tuple[Fac
                 provider=group[0].provider,
                 fact_id=fact_id,
                 occurrences=len(group),
+            ))
+    return facts, tuple(diagnostics)
+
+
+def _occurrence_fact(fact: EvidenceFact) -> EvidenceFact:
+    stable_fact_id = fact.stable_fact_id or fact.fact_id
+    serialized = json.dumps(
+        {
+            "provider": fact.provider,
+            "titles": fact.titles,
+            "year": fact.year,
+            "media_type": fact.media_type,
+            "external_ids": dict(fact.external_ids),
+            "source_url": fact.source_url,
+            "poster_url": fact.poster_url,
+            "original_title": fact.original_title,
+            "original_language": fact.original_language,
+            "official_english_title": fact.official_english_title,
+            "romanized_original_title": fact.romanized_original_title,
+            "chinese_title": fact.chinese_title,
+            "poster_language": fact.poster_language,
+            "genres": fact.genres,
+            "episodes": fact.episodes,
+            "complex_signals": fact.complex_signals,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:12]
+    return replace(
+        fact,
+        fact_id=f"{stable_fact_id}@occurrence:{digest}",
+        stable_fact_id=stable_fact_id,
+    )
+
+
+def _discovery_facts(
+    sources: list[dict],
+) -> tuple[list[EvidenceFact], tuple[FactMergeDiagnostic, ...]]:
+    groups = {}
+    for source in sources or []:
+        for fact in _facts_from_source(source):
+            groups.setdefault(fact.fact_id, []).append(fact)
+    facts = []
+    diagnostics = []
+    for fact_id in sorted(groups):
+        group = groups[fact_id]
+        conflicting_fields = ()
+        try:
+            facts.append(_merge_fact_group(group))
+        except EvidenceFactConflict as exc:
+            conflicting_fields = exc.conflicting_fields
+            occurrences = {
+                occurrence.fact_id: occurrence
+                for occurrence in (
+                    _occurrence_fact(fact) for fact in group
+                )
+            }
+            facts.extend(
+                occurrences[key] for key in sorted(occurrences)
+            )
+        if len(group) > 1:
+            diagnostics.append(FactMergeDiagnostic(
+                provider=group[0].provider,
+                fact_id=fact_id,
+                occurrences=len(group),
+                conflicting_fields=conflicting_fields,
             ))
     return facts, tuple(diagnostics)
 
@@ -787,9 +864,11 @@ def _safe_cluster_matches(
     return same_year if len(same_year) == 1 else []
 
 
-def build_search_graph(sources: list[dict]) -> SearchGraph:
+def _cluster_facts(
+    facts: list[EvidenceFact],
+    diagnostics: tuple[FactMergeDiagnostic, ...],
+) -> SearchGraph:
     clusters: list[list[EvidenceFact]] = []
-    facts, diagnostics = _converged_facts(sources)
     for fact in facts:
         matches = _safe_cluster_matches(clusters, fact)
         if not matches:
@@ -807,6 +886,16 @@ def build_search_graph(sources: list[dict]) -> SearchGraph:
     ]
     candidates.sort(key=lambda item: item.candidate_key)
     return SearchGraph(tuple(candidates), diagnostics)
+
+
+def build_discovery_graph(sources: list[dict]) -> SearchGraph:
+    facts, diagnostics = _discovery_facts(sources)
+    return _cluster_facts(facts, diagnostics)
+
+
+def build_search_graph(sources: list[dict]) -> SearchGraph:
+    facts, diagnostics = _converged_facts(sources)
+    return _cluster_facts(facts, diagnostics)
 
 
 def merge_verified_equivalence_edges(

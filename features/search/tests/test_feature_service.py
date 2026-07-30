@@ -273,6 +273,9 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "indexer": "test",
             }]
 
+        async def selected_candidate_passthrough(candidate, _raw_query):
+            return candidate
+
         self.feature = SearchFeature(
             config={
                 "category_folder": [{
@@ -293,6 +296,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             release_search=search,
             release_rank=lambda items, limit: items[:limit],
             release_resolver=lambda item: item["magnet_url"],
+            selected_candidate_supplementer=selected_candidate_passthrough,
         )
         self.runtime = FakeRuntime()
         self.feature.bind_runtime(self.runtime)
@@ -1287,6 +1291,137 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             f"{plan_id}:release:{release_id}",
         )
 
+    async def test_unresolvable_release_is_removed_and_other_results_remain(self):
+        from telepiplex_search.release_identity import stable_release_id
+
+        self.feature.release_search = lambda *_: [{
+            "title": "English.Title.2024.2160p.WEB-DL-First",
+            "download_url": "https://indexer.example/first.torrent",
+            "seeders": 20,
+            "size": 20 * 1024 ** 3,
+            "indexer": "first",
+        }, {
+            "title": "English.Title.2024.1080p.WEB-DL-Second",
+            "magnet_url": "magnet:?xt=urn:btih:" + "b" * 40,
+            "seeders": 10,
+            "size": 10 * 1024 ** 3,
+            "indexer": "second",
+        }]
+        plan_id = await self._prepare_search()
+        await self.feature.callback({
+            "namespace": "search",
+            "payload": f"confirm:{plan_id}",
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-releases-")
+        stored = self.feature.plans[plan_id]
+        failed_id = stable_release_id(stored["results"][0])
+        remaining_id = stable_release_id(stored["results"][1])
+
+        def resolve_except_first(item):
+            if stable_release_id(item) == failed_id:
+                raise RuntimeError("indexer rejected torrent download")
+            return item["magnet_url"]
+
+        self.feature.release_resolver = resolve_except_first
+        await self.feature.callback({
+            "namespace": "search",
+            "payload": f"release:{plan_id}:{failed_id}",
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-submit-")
+
+        current = self.feature.operations[stored["operation_id"]]
+        self.assertNotIn(failed_id, stored["release_by_id"])
+        self.assertEqual(
+            [stable_release_id(item) for item in stored["results"]],
+            [remaining_id],
+        )
+        self.assertFalse(stored["selection_frozen"])
+        self.assertNotIn("selected_release_id", stored)
+        self.assertEqual(current["state"], "awaiting_input")
+        self.assertEqual(current["stage"], "release_selection")
+        self.assertIn("已从结果中移除", current["status_text"])
+        buttons = [
+            button
+            for row in current["details"]["keyboard"]
+            for button in row
+        ]
+        self.assertEqual(
+            [button["text"] for button in buttons],
+            ["①", "退出"],
+        )
+        self.assertEqual(
+            buttons[0]["callback_data"],
+            f"search:release:{plan_id}:{remaining_id}",
+        )
+        self.assertNotIn(
+            failed_id,
+            [button["callback_data"] for button in buttons],
+        )
+
+        await self.feature.callback({
+            "namespace": "search",
+            "payload": f"release:{plan_id}:{remaining_id}",
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-submit-")
+
+        self.assertEqual(len(self.host.calls), 1)
+        self.assertEqual(
+            self.host.calls[0][2]["release"]["title"],
+            "English.Title.2024.1080p.WEB-DL-Second",
+        )
+        self.assertEqual(
+            self.feature.operations[stored["operation_id"]]["state"],
+            "handed_off",
+        )
+
+    async def test_last_unresolvable_release_leaves_exit_only(self):
+        from telepiplex_search.release_identity import stable_release_id
+
+        plan_id = await self._prepare_search()
+        await self.feature.callback({
+            "namespace": "search",
+            "payload": f"confirm:{plan_id}",
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-releases-")
+        stored = self.feature.plans[plan_id]
+        release_id = stable_release_id(stored["results"][0])
+        self.feature.release_resolver = lambda _item: ""
+
+        await self.feature.callback({
+            "namespace": "search",
+            "payload": f"release:{plan_id}:{release_id}",
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-submit-")
+
+        current = self.feature.operations[stored["operation_id"]]
+        self.assertNotIn(release_id, stored["release_by_id"])
+        self.assertEqual(stored["results"], [])
+        self.assertFalse(stored["selection_frozen"])
+        self.assertNotIn("selected_release_id", stored)
+        self.assertEqual(current["state"], "awaiting_input")
+        self.assertEqual(current["stage"], "release_selection")
+        self.assertIn(
+            "当前搜索结果均无法取得下载内容",
+            current["status_text"],
+        )
+        self.assertEqual(
+            current["details"]["keyboard"],
+            [[{
+                "text": "退出",
+                "callback_data": f"search:cancel:{plan_id}",
+            }]],
+        )
+
     async def test_rejected_handoff_never_calls_download_provider(self):
         original_report = self.host.report_operation
 
@@ -1709,6 +1844,64 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             retry["callback_data"],
             f"search:select:{plan_id}:1",
+        )
+
+    @patch("telepiplex_search.service.hydrate_frozen_candidate")
+    async def test_selected_candidate_is_supplemented_before_exact_read(
+        self,
+        hydrate,
+    ):
+        from telepiplex_search.candidate_hydration import (
+            CandidateHydrationError,
+        )
+
+        events = []
+
+        async def supplement(candidate, raw_query):
+            events.append(("supplement", raw_query))
+            enriched = deepcopy(candidate)
+            enriched["selected_supplemented"] = True
+            return enriched
+
+        def exact_read(candidate, **_kwargs):
+            events.append(
+                ("hydrate", candidate.get("selected_supplemented"))
+            )
+            raise CandidateHydrationError(
+                "metadata_incomplete",
+                ("canonical_latin_title",),
+            )
+
+        self.feature.selected_candidate_supplementer = supplement
+        hydrate.side_effect = exact_read
+        plan_id = "selected-supplement"
+        plan = ranked_search_plan()
+        plan.update({
+            "plan_id": plan_id,
+            "raw_query": "冰果",
+            "entry_kind": "text",
+            "links_frozen": True,
+        })
+        for candidate in plan["candidates"]:
+            candidate.update({
+                "links_frozen": True,
+                "identity_role": "series_root",
+            })
+
+        await self.feature._select_candidate(
+            plan_id,
+            {
+                "plan": plan,
+                "candidates": tuple(plan["candidates"]),
+                "selected_path": "",
+                "operation_id": "",
+            },
+            "0",
+        )
+
+        self.assertEqual(
+            events,
+            [("supplement", "冰果"), ("hydrate", True)],
         )
 
     @patch("telepiplex_search.service.hydrate_frozen_candidate")
@@ -2229,7 +2422,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "method": "resolve_metadata",
                 "payload": {"query": "English Title"},
             })
-        self.assertEqual(raised.exception.code, "metadata_unresolved")
+        self.assertEqual(raised.exception.code, "metadata_ambiguous")
 
     async def test_metadata_capability_exact_reads_a_frozen_candidate(self):
         async def live_planner(_raw_query, plan_id):
@@ -2259,8 +2452,18 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             return result
 
         self.feature.plan_builder = live_planner
+        supplement_calls = []
+
+        async def supplement(candidate, raw_query):
+            supplement_calls.append(raw_query)
+            enriched = deepcopy(candidate)
+            enriched["selected_supplemented"] = True
+            return enriched
+
+        self.feature.selected_candidate_supplementer = supplement
 
         def exact_hydration(candidate, **_kwargs):
+            self.assertTrue(candidate["selected_supplemented"])
             hydrated = deepcopy(candidate)
             hydrated["media_metadata"]["identity"][
                 "english_title"
@@ -2278,6 +2481,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             })
 
         hydrate.assert_called_once()
+        self.assertEqual(supplement_calls, ["布达佩斯大饭店"])
         self.assertEqual(
             resolved["media_metadata"]["identity"]["english_title"],
             "Hydrated Exact Title",
@@ -2442,10 +2646,10 @@ class FeatureSourceContractTest(unittest.TestCase):
             ROOT / "src" / "telepiplex_search.egg-info" / "PKG-INFO"
         ).read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.1.2")
+        self.assertEqual(manifest["version"], "1.2.0")
         self.assertEqual(manifest["host_api"], ">=1.3,<2.0")
-        self.assertIn('version = "1.1.2"', project)
-        self.assertIn("\nVersion: 1.1.2\n", package_metadata)
+        self.assertIn('version = "1.2.0"', project)
+        self.assertIn("\nVersion: 1.2.0\n", package_metadata)
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
@@ -2476,12 +2680,12 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.1.2.tpx", source)
-        self.assertIn("search_media_sources", source)
-        self.assertIn("最多两轮", source)
+        self.assertIn("/tmp/search-1.2.0.tpx", source)
+        self.assertIn("选中后", source)
+        self.assertIn("只针对这个候选", source)
         self.assertIn("不会交给 AI", source)
         self.assertIn("rename", source)
-        self.assertNotIn("dist/search-1.1.2.tpx", source)
+        self.assertNotIn("dist/search-1.2.0.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []
