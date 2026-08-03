@@ -8,18 +8,19 @@ import re
 import time
 import uuid
 from copy import deepcopy
+from dataclasses import replace
 
 from telepiplex_plugin_sdk import FeatureError
 from telepiplex_plugin_sdk.media_metadata import resolve_category_route
 
 from .ai import (
+    infer_douban_search_decision_with_ai,
     infer_anchored_candidates_with_ai,
     infer_relation_hypotheses_with_ai,
     infer_source_supplement_queries_with_ai,
 )
 from .adapters.douban import (
     lookup_douban_evidence,
-    lookup_douban_subject,
 )
 from .adapters.prowlarr import (
     ProwlarrRequestError,
@@ -33,25 +34,36 @@ from .adapters.tvdb import (
     TvdbAuthenticationError,
     TvdbConfigError,
     TvdbRequestError,
-    get_tvdb_movie,
     get_tvdb_series,
-    get_tvdb_series_episodes,
-    search_tvdb_movies,
     search_tvdb_series,
 )
 from .adapters.wikipedia import lookup_wikipedia_evidence
 from .config_wizard import SearchConfigWizard
+from .confirmed_enrichment import (
+    ConfirmedIdentity,
+    build_tvdb_query,
+    build_wikipedia_queries,
+    select_unique_tvdb_series,
+    select_unique_wikipedia_fact,
+)
 from .context import runtime_context
 from .candidate_hydration import (
     CandidateHydrationError,
     hydrate_frozen_candidate,
 )
-from .direct_link import DirectLinkError, resolve_direct_link
-from .input_contract import classify_search_input
+from .direct_link import (
+    DirectLinkError,
+    resolve_direct_link,
+    resolve_shared_metadata_link,
+)
+from .discovery_flow import (
+    build_direct_entity_plan,
+    build_douban_first_search_plan,
+)
+from .input_contract import classify_search_input, contains_url
 from .log_sanitizer import sanitize_log_value
 from .planner import (
     SearchPlanningError,
-    build_confirmable_search_plan,
     supplement_selected_candidate,
 )
 from .prowlarr_query import (
@@ -67,13 +79,13 @@ from .search_plan import (
     confirm_media_metadata,
     finalize_search_plan,
 )
+from .search_logging import bind_search_log_context, log_search_event
 from .series_scope import (
     SeriesScopeError,
     apply_series_scope,
     series_inventory,
     series_scope_options,
 )
-from .source_tools import SourceToolGateway
 
 
 _LATIN = re.compile(r"[A-Za-z]")
@@ -89,6 +101,46 @@ def _positive_integer(value) -> int | None:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+def _probe_media_type(probe: dict) -> str:
+    if not isinstance(probe, dict):
+        return ""
+    shape = _text(probe.get("content_shape")).casefold()
+    if shape == "movie":
+        return "movie"
+    if (
+        "season" in shape
+        or "episode" in shape
+        or probe.get("observed_seasons")
+        or probe.get("observed_episodes")
+    ):
+        return "series"
+    return ""
+
+
+def _candidate_media_type(candidate: dict) -> str:
+    contract = (
+        candidate.get("media_metadata")
+        if isinstance(candidate, dict)
+        else {}
+    ) or {}
+    identity = contract.get("identity") or {}
+    content_kind = _text(identity.get("content_kind")).casefold()
+    if content_kind == "movie" or content_kind.endswith("_movie"):
+        return "movie"
+    if content_kind == "series" or content_kind.endswith("_series"):
+        return "series"
+    retrieval_type = _text(
+        (contract.get("retrieval") or {}).get("media_type")
+    ).casefold()
+    if retrieval_type in {"movie", "series"}:
+        return retrieval_type
+    placement = contract.get("placement") or {}
+    if placement.get("mapping_kind") == "temporary_related_special":
+        return "movie"
+    library_type = _text(placement.get("library_type")).casefold()
+    return library_type if library_type in {"movie", "series"} else ""
 
 
 def _probe_scope(contract: dict, probe: dict) -> tuple[str, int | None, int | None]:
@@ -116,6 +168,15 @@ def _probe_scope(contract: dict, probe: dict) -> tuple[str, int | None, int | No
             season := _positive_integer(item.get("season_number"))
         ) is not None
     )
+    if shape == "single_episode" and len(observed_episodes) == 1:
+        season_number = _positive_integer(
+            observed_episodes[0].get("season_number")
+        )
+        episode_number = _positive_integer(
+            observed_episodes[0].get("episode_number")
+        )
+        if season_number is not None and episode_number is not None:
+            return "episode", season_number, episode_number
     if len(observed_seasons) > 1:
         return "whole_series", None, None
     if len(observed_seasons) == 1:
@@ -166,12 +227,13 @@ _PLANNING_ERROR_MESSAGES = {
     "ai_invalid_after_gate_failure": "规则证据不足，且 AI 未能生成有效计划；请补充信息后重试。",
     "ambiguous_numeric_role": "片名末尾数字无法证明是正式标题的一部分，请补充年份、完整片名或条目链接。",
     "unsupported_metadata_link": "链接不是可识别的豆瓣、TVDB 或 Wikipedia 作品、季或单集地址。",
+    "multiple_metadata_entities": "链接无效，请一次只分享一个作品链接。",
     "unsupported_scope_syntax": "不支持范围、1x02 或英文数字单词写法；请使用作品名、S01、S01E01 或数字季/集。",
     "unsupported_special_scope": "暂不支持 Special、Season 0、OVA、OAD 或附加内容下载。",
     "direct_link_not_found": "无法读取该豆瓣/TVDB条目，请检查链接是否有效。",
     "direct_link_invalid": "链接条目缺少可验证的标题或稳定ID。",
-    "no_match": "所有来源均未找到可由真实事实支持的作品候选。",
-    "source_failure": "来源查询失败，尚未形成可判断的候选。",
+    "no_match": "豆瓣未找到匹配作品，请修改片名后重试。",
+    "source_failure": "豆瓣查询失败，尚未形成可判断的候选。",
     "source_rate_limited": "来源请求受到限流，请稍后重试。",
     "source_fact_conflict": "来源事实存在冲突，无法安全确认作品身份，请重试。",
     "ai_candidate_failure": "AI 候选筛选发生技术故障，请重试或退出。",
@@ -320,6 +382,28 @@ class SearchFeature:
     def bind_runtime(self, runtime):
         self.runtime = runtime
 
+    @staticmethod
+    def _log_completed_once(
+        plan_id: str,
+        stored: dict | None,
+        *,
+        terminal_status: str,
+        **fields,
+    ) -> None:
+        if isinstance(stored, dict) and stored.get(
+            "search_completed_logged"
+        ):
+            return
+        log_search_event(
+            runtime_context.logger,
+            "search.completed",
+            search_session_id=plan_id,
+            terminal_status=terminal_status,
+            **fields,
+        )
+        if isinstance(stored, dict):
+            stored["search_completed_logged"] = True
+
     async def metadata_capability(self, request: dict) -> dict:
         if str(request.get("method") or "") != "resolve_metadata":
             raise FeatureError(
@@ -356,6 +440,21 @@ class SearchFeature:
             for item in plan.get("candidates") or []
             if item.get("selectable") is not False
         ]
+        probe_media_type = _probe_media_type(probe)
+        if probe_media_type:
+            unconstrained_count = len(candidates)
+            candidates = [
+                item
+                for item in candidates
+                if _candidate_media_type(item) == probe_media_type
+            ]
+            if runtime_context.logger:
+                runtime_context.logger.info(
+                    "metadata_probe_constraint "
+                    f"media_type={probe_media_type} "
+                    f"before={unconstrained_count} "
+                    f"after={len(candidates)}"
+                )
         if len(candidates) != 1:
             raise FeatureError(
                 (
@@ -504,14 +603,14 @@ class SearchFeature:
                 request,
                 state="awaiting_input",
                 stage="query_input",
-                status_text="等待输入片名或影视条目链接。",
+                status_text="等待输入片名。",
                 control="exit",
                 kind="search",
             )
             return {
                 "actions": [{
                     "kind": "send_message",
-                    "text": "请输入片名或影视条目链接。",
+                    "text": "请输入片名。",
                     "data": {"keyboard": [[{
                         "text": "退出",
                         "callback_data": "search:exit",
@@ -520,6 +619,29 @@ class SearchFeature:
                 "session": {"state": "open"},
                 "operation": operation,
             }
+        if contains_url(raw_query):
+            search_session_id = uuid.uuid4().hex[:10]
+            bind_search_log_context(
+                search_session_id,
+                chat_id=request.get("chat_id"),
+                user_id=request.get("user_id"),
+            )
+            log_search_event(
+                runtime_context.logger,
+                "search.command_url_rejected",
+                search_session_id=search_session_id,
+                chat_id=request.get("chat_id"),
+                user_id=request.get("user_id"),
+            )
+            log_search_event(
+                runtime_context.logger,
+                "search.completed",
+                search_session_id=search_session_id,
+                terminal_status="invalid_link",
+            )
+            return self._closed(
+                "⚠️ /s 只接受片名；平台链接请直接发送到当前对话。"
+            )
         return self._start_plan_task(raw_query, request)
 
     async def message(self, request: dict) -> dict:
@@ -531,13 +653,22 @@ class SearchFeature:
         if key in self.awaiting_scope_inputs:
             return self._handle_scope_input(request, key)
         if key not in self.awaiting_queries:
+            raw_query = str(request.get("text") or "").strip()
+            parsed = classify_search_input(raw_query)
+            if parsed.kind in {"link", "resolvable_link", "invalid_link"}:
+                return self._start_plan_task(raw_query, request)
             return {
                 "actions": [{"kind": "send_message", "text": "⚠️ 搜索会话已失效。"}],
                 "session": {"state": "close"},
             }
         self.awaiting_queries.discard(key)
+        raw_query = str(request.get("text") or "").strip()
+        if contains_url(raw_query):
+            return self._closed(
+                "⚠️ /s 只接受片名；平台链接请退出输入状态后直接发送。"
+            )
         return self._start_plan_task(
-            str(request.get("text") or "").strip(), request, reuse_owner=True
+            raw_query, request, reuse_owner=True
         )
 
     async def callback(self, request: dict) -> dict:
@@ -557,6 +688,16 @@ class SearchFeature:
             return self._closed("⚠️ 搜索任务已过期，请重新搜索。")
         if action == "cancel":
             operation_id = stored.get("operation_id")
+            terminal_status = (
+                "source_unavailable"
+                if stored.get("kind") == "planning_failure"
+                else "cancelled"
+            )
+            self._log_completed_once(
+                plan_id,
+                stored,
+                terminal_status=terminal_status,
+            )
             self._cancel_release_tasks(stored)
             self._release_plan(plan_id)
             result = self._closed("已退出本次搜索。")
@@ -566,6 +707,29 @@ class SearchFeature:
                     state="cancelled",
                     stage="cancelled",
                     status_text="已退出本次搜索。",
+                    control="",
+                )
+            return result
+        if action == "reject":
+            operation_id = stored.get("operation_id")
+            log_search_event(
+                runtime_context.logger,
+                "search.user_rejected",
+                search_session_id=plan_id,
+            )
+            self._log_completed_once(
+                plan_id,
+                stored,
+                terminal_status="user_rejected",
+            )
+            self._release_plan(plan_id)
+            result = self._closed("已结束本次搜索，没有继续查询其他来源。")
+            if operation_id:
+                result["operation"] = self._advance_operation(
+                    operation_id,
+                    state="cancelled",
+                    stage="user_rejected",
+                    status_text="用户选择“都不是”，本次搜索结束。",
                     control="",
                 )
             return result
@@ -582,6 +746,15 @@ class SearchFeature:
                 if isinstance(raw_lock, (list, tuple))
                 and len(raw_lock) == 2
                 else None
+            )
+            self._log_completed_once(
+                plan_id,
+                stored,
+                terminal_status=(
+                    "source_unavailable"
+                    if stored.get("kind") == "planning_failure"
+                    else "retry"
+                ),
             )
             self._release_plan(plan_id)
             result = self._start_plan_task(
@@ -637,6 +810,29 @@ class SearchFeature:
                 details={},
             )
         plan_id = uuid.uuid4().hex[:10]
+        parsed = classify_search_input(raw_query)
+        bind_search_log_context(
+            plan_id,
+            chat_id=request.get("chat_id"),
+            user_id=request.get("user_id"),
+        )
+        log_search_event(
+            runtime_context.logger,
+            "search.input_classified",
+            search_session_id=plan_id,
+            chat_id=request.get("chat_id"),
+            user_id=request.get("user_id"),
+            input_kind=parsed.kind,
+            reason=parsed.reason,
+        )
+        if parsed.kind in {"link", "resolvable_link", "invalid_link"}:
+            log_search_event(
+                runtime_context.logger,
+                "search.direct_link_received",
+                search_session_id=plan_id,
+                input_kind=parsed.kind,
+                url_count=len(parsed.urls),
+            )
         task_id = f"search-plan-{operation['operation_id']}"
         task = self.runtime.spawn(
             self._prepare_plan_task(
@@ -710,9 +906,9 @@ class SearchFeature:
                     (self.plans[plan_id].get("plan") or {}).get(
                         "links_frozen"
                     )
-                    and len(
-                        self.plans[plan_id].get("candidates") or ()
-                    ) > 1
+                    and not (self.plans[plan_id].get("plan") or {}).get(
+                        "auto_confirm"
+                    )
                 )
                 await self._report_operation(
                     operation_id,
@@ -823,6 +1019,11 @@ class SearchFeature:
         except asyncio.CancelledError:
             if stored.get("selection_frozen"):
                 return
+            self._log_completed_once(
+                plan_id,
+                stored,
+                terminal_status="cancelled",
+            )
             self._release_plan(plan_id)
             await self._report_operation(
                 operation_id,
@@ -833,6 +1034,12 @@ class SearchFeature:
                 details=self._prowlarr_status_details(operation_id),
             )
         except Exception as exc:
+            self._log_completed_once(
+                plan_id,
+                stored,
+                terminal_status="source_unavailable",
+                error=type(exc).__name__,
+            )
             self._release_plan(plan_id)
             await self._report_operation(
                 operation_id,
@@ -918,6 +1125,11 @@ class SearchFeature:
                     control="",
                 )
         except asyncio.CancelledError:
+            self._log_completed_once(
+                plan_id,
+                stored,
+                terminal_status="cancelled",
+            )
             self._release_plan(plan_id)
             await self._report_operation(
                 operation_id,
@@ -927,6 +1139,12 @@ class SearchFeature:
                 control="",
             )
         except Exception as exc:
+            self._log_completed_once(
+                plan_id,
+                stored,
+                terminal_status="source_unavailable",
+                error=type(exc).__name__,
+            )
             self._release_plan(plan_id)
             if self.operations[operation_id]["state"] != "failed":
                 await self._report_operation(
@@ -995,7 +1213,7 @@ class SearchFeature:
                     "严格规则无法唯一确认该条目。",
                 )
                 message = f"{gate_message.rstrip('。')}；{message}"
-            if code in {
+            recoverable_codes = {
                 "source_failure",
                 "source_rate_limited",
                 "source_fact_conflict",
@@ -1004,7 +1222,8 @@ class SearchFeature:
                 "fixed_link_read_failed",
                 "metadata_conflict",
                 "metadata_incomplete",
-            }:
+            }
+            if code in recoverable_codes:
                 self.plans[plan_id] = {
                     "kind": "planning_failure",
                     "owner": self._owner_key(request),
@@ -1033,8 +1252,28 @@ class SearchFeature:
                     }],
                     "session": {"state": "close"},
                 }
+            log_search_event(
+                runtime_context.logger,
+                "search.completed",
+                search_session_id=plan_id,
+                level="warning",
+                terminal_status=(
+                    "invalid_link"
+                    if "link" in code
+                    else "no_match"
+                ),
+                code=code,
+            )
             return self._closed(f"❌ 无法生成媒体元数据：{message}")
         except Exception as exc:
+            log_search_event(
+                runtime_context.logger,
+                "search.completed",
+                search_session_id=plan_id,
+                level="error",
+                terminal_status="internal_error",
+                error=type(exc).__name__,
+            )
             return self._closed(f"❌ 媒体规划失败：{type(exc).__name__}")
         clarification = (
             plan.get("clarification")
@@ -1118,6 +1357,14 @@ class SearchFeature:
             }]
         selectable = [item for item in candidates if item.get("selectable") is not False]
         if not selectable:
+            log_search_event(
+                runtime_context.logger,
+                "search.completed",
+                search_session_id=plan_id,
+                level="warning",
+                terminal_status="no_match",
+                reason="no_selectable_candidate",
+            )
             self.allocator.release(plan_id)
             return self._closed("❌ 候选最高评分低于 65，受控检索后仍不足以安全确认。")
         route = None
@@ -1131,6 +1378,14 @@ class SearchFeature:
                 ).get("category_kind"),
             )
             if not route:
+                log_search_event(
+                    runtime_context.logger,
+                    "search.completed",
+                    search_session_id=plan_id,
+                    level="error",
+                    terminal_status="source_unavailable",
+                    reason="category_route_missing",
+                )
                 self.allocator.release(plan_id)
                 return self._closed("❌ 媒体分类没有对应保存目录。")
         self.plans[plan_id] = {
@@ -1142,20 +1397,53 @@ class SearchFeature:
             "results": [],
             "operation_id": operation_id,
         }
-        if plan.get("links_frozen") and len(selectable) == 1:
-            return await self._select_candidate(
+        if plan.get("links_frozen") and plan.get("auto_confirm") is True:
+            log_search_event(
+                runtime_context.logger,
+                "search.user_confirmed",
+                search_session_id=plan_id,
+                confirmation_mode="program_auto",
+                candidate_id=selectable[0].get("candidate_id"),
+            )
+            selected_result = await self._select_candidate(
                 plan_id,
                 self.plans[plan_id],
                 str(candidates.index(selectable[0])),
             )
+            if plan.get("selection_mode") == "hard_match":
+                identity = (
+                    selectable[0].get("media_metadata") or {}
+                ).get("identity") or {}
+                title = _text(
+                    identity.get("chinese_title")
+                    or identity.get("english_title")
+                    or "未知"
+                )
+                year = _text(identity.get("year")) or "年份未知"
+                action = (selected_result.get("actions") or [{}])[0]
+                action["text"] = (
+                    f"✅ 已识别为：{title}（{year}）\n"
+                    + _text(action.get("text"))
+                )
+            return selected_result
         action = (
             self._candidate_grid_action(self.plans[plan_id])
-            if plan.get("links_frozen") and 2 <= len(selectable) <= 6
+            if plan.get("links_frozen") and 2 <= len(selectable) <= 5
             else self._candidate_action(
                 self.plans[plan_id],
                 0,
                 edit=False,
             )
+        )
+        log_search_event(
+            runtime_context.logger,
+            "search.candidates_displayed",
+            search_session_id=plan_id,
+            candidate_count=len(selectable),
+            candidate_ids=[
+                item.get("candidate_id") or item.get("candidate_key")
+                for item in selectable
+            ],
         )
         return {
             "actions": [action],
@@ -1205,6 +1493,12 @@ class SearchFeature:
         refined_query = str(option.get("query") or "").strip()
         label = str(option.get("label") or refined_query).strip()
         locked_identity = option.get("locked_identity")
+        self._log_completed_once(
+            plan_id,
+            stored,
+            terminal_status="retry",
+            reason="clarification_selected",
+        )
         self._release_plan(plan_id)
         result = self._start_plan_task(
             refined_query,
@@ -1229,6 +1523,60 @@ class SearchFeature:
         contract = candidate["media_metadata"]
         identity = contract.get("identity") or {}
         placement = contract.get("placement") or {}
+        if (stored.get("plan") or {}).get("links_frozen"):
+            title = _text(
+                identity.get("chinese_title")
+                or identity.get("english_title")
+                or "未知"
+            )
+            english_title = _text(
+                identity.get("official_english_title")
+                or identity.get("english_title")
+            )
+            year = _text(identity.get("year")) or "年份未知"
+            providers = list(dict.fromkeys(
+                _text(link.get("provider")).casefold()
+                for link in candidate.get("source_links") or ()
+                if isinstance(link, dict)
+                and _text(link.get("provider"))
+            ))
+            source = "、".join(
+                _PROVIDER_LABELS.get(provider, provider)
+                for provider in providers
+            ) or "豆瓣"
+            lines = [f"{title}（{year}）"]
+            if english_title and english_title != title:
+                lines.append(english_title)
+            lines.extend([
+                f"类型：{_human_media_type(placement.get('library_type'))}",
+                f"来源：{source}",
+            ])
+            plan_id = stored["plan"]["plan_id"]
+            keyboard = []
+            if candidate.get("selectable") is not False:
+                keyboard.append([{
+                    "text": "就是它",
+                    "callback_data": f"search:select:{plan_id}:{index}",
+                }])
+            keyboard.append([{
+                "text": "都不是",
+                "callback_data": f"search:reject:{plan_id}",
+            }])
+            poster = _text(candidate.get("poster_url"))
+            data = {
+                "keyboard": keyboard,
+                "candidate_key": candidate.get("candidate_key") or "",
+            }
+            if poster.startswith("https://"):
+                data["photo_url"] = poster
+                kind = "edit_photo" if edit else "send_photo"
+            else:
+                kind = "edit_message" if edit else "send_message"
+            return {
+                "kind": kind,
+                "text": "\n".join(lines),
+                "data": data,
+            }
         score = candidate.get("score") or {}
         title = identity.get("chinese_title") or identity.get("english_title") or "未知"
         relation = (contract.get("relation") or {}).get("type") or "standalone"
@@ -1274,7 +1622,7 @@ class SearchFeature:
         return {"kind": kind, "text": text, "data": data}
 
     def _candidate_grid_action(self, stored: dict) -> dict:
-        candidates = list(stored.get("candidates") or ())[:6]
+        candidates = list(stored.get("candidates") or ())[:5]
         lines = ["请选择作品候选："]
         poster_items = []
         keyboard = []
@@ -1290,56 +1638,22 @@ class SearchFeature:
                 or "未知"
             )[:36]
             year = _text(identity.get("year")) or "年份未知"
-            role = _human_candidate_role(candidate.get("identity_role"))
-            confidence = round(
-                float(candidate.get("ai_confidence") or 0) * 100
+            english_title = _text(
+                identity.get("official_english_title")
+                or identity.get("english_title")
             )
-            reason = _text(candidate.get("ai_reason"))[:36]
-            candidate_version = (
-                _text(candidate.get("candidate_version")) or "v0"
+            lines.append(
+                f"{index}. <b>{html.escape(title)}</b>（{year}）"
             )
-            candidate_state = _CANDIDATE_VERSION_LABELS.get(
-                candidate_version.casefold(),
-                "来源状态待确认",
-            )
-            source_links = [
-                link for link in candidate.get("source_links") or []
-                if isinstance(link, dict)
-                and str(link.get("url") or "").startswith("https://")
-            ]
-            source_labels = []
-            for link in source_links:
-                provider_key = _text(link.get("provider")).casefold()
-                provider = html.escape(
-                    _PROVIDER_LABELS.get(provider_key, "来源")[:16]
-                )
-                url = html.escape(
-                    _text(link.get("url")),
-                    quote=True,
-                )
-                source_labels.append(f'<a href="{url}">{provider}</a>')
+            if english_title and english_title != title:
+                lines.append(html.escape(english_title))
             lines.extend([
-                (
-                    f"{index}. <b>{html.escape(title)}</b> ({year}) · "
-                    f"{html.escape(_human_media_type(placement.get('library_type')))}"
-                    f" · {html.escape(role)} · {html.escape(candidate_state)}"
+                "类型："
+                + html.escape(
+                    _human_media_type(placement.get("library_type"))
                 ),
-                (
-                    f"来源：{' · '.join(source_labels) or '暂无链接'}"
-                    f" · 匹配参考：{confidence}%"
-                ),
-                f"理由：{html.escape(reason or '来源事实匹配用户意图')}",
+                "来源：豆瓣",
             ])
-            unresolved = [
-                _human_unresolved_source(item)
-                for item in candidate.get("unresolved_sources") or []
-                if _text(item)
-            ]
-            if unresolved:
-                lines.append(
-                    "未补全："
-                    + html.escape("、".join(unresolved[:3]))
-                )
             poster_url = _text(candidate.get("poster_url"))
             has_poster = has_poster or poster_url.startswith("https://")
             poster_items.append({
@@ -1356,8 +1670,8 @@ class SearchFeature:
                 "callback_data": f"search:select:{plan_id}:{index - 1}",
             }])
         keyboard.append([{
-            "text": "退出",
-            "callback_data": f"search:cancel:{plan_id}",
+            "text": "都不是",
+            "callback_data": f"search:reject:{plan_id}",
         }])
         data = {
             "keyboard": keyboard,
@@ -1372,10 +1686,7 @@ class SearchFeature:
             re.sub(r"<[^>]+>", "", caption)
         )
         if len(visible_caption) > 1024:
-            caption = "\n".join(
-                line for line in lines
-                if not line.startswith("理由：")
-            )
+            caption = caption[:1000]
         return {
             "kind": kind,
             "text": caption,
@@ -1410,6 +1721,17 @@ class SearchFeature:
             raise FeatureError("invalid_candidate", "selected candidate is invalid") from None
         if candidate.get("selectable") is False:
             return {"actions": [self._candidate_action(stored, index, edit=True)]}
+        if not (stored.get("plan") or {}).get("auto_confirm"):
+            log_search_event(
+                runtime_context.logger,
+                "search.user_confirmed",
+                search_session_id=plan_id,
+                confirmation_mode="user",
+                candidate_id=(
+                    candidate.get("candidate_id")
+                    or candidate.get("candidate_key")
+                ),
+            )
         if candidate.get("links_frozen"):
             raw_query = str(
                 (stored.get("plan") or {}).get("raw_query") or ""
@@ -1432,74 +1754,147 @@ class SearchFeature:
                     candidate,
                     metadata_id=plan_id,
                     raw_query=raw_query,
-                    require_anchor=(
-                        (stored.get("plan") or {}).get("entry_kind")
-                        == "link"
-                    ),
+                    require_anchor=True,
                     resolver=self.exact_link_resolver,
                 )
                 stored["candidates"][index].update(deepcopy(candidate))
             except CandidateHydrationError as exc:
-                action = self._candidate_action(stored, index, edit=True)
-                detail = {
-                    "fixed_link_read_failed": "固定链接读取失败",
-                    "candidate_binding_failed": "来源绑定失败",
-                    "source_fact_conflict": "来源事实存在冲突",
-                    "metadata_conflict": "元数据类型冲突",
-                    "metadata_incomplete": "严格媒体元数据不完整",
-                }.get(exc.code, "候选精确读取失败")
-                missing = (
-                    "（"
-                    + "、".join(
-                        _human_metadata_field(item)
-                        for item in exc.details
-                    )
-                    + "）"
-                    if exc.details
-                    and exc.code != "source_fact_conflict"
-                    else ""
+                source_links = [
+                    item
+                    for item in candidate.get("source_links") or ()
+                    if isinstance(item, dict)
+                ]
+                anchor_provider = next(
+                    (
+                        _text(item.get("provider")).casefold()
+                        for item in source_links
+                        if _text(item.get("fact_id"))
+                        == _text(candidate.get("anchor_fact_id"))
+                    ),
+                    "",
                 )
-                keyboard = (action.get("data") or {}).get("keyboard") or []
-                retry_callback = (
-                    f"search:select:{plan_id}:{index}"
+                media_type = _text(
+                    (
+                        (candidate.get("media_metadata") or {}).get(
+                            "identity"
+                        )
+                        or {}
+                    ).get("content_kind")
+                ).casefold()
+                can_degrade_tvdb = bool(
+                    media_type == "series"
+                    and anchor_provider != "tvdb"
+                    and any(
+                        _text(item.get("provider")).casefold() == "tvdb"
+                        for item in source_links
+                    )
                 )
-                if exc.code == "fixed_link_read_failed":
-                    action["text"] += (
-                        f"\n❌ {detail}{missing}。可重试精确读取或退出。"
-                    )
-                    retry_button = next(
-                        (
-                            button
-                            for row in keyboard
-                            for button in row
-                            if button.get("callback_data")
-                            == retry_callback
-                        ),
-                        None,
-                    )
-                    if retry_button is None:
-                        keyboard.insert(0, [{
-                            "text": "重试精确读取",
-                            "callback_data": retry_callback,
-                        }])
-                    else:
-                        retry_button["text"] = "重试精确读取"
-                else:
-                    action["text"] += (
-                        f"\n❌ {detail}{missing}。"
-                        "请查看其他候选，或退出。"
-                    )
-                    keyboard[:] = [
-                        [
-                            button
-                            for button in row
-                            if button.get("callback_data")
-                            != retry_callback
-                        ]
-                        for row in keyboard
+                if can_degrade_tvdb:
+                    degraded = deepcopy(candidate)
+                    degraded["source_links"] = [
+                        item
+                        for item in source_links
+                        if _text(item.get("provider")).casefold()
+                        != "tvdb"
                     ]
-                    keyboard[:] = [row for row in keyboard if row]
-                return {"actions": [action]}
+                    degraded["intended_scope"] = "whole_series"
+                    degraded["requested_season_number"] = None
+                    degraded["requested_episode_number"] = None
+                    degraded["unresolved_sources"] = list(dict.fromkeys([
+                        *(
+                            degraded.get("unresolved_sources")
+                            or ()
+                        ),
+                        "tvdb:unavailable",
+                    ]))
+                    try:
+                        candidate = await asyncio.to_thread(
+                            hydrate_frozen_candidate,
+                            degraded,
+                            metadata_id=plan_id,
+                            raw_query=raw_query,
+                            require_anchor=True,
+                            resolver=self.exact_link_resolver,
+                        )
+                    except CandidateHydrationError as degraded_exc:
+                        exc = degraded_exc
+                    else:
+                        stored["candidates"][index].update(
+                            deepcopy(candidate)
+                        )
+                        log_search_event(
+                            runtime_context.logger,
+                            "search.tvdb_completed",
+                            search_session_id=plan_id,
+                            level="warning",
+                            status="unavailable",
+                            matched=False,
+                            degraded_scope="whole_series",
+                        )
+                        exc = None
+                if exc is None:
+                    pass
+                else:
+                    action = self._candidate_action(stored, index, edit=True)
+                    detail = {
+                        "fixed_link_read_failed": "固定链接读取失败",
+                        "candidate_binding_failed": "来源绑定失败",
+                        "source_fact_conflict": "来源事实存在冲突",
+                        "metadata_conflict": "元数据类型冲突",
+                        "metadata_incomplete": "严格媒体元数据不完整",
+                    }.get(exc.code, "候选精确读取失败")
+                    missing = (
+                        "（"
+                        + "、".join(
+                            _human_metadata_field(item)
+                            for item in exc.details
+                        )
+                        + "）"
+                        if exc.details
+                        and exc.code != "source_fact_conflict"
+                        else ""
+                    )
+                    keyboard = (action.get("data") or {}).get("keyboard") or []
+                    retry_callback = (
+                        f"search:select:{plan_id}:{index}"
+                    )
+                    if exc.code == "fixed_link_read_failed":
+                        action["text"] += (
+                            f"\n❌ {detail}{missing}。可重试精确读取或退出。"
+                        )
+                        retry_button = next(
+                            (
+                                button
+                                for row in keyboard
+                                for button in row
+                                if button.get("callback_data")
+                                == retry_callback
+                            ),
+                            None,
+                        )
+                        if retry_button is None:
+                            keyboard.insert(0, [{
+                                "text": "重试精确读取",
+                                "callback_data": retry_callback,
+                            }])
+                        else:
+                            retry_button["text"] = "重试精确读取"
+                    else:
+                        action["text"] += (
+                            f"\n❌ {detail}{missing}。"
+                            "请查看其他候选，或退出。"
+                        )
+                        keyboard[:] = [
+                            [
+                                button
+                                for button in row
+                                if button.get("callback_data")
+                                != retry_callback
+                            ]
+                            for row in keyboard
+                        ]
+                        keyboard[:] = [row for row in keyboard if row]
+                    return {"actions": [action]}
         selected_plan = {
             "plan_id": plan_id,
             "media_metadata": candidate["media_metadata"],
@@ -1515,11 +1910,23 @@ class SearchFeature:
                 stored["selected_candidate_key"] = candidate.get("candidate_key") or ""
                 return self._related_placement_action(plan_id, stored)
             if placement.get("library_type") == "series":
-                if not contract.get("items"):
+                degraded_whole_series = bool(
+                    not contract.get("items")
+                    and _text(
+                        (contract.get("retrieval") or {}).get("scope")
+                    ) == "whole_series"
+                    and "warning:tvdb_inventory_unavailable"
+                    in (contract.get("warnings") or ())
+                )
+                if not contract.get("items") and not degraded_whole_series:
                     raise SeriesScopeError("tvdb_scope_not_verified")
                 decision = ((contract.get("evidence") or {}).get("decision") or {})
                 scope = str(decision.get("scope") or "movie_or_series")
-                if scope == "episode":
+                if degraded_whole_series:
+                    selected_plan["media_metadata"] = apply_series_scope(
+                        contract, "whole_series"
+                    )
+                elif scope == "episode":
                     selected_plan["media_metadata"] = apply_series_scope(
                         contract,
                         "episode",
@@ -2013,6 +2420,18 @@ class SearchFeature:
             or (contract.get("placement") or {}).get("library_type")
             or ""
         )
+        log_search_event(
+            runtime_context.logger,
+            "search.prowlarr_query_built",
+            search_session_id=plan_id,
+            queries=queries,
+            media_type=media_type,
+            scope=(contract.get("retrieval") or {}).get("scope"),
+            title_policy=(contract.get("identity") or {}).get(
+                "search_title_policy"
+            ),
+            year=(contract.get("identity") or {}).get("year"),
+        )
         stored["confirmed_contract"] = contract
         stored["active_prowlarr_queries"] = list(queries)
         try:
@@ -2210,13 +2629,21 @@ class SearchFeature:
             self._release_limit(),
         )
         if runtime_context.logger:
-            runtime_context.logger.info(
-                "prowlarr_release_gate "
-                f"queries={json.dumps(stored.get('active_prowlarr_queries') or [], ensure_ascii=False)} "
-                f"raw={len(raw_items or [])} "
-                f"deduplicated={len(deduplicated)} "
-                f"eligible={len(gate.eligible)} "
-                f"rejections={json.dumps(gate.rejection_counts, ensure_ascii=False, sort_keys=True)}"
+            log_search_event(
+                runtime_context.logger,
+                "search.release_gate_evaluated",
+                search_session_id=str(
+                    contract.get("metadata_id") or ""
+                ),
+                queries=stored.get("active_prowlarr_queries") or [],
+                media_type=(contract.get("retrieval") or {}).get(
+                    "media_type"
+                ),
+                scope=(contract.get("retrieval") or {}).get("scope"),
+                raw_count=len(raw_items or []),
+                deduplicated_count=len(deduplicated),
+                eligible_count=len(gate.eligible),
+                rejections=gate.rejection_counts,
             )
         release_by_id = stored.setdefault("release_by_id", {})
         for item in results:
@@ -2246,10 +2673,27 @@ class SearchFeature:
             indexer_summary,
         )
         if not results:
+            self._log_completed_once(
+                plan_id,
+                stored,
+                terminal_status="no_match",
+                release_result_count=0,
+            )
             self._release_plan(plan_id)
             return self._closed(text)
         stored["indexer_summary"] = indexer_summary
         keyboard = release_keyboard(plan_id, results)
+        self._log_completed_once(
+            plan_id,
+            stored,
+            terminal_status=(
+                "ai_fallback"
+                if (stored.get("plan") or {}).get("selection_mode")
+                == "program_fallback"
+                else "success"
+            ),
+            release_result_count=len(results),
+        )
         return {
             "actions": [{
                 "kind": "edit_message",
@@ -2685,67 +3129,344 @@ class SearchFeature:
         *,
         locked_identity: tuple[str, str] | None = None,
     ):
-        providers = self._source_providers()
+        del locked_identity
         parsed = classify_search_input(raw_query)
         if parsed.kind in {"invalid_link", "unsupported_text"}:
             raise SearchPlanningError(parsed.reason)
-        resolved_identity = locked_identity
-        planning_query = raw_query
-        source_gateway = self._source_tool_gateway()
-        if parsed.kind == "link":
+        if parsed.kind in {"link", "resolvable_link"}:
             try:
-                direct = await asyncio.to_thread(resolve_direct_link, parsed.link)
+                stable_link, fallback_title = await asyncio.to_thread(
+                    resolve_shared_metadata_link,
+                    parsed,
+                )
+                if stable_link is None:
+                    if not fallback_title:
+                        raise DirectLinkError("direct_link_invalid")
+                    log_search_event(
+                        runtime_context.logger,
+                        "search.link_downgraded",
+                        search_session_id=plan_id,
+                        fallback_title=fallback_title,
+                    )
+                    return await build_douban_first_search_plan(
+                        fallback_title,
+                        plan_id,
+                        self._douban_provider,
+                        ai_decider=infer_douban_search_decision_with_ai,
+                    )
+                direct = await asyncio.to_thread(
+                    resolve_direct_link,
+                    stable_link,
+                )
+                log_search_event(
+                    runtime_context.logger,
+                    "search.link_resolved",
+                    search_session_id=plan_id,
+                    provider=direct.provider,
+                    stable_identity=list(direct.stable_identity),
+                    media_type=direct.media_type,
+                    scope=direct.scope,
+                )
             except DirectLinkError as exc:
                 raise SearchPlanningError(
                     getattr(exc, "code", str(exc)),
                     getattr(exc, "details", ()),
                 ) from exc
-            planning_query = direct.query
-            resolved_identity = direct.stable_identity
-            providers[direct.provider] = lambda _hypotheses: direct.evidence
-            source_gateway = None
-        return await build_confirmable_search_plan(
-            planning_query,
+            return build_direct_entity_plan(
+                direct,
+                raw_query=raw_query,
+                plan_id=plan_id,
+            )
+        return await build_douban_first_search_plan(
+            raw_query,
             plan_id,
-            providers,
-            lambda contract: set((contract.get("evidence") or {}).get("occupied_special_numbers") or []),
-            self.allocator,
-            locked_identity=resolved_identity,
-            source_gateway=source_gateway,
-            candidate_editor=infer_anchored_candidates_with_ai,
-            supplement_query_editor=infer_source_supplement_queries_with_ai,
+            self._douban_provider,
+            ai_decider=infer_douban_search_decision_with_ai,
         )
-
-    def _source_providers(self):
-        return {
-            "wikipedia": self._wikipedia_provider,
-            "douban": self._douban_provider,
-            "tvdb": self._tvdb_provider,
-        }
 
     async def _supplement_selected_candidate(
         self,
         candidate: dict,
         raw_query: str,
     ) -> dict:
-        try:
-            return await supplement_selected_candidate(
-                candidate,
-                raw_query,
-                self._source_providers(),
-                candidate_editor=infer_anchored_candidates_with_ai,
-                supplement_query_editor=(
-                    infer_source_supplement_queries_with_ai
+        del raw_query
+        result = deepcopy(candidate)
+        contract = result.get("media_metadata") or {}
+        identity_value = contract.get("identity") or {}
+        source_links = [
+            dict(item)
+            for item in result.get("source_links") or ()
+            if isinstance(item, dict)
+        ]
+        anchor_fact_id = _text(result.get("anchor_fact_id"))
+        anchor_link = next(
+            (
+                item
+                for item in source_links
+                if _text(item.get("fact_id")) == anchor_fact_id
+            ),
+            source_links[0] if source_links else {},
+        )
+        anchor_ids = (
+            anchor_link.get("external_ids")
+            if isinstance(anchor_link.get("external_ids"), dict)
+            else {}
+        )
+        confirmed = ConfirmedIdentity(
+            provider=_text(anchor_link.get("provider")).casefold(),
+            stable_id=_text(next(iter(anchor_ids.values()), "")),
+            chinese_title=_text(identity_value.get("chinese_title")),
+            english_title=_text(
+                identity_value.get("official_english_title")
+                or identity_value.get("english_title")
+            ),
+            original_title=_text(identity_value.get("original_title")),
+            year=_text(identity_value.get("year"))[:4],
+            media_type=_text(
+                identity_value.get("content_kind")
+                or (contract.get("placement") or {}).get("library_type")
+            ).casefold(),
+            requested_scope=_text(
+                result.get("intended_scope")
+                or (contract.get("retrieval") or {}).get("scope")
+            ).casefold(),
+        )
+        unresolved = [
+            _text(item)
+            for item in result.get("unresolved_sources") or ()
+            if _text(item)
+        ]
+        providers = {
+            _text(item.get("provider")).casefold()
+            for item in source_links
+        }
+        search_session_id = _text(
+            contract.get("metadata_id")
+            or result.get("candidate_id")
+        )
+        wikipedia_fact = None
+        if "wikipedia" not in providers:
+            queries = build_wikipedia_queries(confirmed)
+            log_search_event(
+                runtime_context.logger,
+                "search.wikipedia_started",
+                search_session_id=search_session_id,
+                query_count=sum(len(items) for items in queries.values()),
+                queries=queries,
+            )
+            try:
+                wikipedia_result = await asyncio.to_thread(
+                    self._wikipedia_provider,
+                    {"source_queries": queries},
+                )
+            except Exception:
+                wikipedia_result = {
+                    "status": "unavailable",
+                    "facts": [],
+                }
+            wikipedia_fact = select_unique_wikipedia_fact(
+                wikipedia_result,
+                confirmed,
+            )
+            if wikipedia_fact is not None:
+                wikipedia_id = _text(
+                    wikipedia_fact.get("wikibase_item")
+                    or (wikipedia_fact.get("external_ids") or {}).get(
+                        "wikipedia"
+                    )
+                )
+                wikipedia_url = _text(wikipedia_fact.get("url"))
+                if wikipedia_id and wikipedia_url:
+                    source_links.append({
+                        "provider": "wikipedia",
+                        "fact_id": f"wikipedia:{wikipedia_id}",
+                        "url": wikipedia_url,
+                        "external_ids": {"wikipedia": wikipedia_id},
+                        "role": (
+                            "movie"
+                            if confirmed.media_type == "movie"
+                            else "series_root"
+                        ),
+                        "season_number": None,
+                        "episode_number": None,
+                        "verification": "fact_verified",
+                        "proposed_season_number": None,
+                        "proposed_episode_number": None,
+                    })
+                    providers.add("wikipedia")
+            if "wikipedia" not in providers:
+                wikipedia_status = _text(
+                    wikipedia_result.get("status")
+                ).casefold() or "not_found"
+                unresolved.append(f"wikipedia:{wikipedia_status}")
+            log_search_event(
+                runtime_context.logger,
+                "search.wikipedia_completed",
+                search_session_id=search_session_id,
+                level=(
+                    "info" if "wikipedia" in providers else "warning"
+                ),
+                status=(
+                    "ok"
+                    if "wikipedia" in providers
+                    else wikipedia_status
+                ),
+                matched=bool("wikipedia" in providers),
+            )
+        else:
+            log_search_event(
+                runtime_context.logger,
+                "search.wikipedia_skipped",
+                search_session_id=search_session_id,
+                reason="already_confirmed_source",
+            )
+
+        if confirmed.media_type == "series" and "tvdb" not in providers:
+            tvdb_query = build_tvdb_query(confirmed, wikipedia_fact)
+            log_search_event(
+                runtime_context.logger,
+                "search.tvdb_started",
+                search_session_id=search_session_id,
+                query=tvdb_query or {},
+            )
+            tvdb_status = "unavailable"
+            tvdb_series = None
+            if tvdb_query is not None:
+                try:
+                    tvdb_candidates = await asyncio.to_thread(
+                        search_tvdb_series,
+                        tvdb_query["title"],
+                        tvdb_query["year"],
+                    )
+                    tvdb_result = {
+                        "source": "tvdb",
+                        "status": "ok" if tvdb_candidates else "not_found",
+                        "facts": [{
+                            "movies": [],
+                            "series": tvdb_candidates[:5],
+                            "episodes_by_series": {},
+                        }],
+                    }
+                    tvdb_identity = replace(
+                        confirmed,
+                        english_title=tvdb_query["title"],
+                    )
+                    selected = select_unique_tvdb_series(
+                        tvdb_result,
+                        tvdb_identity,
+                    )
+                    if selected is not None:
+                        tvdb_id = _text(
+                            selected.get("tvdb_series_id")
+                            or selected.get("tvdb_id")
+                            or selected.get("id")
+                        )
+                        tvdb_series = await asyncio.to_thread(
+                            get_tvdb_series,
+                            tvdb_id,
+                        )
+                        if not (
+                            isinstance(tvdb_series, dict)
+                            and tvdb_series.get("episodes")
+                        ):
+                            tvdb_series = None
+                            tvdb_status = "unavailable"
+                        else:
+                            tvdb_status = "ok"
+                    else:
+                        tvdb_status = _text(
+                            tvdb_result.get("status")
+                        ).casefold() or "not_found"
+                        if tvdb_status == "ok":
+                            tvdb_status = "not_unique"
+                except TvdbConfigError as exc:
+                    tvdb_status = exc.code
+                except TvdbAuthenticationError:
+                    tvdb_status = "authentication_failed"
+                except TvdbRequestError as exc:
+                    tvdb_status = exc.code
+                except OSError:
+                    tvdb_status = "server_down"
+                except Exception:
+                    tvdb_status = "unavailable"
+            if tvdb_series is not None:
+                tvdb_id = _text(
+                    tvdb_series.get("tvdb_series_id")
+                    or tvdb_series.get("tvdb_id")
+                    or tvdb_series.get("id")
+                )
+                requested_scope = confirmed.requested_scope
+                role = (
+                    requested_scope
+                    if requested_scope in {"season", "episode"}
+                    else "series_root"
+                )
+                source_links.append({
+                    "provider": "tvdb",
+                    "fact_id": f"tvdb:series:{tvdb_id}",
+                    "url": _text(tvdb_series.get("url"))
+                    or f"https://thetvdb.com/series/{tvdb_id}",
+                    "external_ids": {"tvdb": tvdb_id},
+                    "role": role,
+                    "season_number": (
+                        result.get("requested_season_number")
+                        if role in {"season", "episode"}
+                        else None
+                    ),
+                    "episode_number": (
+                        result.get("requested_episode_number")
+                        if role == "episode"
+                        else None
+                    ),
+                    "verification": "fact_verified",
+                    "proposed_season_number": None,
+                    "proposed_episode_number": None,
+                })
+                providers.add("tvdb")
+            if "tvdb" not in providers:
+                unresolved.append(f"tvdb:{tvdb_status}")
+                result["intended_scope"] = "whole_series"
+                result["requested_season_number"] = None
+                result["requested_episode_number"] = None
+                if isinstance(contract.get("retrieval"), dict):
+                    contract["retrieval"]["scope"] = "whole_series"
+            log_search_event(
+                runtime_context.logger,
+                "search.tvdb_completed",
+                search_session_id=search_session_id,
+                level="info" if "tvdb" in providers else "warning",
+                status="ok" if "tvdb" in providers else tvdb_status,
+                matched=bool("tvdb" in providers),
+                tvdb_id=(
+                    next(
+                        (
+                            (item.get("external_ids") or {}).get("tvdb")
+                            for item in source_links
+                            if item.get("provider") == "tvdb"
+                        ),
+                        "",
+                    )
+                ),
+                inventory_count=(
+                    len(tvdb_series.get("episodes") or ())
+                    if isinstance(tvdb_series, dict)
+                    else 0
                 ),
             )
-        except SearchPlanningError as exc:
-            if runtime_context.logger:
-                runtime_context.logger.warning(
-                    "search_supplement status=failed "
-                    "stage=selected_candidate "
-                    f"error={exc.code}"
-                )
-            return deepcopy(candidate)
+        else:
+            log_search_event(
+                runtime_context.logger,
+                "search.tvdb_skipped",
+                search_session_id=search_session_id,
+                reason=(
+                    "not_series"
+                    if confirmed.media_type != "series"
+                    else "already_confirmed_source"
+                ),
+            )
+        result["source_links"] = source_links
+        result["unresolved_sources"] = list(dict.fromkeys(unresolved))
+        return result
 
     def _wikipedia_provider(self, hypotheses: dict):
         config = (((self.config.get("metadata") or {}).get("wikipedia") or {}))
@@ -2827,78 +3548,6 @@ class SearchFeature:
             ),
         )
 
-    def _tvdb_provider(self, hypotheses: dict):
-        facts = []
-        errors = []
-        statuses = []
-        for hypothesis in hypotheses.get("hypotheses") or []:
-            title = hypothesis.get("title") or ""
-            year = hypothesis.get("year") or ""
-            movies = []
-            series = []
-            try:
-                movies = search_tvdb_movies(title, year=year)[:5]
-            except TvdbConfigError as exc:
-                statuses.append(exc.code)
-                errors.append(str(exc))
-            except TvdbAuthenticationError as exc:
-                statuses.append("authentication_failed")
-                errors.append(str(exc))
-            except TvdbRequestError as exc:
-                statuses.append(exc.code)
-                errors.append(str(exc))
-            except OSError as exc:
-                statuses.append("server_down")
-                errors.append(str(exc))
-            try:
-                series = search_tvdb_series(title, year=year)[:5]
-            except TvdbConfigError as exc:
-                statuses.append(exc.code)
-                errors.append(str(exc))
-            except TvdbAuthenticationError as exc:
-                statuses.append("authentication_failed")
-                errors.append(str(exc))
-            except TvdbRequestError as exc:
-                statuses.append(exc.code)
-                errors.append(str(exc))
-            except OSError as exc:
-                statuses.append("server_down")
-                errors.append(str(exc))
-            if movies or series:
-                facts.append({
-                    "hypothesis": hypothesis,
-                    "movies": movies,
-                    "series": series,
-                    "episodes_by_series": {},
-                })
-        if facts:
-            status = "ok"
-        elif statuses:
-            status = next(
-                (
-                    candidate
-                    for candidate in (
-                        "authentication_failed",
-                        "credential_missing",
-                        "rate_limited",
-                        "timeout",
-                        "server_down",
-                        "disabled",
-                    )
-                    if candidate in statuses
-                ),
-                statuses[0],
-            )
-        else:
-            status = "not_found"
-        return {
-            "source": "tvdb",
-            "status": status,
-            "facts": facts,
-            "source_urls": [],
-            "error": "; ".join(dict.fromkeys(errors)),
-        }
-
     @staticmethod
     def _merge_source_results(source: str, results: list[dict]) -> dict:
         facts = []
@@ -2947,157 +3596,6 @@ class SearchFeature:
             "source_urls": urls,
             "error": "; ".join(errors),
         }
-
-    def _targeted_wikipedia(self, arguments: dict) -> dict:
-        queries = list(arguments.get("queries") or [])
-        return self._wikipedia_provider({
-            "source_queries": {
-                "wikipedia_zh": queries,
-                "wikipedia_en": queries,
-            },
-        })
-
-    def _targeted_douban_subject(self, arguments: dict) -> dict:
-        config = ((self.config.get("metadata") or {}).get("douban") or {})
-        facts = []
-        for subject_id in arguments.get("subject_ids") or []:
-            fact = lookup_douban_subject(
-                subject_id,
-                timeout=float(config.get("timeout") or 10),
-                cache_ttl=float(config.get("cache_ttl") or 900),
-                max_concurrency=int(config.get("max_concurrency") or 2),
-            )
-            if fact:
-                facts.append(fact)
-        return {
-            "source": "douban",
-            "status": "ok" if facts else "not_found",
-            "facts": facts,
-            "source_urls": [
-                item.get("url") for item in facts if item.get("url")
-            ],
-            "error": "",
-        }
-
-    def _targeted_tvdb_entity(self, arguments: dict) -> dict:
-        facts = []
-        try:
-            for query in arguments.get("queries") or []:
-                title = query.get("title") or ""
-                year = query.get("year") or ""
-                media_type = query.get("media_type") or "unknown"
-                movies = (
-                    search_tvdb_movies(title, year)
-                    if media_type in {"movie", "unknown"}
-                    else []
-                )
-                series = (
-                    search_tvdb_series(title, year)
-                    if media_type in {"series", "unknown"}
-                    else []
-                )
-                facts.append({
-                    "movies": movies[:5],
-                    "series": series[:5],
-                    "episodes_by_series": {},
-                })
-            for entity in arguments.get("entity_ids") or []:
-                media_type = entity.get("media_type")
-                entity_id = entity.get("tvdb_id")
-                item = (
-                    get_tvdb_series(entity_id)
-                    if media_type == "series"
-                    else get_tvdb_movie(entity_id)
-                )
-                if item:
-                    facts.append({
-                        "movies": [item] if media_type == "movie" else [],
-                        "series": [item] if media_type == "series" else [],
-                        "episodes_by_series": (
-                            {str(entity_id): item.get("episodes") or []}
-                            if media_type == "series"
-                            else {}
-                        ),
-                    })
-        except TvdbConfigError as exc:
-            return {
-                "source": "tvdb",
-                "status": exc.code,
-                "facts": [],
-                "source_urls": [],
-                "error": str(exc),
-            }
-        except TvdbRequestError as exc:
-            return {
-                "source": "tvdb",
-                "status": exc.code,
-                "facts": [],
-                "source_urls": [],
-                "error": str(exc),
-            }
-        return {
-            "source": "tvdb",
-            "status": "ok" if facts else "not_found",
-            "facts": facts,
-            "source_urls": [],
-            "error": "",
-        }
-
-    def _targeted_tvdb_episodes(self, arguments: dict) -> dict:
-        facts = []
-        try:
-            for series_id in arguments.get("series_ids") or []:
-                episodes = get_tvdb_series_episodes(series_id)
-                facts.append({
-                    "movies": [],
-                    "series": [{
-                        "tvdb_series_id": str(series_id),
-                        "media_type": "series",
-                    }],
-                    "episodes_by_series": {
-                        str(series_id): episodes,
-                    },
-                })
-        except TvdbConfigError as exc:
-            return {
-                "source": "tvdb",
-                "status": exc.code,
-                "facts": [],
-                "source_urls": [],
-                "error": str(exc),
-            }
-        except TvdbRequestError as exc:
-            return {
-                "source": "tvdb",
-                "status": exc.code,
-                "facts": [],
-                "source_urls": [],
-                "error": str(exc),
-            }
-        return {
-            "source": "tvdb",
-            "status": "ok" if facts else "not_found",
-            "facts": facts,
-            "source_urls": [],
-            "error": "",
-        }
-
-    def _source_tool_gateway(self) -> SourceToolGateway:
-        return SourceToolGateway(
-            {
-                "wikipedia": self._wikipedia_provider,
-                "douban": self._douban_provider,
-                "tvdb": self._tvdb_provider,
-            },
-            targeted_handlers={
-                "lookup_wikipedia_entity": self._targeted_wikipedia,
-                "lookup_douban_subject": self._targeted_douban_subject,
-                "lookup_tvdb_entity": self._targeted_tvdb_entity,
-                "lookup_tvdb_episodes": self._targeted_tvdb_episodes,
-            },
-            config=self.config,
-            logger=runtime_context.logger,
-        )
 
     @staticmethod
     def _search_releases(query: str, media_type: str):
@@ -3238,6 +3736,11 @@ class SearchFeature:
         self.config_wizard.clear({"chat_id": owner[0], "user_id": owner[1]})
         plan_id = str(operation.get("plan_id") or "")
         if plan_id:
+            self._log_completed_once(
+                plan_id,
+                self.plans.get(plan_id),
+                terminal_status="cancelled",
+            )
             self._release_plan(plan_id)
         task = operation.get("task")
         if task is not None and hasattr(task, "cancel") and not task.done():
@@ -3312,6 +3815,11 @@ class SearchFeature:
         self.awaiting_queries.discard(owner)
         plan_id = str(operation.get("plan_id") or "")
         if plan_id:
+            self._log_completed_once(
+                plan_id,
+                self.plans.get(plan_id),
+                terminal_status="cancelled",
+            )
             self._release_plan(plan_id)
         view = self._advance_operation(
             operation["operation_id"],

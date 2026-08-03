@@ -216,17 +216,52 @@ def _strip_alias_qualifiers(value: str) -> str:
     return ""
 
 
-def _translated_name(item: dict) -> str:
-    translated = item.get("name_translated")
-    if _contains_latin(translated):
-        return _strip_alias_qualifiers(translated)
+def _language_code(value) -> str:
+    raw = str(value or "").strip().casefold().replace("_", "-")
+    primary = raw.split("-", 1)[0]
+    return {
+        "eng": "en",
+        "english": "en",
+        "spa": "es",
+        "spanish": "es",
+        "pol": "pl",
+        "polish": "pl",
+        "jpn": "ja",
+        "japanese": "ja",
+        "kor": "ko",
+        "korean": "ko",
+        "zho": "zh",
+        "chi": "zh",
+        "cmn": "zh",
+        "chinese": "zh",
+    }.get(primary, primary)
 
+
+def _explicit_english_translation(item: dict) -> str:
     translations = item.get("translations")
     if isinstance(translations, dict):
         translated = translations.get("eng") or translations.get("en") or ""
         if _contains_latin(translated):
             return _strip_alias_qualifiers(translated)
+
+    translations_with_language = item.get("translationsWithLang")
+    if isinstance(translations_with_language, list):
+        for translated in translations_with_language:
+            if not isinstance(translated, dict):
+                continue
+            language = _language_code(
+                translated.get("language")
+                or translated.get("lang")
+                or translated.get("languageCode")
+            )
+            value = translated.get("name") or translated.get("title") or ""
+            if language == "en" and _contains_latin(value):
+                return _strip_alias_qualifiers(value)
     return ""
+
+
+def _translated_name(item: dict) -> str:
+    return _explicit_english_translation(item)
 
 
 def _preferred_english_title(item: dict) -> str:
@@ -234,11 +269,21 @@ def _preferred_english_title(item: dict) -> str:
     if translated:
         return translated
 
-    for alias in _alias_values(item.get("aliases")):
-        if _contains_latin(alias):
-            return _strip_alias_qualifiers(alias)
-
-    for key in ("title", "name"):
+    original_language = _language_code(
+        item.get("original_language")
+        or item.get("originalLanguage")
+        or item.get("language")
+    )
+    if original_language != "en":
+        return ""
+    for key in (
+        "original_title",
+        "originalTitle",
+        "original_name",
+        "originalName",
+        "title",
+        "name",
+    ):
         value = str(item.get(key) or "").strip()
         if _contains_latin(value):
             return _strip_alias_qualifiers(value)
@@ -405,6 +450,9 @@ def _translation_name(entity_type: str, entity_id: str) -> str:
     payload = data.get("data") if isinstance(data, dict) else {}
     if not isinstance(payload, dict):
         return ""
+    value = payload.get("name") or payload.get("title") or ""
+    if _contains_latin(value):
+        return _strip_alias_qualifiers(value)
     return _preferred_english_title(payload)
 
 
@@ -469,6 +517,14 @@ def _find_by_slug(items: list[dict], slug: str) -> dict | None:
     )
 
 
+def _first_present(item: dict, *keys: str):
+    for key in keys:
+        value = item.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
 def get_tvdb_series(series_id: str) -> dict | None:
     series_id = str(series_id or "").strip()
     if not series_id:
@@ -515,7 +571,11 @@ def get_tvdb_season(season_id: str) -> dict | None:
             or payload.get("series_id")
             or (payload.get("series") or {}).get("id")
         ),
-        "season_number": payload.get("number") or payload.get("seasonNumber"),
+        "season_number": _first_present(
+            payload,
+            "number",
+            "seasonNumber",
+        ),
     }
 
 
@@ -541,7 +601,12 @@ def _normalize_episode(item: dict) -> dict:
             if item.get("seasonNumber") not in (None, "")
             else item.get("season_number")
         ),
-        "episode_number": item.get("number") or item.get("episodeNumber") or item.get("episode_number"),
+        "episode_number": _first_present(
+            item,
+            "number",
+            "episodeNumber",
+            "episode_number",
+        ),
         "aired": str(item.get("aired") or item.get("firstAired") or "").strip(),
     }
 

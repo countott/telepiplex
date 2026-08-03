@@ -1,14 +1,13 @@
 # search 7 月 29 日日志后续事项
 
-更新时间：2026-07-30
+更新时间：2026-08-03
 
-状态：`recorded / deferred`
+状态：`resolved / closed`
 
-本文只记录从 7 月 29 日搜索测试日志确认的后续事项，不授权在当前任务中
-修改业务逻辑。手动 `/m` 属于 download 的独立入口，不纳入 search 后续
-事项。
+本文记录从 7 月 29 日搜索测试日志确认的后续事项及最终处理结论。手动
+`/m` 属于 download 的独立入口，不纳入 search 后续事项。
 
-## P1：Prowlarr Query 与 Indexer 扇出过大
+## 已关闭：Prowlarr Query 与 Indexer 扇出过大
 
 7 月 29 日两次片源搜索共形成 8 个 Query，每个 Query 都请求 18 个
 Indexer：
@@ -22,36 +21,29 @@ Indexer：
 - Internet Archive：3 次 HTTP 400；
 - `release_gate` 在增量过程中执行 144 次。
 
-后续评审方向：
+该统计对应旧的多别名查询流程。search 现已只从确认后的 canonical identity
+生成一个范围明确的 query，因此旧的 Query 扇出修复项已经过期并关闭。
+Indexer 自身的超时或 HTTP 400 仍属于运行质量观测，但不再作为本轮 search
+业务流程改动。
 
-- 按 Query 价值分层执行，优先官方英文名、原名和用户确认的查询；
-- 达到足够结果数量或质量后停止低价值别名；
-- 对持续超时或确定不支持当前查询的 Indexer 做请求内熔断；
-- 对增量 `release_gate` 计算做批量或节流，避免每个请求完成后全量重算。
+## 已完成：metadata probe 在歧义前约束候选
 
-## P1：metadata probe 未约束初始候选规划
+旧实现虽然收到了文件探测得到的 season、episode 和 content shape，却先用
+纯文本 query 完成候选规划，之后才应用 probe，导致本可排除的候选进入
+`metadata_ambiguous`。
 
-`media.search.resolve_metadata` 已收到文件探测得到的 season、episode 和
-content shape，但当前先用纯文本 query 完成候选规划，之后才应用 probe。
-这会扩大无交互候选集合，并可能把本可由 S09E10 等结构化信息排除的候选
-带入 `metadata_ambiguous`。
+search 1.4.0 在 `metadata_ambiguous` 判断前把 probe 转换为电影/剧集类型
+约束，只保留匹配类型的候选；唯一剧集候选确定后才应用 season/episode
+scope。probe 不参与标题、年份或稳定 ID 判断，也不能在多个同类型作品之间
+选择；约束后为零则返回 `metadata_unresolved`。上游已有 confirmed
+`media_metadata` 时，rename 继续直接复用合同，不调用此 capability。
 
-后续评审方向：
+## 已完成：移除未生效的 source orchestration
 
-- 将 probe 转换为候选规划的结构化 intent，而不是只在候选选定后应用；
-- probe 只能缩小 scope，不得凭文件名改写作品身份；
-- 如果上游已有 confirmed search contract，应优先复用合同，不重新规划。
+旧默认配置曾保留 `ai.source_orchestration.enable`，但正常 `SearchFeature`
+并不进入该 source gateway orchestration 分支。
 
-## P2：source orchestration 配置与实际入口不一致
-
-默认配置保留 `ai.source_orchestration.enable`，但正常 `SearchFeature`
-调用始终传入 candidate editor；planner 会先进入 anchored candidate
-路径，后面的 source gateway orchestration 分支不会执行。
-
-后续需要二选一：
-
-1. 删除未生效的配置和死路径，保持当前 candidate-first 架构；
-2. 重新设计 source orchestration，使其遵守“先展示候选、选中后只验证
-   单个候选”的 search 1.2.0 合同。
-
-在完成独立设计和测试计划前，不实施其中任何方案。
+search 1.4.0 采用原方案 1：删除未生效的工具编排配置、运行时分支、工具
+网关、定向 handler 和专属测试，保留豆瓣首次发现、统一 AI 候选清洗以及
+确认后的 Wikipedia/TVDB 确定性增强。原先误挂在旧配置下但被现行 AI 共用的
+`thinking_mode` 已提升为 `ai.thinking_mode`，默认行为保持 `enabled`。

@@ -7,9 +7,11 @@ import requests
 
 from telepiplex_search.ai import (
     chat_completion_messages,
+    check_ai_api_available,
     extract_ai_message,
     infer_anchored_candidates_with_ai,
     infer_candidate_scorecard_with_ai,
+    infer_douban_search_decision_with_ai,
     infer_relation_hypotheses_with_ai,
     infer_search_hypotheses_with_ai,
     infer_source_supplement_queries_with_ai,
@@ -19,6 +21,18 @@ from telepiplex_search.context import runtime_context
 
 
 class SearchAiPipelineTest(unittest.TestCase):
+    def test_disabled_ai_is_unavailable_even_with_saved_credentials(self):
+        runtime_context.configure({
+            "ai": {
+                "enable": False,
+                "api_url": "https://ai.example/v1",
+                "api_key": "saved-secret",
+                "model": "saved-model",
+            },
+        })
+
+        self.assertFalse(check_ai_api_available())
+
     def setUp(self):
         runtime_context.configure({
             "ai": {
@@ -83,6 +97,35 @@ class SearchAiPipelineTest(unittest.TestCase):
                 "tool_calls": [],
             },
         )
+
+    @patch("telepiplex_search.ai.check_ai_api_available", return_value=True)
+    @patch("telepiplex_search.ai.chat_completion")
+    def test_unified_douban_decision_returns_only_fixed_contract(
+        self,
+        chat_mock,
+        _available,
+    ):
+        chat_mock.return_value = {
+            "choices": [{"message": {"content": json.dumps({
+                "action": "show_candidates",
+                "candidate_ids": ["35314632", "36490422"],
+                "rewrite_query": "",
+            })}}],
+        }
+
+        result = infer_douban_search_decision_with_ai({
+            "search_session_id": "session-1",
+            "candidates": [],
+        })
+
+        self.assertEqual(set(result), {
+            "action",
+            "candidate_ids",
+            "rewrite_query",
+        })
+        prompt = chat_mock.call_args.args[0]
+        self.assertIn("candidate_ids", prompt)
+        self.assertIn("search_session_id", prompt)
 
     @patch("telepiplex_search.ai.requests.post")
     def test_tool_transport_omits_tool_fields_for_plain_messages(self, post):
@@ -576,9 +619,7 @@ class SearchAiPipelineTest(unittest.TestCase):
                 "api_key": "secret-key",
                 "model": "tool-model",
                 "timeout": 12,
-                "source_orchestration": {
-                    "thinking_mode": "disabled",
-                },
+                "thinking_mode": "disabled",
             },
         })
         post.return_value.status_code = 200

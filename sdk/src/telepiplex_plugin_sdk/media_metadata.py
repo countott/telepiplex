@@ -287,7 +287,17 @@ def validate_media_metadata(value: object, require_confirmed: bool = False):
         ):
             return None
         if library_type == "series":
-            if not items or any(
+            degraded_whole_series = bool(
+                not items
+                and _text(
+                    (value.get("retrieval") or {}).get("scope")
+                ) == "whole_series"
+                and "warning:tvdb_inventory_unavailable" in warnings
+                and not _text(
+                    (identity.get("external_ids") or {}).get("tvdb")
+                )
+            )
+            if (not items and not degraded_whole_series) or any(
                 item.get("season_number") is None or item.get("episode_number") is None
                 for item in items
             ):

@@ -5,7 +5,11 @@ from __future__ import annotations
 from .anchored_candidate import AnchoredCandidate
 from .entity_graph import CandidateEntity, EvidenceFact
 from .prowlarr_query import build_prowlarr_query_chain
-from .title_policy import TitlePolicyError, resolve_title_policy
+from .title_policy import (
+    CanonicalTitles,
+    TitlePolicyError,
+    resolve_title_policy,
+)
 
 
 class MetadataV1Error(ValueError):
@@ -204,16 +208,67 @@ def build_media_metadata_v1(
         raise MetadataV1Error("metadata_incomplete", ("media_type",))
     media_type = next(iter(media_types))
     entity = CandidateEntity(candidate.candidate_id, primary_facts)
+    degraded_series_candidate = bool(
+        media_type == "series"
+        and candidate.intended_scope in {"work", "whole_series"}
+        and any(
+            _text(item).startswith("tvdb:")
+            and not _text(item).endswith(":ok")
+            for item in candidate.unresolved_sources
+        )
+    )
     try:
         titles = resolve_title_policy(
             entity,
             preferred_chinese_title=raw_query,
         )
     except TitlePolicyError as exc:
-        raise MetadataV1Error(
-            "metadata_incomplete",
-            ("canonical_latin_title",),
-        ) from exc
+        if not degraded_series_candidate:
+            raise MetadataV1Error(
+                "metadata_incomplete",
+                ("canonical_latin_title",),
+            ) from exc
+        chinese_title = next(
+            (
+                fact.chinese_title
+                for fact in primary_facts
+                if fact.chinese_title
+            ),
+            next(
+                (
+                    title
+                    for fact in primary_facts
+                    for title in fact.titles
+                    if _text(title)
+                ),
+                _text(raw_query),
+            ),
+        )
+        original_title = next(
+            (
+                fact.original_title
+                for fact in primary_facts
+                if fact.original_title
+            ),
+            "",
+        )
+        titles = CanonicalTitles(
+            chinese_title=_text(chinese_title),
+            original_title=_text(original_title),
+            original_language=next(
+                (
+                    fact.original_language
+                    for fact in primary_facts
+                    if fact.original_language
+                ),
+                "",
+            ),
+            official_english_title="",
+            romanized_original_title="",
+            canonical_search_title=_text(chinese_title),
+            canonical_latin_title="",
+            search_title_policy="",
+        )
 
     root = _root_fact(candidate)
     year = root.year or next(
@@ -227,17 +282,26 @@ def build_media_metadata_v1(
         media_type,
     )
     inventory = _inventory(primary_facts)
+    degraded_tvdb_inventory = bool(
+        media_type == "series"
+        and scope == "whole_series"
+        and any(
+            _text(item).startswith("tvdb:")
+            and not _text(item).endswith(":ok")
+            for item in candidate.unresolved_sources
+        )
+    )
     if media_type == "series":
         if not any(
             fact.provider == "tvdb"
             and _text(fact.external_ids.get("tvdb"))
             for fact in primary_facts
-        ):
+        ) and not degraded_tvdb_inventory:
             raise MetadataV1Error(
                 "metadata_incomplete",
                 ("tvdb_root",),
             )
-        if not inventory:
+        if not inventory and not degraded_tvdb_inventory:
             raise MetadataV1Error(
                 "metadata_incomplete",
                 ("tvdb_inventory",),
@@ -326,6 +390,8 @@ def build_media_metadata_v1(
         warnings.append("warning:source_titles_differ")
     if candidate.unresolved_sources:
         warnings.append("warning:source_unresolved")
+    if degraded_tvdb_inventory:
+        warnings.append("warning:tvdb_inventory_unavailable")
     anchor_link = next(
         (
             link for link in candidate.source_links

@@ -189,6 +189,23 @@ JSON 结构：
 输入事实：
 """
 
+DOUBAN_SEARCH_DECISION_PROMPT = """你是 telepiplex 的豆瓣搜索裁决器。只返回 JSON，不要返回 Markdown、解释或额外字段。
+你会一次收到完整 SearchContext，其中包含原始输入、程序解析结果、当前豆瓣 query、真实豆瓣候选、上一轮历史和剩余重试预算。
+
+硬性规则：
+1. 你只能引用当前 candidates 中真实存在的 subject_id；不得编造、修改或补写任何来源事实。
+2. action 只能是 show_candidates、retry、no_match。
+3. show_candidates 返回 1 至 5 个 candidate_ids；当前候选多于一个时至少返回两个。
+4. retry 只能在 attempt=1 且 retry_available=true 时使用；candidate_ids 必须为空，rewrite_query 必须是一个与当前 query 不同的作品检索词。
+5. no_match 的 candidate_ids 必须为空、rewrite_query 必须为空；第一轮尚可重试时应输出 retry。
+6. 三个字段始终存在，rewrite_query 不使用 null。
+
+固定结构：
+{"action":"show_candidates|retry|no_match","candidate_ids":["真实豆瓣 subject_id"],"rewrite_query":""}
+
+SearchContext：
+"""
+
 RELATION_SCOUT_PROMPT = """你是影视作品关系审查员。只返回 JSON，不要返回 Markdown。
 你只能引用输入中的 candidate_key 和 fact_id，不得编造标题、年份、稳定 ID、集号或来源事实。
 最多输出 3 个关系假设；假设不是事实，后续必须由程序定向复查。
@@ -288,18 +305,23 @@ JSON 结构：
 
 
 def check_ai_api_available():
-    url = runtime_context.config.get("ai", {}).get("api_url", "")
+    ai_config = runtime_context.config.get("ai") or {}
+    if not ai_config.get("enable", True):
+        if runtime_context.logger:
+            runtime_context.logger.info("AI 已禁用，跳过可选 AI 阶段。")
+        return False
+    url = ai_config.get("api_url", "")
     if not url:
         if runtime_context.logger:
             runtime_context.logger.info("AI API URL 未定义，跳过可选 AI 阶段。")
         return False
-    model = runtime_context.config.get("ai", {}).get("model", "")
+    model = ai_config.get("model", "")
     if not model:
         if runtime_context.logger:
             runtime_context.logger.info("AI 模型未定义，跳过可选 AI 阶段。")
         return False
     
-    api_key = runtime_context.config.get("ai", {}).get("api_key", "")
+    api_key = ai_config.get("api_key", "")
     if not api_key:
         if runtime_context.logger:
             runtime_context.logger.info("AI API Key 未定义，跳过可选 AI 阶段。")
@@ -519,17 +541,12 @@ def chat_completion_messages(
 
 
 def chat_completion(tip_words, max_tokens=8192):
-    source_orchestration = _ai_config().get("source_orchestration")
     thinking_mode = None
-    if (
-        isinstance(source_orchestration, dict)
-        and "thinking_mode" in source_orchestration
-    ):
-        configured_mode = str(
-            source_orchestration.get("thinking_mode") or ""
-        ).strip().casefold()
-        if configured_mode in {"enabled", "disabled"}:
-            thinking_mode = configured_mode
+    configured_mode = str(
+        _ai_config().get("thinking_mode") or ""
+    ).strip().casefold()
+    if configured_mode in {"enabled", "disabled"}:
+        thinking_mode = configured_mode
     return chat_completion_messages(
         [{"role": "user", "content": tip_words}],
         thinking_mode=thinking_mode,
@@ -862,6 +879,33 @@ def infer_anchored_candidates_with_ai(context: dict):
     if not 1 <= len(candidates) <= 6 or any(
         not isinstance(candidate, dict) for candidate in candidates
     ):
+        return None
+    return parsed
+
+
+def infer_douban_search_decision_with_ai(context: dict):
+    if not check_ai_api_available():
+        return None
+    prompt = DOUBAN_SEARCH_DECISION_PROMPT + json.dumps(
+        context or {},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    _log_ai_info(
+        "AI豆瓣统一裁决输入 "
+        f"context={_compact_json_for_log(context)}"
+    )
+    result = chat_completion(prompt, max_tokens=1200)
+    _log_ai_info(
+        "AI豆瓣统一裁决原始响应 "
+        f"result={_compact_json_for_log(result)}"
+    )
+    parsed = parse_ai_json_response(result)
+    if not isinstance(parsed, dict) or set(parsed) != {
+        "action",
+        "candidate_ids",
+        "rewrite_query",
+    }:
         return None
     return parsed
 

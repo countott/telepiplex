@@ -17,6 +17,10 @@ _HOST_RANGE = re.compile(
 )
 _HOST_VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_HOSTNAME = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+)
 _MANIFEST_KEYS = {
     "plugin_id",
     "name",
@@ -29,6 +33,7 @@ _MANIFEST_KEYS = {
     "publishes",
     "commands",
     "callbacks",
+    "direct_message_hosts",
     "config_schema_version",
     "state_schema_version",
     "source",
@@ -74,6 +79,24 @@ def _unique_identifiers(values, field: str) -> tuple[str, ...]:
     return parsed
 
 
+def _unique_hosts(values, field: str) -> tuple[str, ...]:
+    if not isinstance(values, list):
+        _invalid(f"{field} must be a list")
+    parsed = []
+    for value in values:
+        host = _text(value, f"{field}[]").casefold().rstrip(".")
+        if (
+            not _HOSTNAME.fullmatch(host)
+            or "." not in host
+            or host.startswith(".")
+        ):
+            _invalid(f"{field}[] has invalid hostname: {host}")
+        if host in parsed:
+            _invalid(f"{field} contains duplicates")
+        parsed.append(host)
+    return tuple(parsed)
+
+
 @dataclass(frozen=True)
 class CapabilityDeclaration:
     name: str
@@ -107,6 +130,7 @@ class PluginManifest:
     publishes: tuple[str, ...]
     commands: tuple[CommandDeclaration, ...]
     callbacks: tuple[str, ...]
+    direct_message_hosts: tuple[str, ...]
     config_schema_version: int
     state_schema_version: int
     source: SourceDeclaration
@@ -196,6 +220,10 @@ class PluginManifest:
             publishes=_unique_identifiers(value.get("publishes", []), "publishes"),
             commands=tuple(commands),
             callbacks=_unique_identifiers(value.get("callbacks", []), "callbacks"),
+            direct_message_hosts=_unique_hosts(
+                value.get("direct_message_hosts", []),
+                "direct_message_hosts",
+            ),
             config_schema_version=_positive_int(
                 value.get("config_schema_version", 1),
                 "config_schema_version",

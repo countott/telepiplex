@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import html
+import re
 from threading import RLock
 from types import MappingProxyType
+from urllib.parse import urlsplit
 
 from app.runtime.plugin_contract import ContractError
 from app.runtime.plugin_manifest import PluginManifest
@@ -45,6 +48,9 @@ _EMPTY_SNAPSHOT = RouteSnapshot(
     callbacks=MappingProxyType({}),
     blocked=MappingProxyType({}),
 )
+
+_MESSAGE_URL = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
+_TRAILING_URL_PUNCTUATION = ".,;:!?)]}，。；：！？）】》"
 
 
 class CapabilityRouter:
@@ -227,6 +233,39 @@ class CapabilityRouter:
         if plugin_id in self._snapshot.blocked:
             return None
         return self._registrations.get(plugin_id)
+
+    def direct_message_route(self, text: str) -> PluginRoute | None:
+        hosts = []
+        for raw_url in _MESSAGE_URL.findall(html.unescape(str(text or ""))):
+            host = str(
+                urlsplit(
+                    raw_url.rstrip(_TRAILING_URL_PUNCTUATION)
+                ).hostname
+                or ""
+            ).casefold().rstrip(".")
+            if host and host not in hosts:
+                hosts.append(host)
+        if not hosts:
+            return None
+        matched = []
+        blocked = set(self._snapshot.blocked)
+        for plugin_id, route in self._registrations.items():
+            if plugin_id in blocked:
+                continue
+            declared = tuple(
+                str(item or "").casefold().rstrip(".")
+                for item in route.manifest.direct_message_hosts
+            )
+            if any(
+                host == domain or host.endswith(f".{domain}")
+                for host in hosts
+                for domain in declared
+            ):
+                matched.append(route)
+        unique = {
+            route.plugin_id: route for route in matched
+        }
+        return next(iter(unique.values())) if len(unique) == 1 else None
 
     def plugin_status(self, plugin_id: str) -> dict:
         plugin_id = str(plugin_id)

@@ -26,6 +26,10 @@ class WikipediaAdapterTest(unittest.TestCase):
                 "pages": {
                     "1": {
                         "title": "想見你 (電影)",
+                        "varianttitles": {
+                            "zh-cn": "想见你 (电影)",
+                            "zh-tw": "想見你 (電影)",
+                        },
                         "extract": "2022年上映，為電視劇《想見你》的同名續篇電影。",
                         "pageprops": {"wikibase_item": "Q115000000"},
                         "fullurl": "https://zh.wikipedia.org/wiki/想見你_(電影)",
@@ -53,10 +57,23 @@ class WikipediaAdapterTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["facts"][0]["wikibase_item"], "Q115000000")
+        self.assertEqual(result["facts"][0]["title"], "想见你 (电影)")
+        self.assertEqual(
+            result["facts"][0]["canonical_title"],
+            "想見你 (電影)",
+        )
+        self.assertEqual(
+            result["facts"][0]["chinese_title"],
+            "想见你 (电影)",
+        )
         self.assertIn("續篇電影", result["facts"][0]["extract"])
         self.assertEqual(result["facts"][0]["year"], "2022")
         self.assertEqual(result["facts"][0]["media_type"], "movie")
         self.assertEqual(result["facts"][1]["language"], "en")
+        zh_params = get_mock.call_args_list[0].kwargs["params"]
+        self.assertEqual(zh_params["variant"], "zh-cn")
+        self.assertEqual(zh_params["converttitles"], 1)
+        self.assertIn("varianttitles", zh_params["inprop"])
         self.assertEqual(
             result["source_urls"],
             [

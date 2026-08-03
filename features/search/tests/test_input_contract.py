@@ -2,6 +2,7 @@ import unittest
 
 from telepiplex_search.input_contract import (
     classify_search_input,
+    extract_message_urls,
     has_ambiguous_bare_number,
 )
 
@@ -17,6 +18,20 @@ class InputContractTest(unittest.TestCase):
         self.assertEqual(
             (episode.scope, episode.season_number, episode.episode_number),
             ("episode", 1, 3),
+        )
+        self.assertEqual(season.media_type, "series")
+
+    def test_year_and_media_type_are_separate_from_clean_title(self):
+        movie = classify_search_input("康斯坦丁 2005 电影")
+        series = classify_search_input("康斯坦丁（电视剧） 2014")
+
+        self.assertEqual(
+            (movie.title, movie.year, movie.media_type, movie.raw_query),
+            ("康斯坦丁", "2005", "movie", "康斯坦丁 2005"),
+        )
+        self.assertEqual(
+            (series.title, series.year, series.media_type, series.raw_query),
+            ("康斯坦丁", "2014", "series", "康斯坦丁 2014"),
         )
 
     def test_nfkc_and_punctuation_keep_the_full_title(self):
@@ -100,6 +115,30 @@ class InputContractTest(unittest.TestCase):
         self.assertEqual(parsed.link.entity_id, "35314632")
         self.assertEqual(parsed.link.scope, "work")
 
+    def test_share_text_extracts_one_mobile_douban_entity(self):
+        raw = (
+            "分享《繁花》\n"
+            "https://m.douban.com/movie/subject/36490422/?from=share"
+        )
+
+        parsed = classify_search_input(raw)
+
+        self.assertEqual(parsed.kind, "link")
+        self.assertEqual(parsed.link.provider, "douban")
+        self.assertEqual(parsed.link.entity_id, "36490422")
+        self.assertEqual(parsed.urls, (
+            "https://m.douban.com/movie/subject/36490422/?from=share",
+        ))
+        self.assertEqual(parsed.fallback_title, "分享《繁花》")
+
+    def test_url_extraction_strips_share_punctuation(self):
+        self.assertEqual(
+            extract_message_urls(
+                "见：https://zh.wikipedia.org/wiki/%E7%B9%81%E8%8A%B1。"
+            ),
+            ("https://zh.wikipedia.org/wiki/%E7%B9%81%E8%8A%B1",),
+        )
+
     def test_tvdb_work_season_and_episode_links(self):
         series = classify_search_input("https://thetvdb.com/series/411469")
         season = classify_search_input("https://thetvdb.com/seasons/205768")
@@ -108,6 +147,14 @@ class InputContractTest(unittest.TestCase):
         self.assertEqual((series.link.media_type, series.link.scope), ("series", "work"))
         self.assertEqual((season.link.media_type, season.link.scope), ("series", "season"))
         self.assertEqual((episode.link.media_type, episode.link.scope), ("series", "episode"))
+
+    def test_tvdb_localized_link_is_supported(self):
+        parsed = classify_search_input(
+            "https://thetvdb.com/zh-CN/series/411469"
+        )
+
+        self.assertEqual(parsed.kind, "link")
+        self.assertEqual(parsed.link.entity_id, "411469")
 
     def test_wikipedia_article_link_is_a_supported_exact_anchor(self):
         parsed = classify_search_input(
@@ -122,11 +169,46 @@ class InputContractTest(unittest.TestCase):
         )
         self.assertEqual(parsed.link.scope, "work")
 
-    def test_malformed_supported_link_does_not_become_text_search(self):
+    def test_wikipedia_mobile_article_uses_language_identity(self):
+        parsed = classify_search_input(
+            "https://zh.m.wikipedia.org/wiki/%E7%B9%81%E8%8A%B1_(2023%E5%B9%B4%E7%94%B5%E8%A7%86%E5%89%A7)"
+        )
+
+        self.assertEqual(parsed.kind, "link")
+        self.assertEqual(parsed.link.provider, "wikipedia")
+        self.assertTrue(parsed.link.entity_id.startswith("zh:繁花"))
+
+    def test_supported_non_entity_page_can_be_resolved_or_downgraded(self):
         parsed = classify_search_input("https://thetvdb.com/search?query=glory")
 
+        self.assertEqual(parsed.kind, "resolvable_link")
+        self.assertEqual(parsed.urls, (
+            "https://thetvdb.com/search?query=glory",
+        ))
+
+    def test_short_wikipedia_link_requires_resolution(self):
+        parsed = classify_search_input("分享 https://w.wiki/AbCd")
+
+        self.assertEqual(parsed.kind, "resolvable_link")
+        self.assertEqual(parsed.link.provider, "wikipedia")
+
+    def test_duplicate_links_for_same_entity_are_one_link(self):
+        parsed = classify_search_input(
+            "https://movie.douban.com/subject/1/ "
+            "https://m.douban.com/movie/subject/1/"
+        )
+
+        self.assertEqual(parsed.kind, "link")
+        self.assertEqual(parsed.link.entity_id, "1")
+
+    def test_multiple_distinct_entities_are_rejected(self):
+        parsed = classify_search_input(
+            "https://movie.douban.com/subject/1/ "
+            "https://movie.douban.com/subject/2/"
+        )
+
         self.assertEqual(parsed.kind, "invalid_link")
-        self.assertEqual(parsed.reason, "unsupported_metadata_link")
+        self.assertEqual(parsed.reason, "multiple_metadata_entities")
 
     def test_provider_lookalike_domains_are_not_trusted_as_metadata_links(self):
         for url in (

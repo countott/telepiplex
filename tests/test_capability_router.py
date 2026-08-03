@@ -29,6 +29,7 @@ class CapabilityRouterTest(unittest.IsolatedAsyncioTestCase):
         requires=(),
         commands=(),
         callbacks=(),
+        direct_message_hosts=(),
     ):
         from app.runtime.plugin_manifest import PluginManifest
 
@@ -50,12 +51,49 @@ class CapabilityRouterTest(unittest.IsolatedAsyncioTestCase):
                 for name in commands
             ],
             "callbacks": list(callbacks),
+            "direct_message_hosts": list(direct_message_hosts),
             "source": {
                 "repository": "origin",
                 "branch": f"feature/{plugin_id}",
                 "commit": "a" * 40,
             },
         })
+
+    async def test_direct_message_route_matches_declared_hosts_only(self):
+        from app.runtime.capability_router import CapabilityRouter
+
+        router = CapabilityRouter()
+        router.activate(
+            "search",
+            self._manifest(
+                "search",
+                direct_message_hosts=(
+                    "douban.com",
+                    "wikipedia.org",
+                    "w.wiki",
+                ),
+            ),
+            FakeClient(),
+        )
+
+        for text in (
+            "分享 https://m.douban.com/movie/subject/35314632/",
+            "https://zh.m.wikipedia.org/wiki/%E7%B9%81%E8%8A%B1",
+            "短链 https://w.wiki/AbCd",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    router.direct_message_route(text).plugin_id,
+                    "search",
+                )
+
+        for text in (
+            "普通文本",
+            "https://douban.com.evil.example/subject/1/",
+            "https://example.com/?next=https://douban.com/subject/1/",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(router.direct_message_route(text))
 
     async def test_routes_capability_with_context_and_idempotency(self):
         from app.runtime.capability_router import CapabilityRouter

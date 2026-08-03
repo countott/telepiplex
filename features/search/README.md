@@ -1,72 +1,101 @@
 # search Feature
 
-该目录只包含媒体搜索 Feature 源码。search 1.2.0 将普通文本和 Wikipedia、豆瓣、TVDB 直链接入同一条候选、用户选择、严格元数据与 Prowlarr 管线。
+search 1.5.0 使用“豆瓣发现、用户确认、确认后增强”的分阶段流程，避免首次搜索把不同来源、不同语言和不同作品混成一组候选。本版本不改变业务流程，修复 AI 禁用开关、Prowlarr torrent 重定向与纯文本 magnet 解析，以及 TVDB 零编号保真问题。
 
-普通文本由程序并发广泛召回全部已启用 Provider 的事实，不按标题相似度、年份一致性或来源数量提前淘汰。发现阶段若同一 Provider 的同一稳定 ID 返回互相矛盾的版本，程序会保留独立事实版本，不在用户选择前宣判哪一条正确。AI 只负责把真实事实 ID 整理为 0–6 个作品候选，识别跨来源身份以及 root、season、episode、related work 层级；程序严格验证 AI 引用的事实 ID，最终由用户在多个作品候选中选择。首轮零事实时允许 AI 生成一次纠错或别名查询，但最终候选仍必须来自 Provider 的真实事实。
+## 发起搜索
 
-候选保存发现阶段已有的来源链接、稳定 ID 和海报，无法确认的来源保留为 `unresolved`。Wikipedia、豆瓣和 TVDB 三个来源均已确认时，候选标记为 `v1`；只有一至两个来源时标记为可展示的 `v0`，同时显示具体失败来源，不因来源不全提前丢弃候选。发现阶段不会为了补齐来源而对所有候选重新搜索。
+- `/s 片名` 或 `/search 片名` 只接受普通文本片名。
+- `/s <链接>` 不再兼容，系统会提示直接发送链接。
+- 可以把豆瓣、Wikipedia 或 TVDB 的 PC、手机、本地化页面、分享文本或短链接直接发送到当前 Telegram 对话；无需命令，适用于系统分享面板。
+- 一条消息只能指向一个作品实体。多个不同作品链接会直接提示链接无效。
+- 豆瓣、Wikipedia 和 TVDB 的稳定作品链接会锁定该实体并跳过文本候选发现。无法从分享页提取稳定实体但能读取可靠页面标题时，标题才会回到普通文本搜索。
 
-纯数字片名可用中文或英文引号明确标记，例如 `/s "1917"` 或
-`/s “1917”`；引号只用于声明这是片名，不进入 Provider 查询。未加引号的
-`/s 1917` 仍按完整片名查询，不会把 `1917` 自动改写为年份条件。
+## 普通文本发现
 
-直链入口先精确读取稳定 ID 并锁定用户锚点，再用页面事实反查其他 Provider。稳定 ID 可直接证明时由程序绑定；存在多个近似条目时由 AI 选择属于锚点的事实，但不能改变锚定作品或生成第二组候选。直链始终形成一个锁定候选。
+普通文本只由豆瓣承载作品发现。程序先清理标题、年份、电影/剧集类型和季集范围，再生成第一轮豆瓣 query；Wikipedia 和 TVDB 不参与首次召回。
 
-文本最终只有一个候选时自动进入下一步；2–6 个候选通过一条编号海报拼图消息交给用户选择；零候选明确返回 `no_match`。拼图缺失单张海报时使用编号占位卡，全部缺失时降级为文本。候选一经展示即锁定作品身份；选中后若该候选缺少 Provider，才只针对这个候选使用其已绑定的跨语言标题、年份和媒体类型补查，不触碰或重排其他候选，也不能改变用户选中的候选 ID 和锚点。
+豆瓣结果先按 subject ID 去重并过滤用户明确指定的媒体类型。只有标题、年份和类型形成唯一硬匹配时才自动确认，并且不调用 AI。其他情况进入一次保留完整上下文的统一 AI 搜索裁决：
 
-选中候选的定向补查结束后，程序只精确读取该候选保存的固定链接，由页面事实构建严格 `media_metadata v1`。发现阶段的临时事实版本 ID 会按 Provider 稳定 ID 映射回精确事实；锚点来源自身冲突会明确报错，非锚点来源自身冲突只隔离该来源并写入 `unresolved`，不会否定用户已经选择的作品。补查失败的 `v0` 保留已有链接、海报和失败状态，并沿用与用户直链相同的精确读取与元数据门禁。严格 v1 保存根身份、稳定 ID、全部来源链接、季集层级、TVDB inventory、标题、别名、海报、字段来源、AI 判断与 unresolved 状态。媒体类型冲突返回 `metadata_conflict`；必要字段不足返回 `metadata_incomplete`；固定链接本身读取失败单独报告。
+- AI 只能引用本轮真实豆瓣 subject ID，不能生成作品或修改来源事实。
+- AI 最多返回 1–5 个候选；原始池有多个结果时不得缩成一个来取得自动确认权。
+- 第一轮零结果或全部不相关时，AI 只能改写一次业务 query；第二轮不能再次改写。
+- AI 超时、服务错误或结构不合规时，程序用完全相同的上下文原样重试一次，不重新调用豆瓣。
+- AI 技术重试仍失败但豆瓣已有结果时，按豆瓣原始顺序展示前 5 个；豆瓣为零时提示修改关键词。
 
-《蜂蜜与四叶草》这类来源粒度不同的剧集会形成一个层级候选：TVDB 和 Wikipedia 保存为 `series_root`，豆瓣第一、二季分别保存为 season 1、season 2；真人电影仍是独立作品。AI 判断的季集号必须通过 TVDB inventory 验证，失败时不得强行挂载。
+一个非硬匹配候选仍显示 `就是它 / 都不是`；多个候选逐项选择，并提供 `都不是`。用户点击 `都不是` 后立即结束，不重搜、不改写，也不调用后续来源。
 
-v1 通过后才由程序生成 Prowlarr Query，最终元数据和查询构造不会交给 AI。日本动画依次优先使用官方罗马字、官方英文名、其他来源拉丁别名、原名和用户原文，其他作品使用同一事实优先级并去重；季集后缀只来自 v1。Prowlarr 不参与作品身份判断。
+候选文案只显示：
 
-search 1.2.0 不设置 30/65/90 秒业务规划预算，也不会把 AI 较慢转换成无候选。Provider、AI 和 Prowlarr 的 HTTP 客户端仍使用可配置故障超时。AI 技术故障不会退化为程序评分候选，交互会明确区分来源失败、来源限流、AI `no_match`、AI 故障、候选绑定失败、锚点来源事实冲突、固定链接读取失败、Prowlarr 全部失败和 v1 不完整，并在已进入前台链路时提供对应提示以及重试和退出。一个或两个来源成功时仍展示 `v0` 候选；零事实时明确列出失败来源；所有来源均不可用时明确告知当前来源全部不可用。
-
-Feature 同时提供无状态的 `media.search.resolve_metadata`，供 direct magnet 下载后的 rename 实时复用同一套证据门禁。用户确认后的 `media_metadata v1` 与 `naming_metadata` 仍按合同传给 `download.provider`，再由下载完成事件交给 rename；搜索证据与候选仍是当前请求内状态，不创建媒体实体数据库。
-
-运行配置位于 `/config/plugins/search/config.yaml`。Feature 不包含 telepiplex、Telegram 或其他 Feature 源码。
-
-Wikipedia 和豆瓣默认可直接取证，不需要额外 API Key。TVDB 与 AI 默认启用，但仍分别需要填写 TVDB API Key，以及 AI API URL、Key 和模型。所有 TVDB/AI 凭据只由服务端适配器读取，不会进入模型消息或工具结果。任一来源关闭、凭据缺失、鉴权失败、超时、限流、被拦截或服务不可用时都会保留独立状态；其余来源会继续工作，最终是否可继续由用户选中候选后的严格元数据门禁决定。
-
-Prowlarr 继续用 Movie/TV 分类做媒体类型粗筛，并按已启用 Indexer 和当前范围的每条 Query 独立有界并发查询；成功的查询返回多少就增量合并、门禁、评分和更新多少。一个 Query 失败不会丢弃同 Indexer 的其他结果，只有全部 Query 都失败才把该 Indexer 计为异常。搜索中和完成后都只显示当前 Top 12：海报候选卡保留作品身份，片源消息不重复长片名，只显示最终可选条目数、Indexer 完成数和异常数；每条用一行展示范围、去重后的画质/片源/编码/动态范围/声道与音频格式、版本标记、约数大小、做种和发布组。显式 `2CH` 会显示为 `2.0`，但不会仅凭 AAC 推断声道。相同片源的多 Query 或多 Indexer 镜像在内部合并，不向用户暴露“版本”或“来源组”概念；原始评分与真实错误详情只保留在内部状态和日志。按钮内部绑定稳定片源 ID，后续重排不会改变已经显示过的按钮所指向的片源。`search.prowlarr.timeout` 是全局搜索上限，`search.prowlarr.indexer_timeout` 是单 Indexer 上限（默认 75 秒）。
-
-Prowlarr 结果先经过身份与范围正确性硬门禁，再进行片源质量评分；`Season 02` 和 `Complete Season 02` 都会按明确的第二季整季包解析，不能混入其他季或全剧结果。单集、单季和多季包不会混排，最多展示 12 个结果且不会自动降级范围。公开配置入口是 `search.scoring`：
-- `prefer_resolution`、`prefer_source`、`prefer_codec`、`prefer_audio`、`reject_keywords` 定义默认关键词组
-- `keyword_scores` 用于标题关键词加权
-- `indexer_scores` 用于按 indexer 名称加权
-
-如果不填 `search.scoring`，Feature 会回退到内置默认权重。
-
-search 的默认测试包含 17 个命名作品家族，其中 12 个是复杂剧集：
-`进击的巨人`、`深夜食堂`、`三体`、`西部世界`、`雪国列车`、
-`汉尼拔`、`东京爱情故事`、`射雕英雄传`、`大奥`、`康斯坦丁`、
-`Fargo` 和 `Watchmen`。矩阵验证真实来源形状、多季条目收敛、重拍版与
-同名电影/剧集隔离、跨地区和动画/真人改编、候选可区分、严格元数据、
-Prowlarr Query 和用户界面文案。
-
-Wikipedia 与豆瓣的无凭据真实网络门禁需要显式启用，避免普通单元测试
-被外部网络波动影响：
-
-```bash
-TELEPIPLEX_SEARCH_PUBLIC_LIVE=1 \
-  PYTHONDONTWRITEBYTECODE=1 \
-  PYTHONPATH=features/search/src:sdk/src \
-  python -m pytest -q -p no:cacheprovider \
-  features/search/tests/test_live_search_usability.py::PublicSourceLiveUsabilityTest
+```text
+简中标题（年份）
+Official English Title
+类型：电影 / 剧集
+来源：豆瓣
 ```
 
-完整 TVDB 与 AI 真实门禁读取实际 Search 配置，但不会输出凭据：
+英文标题只有豆瓣提供可靠字段时才显示。界面不显示 AI 置信度、理由、内部评分、候选版本或未补全来源。
+
+豆瓣混合标题会按来源字段拆分：`后室 Backrooms` 的简中主标题只保留
+`后室`，`蜂蜜与四叶草 ハチミツとクローバー` 的日文部分进入原名字段。
+不同文字系统不得整体写入简中标题。
+
+## 确认后增强
+
+用户或程序确认一个作品后，search 锁定其稳定身份，再执行确定性的顺序增强：
+
+1. Wikipedia query 只使用已确认的简中标题、年份和媒体类型；只有唯一同作品结果才补简中/英文/原名、别名和 Wikidata 身份。
+2. 剧集随后使用 Wikipedia 验证的英文标题，或豆瓣已有的可靠英文/原名，加年份和 series 类型约束查询 TVDB。
+3. TVDB 只有唯一匹配时才补 Series ID 和季集 inventory。该阶段不调用 AI。
+
+Wikipedia 失败或歧义不阻断搜索。TVDB 不可用、无可靠英文身份或无法唯一匹配时，剧集降级为 `whole_series`，写入 `warning:tvdb_inventory_unavailable`，不展示季/单集选择，也不会把未经验证的季集号写入 Prowlarr query。
+
+中文 Wikipedia 请求使用 `zh-cn` 显示变体，同时保留规范标题和 Wikidata
+身份；Wikipedia 标题不得覆盖已经确认的豆瓣简中标题。TVDB 英文标题只接受
+明确的 `eng/en` 翻译，或 `original_language=en` 的主标题；没有可靠语言
+标签的拉丁别名不再当作英文。
+
+选中后只精确读取已保存的固定来源链接。豆瓣锚点必须保持可读且稳定 ID 一致；其他来源冲突会隔离并记录，不得改变用户确认的作品。
+
+## Prowlarr 与下游
+
+严格 `media_metadata v1` 形成后，程序才生成唯一、来源已验证的 Prowlarr
+query；AI 不生成资源 query，来源别名和用户原始输入也不会混入 query：
+
+- 单电影：`Canonical Title YYYY`；
+- 多季全集：`Canonical Title`；
+- 单季：`Canonical Title Sxx`；
+- 单集：`Canonical Title SxxExx`。
+
+Prowlarr 继续按 Indexer 和 query 有界并发搜索，执行身份与范围硬门禁、去重
+和质量排序，最多展示 12 个结果。电影片源标题必须包含匹配年份；多季全集、
+单季和单集不要求年份。整剧或单季标题出现年份时，只使用已验证的剧集播出
+区间或目标季年份判断；单集年份只作为软证据。选中片源后继续交给
+`download.provider`，下载完成后由 rename 复用确认过的 `media_metadata v1`。
+
+search 仍提供无状态的 `media.search.resolve_metadata` capability。rename
+提供的结构化 probe 会在无交互候选歧义判断前只按电影/剧集类型收窄候选，
+再在唯一剧集候选上应用季集范围；probe 不修改作品标题或身份，也不会替用户
+从多个同类型作品中做选择。运行配置位于
+`/config/plugins/search/config.yaml`；Wikipedia 和豆瓣无需 API Key，TVDB
+与 AI 使用服务端配置，凭据不会进入模型上下文或结构化日志。
+
+## 日志
+
+每个搜索会话使用稳定的 `search_session_id`。日志记录输入分类、直链解析、豆瓣 query 与结果摘要、硬匹配、统一 AI 请求/响应和原样技术重试、候选展示、用户确认或拒绝、Wikipedia/TVDB 增强、metadata probe 类型约束前后的候选数量、降级原因、最终 `search.prowlarr_query_built`、`search.release_gate_evaluated` 以及唯一终态 `search.completed`。日志不记录 API Key、Token、Cookie、Authorization、magnet 或完整 URL；TVDB inventory 只记录数量。
+
+## 测试与构建
 
 ```bash
-TELEPIPLEX_SEARCH_LIVE_CONFIG=/config/plugins/search/config.yaml \
-  PYTHONDONTWRITEBYTECODE=1 \
-  PYTHONPATH=features/search/src:sdk/src \
-  python -m pytest -q -p no:cacheprovider \
-  features/search/tests/test_live_search_usability.py
+PY=/Users/young/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
+  "$PY" -m pytest -q -p no:cacheprovider tests
 ```
 
+构建示例：
+
 ```bash
-python tools/build_feature.py features/search /tmp/search-1.2.0.tpx \
+python tools/build_feature.py features/search /tmp/search-1.5.0.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

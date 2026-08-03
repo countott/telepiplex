@@ -134,6 +134,59 @@ class DoubanAdapterTest(unittest.TestCase):
             all("\u200e" not in value and "(2012)" not in value for value in fact["aliases"])
         )
 
+    def test_mixed_chinese_and_english_title_does_not_pollute_chinese_title(self):
+        fact = douban._normalize_payload(
+            {
+                "id": "1",
+                "title": "后室 Backrooms",
+                "original_title": "Backrooms",
+                "original_language": "en",
+                "official_english_title": "Backrooms",
+                "year": "2022",
+                "type": "movie",
+            },
+            "https://movie.douban.com/subject/1/",
+        )
+
+        self.assertEqual(fact["chinese_title"], "后室")
+        self.assertEqual(fact["official_english_title"], "Backrooms")
+        self.assertEqual(fact["original_title"], "Backrooms")
+
+    def test_mixed_chinese_and_japanese_title_does_not_pollute_chinese_title(self):
+        fact = douban._normalize_payload(
+            {
+                "id": "2",
+                "title": "蜂蜜与四叶草 ハチミツとクローバー",
+                "original_title": "ハチミツとクローバー",
+                "original_language": "ja",
+                "official_english_title": "Honey and Clover",
+                "year": "2005",
+                "type": "tv",
+            },
+            "https://movie.douban.com/subject/2/",
+        )
+
+        self.assertEqual(fact["chinese_title"], "蜂蜜与四叶草")
+        self.assertEqual(fact["original_title"], "ハチミツとクローバー")
+        self.assertEqual(fact["official_english_title"], "Honey and Clover")
+
+    def test_original_title_suffix_is_removed_even_when_both_titles_use_han(self):
+        fact = douban._normalize_payload(
+            {
+                "id": "3",
+                "title": "冰果 氷菓",
+                "original_title": "氷菓",
+                "original_language": "ja",
+                "official_english_title": "Hyouka",
+                "year": "2012",
+                "type": "tv",
+            },
+            "https://movie.douban.com/subject/3/",
+        )
+
+        self.assertEqual(fact["chinese_title"], "冰果")
+        self.assertEqual(fact["original_title"], "氷菓")
+
     @patch("telepiplex_search.adapters.douban.requests.get")
     def test_successful_empty_search_is_not_found(self, get_mock):
         get_mock.return_value = response(text="<html>没有影视条目</html>")

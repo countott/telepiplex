@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import requests
 
@@ -102,6 +102,67 @@ class ProwlarrAdapterTest(unittest.TestCase):
 
         _url, kwargs = get.call_args
         self.assertEqual(kwargs["params"]["categories"], 5001)
+
+    @patch.object(prowlarr.requests, "get")
+    def test_torrent_download_follows_http_redirect_before_conversion(self, get):
+        redirected = Mock(
+            status_code=302,
+            headers={"Location": "https://cdn.example/release.torrent"},
+            content=b"",
+            text="",
+        )
+        redirected.raise_for_status.return_value = None
+        torrent_data = b"d4:infod4:name7:Release6:lengthi1eee"
+        downloaded = Mock(
+            status_code=200,
+            headers={},
+            content=torrent_data,
+            text="",
+        )
+        downloaded.raise_for_status.return_value = None
+        get.side_effect = [redirected, downloaded]
+
+        result = prowlarr.resolve_prowlarr_download_url({
+            "title": "Release",
+            "protocol": "torrent",
+            "download_url": "https://indexer.example/download/1",
+        })
+
+        self.assertEqual(
+            result,
+            prowlarr.magnet_from_torrent_bytes(torrent_data, "Release"),
+        )
+        self.assertEqual(
+            [call.args[0] for call in get.call_args_list],
+            [
+                "https://indexer.example/download/1",
+                "https://cdn.example/release.torrent",
+            ],
+        )
+        self.assertTrue(all(
+            call.kwargs["allow_redirects"] is False
+            for call in get.call_args_list
+        ))
+
+    @patch.object(prowlarr.requests, "get")
+    def test_plain_text_magnet_download_is_accepted(self, get):
+        magnet = "magnet:?xt=urn:btih:" + "a" * 40 + "&dn=Release"
+        response = Mock(
+            status_code=200,
+            headers={"Content-Type": "text/plain"},
+            content=magnet.encode(),
+            text=magnet,
+        )
+        response.raise_for_status.return_value = None
+        get.return_value = response
+
+        result = prowlarr.resolve_prowlarr_download_url({
+            "title": "Release",
+            "protocol": "torrent",
+            "download_url": "https://indexer.example/download/1",
+        })
+
+        self.assertEqual(result, magnet)
 
 
 if __name__ == "__main__":

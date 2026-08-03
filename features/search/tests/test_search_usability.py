@@ -946,16 +946,18 @@ class SearchUsabilityTest(unittest.IsolatedAsyncioTestCase):
                     re.sub(r"<[^>]+>", "", action["text"])
                 )
                 self.assertIn("请选择作品候选", visible)
-                self.assertIn("来源完整", visible)
-                self.assertIn("维基百科", visible)
+                self.assertIn("来源：豆瓣", visible)
+                self.assertNotIn("来源完整", visible)
+                self.assertNotIn("匹配参考", visible)
+                self.assertNotIn("维基百科", visible)
                 self.assertIn("豆瓣", visible)
-                self.assertIn("TVDB", visible)
+                self.assertNotIn("TVDB", visible)
                 self.assertEqual(
                     action["data"]["keyboard"][-1],
                     [{
-                        "text": "退出",
+                        "text": "都不是",
                         "callback_data": (
-                            f"search:cancel:{plan['plan_id']}"
+                            f"search:reject:{plan['plan_id']}"
                         ),
                     }],
                 )
@@ -1006,7 +1008,8 @@ class SearchUsabilityTest(unittest.IsolatedAsyncioTestCase):
             "plan": plan,
             "candidates": plan["candidates"],
         })
-        self.assertIn("维基百科查询受限", action["text"])
+        self.assertIn("来源：豆瓣", action["text"])
+        self.assertNotIn("维基百科查询受限", action["text"])
         self.assertNotIn("wikipedia:rate_limited", action["text"])
 
     async def test_missing_tvdb_keeps_movie_and_series_candidates_visible(self):
@@ -1044,9 +1047,19 @@ class SearchUsabilityTest(unittest.IsolatedAsyncioTestCase):
             for candidate in plan["candidates"]
         }
         self.assertEqual(readiness, {
-            "series": False,
+            "series": True,
             "movie": True,
         })
+        series = next(
+            candidate
+            for candidate in plan["candidates"]
+            if candidate["media_metadata"]["placement"]["library_type"]
+            == "series"
+        )
+        self.assertIn(
+            "warning:tvdb_inventory_unavailable",
+            series["media_metadata"]["warnings"],
+        )
         action = SearchFeature(
             config={},
             host=None,
@@ -1054,7 +1067,7 @@ class SearchUsabilityTest(unittest.IsolatedAsyncioTestCase):
             "plan": plan,
             "candidates": plan["candidates"],
         })
-        self.assertIn("TVDB缺少凭据", action["text"])
+        self.assertNotIn("TVDB缺少凭据", action["text"])
         self.assertNotIn("tvdb:credential_missing", action["text"])
 
     async def test_japanese_animation_without_romanized_provider_field_uses_fallback(self):

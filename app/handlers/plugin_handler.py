@@ -454,22 +454,37 @@ async def dynamic_message_gateway(update, context):
         return
     bot_data = context.application.bot_data
     sessions = bot_data.get(SESSION_KEY)
-    if not isinstance(sessions, dict):
-        return
     key = _session_key(update)
-    session = sessions.get(key)
-    if not isinstance(session, dict):
-        return
-    if float(session.get("expires_at") or 0) <= time.time():
-        _drop_session(bot_data, key)
-        await update.effective_message.reply_text("⚠️ Feature 会话已超时，请重新发起命令。")
-        return
     router = bot_data.get(ROUTER_KEY)
-    route = router.plugin_route(str(session.get("plugin_id") or "")) if router is not None else None
-    if route is None:
-        _drop_session(bot_data, key)
-        await update.effective_message.reply_text("⚠️ Feature 已停用或更新，本次会话已结束。")
-        return
+    session = sessions.get(key) if isinstance(sessions, dict) else None
+    if isinstance(session, dict):
+        if float(session.get("expires_at") or 0) <= time.time():
+            _drop_session(bot_data, key)
+            await update.effective_message.reply_text(
+                "⚠️ Feature 会话已超时，请重新发起命令。"
+            )
+            return
+        route = (
+            router.plugin_route(str(session.get("plugin_id") or ""))
+            if router is not None
+            else None
+        )
+        if route is None:
+            _drop_session(bot_data, key)
+            await update.effective_message.reply_text(
+                "⚠️ Feature 已停用或更新，本次会话已结束。"
+            )
+            return
+    else:
+        route = (
+            router.direct_message_route(
+                str(update.effective_message.text or "")
+            )
+            if router is not None
+            else None
+        )
+        if route is None:
+            return
     try:
         result = await route.client.request(
             "message.dispatch",

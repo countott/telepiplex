@@ -1001,6 +1001,46 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(methods, ["command.dispatch", "message.dispatch"])
         self.assertNotIn("telepiplex_plugin_sessions", context.application.bot_data)
 
+    async def test_supported_link_without_session_routes_directly_to_feature(self):
+        from app.handlers.plugin_handler import dynamic_message_gateway
+
+        client = AsyncMock()
+        client.request.return_value = {
+            "actions": [{"kind": "send_message", "text": "已接收作品链接"}],
+            "session": {"state": "close"},
+        }
+        route = SimpleNamespace(
+            plugin_id="search",
+            client=client,
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        router = Mock()
+        router.direct_message_route.return_value = route
+        update, context, _manager = self._request([], user_id=1)
+        update.effective_message.text = (
+            "分享《繁花》 "
+            "https://m.douban.com/movie/subject/36490422/"
+        )
+        context.application.bot_data.update({
+            "telepiplex_plugin_router": router,
+        })
+
+        with patch(
+            "app.handlers.plugin_handler.init.check_user",
+            return_value=True,
+        ):
+            await dynamic_message_gateway(update, context)
+
+        router.direct_message_route.assert_called_once_with(
+            update.effective_message.text
+        )
+        method, params = client.request.await_args.args
+        self.assertEqual(method, "message.dispatch")
+        self.assertEqual(params["text"], update.effective_message.text)
+        update.effective_message.reply_text.assert_awaited_once_with(
+            "已接收作品链接"
+        )
+
     async def test_route_loss_closes_feature_session_without_dispatch(self):
         from app.handlers.plugin_handler import dynamic_message_gateway
 

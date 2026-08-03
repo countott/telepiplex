@@ -71,6 +71,32 @@ class PluginManifestTest(unittest.TestCase):
             PluginManifest.from_mapping(value)
         self.assertEqual(raised.exception.code, "invalid_manifest")
 
+    def test_direct_message_hosts_are_optional_normalized_and_immutable(self):
+        from app.runtime.plugin_contract import ContractError
+        from app.runtime.plugin_manifest import PluginManifest
+
+        value = self._value()
+        value["direct_message_hosts"] = [
+            "Douban.COM",
+            "wikipedia.org",
+        ]
+
+        manifest = PluginManifest.from_mapping(value)
+
+        self.assertEqual(
+            manifest.direct_message_hosts,
+            ("douban.com", "wikipedia.org"),
+        )
+        self.assertEqual(
+            PluginManifest.from_mapping(self._value()).direct_message_hosts,
+            (),
+        )
+
+        value["direct_message_hosts"] = ["https://douban.com"]
+        with self.assertRaises(ContractError) as raised:
+            PluginManifest.from_mapping(value)
+        self.assertEqual(raised.exception.code, "invalid_manifest")
+
     def test_rejects_missing_identity_and_invalid_versions(self):
         from app.runtime.plugin_contract import ContractError
         from app.runtime.plugin_manifest import PluginManifest

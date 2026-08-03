@@ -214,6 +214,116 @@ class ReleaseGateTest(unittest.TestCase):
             1,
         )
 
+    def test_movie_release_without_year_is_rejected(self):
+        contract = {
+            "identity": {
+                "english_title": "Backrooms",
+                "official_english_title": "Backrooms",
+                "year": "2022",
+            },
+            "retrieval": {"media_type": "movie", "scope": "movie"},
+            "placement": {"library_type": "movie"},
+            "items": [],
+            "evidence": {"decision": {"scope": "movie"}},
+        }
+
+        result = gate_releases(
+            [release("Backrooms.1080p.WEB-DL", "a")],
+            contract,
+        )
+
+        self.assertEqual(result.eligible, ())
+        self.assertEqual(result.rejection_counts["missing_year"], 1)
+
+    def test_season_year_is_optional_and_accepts_series_or_season_year(self):
+        contract = series_contract(
+            scope="season",
+            expected_seasons=(1, 2),
+            season=2,
+        )
+        for item in contract["items"]:
+            if item["season_number"] == 2:
+                item["aired"] = "2006-09-21"
+
+        result = gate_releases(
+            [
+                release("The.Office.US.S02.1080p", "a"),
+                release("The.Office.US.2005.S02.1080p", "b"),
+                release("The.Office.US.2006.S02.1080p", "c"),
+                release("The.Office.US.2019.S02.1080p", "d"),
+            ],
+            contract,
+        )
+
+        self.assertEqual(
+            [item["title"] for item in result.eligible],
+            [
+                "The.Office.US.S02.1080p",
+                "The.Office.US.2005.S02.1080p",
+                "The.Office.US.2006.S02.1080p",
+            ],
+        )
+        self.assertEqual(result.rejection_counts["year_mismatch"], 1)
+
+    def test_whole_series_year_is_optional_but_present_year_uses_verified_run(self):
+        contract = series_contract(
+            scope="whole_series",
+            expected_seasons=(1, 2),
+        )
+        contract["items"][0]["aired"] = "2005-03-24"
+        contract["items"][1]["aired"] = "2006-09-21"
+
+        result = gate_releases(
+            [
+                release("The.Office.US.S01-S02.1080p", "a"),
+                release("The.Office.US.2005-2006.S01-S02.1080p", "b"),
+                release("The.Office.US.2006.S01-S02.1080p", "c"),
+                release("The.Office.US.2019.S01-S02.1080p", "d"),
+            ],
+            contract,
+        )
+
+        self.assertEqual(len(result.eligible), 3)
+        self.assertEqual(result.rejection_counts["year_mismatch"], 1)
+
+    def test_whole_series_does_not_compare_to_premiere_year_without_run_inventory(self):
+        contract = series_contract(
+            scope="whole_series",
+            expected_seasons=(),
+        )
+
+        result = gate_releases(
+            [
+                release(
+                    "The.Office.US.Complete.Series.2013.1080p",
+                    "a",
+                ),
+            ],
+            contract,
+        )
+
+        self.assertEqual(len(result.eligible), 1)
+        self.assertNotIn("year_mismatch", result.rejection_counts)
+
+    def test_episode_year_is_optional_soft_evidence(self):
+        contract = series_contract(
+            scope="episode",
+            expected_seasons=(1,),
+            season=1,
+            episode=1,
+        )
+        contract["items"][0]["aired"] = "2006-03-24"
+
+        result = gate_releases(
+            [
+                release("The.Office.US.S01E01.1080p", "a"),
+                release("The.Office.US.2006.S01E01.1080p", "b"),
+            ],
+            contract,
+        )
+
+        self.assertEqual(len(result.eligible), 2)
+
     def test_year_mismatch_missing_link_and_duplicate_are_reported(self):
         first = release("Midnight.Special.2016.1080p", "a")
         result = gate_releases(

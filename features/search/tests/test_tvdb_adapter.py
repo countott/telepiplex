@@ -12,7 +12,6 @@ sys.path.insert(0, str(ROOT / "app"))
 
 from telepiplex_search.adapters import tvdb
 from telepiplex_search.context import runtime_context
-from telepiplex_search.service import SearchFeature
 
 
 class TvdbAdapterTest(unittest.TestCase):
@@ -59,52 +58,13 @@ class TvdbAdapterTest(unittest.TestCase):
         with self.assertRaises(tvdb.TvdbAuthenticationError):
             tvdb._login_tvdb(tvdb._get_tvdb_config())
 
-    def test_feature_provider_reports_missing_credentials(self):
-        config = {
-            "metadata": {
-                "tvdb": {
-                    "enable": True,
-                    "api_key": "",
-                },
-            },
-        }
-        runtime_context.configure(config)
-        feature = SearchFeature(config=config, host=Mock())
-
-        result = feature._tvdb_provider({
-            "hypotheses": [{"title": "The Glory", "year": "2022"}],
-        })
-
-        self.assertEqual(result["status"], "credential_missing")
-
-    @patch(
-        "telepiplex_search.service.search_tvdb_movies",
-        side_effect=tvdb.TvdbAuthenticationError("rejected"),
-    )
-    def test_feature_provider_reports_authentication_failure(self, _search):
-        config = {
-            "metadata": {
-                "tvdb": {
-                    "enable": True,
-                    "api_key": "configured-secret",
-                },
-            },
-        }
-        runtime_context.configure(config)
-        feature = SearchFeature(config=config, host=Mock())
-
-        result = feature._tvdb_provider({
-            "hypotheses": [{"title": "The Glory", "year": "2022"}],
-        })
-
-        self.assertEqual(result["status"], "authentication_failed")
-
-    def test_korean_primary_name_uses_latin_alias_and_search_image(self):
+    def test_korean_primary_name_uses_explicit_english_translation_and_search_image(self):
         item = tvdb._normalize_search_item(
             {
                 "tvdb_id": "411469",
                 "name": "더 글로리",
-                "aliases": ["The Glory (2022)", "The Glory (KR)"],
+                "translations": {"eng": "The Glory"},
+                "aliases": ["La gloria", "The Glory (2022)"],
                 "image_url": "https://art.example/glory.jpg",
                 "year": "2022",
             },
@@ -184,6 +144,50 @@ class TvdbAdapterTest(unittest.TestCase):
         self.assertEqual(item["english_title"], "The Glory")
         self.assertIn("黑暗荣耀", item["aliases"])
 
+    def test_explicit_english_translation_beats_unlabelled_latin_translation(self):
+        item = tvdb._normalize_search_item(
+            {
+                "tvdb_id": "855",
+                "name": "Constantine",
+                "original_language": "eng",
+                "name_translated": "Constantino",
+                "translations": {
+                    "spa": "Constantino",
+                    "eng": "Constantine",
+                },
+            },
+            "movie",
+        )
+
+        self.assertEqual(item["official_english_title"], "Constantine")
+
+    def test_english_original_primary_name_beats_foreign_latin_alias(self):
+        item = tvdb._normalize_search_item(
+            {
+                "tvdb_id": "856",
+                "name": "The American",
+                "original_language": "eng",
+                "aliases": ["El americano", "Amerykanin"],
+            },
+            "movie",
+        )
+
+        self.assertEqual(item["official_english_title"], "The American")
+
+    def test_unlabelled_latin_values_are_not_treated_as_english(self):
+        item = tvdb._normalize_search_item(
+            {
+                "tvdb_id": "857",
+                "name": "La vida",
+                "original_language": "spa",
+                "name_translated": "Życie",
+                "aliases": ["La vie"],
+            },
+            "movie",
+        )
+
+        self.assertEqual(item["official_english_title"], "")
+
     def test_structured_japanese_titles_are_preserved(self):
         item = tvdb._normalize_search_item(
             {
@@ -215,22 +219,32 @@ class TvdbAdapterTest(unittest.TestCase):
         self.assertEqual(get_mock.call_args_list[1].args[0], "/movies/123/translations/eng")
 
     @patch.object(tvdb, "_tvdb_get")
-    def test_latin_alias_avoids_translation_request(self, get_mock):
-        get_mock.return_value = {
-            "data": [
-                {
-                    "tvdb_id": "411469",
-                    "name": "더 글로리",
-                    "aliases": ["The Glory (2022)"],
-                    "year": "2022",
-                }
-            ]
-        }
+    def test_unlabelled_latin_alias_uses_explicit_english_translation_endpoint(self, get_mock):
+        get_mock.side_effect = [
+            {
+                "data": [
+                    {
+                        "tvdb_id": "411469",
+                        "name": "더 글로리",
+                        "aliases": ["La gloria", "The Glory (2022)"],
+                        "year": "2022",
+                    }
+                ]
+            },
+            {"data": {"name": "The Glory", "language": "eng"}},
+        ]
 
         result = tvdb.search_tvdb_series("黑暗荣耀", "2022")
 
         self.assertEqual(result[0]["english_title"], "The Glory")
-        get_mock.assert_called_once_with("/search", params={"query": "黑暗荣耀", "type": "series", "year": "2022"})
+        self.assertEqual(
+            get_mock.call_args_list[0].args,
+            ("/search",),
+        )
+        self.assertEqual(
+            get_mock.call_args_list[1].args,
+            ("/series/411469/translations/eng",),
+        )
 
     @patch.object(tvdb, "_tvdb_get")
     def test_movie_artwork_uses_extended_image(self, get_mock):
@@ -241,6 +255,27 @@ class TvdbAdapterTest(unittest.TestCase):
             "https://art.example/movie.jpg",
         )
         get_mock.assert_called_once_with("/movies/123/extended", params={"short": True})
+
+    @patch.object(tvdb, "_entity_payload")
+    def test_special_season_number_zero_is_preserved(self, payload):
+        payload.return_value = {
+            "id": 99,
+            "seriesId": 411469,
+            "number": 0,
+        }
+
+        result = tvdb.get_tvdb_season("99")
+
+        self.assertEqual(result["season_number"], 0)
+
+    def test_episode_number_zero_is_not_treated_as_missing(self):
+        result = tvdb._normalize_episode({
+            "id": 100,
+            "seasonNumber": 1,
+            "number": 0,
+        })
+
+        self.assertEqual(result["episode_number"], 0)
 
     @patch.object(tvdb, "_tvdb_get")
     def test_series_episodes_preserve_special_season_zero(self, get_mock):

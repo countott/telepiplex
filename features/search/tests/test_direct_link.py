@@ -7,11 +7,109 @@ from telepiplex_search.adapters.wikipedia import WikipediaPageLookupError
 from telepiplex_search.direct_link import (
     DirectLinkError,
     resolve_direct_link,
+    resolve_shared_metadata_link,
 )
-from telepiplex_search.input_contract import MetadataLink
+from telepiplex_search.input_contract import MetadataLink, ParsedInput
 
 
 class DirectLinkTest(unittest.TestCase):
+    @patch("telepiplex_search.direct_link.requests.get")
+    def test_short_wikipedia_link_resolves_to_stable_article(self, get):
+        get.side_effect = [
+            type("Response", (), {
+                "status_code": 302,
+                "headers": {
+                    "Location": (
+                        "https://zh.wikipedia.org/wiki/"
+                        "%E7%B9%81%E8%8A%B1_(2023%E5%B9%B4%E7%94%B5%E8%A7%86%E5%89%A7)"
+                    ),
+                },
+                "text": "",
+                "url": "https://w.wiki/AbCd",
+            })(),
+            type("Response", (), {
+                "status_code": 200,
+                "headers": {},
+                "text": "<title>繁花 (2023年电视剧) - 维基百科</title>",
+                "url": (
+                    "https://zh.wikipedia.org/wiki/"
+                    "%E7%B9%81%E8%8A%B1_(2023%E5%B9%B4%E7%94%B5%E8%A7%86%E5%89%A7)"
+                ),
+            })(),
+        ]
+        parsed = ParsedInput(
+            kind="resolvable_link",
+            raw_query="分享 https://w.wiki/AbCd",
+            link=MetadataLink(
+                provider="wikipedia",
+                media_type="",
+                entity_id="",
+                scope="work",
+                url="https://w.wiki/AbCd",
+            ),
+            urls=("https://w.wiki/AbCd",),
+            fallback_title="分享",
+        )
+
+        link, fallback_title = resolve_shared_metadata_link(parsed)
+
+        self.assertEqual(link.provider, "wikipedia")
+        self.assertTrue(link.entity_id.startswith("zh:繁花"))
+        self.assertEqual(fallback_title, "分享")
+
+    @patch("telepiplex_search.direct_link.requests.get")
+    def test_unresolved_supported_page_returns_clean_page_title(self, get):
+        get.return_value = type("Response", (), {
+            "status_code": 200,
+            "headers": {},
+            "text": "<meta property='og:title' content='The Glory (2022)'>",
+            "url": "https://thetvdb.com/search?query=glory",
+        })()
+        parsed = ParsedInput(
+            kind="resolvable_link",
+            raw_query="https://thetvdb.com/search?query=glory",
+            link=MetadataLink(
+                provider="tvdb",
+                media_type="",
+                entity_id="",
+                scope="work",
+                url="https://thetvdb.com/search?query=glory",
+            ),
+            urls=("https://thetvdb.com/search?query=glory",),
+        )
+
+        link, fallback_title = resolve_shared_metadata_link(parsed)
+
+        self.assertIsNone(link)
+        self.assertEqual(fallback_title, "The Glory 2022")
+
+    @patch("telepiplex_search.direct_link.requests.get")
+    def test_redirect_outside_supported_hosts_is_rejected(self, get):
+        get.return_value = type("Response", (), {
+            "status_code": 302,
+            "headers": {"Location": "http://127.0.0.1/private"},
+            "text": "",
+            "url": "https://w.wiki/AbCd",
+        })()
+        parsed = ParsedInput(
+            kind="resolvable_link",
+            raw_query="https://w.wiki/AbCd",
+            link=MetadataLink(
+                provider="wikipedia",
+                media_type="",
+                entity_id="",
+                scope="work",
+                url="https://w.wiki/AbCd",
+            ),
+            urls=("https://w.wiki/AbCd",),
+        )
+
+        with self.assertRaisesRegex(
+            DirectLinkError,
+            "direct_link_redirect_rejected",
+        ):
+            resolve_shared_metadata_link(parsed)
+
     @patch("telepiplex_search.direct_link.lookup_wikipedia_page")
     def test_wikipedia_article_locks_wikibase_identity(self, lookup):
         lookup.return_value = {

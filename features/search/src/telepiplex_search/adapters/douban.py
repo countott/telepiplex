@@ -197,6 +197,32 @@ def _contains_japanese_script(value: str) -> bool:
     return bool(re.search(r"[\u3040-\u30ff]", value))
 
 
+def _chinese_title_part(title: str, original_title: str) -> str:
+    """Keep the provider's Chinese display title without a trailing foreign title."""
+
+    value = _clean_title_text(title)
+    original = _clean_title_text(original_title)
+    if not _contains_cjk(value):
+        return ""
+
+    if original and value != original and value.endswith(original):
+        prefix = value[:-len(original)].rstrip(" \t/／|｜·・-–—:：")
+        if _contains_cjk(prefix):
+            return prefix
+
+    for match in re.finditer(r"\S+", value):
+        if match.start() == 0:
+            continue
+        token = match.group(0)
+        prefix = value[:match.start()].rstrip()
+        if (
+            _contains_cjk(prefix)
+            and (_contains_latin(token) or _contains_japanese_script(token))
+        ):
+            return prefix.rstrip(" \t/／|｜·・-–—:：")
+    return value
+
+
 def _language(data: dict, original_title: str) -> str:
     value = _text(
         data.get("original_language")
@@ -266,7 +292,6 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
         data.get("title") or data.get("name"),
         data.get("release_year") or data.get("year"),
     )
-    chinese_title = title if _contains_cjk(title) else ""
     original_title, _unused_original_year = _normalize_title_and_year(
         data.get("original_title")
         or data.get("originalTitle")
@@ -274,6 +299,7 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
         or data.get("originalName"),
         "",
     )
+    chinese_title = _chinese_title_part(title, original_title)
     candidates = [
         original_title,
         data.get("originalTitle"),

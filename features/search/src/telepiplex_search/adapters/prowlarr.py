@@ -8,7 +8,7 @@ from collections import Counter
 import hashlib
 from html import unescape
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlparse
 
 import requests
 
@@ -18,6 +18,7 @@ from ..context import runtime_context
 DEFAULT_PROWLARR_SEARCH_TIMEOUT = 200
 DEFAULT_PROWLARR_INDEXER_TIMEOUT = 75
 PROWLARR_STATUS_TIMEOUT = 15
+MAX_TORRENT_DOWNLOAD_REDIRECTS = 3
 
 
 class ProwlarrConfigError(Exception):
@@ -541,18 +542,53 @@ def _fetch_magnet_from_info_page(item: dict, timeout) -> str:
 
 
 def _fetch_magnet_from_torrent_download(link: str, item: dict, timeout) -> str:
-    response = requests.get(link, timeout=timeout, allow_redirects=False)
-    try:
-        status_code = int(getattr(response, "status_code", 200) or 200)
-    except (TypeError, ValueError):
-        status_code = 200
+    current_link = str(link or "").strip()
+    for redirect_count in range(MAX_TORRENT_DOWNLOAD_REDIRECTS + 1):
+        response = requests.get(
+            current_link,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+        try:
+            status_code = int(
+                getattr(response, "status_code", 200) or 200
+            )
+        except (TypeError, ValueError):
+            status_code = 200
 
-    location = (getattr(response, "headers", {}) or {}).get("Location", "")
-    if 300 <= status_code < 400 and _is_magnet_url(location):
-        return location
+        location = str(
+            (getattr(response, "headers", {}) or {}).get("Location", "")
+            or ""
+        ).strip()
+        if 300 <= status_code < 400:
+            if _is_magnet_url(location):
+                return location
+            if (
+                not location
+                or redirect_count >= MAX_TORRENT_DOWNLOAD_REDIRECTS
+            ):
+                raise ValueError("torrent download redirect is invalid")
+            next_link = urljoin(current_link, location)
+            parsed = urlparse(next_link)
+            if (
+                parsed.scheme.casefold() not in {"http", "https"}
+                or not parsed.hostname
+            ):
+                raise ValueError(
+                    "torrent download redirect target is unsupported"
+                )
+            current_link = next_link
+            continue
 
-    response.raise_for_status()
-    return magnet_from_torrent_bytes(response.content, item.get("title") or "")
+        response.raise_for_status()
+        magnet_url = _extract_magnet_from_text(_response_text(response))
+        if magnet_url:
+            return magnet_url
+        return magnet_from_torrent_bytes(
+            response.content,
+            item.get("title") or "",
+        )
+    raise ValueError("torrent download redirect limit exceeded")
 
 
 def resolve_prowlarr_download_url(item: dict, timeout=None) -> str:

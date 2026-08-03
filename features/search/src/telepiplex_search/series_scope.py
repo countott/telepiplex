@@ -92,11 +92,14 @@ def apply_series_scope(
     english = " ".join(
         str((result.get("identity") or {}).get("english_title") or "").split()
     )
-    if not english:
-        raise SeriesScopeError("english_title_missing")
+    search_title = english or " ".join(
+        str((result.get("identity") or {}).get("chinese_title") or "").split()
+    )
+    if not search_title:
+        raise SeriesScopeError("search_title_missing")
     choice = str(choice or "")
     if choice == "whole_series":
-        query = build_prowlarr_query(english, "whole_series")
+        query = build_prowlarr_query(search_title, "whole_series")
         selected = [
             item
             for item in result.get("items") or []
@@ -114,7 +117,7 @@ def apply_series_scope(
             if not aired:
                 raise SeriesScopeError("season_not_aired")
             query = build_prowlarr_query(
-                english,
+                search_title,
                 "season",
                 season_number=season_number,
             )
@@ -133,7 +136,7 @@ def apply_series_scope(
             if episode_number not in inventory.aired_by_season.get(season_number, ()):
                 raise SeriesScopeError("episode_not_aired")
             query = build_prowlarr_query(
-                english,
+                search_title,
                 "episode",
                 season_number=season_number,
                 episode_number=episode_number,

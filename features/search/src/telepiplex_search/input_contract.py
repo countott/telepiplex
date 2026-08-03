@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .query_normalization import (
     has_unsupported_range_syntax,
     normalize_query_text,
 )
-from .search_query import extract_douban_subject_id, is_supported_metadata_url
+from .search_query import extract_douban_subject_id
 from .search_resolution import parse_search_intent, quoted_numeric_title
 
 
@@ -41,13 +42,119 @@ class ParsedInput:
     episode_number: int | None = None
     link: MetadataLink | None = None
     numeric_tokens: tuple[NumericToken, ...] = ()
+    urls: tuple[str, ...] = ()
+    fallback_title: str = ""
     reason: str = ""
 
 
 _TRAILING_BARE_NUMBER = re.compile(r"(?<!\d)(\d{1,3})\s*$")
+_MEDIA_TYPE_TOKEN = re.compile(
+    r"(?i)(?<!\S)"
+    r"(电影|電影|movie|film|电视剧|電視劇|剧集|劇集|series|tv\s*show)"
+    r"(?!\S)"
+)
+_MESSAGE_URL = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
+_TRAILING_URL_PUNCTUATION = ".,;:!?，。；：！？"
+_TRAILING_URL_CLOSERS = {
+    ")": "(",
+    "]": "[",
+    "}": "{",
+    ">": "<",
+    "》": "《",
+    "】": "【",
+    "」": "「",
+    "』": "『",
+}
+_SUPPORTED_LINK_HOSTS = (
+    "douban.com",
+    "wikipedia.org",
+    "w.wiki",
+    "thetvdb.com",
+    "tvdb.com",
+)
+
+
+def extract_message_urls(raw_query: str) -> tuple[str, ...]:
+    urls = []
+    for match in _MESSAGE_URL.finditer(str(raw_query or "")):
+        url = html.unescape(match.group(0)).rstrip(
+            _TRAILING_URL_PUNCTUATION
+        )
+        while (
+            url
+            and url[-1] in _TRAILING_URL_CLOSERS
+            and url.count(url[-1])
+            > url.count(_TRAILING_URL_CLOSERS[url[-1]])
+        ):
+            url = url[:-1]
+        if url and url not in urls:
+            urls.append(url)
+    return tuple(urls)
+
+
+def contains_url(raw_query: str) -> bool:
+    return bool(extract_message_urls(raw_query))
+
+
+def _host_matches(host: str, root: str) -> bool:
+    return host == root or host.endswith(f".{root}")
+
+
+def _supported_provider(raw_url: str) -> str:
+    parsed = urlparse(str(raw_url or "").strip())
+    if parsed.scheme.casefold() not in {"http", "https"}:
+        return ""
+    host = str(parsed.hostname or "").casefold()
+    if _host_matches(host, "douban.com"):
+        return "douban"
+    if _host_matches(host, "wikipedia.org") or host == "w.wiki":
+        return "wikipedia"
+    if (
+        _host_matches(host, "thetvdb.com")
+        or _host_matches(host, "tvdb.com")
+    ):
+        return "tvdb"
+    return ""
+
+
+def is_supported_direct_message_url(raw_url: str) -> bool:
+    return bool(_supported_provider(raw_url))
+
+
+def _fallback_title(raw_query: str, urls: tuple[str, ...]) -> str:
+    text = str(raw_query or "")
+    for url in urls:
+        text = text.replace(url, " ")
+    return " ".join(text.split()).strip()
+
+
+def _douban_link(raw_url: str) -> MetadataLink | None:
+    if _supported_provider(raw_url) != "douban":
+        return None
+    subject_id = extract_douban_subject_id(raw_url)
+    if not subject_id:
+        query = parse_qs(urlparse(raw_url).query)
+        for key in ("uri", "url", "target"):
+            for value in query.get(key, ()):
+                subject_id = extract_douban_subject_id(unquote(value))
+                if subject_id:
+                    break
+            if subject_id:
+                break
+    if not subject_id:
+        return None
+    return MetadataLink(
+        provider="douban",
+        media_type="",
+        entity_id=subject_id,
+        scope="work",
+        url=raw_url,
+    )
 
 
 def _tvdb_link(raw_query: str) -> MetadataLink | None:
+    if _supported_provider(raw_query) != "tvdb":
+        return None
     parsed = urlparse(raw_query)
     host = str(parsed.hostname or "").casefold()
     if host not in {
@@ -58,7 +165,8 @@ def _tvdb_link(raw_query: str) -> MetadataLink | None:
     }:
         return None
     match = re.fullmatch(
-        r"/(?:[a-z]{2}/)?(movies|series|seasons|episodes)/([^/?#]+)/?",
+        r"/(?:[a-z]{2}(?:-[a-z]{2})?/)?"
+        r"(movies|series|seasons|episodes)/([^/?#]+)/?",
         parsed.path,
         re.IGNORECASE,
     )
@@ -83,8 +191,8 @@ def _tvdb_link(raw_query: str) -> MetadataLink | None:
 def _wikipedia_link(raw_query: str) -> MetadataLink | None:
     parsed = urlparse(raw_query)
     match = re.fullmatch(
-        r"([a-z][a-z0-9-]*)\.wikipedia\.org",
-        parsed.netloc.casefold(),
+        r"([a-z][a-z0-9-]*)(?:\.m)?\.wikipedia\.org",
+        str(parsed.hostname or "").casefold(),
     )
     if not match:
         return None
@@ -103,35 +211,77 @@ def _wikipedia_link(raw_query: str) -> MetadataLink | None:
     )
 
 
-def _metadata_link(raw_query: str) -> MetadataLink | None:
-    subject_id = extract_douban_subject_id(raw_query)
-    if subject_id:
-        return MetadataLink(
-            provider="douban",
-            media_type="",
-            entity_id=subject_id,
-            scope="work",
-            url=raw_query,
-        )
-    return _tvdb_link(raw_query) or _wikipedia_link(raw_query)
+def metadata_link_from_url(raw_url: str) -> MetadataLink | None:
+    return (
+        _douban_link(raw_url)
+        or _tvdb_link(raw_url)
+        or _wikipedia_link(raw_url)
+    )
+
+
+def _resolvable_link(raw_url: str) -> MetadataLink | None:
+    provider = _supported_provider(raw_url)
+    if not provider:
+        return None
+    return MetadataLink(
+        provider=provider,
+        media_type="",
+        entity_id="",
+        scope="work",
+        url=raw_url,
+    )
 
 
 def classify_search_input(raw_query: str) -> ParsedInput:
     collapsed_query = " ".join(str(raw_query or "").split())
-    link = _metadata_link(collapsed_query)
-    if link:
+    urls = extract_message_urls(raw_query)
+    links = tuple(
+        link
+        for url in urls
+        if (link := metadata_link_from_url(url)) is not None
+    )
+    unresolved = tuple(
+        link
+        for url in urls
+        if metadata_link_from_url(url) is None
+        and (link := _resolvable_link(url)) is not None
+    )
+    stable_identities = {
+        (link.provider, link.entity_id)
+        for link in links
+    }
+    unresolved_urls = {link.url for link in unresolved}
+    if (
+        len(stable_identities) > 1
+        or (stable_identities and unresolved_urls)
+        or len(unresolved_urls) > 1
+    ):
+        return ParsedInput(
+            kind="invalid_link",
+            raw_query=collapsed_query,
+            urls=urls,
+            fallback_title=_fallback_title(raw_query, urls),
+            reason="multiple_metadata_entities",
+        )
+    if links:
+        link = links[0]
         return ParsedInput(
             kind="link",
             raw_query=collapsed_query,
             media_type=link.media_type,
             scope=link.scope,
             link=link,
+            urls=urls,
+            fallback_title=_fallback_title(raw_query, urls),
         )
-    if is_supported_metadata_url(collapsed_query):
+    if unresolved:
+        link = unresolved[0]
         return ParsedInput(
-            kind="invalid_link",
+            kind="resolvable_link",
             raw_query=collapsed_query,
-            reason="unsupported_metadata_link",
+            link=link,
+            urls=urls,
+            fallback_title=_fallback_title(raw_query, urls),
         )
     if has_unsupported_range_syntax(collapsed_query):
         return ParsedInput(
@@ -151,6 +301,30 @@ def classify_search_input(raw_query: str) -> ParsedInput:
     scope = str(intent.get("scope") or "movie_or_series")
     if scope == "movie_or_series":
         scope = "work"
+    title = str(intent.get("title") or "").strip()
+    media_type = ""
+    media_type_matches = list(_MEDIA_TYPE_TOKEN.finditer(title))
+    if media_type_matches:
+        token = media_type_matches[-1].group(1).casefold()
+        media_type = (
+            "movie"
+            if token in {"电影", "電影", "movie", "film"}
+            else "series"
+        )
+        title = _MEDIA_TYPE_TOKEN.sub(" ", title)
+    if scope in {"whole_series", "season", "episode"}:
+        media_type = "series"
+    year = str(intent.get("year") or "").strip()
+    if year:
+        title = re.sub(
+            rf"(?<!\d){re.escape(year)}(?!\d)",
+            " ",
+            title,
+        )
+    title = " ".join(title.split())
+    normalized_raw_query = " ".join(
+        item for item in (title, year) if item
+    )
     numeric_tokens = []
     match = _TRAILING_BARE_NUMBER.search(raw_query)
     if match and not (
@@ -161,9 +335,10 @@ def classify_search_input(raw_query: str) -> ParsedInput:
         numeric_tokens.append(NumericToken(int(match.group(1)), "ambiguous"))
     return ParsedInput(
         kind="text",
-        raw_query=raw_query,
-        title=str(intent.get("title") or "").strip(),
-        year=str(intent.get("year") or "").strip(),
+        raw_query=normalized_raw_query,
+        title=title,
+        year=year,
+        media_type=media_type,
         scope=scope,
         season_number=intent.get("season_number"),
         episode_number=intent.get("episode_number"),

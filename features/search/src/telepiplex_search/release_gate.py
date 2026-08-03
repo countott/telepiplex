@@ -347,6 +347,80 @@ def _target_numbers(contract: dict) -> tuple[int | None, int | None]:
     return season, episode
 
 
+def _aired_years(
+    contract: dict,
+    *,
+    season_number: int | None = None,
+    episode_number: int | None = None,
+) -> set[str]:
+    years = set()
+    for item in contract.get("items") or ():
+        if not isinstance(item, dict):
+            continue
+        try:
+            item_season = int(item.get("season_number"))
+        except (TypeError, ValueError):
+            item_season = None
+        try:
+            item_episode = int(item.get("episode_number"))
+        except (TypeError, ValueError):
+            item_episode = None
+        if season_number is not None and item_season != season_number:
+            continue
+        if episode_number is not None and item_episode != episode_number:
+            continue
+        aired = _text(
+            item.get("aired")
+            or item.get("air_date")
+            or item.get("firstAired")
+        )
+        match = re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", aired)
+        if match:
+            years.add(match.group(0))
+    return years
+
+
+def _year_rejection(
+    years: set[str],
+    *,
+    target_scope: str,
+    expected_year: str,
+    contract: dict,
+    season_number: int | None,
+    episode_number: int | None,
+) -> str:
+    if target_scope == "movie":
+        if not years:
+            return "missing_year"
+        if expected_year and expected_year not in years:
+            return "year_mismatch"
+        return ""
+    if not years or target_scope == "episode":
+        return ""
+
+    verified = {expected_year} if expected_year else set()
+    if target_scope == "season":
+        verified.update(
+            _aired_years(contract, season_number=season_number)
+        )
+        return (
+            "year_mismatch"
+            if verified and years.isdisjoint(verified)
+            else ""
+        )
+    if target_scope == "whole_series":
+        run_years = _aired_years(contract)
+        if not run_years:
+            return ""
+        verified.update(run_years)
+        first, last = min(int(year) for year in verified), max(
+            int(year) for year in verified
+        )
+        if any(not first <= int(year) <= last for year in years):
+            return "year_mismatch"
+    return ""
+
+
 def _scope_matches(
     *,
     target_scope: str,
@@ -487,8 +561,16 @@ def gate_releases(items: list[dict], contract: dict) -> ReleaseGateResult:
             ))
             continue
         years = set(re.findall(r"(?<!\d)(?:19|20)\d{2}(?!\d)", title))
-        if expected_year and years and expected_year not in years:
-            reason = "year_mismatch"
+        year_rejection = _year_rejection(
+            years,
+            target_scope=target_scope,
+            expected_year=expected_year,
+            contract=contract,
+            season_number=season_number,
+            episode_number=episode_number,
+        )
+        if year_rejection:
+            reason = year_rejection
             rejections[reason] += 1
             classifications.append(ReleaseClassification(
                 True,

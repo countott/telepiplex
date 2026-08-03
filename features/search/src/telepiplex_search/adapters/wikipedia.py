@@ -152,6 +152,31 @@ def _exception_status(exc: Exception) -> str:
     return "server_down"
 
 
+def _page_titles(page: dict, language: str) -> tuple[str, str]:
+    canonical = " ".join(str(page.get("title") or "").split())
+    display = canonical
+    if language.startswith("zh"):
+        variants = page.get("varianttitles")
+        if isinstance(variants, dict):
+            display = " ".join(
+                str(
+                    variants.get("zh-cn")
+                    or variants.get("zh-hans")
+                    or canonical
+                ).split()
+            )
+    return canonical, display
+
+
+def _variant_params(language: str) -> dict:
+    if not language.startswith("zh"):
+        return {}
+    return {
+        "variant": "zh-cn",
+        "converttitles": 1,
+    }
+
+
 def lookup_wikipedia_evidence(
     queries: list[str],
     languages: tuple[str, ...] = ("zh", "en"),
@@ -184,9 +209,10 @@ def lookup_wikipedia_evidence(
                         "prop": "extracts|pageprops|info",
                         "exintro": 1,
                         "explaintext": 1,
-                        "inprop": "url",
+                        "inprop": "url|varianttitles",
                         "format": "json",
                         "formatversion": 2,
+                        **_variant_params(language),
                     },
                     headers={"User-Agent": USER_AGENT},
                     timeout=timeout,
@@ -212,7 +238,7 @@ def lookup_wikipedia_evidence(
             for page in pages:
                 if not isinstance(page, dict):
                     continue
-                title = " ".join(str(page.get("title") or "").split())
+                canonical_title, title = _page_titles(page, language)
                 extract = " ".join(str(page.get("extract") or "").split())
                 if not title or not extract:
                     continue
@@ -228,6 +254,7 @@ def lookup_wikipedia_evidence(
                         "language": language,
                         "query": query,
                         "title": title,
+                        "canonical_title": canonical_title,
                         "extract": extract,
                         "url": page_url,
                         "wikibase_item": str(
@@ -282,11 +309,12 @@ def lookup_wikipedia_page(
                 "prop": "extracts|pageprops|info|pageimages",
                 "exintro": 1,
                 "explaintext": 1,
-                "inprop": "url",
                 "piprop": "original|thumbnail",
                 "pithumbsize": 1000,
+                "inprop": "url|varianttitles",
                 "format": "json",
                 "formatversion": 2,
+                **_variant_params(language),
             },
             headers={"User-Agent": USER_AGENT},
             timeout=timeout,
@@ -311,7 +339,11 @@ def lookup_wikipedia_page(
     )
     if page is None:
         return None
-    resolved_title = " ".join(str(page.get("title") or title).split())
+    canonical_title, resolved_title = _page_titles(page, language)
+    if not canonical_title:
+        canonical_title = title
+    if not resolved_title:
+        resolved_title = canonical_title
     extract = " ".join(str(page.get("extract") or "").split())
     year, media_type = _classification(resolved_title, extract)
     page_url = str(page.get("fullurl") or "").strip() or (
@@ -327,6 +359,7 @@ def lookup_wikipedia_page(
     return {
         "language": language,
         "title": resolved_title,
+        "canonical_title": canonical_title,
         "extract": extract,
         "url": page_url,
         "wikibase_item": str(

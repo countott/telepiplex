@@ -96,10 +96,4 @@ ai:
   api_key: ""
   model: ""
   timeout: 60
-  source_orchestration:
-    enable: true
-    max_targeted_rounds: 2
-    max_tools_per_round: 3
-    protocol: openai_tools_v1
-    thinking_mode: enabled
-    tool_choice_mode: omit
+  thinking_mode: enabled

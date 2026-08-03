@@ -122,6 +122,55 @@ def _candidate(*, intended_scope="movie", facts=None, unresolved=()):
 
 
 class MediaMetadataV1Test(unittest.TestCase):
+    def test_tvdb_unavailable_series_degrades_to_whole_series(self):
+        fact = _fact(
+            "douban:20",
+            "douban",
+            titles=("繁花",),
+            year="2023",
+            media_type="series",
+            url="https://movie.douban.com/subject/20/",
+            external_ids={"douban_subject": "20"},
+            chinese="繁花",
+            english="",
+        )
+        candidate = AnchoredCandidate(
+            candidate_id="douban:20",
+            anchor_fact_id=fact.fact_id,
+            identity_role="series_root",
+            intended_scope="whole_series",
+            source_links=(SourceLink(
+                provider="douban",
+                fact_id=fact.fact_id,
+                url=fact.source_url,
+                external_ids=fact.external_ids,
+                role="series_root",
+                season_number=None,
+                episode_number=None,
+                verification="fact_verified",
+            ),),
+            poster_assets=(),
+            unresolved_sources=("tvdb:unavailable",),
+            ai_confidence=1,
+            ai_reason="confirmed_douban_identity",
+            facts=(fact,),
+        )
+
+        contract = build_media_metadata_v1(
+            candidate,
+            metadata_id="degraded-series",
+            raw_query="繁花 第一季",
+        )
+
+        self.assertEqual(contract["retrieval"]["scope"], "whole_series")
+        self.assertEqual(contract["items"], [])
+        self.assertNotIn("tvdb", contract["identity"]["external_ids"])
+        self.assertEqual(contract["retrieval"]["query"], "繁花")
+        self.assertIn(
+            "warning:tvdb_inventory_unavailable",
+            contract["warnings"],
+        )
+
     def test_contract_keeps_every_link_poster_field_source_and_ai_decision(self):
         contract = build_media_metadata_v1(
             _candidate(unresolved=("wikipedia:not_found",)),
@@ -146,7 +195,7 @@ class MediaMetadataV1Test(unittest.TestCase):
         self.assertIn("wikipedia:not_found", evidence["unresolved"])
         self.assertIn("warning:source_unresolved", contract["warnings"])
 
-    def test_japanese_animation_query_chain_uses_v1_order_and_deduplicates(self):
+    def test_movie_query_uses_one_verified_canonical_title_with_year(self):
         contract = build_media_metadata_v1(
             _candidate(),
             metadata_id="m2",
@@ -157,12 +206,7 @@ class MediaMetadataV1Test(unittest.TestCase):
 
         self.assertEqual(
             queries,
-            [
-                "Sen to Chihiro no Kamikakushi",
-                "Spirited Away",
-                "千と千尋の神隠し",
-                "千与千寻",
-            ],
+            ["Sen to Chihiro no Kamikakushi 2001"],
         )
         self.assertEqual(contract["retrieval"]["queries"], queries)
 
@@ -261,12 +305,26 @@ class MediaMetadataV1Test(unittest.TestCase):
         self.assertEqual(contract["evidence"]["decision"]["season_number"], 2)
         self.assertEqual(
             build_prowlarr_query_chain(contract, "蜂蜜与四叶草 第二季"),
-            [
-                "Hachimitsu to Clover S02",
-                "Honey and Clover S02",
-                "ハチミツとクローバー S02",
-                "蜂蜜与四叶草 S02",
-            ],
+            ["Hachimitsu to Clover S02"],
+        )
+
+    def test_query_ignores_unverified_aliases_and_raw_query_noise(self):
+        contract = build_media_metadata_v1(
+            _candidate(),
+            metadata_id="clean-query",
+            raw_query="千与千寻 4K 国语 导演剪辑版",
+        )
+        contract["identity"]["aliases"] = [
+            "El viaje de Chihiro",
+            "Sen to Chihiro no Kamikakushi Extended",
+        ]
+
+        self.assertEqual(
+            build_prowlarr_query_chain(
+                contract,
+                "千与千寻 4K 国语 导演剪辑版",
+            ),
+            ["Sen to Chihiro no Kamikakushi 2001"],
         )
 
     def test_media_type_conflict_and_incomplete_scope_fail_explicitly(self):

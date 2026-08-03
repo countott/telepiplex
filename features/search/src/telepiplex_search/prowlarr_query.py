@@ -6,7 +6,6 @@ import re
 
 
 _BASE_SCOPES = {"movie", "movie_or_series", "whole_series", "work"}
-_LATIN = re.compile(r"[A-Za-z]")
 _DISAMBIGUATION_SUFFIX = re.compile(
     r"\s*[\(（]\s*"
     r"(?:(?:19|20)\d{2}\s*年?\s*)?"
@@ -57,46 +56,13 @@ def build_prowlarr_query(
     raise ValueError("bounded_scope_incomplete")
 
 
-def _unique_titles(values) -> list[str]:
-    result = []
-    seen = set()
-    for value in values:
-        value = " ".join(str(value or "").replace("\xa0", " ").split())
-        key = value.casefold()
-        if value and key not in seen:
-            result.append(value)
-            seen.add(key)
-    return result
-
-
-def _raw_query_title(value: str) -> str:
-    value = " ".join(str(value or "").replace("\xa0", " ").split())
-    value = re.sub(r"(?i)\bS\d{1,2}(?:E\d{1,3})?\b", " ", value)
-    value = re.sub(
-        r"(?i)\bseason\s*\d+(?:\s*(?:episode|ep)\s*\d+)?\b",
-        " ",
-        value,
-    )
-    value = re.sub(
-        r"第?\s*[零〇一二两三四五六七八九十百两\d]+\s*季"
-        r"(?:\s*第?\s*[零〇一二两三四五六七八九十百两\d]+\s*[集话話])?",
-        " ",
-        value,
-    )
-    value = re.sub(
-        r"全集|全季|整季|整剧|整劇|全剧|全劇",
-        " ",
-        value,
-    )
-    return " ".join(value.split())
-
-
 def build_prowlarr_query_chain(
     media_metadata: dict,
     raw_query: str,
 ) -> list[str]:
-    """Build ordered, deduplicated queries only from verified metadata v1."""
+    """Build one canonical query only from verified metadata v1."""
 
+    del raw_query
     if not isinstance(media_metadata, dict):
         raise ValueError("media_metadata_missing")
     identity = media_metadata.get("identity")
@@ -123,46 +89,23 @@ def build_prowlarr_query_chain(
     if scope == "episode" and episode_number is None:
         raise ValueError("bounded_scope_incomplete")
 
-    aliases = identity.get("aliases")
-    aliases = list(aliases) if isinstance(aliases, list) else []
-    romanized = str(identity.get("romanized_original_title") or "")
-    official_english = str(identity.get("official_english_title") or "")
-    original = str(identity.get("original_title") or "")
-    original_language = str(identity.get("original_language") or "").casefold()
-    content_kind = str(identity.get("content_kind") or "")
-    category = str(
-        (media_metadata.get("placement") or {}).get("category_kind") or ""
-    )
-    japanese_animation = bool(
-        original_language == "ja"
-        and (
-            content_kind in {"movie", "series"}
-            and category.startswith("animated_")
-        )
-    )
-
-    ordered_titles = []
-    if japanese_animation:
-        ordered_titles.append(romanized)
-    ordered_titles.append(official_english)
-    ordered_titles.extend(
-        alias for alias in aliases if _LATIN.search(str(alias or ""))
-    )
-    ordered_titles.extend((original, _raw_query_title(raw_query)))
-
-    queries = []
-    seen = set()
-    for title in _unique_titles(ordered_titles):
-        query = build_prowlarr_query(
-            title,
-            scope,
-            season_number=season_number,
-            episode_number=episode_number,
-        )
-        key = query.casefold()
-        if key not in seen:
-            queries.append(query)
-            seen.add(key)
-    if not queries:
+    title = str(
+        identity.get("canonical_search_title")
+        or identity.get("official_english_title")
+        or identity.get("english_title")
+        or ""
+    ).strip()
+    if not title:
         raise ValueError("query_chain_empty")
-    return queries
+    if scope == "movie":
+        year = str(identity.get("year") or "")[:4]
+        if not re.fullmatch(r"(?:19|20)\d{2}", year):
+            raise ValueError("movie_year_missing")
+        title = f"{title} {year}"
+    query = build_prowlarr_query(
+        title,
+        scope,
+        season_number=season_number,
+        episode_number=episode_number,
+    )
+    return [query]

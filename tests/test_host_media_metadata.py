@@ -231,6 +231,35 @@ class HostMediaMetadataTest(unittest.TestCase):
         value["items"] = []
         self.assertIsNone(validate_media_metadata(value, require_confirmed=True))
 
+    def test_tvdb_unavailable_whole_series_allows_empty_inventory(self):
+        value = self._value()
+        value["identity"].update({
+            "content_kind": "series",
+            "external_ids": {"douban_subject": "20"},
+        })
+        value["relation"]["target_series"] = {}
+        value["placement"].update({
+            "mapping_kind": "standalone",
+            "season_number": None,
+            "episode_number": None,
+        })
+        value["retrieval"] = {
+            "media_type": "series",
+            "scope": "whole_series",
+            "query": "Blossoms Shanghai",
+            "queries": ["Blossoms Shanghai"],
+        }
+        value["items"] = []
+        value["warnings"] = ["warning:tvdb_inventory_unavailable"]
+
+        self.assertIsNotNone(
+            validate_media_metadata(value, require_confirmed=True)
+        )
+        value["warnings"] = []
+        self.assertIsNone(
+            validate_media_metadata(value, require_confirmed=True)
+        )
+
     def test_all_v1_content_kinds_are_explicit_and_unknown_is_rejected(self):
         for content_kind in CONTENT_KINDS:
             with self.subTest(content_kind=content_kind):

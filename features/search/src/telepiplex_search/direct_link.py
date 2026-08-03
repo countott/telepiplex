@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlparse
+
+import requests
 
 from .adapters.douban import (
     DoubanSubjectLookupError,
@@ -21,8 +25,13 @@ from .adapters.wikipedia import (
     WikipediaPageLookupError,
     lookup_wikipedia_page,
 )
-from .input_contract import MetadataLink
+from .input_contract import (
+    MetadataLink,
+    ParsedInput,
+    metadata_link_from_url,
+)
 from .prowlarr_query import build_prowlarr_query
+from .search_query import parse_media_page_title
 
 
 class DirectLinkError(ValueError):
@@ -52,6 +61,135 @@ class DirectEntity:
             self.season_number,
             self.episode_number,
         )
+
+
+_REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+_DIRECT_LINK_HOSTS = (
+    "douban.com",
+    "wikipedia.org",
+    "w.wiki",
+    "thetvdb.com",
+    "tvdb.com",
+)
+
+
+class _CanonicalLinkParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.canonical_urls = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.casefold() not in {"link", "meta"}:
+            return
+        values = {
+            str(key).casefold(): str(value or "")
+            for key, value in attrs
+        }
+        if (
+            tag.casefold() == "link"
+            and "canonical" in values.get("rel", "").casefold().split()
+            and values.get("href")
+        ):
+            self.canonical_urls.append(values["href"])
+        if (
+            tag.casefold() == "meta"
+            and values.get("property", "").casefold() == "og:url"
+            and values.get("content")
+        ):
+            self.canonical_urls.append(values["content"])
+
+
+def _allowed_direct_url(raw_url: str) -> bool:
+    parsed = urlparse(str(raw_url or "").strip())
+    if parsed.scheme.casefold() not in {"http", "https"}:
+        return False
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    if parsed.username or parsed.password or port:
+        return False
+    host = str(parsed.hostname or "").casefold()
+    return any(
+        host == root or host.endswith(f".{root}")
+        for root in _DIRECT_LINK_HOSTS
+    )
+
+
+def _read_shared_link(
+    raw_url: str,
+    *,
+    timeout: int,
+    max_redirects: int,
+):
+    current_url = str(raw_url or "").strip()
+    redirects = 0
+    while True:
+        if not _allowed_direct_url(current_url):
+            raise DirectLinkError("direct_link_redirect_rejected")
+        try:
+            response = requests.get(
+                current_url,
+                timeout=timeout,
+                allow_redirects=False,
+            )
+        except requests.RequestException as exc:
+            raise DirectLinkError("fixed_link_read_failed") from exc
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code in _REDIRECT_STATUS_CODES:
+            location = str(
+                getattr(response, "headers", {}).get("Location") or ""
+            ).strip()
+            if not location or redirects >= max_redirects:
+                raise DirectLinkError("fixed_link_read_failed")
+            current_url = urljoin(current_url, location)
+            redirects += 1
+            continue
+        if not 200 <= status_code < 300:
+            raise DirectLinkError("fixed_link_read_failed")
+        final_url = str(getattr(response, "url", "") or current_url)
+        if not _allowed_direct_url(final_url):
+            raise DirectLinkError("direct_link_redirect_rejected")
+        return response, final_url
+
+
+def resolve_shared_metadata_link(
+    parsed: ParsedInput,
+    *,
+    timeout: int = 10,
+    max_redirects: int = 3,
+) -> tuple[MetadataLink | None, str]:
+    if parsed.kind == "link" and parsed.link is not None:
+        return parsed.link, parsed.fallback_title
+    if parsed.kind != "resolvable_link" or parsed.link is None:
+        raise DirectLinkError(parsed.reason or "direct_link_invalid")
+
+    response, final_url = _read_shared_link(
+        parsed.link.url,
+        timeout=timeout,
+        max_redirects=max_redirects,
+    )
+    html_text = str(getattr(response, "text", "") or "")
+    candidates = [final_url]
+    parser = _CanonicalLinkParser()
+    try:
+        parser.feed(html_text)
+    except (TypeError, ValueError):
+        pass
+    candidates.extend(
+        urljoin(final_url, candidate)
+        for candidate in parser.canonical_urls
+    )
+    for candidate in candidates:
+        if not _allowed_direct_url(candidate):
+            continue
+        link = metadata_link_from_url(candidate)
+        if link is not None:
+            return link, parsed.fallback_title
+    return None, (
+        parsed.fallback_title
+        or parse_media_page_title(html_text)
+    )
 
 
 def _text(value) -> str:

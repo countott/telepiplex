@@ -38,14 +38,14 @@ class ConfigSchemaContractTest(unittest.TestCase):
                 "api_key",
                 "model",
                 "timeout",
-                "source_orchestration",
+                "thinking_mode",
             },
         )
         self.assertTrue(tvdb["properties"]["api_key"]["writeOnly"])
         self.assertTrue(tvdb["properties"]["subscriber_pin"]["writeOnly"])
         self.assertTrue(ai["properties"]["api_key"]["writeOnly"])
 
-    def test_source_orchestration_and_douban_defaults_are_bounded(self):
+    def test_active_ai_and_metadata_defaults_are_bounded(self):
         schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))
         default = yaml.safe_load((ROOT / "config.default.yaml").read_text(encoding="utf-8"))
 
@@ -86,35 +86,15 @@ class ConfigSchemaContractTest(unittest.TestCase):
                 "rate_limit_cooldown",
             },
         )
-        self.assertEqual(
-            default["ai"]["source_orchestration"],
-            {
-                "enable": True,
-                "max_targeted_rounds": 2,
-                "max_tools_per_round": 3,
-                "protocol": "openai_tools_v1",
-                "thinking_mode": "enabled",
-                "tool_choice_mode": "omit",
-            },
+        self.assertNotIn("source_orchestration", default["ai"])
+        self.assertNotIn(
+            "source_orchestration",
+            schema["properties"]["ai"]["properties"],
         )
-        orchestration = (
-            schema["properties"]["ai"]["properties"]["source_orchestration"]
-        )
+        self.assertEqual(default["ai"]["thinking_mode"], "enabled")
         self.assertEqual(
-            orchestration["properties"]["max_targeted_rounds"]["maximum"],
-            2,
-        )
-        self.assertEqual(
-            orchestration["properties"]["max_tools_per_round"]["maximum"],
-            3,
-        )
-        self.assertEqual(
-            orchestration["properties"]["thinking_mode"]["enum"],
+            schema["properties"]["ai"]["properties"]["thinking_mode"]["enum"],
             ["enabled", "disabled"],
-        )
-        self.assertEqual(
-            orchestration["properties"]["tool_choice_mode"]["enum"],
-            ["omit", "forced"],
         )
 
     def test_search_scoring_is_part_of_public_config_contract(self):
