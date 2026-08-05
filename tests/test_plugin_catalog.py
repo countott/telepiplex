@@ -67,6 +67,60 @@ class PluginCatalogTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved.expected_sha256, digest)
         self.assertEqual(calls[0][0], "https://example.test/echo.tpx")
 
+    async def test_remote_update_recovers_from_transient_catalog_and_artifact_connection_failures(self):
+        from app.runtime.plugin_catalog import CatalogError, PluginCatalog
+
+        artifact = b"release after transient DNS failure"
+        digest = hashlib.sha256(artifact).hexdigest()
+        catalog_payload = yaml.safe_dump({
+            "plugins": {
+                "echo": {
+                    "versions": {
+                        "1.5.0": {
+                            "url": "https://example.test/echo-1.5.0.tpx",
+                            "sha256": digest,
+                        }
+                    }
+                }
+            }
+        }).encode()
+        attempts = {"catalog": 0, "artifact": 0}
+
+        def opener(request, timeout):
+            del timeout
+            kind = (
+                "catalog"
+                if request.full_url.endswith("catalog.yaml")
+                else "artifact"
+            )
+            attempts[kind] += 1
+            if attempts[kind] == 1:
+                raise OSError(
+                    "[Errno -3] Temporary failure in name resolution"
+                )
+            return io.BytesIO(
+                catalog_payload if kind == "catalog" else artifact
+            )
+
+        catalog = PluginCatalog(
+            "https://example.test/catalog.yaml",
+            self.cache,
+            opener=opener,
+            retry_delays=(0,),
+        )
+
+        try:
+            resolved = await catalog.resolve("echo@1.5.0")
+        except CatalogError as exc:
+            self.fail(
+                "a transient connection failure must not abort a Feature "
+                f"update: {exc.code}"
+            )
+
+        self.assertEqual(resolved.path.read_bytes(), artifact)
+        self.assertEqual(resolved.expected_sha256, digest)
+        self.assertEqual(attempts, {"catalog": 2, "artifact": 2})
+
     async def test_rejects_unpinned_or_non_https_catalog_entry(self):
         from app.runtime.plugin_catalog import CatalogError, PluginCatalog
 

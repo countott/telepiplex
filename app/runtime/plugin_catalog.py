@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import tempfile
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,6 +85,7 @@ class PluginCatalog:
         timeout: float = 30,
         max_download_bytes: int = 256 * 1024 * 1024,
         max_catalog_bytes: int = 2 * 1024 * 1024,
+        retry_delays: tuple[float, ...] = (1.0, 3.0, 10.0),
     ):
         self.cache_root = Path(cache_root)
         raw_source = str(catalog_path).strip()
@@ -108,6 +110,10 @@ class PluginCatalog:
         self.timeout = float(timeout)
         self.max_download_bytes = int(max_download_bytes)
         self.max_catalog_bytes = int(max_catalog_bytes)
+        self.retry_delays = tuple(
+            max(0.0, float(delay))
+            for delay in retry_delays
+        )
 
     async def refresh(self) -> Path:
         if not self.catalog_url:
@@ -298,6 +304,17 @@ class PluginCatalog:
         return data
 
     def _refresh_remote(self) -> None:
+        try:
+            self._with_network_retries(self._refresh_remote_once)
+        except CatalogError:
+            raise
+        except Exception as exc:
+            raise CatalogError(
+                "catalog_download_failed",
+                "Feature catalog download failed",
+            ) from exc
+
+    def _refresh_remote_once(self) -> None:
         temporary_path = None
         try:
             with self._opener(
@@ -341,13 +358,6 @@ class PluginCatalog:
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temporary_path, self.catalog_path)
-        except CatalogError:
-            raise
-        except Exception as exc:
-            raise CatalogError(
-                "catalog_download_failed",
-                "Feature catalog download failed",
-            ) from exc
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
@@ -409,6 +419,28 @@ class PluginCatalog:
         return releases
 
     def _download(self, url: str, target: Path, expected_sha256: str):
+        try:
+            self._with_network_retries(
+                lambda: self._download_once(
+                    url,
+                    target,
+                    expected_sha256,
+                )
+            )
+        except CatalogError:
+            raise
+        except Exception as exc:
+            raise CatalogError(
+                "download_failed",
+                "Feature artifact download failed",
+            ) from exc
+
+    def _download_once(
+        self,
+        url: str,
+        target: Path,
+        expected_sha256: str,
+    ):
         target.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
         file_descriptor, temporary_name = tempfile.mkstemp(
@@ -441,12 +473,19 @@ class PluginCatalog:
             if digest.hexdigest() != expected_sha256:
                 raise CatalogError("digest_mismatch", "Feature artifact sha256 mismatch")
             os.replace(temporary_path, target)
-        except CatalogError:
-            raise
-        except Exception as exc:
-            raise CatalogError("download_failed", "Feature artifact download failed") from exc
         finally:
             temporary_path.unlink(missing_ok=True)
+
+    def _with_network_retries(self, operation):
+        for delay in (*self.retry_delays, None):
+            try:
+                return operation()
+            except CatalogError:
+                raise
+            except Exception:
+                if delay is None:
+                    raise
+                time.sleep(delay)
 
     @staticmethod
     def _matches(path: Path, expected_sha256: str) -> bool:
