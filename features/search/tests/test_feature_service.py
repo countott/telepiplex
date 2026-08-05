@@ -1761,6 +1761,28 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "都不是",
         )
 
+    def test_single_candidate_grid_returns_poster_and_source_overview(self):
+        plan = ranked_search_plan()
+        candidate = plan["candidates"][0]
+        candidate["media_metadata"]["identity"]["summary"] = (
+            "一名年轻电影制作人进入诡异的后室，并试图找到出口。"
+        )
+
+        action = self.feature._candidate_grid_action({
+            "candidates": [candidate],
+            "plan": {"plan_id": "backrooms"},
+        })
+
+        self.assertEqual(action["kind"], "send_photo_grid")
+        self.assertEqual(
+            action["data"]["poster_items"][0]["poster_url"],
+            "https://image.example/top.jpg",
+        )
+        self.assertIn(
+            "总览：一名年轻电影制作人进入诡异的后室，并试图找到出口。",
+            action["text"],
+        )
+
     def test_candidate_detail_uses_human_media_and_relation_labels(self):
         plan = series_ranked_search_plan()
         candidate = plan["candidates"][0]
@@ -2879,10 +2901,10 @@ class FeatureSourceContractTest(unittest.TestCase):
             ROOT / "src" / "telepiplex_search.egg-info" / "PKG-INFO"
         ).read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.5.0")
+        self.assertEqual(manifest["version"], "1.5.1")
         self.assertEqual(manifest["host_api"], ">=1.3,<2.0")
-        self.assertIn('version = "1.5.0"', project)
-        self.assertIn("\nVersion: 1.5.0\n", package_metadata)
+        self.assertIn('version = "1.5.1"', project)
+        self.assertIn("\nVersion: 1.5.1\n", package_metadata)
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
@@ -2914,14 +2936,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.5.0.tpx", source)
+        self.assertIn("/tmp/search-1.5.1.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("都不是", source)
         self.assertIn("统一 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("rename", source)
-        self.assertNotIn("dist/search-1.5.0.tpx", source)
+        self.assertNotIn("dist/search-1.5.1.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

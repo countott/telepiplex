@@ -95,6 +95,13 @@ def _text(value) -> str:
     return " ".join(str(value or "").replace("\xa0", " ").split())
 
 
+def _compact_summary(value, limit: int = 240) -> str:
+    value = _text(value)
+    if len(value) <= limit:
+        return value
+    return value[: max(1, limit - 1)].rstrip() + "…"
+
+
 def _positive_integer(value) -> int | None:
     try:
         number = int(value)
@@ -1551,6 +1558,8 @@ class SearchFeature:
                 f"类型：{_human_media_type(placement.get('library_type'))}",
                 f"来源：{source}",
             ])
+            if summary := _compact_summary(identity.get("summary")):
+                lines.append(f"总览：{summary}")
             plan_id = stored["plan"]["plan_id"]
             keyboard = []
             if candidate.get("selectable") is not False:
@@ -1588,6 +1597,8 @@ class SearchFeature:
             f" · 关系：{_human_relation(relation)}\n"
             f"评分：{score.get('total', 0)}/100"
         )
+        if summary := _compact_summary(identity.get("summary")):
+            text += f"\n总览：{summary}"
         navigation = []
         if len(candidates) > 1:
             navigation = [{
@@ -1654,6 +1665,10 @@ class SearchFeature:
                 ),
                 "来源：豆瓣",
             ])
+            if len(candidates) == 1 and (
+                summary := _compact_summary(identity.get("summary"))
+            ):
+                lines.append(f"总览：{html.escape(summary)}")
             poster_url = _text(candidate.get("poster_url"))
             has_poster = has_poster or poster_url.startswith("https://")
             poster_items.append({

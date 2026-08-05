@@ -10,6 +10,42 @@ from telepiplex_rename.media_naming import build_media_naming_plan, infer_englis
 
 
 class MediaAutoRenameTest(unittest.TestCase):
+    def test_old_search_contract_uses_english_original_and_removes_duplicate_suffix(self):
+        plan = build_media_naming_plan(
+            {
+                "source": "media_metadata",
+                "chinese_title": "后室 Backrooms",
+                "english_title": "Backrooms: sin salida",
+                "original_title": "Backrooms",
+                "original_language": "en",
+                "official_english_title": "Backrooms: sin salida",
+            },
+            "Backrooms.2026.2160p.WEB-DL",
+            "movie.mp4",
+        )
+
+        self.assertEqual(plan.target_relative_dir, "后室 (Backrooms)")
+        self.assertEqual(plan.file_name, "Backrooms.mp4")
+
+    def test_mixed_chinese_title_does_not_repeat_matching_english_title(self):
+        plan = build_media_naming_plan(
+            {
+                "source": "media_metadata",
+                "chinese_title": "火星人玩转地球 Mars Attacks!",
+                "english_title": "Mars Attacks!",
+                "original_title": "Mars Attacks!",
+                "original_language": "en",
+            },
+            "Mars.Attacks.1996.1080p",
+            "movie.mkv",
+        )
+
+        self.assertEqual(
+            plan.target_relative_dir,
+            "火星人玩转地球 (Mars Attacks!)",
+        )
+        self.assertEqual(plan.file_name, "Mars Attacks!.mkv")
+
     def test_japanese_romaji_compatibility_title_reaches_series_and_file_names(self):
         plan = build_media_naming_plan(
             {

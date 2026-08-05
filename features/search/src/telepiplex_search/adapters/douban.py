@@ -351,6 +351,11 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
         "aliases": aliases,
         "genres": genres,
         "cover_url": _cover_url(data),
+        "summary": _text(
+            data.get("summary")
+            or data.get("intro")
+            or data.get("description")
+        ),
     }
 
 

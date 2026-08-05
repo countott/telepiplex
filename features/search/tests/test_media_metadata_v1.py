@@ -28,6 +28,7 @@ def _fact(
     language="en",
     english="",
     romanized="",
+    summary="",
     genres=(),
     episodes=(),
 ):
@@ -45,6 +46,7 @@ def _fact(
         original_language=language,
         official_english_title=english,
         romanized_original_title=romanized,
+        summary=summary,
         genres=tuple(genres),
         episodes=tuple(episodes),
     )
@@ -122,6 +124,43 @@ def _candidate(*, intended_scope="movie", facts=None, unresolved=()):
 
 
 class MediaMetadataV1Test(unittest.TestCase):
+    def test_contract_returns_source_overview_in_confirmed_identity(self):
+        douban = _fact(
+            "douban:36235977",
+            "douban",
+            titles=("后室", "Backrooms"),
+            year="2026",
+            url="https://movie.douban.com/subject/36235977/",
+            external_ids={"douban_subject": "36235977"},
+            chinese="后室",
+            original="Backrooms",
+            language="en",
+            english="Backrooms",
+        )
+        tvdb = _fact(
+            "tvdb:movie:363177",
+            "tvdb",
+            titles=("Backrooms",),
+            year="2026",
+            url="https://thetvdb.com/movies/363177",
+            external_ids={"tvdb": "363177"},
+            original="Backrooms",
+            language="en",
+            english="Backrooms",
+            summary="A young filmmaker encounters the unsettling Backrooms.",
+        )
+
+        contract = build_media_metadata_v1(
+            _candidate(facts=(douban, tvdb)),
+            metadata_id="backrooms",
+            raw_query="后室",
+        )
+
+        self.assertEqual(
+            contract["identity"]["summary"],
+            "A young filmmaker encounters the unsettling Backrooms.",
+        )
+
     def test_tvdb_unavailable_series_degrades_to_whole_series(self):
         fact = _fact(
             "douban:20",

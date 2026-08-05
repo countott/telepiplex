@@ -1,6 +1,6 @@
 # search Feature
 
-search 1.5.0 使用“豆瓣发现、用户确认、确认后增强”的分阶段流程，避免首次搜索把不同来源、不同语言和不同作品混成一组候选。本版本不改变业务流程，修复 AI 禁用开关、Prowlarr torrent 重定向与纯文本 magnet 解析，以及 TVDB 零编号保真问题。
+search 1.5.1 使用“豆瓣发现、用户确认、确认后增强”的分阶段流程，避免首次搜索把不同来源、不同语言和不同作品混成一组候选。本版本补齐来源总览在证据、确认元数据和单候选结果卡片间的传递；海报可用时继续由 Host 发送图片结果。
 
 ## 发起搜索
 
@@ -31,6 +31,7 @@ search 1.5.0 使用“豆瓣发现、用户确认、确认后增强”的分阶�
 Official English Title
 类型：电影 / 剧集
 来源：豆瓣
+总览：来源提供的作品简介（存在时）
 ```
 
 英文标题只有豆瓣提供可靠字段时才显示。界面不显示 AI 置信度、理由、内部评分、候选版本或未补全来源。
@@ -95,7 +96,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
 构建示例：
 
 ```bash
-python tools/build_feature.py features/search /tmp/search-1.5.0.tpx \
+python tools/build_feature.py features/search /tmp/search-1.5.1.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

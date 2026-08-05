@@ -75,6 +75,7 @@ class EvidenceFact:
     external_ids: Mapping[str, str]
     source_url: str = ""
     poster_url: str = ""
+    summary: str = ""
     original_title: str = ""
     original_language: str = ""
     official_english_title: str = ""
@@ -163,6 +164,14 @@ class CandidateEntity:
                     and not fact.poster_language
                 ):
                     return fact.poster_url
+        return ""
+
+    @property
+    def summary(self) -> str:
+        for provider in ("tvdb", "douban", "wikipedia"):
+            for fact in self.facts:
+                if fact.provider == provider and fact.summary:
+                    return fact.summary
         return ""
 
     @property
@@ -331,6 +340,13 @@ def _fact(
         external_ids=_mapping(external_ids),
         source_url=source_url,
         poster_url=_text(raw.get("cover_url") or raw.get("poster_url")),
+        summary=_text(
+            raw.get("overview")
+            or raw.get("summary")
+            or raw.get("extract")
+            or raw.get("intro")
+            or raw.get("description")
+        ),
         original_title=_text(raw.get("original_title")),
         original_language=normalize_language(raw.get("original_language")),
         official_english_title=_text(
@@ -646,6 +662,7 @@ def _merge_fact_group(facts: list[EvidenceFact]) -> EvidenceFact:
                 "external_ids": dict(fact.external_ids),
                 "source_url": fact.source_url,
                 "poster_url": fact.poster_url,
+                "summary": fact.summary,
                 "original_title": fact.original_title,
                 "original_language": fact.original_language,
                 "official_english_title": fact.official_english_title,
@@ -707,6 +724,9 @@ def _merge_fact_group(facts: list[EvidenceFact]) -> EvidenceFact:
             shortest=True,
         ),
         poster_url=poster_url,
+        summary=_preferred_text(
+            fact.summary for fact in facts
+        ),
         original_title=_preferred_text(
             fact.original_title for fact in facts
         ),
@@ -765,6 +785,7 @@ def _occurrence_fact(fact: EvidenceFact) -> EvidenceFact:
             "external_ids": dict(fact.external_ids),
             "source_url": fact.source_url,
             "poster_url": fact.poster_url,
+            "summary": fact.summary,
             "original_title": fact.original_title,
             "original_language": fact.original_language,
             "official_english_title": fact.official_english_title,

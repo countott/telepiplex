@@ -142,6 +142,14 @@ class AnchoredCandidate:
             "",
         )
 
+    @property
+    def primary_summary(self) -> str:
+        for provider in ("tvdb", "douban", "wikipedia"):
+            for fact in self.facts:
+                if fact.provider == provider and fact.summary:
+                    return fact.summary
+        return ""
+
     def to_dict(self) -> dict:
         return {
             "candidate_id": self.candidate_id,

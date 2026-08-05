@@ -367,7 +367,7 @@ def build_media_metadata_v1(
         "aliases": aliases,
         "year": year,
         "content_kind": media_type,
-        "summary": "",
+        "summary": candidate.primary_summary,
         "original_release_date": "",
         "poster_url": poster,
         "poster_source": poster_source,

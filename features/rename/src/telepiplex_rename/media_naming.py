@@ -15,6 +15,7 @@ QUALITY_START_PATTERN = re.compile(
     r"2160p|1080p|720p|480p|WEB[-_. ]?DL|WEBRip|BluRay|BDRip|Remux|"
     r"HEVC|H\.?265|x265|H\.?264|x264|AAC|DTS|DDP?|EAC3|Atmos|TrueHD)\b"
 )
+CJK_PATTERN = re.compile(r"[\u3400-\u9fff]")
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,16 @@ def _strip_collection_suffix(name: str, suffix: str) -> str:
 def _display_folder(chinese_title: str, english_title: str) -> str:
     chinese_title = sanitize_path_name(chinese_title)
     english_title = sanitize_path_name(english_title)
+    if (
+        chinese_title
+        and english_title
+        and chinese_title.casefold().endswith(english_title.casefold())
+    ):
+        prefix = chinese_title[: -len(english_title)].rstrip(
+            " \t-–—:：/／|｜·・"
+        )
+        if prefix and CJK_PATTERN.search(prefix):
+            chinese_title = sanitize_path_name(prefix)
     if chinese_title and english_title and chinese_title != english_title:
         return f"{chinese_title} ({english_title})"
     return chinese_title or english_title
@@ -109,6 +120,16 @@ def build_media_naming_plan(metadata: dict | None, release_title: str, original_
     source = str(metadata.get("source") or "").strip()
     chinese_folder = sanitize_path_name(metadata.get("chinese_title"))
     english_folder = sanitize_path_name(metadata.get("english_title"))
+    original_language = str(
+        metadata.get("original_language") or ""
+    ).strip().casefold().replace("_", "-").split("-", 1)[0]
+    original_title = sanitize_path_name(metadata.get("original_title"))
+    if (
+        source == "media_metadata"
+        and original_language in {"en", "eng"}
+        and original_title
+    ):
+        english_folder = original_title
     if not english_folder and source in {"search_query", "filename"}:
         english_folder = infer_english_title_from_release(release_title)
     if not chinese_folder and source == "filename":
