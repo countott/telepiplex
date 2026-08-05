@@ -503,9 +503,22 @@ async def dynamic_message_gateway(update, context):
         await update.effective_message.reply_text(f"❌ {code}：{_safe_error(exc)}")
 
 
+def _is_stale_operation_snapshot(operation, active) -> bool:
+    if not isinstance(operation, dict) or active is None:
+        return False
+    if str(operation.get("operation_id") or "") != active.operation_id:
+        return False
+    try:
+        revision = int(operation.get("revision"))
+    except (TypeError, ValueError):
+        return False
+    return revision < active.revision
+
+
 async def handle_feature_result(update, context, route, result: dict):
     coordinator = context.application.bot_data.get(COORDINATOR_KEY)
     operation_record = None
+    stale_operation_snapshot = False
     operation = result.get("operation") if isinstance(result, dict) else None
     if operation is not None:
         if coordinator is None or not isinstance(operation, dict):
@@ -520,6 +533,10 @@ async def handle_feature_result(update, context, route, result: dict):
                 route.plugin_id,
                 _with_rendered_keyboard(route, result, operation),
             )
+            stale_operation_snapshot = _is_stale_operation_snapshot(
+                operation,
+                operation_record,
+            )
         except Exception as exc:
             await _feature_feedback(
                 update,
@@ -530,7 +547,15 @@ async def handle_feature_result(update, context, route, result: dict):
     if isinstance(result, dict) and "config_patch" in result:
         await _apply_feature_config_patch(update, context, route, result)
         return
-    if operation_record is not None:
+    if operation_record is not None and stale_operation_snapshot:
+        message_id = await render_operation(
+            context.application,
+            context.application.bot_data.get(ROUTER_KEY),
+            operation_record,
+        )
+        message_kind = operation_record.message_kind if message_id is not None else None
+        rendered = True
+    elif operation_record is not None:
         async with operation_render_lock(
             context.application,
             operation_record.operation_id,
@@ -583,6 +608,7 @@ async def handle_feature_result(update, context, route, result: dict):
             active is not None
             and active.plugin_id == route.plugin_id
             and active.state == "awaiting_input"
+            and not _is_stale_operation_snapshot(operation, active)
         ):
             operation_record = coordinator.report(route.plugin_id, {
                 "operation_id": active.operation_id,

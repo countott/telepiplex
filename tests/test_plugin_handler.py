@@ -364,6 +364,77 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(coordinator.active(10, 1))
             self.assertEqual(coordinator.get("op-1").state, "cancelled")
 
+    async def test_stale_closing_result_keeps_newer_awaiting_operation(self):
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+        from app.handlers.plugin_handler import handle_feature_result
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "host.db")
+            self.addCleanup(coordinator.close)
+            coordinator.report("search", {
+                "operation_id": "op-race",
+                "chat_id": 10,
+                "user_id": 1,
+                "state": "awaiting_input",
+                "stage": "candidate_recovery",
+                "status_text": "请选择重试或退出",
+                "control": "exit",
+                "revision": 2,
+            })
+            update, context, _manager = self._request([], user_id=1)
+            update.effective_message.reply_text.return_value = SimpleNamespace(
+                message_id=55
+            )
+            context.application.bot_data.update({
+                "telepiplex_interaction_coordinator": coordinator,
+                "telepiplex_plugin_sessions": {
+                    (10, 1): {
+                        "plugin_id": "search",
+                        "expires_at": 9999999999,
+                    },
+                },
+            })
+            context.application.bot = SimpleNamespace(
+                send_message=AsyncMock(
+                    return_value=SimpleNamespace(message_id=56)
+                ),
+                edit_message_text=AsyncMock(),
+            )
+            route = SimpleNamespace(
+                plugin_id="search",
+                manifest=SimpleNamespace(callbacks=("search",)),
+            )
+
+            await handle_feature_result(update, context, route, {
+                "actions": [{
+                    "kind": "send_message",
+                    "text": "正在规划媒体证据",
+                }],
+                "session": {"state": "close"},
+                "operation": {
+                    "operation_id": "op-race",
+                    "chat_id": 10,
+                    "user_id": 1,
+                    "state": "running",
+                    "stage": "planning",
+                    "status_text": "正在规划媒体证据",
+                    "control": "cancel",
+                    "revision": 1,
+                },
+            })
+
+            active = coordinator.active(10, 1)
+            self.assertIsNotNone(active)
+            self.assertEqual(active.state, "awaiting_input")
+            self.assertEqual(active.stage, "candidate_recovery")
+            self.assertEqual(active.revision, 2)
+            self.assertEqual(active.message_id, 56)
+            update.effective_message.reply_text.assert_not_awaited()
+            self.assertEqual(
+                context.application.bot.send_message.await_args.kwargs["text"],
+                "请选择重试或退出",
+            )
+
     async def test_feature_result_persists_only_current_prompt_callbacks(self):
         from app.runtime.interaction_coordinator import InteractionCoordinator
         from app.handlers.interaction_handler import operation_gate
