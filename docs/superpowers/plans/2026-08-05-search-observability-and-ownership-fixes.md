@@ -60,6 +60,7 @@
 
 ## 实际验证记录
 
+- 发布身份：Core Host `v3.4.13-host`；search Feature `1.5.2`
 - search Feature：`414 passed, 2 skipped, 95 subtests passed`
 - Host：`380 passed, 1 skipped, 176 subtests passed`
 - download Feature：`60 passed, 25 subtests passed`

@@ -24,10 +24,10 @@ def load_bot_module():
 
 
 class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
-    async def test_core_runtime_version_is_v3_4_12_host(self):
+    async def test_core_runtime_version_is_v3_4_13_host(self):
         bot_module = await asyncio.to_thread(load_bot_module)
 
-        self.assertEqual(bot_module.get_version(), "v3.4.12-host")
+        self.assertEqual(bot_module.get_version(), "v3.4.13-host")
 
     async def test_missing_legacy_catalog_uses_official_catalog_branch(self):
         bot_module = await asyncio.to_thread(load_bot_module)

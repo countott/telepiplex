@@ -1,6 +1,6 @@
 # search Feature
 
-search 1.5.1 使用“豆瓣发现、用户确认、确认后增强”的分阶段流程，避免首次搜索把不同来源、不同语言和不同作品混成一组候选。本版本补齐来源总览在证据、确认元数据和单候选结果卡片间的传递；海报可用时继续由 Host 发送图片结果。
+search 1.5.2 使用“豆瓣发现、用户确认、确认后增强”的分阶段流程，避免首次搜索把不同来源、不同语言和不同作品混成一组候选。本版本直接识别豆瓣 App dispatch 链接，通过同一 Wikipedia 实体的英文跨语言链接补齐规范英文标题，并收紧 Host action 数据与 operation 日志关联契约。
 
 ## 发起搜索
 
@@ -96,7 +96,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
 构建示例：
 
 ```bash
-python tools/build_feature.py features/search /tmp/search-1.5.1.tpx \
+python tools/build_feature.py features/search /tmp/search-1.5.2.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

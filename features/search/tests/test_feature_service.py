@@ -2977,10 +2977,10 @@ class FeatureSourceContractTest(unittest.TestCase):
             ROOT / "src" / "telepiplex_search.egg-info" / "PKG-INFO"
         ).read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.5.1")
+        self.assertEqual(manifest["version"], "1.5.2")
         self.assertEqual(manifest["host_api"], ">=1.3,<2.0")
-        self.assertIn('version = "1.5.1"', project)
-        self.assertIn("\nVersion: 1.5.1\n", package_metadata)
+        self.assertIn('version = "1.5.2"', project)
+        self.assertIn("\nVersion: 1.5.2\n", package_metadata)
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
@@ -3012,14 +3012,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.5.1.tpx", source)
+        self.assertIn("/tmp/search-1.5.2.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("都不是", source)
         self.assertIn("统一 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("rename", source)
-        self.assertNotIn("dist/search-1.5.1.tpx", source)
+        self.assertNotIn("dist/search-1.5.2.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []
