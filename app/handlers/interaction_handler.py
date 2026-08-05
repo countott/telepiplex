@@ -24,6 +24,7 @@ ROUTER_KEY = "telepiplex_plugin_router"
 OPERATION_RECOVERY_TASK_KEY = "telepiplex_operation_recovery_task"
 CONFIG_OPERATION_TASKS_KEY = "telepisync_config_operation_tasks"
 OPERATION_RENDER_LOCKS_KEY = "telepiplex_operation_render_locks"
+FEATURE_SESSION_KEY = "telepiplex_plugin_sessions"
 CONTROL_CALLBACK_PREFIX = "host-operation:"
 CONTROL_CALLBACK_PATTERN = r"^host-operation:"
 _CONTROL_RE = re.compile(
@@ -51,6 +52,28 @@ def _log(level: str, message: str):
     method = getattr(logger, level, None) or getattr(logger, "info", None)
     if method is not None:
         method(message)
+
+
+def operation_accepts_text(bot_data: dict, record, chat_id: int, user_id: int) -> bool:
+    if record is None or str(getattr(record, "state", "")) != "awaiting_input":
+        return False
+    sessions = bot_data.get(FEATURE_SESSION_KEY)
+    session = (
+        sessions.get((int(chat_id), int(user_id)))
+        if isinstance(sessions, dict)
+        else None
+    )
+    if not isinstance(session, dict):
+        return False
+    try:
+        expires_at = float(session.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        expires_at > time.time()
+        and str(session.get("plugin_id") or "")
+        == str(getattr(record, "plugin_id", "") or "")
+    )
 
 
 def operation_render_lock(application, operation_id: str) -> asyncio.Lock:
@@ -193,8 +216,29 @@ async def operation_gate(update, context):
 
     message = getattr(update, "effective_message", None)
     text = str(getattr(message, "text", "") or "")
-    if record.state == "awaiting_input" and text and not text.lstrip().startswith("/"):
-        return
+    if text and not text.lstrip().startswith("/"):
+        if operation_accepts_text(
+            bot_data,
+            record,
+            int(chat.id),
+            int(user.id),
+        ):
+            return
+        reply_text = getattr(message, "reply_text", None)
+        if callable(reply_text):
+            if (
+                record.state == "awaiting_input"
+                and isinstance(record.details.get("keyboard"), list)
+            ):
+                await reply_text(
+                    f"⚠️ 当前 {record.plugin_id} 任务正在等待按钮操作；"
+                    "请先完成或退出。"
+                )
+            else:
+                await reply_text(
+                    f"⚠️ 当前 {record.plugin_id} 任务正在执行；"
+                    "请先等待完成或取消。"
+                )
     raise ApplicationHandlerStop
 
 

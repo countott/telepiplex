@@ -52,6 +52,8 @@ class SearchLoggingTest(unittest.TestCase):
             "session-context",
             chat_id=10,
             user_id=20,
+            operation_id="operation-30",
+            update_id=40,
         )
 
         log_search_event(
@@ -77,10 +79,14 @@ class SearchLoggingTest(unittest.TestCase):
         for message in (first, terminal):
             self.assertIn("chat_id=10", message)
             self.assertIn("user_id=20", message)
+            self.assertIn("operation_id=operation-30", message)
+            self.assertIn("update_id=40", message)
             self.assertRegex(message, r"elapsed_ms=\d+")
         self.assertNotIn("chat_id=", after_terminal)
         self.assertNotIn("user_id=", after_terminal)
         self.assertNotIn("elapsed_ms=", after_terminal)
+        self.assertNotIn("operation_id=", after_terminal)
+        self.assertNotIn("update_id=", after_terminal)
 
     def test_business_session_terminal_is_logged_once(self):
         logger = Mock()

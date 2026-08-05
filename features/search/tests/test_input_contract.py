@@ -115,6 +115,17 @@ class InputContractTest(unittest.TestCase):
         self.assertEqual(parsed.link.entity_id, "35314632")
         self.assertEqual(parsed.link.scope, "work")
 
+    def test_douban_app_dispatch_link_is_a_stable_subject(self):
+        parsed = classify_search_input(
+            "https://www.douban.com/doubanapp/dispatch/movie/"
+            "36235977?dt_dapp=1"
+        )
+
+        self.assertEqual(parsed.kind, "link")
+        self.assertEqual(parsed.link.provider, "douban")
+        self.assertEqual(parsed.link.entity_id, "36235977")
+        self.assertEqual(parsed.link.scope, "work")
+
     def test_share_text_extracts_one_mobile_douban_entity(self):
         raw = (
             "分享《繁花》\n"

@@ -5,7 +5,7 @@ import html
 import re
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import yaml
 
@@ -317,6 +317,48 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         plan_report = self.host.reports[-1]
         callback_data = plan_report["details"]["keyboard"][0][0]["callback_data"]
         return callback_data.rsplit(":", 1)[-1]
+
+    async def test_background_operation_rejection_is_logged_once_without_second_report(
+        self,
+    ):
+        from telepiplex_search.context import runtime_context
+
+        self.host.report_operation = AsyncMock(return_value={
+            "accepted": False,
+            "error_code": "operation_owner_conflict",
+        })
+        logger = Mock()
+        original = runtime_context.logger
+        runtime_context.logger = logger
+        try:
+            command = await self.feature.command({
+                "command": "s",
+                "args": ["后室"],
+                "user_id": 1,
+                "chat_id": 10,
+                "update_id": 99,
+            })
+            await self.runtime.run("search-plan-")
+        finally:
+            runtime_context.logger = original
+
+        self.host.report_operation.assert_awaited_once()
+        operation_id = command["operation"]["operation_id"]
+        messages = [
+            call.args[0]
+            for call in logger.warning.call_args_list
+        ]
+        self.assertTrue(any(
+            "event=search.operation_report_failed" in message
+            and f"operation_id={operation_id}" in message
+            and "update_id=99" in message
+            for message in messages
+        ))
+        self.assertTrue(any(
+            "event=search.background_task_failed" in message
+            and "error_code=operation_rejected" in message
+            for message in messages
+        ))
 
     async def test_confirmed_plan_searches_prowlarr_in_english_only(self):
         command = await self.feature.command({
@@ -684,7 +726,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.feature.plans, {})
         self.assertEqual(self.search_queries, [])
 
-    async def test_candidate_binding_failure_logs_plan_query_and_concrete_reason(self):
+    async def test_candidate_binding_failure_logs_correlation_without_raw_query(self):
         from telepiplex_search.context import runtime_context
         from telepiplex_search.planner import SearchPlanningError
 
@@ -702,6 +744,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "args": ["ODDTAXI"],
                 "user_id": 1,
                 "chat_id": 10,
+                "update_id": 88,
             })
             await self.runtime.run("search-plan-")
 
@@ -709,12 +752,15 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             call.args[0]
             for call in logger.warning.call_args_list
         )
-        self.assertIn("search_planning status=failed", warning)
-        self.assertIn("query=ODDTAXI", warning)
-        self.assertRegex(warning, r"plan_id=[a-f0-9]{10}")
-        self.assertIn("code=candidate_binding_failed", warning)
+        self.assertIn("event=search.planning_failed", warning)
+        self.assertRegex(warning, r"search_session_id=[a-f0-9]{10}")
+        self.assertRegex(warning, r"operation_id=[a-f0-9]{32}")
+        self.assertIn("update_id=88", warning)
+        self.assertIn("error_code=candidate_binding_failed", warning)
         self.assertIn("fact_bound_multiple_times", warning)
         self.assertIn("unknown_fact_id", warning)
+        self.assertIn("query_chars=7", warning)
+        self.assertNotIn("ODDTAXI", warning)
 
     async def test_recoverable_planning_errors_have_retry_and_single_exit_ui(self):
         from telepiplex_search.planner import SearchPlanningError
@@ -1809,6 +1855,34 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             action["data"]["keyboard"][0][0]["text"],
             "选择并验证",
         )
+        self.assertEqual(set(action["data"]), {"keyboard", "photo_url"})
+        self.assertNotIn("candidate_key", action["data"])
+
+    def test_frozen_candidate_action_only_emits_host_render_fields(self):
+        plan = ranked_search_plan()
+        candidate = plan["candidates"][0]
+        candidate.update({
+            "links_frozen": True,
+            "source_links": [{
+                "provider": "douban",
+                "url": "https://movie.douban.com/subject/36235977/",
+            }],
+        })
+
+        action = self.feature._candidate_action(
+            {
+                "candidates": (candidate,),
+                "plan": {
+                    "plan_id": "frozen-contract",
+                    "links_frozen": True,
+                },
+            },
+            0,
+            edit=False,
+        )
+
+        self.assertEqual(set(action["data"]), {"keyboard", "photo_url"})
+        self.assertNotIn("candidate_key", action["data"])
 
     async def test_unified_single_candidate_requires_user_confirmation(self):
         async def planner(_raw_query, plan_id):
@@ -2147,6 +2221,8 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             ],
             ["电影《康斯坦丁》", "剧集《康斯坦丁》"],
         )
+        self.assertEqual(set(report["details"]), {"keyboard"})
+        self.assertNotIn("clarification", report["details"])
 
     async def test_clarification_choice_replans_in_same_operation(self):
         queries = []

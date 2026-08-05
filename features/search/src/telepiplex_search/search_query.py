@@ -203,7 +203,10 @@ def extract_douban_subject_id(raw_url: str) -> str:
     if not (host == "douban.com" or host.endswith(".douban.com")):
         return ""
 
-    match = re.search(r"/subject/(\d+)/?", parsed.path)
+    match = re.search(
+        r"/(?:subject|doubanapp/dispatch/movie)/(\d+)/?",
+        parsed.path,
+    )
     return match.group(1) if match else ""
 
 

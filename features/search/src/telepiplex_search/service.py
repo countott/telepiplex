@@ -632,6 +632,7 @@ class SearchFeature:
                 search_session_id,
                 chat_id=request.get("chat_id"),
                 user_id=request.get("user_id"),
+                update_id=request.get("update_id"),
             )
             log_search_event(
                 runtime_context.logger,
@@ -822,6 +823,8 @@ class SearchFeature:
             plan_id,
             chat_id=request.get("chat_id"),
             user_id=request.get("user_id"),
+            operation_id=operation["operation_id"],
+            update_id=request.get("update_id"),
         )
         log_search_event(
             runtime_context.logger,
@@ -951,14 +954,54 @@ class SearchFeature:
                 control="",
             )
         except Exception as exc:
-            self._release_plan(plan_id)
-            await self._report_operation(
-                operation_id,
-                state="failed",
-                stage="planning",
-                status_text=f"媒体规划失败：{type(exc).__name__}",
-                control="",
+            error_code = str(
+                getattr(exc, "code", "")
+                or type(exc).__name__
             )
+            log_search_event(
+                runtime_context.logger,
+                "search.background_task_failed",
+                search_session_id=plan_id,
+                level="warning",
+                operation_id=operation_id,
+                stage="planning",
+                error_code=error_code,
+                error_type=type(exc).__name__,
+            )
+            self._release_plan(plan_id)
+            if (self.operations.get(operation_id) or {}).get(
+                "_host_report_rejected"
+            ):
+                log_search_event(
+                    runtime_context.logger,
+                    "search.completed",
+                    search_session_id=plan_id,
+                    level="warning",
+                    terminal_status="operation_rejected",
+                )
+                return
+            try:
+                await self._report_operation(
+                    operation_id,
+                    state="failed",
+                    stage="planning",
+                    status_text=f"媒体规划失败：{type(exc).__name__}",
+                    control="",
+                )
+            except Exception as report_exc:
+                log_search_event(
+                    runtime_context.logger,
+                    "search.background_task_failed",
+                    search_session_id=plan_id,
+                    level="warning",
+                    operation_id=operation_id,
+                    stage="planning_finalization",
+                    error_code=str(
+                        getattr(report_exc, "code", "")
+                        or type(report_exc).__name__
+                    ),
+                    error_type=type(report_exc).__name__,
+                )
 
     def _start_release_search_task(self, plan_id: str, stored: dict) -> dict:
         operation_id = stored["operation_id"]
@@ -1041,6 +1084,20 @@ class SearchFeature:
                 details=self._prowlarr_status_details(operation_id),
             )
         except Exception as exc:
+            error_code = str(
+                getattr(exc, "code", "")
+                or type(exc).__name__
+            )
+            log_search_event(
+                runtime_context.logger,
+                "search.background_task_failed",
+                search_session_id=plan_id,
+                level="warning",
+                operation_id=operation_id,
+                stage="prowlarr_search",
+                error_code=error_code,
+                error_type=type(exc).__name__,
+            )
             self._log_completed_once(
                 plan_id,
                 stored,
@@ -1048,14 +1105,24 @@ class SearchFeature:
                 error=type(exc).__name__,
             )
             self._release_plan(plan_id)
-            await self._report_operation(
-                operation_id,
-                state="failed",
-                stage="prowlarr_search",
-                status_text=f"Prowlarr 搜索失败：{type(exc).__name__}",
-                control="",
-                details=self._prowlarr_status_details(operation_id),
-            )
+            if not (self.operations.get(operation_id) or {}).get(
+                "_host_report_rejected"
+            ):
+                try:
+                    await self._report_operation(
+                        operation_id,
+                        state="failed",
+                        stage="prowlarr_search",
+                        status_text=(
+                            f"Prowlarr 搜索失败：{type(exc).__name__}"
+                        ),
+                        control="",
+                        details=self._prowlarr_status_details(
+                            operation_id
+                        ),
+                    )
+                except Exception:
+                    pass
 
     def _start_submission_task(self, plan_id, stored, release_id):
         operation_id = stored["operation_id"]
@@ -1146,6 +1213,20 @@ class SearchFeature:
                 control="",
             )
         except Exception as exc:
+            error_code = str(
+                getattr(exc, "code", "")
+                or type(exc).__name__
+            )
+            log_search_event(
+                runtime_context.logger,
+                "search.background_task_failed",
+                search_session_id=plan_id,
+                level="warning",
+                operation_id=operation_id,
+                stage="resolving_release",
+                error_code=error_code,
+                error_type=type(exc).__name__,
+            )
             self._log_completed_once(
                 plan_id,
                 stored,
@@ -1153,14 +1234,24 @@ class SearchFeature:
                 error=type(exc).__name__,
             )
             self._release_plan(plan_id)
-            if self.operations[operation_id]["state"] != "failed":
-                await self._report_operation(
-                    operation_id,
-                    state="failed",
-                    stage="resolving_release",
-                    status_text=f"片源提交失败：{type(exc).__name__}",
-                    control="",
+            if (
+                not (self.operations.get(operation_id) or {}).get(
+                    "_host_report_rejected"
                 )
+                and self.operations[operation_id]["state"] != "failed"
+            ):
+                try:
+                    await self._report_operation(
+                        operation_id,
+                        state="failed",
+                        stage="resolving_release",
+                        status_text=(
+                            f"片源提交失败：{type(exc).__name__}"
+                        ),
+                        control="",
+                    )
+                except Exception:
+                    pass
 
     async def _prepare_plan(
         self,
@@ -1187,15 +1278,15 @@ class SearchFeature:
             reason_codes = tuple(
                 getattr(exc, "reason_codes", ()) or ()
             )
-            if runtime_context.logger:
-                runtime_context.logger.warning(
-                    "search_planning status=failed "
-                    f"plan_id={sanitize_log_value(plan_id, max_chars=80)} "
-                    f"query={sanitize_log_value(raw_query, max_chars=300)} "
-                    f"code={sanitize_log_value(code, max_chars=120)} "
-                    "reason_codes="
-                    f"{sanitize_log_value(list(reason_codes), max_chars=1000)}"
-                )
+            log_search_event(
+                runtime_context.logger,
+                "search.planning_failed",
+                search_session_id=plan_id,
+                level="warning",
+                error_code=code,
+                reason_codes=list(reason_codes),
+                query_chars=len(str(raw_query or "")),
+            )
             message = _PLANNING_ERROR_MESSAGES.get(
                 code,
                 "媒体证据无法形成有效计划，请补充信息后重试。",
@@ -1476,10 +1567,7 @@ class SearchFeature:
         return {
             "kind": "edit_message" if edit else "send_message",
             "text": f"需要确认搜索目标\n{reason}",
-            "data": {
-                "keyboard": keyboard,
-                "clarification": True,
-            },
+            "data": {"keyboard": keyboard},
         }
 
     def _clarify_choice(
@@ -1572,10 +1660,7 @@ class SearchFeature:
                 "callback_data": f"search:reject:{plan_id}",
             }])
             poster = _text(candidate.get("poster_url"))
-            data = {
-                "keyboard": keyboard,
-                "candidate_key": candidate.get("candidate_key") or "",
-            }
+            data = {"keyboard": keyboard}
             if poster.startswith("https://"):
                 data["photo_url"] = poster
                 kind = "edit_photo" if edit else "send_photo"
@@ -1624,7 +1709,7 @@ class SearchFeature:
             "callback_data": f"search:cancel:{stored['plan']['plan_id']}",
         }])
         poster = str(candidate.get("poster_url") or "")
-        data = {"keyboard": keyboard, "candidate_key": candidate.get("candidate_key") or ""}
+        data = {"keyboard": keyboard}
         if poster.startswith("https://"):
             data["photo_url"] = poster
             kind = "edit_photo" if edit else "send_photo"
@@ -3899,15 +3984,53 @@ class SearchFeature:
     async def _report_operation(self, operation_id, **changes):
         view = self._advance_operation(operation_id, **changes)
         if view["chat_id"] and view["user_id"]:
-            response = await self.host.report_operation(view)
+            operation = self.operations[operation_id]
+            operation.pop("_host_report_rejected", None)
+            plan_id = str(operation.get("plan_id") or "")
+            try:
+                response = await self.host.report_operation(view)
+            except Exception as exc:
+                operation["_host_report_rejected"] = True
+                log_search_event(
+                    runtime_context.logger,
+                    "search.operation_report_failed",
+                    search_session_id=plan_id,
+                    level="warning",
+                    operation_id=operation_id,
+                    state=view["state"],
+                    stage=view["stage"],
+                    revision=view["revision"],
+                    error_code=str(
+                        getattr(exc, "code", "")
+                        or type(exc).__name__
+                    ),
+                    error_type=type(exc).__name__,
+                )
+                raise
             if not isinstance(response, dict) or response.get("accepted") is not True:
-                operation = self.operations[operation_id]
                 operation.update({
                     "state": "interrupted",
                     "status_text": "Host 未接受当前 Feature 的任务所有权。",
                     "control": "",
                     "next_plugin_id": "",
+                    "_host_report_rejected": True,
                 })
+                log_search_event(
+                    runtime_context.logger,
+                    "search.operation_report_failed",
+                    search_session_id=plan_id,
+                    level="warning",
+                    operation_id=operation_id,
+                    state=view["state"],
+                    stage=view["stage"],
+                    revision=view["revision"],
+                    error_code=str(
+                        response.get("error_code")
+                        if isinstance(response, dict)
+                        else "invalid_response"
+                    ),
+                    error_type="operation_rejected",
+                )
                 raise FeatureError(
                     "operation_rejected",
                     "Host rejected search operation ownership",

@@ -17,11 +17,13 @@ from app.runtime.interaction_coordinator import TERMINAL_STATES
 from app.runtime.command_catalog import sync_bot_commands
 from app.runtime.poster_grid import build_poster_grid
 from app.runtime.telegram_text import bounded_photo_caption
+from app.utils.log_sanitizer import sanitize_log_value
 from app.handlers.interaction_handler import (
     CONFIG_OPERATION_TASKS_KEY,
     COORDINATOR_KEY,
     deduplicate_terminal_controls,
     operation_markup,
+    operation_accepts_text,
     operation_render_lock,
     render_operation,
 )
@@ -81,6 +83,70 @@ def _safe_error(value) -> str:
         str(value),
     )
     return text[:1000]
+
+
+def _log_feature_event(
+    level: str,
+    event: str,
+    update,
+    route=None,
+    **fields,
+) -> None:
+    logger = getattr(init, "logger", None)
+    if logger is None:
+        return
+    method = getattr(logger, level, None)
+    if not callable(method) and level == "warning":
+        method = getattr(logger, "warn", None)
+    if not callable(method):
+        method = getattr(logger, "info", None)
+    if not callable(method):
+        return
+    base_fields = {
+        "plugin_id": str(getattr(route, "plugin_id", "") or ""),
+        "update_id": getattr(update, "update_id", None),
+        "chat_id": getattr(
+            getattr(update, "effective_chat", None),
+            "id",
+            None,
+        ),
+        "user_id": getattr(
+            getattr(update, "effective_user", None),
+            "id",
+            None,
+        ),
+    }
+    base_fields.update(fields)
+    parts = [f"event={sanitize_log_value(event, max_chars=120)}"]
+    for key in sorted(base_fields):
+        value = base_fields[key]
+        if value is None or value == "":
+            continue
+        parts.append(
+            f"{key}={sanitize_log_value(value, max_chars=500)}"
+        )
+    method(" ".join(parts))
+
+
+def _log_invalid_feature_response(
+    update,
+    route,
+    reason: str,
+    *,
+    action_index: int | None = None,
+    operation_record=None,
+) -> None:
+    _log_feature_event(
+        "warning",
+        "feature.response_invalid",
+        update,
+        route,
+        reason=reason,
+        action_index=action_index,
+        operation_id=str(
+            getattr(operation_record, "operation_id", "") or ""
+        ),
+    )
 
 
 def _config_migration_suffix(result) -> str:
@@ -457,6 +523,22 @@ async def dynamic_message_gateway(update, context):
     key = _session_key(update)
     router = bot_data.get(ROUTER_KEY)
     session = sessions.get(key) if isinstance(sessions, dict) else None
+    coordinator = bot_data.get(COORDINATOR_KEY)
+    active = (
+        coordinator.active(*key)
+        if coordinator is not None
+        else None
+    )
+    if active is not None and not operation_accepts_text(
+        bot_data,
+        active,
+        *key,
+    ):
+        await update.effective_message.reply_text(
+            f"⚠️ 当前 {active.plugin_id} 任务正在等待按钮操作；"
+            "请先完成或退出。"
+        )
+        return
     if isinstance(session, dict):
         if float(session.get("expires_at") or 0) <= time.time():
             _drop_session(bot_data, key)
@@ -500,6 +582,18 @@ async def dynamic_message_gateway(update, context):
         await handle_feature_result(update, context, route, result)
     except Exception as exc:
         code = getattr(exc, "code", "feature_message_failed")
+        _log_feature_event(
+            "warning",
+            "feature.message_dispatch_failed",
+            update,
+            route,
+            operation_id=str(
+                getattr(active, "operation_id", "") or ""
+            ),
+            error_code=code,
+            error_type=type(exc).__name__,
+            error_message=_safe_error(exc),
+        )
         await update.effective_message.reply_text(f"❌ {code}：{_safe_error(exc)}")
 
 
@@ -522,6 +616,11 @@ async def handle_feature_result(update, context, route, result: dict):
     operation = result.get("operation") if isinstance(result, dict) else None
     if operation is not None:
         if coordinator is None or not isinstance(operation, dict):
+            _log_invalid_feature_response(
+                update,
+                route,
+                "operation_state_invalid",
+            )
             await _feature_feedback(
                 update,
                 "❌ Feature 返回了无效任务状态。",
@@ -538,6 +637,43 @@ async def handle_feature_result(update, context, route, result: dict):
                 operation_record,
             )
         except Exception as exc:
+            active = None
+            try:
+                active = coordinator.active(
+                    int(update.effective_chat.id),
+                    int(update.effective_user.id),
+                )
+            except Exception:
+                pass
+            _log_feature_event(
+                "warning",
+                "feature.operation_report_rejected",
+                update,
+                route,
+                operation_id=str(
+                    operation.get("operation_id") or ""
+                ),
+                submitted_state=str(
+                    operation.get("state") or ""
+                ),
+                submitted_stage=str(
+                    operation.get("stage") or ""
+                ),
+                submitted_revision=operation.get("revision"),
+                active_operation_id=str(
+                    getattr(active, "operation_id", "") or ""
+                ),
+                active_state=str(
+                    getattr(active, "state", "") or ""
+                ),
+                active_revision=getattr(active, "revision", None),
+                error_code=str(
+                    getattr(exc, "code", "")
+                    or type(exc).__name__
+                ),
+                error_type=type(exc).__name__,
+                error_message=_safe_error(exc),
+            )
             await _feature_feedback(
                 update,
                 f"❌ operation_report_failed：{_safe_error(exc)}",
@@ -588,6 +724,12 @@ async def handle_feature_result(update, context, route, result: dict):
             await render_operation(context.application, None, operation_record)
         return
     if not isinstance(session, dict) or session.get("state") not in {"open", "close"}:
+        _log_invalid_feature_response(
+            update,
+            route,
+            "session_state_invalid",
+            operation_record=operation_record,
+        )
         await _feature_feedback(
             update,
             "❌ Feature 返回了无效会话状态。",
@@ -896,6 +1038,16 @@ async def _render_actions(
 ) -> tuple[bool, int | None, str | None]:
     actions = result.get("actions") if isinstance(result, dict) else None
     if not isinstance(actions, list) or len(actions) > 20:
+        _log_invalid_feature_response(
+            update,
+            route,
+            (
+                "actions_invalid"
+                if not isinstance(actions, list)
+                else "actions_limit_exceeded"
+            ),
+            operation_record=operation_record,
+        )
         await _feature_feedback(
             update,
             "❌ Feature 返回了无效响应。",
@@ -907,6 +1059,17 @@ async def _render_actions(
     source_keyboard_resolved = False
     for index, action in enumerate(actions):
         if not isinstance(action, dict) or action.get("kind") not in _SAFE_ACTIONS:
+            _log_invalid_feature_response(
+                update,
+                route,
+                (
+                    "action_invalid"
+                    if not isinstance(action, dict)
+                    else "action_kind_invalid"
+                ),
+                action_index=index,
+                operation_record=operation_record,
+            )
             await _feature_feedback(
                 update,
                 "❌ Feature 返回了无效响应。",
@@ -915,6 +1078,13 @@ async def _render_actions(
             return False, None, None
         text = str(action.get("text") or "")
         if not text:
+            _log_invalid_feature_response(
+                update,
+                route,
+                "action_text_missing",
+                action_index=index,
+                operation_record=operation_record,
+            )
             await _feature_feedback(
                 update,
                 "❌ Feature 返回了无效响应。",
@@ -930,6 +1100,13 @@ async def _render_actions(
         action_data = action.get("data")
         reply_markup = _keyboard_markup(route, action_data)
         if reply_markup is False:
+            _log_invalid_feature_response(
+                update,
+                route,
+                "action_data_invalid",
+                action_index=index,
+                operation_record=operation_record,
+            )
             await _feature_feedback(
                 update,
                 "❌ Feature 返回了无效响应。",
@@ -954,6 +1131,13 @@ async def _render_actions(
             and isinstance(action_data, dict)
             and "photo_url" in action_data
         ) or poster_items is False:
+            _log_invalid_feature_response(
+                update,
+                route,
+                "photo_data_invalid",
+                action_index=index,
+                operation_record=operation_record,
+            )
             await _feature_feedback(
                 update,
                 "❌ Feature 返回了无效响应。",
@@ -965,6 +1149,13 @@ async def _render_actions(
             and isinstance(action_data, dict)
             and "poster_items" in action_data
         ):
+            _log_invalid_feature_response(
+                update,
+                route,
+                "poster_data_invalid",
+                action_index=index,
+                operation_record=operation_record,
+            )
             await _feature_feedback(
                 update,
                 "❌ Feature 返回了无效响应。",

@@ -134,19 +134,33 @@ def _read_shared_link(
                 allow_redirects=False,
             )
         except requests.RequestException as exc:
-            raise DirectLinkError("fixed_link_read_failed") from exc
+            raise DirectLinkError(
+                "fixed_link_read_failed",
+                (f"request_error:{type(exc).__name__}",),
+            ) from exc
         status_code = int(getattr(response, "status_code", 0) or 0)
         if status_code in _REDIRECT_STATUS_CODES:
             location = str(
                 getattr(response, "headers", {}).get("Location") or ""
             ).strip()
-            if not location or redirects >= max_redirects:
-                raise DirectLinkError("fixed_link_read_failed")
+            if not location:
+                raise DirectLinkError(
+                    "fixed_link_read_failed",
+                    ("redirect_missing",),
+                )
+            if redirects >= max_redirects:
+                raise DirectLinkError(
+                    "fixed_link_read_failed",
+                    ("redirect_limit",),
+                )
             current_url = urljoin(current_url, location)
             redirects += 1
             continue
         if not 200 <= status_code < 300:
-            raise DirectLinkError("fixed_link_read_failed")
+            raise DirectLinkError(
+                "fixed_link_read_failed",
+                (f"http_status:{status_code}",),
+            )
         final_url = str(getattr(response, "url", "") or current_url)
         if not _allowed_direct_url(final_url):
             raise DirectLinkError("direct_link_redirect_rejected")

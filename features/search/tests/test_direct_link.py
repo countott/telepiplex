@@ -110,6 +110,45 @@ class DirectLinkTest(unittest.TestCase):
         ):
             resolve_shared_metadata_link(parsed)
 
+    @patch("telepiplex_search.direct_link.requests.get")
+    def test_shared_link_http_failure_has_safe_reason_code(self, get):
+        get.return_value = type("Response", (), {
+            "status_code": 418,
+            "headers": {},
+            "text": "",
+            "url": (
+                "https://www.douban.com/doubanapp/dispatch/movie/"
+                "36235977?dt_dapp=1"
+            ),
+        })()
+        parsed = ParsedInput(
+            kind="resolvable_link",
+            raw_query=(
+                "https://www.douban.com/doubanapp/dispatch/movie/"
+                "36235977?dt_dapp=1"
+            ),
+            link=MetadataLink(
+                provider="douban",
+                media_type="",
+                entity_id="",
+                scope="work",
+                url=(
+                    "https://www.douban.com/doubanapp/dispatch/movie/"
+                    "36235977?dt_dapp=1"
+                ),
+            ),
+            urls=(
+                "https://www.douban.com/doubanapp/dispatch/movie/"
+                "36235977?dt_dapp=1",
+            ),
+        )
+
+        with self.assertRaises(DirectLinkError) as failed:
+            resolve_shared_metadata_link(parsed)
+
+        self.assertEqual(failed.exception.code, "fixed_link_read_failed")
+        self.assertEqual(failed.exception.details, ("http_status:418",))
+
     @patch("telepiplex_search.direct_link.lookup_wikipedia_page")
     def test_wikipedia_article_locks_wikibase_identity(self, lookup):
         lookup.return_value = {

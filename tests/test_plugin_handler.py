@@ -128,6 +128,108 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             [("取消", "search:cancel:p1")],
         )
 
+    async def test_invalid_action_logs_safe_reason_and_correlation_fields(self):
+        from app.handlers import plugin_handler
+        from app.handlers.plugin_handler import _render_actions
+
+        update, context, _manager = self._request([], user_id=1)
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        operation = SimpleNamespace(operation_id="op-render-1")
+        logger = Mock()
+
+        with patch.object(plugin_handler.init, "logger", logger):
+            rendered, message_id, message_kind = await _render_actions(
+                update,
+                context,
+                route,
+                {
+                    "actions": [{
+                        "kind": "send_message",
+                        "text": "access_token=must-not-leak",
+                        "data": {
+                            "keyboard": [[{
+                                "text": "选择",
+                                "callback_data": "search:select:1",
+                            }]],
+                            "candidate_key": "internal-secret",
+                        },
+                    }],
+                },
+                operation_record=operation,
+            )
+
+        self.assertEqual((rendered, message_id, message_kind), (
+            False,
+            None,
+            None,
+        ))
+        message = logger.warning.call_args.args[0]
+        self.assertIn("event=feature.response_invalid", message)
+        self.assertIn("reason=action_data_invalid", message)
+        self.assertIn("plugin_id=search", message)
+        self.assertIn("operation_id=op-render-1", message)
+        self.assertIn("update_id=99", message)
+        self.assertIn("chat_id=10", message)
+        self.assertIn("user_id=1", message)
+        self.assertNotIn("must-not-leak", message)
+        self.assertNotIn("internal-secret", message)
+
+    async def test_operation_report_conflict_logs_submitted_and_active_ids(self):
+        from app.handlers import plugin_handler
+        from app.handlers.plugin_handler import handle_feature_result
+
+        update, context, _manager = self._request([], user_id=1)
+        coordinator = Mock()
+        coordinator.report.side_effect = RuntimeError(
+            "operation already owns this user "
+            "access_token=must-not-leak"
+        )
+        coordinator.active.return_value = SimpleNamespace(
+            operation_id="op-active",
+            state="awaiting_input",
+            revision=7,
+        )
+        context.application.bot_data[
+            "telepiplex_interaction_coordinator"
+        ] = coordinator
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        logger = Mock()
+
+        with patch.object(plugin_handler.init, "logger", logger):
+            await handle_feature_result(
+                update,
+                context,
+                route,
+                {
+                    "actions": [],
+                    "operation": {
+                        "operation_id": "op-submitted",
+                        "chat_id": 10,
+                        "user_id": 1,
+                        "state": "running",
+                        "stage": "planning",
+                        "revision": 1,
+                    },
+                },
+            )
+
+        message = logger.warning.call_args.args[0]
+        self.assertIn(
+            "event=feature.operation_report_rejected",
+            message,
+        )
+        self.assertIn("operation_id=op-submitted", message)
+        self.assertIn("active_operation_id=op-active", message)
+        self.assertIn("active_revision=7", message)
+        self.assertIn("update_id=99", message)
+        self.assertNotIn("must-not-leak", message)
+
     async def test_feature_config_patch_is_merged_and_reloaded_by_host(self):
         from app.handlers.plugin_handler import handle_feature_result
 
@@ -1110,6 +1212,45 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["text"], update.effective_message.text)
         update.effective_message.reply_text.assert_awaited_once_with(
             "已接收作品链接"
+        )
+
+    async def test_active_button_only_operation_blocks_direct_message_dispatch(self):
+        from app.handlers.plugin_handler import dynamic_message_gateway
+
+        client = AsyncMock()
+        route = SimpleNamespace(
+            plugin_id="search",
+            client=client,
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        router = Mock()
+        router.direct_message_route.return_value = route
+        coordinator = Mock()
+        coordinator.active.return_value = SimpleNamespace(
+            plugin_id="search",
+            state="awaiting_input",
+        )
+        update, context, _manager = self._request([], user_id=1)
+        update.effective_message.text = (
+            "https://www.douban.com/doubanapp/dispatch/movie/"
+            "36235977?dt_dapp=1"
+        )
+        context.application.bot_data.update({
+            "telepiplex_plugin_router": router,
+            "telepiplex_interaction_coordinator": coordinator,
+        })
+
+        with patch(
+            "app.handlers.plugin_handler.init.check_user",
+            return_value=True,
+        ):
+            await dynamic_message_gateway(update, context)
+
+        router.direct_message_route.assert_not_called()
+        client.request.assert_not_awaited()
+        self.assertIn(
+            "等待按钮",
+            update.effective_message.reply_text.await_args.args[0],
         )
 
     async def test_route_loss_closes_feature_session_without_dispatch(self):

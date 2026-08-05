@@ -16,6 +16,8 @@ def bind_search_log_context(
     *,
     chat_id=None,
     user_id=None,
+    operation_id=None,
+    update_id=None,
 ) -> None:
     session_id = str(search_session_id or "").strip()
     if not session_id:
@@ -23,6 +25,8 @@ def bind_search_log_context(
     _SEARCH_LOG_CONTEXTS[session_id] = {
         "chat_id": chat_id,
         "user_id": user_id,
+        "operation_id": operation_id,
+        "update_id": update_id,
         "started_at": time.monotonic(),
     }
 
@@ -48,7 +52,7 @@ def log_search_event(
             clear_search_log_context(session_id)
         return
     context = _SEARCH_LOG_CONTEXTS.get(session_id) or {}
-    for key in ("chat_id", "user_id"):
+    for key in ("chat_id", "user_id", "operation_id", "update_id"):
         if key not in fields and context.get(key) is not None:
             fields[key] = context[key]
     if "elapsed_ms" not in fields and context.get("started_at") is not None:

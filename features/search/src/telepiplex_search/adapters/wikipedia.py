@@ -168,6 +168,34 @@ def _page_titles(page: dict, language: str) -> tuple[str, str]:
     return canonical, display
 
 
+_ENGLISH_MEDIA_DISAMBIGUATION = re.compile(
+    r"\s*\((?:(?:18|19|20)\d{2}\s+)?"
+    r"(?:film|movie|TV\s+series|television\s+series|web\s+series|"
+    r"miniseries|anime)\)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _english_work_title(page: dict, language: str) -> str:
+    if language.startswith("en"):
+        title = str(page.get("title") or "")
+    else:
+        langlinks = page.get("langlinks")
+        if isinstance(langlinks, dict):
+            langlinks = list(langlinks.values())
+        title = ""
+        for item in langlinks if isinstance(langlinks, list) else ():
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("lang") or "en").casefold() != "en":
+                continue
+            title = str(item.get("title") or item.get("*") or "")
+            if title:
+                break
+    title = " ".join(title.split())
+    return _ENGLISH_MEDIA_DISAMBIGUATION.sub("", title).strip()
+
+
 def _variant_params(language: str) -> dict:
     if not language.startswith("zh"):
         return {}
@@ -206,10 +234,12 @@ def lookup_wikipedia_evidence(
                         "generator": "search",
                         "gsrsearch": query,
                         "gsrlimit": 5,
-                        "prop": "extracts|pageprops|info",
+                        "prop": "extracts|pageprops|info|langlinks",
                         "exintro": 1,
                         "explaintext": 1,
                         "inprop": "url|varianttitles",
+                        "lllang": "en",
+                        "lllimit": 1,
                         "format": "json",
                         "formatversion": 2,
                         **_variant_params(language),
@@ -249,6 +279,10 @@ def lookup_wikipedia_evidence(
                         f"{quote(title.replace(' ', '_'))}"
                     )
                 year, media_type = _classification(title, extract)
+                official_english_title = _english_work_title(
+                    page,
+                    language,
+                )
                 facts.append(
                     {
                         "language": language,
@@ -264,6 +298,7 @@ def lookup_wikipedia_evidence(
                         "media_type": media_type,
                         "chinese_title": title if language.startswith("zh") else "",
                         "english_title": title if language.startswith("en") else "",
+                        "official_english_title": official_english_title,
                     }
                 )
                 if page_url not in urls:
@@ -306,12 +341,14 @@ def lookup_wikipedia_page(
                 "action": "query",
                 "titles": title,
                 "redirects": 1,
-                "prop": "extracts|pageprops|info|pageimages",
+                "prop": "extracts|pageprops|info|pageimages|langlinks",
                 "exintro": 1,
                 "explaintext": 1,
                 "piprop": "original|thumbnail",
                 "pithumbsize": 1000,
                 "inprop": "url|varianttitles",
+                "lllang": "en",
+                "lllimit": 1,
                 "format": "json",
                 "formatversion": 2,
                 **_variant_params(language),
@@ -356,6 +393,7 @@ def lookup_wikipedia_page(
         if isinstance(image, dict)
         else ""
     )
+    official_english_title = _english_work_title(page, language)
     return {
         "language": language,
         "title": resolved_title,
@@ -368,9 +406,11 @@ def lookup_wikipedia_page(
         "year": year,
         "media_type": media_type,
         "chinese_title": resolved_title if language.startswith("zh") else "",
-        "english_title": resolved_title if language.startswith("en") else "",
-        "official_english_title": (
-            resolved_title if language.startswith("en") else ""
+        "english_title": (
+            resolved_title
+            if language.startswith("en")
+            else official_english_title
         ),
+        "official_english_title": official_english_title,
         "cover_url": poster_url,
     }

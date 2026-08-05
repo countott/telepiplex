@@ -56,7 +56,10 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             update_id=10,
             effective_chat=SimpleNamespace(id=10),
             effective_user=SimpleNamespace(id=1),
-            effective_message=SimpleNamespace(text=text),
+            effective_message=SimpleNamespace(
+                text=text,
+                reply_text=AsyncMock(),
+            ),
             callback_query=None,
         )
 
@@ -195,7 +198,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         update.callback_query.answer.assert_awaited_once_with("当前任务执行中")
 
-    async def test_awaiting_input_allows_plain_text_and_owned_callback_only(self):
+    async def test_button_only_operation_rejects_plain_text_and_allows_owned_callback(self):
         from app.handlers.interaction_handler import operation_gate
 
         record = self.coordinator.report(
@@ -221,7 +224,13 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         router.plugin_route.return_value = route
         context = self.context(router=router)
 
-        await operation_gate(self.message_update("第二季"), context)
+        blocked = self.message_update("第二季")
+        with self.assertRaises(ApplicationHandlerStop):
+            await operation_gate(blocked, context)
+        self.assertIn(
+            "等待按钮",
+            blocked.effective_message.reply_text.await_args.args[0],
+        )
         owned = self.callback_update("search:release:1")
         await operation_gate(owned, context)
         owned.callback_query.answer.assert_not_awaited()
@@ -231,6 +240,34 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApplicationHandlerStop):
             await operation_gate(unrelated, context)
         unrelated.callback_query.answer.assert_awaited_once_with("当前任务执行中")
+
+    async def test_awaiting_input_allows_text_only_for_matching_open_session(self):
+        from app.handlers.interaction_handler import operation_gate
+
+        self.coordinator.report(
+            "search",
+            self.report(
+                state="awaiting_input",
+                stage="query_input",
+                status_text="等待输入片名",
+                control="exit",
+            ),
+        )
+        context = self.context()
+        context.application.bot_data["telepiplex_plugin_sessions"] = {
+            (10, 1): {
+                "plugin_id": "search",
+                "expires_at": time.time() + 60,
+            },
+        }
+
+        await operation_gate(self.message_update("后室"), context)
+
+        context.application.bot_data["telepiplex_plugin_sessions"][
+            (10, 1)
+        ]["plugin_id"] = "download"
+        with self.assertRaises(ApplicationHandlerStop):
+            await operation_gate(self.message_update("后室"), context)
 
     async def test_awaiting_input_rejects_stale_callback_from_same_feature(self):
         from app.handlers.interaction_handler import operation_gate

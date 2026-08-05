@@ -6,6 +6,7 @@ import requests
 from telepiplex_search.adapters.wikipedia import (
     _classification,
     lookup_wikipedia_evidence,
+    lookup_wikipedia_page,
 )
 
 
@@ -81,6 +82,76 @@ class WikipediaAdapterTest(unittest.TestCase):
                 "https://en.wikipedia.org/wiki/Someday_or_One_Day",
             ],
         )
+
+    @patch("telepiplex_search.adapters.wikipedia.requests.get")
+    def test_zh_page_uses_same_entity_english_langlink_as_official_title(
+        self,
+        get_mock,
+    ):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "query": {
+                "pages": [{
+                    "title": "后室 (电影)",
+                    "extract": "《后室》是一部2026年美国恐怖电影。",
+                    "pageprops": {"wikibase_item": "Q125131076"},
+                    "fullurl": "https://zh.wikipedia.org/wiki/后室_(电影)",
+                    "langlinks": [{
+                        "lang": "en",
+                        "title": "Backrooms (film)",
+                    }],
+                }]
+            }
+        }
+        get_mock.return_value = response
+
+        result = lookup_wikipedia_evidence(
+            ["后室 电影 2026"],
+            languages=("zh",),
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            result["facts"][0]["wikibase_item"],
+            "Q125131076",
+        )
+        self.assertEqual(
+            result["facts"][0]["official_english_title"],
+            "Backrooms",
+        )
+        params = get_mock.call_args.kwargs["params"]
+        self.assertIn("langlinks", params["prop"])
+        self.assertEqual(params["lllang"], "en")
+        self.assertEqual(params["lllimit"], 1)
+
+    @patch("telepiplex_search.adapters.wikipedia.requests.get")
+    def test_exact_zh_page_exposes_same_entity_english_work_title(
+        self,
+        get_mock,
+    ):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "query": {
+                "pages": [{
+                    "title": "后室 (电影)",
+                    "extract": "《后室》是一部2026年美国恐怖电影。",
+                    "pageprops": {"wikibase_item": "Q125131076"},
+                    "fullurl": "https://zh.wikipedia.org/wiki/后室_(电影)",
+                    "langlinks": [{
+                        "lang": "en",
+                        "title": "Backrooms (2026 film)",
+                    }],
+                }]
+            }
+        }
+        get_mock.return_value = response
+
+        fact = lookup_wikipedia_page("zh", "后室 (电影)")
+
+        self.assertEqual(fact["official_english_title"], "Backrooms")
+        self.assertEqual(fact["english_title"], "Backrooms")
 
     @patch("telepiplex_search.adapters.wikipedia.requests.get", side_effect=OSError("dns failed"))
     def test_server_failure_is_soft_evidence(self, _get_mock):
