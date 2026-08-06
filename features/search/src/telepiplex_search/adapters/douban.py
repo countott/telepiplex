@@ -322,6 +322,12 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
         if item and item not in aliases:
             aliases.append(item)
     genres = _list_values(data.get("genres") or data.get("genre"))
+    countries = _list_values(
+        data.get("countries")
+        or data.get("country")
+        or data.get("regions")
+        or data.get("region")
+    )
     official_english_title, _unused_official_year = _normalize_title_and_year(
         data.get("official_english_title")
         or data.get("officialEnglishTitle")
@@ -350,6 +356,7 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
         "media_type": _media_type(data),
         "aliases": aliases,
         "genres": genres,
+        "countries": countries,
         "cover_url": _cover_url(data),
         "summary": _text(
             data.get("summary")
@@ -357,6 +364,54 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
             or data.get("description")
         ),
     }
+
+
+def _merge_subject_facts(facts: list[dict]) -> dict | None:
+    valid = [deepcopy(item) for item in facts if isinstance(item, dict)]
+    if not valid:
+        return None
+    subject_ids = {_text(item.get("subject_id")) for item in valid}
+    if len(subject_ids) != 1 or "" in subject_ids:
+        return None
+
+    merged = valid[0]
+    conflicts = []
+    scalar_fields = (
+        "title",
+        "chinese_title",
+        "english_title",
+        "original_title",
+        "original_language",
+        "official_english_title",
+        "romanized_original_title",
+        "cover_url",
+        "summary",
+    )
+    list_fields = ("aliases", "genres", "countries")
+    for fact in valid[1:]:
+        for field in scalar_fields:
+            if not _text(merged.get(field)) and _text(fact.get(field)):
+                merged[field] = fact[field]
+        for field in list_fields:
+            values = []
+            for value in list(merged.get(field) or []) + list(fact.get(field) or []):
+                value = _text(value)
+                if value and value not in values:
+                    values.append(value)
+            merged[field] = values
+        for field in ("year", "media_type"):
+            current = _text(merged.get(field))
+            incoming = _text(fact.get(field))
+            if current and incoming and current != incoming:
+                conflicts.append(field)
+            elif not current and incoming:
+                merged[field] = fact[field]
+        external_ids = dict(merged.get("external_ids") or {})
+        external_ids.update(dict(fact.get("external_ids") or {}))
+        merged["external_ids"] = external_ids
+    if conflicts:
+        merged["identity_conflicts"] = sorted(set(conflicts))
+    return merged
 
 
 def _fetch_subject(
@@ -375,6 +430,7 @@ def _fetch_subject(
             f"https://m.douban.com/movie/subject/{subject_id}/",
         ),
     )
+    facts = []
     for endpoint, referer in attempts:
         try:
             response = requests.get(
@@ -388,8 +444,8 @@ def _fetch_subject(
             errors.append((_exception_status(exc), str(exc)))
             continue
         if fact:
-            return fact
-    return None
+            facts.append(fact)
+    return _merge_subject_facts(facts)
 
 
 def lookup_douban_subject(

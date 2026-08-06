@@ -61,6 +61,7 @@ from .discovery_flow import (
     build_douban_first_search_plan,
 )
 from .input_contract import classify_search_input, contains_url
+from .identity_presentation import build_identity_presentation
 from .log_sanitizer import sanitize_log_value
 from .planner import (
     SearchPlanningError,
@@ -148,6 +149,58 @@ def _candidate_media_type(candidate: dict) -> str:
         return "movie"
     library_type = _text(placement.get("library_type")).casefold()
     return library_type if library_type in {"movie", "series"} else ""
+
+
+def _metadata_candidate_ref(candidate: dict) -> str:
+    value = _text(
+        candidate.get("candidate_key")
+        or candidate.get("candidate_id")
+    )
+    if value:
+        return value[:160]
+    for link in candidate.get("source_links") or ():
+        if not isinstance(link, dict):
+            continue
+        provider = _text(link.get("provider")).casefold()
+        identifiers = link.get("external_ids") or {}
+        if provider and isinstance(identifiers, dict):
+            stable_id = next(
+                (_text(item) for item in identifiers.values() if _text(item)),
+                "",
+            )
+            if stable_id:
+                return f"{provider}:{stable_id}"[:160]
+    return ""
+
+
+def _metadata_candidate_preview(candidate: dict) -> dict:
+    contract = candidate.get("media_metadata") or {}
+    identity = contract.get("identity") or {}
+    countries = [
+        _text(item)
+        for item in identity.get("countries") or ()
+        if _text(item)
+    ]
+    return {
+        "ref": _metadata_candidate_ref(candidate),
+        "title": _text(
+            identity.get("chinese_title")
+            or identity.get("english_title")
+            or "未知作品"
+        ),
+        "original_title": _text(
+            identity.get("official_english_title")
+            or identity.get("english_title")
+            or identity.get("original_title")
+        ),
+        "year": _text(identity.get("year")),
+        "countries": countries,
+        "media_type": _candidate_media_type(candidate),
+        "poster_url": _text(
+            candidate.get("poster_url")
+            or identity.get("poster_url")
+        ),
+    }
 
 
 def _probe_scope(contract: dict, probe: dict) -> tuple[str, int | None, int | None]:
@@ -412,7 +465,8 @@ class SearchFeature:
             stored["search_completed_logged"] = True
 
     async def metadata_capability(self, request: dict) -> dict:
-        if str(request.get("method") or "") != "resolve_metadata":
+        method = str(request.get("method") or "")
+        if method not in {"resolve_metadata", "confirm_metadata"}:
             raise FeatureError(
                 "method_not_allowed",
                 "media.search method is not allowed",
@@ -442,11 +496,12 @@ class SearchFeature:
                 "metadata_unresolved",
                 f"metadata resolution failed: {exc.code}",
             ) from exc
-        candidates = [
+        all_candidates = [
             item
             for item in plan.get("candidates") or []
             if item.get("selectable") is not False
         ]
+        candidates = list(all_candidates)
         probe_media_type = _probe_media_type(probe)
         if probe_media_type:
             unconstrained_count = len(candidates)
@@ -462,15 +517,44 @@ class SearchFeature:
                     f"before={unconstrained_count} "
                     f"after={len(candidates)}"
                 )
-        if len(candidates) != 1:
-            raise FeatureError(
-                (
-                    "metadata_ambiguous"
-                    if len(candidates) > 1
-                    else "metadata_unresolved"
+        if not candidates:
+            return {
+                "status": "unresolved",
+                "reason_code": (
+                    "media_type_mismatch"
+                    if probe_media_type and all_candidates
+                    else "no_candidate"
                 ),
-                "noninteractive metadata resolution requires exactly one candidate",
-            )
+            }
+        if method == "confirm_metadata":
+            candidate_ref = _text(payload.get("candidate_ref"))
+            candidates = [
+                item
+                for item in candidates
+                if _metadata_candidate_ref(item) == candidate_ref
+            ]
+            if len(candidates) != 1:
+                return {
+                    "status": "unresolved",
+                    "reason_code": "invalid_candidate_ref",
+                }
+        elif len(candidates) != 1:
+            previews = [
+                preview
+                for item in candidates[:5]
+                if (preview := _metadata_candidate_preview(item))["ref"]
+            ]
+            if not previews:
+                return {
+                    "status": "unresolved",
+                    "reason_code": "candidate_ref_missing",
+                }
+            return {
+                "status": "confirmation_required",
+                "query": raw_query,
+                "probe": deepcopy(probe),
+                "candidates": previews,
+            }
         selected = deepcopy(candidates[0])
         if selected.get("links_frozen"):
             try:
@@ -549,10 +633,10 @@ class SearchFeature:
             elif scope == "whole_series":
                 contract = apply_series_scope(contract, "whole_series")
             else:
-                raise FeatureError(
-                    "metadata_unresolved",
-                    "series metadata resolution requires an explicit scope",
-                )
+                return {
+                    "status": "unresolved",
+                    "reason_code": "scope_unresolved",
+                }
             selected_plan["media_metadata"] = contract
         try:
             contract = confirm_media_metadata(selected_plan)
@@ -563,6 +647,7 @@ class SearchFeature:
             ) from exc
         identity = contract["identity"]
         return {
+            "status": "resolved",
             "media_metadata": contract,
             "naming_metadata": {
                 "source": "search-live",
@@ -576,6 +661,7 @@ class SearchFeature:
             },
             "source_queries": deepcopy(plan.get("source_queries") or {}),
             "evidence": deepcopy(contract.get("evidence") or {}),
+            "presentation": build_identity_presentation(contract),
         }
 
     async def command(self, request: dict) -> dict:
@@ -1005,11 +1091,14 @@ class SearchFeature:
 
     def _start_release_search_task(self, plan_id: str, stored: dict) -> dict:
         operation_id = stored["operation_id"]
+        title = _text(
+            (stored.get("identity_presentation") or {}).get("title")
+        ) or "未知作品"
         operation_view = self._advance_operation(
             operation_id,
             state="running",
             stage="prowlarr_search",
-            status_text="正在搜索并排序 Prowlarr 片源。",
+            status_text=f"🔍 {title}",
             control="cancel",
             details=self._prowlarr_status_details(operation_id),
         )
@@ -1022,7 +1111,7 @@ class SearchFeature:
         return {
             "actions": [{
                 "kind": "edit_message",
-                "text": "⏳ 正在搜索并排序 Prowlarr 片源...",
+                "text": f"🔍 {title}",
             }],
             "operation": operation_view,
         }
@@ -1508,21 +1597,6 @@ class SearchFeature:
                 self.plans[plan_id],
                 str(candidates.index(selectable[0])),
             )
-            if plan.get("selection_mode") == "hard_match":
-                identity = (
-                    selectable[0].get("media_metadata") or {}
-                ).get("identity") or {}
-                title = _text(
-                    identity.get("chinese_title")
-                    or identity.get("english_title")
-                    or "未知"
-                )
-                year = _text(identity.get("year")) or "年份未知"
-                action = (selected_result.get("actions") or [{}])[0]
-                action["text"] = (
-                    f"✅ 已识别为：{title}（{year}）\n"
-                    + _text(action.get("text"))
-                )
             return selected_result
         action = (
             self._candidate_grid_action(self.plans[plan_id])
@@ -1644,6 +1718,15 @@ class SearchFeature:
                 lines.append(english_title)
             lines.extend([
                 f"类型：{_human_media_type(placement.get('library_type'))}",
+                "国家/地区："
+                + (
+                    "、".join(
+                        _text(item)
+                        for item in identity.get("countries") or ()
+                        if _text(item)
+                    )
+                    or "未知"
+                ),
                 f"来源：{source}",
             ])
             if summary := _compact_summary(identity.get("summary")):
@@ -1747,6 +1830,15 @@ class SearchFeature:
                 "类型："
                 + html.escape(
                     _human_media_type(placement.get("library_type"))
+                ),
+                "国家/地区："
+                + html.escape(
+                    "、".join(
+                        _text(item)
+                        for item in identity.get("countries") or ()
+                        if _text(item)
+                    )
+                    or "未知"
                 ),
                 "来源：豆瓣",
             ])
@@ -2502,11 +2594,41 @@ class SearchFeature:
             self._release_plan(plan_id)
             return self._closed("❌ 媒体分类没有对应保存目录。")
         stored["selected_path"] = route["path"]
+        stored["identity_presentation"] = build_identity_presentation(
+            contract
+        )
         return self._start_release_search_task(plan_id, stored)
 
     async def _confirm_and_search(self, plan_id: str, stored: dict) -> dict:
         plan = stored["plan"]
         contract = confirm_media_metadata(plan)
+        presentation = build_identity_presentation(contract)
+        stored["identity_presentation"] = deepcopy(presentation)
+        if (
+            stored.get("identity_milestone_id")
+            != presentation["milestone_id"]
+        ):
+            try:
+                response = await self.host.publish_operation_milestone(
+                    stored["operation_id"],
+                    presentation["milestone_id"],
+                    presentation["text"],
+                    photo_url=presentation["photo_url"],
+                )
+            except Exception as exc:
+                if runtime_context.logger:
+                    runtime_context.logger.warning(
+                        "search_identity_milestone "
+                        f"status=failed error={type(exc).__name__}"
+                    )
+            else:
+                if (
+                    not isinstance(response, dict)
+                    or response.get("accepted") is not False
+                ):
+                    stored["identity_milestone_id"] = (
+                        presentation["milestone_id"]
+                    )
         evidence = contract.get("evidence") or {}
         if isinstance(evidence.get("source_links"), list):
             queries = build_prowlarr_query_chain(
@@ -2767,7 +2889,9 @@ class SearchFeature:
             contract,
         )
         text = format_release_report(
-            query,
+            _text(
+                (stored.get("identity_presentation") or {}).get("title")
+            ) or query,
             gate,
             results,
             indexer_summary,
@@ -3028,7 +3152,9 @@ class SearchFeature:
         if last_report and now - last_report < 1.25:
             return
         text = format_release_report(
-            query,
+            _text(
+                (stored.get("identity_presentation") or {}).get("title")
+            ) or query,
             gate,
             results,
             indexer_summary,
@@ -3039,7 +3165,10 @@ class SearchFeature:
             stage="prowlarr_search",
             status_text=text,
             control="cancel",
-            details={"keyboard": release_keyboard(plan_id, results)},
+            details={
+                "allow_running_callbacks": True,
+                "keyboard": release_keyboard(plan_id, results),
+            },
         )
         stored["last_incremental_report"] = time.monotonic()
 
@@ -3071,7 +3200,12 @@ class SearchFeature:
             )
         if remaining:
             report = format_release_report(
-                " | ".join(stored.get("active_prowlarr_queries") or []),
+                _text(
+                    (stored.get("identity_presentation") or {}).get("title")
+                )
+                or " | ".join(
+                    stored.get("active_prowlarr_queries") or []
+                ),
                 stored.get("gate_report"),
                 remaining,
                 stored.get("indexer_summary") or {},

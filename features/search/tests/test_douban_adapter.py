@@ -51,6 +51,13 @@ class DoubanAdapterTest(unittest.TestCase):
                     "pic": {"large": "https://img.example/glory.jpg"},
                 }
             }),
+            response(payload={
+                "id": "35314632",
+                "title": "黑暗荣耀",
+                "original_title": "The Glory",
+                "year": "2022",
+                "type": "tv",
+            }),
         ]
 
         result = douban.lookup_douban_evidence(["黑暗荣耀 2022"])
@@ -70,7 +77,7 @@ class DoubanAdapterTest(unittest.TestCase):
             result["source_urls"],
             ["https://movie.douban.com/subject/35314632/"],
         )
-        self.assertEqual(get_mock.call_count, 2)
+        self.assertEqual(get_mock.call_count, 3)
 
     @patch("telepiplex_search.adapters.douban.requests.get")
     def test_subject_abstract_failure_falls_back_to_mobile_json(self, get_mock):
@@ -90,6 +97,42 @@ class DoubanAdapterTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["facts"][0]["english_title"], "Léon")
+
+    @patch("telepiplex_search.adapters.douban.requests.get")
+    def test_subject_lookup_merges_rich_country_poster_and_aliases(self, get_mock):
+        get_mock.side_effect = [
+            response(payload={
+                "subject": {
+                    "id": "35981510",
+                    "title": "繁花",
+                    "year": "2023",
+                    "type": "tv",
+                }
+            }),
+            response(payload={
+                "id": "35981510",
+                "title": "繁花",
+                "original_title": "Blossoms Shanghai",
+                "year": "2023",
+                "type": "tv",
+                "countries": ["中国大陆", "中国大陆"],
+                "aka": ["繁花(剧版)", "Blossoms Shanghai"],
+                "pic": {"large": "https://img.example/blossoms.jpg"},
+            }),
+        ]
+
+        fact = douban.lookup_douban_subject("35981510", cache_ttl=0)
+
+        self.assertEqual(fact["subject_id"], "35981510")
+        self.assertEqual(fact["chinese_title"], "繁花")
+        self.assertEqual(fact["english_title"], "Blossoms Shanghai")
+        self.assertEqual(fact["countries"], ["中国大陆"])
+        self.assertEqual(fact["cover_url"], "https://img.example/blossoms.jpg")
+        self.assertEqual(
+            fact["aliases"],
+            ["Blossoms Shanghai", "繁花(剧版)"],
+        )
+        self.assertEqual(get_mock.call_count, 2)
 
     @patch("telepiplex_search.adapters.douban.requests.get")
     def test_japanese_language_and_romaji_are_preserved_without_translation(self, get_mock):
@@ -260,6 +303,13 @@ class DoubanAdapterTest(unittest.TestCase):
                 "year": "1994",
                 "type": "movie",
             }),
+            response(payload={
+                "id": "1295644",
+                "title": "这个杀手不太冷",
+                "original_title": "Léon",
+                "year": "1994",
+                "type": "movie",
+            }),
         ]
 
         first = douban.lookup_douban_evidence(
@@ -272,7 +322,7 @@ class DoubanAdapterTest(unittest.TestCase):
         )
 
         self.assertEqual(first, second)
-        self.assertEqual(get_mock.call_count, 2)
+        self.assertEqual(get_mock.call_count, 3)
 
     @patch("telepiplex_search.service.lookup_douban_evidence", create=True)
     def test_feature_provider_uses_rule_queries(self, lookup_mock):

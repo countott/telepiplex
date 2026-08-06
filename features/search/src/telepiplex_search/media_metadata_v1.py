@@ -325,6 +325,9 @@ def build_media_metadata_v1(
     aliases = _unique(
         title for fact in primary_facts for title in fact.titles
     )
+    countries = _unique(
+        country for fact in primary_facts for country in fact.countries
+    )
     external_ids = {}
     for fact in (root, *primary_facts):
         for key, value in fact.external_ids.items():
@@ -365,6 +368,7 @@ def build_media_metadata_v1(
         **titles.identity_fields(),
         "chinese_title": chinese_title,
         "aliases": aliases,
+        "countries": countries,
         "year": year,
         "content_kind": media_type,
         "summary": candidate.primary_summary,
@@ -450,6 +454,7 @@ def build_media_metadata_v1(
                 "titles": list(fact.titles),
                 "year": fact.year,
                 "media_type": fact.media_type,
+                "countries": list(fact.countries),
                 "external_ids": dict(fact.external_ids),
             } for fact in primary_facts],
             "provider_statuses": _provider_statuses(candidate),

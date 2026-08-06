@@ -144,7 +144,10 @@ def build_metadata_probe(payload: dict) -> dict:
     else:
         shape = "unknown"
     identity_query = _identity_query(payload)
-    year_match = re.search(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)", identity_query)
+    year_match = re.search(
+        r"(?<!\d)(19\d{2}|20\d{2})(?!\d)",
+        _text(_root_name(payload)),
+    )
     return {
         "identity_query": identity_query,
         "year_hint": year_match.group(1) if year_match else "",

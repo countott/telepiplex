@@ -57,12 +57,16 @@ class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
         self.router = CapabilityRouter()
         self.journal = EventJournal(root / "host.db")
         self.notifications = []
+        self.milestones = []
         self.operation_sink = AsyncMock(return_value={"accepted": True, "revision": 1})
         self.broker = RuntimeBroker(
             self.router,
             self.journal,
             root / "host.sock",
             notification_sink=lambda user_id, text: self.notifications.append((user_id, text)),
+            milestone_sink=lambda plugin_id, payload: self.milestones.append(
+                (plugin_id, payload)
+            ),
             operation_sink=self.operation_sink,
         )
         await self.broker.start()
@@ -176,6 +180,34 @@ class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(FeatureError) as raised:
             await client.notify_user(123, "x" * 5000, deadline=1)
         self.assertEqual(raised.exception.code, "invalid_notification")
+
+    async def test_feature_publishes_operation_owned_photo_milestone(self):
+        from telepiplex_plugin_sdk import HostClient
+
+        self.broker.register("search", "milestone-token", manifest("search"))
+        client = HostClient(self.broker.socket_path, "milestone-token")
+
+        result = await client.publish_operation_milestone(
+            "op-1",
+            "media-douban-35981510",
+            "繁花 (Blossoms Shanghai)\n2023｜中国大陆｜剧集｜全剧",
+            photo_url="https://img.example/blossoms.jpg",
+            deadline=1,
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(
+            self.milestones,
+            [(
+                "search",
+                {
+                    "operation_id": "op-1",
+                    "milestone_id": "media-douban-35981510",
+                    "text": "繁花 (Blossoms Shanghai)\n2023｜中国大陆｜剧集｜全剧",
+                    "photo_url": "https://img.example/blossoms.jpg",
+                },
+            )],
+        )
 
     async def test_operation_report_uses_authenticated_feature_identity(self):
         from telepiplex_plugin_sdk import HostClient

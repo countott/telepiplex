@@ -79,6 +79,29 @@ class HostClient:
             deadline=deadline,
         )
 
+    async def publish_operation_milestone(
+        self,
+        operation_id: str,
+        milestone_id: str,
+        text: str,
+        *,
+        photo_url: str = "",
+        deadline: float = 10,
+    ) -> dict:
+        return await self._request(
+            "operation.milestone",
+            {
+                "operation_id": str(operation_id),
+                "milestone_id": str(milestone_id),
+                "text": str(text),
+                "photo_url": str(photo_url or ""),
+            },
+            deadline=deadline,
+            idempotency_key=(
+                f"{str(operation_id)}:{str(milestone_id)}"
+            ),
+        )
+
     async def _request(
         self,
         method: str,

@@ -104,6 +104,14 @@ class InteractionCoordinator:
             WHERE state IN ({active_states});
             CREATE INDEX IF NOT EXISTS operations_active_plugin
             ON operations(plugin_id, state, updated_at);
+            CREATE TABLE IF NOT EXISTS operation_milestones (
+                operation_id TEXT NOT NULL,
+                milestone_id TEXT NOT NULL,
+                plugin_id TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY(operation_id, milestone_id),
+                FOREIGN KEY(operation_id) REFERENCES operations(operation_id)
+            );
         """)
         columns = {
             str(row["name"])
@@ -208,6 +216,82 @@ class InteractionCoordinator:
                 (str(operation_id),),
             ).fetchone()
         return self._from_row(row) if row is not None else None
+
+    def claim_milestone(
+        self,
+        plugin_id: str,
+        operation_id: str,
+        milestone_id: str,
+    ) -> OperationRecord | None:
+        normalized_plugin = str(plugin_id or "").strip()
+        normalized_operation = str(operation_id or "").strip()
+        normalized_milestone = str(milestone_id or "").strip()
+        if (
+            not normalized_plugin
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", normalized_operation)
+            or not re.fullmatch(
+                r"[A-Za-z0-9_.:-]{1,120}",
+                normalized_milestone,
+            )
+        ):
+            raise InteractionError(
+                "invalid_milestone",
+                "operation milestone identity is invalid",
+            )
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT * FROM operations WHERE operation_id = ?",
+                    (normalized_operation,),
+                ).fetchone()
+                if row is None:
+                    raise InteractionError(
+                        "not_found",
+                        "operation was not found",
+                    )
+                record = self._from_row(row)
+                if record.plugin_id != normalized_plugin:
+                    raise InteractionError(
+                        "owner_mismatch",
+                        "operation belongs to another Feature",
+                    )
+                cursor = self._connection.execute(
+                    "INSERT OR IGNORE INTO operation_milestones("
+                    "operation_id, milestone_id, plugin_id, created_at"
+                    ") VALUES (?, ?, ?, ?)",
+                    (
+                        normalized_operation,
+                        normalized_milestone,
+                        normalized_plugin,
+                        time.time(),
+                    ),
+                )
+                self._connection.execute("COMMIT")
+                return record if cursor.rowcount == 1 else None
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+
+    def release_milestone(
+        self,
+        plugin_id: str,
+        operation_id: str,
+        milestone_id: str,
+    ) -> None:
+        normalized_plugin = str(plugin_id or "").strip()
+        normalized_operation = str(operation_id or "").strip()
+        normalized_milestone = str(milestone_id or "").strip()
+        with self._lock, self._connection:
+            self._connection.execute(
+                "DELETE FROM operation_milestones "
+                "WHERE operation_id = ? AND milestone_id = ? AND plugin_id = ?",
+                (
+                    normalized_operation,
+                    normalized_milestone,
+                    normalized_plugin,
+                ),
+            )
 
     def active(self, chat_id: int, user_id: int) -> OperationRecord | None:
         placeholders = ",".join("?" for _ in ACTIVE_STATES)

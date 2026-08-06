@@ -89,6 +89,44 @@ def operation_render_lock(application, operation_id: str) -> asyncio.Lock:
     return lock
 
 
+class OperationMilestoneSink:
+    def __init__(self, coordinator, delivery):
+        self.coordinator = coordinator
+        self.delivery = delivery
+
+    def __call__(self, plugin_id: str, payload: dict) -> dict:
+        operation_id = str(payload.get("operation_id") or "")
+        milestone_id = str(payload.get("milestone_id") or "")
+        record = self.coordinator.claim_milestone(
+            plugin_id,
+            operation_id,
+            milestone_id,
+        )
+        if record is None:
+            return {"accepted": True, "duplicate": True}
+        text = str(payload.get("text") or "")
+        photo_url = str(payload.get("photo_url") or "") or None
+        try:
+            accepted = self.delivery(record.chat_id, photo_url, text)
+            if accepted is False and photo_url:
+                accepted = self.delivery(record.chat_id, None, text)
+        except Exception:
+            self.coordinator.release_milestone(
+                plugin_id,
+                operation_id,
+                milestone_id,
+            )
+            raise
+        if accepted is False:
+            self.coordinator.release_milestone(
+                plugin_id,
+                operation_id,
+                milestone_id,
+            )
+            return {"accepted": False, "duplicate": False}
+        return {"accepted": True, "duplicate": False}
+
+
 class OperationReportSink:
     def __init__(self, coordinator, router=None):
         self.coordinator = coordinator
@@ -195,7 +233,12 @@ async def operation_gate(update, context):
         control = _CONTROL_RE.fullmatch(data)
         if control is not None and control.group("operation_id") == record.operation_id:
             return
-        if record.state == "awaiting_input":
+        running_interaction = bool(
+            record.state == "running"
+            and record.stage == "prowlarr_search"
+            and record.details.get("allow_running_callbacks") is True
+        )
+        if record.state == "awaiting_input" or running_interaction:
             router = bot_data.get(ROUTER_KEY)
             allowed = {
                 str(button.callback_data)

@@ -200,6 +200,19 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertEqual(probe["year_hint"], "2024")
         self.assertEqual(probe["content_shape"], "movie")
 
+    def test_probe_extracts_year_before_truncating_season_markers(self):
+        probe = build_metadata_probe({
+            "resource_name": "The.Office.US.S01.2005.1080p.WEB-DL",
+            "file_tree": [{
+                "relative_path": "The.Office.US.S01E01.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "The Office US")
+        self.assertEqual(probe["year_hint"], "2005")
+        self.assertEqual(probe["content_shape"], "single_episode")
+
     def test_probe_preserves_bare_episode_pack_without_inventing_season(self):
         probe = build_metadata_probe({
             "resource_name": "Honey.and.Clover",
@@ -546,6 +559,7 @@ class FakeHost:
         self.events = []
         self.notifications = []
         self.reports = []
+        self.milestones = []
         self.fail_notification = False
 
     async def call_capability(self, capability, method, payload, **_kwargs):
@@ -554,6 +568,7 @@ class FakeHost:
             self.metadata_payload = payload
             self.metadata_query = payload["query"]
             return {
+                "status": "resolved",
                 "media_metadata": movie_contract(),
                 "naming_metadata": {
                     "source": "search",
@@ -561,6 +576,11 @@ class FakeHost:
                     "chinese_title": "中文电影",
                     "english_title": "English Movie",
                     "year": "2024",
+                },
+                "presentation": {
+                    "milestone_id": "media-movie-2024",
+                    "text": "🎬 中文电影 (English Movie)",
+                    "photo_url": "https://img.example/movie.jpg",
                 },
             }
         value = getattr(self.storage, method)(*(payload.get("args") or []), **(payload.get("kwargs") or {}))
@@ -580,6 +600,24 @@ class FakeHost:
         self.reports.append(operation)
         return {"accepted": True, "revision": operation["revision"]}
 
+    async def publish_operation_milestone(
+        self,
+        operation_id,
+        milestone_id,
+        text,
+        *,
+        photo_url="",
+        deadline=10,
+    ):
+        self.milestones.append({
+            "operation_id": operation_id,
+            "milestone_id": milestone_id,
+            "text": text,
+            "photo_url": photo_url,
+            "deadline": deadline,
+        })
+        return {"accepted": True, "duplicate": False}
+
 
 class FakeRuntime:
     def __init__(self):
@@ -598,6 +636,119 @@ class FakeRuntime:
 
 
 class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
+    async def test_ambiguous_magnet_waits_for_confirmation_and_resumes_same_job(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        class AmbiguousHost(FakeHost):
+            async def call_capability(
+                self, capability, method, payload, **kwargs
+            ):
+                if capability == "media.search" and method == "resolve_metadata":
+                    return {
+                        "status": "confirmation_required",
+                        "query": payload["query"],
+                        "probe": payload["probe"],
+                        "candidates": [{
+                            "ref": "douban:1",
+                            "title": "中文电影甲",
+                            "original_title": "English Movie A",
+                            "year": "2024",
+                            "countries": ["美国"],
+                            "media_type": "movie",
+                            "poster_url": "https://img.example/a.jpg",
+                        }, {
+                            "ref": "douban:2",
+                            "title": "中文电影乙",
+                            "original_title": "English Movie B",
+                            "year": "2024",
+                            "countries": ["英国"],
+                            "media_type": "movie",
+                            "poster_url": "https://img.example/b.jpg",
+                        }],
+                    }
+                if capability == "media.search" and method == "confirm_metadata":
+                    self.confirm_payload = payload
+                    return {
+                        "status": "resolved",
+                        "media_metadata": movie_contract(),
+                        "naming_metadata": {
+                            "source": "search",
+                            "media_type": "movie",
+                            "chinese_title": "中文电影乙",
+                            "english_title": "English Movie B",
+                            "year": "2024",
+                        },
+                        "presentation": {
+                            "milestone_id": "media-confirmed-b",
+                            "text": "🎬 中文电影乙 (English Movie B)",
+                            "photo_url": "https://img.example/b.jpg",
+                        },
+                    }
+                return await super().call_capability(
+                    capability, method, payload, **kwargs
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = AmbiguousHost()
+            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
+            feature = RenameFeature(
+                config={
+                    "unorganized_path": "/Unorganized",
+                    "storage_timeout": 3,
+                },
+                host=host,
+                jobs=jobs,
+            )
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+
+            await feature.download_completed({
+                "event_id": "event-ambiguous",
+                "payload": {
+                    "job_id": "job-ambiguous",
+                    "selected_path": "/Movies",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "download_root": "/Downloads/Movie.2024.mkv",
+                    "final_path": "/Downloads/Movie.2024.mkv",
+                    "resource_name": "Movie.2024.mkv",
+                    "operation_id": "op-ambiguous",
+                    "operation_revision": 2,
+                    "file_tree": [{
+                        "name": "Movie.2024.mkv",
+                        "relative_path": "Movie.2024.mkv",
+                        "path": "/Downloads/Movie.2024.mkv",
+                        "is_dir": False,
+                        "size": 1000,
+                    }],
+                },
+            })
+            await runtime.wait()
+
+            waiting = jobs.get("job-ambiguous")
+            self.assertEqual(waiting["state"], "awaiting_metadata")
+            self.assertEqual(host.storage.renamed, [])
+            self.assertEqual(host.reports[-1]["state"], "awaiting_input")
+            callback_data = host.reports[-1]["details"]["keyboard"][1][0][
+                "callback_data"
+            ]
+
+            resumed = await feature.callback({
+                "payload": callback_data.split("rename:", 1)[1],
+                "chat_id": 10,
+                "user_id": 123,
+            })
+            self.assertEqual(resumed["operation"]["state"], "running")
+            await runtime.wait()
+
+            self.assertEqual(host.confirm_payload["candidate_ref"], "douban:2")
+            self.assertEqual(len(host.milestones), 1)
+            self.assertEqual(
+                host.storage.renamed[0][0],
+                "/Downloads/Movie.2024.mkv",
+            )
+            self.assertEqual(jobs.get("job-ambiguous")["state"], "completed")
+
     async def test_resume_durable_job_defers_transient_failure(self):
         feature = RenameFeature(
             config={"unorganized_path": "/Unorganized"},
@@ -1051,7 +1202,9 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             "event_id": "event-direct",
             "payload": {
                 "job_id": "job-direct", "selected_path": "/Movies",
-                "user_id": 123,
+                "user_id": 123, "chat_id": 10,
+                "operation_id": "op-direct",
+                "operation_revision": 2,
                 "download_root": "/Downloads/Movie.2024.mkv",
                 "final_path": "/Downloads/Movie.2024.mkv",
                 "resource_name": "Movie.2024.mkv",
@@ -1074,6 +1227,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("|", host.metadata_payload["query"])
         self.assertNotIn("1080p", host.metadata_payload["query"])
+        self.assertEqual(len(host.milestones), 1)
+        self.assertIn("中文电影 (English Movie)", host.milestones[0]["text"])
         self.assertEqual(
             host.storage.renamed[0][0],
             "/Downloads/Movie.2024.mkv",
@@ -1467,14 +1622,14 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.0.6")
-        self.assertEqual(manifest["host_api"], ">=1.1,<2.0")
-        self.assertIn('version = "1.0.6"', project)
+        self.assertEqual(manifest["version"], "1.1.0")
+        self.assertEqual(manifest["host_api"], ">=1.4,<2.0")
+        self.assertIn('version = "1.1.0"', project)
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.0.6.tpx", source)
-        self.assertNotIn("dist/rename-1.0.6.tpx", source)
+        self.assertIn("/tmp/rename-1.1.0.tpx", source)
+        self.assertNotIn("dist/rename-1.1.0.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

@@ -223,6 +223,7 @@ class FakeHost:
     def __init__(self):
         self.calls = []
         self.reports = []
+        self.milestones = []
 
     async def call_capability(self, capability, method, payload, **kwargs):
         self.calls.append((capability, method, payload, kwargs))
@@ -235,6 +236,24 @@ class FakeHost:
             "state": operation["state"],
             "revision": operation["revision"],
         }
+
+    async def publish_operation_milestone(
+        self,
+        operation_id,
+        milestone_id,
+        text,
+        *,
+        photo_url="",
+        deadline=10,
+    ):
+        self.milestones.append({
+            "operation_id": operation_id,
+            "milestone_id": milestone_id,
+            "text": text,
+            "photo_url": photo_url,
+            "deadline": deadline,
+        })
+        return {"accepted": True, "duplicate": False}
 
 
 class FakeRuntime:
@@ -384,7 +403,10 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         await self.runtime.run("search-releases-")
 
         self.assertEqual(self.search_queries, [("English Title", "movie")])
-        self.assertIn("搜索结果 1", self.host.reports[-1]["status_text"])
+        self.assertIn(
+            "✅ 中文标题 (English Title)",
+            self.host.reports[-1]["status_text"],
+        )
         self.assertEqual(self.host.reports[-1]["state"], "awaiting_input")
 
     async def test_prowlarr_failure_keeps_plan_and_offers_retry_exit(self):
@@ -608,9 +630,12 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         partial = [
             report for report in self.host.reports
             if report["stage"] == "prowlarr_search"
-            and "Fast" in report["status_text"]
+            and report["details"].get("allow_running_callbacks") is True
+            and report["details"].get("keyboard")
         ]
         self.assertTrue(partial)
+        self.assertIn("🔍 中文标题 (English Title)", partial[-1]["status_text"])
+        self.assertNotIn("Fast", partial[-1]["status_text"])
         first_callback = partial[-1]["details"]["keyboard"][0][0][
             "callback_data"
         ]
@@ -636,7 +661,8 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             first_release_id,
             stored["release_by_id"],
         )
-        self.assertIn("Slow", result["actions"][0]["text"])
+        self.assertIn("✅ 中文标题 (English Title)", result["actions"][0]["text"])
+        self.assertNotIn("Slow", result["actions"][0]["text"])
 
         await self.feature._submit_release(
             plan_id,
@@ -1180,7 +1206,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Partial", str(
             stored["indexer_summary"]["down_indexers"]
         ))
-        self.assertIn("搜索结果 1", result["actions"][0]["text"])
+        self.assertIn("✅ 黑暗荣耀 (The Glory)", result["actions"][0]["text"])
 
     async def test_aggregate_whole_series_keeps_successful_variants(self):
         from telepiplex_search.adapters.prowlarr import ProwlarrRequestError
@@ -1226,7 +1252,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             ("The Glory Complete", "series"),
         ])
         self.assertEqual(len(stored["results"]), 1)
-        self.assertIn("搜索结果 1", result["actions"][0]["text"])
+        self.assertIn("✅ 黑暗荣耀 (The Glory)", result["actions"][0]["text"])
 
     async def test_selected_release_calls_download_provider_with_canonical_contract(self):
         plan_id = await self._prepare_search()
@@ -1813,6 +1839,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         candidate["media_metadata"]["identity"]["summary"] = (
             "一名年轻电影制作人进入诡异的后室，并试图找到出口。"
         )
+        candidate["media_metadata"]["identity"]["countries"] = ["美国"]
 
         action = self.feature._candidate_grid_action({
             "candidates": [candidate],
@@ -1828,6 +1855,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "总览：一名年轻电影制作人进入诡异的后室，并试图找到出口。",
             action["text"],
         )
+        self.assertIn("国家/地区：美国", action["text"])
 
     def test_candidate_detail_uses_human_media_and_relation_labels(self):
         plan = series_ranked_search_plan()
@@ -1868,6 +1896,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "url": "https://movie.douban.com/subject/36235977/",
             }],
         })
+        candidate["media_metadata"]["identity"]["countries"] = ["美国"]
 
         action = self.feature._candidate_action(
             {
@@ -1882,6 +1911,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(set(action["data"]), {"keyboard", "photo_url"})
+        self.assertIn("国家/地区：美国", action["text"])
         self.assertNotIn("candidate_key", action["data"])
 
     async def test_unified_single_candidate_requires_user_confirmation(self):
@@ -1992,11 +2022,14 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "chat_id": 10,
         })
         await self.runtime.run("search-plan-")
+        await self.runtime.run("search-releases-")
 
+        self.assertEqual(len(self.host.milestones), 1)
         self.assertIn(
-            "✅ 已识别为：中文标题1（2024）",
-            self.host.reports[-1]["status_text"],
+            "🎬 中文标题1 (English Title)",
+            self.host.milestones[0]["text"],
         )
+        self.assertNotIn("已识别为", self.host.reports[-1]["status_text"])
 
     async def test_multi_candidate_exact_read_retry_keeps_selected_index(self):
         from telepiplex_search.direct_link import DirectLinkError
@@ -2628,19 +2661,21 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved["naming_metadata"]["source"], "search-live")
         self.assertEqual(self.host.calls, [])
 
-        from telepiplex_plugin_sdk import FeatureError
         async def ambiguous_planner(_raw_query, plan_id):
             result = ranked_search_plan()
             result["plan_id"] = plan_id
             return result
 
         self.feature.plan_builder = ambiguous_planner
-        with self.assertRaises(FeatureError) as raised:
-            await self.feature.metadata_capability({
-                "method": "resolve_metadata",
-                "payload": {"query": "English Title"},
-            })
-        self.assertEqual(raised.exception.code, "metadata_ambiguous")
+        ambiguous = await self.feature.metadata_capability({
+            "method": "resolve_metadata",
+            "payload": {"query": "English Title"},
+        })
+        self.assertEqual(ambiguous["status"], "confirmation_required")
+        self.assertEqual(len(ambiguous["candidates"]), 2)
+        self.assertTrue(all(
+            item["ref"] for item in ambiguous["candidates"]
+        ))
 
     async def test_metadata_probe_filters_media_type_before_ambiguity(self):
         async def mixed_planner(_raw_query, plan_id):
@@ -2699,23 +2734,39 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             }
 
         self.feature.plan_builder = series_planner
-        from telepiplex_plugin_sdk import FeatureError
 
-        with self.assertRaises(FeatureError) as raised:
-            await self.feature.metadata_capability({
-                "method": "resolve_metadata",
-                "payload": {
-                    "query": "同名剧集",
-                    "probe": {
-                        "content_shape": "season_pack",
-                        "observed_seasons": [1],
-                        "observed_episodes": [],
-                        "video_count": 8,
-                    },
+        ambiguous = await self.feature.metadata_capability({
+            "method": "resolve_metadata",
+            "payload": {
+                "query": "同名剧集",
+                "probe": {
+                    "year_hint": "2022",
+                    "content_shape": "season_pack",
+                    "observed_seasons": [1],
+                    "observed_episodes": [],
+                    "video_count": 8,
                 },
-            })
+            },
+        })
 
-        self.assertEqual(raised.exception.code, "metadata_ambiguous")
+        self.assertEqual(ambiguous["status"], "confirmation_required")
+        self.assertEqual(
+            [item["title"] for item in ambiguous["candidates"]],
+            ["剧集甲", "剧集乙"],
+        )
+        confirmed = await self.feature.metadata_capability({
+            "method": "confirm_metadata",
+            "payload": {
+                "query": "同名剧集",
+                "probe": ambiguous["probe"],
+                "candidate_ref": ambiguous["candidates"][1]["ref"],
+            },
+        })
+        self.assertEqual(confirmed["status"], "resolved")
+        self.assertEqual(
+            confirmed["media_metadata"]["identity"]["chinese_title"],
+            "剧集乙",
+        )
 
     async def test_metadata_probe_conflict_fails_without_rewriting_identity(self):
         async def movie_planner(_raw_query, plan_id):
@@ -2726,23 +2777,25 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             return result
 
         self.feature.plan_builder = movie_planner
-        from telepiplex_plugin_sdk import FeatureError
 
-        with self.assertRaises(FeatureError) as raised:
-            await self.feature.metadata_capability({
-                "method": "resolve_metadata",
-                "payload": {
-                    "query": "English Title 2024",
-                    "probe": {
-                        "content_shape": "season_pack",
-                        "observed_seasons": [1],
-                        "observed_episodes": [],
-                        "video_count": 8,
-                    },
+        unresolved = await self.feature.metadata_capability({
+            "method": "resolve_metadata",
+            "payload": {
+                "query": "English Title 2024",
+                "probe": {
+                    "year_hint": "2024",
+                    "content_shape": "season_pack",
+                    "observed_seasons": [1],
+                    "observed_episodes": [],
+                    "video_count": 8,
                 },
-            })
+            },
+        })
 
-        self.assertEqual(raised.exception.code, "metadata_unresolved")
+        self.assertEqual(unresolved, {
+            "status": "unresolved",
+            "reason_code": "media_type_mismatch",
+        })
 
     async def test_metadata_capability_exact_reads_a_frozen_candidate(self):
         async def live_planner(_raw_query, plan_id):
@@ -2944,27 +2997,25 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             return result
 
         self.feature.plan_builder = live_planner
-        from telepiplex_plugin_sdk import FeatureError
 
-        with self.assertRaises(FeatureError) as raised:
-            await self.feature.metadata_capability({
-                "method": "resolve_metadata",
-                "payload": {
-                    "query": "黑暗荣耀",
-                    "probe": {
-                        "content_shape": "episode_pack_unscoped",
-                        "observed_seasons": [],
-                        "observed_episodes": [
-                            {"season_number": None, "episode_number": 1},
-                            {"season_number": None, "episode_number": 2},
-                        ],
-                        "video_count": 2,
-                    },
+        unresolved = await self.feature.metadata_capability({
+            "method": "resolve_metadata",
+            "payload": {
+                "query": "黑暗荣耀",
+                "probe": {
+                    "content_shape": "episode_pack_unscoped",
+                    "observed_seasons": [],
+                    "observed_episodes": [
+                        {"season_number": None, "episode_number": 1},
+                        {"season_number": None, "episode_number": 2},
+                    ],
+                    "video_count": 2,
                 },
-            })
+            },
+        })
 
-        self.assertEqual(raised.exception.code, "metadata_unresolved")
-        self.assertIn("explicit scope", str(raised.exception))
+        self.assertEqual(unresolved["status"], "unresolved")
+        self.assertEqual(unresolved["reason_code"], "scope_unresolved")
 
 
 class FeatureSourceContractTest(unittest.TestCase):
@@ -2977,10 +3028,10 @@ class FeatureSourceContractTest(unittest.TestCase):
             ROOT / "src" / "telepiplex_search.egg-info" / "PKG-INFO"
         ).read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.5.2")
-        self.assertEqual(manifest["host_api"], ">=1.3,<2.0")
-        self.assertIn('version = "1.5.2"', project)
-        self.assertIn("\nVersion: 1.5.2\n", package_metadata)
+        self.assertEqual(manifest["version"], "1.6.0")
+        self.assertEqual(manifest["host_api"], ">=1.4,<2.0")
+        self.assertIn('version = "1.6.0"', project)
+        self.assertIn("\nVersion: 1.6.0\n", package_metadata)
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
@@ -3012,14 +3063,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.5.2.tpx", source)
+        self.assertIn("/tmp/search-1.6.0.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("都不是", source)
         self.assertIn("统一 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("rename", source)
-        self.assertNotIn("dist/search-1.5.2.tpx", source)
+        self.assertNotIn("dist/search-1.6.0.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

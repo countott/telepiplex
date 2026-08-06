@@ -43,9 +43,9 @@ plugins:
   restart_limit: 3
 ```
 
-## Host API 1.3 and Telegram interactions
+## Host API 1.4 and Telegram interactions
 
-Host API 1.3 remains startup-compatible with API 1.0–1.2 Features. On top of the safe `send_photo` / `edit_photo` actions in 1.2, it adds the `send_photo_grid` candidate-poster action. Only Features using the grid must declare `host_api: ">=1.3,<2.0"`; Features using single-photo actions may retain the 1.2 range. Both `/start` and Telegram's native command menu are generated from the manifests of currently enabled, routable Features. Disabled, dependency-blocked, and Host-reserved commands are not advertised as executable.
+Host API 1.4 remains startup-compatible with API 1.0–1.3 Features and adds the idempotent `operation.milestone` action, allowing a Feature to publish the final media identity as a standalone message that later status edits cannot overwrite. The Host also accepts running-result callbacks only during the Prowlarr stage when the current status message and keyboard both match, so selecting an available result can stop the remaining search. Features using these capabilities must declare `host_api: ">=1.4,<2.0"`. Both `/start` and Telegram's native command menu remain generated from currently enabled, routable Feature manifests.
 
 Each user may own only one active interaction at a time. While input is requested, telepiplex accepts only ordinary text or callback IDs shown by the current status message. While work is running, cancelling, or rolling back, unrelated commands and stale buttons are blocked. Controls mean:
 

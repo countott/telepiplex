@@ -83,6 +83,7 @@ class EvidenceFact:
     chinese_title: str = ""
     poster_language: str = ""
     genres: tuple[str, ...] = ()
+    countries: tuple[str, ...] = ()
     episodes: tuple[dict, ...] = ()
     complex_signals: tuple[str, ...] = ()
     stable_fact_id: str = ""
@@ -356,6 +357,7 @@ def _fact(
         chinese_title=_text(raw.get("chinese_title")),
         poster_language=normalize_language(raw.get("poster_language")),
         genres=_unique_text(raw.get("genres") or []),
+        countries=_unique_text(raw.get("countries") or []),
         episodes=tuple(dict(item) for item in (episodes or []) if isinstance(item, dict)),
         complex_signals=_unique_text(signals),
         stable_fact_id=fact_id,
@@ -670,6 +672,7 @@ def _merge_fact_group(facts: list[EvidenceFact]) -> EvidenceFact:
                 "chinese_title": fact.chinese_title,
                 "poster_language": fact.poster_language,
                 "genres": fact.genres,
+                "countries": fact.countries,
                 "episodes": fact.episodes,
                 "complex_signals": fact.complex_signals,
             },
@@ -744,6 +747,9 @@ def _merge_fact_group(facts: list[EvidenceFact]) -> EvidenceFact:
         genres=_sorted_unique_text(
             genre for fact in facts for genre in fact.genres
         ),
+        countries=_sorted_unique_text(
+            country for fact in facts for country in fact.countries
+        ),
         episodes=_merged_episodes(facts),
         complex_signals=_sorted_unique_text(
             signal for fact in facts for signal in fact.complex_signals
@@ -793,6 +799,7 @@ def _occurrence_fact(fact: EvidenceFact) -> EvidenceFact:
             "chinese_title": fact.chinese_title,
             "poster_language": fact.poster_language,
             "genres": fact.genres,
+            "countries": fact.countries,
             "episodes": fact.episodes,
             "complex_signals": fact.complex_signals,
         },

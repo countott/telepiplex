@@ -1,6 +1,6 @@
 # search Feature
 
-search 1.5.2 使用“豆瓣发现、用户确认、确认后增强”的分阶段流程，避免首次搜索把不同来源、不同语言和不同作品混成一组候选。本版本直接识别豆瓣 App dispatch 链接，通过同一 Wikipedia 实体的英文跨语言链接补齐规范英文标题，并收紧 Host action 数据与 operation 日志关联契约。
+search 1.6.0 使用“豆瓣发现、用户确认、确认后增强”的分阶段流程。豆瓣候选补充海报、国家/地区、类型与简介；最终身份通过独立消息确认，后续 Prowlarr 进度不会覆盖它。Prowlarr 搜索期间可直接选择已有结果并中止剩余搜索，结果按规格、大小和种子状态分层展示。
 
 ## 发起搜索
 
@@ -24,11 +24,12 @@ search 1.5.2 使用“豆瓣发现、用户确认、确认后增强”的分阶�
 
 一个非硬匹配候选仍显示 `就是它 / 都不是`；多个候选逐项选择，并提供 `都不是`。用户点击 `都不是` 后立即结束，不重搜、不改写，也不调用后续来源。
 
-候选文案只显示：
+候选文案显示：
 
 ```text
 简中标题（年份）
 Official English Title
+国家/地区：中国大陆
 类型：电影 / 剧集
 来源：豆瓣
 总览：来源提供的作品简介（存在时）
@@ -73,10 +74,11 @@ Prowlarr 继续按 Indexer 和 query 有界并发搜索，执行身份与范围�
 区间或目标季年份判断；单集年份只作为软证据。选中片源后继续交给
 `download.provider`，下载完成后由 rename 复用确认过的 `media_metadata v1`。
 
-search 仍提供无状态的 `media.search.resolve_metadata` capability。rename
-提供的结构化 probe 会在无交互候选歧义判断前只按电影/剧集类型收窄候选，
-再在唯一剧集候选上应用季集范围；probe 不修改作品标题或身份，也不会替用户
-从多个同类型作品中做选择。运行配置位于
+search 仍提供无状态的 `media.search.resolve_metadata` capability，并返回
+`resolved`、`confirmation_required` 或 `unresolved` 结构化状态。rename
+提供的结构化 probe 会先按电影/剧集类型收窄候选；唯一候选直接补全元数据，
+歧义候选由用户确认后从同一个 Rename job 继续，不会重新下载或丢失文件树。
+probe 不修改作品标题或身份。运行配置位于
 `/config/plugins/search/config.yaml`；Wikipedia 和豆瓣无需 API Key，TVDB
 与 AI 使用服务端配置，凭据不会进入模型上下文或结构化日志。
 
@@ -96,7 +98,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
 构建示例：
 
 ```bash
-python tools/build_feature.py features/search /tmp/search-1.5.2.tpx \
+python tools/build_feature.py features/search /tmp/search-1.6.0.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

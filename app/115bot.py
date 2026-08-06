@@ -51,6 +51,7 @@ from app.handlers.interaction_handler import (
     COORDINATOR_KEY,
     CONTROL_CALLBACK_PATTERN,
     OPERATION_RECOVERY_TASK_KEY,
+    OperationMilestoneSink,
     OperationReportSink,
     operation_control_callback,
     operation_gate,
@@ -89,7 +90,7 @@ DEFAULT_PLUGIN_CATALOG_URL = (
 
 
 def get_version(md_format=False):
-    version = "v3.4.13-host"
+    version = "v3.4.14-host"
     if md_format:
         return escape_markdown(version, version=2)
     return version
@@ -155,6 +156,14 @@ def build_plugin_manager(config=None, host_database=None):
     journal = EventJournal(Path(host_database))
     coordinator = InteractionCoordinator(Path(host_database))
     operation_sink = OperationReportSink(coordinator, router=router)
+    milestone_sink = OperationMilestoneSink(
+        coordinator,
+        lambda chat_id, photo_url, text: add_task_to_queue(
+            chat_id,
+            photo_url,
+            message=text,
+        ),
+    )
     runtime_root = Path(str(plugin_config.get("runtime_root") or "/tmp/telepiplex"))
     dispatcher = EventDispatcher(
         router,
@@ -174,6 +183,7 @@ def build_plugin_manager(config=None, host_database=None):
         notification_sink=lambda user_id, text: add_task_to_queue(
             user_id, None, message=text
         ),
+        milestone_sink=milestone_sink,
         operation_sink=operation_sink,
     )
     supervisor = PluginSupervisor(

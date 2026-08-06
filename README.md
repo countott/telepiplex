@@ -44,9 +44,9 @@ plugins:
   restart_limit: 3
 ```
 
-## Host API 1.3 与 Telegram 交互
+## Host API 1.4 与 Telegram 交互
 
-Host API 1.3 保持对 API 1.0–1.2 Feature 的启动兼容，在 1.2 的安全 `send_photo` / `edit_photo` 海报动作之上，新增 `send_photo_grid` 候选海报拼图动作。只有使用拼图动作的 Feature 必须声明 `host_api: ">=1.3,<2.0"`；继续只使用单图动作的 Feature 可保留 1.2 范围。`/start` 与 Telegram 原生命令列表都从当前已启用且依赖可路由的 Feature `manifest.yaml` 动态生成；停用、被依赖阻塞或声明 telepiplex 保留命令的 Feature 不会被错误展示。
+Host API 1.4 保持对 API 1.0–1.3 Feature 的启动兼容，并新增幂等的 `operation.milestone`：Feature 可以把最终作品身份作为独立消息发送，不再被后续状态更新覆盖。Host 也只在 Prowlarr 搜索阶段、当前状态消息和当前键盘同时匹配时放行运行中结果按钮，使用户能够选中已有结果并中止剩余搜索。使用这些能力的 Feature 必须声明 `host_api: ">=1.4,<2.0"`；`/start` 与 Telegram 原生命令列表仍从当前已启用且依赖可路由的 Feature `manifest.yaml` 动态生成。
 
 同一用户同一时间只允许一个活动交互。等待输入时，只接受当前状态消息实际展示的按钮或普通文本；任务运行、取消或回滚期间，其他命令和过期按钮会被拦截。按钮含义如下：
 

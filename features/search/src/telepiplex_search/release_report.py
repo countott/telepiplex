@@ -35,9 +35,11 @@ def _safe_int(value) -> int:
 def _approx_size_label(value) -> str:
     size = max(0, _safe_int(value))
     if not size:
-        return "?G"
+        return "未知大小"
     gib = size / 1024 ** 3
-    return f"{max(1, int(gib + 0.5))}G"
+    if abs(gib - round(gib)) < 0.05:
+        return f"{max(1, int(round(gib)))} GB"
+    return f"{gib:.1f} GB"
 
 
 def _matches(title: str, pattern: str) -> bool:
@@ -46,7 +48,7 @@ def _matches(title: str, pattern: str) -> bool:
 
 def _resolution(title: str) -> str:
     for pattern, label in (
-        (r"(?<!\w)(?:2160p|4k|uhd)(?!\w)", "4K"),
+        (r"(?<!\w)(?:2160p|4k|uhd)(?!\w)", "2160p"),
         (r"(?<!\w)1080p(?!\w)", "1080p"),
         (r"(?<!\w)1080i(?!\w)", "1080i"),
         (r"(?<!\w)720p(?!\w)", "720p"),
@@ -72,10 +74,10 @@ def _source(title: str) -> str:
 def _codec(title: str) -> str:
     for pattern, label in (
         (r"(?<!\w)x265(?!\w)", "x265"),
-        (r"(?<!\w)(?:h[ ._-]?265|hevc)(?!\w)", "HEVC"),
+        (r"(?<!\w)(?:h[ ._-]?265|hevc)(?!\w)", "x265"),
         (r"(?<!\w)av1(?!\w)", "AV1"),
         (r"(?<!\w)x264(?!\w)", "x264"),
-        (r"(?<!\w)(?:h[ ._-]?264|avc)(?!\w)", "AVC"),
+        (r"(?<!\w)(?:h[ ._-]?264|avc)(?!\w)", "x264"),
     ):
         if _matches(title, pattern):
             return label
@@ -178,9 +180,8 @@ def _specifications(item: dict) -> str:
         _codec(title),
     )))
     labels.extend(_dynamic_range(title))
-    labels.extend(_audio(title))
     labels.extend(_editions(title))
-    return "·".join(labels) or "规格未知"
+    return " · ".join(dict.fromkeys(labels)) or "规格未知"
 
 
 def _compact_scope(value) -> str:
@@ -232,19 +233,54 @@ def _display_versions(ranked) -> list[dict]:
             by_fingerprint[fingerprint] = representative
         else:
             existing["_source_count"] += 1
+            values = list(existing.get("_explicit_seeders") or [])
+            if not values:
+                try:
+                    values.append(int(existing.get("seeders")))
+                except (TypeError, ValueError):
+                    pass
+            try:
+                values.append(int(item.get("seeders")))
+            except (TypeError, ValueError):
+                pass
+            existing["_explicit_seeders"] = values
+            if values:
+                existing["seeders"] = max(values)
     return versions[:12]
 
 
-def _result_line(index: int, item: dict) -> str:
-    line = (
-        f"{_CIRCLED[index]} {_specifications(item)}"
-        f"｜{_approx_size_label(item.get('size'))}"
-        f"·{_safe_int(item.get('seeders'))}种"
+def _seed_status(item: dict) -> str:
+    raw_values = (
+        item.get("_explicit_seeders")
+        if isinstance(item.get("_explicit_seeders"), list)
+        else [item.get("seeders")] if "seeders" in item else []
     )
-    group = _release_group(item.get("title"))
-    if group:
-        line += f"｜{group}"
-    return _clip(line, _RESULT_LINE_LIMIT)
+    values = []
+    for raw in raw_values:
+        try:
+            values.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    if not values:
+        return "疑似死种"
+    maximum = max(values)
+    if maximum >= 3:
+        return "活种"
+    if maximum >= 1:
+        return "疑似死种"
+    return "死种"
+
+
+def _result_lines(index: int, item: dict) -> tuple[str, str]:
+    specification = _clip(
+        f"{_CIRCLED[index]} {_specifications(item)}",
+        _RESULT_LINE_LIMIT,
+    )
+    availability = (
+        f"   {_approx_size_label(item.get('size'))}"
+        f"｜{_seed_status(item)}"
+    )
+    return specification, availability
 
 
 def release_keyboard(plan_id: str, ranked) -> list[list[dict]]:
@@ -272,7 +308,7 @@ def format_release_report(
     ranked: list[dict],
     indexer_summary: dict,
 ) -> str:
-    del query, gate
+    del gate
     summary = indexer_summary if isinstance(indexer_summary, dict) else {}
     enabled = summary.get("enabled_indexers") or []
     total = _safe_int(summary.get("total_indexers") or len(enabled))
@@ -285,22 +321,29 @@ def format_release_report(
         item for item in summary.get("down_indexers") or []
         if isinstance(item, dict)
     ]
-    abnormal_count = len(down) + bool(str(summary.get("error") or "").strip())
     releases = [
         item for item in (ranked or [])
         if isinstance(item, dict)
     ][:12]
     displayed = _display_versions(releases)
-    count_label = f"搜索结果 {len(displayed)}条"
-    lines = [(
-        f"🔍 {count_label}"
-        f"｜索引器 {completed}/{total or '?'}"
-        f"｜异常{int(abnormal_count)}"
-    )]
+    offline = len(down)
+    online_completed = max(0, completed - offline)
+    final = bool(
+        summary.get("final")
+        if summary.get("final") is not None
+        else completed >= total
+    )
+    title = _clip(query, 120) or "未知作品"
+    lines = [
+        f"{'✅' if final else '🔍'} {title}",
+        f"搜索器 {online_completed}/({total}-{offline})，离线 {offline}",
+    ]
+    if displayed:
+        lines.append("")
     if not displayed:
         lines.append("没有同身份、同范围的可用片源。")
     for index, item in enumerate(displayed):
-        lines.append(_result_line(index, item))
+        lines.extend(_result_lines(index, item))
     text = "\n".join(lines)
     if len(text) > 4096:
         text = text[:4095].rstrip() + "…"

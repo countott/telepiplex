@@ -111,16 +111,16 @@ class DeploymentContractTest(unittest.TestCase):
             ):
                 self.assertIn(term, source, f"{name}: {term}")
 
-    def test_photo_grid_action_is_declared_as_host_api_1_3(self):
+    def test_operation_milestone_is_declared_as_host_api_1_4(self):
         from app.runtime.plugin_contract import HOST_API_VERSION
 
-        self.assertEqual(HOST_API_VERSION, "1.3")
+        self.assertEqual(HOST_API_VERSION, "1.4")
         self.assertIn(
-            "Host API 1.3",
+            "Host API 1.4",
             (ROOT / "README.md").read_text(encoding="utf-8"),
         )
         self.assertIn(
-            "Host API 1.3",
+            "Host API 1.4",
             (ROOT / "README_EN.md").read_text(encoding="utf-8"),
         )
 

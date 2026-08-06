@@ -45,6 +45,44 @@ class InteractionCoordinatorTest(unittest.TestCase):
         self.assertEqual(terminal.state, "completed")
         self.assertIsNone(self.coordinator.active(10, 1))
 
+    def test_operation_milestone_is_owned_and_claimed_once(self):
+        from app.runtime.interaction_coordinator import InteractionError
+
+        self.coordinator.report("search", self.report())
+
+        first = self.coordinator.claim_milestone(
+            "search",
+            "op-1",
+            "media-douban-35981510",
+        )
+        duplicate = self.coordinator.claim_milestone(
+            "search",
+            "op-1",
+            "media-douban-35981510",
+        )
+
+        self.assertEqual(first.operation_id, "op-1")
+        self.assertIsNone(duplicate)
+        with self.assertRaises(InteractionError) as raised:
+            self.coordinator.claim_milestone(
+                "rename",
+                "op-1",
+                "media-douban-35981510-other",
+            )
+        self.assertEqual(raised.exception.code, "owner_mismatch")
+
+    def test_failed_milestone_delivery_can_be_retried(self):
+        self.coordinator.report("search", self.report())
+        self.assertIsNotNone(
+            self.coordinator.claim_milestone("search", "op-1", "media-1")
+        )
+
+        self.coordinator.release_milestone("search", "op-1", "media-1")
+
+        self.assertIsNotNone(
+            self.coordinator.claim_milestone("search", "op-1", "media-1")
+        )
+
     def test_only_one_non_terminal_operation_may_own_a_user(self):
         from app.runtime.interaction_coordinator import InteractionError
 

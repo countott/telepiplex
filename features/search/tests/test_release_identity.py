@@ -32,6 +32,18 @@ class ReleaseIdentityTest(unittest.TestCase):
             [first, second],
         )
 
+    def test_same_infohash_uses_maximum_parsable_seeder_count(self):
+        magnet = "magnet:?xt=urn:btih:" + "c" * 40
+        merged = deduplicate_releases([
+            {"magnet_url": magnet, "title": "Movie", "seeders": 0},
+            {"magnet_url": magnet, "title": "Movie", "seeders": "2"},
+            {"magnet_url": magnet, "title": "Movie", "seeders": 1},
+        ])
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["seeders"], 2)
+        self.assertEqual(merged[0]["_explicit_seeders"], [0, 2, 1])
+
 
 if __name__ == "__main__":
     unittest.main()

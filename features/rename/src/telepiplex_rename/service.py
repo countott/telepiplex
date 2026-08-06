@@ -207,6 +207,24 @@ class RenameFeature:
     async def _resume_durable_job(self, job):
         try:
             outcome = job.get("result") or {}
+            if job.get("state") == "awaiting_metadata":
+                await self._restore_metadata_confirmation(
+                    job["job_id"],
+                    outcome,
+                )
+                return
+            if job.get("state") == "ready_metadata":
+                payload = outcome.get("event_payload") or {}
+                operation = await self._accept_event_operation(
+                    payload,
+                    job["job_id"],
+                )
+                self._spawn_organization(
+                    job["job_id"],
+                    payload,
+                    operation["operation_id"] if operation else "",
+                )
+                return
             event_payload = outcome.get("event_payload") or {}
             operation_id = str(event_payload.get("operation_id") or "")
             if job.get("state") == "published":
@@ -249,8 +267,213 @@ class RenameFeature:
         return result
 
     async def callback(self, request: dict) -> dict:
+        payload = str(request.get("payload") or "")
+        if payload.startswith("metadata:"):
+            return await self._metadata_callback(request, payload)
         return self._decorate_config_result(
             request, self.config_wizard.callback(request)
+        )
+
+    async def _metadata_callback(self, request: dict, payload: str) -> dict:
+        try:
+            _prefix, job_id, raw_index = payload.split(":", 2)
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            raise FeatureError(
+                "invalid_callback",
+                "rename metadata candidate is invalid",
+            ) from None
+        job = self.jobs.get(job_id) if self.jobs else None
+        if not job or job.get("state") != "awaiting_metadata":
+            raise FeatureError(
+                "invalid_state",
+                "rename metadata confirmation is no longer active",
+            )
+        outcome = job.get("result") or {}
+        candidates = outcome.get("candidates") or []
+        try:
+            candidate = candidates[index]
+        except (TypeError, IndexError):
+            raise FeatureError(
+                "invalid_callback",
+                "rename metadata candidate is invalid",
+            ) from None
+        event_payload = dict(outcome.get("event_payload") or {})
+        operation_id = str(event_payload.get("operation_id") or "")
+        operation = self.operations.get(operation_id)
+        if operation is None:
+            operation = await self._accept_event_operation(
+                event_payload,
+                job_id,
+            )
+        owner = self._owner_key(request)
+        if operation and owner != (
+            operation["chat_id"],
+            operation["user_id"],
+        ):
+            raise FeatureError(
+                "forbidden",
+                "rename metadata confirmation belongs to another user",
+            )
+        resolved = await self.host.call_capability(
+            "media.search",
+            "confirm_metadata",
+            {
+                "query": outcome.get("query") or "",
+                "probe": outcome.get("probe") or {},
+                "candidate_ref": candidate.get("ref") or "",
+            },
+            deadline=float(self.config.get("metadata_timeout") or 120),
+            idempotency_key=f"{job_id}:metadata:{candidate.get('ref') or index}",
+        )
+        if (
+            not isinstance(resolved, dict)
+            or resolved.get("status") not in {None, "resolved"}
+            or not isinstance(resolved.get("media_metadata"), dict)
+        ):
+            raise FeatureError(
+                "metadata_unresolved",
+                "confirmed metadata candidate could not be resolved",
+            )
+        event_payload["media_metadata"] = resolved["media_metadata"]
+        if isinstance(resolved.get("naming_metadata"), dict):
+            event_payload["naming_metadata"] = resolved["naming_metadata"]
+        if isinstance(resolved.get("presentation"), dict):
+            event_payload["_metadata_presentation"] = resolved[
+                "presentation"
+            ]
+        ready = {
+            **outcome,
+            "event_payload": event_payload,
+            "selected_candidate_ref": candidate.get("ref") or "",
+        }
+        if self.jobs:
+            self.jobs.update(job_id, "ready_metadata", ready)
+        running = await self._report_if_active(
+            operation_id,
+            state="running",
+            stage="metadata_resolution",
+            status_text="已确认媒体身份，正在恢复整理任务。",
+            control="cancel",
+            details={},
+        )
+        self._spawn_organization(job_id, event_payload, operation_id)
+        return {
+            "actions": [{
+                "kind": "edit_message",
+                "text": "已确认媒体身份，正在恢复整理任务。",
+            }],
+            "session": {"state": "close"},
+            "operation": running,
+        }
+
+    @staticmethod
+    def _metadata_confirmation_view(job_id: str, outcome: dict) -> tuple[str, dict]:
+        lines = ["请选择文件树对应的作品："]
+        keyboard = []
+        poster_items = []
+        for index, candidate in enumerate(
+            (outcome.get("candidates") or [])[:5]
+        ):
+            title = str(candidate.get("title") or "未知作品").strip()
+            original = str(
+                candidate.get("original_title") or ""
+            ).strip()
+            display_title = (
+                f"{title} ({original})"
+                if original and original.casefold() != title.casefold()
+                else title
+            )
+            countries = "、".join(
+                str(item).strip()
+                for item in candidate.get("countries") or []
+                if str(item).strip()
+            ) or "地区未知"
+            media_type = (
+                "电影"
+                if candidate.get("media_type") == "movie"
+                else "剧集"
+            )
+            lines.append(
+                f"{index + 1}. {display_title}\n"
+                f"   {candidate.get('year') or '年份未知'}"
+                f"｜{countries}｜{media_type}"
+            )
+            keyboard.append([{
+                "text": f"{index + 1}. {title[:24]}",
+                "callback_data": f"rename:metadata:{job_id}:{index}",
+            }])
+            poster_items.append({
+                "number": index + 1,
+                "title": title,
+                "poster_url": str(
+                    candidate.get("poster_url") or ""
+                ),
+            })
+        details = {"keyboard": keyboard}
+        if any(
+            item["poster_url"].startswith("https://")
+            for item in poster_items
+        ):
+            details["poster_items"] = poster_items
+        return "\n".join(lines), details
+
+    async def _restore_metadata_confirmation(
+        self,
+        job_id: str,
+        outcome: dict,
+    ) -> None:
+        payload = outcome.get("event_payload") or {}
+        operation_id = str(payload.get("operation_id") or "")
+        if operation_id not in self.operations:
+            await self._accept_event_operation(payload, job_id)
+        text, details = self._metadata_confirmation_view(
+            job_id,
+            outcome,
+        )
+        await self._report_if_active(
+            operation_id,
+            state="awaiting_input",
+            stage="metadata_confirmation",
+            status_text=text,
+            control="exit",
+            details=details,
+        )
+
+    async def _await_metadata_confirmation(
+        self,
+        job_id: str,
+        payload: dict,
+        operation_id: str,
+        resolved: dict,
+    ) -> None:
+        outcome = {
+            "event_payload": dict(payload),
+            "query": str(resolved.get("query") or ""),
+            "probe": dict(resolved.get("probe") or {}),
+            "candidates": list(resolved.get("candidates") or [])[:5],
+            "organized": False,
+            "final_path": str(
+                payload.get("download_root")
+                or payload.get("final_path")
+                or ""
+            ),
+            "user_id": int(payload.get("user_id") or 0),
+            "job_id": job_id,
+        }
+        if self.jobs:
+            self.jobs.update(job_id, "awaiting_metadata", outcome)
+        text, details = self._metadata_confirmation_view(
+            job_id,
+            outcome,
+        )
+        await self._report_if_active(
+            operation_id,
+            state="awaiting_input",
+            stage="metadata_confirmation",
+            status_text=text,
+            control="exit",
+            details=details,
         )
 
     async def message(self, request: dict) -> dict:
@@ -461,6 +684,16 @@ class RenameFeature:
                     raise
                 except Exception:
                     raise
+                if resolved.get("status") == "confirmation_required":
+                    await self._await_metadata_confirmation(
+                        job_id,
+                        payload,
+                        operation_id,
+                        resolved,
+                    )
+                    return
+                if resolved.get("status") == "unresolved":
+                    resolved = {}
                 if isinstance(resolved.get("media_metadata"), dict):
                     try:
                         metadata = attach_media_metadata(
@@ -470,6 +703,22 @@ class RenameFeature:
                         metadata = {}
                     if isinstance(resolved.get("naming_metadata"), dict):
                         naming_metadata = resolved["naming_metadata"]
+                    presentation = resolved.get("presentation")
+                    if isinstance(presentation, dict):
+                        payload["_metadata_presentation"] = presentation
+            presentation = payload.get("_metadata_presentation")
+            if metadata and isinstance(presentation, dict) and operation_id:
+                try:
+                    await self.host.publish_operation_milestone(
+                        operation_id,
+                        str(presentation.get("milestone_id") or ""),
+                        str(presentation.get("text") or ""),
+                        photo_url=str(
+                            presentation.get("photo_url") or ""
+                        ),
+                    )
+                except Exception:
+                    pass
             self._raise_if_cancelled(operation_id)
             await self._report_if_active(
                 operation_id,

@@ -45,13 +45,28 @@ def stable_release_id(item: dict) -> str:
 
 def deduplicate_releases(items) -> list[dict]:
     releases = []
-    seen = set()
+    by_id = {}
     for raw_item in items or []:
         if not isinstance(raw_item, dict):
             continue
         release_id = stable_release_id(raw_item)
-        if release_id in seen:
+        existing = by_id.get(release_id)
+        if existing is not None:
+            values = list(existing.get("_explicit_seeders") or [])
+            if not values:
+                try:
+                    values.append(int(existing.get("seeders")))
+                except (TypeError, ValueError):
+                    pass
+            try:
+                values.append(int(raw_item.get("seeders")))
+            except (TypeError, ValueError):
+                pass
+            if values:
+                existing["_explicit_seeders"] = values
+                existing["seeders"] = max(values)
             continue
-        seen.add(release_id)
-        releases.append(raw_item)
+        item = dict(raw_item)
+        by_id[release_id] = item
+        releases.append(item)
     return releases

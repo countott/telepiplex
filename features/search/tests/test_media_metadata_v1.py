@@ -30,6 +30,7 @@ def _fact(
     romanized="",
     summary="",
     genres=(),
+    countries=(),
     episodes=(),
 ):
     return EvidenceFact(
@@ -48,6 +49,7 @@ def _fact(
         romanized_original_title=romanized,
         summary=summary,
         genres=tuple(genres),
+        countries=tuple(countries),
         episodes=tuple(episodes),
     )
 
@@ -124,6 +126,33 @@ def _candidate(*, intended_scope="movie", facts=None, unresolved=()):
 
 
 class MediaMetadataV1Test(unittest.TestCase):
+    def test_contract_preserves_anchor_country_for_candidate_presentation(self):
+        fact = _fact(
+            "douban:35981510",
+            "douban",
+            titles=("繁花", "Blossoms Shanghai"),
+            year="2023",
+            media_type="series",
+            url="https://movie.douban.com/subject/35981510/",
+            external_ids={"douban_subject": "35981510"},
+            poster="https://img.example/blossoms.jpg",
+            chinese="繁花",
+            english="Blossoms Shanghai",
+            countries=("中国大陆",),
+        )
+
+        contract = build_media_metadata_v1(
+            _candidate(
+                intended_scope="whole_series",
+                facts=(fact,),
+                unresolved=("tvdb:unavailable",),
+            ),
+            metadata_id="blossoms",
+            raw_query="繁花 2023",
+        )
+
+        self.assertEqual(contract["identity"]["countries"], ["中国大陆"])
+
     def test_contract_returns_source_overview_in_confirmed_identity(self):
         douban = _fact(
             "douban:36235977",

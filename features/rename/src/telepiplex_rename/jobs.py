@@ -38,7 +38,10 @@ class RenameJobStore:
             db.row_factory = sqlite3.Row
             rows = db.execute(
                 "SELECT job_id FROM rename_jobs "
-                "WHERE state IN ('processed', 'published') "
+                "WHERE state IN ("
+                "'awaiting_metadata', 'ready_metadata', "
+                "'processed', 'published'"
+                ") "
                 "ORDER BY updated_at"
             ).fetchall()
         return [self.get(row["job_id"]) for row in rows]

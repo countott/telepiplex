@@ -40,7 +40,7 @@ class ReleaseReportTest(unittest.TestCase):
         ranked = mirrored + [distinct]
 
         text = format_release_report(
-            "A title long enough that it must not be repeated",
+            "康斯坦丁 (Constantine)",
             ReleaseGateResult(
                 raw_count=4,
                 eligible=tuple(ranked),
@@ -54,6 +54,7 @@ class ReleaseReportTest(unittest.TestCase):
                 "completed_indexers": 3,
                 "total_indexers": 3,
                 "error": "",
+                "final": True,
             },
         )
         keyboard = release_keyboard("plan", ranked)
@@ -61,19 +62,20 @@ class ReleaseReportTest(unittest.TestCase):
         self.assertEqual(
             text.splitlines(),
             [
-                "🔍 搜索结果 2条｜索引器 3/3｜异常0",
+                "✅ 康斯坦丁 (Constantine)",
+                "搜索器 3/(3-0)，离线 0",
+                "",
                 (
-                    "① 1080p·BluRay·x265·5.1·有损·Remastered"
-                    "｜2G·302种｜BONE"
+                    "① 1080p · BluRay · x265 · Remastered"
                 ),
                 (
-                    "② 4K·REMUX·HEVC·7.1·无损·Atmos"
-                    "｜57G·4种｜HexDrift"
+                    "   2 GB｜活种"
                 ),
+                "② 2160p · REMUX · x265",
+                "   57 GB｜活种",
             ],
         )
         self.assertNotIn("10568", text)
-        self.assertNotIn("Constantine", text)
         self.assertEqual(
             [len(row) for row in keyboard],
             [2, 1],
@@ -115,12 +117,14 @@ class ReleaseReportTest(unittest.TestCase):
             },
         )
 
-        row = text.splitlines()[1]
-        self.assertIn("4K·x265·DV·HDR10+·7.1·有损·Atmos", row)
+        row = text.splitlines()[3]
+        self.assertIn("2160p · x265 · DV · HDR10+", row)
         self.assertEqual(row.count("DV"), 1)
-        self.assertNotIn("HEVC·x265", row)
+        self.assertNotIn("HEVC", row)
+        self.assertNotIn("Atmos", row)
+        self.assertNotIn("7.1", row)
 
-    def test_audio_labels_keep_only_quality_and_useful_format_family(self):
+    def test_audio_labels_are_deferred_and_not_displayed(self):
         cases = (
             ("Movie.2.0.FLAC-GROUP", "2.0·无损·FLAC"),
             ("Movie.5.1.DTS-GROUP", "5.1·高码有损·DTS"),
@@ -145,7 +149,7 @@ class ReleaseReportTest(unittest.TestCase):
             ),
         )
 
-        for title, expected in cases:
+        for title, _expected in cases:
             with self.subTest(title=title):
                 item = {
                     "title": title,
@@ -169,7 +173,12 @@ class ReleaseReportTest(unittest.TestCase):
                     },
                 )
 
-                self.assertIn(f"① {expected}｜", text)
+                first_result = text.splitlines()[3]
+                for audio_label in (
+                    "2.0", "5.1", "7.1", "无损", "有损",
+                    "高码有损", "Atmos", "DTS", "FLAC",
+                ):
+                    self.assertNotIn(audio_label, first_result)
 
     def test_keyboard_has_twelve_circled_buttons_in_three_columns(self):
         ranked = [{
@@ -247,18 +256,20 @@ class ReleaseReportTest(unittest.TestCase):
         )
 
         lines = text.splitlines()
-        self.assertEqual(lines[0], "🔍 搜索结果 12条｜索引器 1/3｜异常2")
+        self.assertEqual(lines[0], "🔍 Constantine 2005")
         self.assertEqual(
             lines[1],
-            "① 4K·REMUX·HEVC｜35G·46种｜Group0",
+            "搜索器 0/(3-2)，离线 2",
         )
+        self.assertEqual(lines[2], "")
+        self.assertEqual(lines[3], "① 2160p · REMUX · x265")
+        self.assertEqual(lines[4], "   35 GB｜活种")
         result_lines = [
             line for line in text.splitlines()
-            if line[:1] in "①②③④⑤⑥⑦⑧⑨⑩⑪⑫"
+            if line and line[0] in "①②③④⑤⑥⑦⑧⑨⑩⑪⑫"
         ]
         self.assertEqual(len(result_lines), 12)
         for hidden_detail in (
-            "Constantine",
             "128分",
             "Prowlarr",
             "门禁",
@@ -330,14 +341,14 @@ class ReleaseReportTest(unittest.TestCase):
         self.assertEqual(
             len([
                 line for line in text.splitlines()
-                if line[:1] in "①②③④⑤⑥⑦⑧⑨⑩⑪⑫"
+                if line and line[0] in "①②③④⑤⑥⑦⑧⑨⑩⑪⑫"
             ]),
             12,
         )
-        self.assertIn("4K·REMUX·HEVC·Atmos", text)
+        self.assertIn("2160p · REMUX · x265", text)
         self.assertNotIn("M-Team", text)
         self.assertNotIn("(+", text)
-        self.assertIn("35G·46种", text)
+        self.assertIn("35 GB｜活种", text)
 
     def test_zero_eligible_report_keeps_one_short_reason_line(self):
         text = format_release_report(
@@ -358,7 +369,8 @@ class ReleaseReportTest(unittest.TestCase):
         )
 
         self.assertEqual(text.splitlines(), [
-            "🔍 搜索结果 0条｜索引器 0/?｜异常1",
+            "✅ Title S01",
+            "搜索器 0/(0-0)，离线 0",
             "没有同身份、同范围的可用片源。",
         ])
 
@@ -380,7 +392,7 @@ class ReleaseReportTest(unittest.TestCase):
                     "size": int(1.4 * 1024 ** 3),
                 },
                 "expected": (
-                    "① 4K｜1G·2种"
+                    "① 2160p\n   1.4 GB｜疑似死种"
                 ),
             },
             {
@@ -399,7 +411,7 @@ class ReleaseReportTest(unittest.TestCase):
                     "size": int(10.6 * 1024 ** 3),
                 },
                 "expected": (
-                    "① 第2季整季·1080p·WEB-DL·Atmos｜11G·13种"
+                    "① 第2季整季 · 1080p · WEB-DL\n   10.6 GB｜活种"
                 ),
             },
             {
@@ -414,7 +426,7 @@ class ReleaseReportTest(unittest.TestCase):
                     "size": None,
                 },
                 "expected": (
-                    "① S01E02｜?G·0种"
+                    "① S01E02\n   未知大小｜疑似死种"
                 ),
             },
         ]
@@ -440,8 +452,10 @@ class ReleaseReportTest(unittest.TestCase):
                 )
 
                 self.assertEqual(text.splitlines(), [
-                    "🔍 搜索结果 1条｜索引器 2/2｜异常0",
-                    case["expected"],
+                    f"✅ {case['query']}",
+                    "搜索器 2/(2-0)，离线 0",
+                    "",
+                    *case["expected"].splitlines(),
                 ])
 
 

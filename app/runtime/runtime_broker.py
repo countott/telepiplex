@@ -34,6 +34,7 @@ class RuntimeBroker:
         *,
         dispatcher=None,
         notification_sink=None,
+        milestone_sink=None,
         operation_sink=None,
         max_frame_bytes: int = 1024 * 1024,
         max_deadline: float = 300,
@@ -43,6 +44,7 @@ class RuntimeBroker:
         self.socket_path = Path(socket_path)
         self.dispatcher = dispatcher
         self.notification_sink = notification_sink
+        self.milestone_sink = milestone_sink
         self.operation_sink = operation_sink
         self.max_frame_bytes = int(max_frame_bytes)
         self.max_deadline = max(1, float(max_deadline))
@@ -217,4 +219,39 @@ class RuntimeBroker:
                     "internal_error", "Host operation sink must return an object"
                 )
             return result
+        if method == "operation.milestone":
+            operation_id = str(params.get("operation_id") or "").strip()
+            milestone_id = str(params.get("milestone_id") or "").strip()
+            text = str(params.get("text") or "").strip()
+            photo_url = str(params.get("photo_url") or "").strip()
+            text_limit = 1024 if photo_url else 4096
+            if (
+                not operation_id
+                or not milestone_id
+                or not text
+                or len(text) > text_limit
+                or len(photo_url) > 2048
+                or (photo_url and not photo_url.startswith("https://"))
+            ):
+                raise BrokerError(
+                    "invalid_milestone",
+                    "operation milestone payload is invalid",
+                )
+            if self.milestone_sink is None:
+                raise BrokerError(
+                    "operation_unavailable",
+                    "Host operation milestone sink is unavailable",
+                )
+            payload = {
+                "operation_id": operation_id,
+                "milestone_id": milestone_id,
+                "text": text,
+                "photo_url": photo_url,
+            }
+            accepted = self.milestone_sink(identity.plugin_id, payload)
+            if inspect.isawaitable(accepted):
+                accepted = await accepted
+            if isinstance(accepted, dict):
+                return accepted
+            return {"accepted": accepted is not False}
         raise BrokerError("not_found", f"unknown Host RPC method: {method}")

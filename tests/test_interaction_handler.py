@@ -187,6 +187,39 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             "rename", "running", 1,
         ))
 
+    async def test_operation_milestone_is_idempotent_and_photo_falls_back_to_text(self):
+        from app.handlers.interaction_handler import OperationMilestoneSink
+
+        self.coordinator.report("search", self.report())
+        deliveries = []
+
+        def deliver(chat_id, photo_url, text):
+            deliveries.append((chat_id, photo_url, text))
+            return not photo_url
+
+        sink = OperationMilestoneSink(self.coordinator, deliver)
+        payload = {
+            "operation_id": "op-1",
+            "milestone_id": "media-douban-35981510",
+            "text": "繁花 (Blossoms Shanghai)",
+            "photo_url": "https://img.example/blossoms.jpg",
+        }
+
+        first = sink("search", payload)
+        duplicate = sink("search", payload)
+
+        self.assertEqual(first, {"accepted": True, "duplicate": False})
+        self.assertEqual(duplicate, {"accepted": True, "duplicate": True})
+        self.assertEqual(deliveries, [
+            (
+                10,
+                "https://img.example/blossoms.jpg",
+                "繁花 (Blossoms Shanghai)",
+            ),
+            (10, None, "繁花 (Blossoms Shanghai)"),
+        ])
+        self.assertIsNone(self.coordinator.get("op-1").message_id)
+
     async def test_running_operation_rejects_unrelated_callback_with_toast(self):
         from app.handlers.interaction_handler import operation_gate
 
@@ -197,6 +230,41 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             await operation_gate(update, self.context())
 
         update.callback_query.answer.assert_awaited_once_with("当前任务执行中")
+
+    async def test_running_prowlarr_allows_only_current_opted_in_release_button(self):
+        from app.handlers.interaction_handler import operation_gate
+
+        record = self.coordinator.report(
+            "search",
+            self.report(
+                state="running",
+                stage="prowlarr_search",
+                details={
+                    "allow_running_callbacks": True,
+                    "keyboard": [[{
+                        "text": "①",
+                        "callback_data": "search:release:current",
+                    }]],
+                },
+            ),
+        )
+        self.coordinator.set_message_id(record.operation_id, 55)
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        router = Mock()
+        router.callback_route.return_value = route
+        router.plugin_route.return_value = route
+
+        current = self.callback_update("search:release:current")
+        await operation_gate(current, self.context(router=router))
+        current.callback_query.answer.assert_not_awaited()
+
+        stale = self.callback_update("search:release:stale")
+        with self.assertRaises(ApplicationHandlerStop):
+            await operation_gate(stale, self.context(router=router))
+        stale.callback_query.answer.assert_awaited_once_with("当前任务执行中")
 
     async def test_button_only_operation_rejects_plain_text_and_allows_owned_callback(self):
         from app.handlers.interaction_handler import operation_gate
