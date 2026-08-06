@@ -35,13 +35,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest setuptools wheel
-          python -m pip install \
-            ./sdk \
-            ./features/download \
-            ./features/search \
-            ./features/rename \
-            ./features/sync \
-            ./features/caption
+          python -m pip install ./sdk
+          for module in download search rename sync caption; do
+            python -m pip install -r "features/$module/requirements-feature.txt"
+          done
 
       - name: Validate immutable telepiplex tag
         run: |

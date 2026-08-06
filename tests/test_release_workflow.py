@@ -210,20 +210,31 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertNotIn("catalog.yaml", create)
         self.assertNotIn(".tpx", source)
 
-    def test_telepiplex_release_installs_and_tests_workspaces_in_isolation(self):
+    def test_telepiplex_release_installs_feature_test_dependencies_in_isolation(self):
         workflow = self._workflow(TELEPIPLEX_WORKFLOW)
         install = self._step(
             workflow, "validate-telepiplex", "Install telepiplex test dependencies"
         )["run"]
-        for package in (
-            "./sdk",
-            "./features/download",
-            "./features/search",
-            "./features/rename",
-            "./features/sync",
-            "./features/caption",
-        ):
-            self.assertIn(package, install)
+        self.assertIn("python -m pip install ./sdk", install)
+        self.assertIn(
+            "for module in download search rename sync caption; do",
+            install,
+        )
+        self.assertIn(
+            'python -m pip install -r "features/$module/requirements-feature.txt"',
+            install,
+        )
+        self.assertNotIn('python -m pip install "./features/$module"', install)
+        self.assertNotIn(
+            'python -m pip install --no-deps "./features/$module"',
+            install,
+        )
+        self.assertNotIn(
+            "python -m pip install \\\n"
+            "            ./sdk \\\n"
+            "            ./features/download",
+            install,
+        )
 
         tests = self._step(
             workflow, "validate-telepiplex", "Run telepiplex tests"
