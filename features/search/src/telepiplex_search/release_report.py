@@ -71,19 +71,6 @@ def _source(title: str) -> str:
     return ""
 
 
-def _codec(title: str) -> str:
-    for pattern, label in (
-        (r"(?<!\w)x265(?!\w)", "x265"),
-        (r"(?<!\w)(?:h[ ._-]?265|hevc)(?!\w)", "x265"),
-        (r"(?<!\w)av1(?!\w)", "AV1"),
-        (r"(?<!\w)x264(?!\w)", "x264"),
-        (r"(?<!\w)(?:h[ ._-]?264|avc)(?!\w)", "x264"),
-    ):
-        if _matches(title, pattern):
-            return label
-    return ""
-
-
 def _dynamic_range(title: str) -> list[str]:
     labels = []
     if _matches(title, r"(?<!\w)(?:dv|dovi)(?!\w)|dolby[ ._-]?vision"):
@@ -97,59 +84,49 @@ def _dynamic_range(title: str) -> list[str]:
     return labels
 
 
-def _audio(title: str) -> list[str]:
+def _channel_count(title: str) -> int | None:
+    layout = re.search(
+        r"(?<!\d)(\d{1,2})\.(\d)(?:\.(\d))?(?!\d)",
+        title,
+    )
+    if layout:
+        parts = [
+            int(value)
+            for value in layout.groups()
+            if value is not None
+        ]
+        if (
+            parts[0] <= 12
+            and parts[1] <= 2
+            and all(value <= 8 for value in parts[2:])
+        ):
+            return sum(parts)
+    explicit = re.search(
+        r"(?<![a-z0-9])(\d{1,2})[ ._-]?ch(?![a-z0-9])",
+        title,
+        re.IGNORECASE,
+    )
+    if explicit:
+        return int(explicit.group(1))
+    return None
+
+
+def _audio_tier(title: str) -> str:
     compact = re.sub(r"[^a-z0-9]+", "", title.casefold())
-    channel = ""
-    match = re.search(r"(?<!\d)([257]\.1|[12]\.0)(?!\d)", title)
-    if match:
-        channel = match.group(1)
-    elif _matches(title, r"(?<![a-z0-9])2[ ._-]?ch(?![a-z0-9])"):
-        channel = "2.0"
-    quality = ""
-    family = ""
-    if "truehd" in compact:
-        quality = "无损"
-    elif any(token in compact for token in (
-        "dtshdmasteraudio", "dtshdma", "dtsma",
-    )):
-        quality = "无损"
-        family = "DTS"
-    elif "flac" in compact:
-        quality = "无损"
-        family = "FLAC"
-    elif "alac" in compact:
-        quality = "无损"
-    elif any(token in compact for token in ("lpcm", "linearpcm")):
-        quality = "无损"
-    elif any(token in compact for token in (
-        "dtshdhighresolution", "dtshdhra",
-    )):
-        quality = "高码有损"
-        family = "DTS"
-    elif "dtshd" in compact:
-        family = "DTS"
-    elif "dts" in compact and "dtsx" not in compact:
-        quality = "高码有损"
-        family = "DTS"
-    elif any(token in compact for token in (
-        "eac3", "ddp", "dolbydigitalplus",
-    )) or _matches(title, r"(?<!\w)dd[+](?!\w)"):
-        quality = "有损"
-    elif any(token in compact for token in ("ac3", "dolbydigital")):
-        quality = "有损"
-    elif "aac" in compact:
-        quality = "有损"
-    if "dtsx" in compact and not family:
-        family = "DTS"
-    experience = "Atmos" if "atmos" in compact else family
-    labels = []
-    if channel:
-        labels.append(channel)
-    if quality:
-        labels.append(quality)
-    if experience:
-        labels.append(experience)
-    return labels
+    immersive = any(
+        marker in compact
+        for marker in ("atmos", "dtsx", "auro3d")
+    )
+    channels = _channel_count(title)
+    if channels is None:
+        return "?ch沉浸" if immersive else "?ch"
+    if immersive:
+        return f"{channels}ch沉浸"
+    if channels == 2:
+        return "2ch立体"
+    if channels > 2:
+        return f"{channels}ch环绕"
+    return f"{channels}ch"
 
 
 def _editions(title: str) -> list[str]:
@@ -170,17 +147,14 @@ def _editions(title: str) -> list[str]:
 
 def _specifications(item: dict) -> str:
     title = str(item.get("title") or "")
-    scope = _compact_scope(item.get("scope_label"))
     labels = []
-    if scope != "整片":
-        labels.append(scope)
     labels.extend(filter(None, (
         _resolution(title),
         _source(title),
-        _codec(title),
     )))
     labels.extend(_dynamic_range(title))
     labels.extend(_editions(title))
+    labels.append(_audio_tier(title))
     return " · ".join(dict.fromkeys(labels)) or "规格未知"
 
 
@@ -192,6 +166,20 @@ def _compact_scope(value) -> str:
     if season:
         return f"第{season.group(1)}季整季"
     return scope
+
+
+def _shared_scope(items: list[dict]) -> str:
+    scopes = {
+        scope
+        for scope in (
+            _compact_scope(item.get("scope_label"))
+            for item in items
+        )
+        if scope != "整片"
+    }
+    if len(scopes) == 1:
+        return scopes.pop()
+    return ""
 
 
 def _release_group(title: str) -> str:
@@ -333,7 +321,12 @@ def format_release_report(
         if summary.get("final") is not None
         else completed >= total
     )
-    title = _clip(query, 120) or "未知作品"
+    scope = _shared_scope(displayed)
+    if scope:
+        title_limit = max(1, 120 - len(scope) - 3)
+        title = f"{_clip(query, title_limit) or '未知作品'} · {scope}"
+    else:
+        title = _clip(query, 120) or "未知作品"
     lines = [
         f"{'✅' if final else '🔍'} {title}",
         f"搜索器 {online_completed}/({total}-{offline})，离线 {offline}",

@@ -3,6 +3,7 @@ import asyncio
 from copy import deepcopy
 import html
 import re
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -3023,15 +3024,13 @@ class FeatureSourceContractTest(unittest.TestCase):
         manifest = yaml.safe_load(
             (ROOT / "manifest.yaml").read_text(encoding="utf-8")
         )
-        project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        package_metadata = (
-            ROOT / "src" / "telepiplex_search.egg-info" / "PKG-INFO"
-        ).read_text(encoding="utf-8")
+        project = tomllib.loads(
+            (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        )
 
-        self.assertEqual(manifest["version"], "1.6.0")
+        self.assertEqual(manifest["version"], "1.7.0")
         self.assertEqual(manifest["host_api"], ">=1.4,<2.0")
-        self.assertIn('version = "1.6.0"', project)
-        self.assertIn("\nVersion: 1.6.0\n", package_metadata)
+        self.assertEqual(project["project"]["version"], "1.7.0")
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
@@ -3063,14 +3062,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.6.0.tpx", source)
+        self.assertIn("/tmp/search-1.7.0.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("都不是", source)
         self.assertIn("统一 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("rename", source)
-        self.assertNotIn("dist/search-1.6.0.tpx", source)
+        self.assertNotIn("dist/search-1.7.0.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

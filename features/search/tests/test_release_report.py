@@ -66,12 +66,12 @@ class ReleaseReportTest(unittest.TestCase):
                 "搜索器 3/(3-0)，离线 0",
                 "",
                 (
-                    "① 1080p · BluRay · x265 · Remastered"
+                    "① 1080p · BluRay · Remastered · 6ch环绕"
                 ),
                 (
                     "   2 GB｜活种"
                 ),
-                "② 2160p · REMUX · x265",
+                "② 2160p · REMUX · 8ch沉浸",
                 "   57 GB｜活种",
             ],
         )
@@ -118,38 +118,42 @@ class ReleaseReportTest(unittest.TestCase):
         )
 
         row = text.splitlines()[3]
-        self.assertIn("2160p · x265 · DV · HDR10+", row)
+        self.assertEqual(row, "① 2160p · DV · HDR10+ · 8ch沉浸")
         self.assertEqual(row.count("DV"), 1)
         self.assertNotIn("HEVC", row)
+        self.assertNotIn("x265", row)
         self.assertNotIn("Atmos", row)
         self.assertNotIn("7.1", row)
 
-    def test_audio_labels_are_deferred_and_not_displayed(self):
+    def test_audio_formats_collapse_to_one_user_facing_capability_tier(self):
         cases = (
-            ("Movie.2.0.FLAC-GROUP", "2.0·无损·FLAC"),
-            ("Movie.5.1.DTS-GROUP", "5.1·高码有损·DTS"),
-            ("Movie.7.1.DTS-HD.MA-GROUP", "7.1·无损·DTS"),
-            (
-                "Movie.7.1.DTS-HD.HRA-GROUP",
-                "7.1·高码有损·DTS",
-            ),
-            ("Movie.7.1.DTS-HD-GROUP", "7.1·DTS"),
-            ("Movie.7.1.TrueHD.Atmos-GROUP", "7.1·无损·Atmos"),
-            ("Movie.5.1.AC3-GROUP", "5.1·有损"),
-            ("Movie.5.1.EAC3-GROUP", "5.1·有损"),
-            ("Movie.5.1.DD+.Atmos-GROUP", "5.1·有损·Atmos"),
-            ("Movie.2.0.AAC-GROUP", "2.0·有损"),
+            ("Movie.2.0.FLAC-GROUP", "① 2ch立体"),
+            ("Movie.5.1.DTS-GROUP", "① 6ch环绕"),
+            ("Movie.7.1.DTS-HD.MA-GROUP", "① 8ch环绕"),
+            ("Movie.7.1.DTS-HD.HRA-GROUP", "① 8ch环绕"),
+            ("Movie.7.1.DTS-HD-GROUP", "① 8ch环绕"),
+            ("Movie.7.1.TrueHD.Atmos-GROUP", "① 8ch沉浸"),
+            ("Movie.5.1.AC3-GROUP", "① 6ch环绕"),
+            ("Movie.5.1.EAC3-GROUP", "① 6ch环绕"),
+            ("Movie.5.1.DD+.Atmos-GROUP", "① 6ch沉浸"),
+            ("Movie.2.0.AAC-GROUP", "① 2ch立体"),
             (
                 "Movie.1080p.WEB-DL.x264.AAC.2CH-GROUP",
-                "1080p·WEB-DL·x264·2.0·有损",
+                "① 1080p · WEB-DL · 2ch立体",
             ),
             (
                 "Movie.7.1.DTS-HD.MA.DTS:X-GROUP",
-                "7.1·无损·DTS",
+                "① 8ch沉浸",
             ),
+            ("Movie.5.1.Auro-3D-GROUP", "① 6ch沉浸"),
+            ("Movie.5.1.2.Atmos-GROUP", "① 8ch沉浸"),
+            ("Movie.7.1.4.DTS-X-GROUP", "① 12ch沉浸"),
+            ("Movie.Atmos-GROUP", "① ?ch沉浸"),
+            ("Movie.FLAC-GROUP", "① ?ch"),
+            ("Movie-GROUP", "① ?ch"),
         )
 
-        for title, _expected in cases:
+        for title, expected in cases:
             with self.subTest(title=title):
                 item = {
                     "title": title,
@@ -174,11 +178,12 @@ class ReleaseReportTest(unittest.TestCase):
                 )
 
                 first_result = text.splitlines()[3]
-                for audio_label in (
-                    "2.0", "5.1", "7.1", "无损", "有损",
-                    "高码有损", "Atmos", "DTS", "FLAC",
+                self.assertEqual(first_result, expected)
+                for hidden_format in (
+                    "无损", "有损", "Atmos", "DTS", "FLAC",
+                    "Auro", "x264",
                 ):
-                    self.assertNotIn(audio_label, first_result)
+                    self.assertNotIn(hidden_format, first_result)
 
     def test_keyboard_has_twelve_circled_buttons_in_three_columns(self):
         ranked = [{
@@ -262,7 +267,7 @@ class ReleaseReportTest(unittest.TestCase):
             "搜索器 0/(3-2)，离线 2",
         )
         self.assertEqual(lines[2], "")
-        self.assertEqual(lines[3], "① 2160p · REMUX · x265")
+        self.assertEqual(lines[3], "① 2160p · REMUX · ?ch")
         self.assertEqual(lines[4], "   35 GB｜活种")
         result_lines = [
             line for line in text.splitlines()
@@ -345,7 +350,8 @@ class ReleaseReportTest(unittest.TestCase):
             ]),
             12,
         )
-        self.assertIn("2160p · REMUX · x265", text)
+        self.assertIn("2160p · REMUX · ?ch沉浸", text)
+        self.assertNotIn("x265", text)
         self.assertNotIn("M-Team", text)
         self.assertNotIn("(+", text)
         self.assertIn("35 GB｜活种", text)
@@ -392,8 +398,9 @@ class ReleaseReportTest(unittest.TestCase):
                     "size": int(1.4 * 1024 ** 3),
                 },
                 "expected": (
-                    "① 2160p\n   1.4 GB｜疑似死种"
+                    "① 2160p · ?ch\n   1.4 GB｜疑似死种"
                 ),
+                "expected_title": "✅ Constantine 2005",
             },
             {
                 "name": "season",
@@ -411,8 +418,9 @@ class ReleaseReportTest(unittest.TestCase):
                     "size": int(10.6 * 1024 ** 3),
                 },
                 "expected": (
-                    "① 第2季整季 · 1080p · WEB-DL\n   10.6 GB｜活种"
+                    "① 1080p · WEB-DL · ?ch沉浸\n   10.6 GB｜活种"
                 ),
+                "expected_title": "✅ The Glory S02 · 第2季整季",
             },
             {
                 "name": "episode_unknown_specs",
@@ -426,8 +434,9 @@ class ReleaseReportTest(unittest.TestCase):
                     "size": None,
                 },
                 "expected": (
-                    "① S01E02\n   未知大小｜疑似死种"
+                    "① ?ch\n   未知大小｜疑似死种"
                 ),
+                "expected_title": "✅ The Glory S01E02 · S01E02",
             },
         ]
 
@@ -452,7 +461,7 @@ class ReleaseReportTest(unittest.TestCase):
                 )
 
                 self.assertEqual(text.splitlines(), [
-                    f"✅ {case['query']}",
+                    case["expected_title"],
                     "搜索器 2/(2-0)，离线 0",
                     "",
                     *case["expected"].splitlines(),

@@ -181,7 +181,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
                 (
                     "host refs/tags/telepiplex-v3.4.10",
                     "a refs/tags/download-v1.0.5",
-                    "b refs/tags/search-v1.5.0",
+                    "b refs/tags/search-v1.6.0",
                     "c refs/tags/rename-v1.0.5",
                     "d refs/tags/sync-v1.0.2",
                     "e refs/tags/caption-v0.1.2",
@@ -200,7 +200,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
             [
                 "push origin refs/tags/telepiplex-v3.4.11",
                 "push origin refs/tags/download-v1.0.6",
-                "push origin refs/tags/search-v1.6.0",
+                "push origin refs/tags/search-v1.7.0",
                 "push origin refs/tags/rename-v1.1.0",
                 "push origin refs/tags/sync-v1.0.3",
             ],
@@ -223,7 +223,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
                 (
                     "host refs/tags/telepiplex-v3.4.11",
                     "a refs/tags/download-v1.0.6",
-                    "b refs/tags/search-v1.6.0",
+                    "b refs/tags/search-v1.7.0",
                     "c refs/tags/rename-v1.1.0",
                     "d refs/tags/sync-v1.0.3",
                     "e refs/tags/caption-v0.1.2",
@@ -243,7 +243,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
                 (
                     "host refs/tags/telepiplex-v3.4.11",
                     "a refs/tags/download-v1.0.6",
-                    "b refs/tags/search-v1.5.2",
+                    "b refs/tags/search-v1.6.0",
                     "c refs/tags/rename-v1.1.0",
                     "d refs/tags/sync-v1.0.3",
                     "e refs/tags/caption-v0.1.2",
@@ -252,9 +252,9 @@ class UnraidPublishScriptTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("search-v1.6.0", result.stdout)
+        self.assertIn("search-v1.7.0", result.stdout)
         self.assertIn(
-            "push origin refs/tags/search-v1.6.0",
+            "push origin refs/tags/search-v1.7.0",
             git_log.read_text(encoding="utf-8"),
         )
 
@@ -269,7 +269,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
                 (
                     "host refs/tags/telepiplex-v3.4.11",
                     "a refs/tags/download-v1.0.6",
-                    "b refs/tags/search-v1.6.0",
+                    "b refs/tags/search-v1.7.0",
                     "c refs/tags/rename-v1.1.0",
                     "d refs/tags/sync-v1.0.3",
                     "e refs/tags/caption-v0.1.2",

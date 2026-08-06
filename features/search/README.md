@@ -1,6 +1,6 @@
 # search Feature
 
-search 1.6.0 使用“豆瓣发现、用户确认、确认后增强”的分阶段流程。豆瓣候选补充海报、国家/地区、类型与简介；最终身份通过独立消息确认，后续 Prowlarr 进度不会覆盖它。Prowlarr 搜索期间可直接选择已有结果并中止剩余搜索，结果按规格、大小和种子状态分层展示。
+search 1.7.0 使用“豆瓣发现、用户确认、确认后增强”的分阶段流程。豆瓣候选补充海报、国家/地区、类型与简介；最终身份通过独立消息确认，后续 Prowlarr 进度不会覆盖它。Prowlarr 搜索期间可直接选择已有结果并中止剩余搜索，结果按分辨率、来源、画面特性、版本和音频体验层级紧凑展示。
 
 ## 发起搜索
 
@@ -98,7 +98,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
 构建示例：
 
 ```bash
-python tools/build_feature.py features/search /tmp/search-1.6.0.tpx \
+python tools/build_feature.py features/search /tmp/search-1.7.0.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```
