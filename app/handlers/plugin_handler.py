@@ -1221,7 +1221,15 @@ async def _render_actions(
                     )
                     edited_source = True
                 rendered_kind = "photo"
-            except Exception:
+            except Exception as exc:
+                if grid_action:
+                    _log_feature_event(
+                        "warning",
+                        "poster_grid_unavailable",
+                        update,
+                        route,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
                 sent = await update.effective_message.reply_text(text, **kwargs)
                 rendered_kind = "text"
                 edited_source = False

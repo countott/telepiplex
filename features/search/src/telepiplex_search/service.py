@@ -6,6 +6,7 @@ import html
 import json
 import re
 import time
+import unicodedata
 import uuid
 from copy import deepcopy
 from dataclasses import replace
@@ -101,6 +102,48 @@ def _compact_summary(value, limit: int = 240) -> str:
     if len(value) <= limit:
         return value
     return value[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _normalized_title(value) -> str:
+    return "".join(
+        character
+        for character in unicodedata.normalize(
+            "NFKC",
+            _text(value),
+        ).casefold()
+        if character.isalnum()
+    )
+
+
+def _candidate_title_component(value, limit: int | None) -> str:
+    value = _text(value)
+    if limit is None or len(value) <= limit:
+        return value
+    return value[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _candidate_display_title(
+    identity: dict,
+    *,
+    component_limit: int | None = None,
+) -> str:
+    identity = identity if isinstance(identity, dict) else {}
+    chinese = _text(
+        identity.get("chinese_title")
+        or identity.get("english_title")
+        or "未知"
+    )
+    original = _text(identity.get("original_title"))
+    year = _text(identity.get("year")) or "年份未知"
+    include_original = (
+        bool(original)
+        and _normalized_title(original) != _normalized_title(chinese)
+    )
+    chinese = _candidate_title_component(chinese, component_limit)
+    if include_original:
+        original = _candidate_title_component(original, component_limit)
+        return f"{chinese} ({original}) {year}"
+    return f"{chinese} {year}"
 
 
 def _positive_integer(value) -> int | None:
@@ -1693,16 +1736,10 @@ class SearchFeature:
         identity = contract.get("identity") or {}
         placement = contract.get("placement") or {}
         if (stored.get("plan") or {}).get("links_frozen"):
-            title = _text(
-                identity.get("chinese_title")
-                or identity.get("english_title")
-                or "未知"
+            title = _candidate_display_title(
+                identity,
+                component_limit=48,
             )
-            english_title = _text(
-                identity.get("official_english_title")
-                or identity.get("english_title")
-            )
-            year = _text(identity.get("year")) or "年份未知"
             providers = list(dict.fromkeys(
                 _text(link.get("provider")).casefold()
                 for link in candidate.get("source_links") or ()
@@ -1713,9 +1750,7 @@ class SearchFeature:
                 _PROVIDER_LABELS.get(provider, provider)
                 for provider in providers
             ) or "豆瓣"
-            lines = [f"{title}（{year}）"]
-            if english_title and english_title != title:
-                lines.append(english_title)
+            lines = [title]
             lines.extend([
                 f"类型：{_human_media_type(placement.get('library_type'))}",
                 "国家/地区："
@@ -1755,12 +1790,15 @@ class SearchFeature:
                 "data": data,
             }
         score = candidate.get("score") or {}
-        title = identity.get("chinese_title") or identity.get("english_title") or "未知"
+        title = _candidate_display_title(
+            identity,
+            component_limit=48,
+        )
         relation = (contract.get("relation") or {}).get("type") or "standalone"
         recommended = " · 推荐" if candidate.get("recommended") else ""
         text = (
             f"候选 {index + 1}/{len(candidates)}{recommended}\n"
-            f"{title} ({identity.get('year') or '年份未知'})\n"
+            f"{title}\n"
             f"类型：{_human_media_type(placement.get('library_type'))}"
             f" · 关系：{_human_relation(relation)}\n"
             f"评分：{score.get('total', 0)}/100"
@@ -1811,21 +1849,18 @@ class SearchFeature:
             contract = candidate.get("media_metadata") or {}
             identity = contract.get("identity") or {}
             placement = contract.get("placement") or {}
-            title = _text(
+            chinese_title = _text(
                 identity.get("chinese_title")
                 or identity.get("english_title")
                 or "未知"
             )[:36]
-            year = _text(identity.get("year")) or "年份未知"
-            english_title = _text(
-                identity.get("official_english_title")
-                or identity.get("english_title")
+            title = _candidate_display_title(
+                identity,
+                component_limit=36,
             )
             lines.append(
-                f"{index}. <b>{html.escape(title)}</b>（{year}）"
+                f"{index}. <b>{html.escape(title)}</b>"
             )
-            if english_title and english_title != title:
-                lines.append(html.escape(english_title))
             lines.extend([
                 "类型："
                 + html.escape(
@@ -1850,7 +1885,7 @@ class SearchFeature:
             has_poster = has_poster or poster_url.startswith("https://")
             poster_items.append({
                 "number": index,
-                "title": title,
+                "title": chinese_title,
                 "poster_url": (
                     poster_url
                     if poster_url.startswith("https://")
@@ -1858,7 +1893,13 @@ class SearchFeature:
                 ),
             })
             keyboard.append([{
-                "text": f"{index}. {title[:24]}",
+                "text": (
+                    f"{index}. "
+                    + _candidate_display_title(
+                        identity,
+                        component_limit=18,
+                    )
+                ),
                 "callback_data": f"search:select:{plan_id}:{index - 1}",
             }])
         keyboard.append([{

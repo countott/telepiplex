@@ -314,8 +314,9 @@ def format_release_report(
         if isinstance(item, dict)
     ][:12]
     displayed = _display_versions(releases)
-    offline = len(down)
-    online_completed = max(0, completed - offline)
+    failed = len(down)
+    available = max(0, total - failed)
+    successful_completed = max(0, completed - failed)
     final = bool(
         summary.get("final")
         if summary.get("final") is not None
@@ -329,7 +330,7 @@ def format_release_report(
         title = _clip(query, 120) or "未知作品"
     lines = [
         f"{'✅' if final else '🔍'} {title}",
-        f"搜索器 {online_completed}/({total}-{offline})，离线 {offline}",
+        f"搜索器 {successful_completed}/{available}，失败 {failed}",
     ]
     if displayed:
         lines.append("")

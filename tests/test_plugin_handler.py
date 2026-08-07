@@ -1386,6 +1386,62 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             grid,
         )
 
+    @patch(
+        "app.handlers.plugin_handler.build_poster_grid",
+        side_effect=RuntimeError(
+            "poster_grid_no_images "
+            "https://img9.doubanio.com/private/poster.jpg "
+            "http_status:403"
+        ),
+    )
+    async def test_feature_poster_grid_failure_logs_and_falls_back_to_text(
+        self,
+        _build_grid,
+    ):
+        from app.handlers.plugin_handler import _render_actions
+
+        update, context, _manager = self._request([], user_id=1)
+        update.effective_message.reply_text = AsyncMock(
+            return_value=SimpleNamespace(message_id=85)
+        )
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        result = {"actions": [{
+            "kind": "send_photo_grid",
+            "text": "候选文本",
+            "data": {
+                "poster_items": [{
+                    "number": 1,
+                    "title": "想见你",
+                    "poster_url": "https://image.example/one.jpg",
+                }],
+                "keyboard": [[{
+                    "text": "1. 想见你 (想見你) 2019",
+                    "callback_data": "search:select:p1:0",
+                }]],
+            },
+        }]}
+        logger = Mock()
+
+        with patch("app.handlers.plugin_handler.init.logger", logger):
+            rendered, message_id, message_kind = await _render_actions(
+                update,
+                context,
+                route,
+                result,
+            )
+
+        self.assertTrue(rendered)
+        self.assertEqual((message_id, message_kind), (85, "text"))
+        update.effective_message.reply_photo.assert_not_called()
+        update.effective_message.reply_text.assert_awaited_once()
+        logged = logger.warning.call_args.args[0]
+        self.assertIn("event=poster_grid_unavailable", logged)
+        self.assertIn("http_status:403", logged)
+        self.assertNotIn("img9.doubanio.com/private", logged)
+
     @patch("app.handlers.plugin_handler.build_poster_grid")
     async def test_long_html_photo_caption_falls_back_to_bounded_plain_text(
         self, build_grid

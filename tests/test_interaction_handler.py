@@ -726,6 +726,58 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             "HTML",
         )
 
+    @patch(
+        "app.handlers.interaction_handler.build_poster_grid",
+        side_effect=RuntimeError(
+            "poster_grid_no_images "
+            "https://img9.doubanio.com/private/poster.jpg "
+            "http_status:403"
+        ),
+    )
+    async def test_status_renderer_grid_failure_falls_back_to_text(
+        self,
+        _build_grid,
+    ):
+        from app.handlers.interaction_handler import render_operation
+
+        record = self.coordinator.report("search", self.report(
+            state="awaiting_input",
+            stage="candidate_selection",
+            status_text="候选文本",
+            control="exit",
+            details={
+                "poster_items": [{
+                    "number": 1,
+                    "title": "想见你",
+                    "poster_url": "https://image.example/one.jpg",
+                }],
+            },
+        ))
+        context = self.context()
+        context.application.bot.send_photo = AsyncMock()
+        context.application.bot.send_message = AsyncMock(
+            return_value=SimpleNamespace(message_id=58)
+        )
+        logger = Mock()
+
+        with patch("app.handlers.interaction_handler.init.logger", logger):
+            message_id = await render_operation(
+                context.application,
+                Mock(),
+                record,
+            )
+
+        self.assertEqual(message_id, 58)
+        context.application.bot.send_photo.assert_not_awaited()
+        context.application.bot.send_message.assert_awaited_once()
+        self.assertEqual(
+            context.application.bot.send_message.await_args.kwargs["text"],
+            "候选文本",
+        )
+        logged = logger.warn.call_args.args[0]
+        self.assertIn("http_status:403", logged)
+        self.assertNotIn("img9.doubanio.com/private", logged)
+
     @patch("app.handlers.interaction_handler.build_poster_grid")
     async def test_status_renderer_bounds_long_html_photo_caption(
         self, build_grid

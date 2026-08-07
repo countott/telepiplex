@@ -1771,8 +1771,8 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 f"search:select:{next(iter(self.feature.plans))}:1",
             ],
         )
-        self.assertIn("<b>中文标题1</b>（2024）", report["status_text"])
-        self.assertIn("English Title", report["status_text"])
+        self.assertIn("<b>中文标题1 2024</b>", report["status_text"])
+        self.assertNotIn("English Title", report["status_text"])
         self.assertIn("类型：电影", report["status_text"])
         self.assertIn("来源：豆瓣", report["status_text"])
         for internal in (
@@ -1783,6 +1783,94 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "https://",
         ):
             self.assertNotIn(internal, report["status_text"])
+
+    def test_candidate_grid_uses_chinese_original_year_in_body_and_button(self):
+        plan = ranked_search_plan()
+        first, second = plan["candidates"]
+        first["media_metadata"]["identity"].update({
+            "chinese_title": "想见你",
+            "original_title": "想見你",
+            "english_title": "Someday or One Day",
+            "official_english_title": "Someday or One Day",
+            "year": "2019",
+        })
+        second["media_metadata"]["identity"].update({
+            "chinese_title": "让子弹飞",
+            "original_title": "让子弹飞",
+            "english_title": "Let the Bullets Fly",
+            "official_english_title": "Let the Bullets Fly",
+            "year": "2010",
+        })
+
+        action = self.feature._candidate_grid_action({
+            "candidates": plan["candidates"],
+            "plan": {"plan_id": "douban-labels"},
+        })
+
+        visible = html.unescape(re.sub(r"<[^>]+>", "", action["text"]))
+        self.assertIn("1. 想见你 (想見你) 2019", visible)
+        self.assertIn("2. 让子弹飞 2010", visible)
+        self.assertNotIn("Someday or One Day", visible)
+        self.assertNotIn("Let the Bullets Fly", visible)
+        self.assertEqual(
+            [
+                row[0]["text"]
+                for row in action["data"]["keyboard"][:2]
+            ],
+            [
+                "1. 想见你 (想見你) 2019",
+                "2. 让子弹飞 2010",
+            ],
+        )
+        self.assertEqual(
+            action["data"]["poster_items"][0]["title"],
+            "想见你",
+        )
+
+    def test_candidate_grid_omits_missing_optional_original_title(self):
+        plan = ranked_search_plan()
+        candidate = plan["candidates"][0]
+        candidate["media_metadata"]["identity"].update({
+            "chinese_title": "让子弹飞",
+            "original_title": "",
+            "year": "2010",
+        })
+
+        action = self.feature._candidate_grid_action({
+            "candidates": [candidate],
+            "plan": {"plan_id": "missing-original"},
+        })
+
+        visible = html.unescape(re.sub(r"<[^>]+>", "", action["text"]))
+        self.assertIn("1. 让子弹飞 2010", visible)
+        self.assertNotIn("让子弹飞 (", visible)
+        self.assertEqual(
+            action["data"]["keyboard"][0][0]["text"],
+            "1. 让子弹飞 2010",
+        )
+
+    def test_candidate_grid_omits_matching_original_before_title_clipping(self):
+        plan = ranked_search_plan()
+        candidate = plan["candidates"][0]
+        long_title = "一部名称非常长但原标题仍然完全相同的中文电影" * 2
+        candidate["media_metadata"]["identity"].update({
+            "chinese_title": long_title,
+            "original_title": long_title,
+            "year": "2026",
+        })
+
+        action = self.feature._candidate_grid_action({
+            "candidates": [candidate],
+            "plan": {"plan_id": "matching-long-original"},
+        })
+
+        visible = html.unescape(re.sub(r"<[^>]+>", "", action["text"]))
+        title_line = visible.splitlines()[1]
+        self.assertNotIn("(", title_line)
+        self.assertTrue(title_line.endswith(" 2026"))
+        button = action["data"]["keyboard"][0][0]["text"]
+        self.assertNotIn("(", button)
+        self.assertTrue(button.endswith(" 2026"))
 
     def test_candidate_grid_is_bounded_to_five_and_hides_internal_fields(self):
         candidates = []
@@ -1866,6 +1954,13 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "identity_role": "series_root",
             "candidate_version": "v0",
         })
+        candidate["media_metadata"]["identity"].update({
+            "chinese_title": "想见你",
+            "original_title": "想見你",
+            "english_title": "Someday or One Day",
+            "official_english_title": "Someday or One Day",
+            "year": "2019",
+        })
 
         action = self.feature._candidate_action(
             {
@@ -1878,6 +1973,11 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("类型：剧集", action["text"])
         self.assertIn("关系：独立作品", action["text"])
+        self.assertEqual(
+            action["text"].splitlines()[1],
+            "想见你 (想見你) 2019",
+        )
+        self.assertNotIn("Someday or One Day", action["text"])
         self.assertNotIn("standalone", action["text"])
         self.assertNotIn("series_root", action["text"])
         self.assertEqual(
@@ -1898,6 +1998,13 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             }],
         })
         candidate["media_metadata"]["identity"]["countries"] = ["美国"]
+        candidate["media_metadata"]["identity"].update({
+            "chinese_title": "想见你",
+            "original_title": "想見你",
+            "english_title": "Someday or One Day",
+            "official_english_title": "Someday or One Day",
+            "year": "2019",
+        })
 
         action = self.feature._candidate_action(
             {
@@ -1912,6 +2019,11 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(set(action["data"]), {"keyboard", "photo_url"})
+        self.assertEqual(
+            action["text"].splitlines()[0],
+            "想见你 (想見你) 2019",
+        )
+        self.assertNotIn("Someday or One Day", action["text"])
         self.assertIn("国家/地区：美国", action["text"])
         self.assertNotIn("candidate_key", action["data"])
 

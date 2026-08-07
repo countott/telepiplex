@@ -135,6 +135,40 @@ class DoubanAdapterTest(unittest.TestCase):
         self.assertEqual(get_mock.call_count, 2)
 
     @patch("telepiplex_search.adapters.douban.requests.get")
+    def test_merged_title_is_reconciled_after_detail_adds_original_title(
+        self,
+        get_mock,
+    ):
+        get_mock.side_effect = [
+            response(payload={
+                "subject": {
+                    "id": "30468961",
+                    "title": "想见你 想見你",
+                    "year": "2019",
+                    "type": "tv",
+                }
+            }),
+            response(payload={
+                "id": "30468961",
+                "title": "想见你 想見你",
+                "original_title": "想見你",
+                "aka": ["Someday or One Day"],
+                "year": "2019",
+                "type": "tv",
+            }),
+        ]
+
+        fact = douban.lookup_douban_subject("30468961", cache_ttl=0)
+
+        self.assertEqual(fact["title"], "Someday or One Day")
+        self.assertEqual(fact["chinese_title"], "想见你")
+        self.assertEqual(fact["original_title"], "想見你")
+        self.assertEqual(
+            fact["official_english_title"],
+            "Someday or One Day",
+        )
+
+    @patch("telepiplex_search.adapters.douban.requests.get")
     def test_japanese_language_and_romaji_are_preserved_without_translation(self, get_mock):
         get_mock.side_effect = [
             response(text='https://movie.douban.com/subject/1/'),

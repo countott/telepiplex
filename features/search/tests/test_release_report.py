@@ -63,7 +63,7 @@ class ReleaseReportTest(unittest.TestCase):
             text.splitlines(),
             [
                 "✅ 康斯坦丁 (Constantine)",
-                "搜索器 3/(3-0)，离线 0",
+                "搜索器 3/3，失败 0",
                 "",
                 (
                     "① 1080p · BluRay · Remastered · 6ch环绕"
@@ -264,7 +264,7 @@ class ReleaseReportTest(unittest.TestCase):
         self.assertEqual(lines[0], "🔍 Constantine 2005")
         self.assertEqual(
             lines[1],
-            "搜索器 0/(3-2)，离线 2",
+            "搜索器 0/1，失败 2",
         )
         self.assertEqual(lines[2], "")
         self.assertEqual(lines[3], "① 2160p · REMUX · ?ch")
@@ -376,7 +376,7 @@ class ReleaseReportTest(unittest.TestCase):
 
         self.assertEqual(text.splitlines(), [
             "✅ Title S01",
-            "搜索器 0/(0-0)，离线 0",
+            "搜索器 0/0，失败 0",
             "没有同身份、同范围的可用片源。",
         ])
 
@@ -462,7 +462,7 @@ class ReleaseReportTest(unittest.TestCase):
 
                 self.assertEqual(text.splitlines(), [
                     case["expected_title"],
-                    "搜索器 2/(2-0)，离线 0",
+                    "搜索器 2/2，失败 0",
                     "",
                     *case["expected"].splitlines(),
                 ])

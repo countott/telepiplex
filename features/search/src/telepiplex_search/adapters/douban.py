@@ -411,6 +411,17 @@ def _merge_subject_facts(facts: list[dict]) -> dict | None:
         merged["external_ids"] = external_ids
     if conflicts:
         merged["identity_conflicts"] = sorted(set(conflicts))
+    merged_chinese_title = _chinese_title_part(
+        _text(merged.get("chinese_title") or merged.get("title")),
+        _text(merged.get("original_title")),
+    )
+    if merged_chinese_title:
+        merged["chinese_title"] = merged_chinese_title
+    merged["title"] = (
+        _text(merged.get("english_title"))
+        or merged_chinese_title
+        or _text(merged.get("title"))
+    )
     return merged
 
 
