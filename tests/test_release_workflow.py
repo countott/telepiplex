@@ -254,6 +254,28 @@ class ReleaseWorkflowTest(unittest.TestCase):
         )
         self.assertNotEqual(tests.strip(), "python -m pytest -q")
 
+    def test_telepiplex_release_installs_cjk_font_before_poster_grid_tests(self):
+        workflow = self._workflow(TELEPIPLEX_WORKFLOW)
+        steps = workflow["jobs"]["validate-telepiplex"]["steps"]
+        step_names = [step.get("name") for step in steps]
+        install_name = "Install telepiplex system test dependencies"
+
+        self.assertIn(install_name, step_names)
+        self.assertLess(
+            step_names.index(install_name),
+            step_names.index("Run telepiplex tests"),
+        )
+        install = self._step(
+            workflow,
+            "validate-telepiplex",
+            install_name,
+        )["run"]
+        self.assertIn("apt-get update", install)
+        self.assertIn(
+            "apt-get install -y --no-install-recommends fonts-noto-cjk",
+            install,
+        )
+
     def test_telepiplex_manifest_probe_fails_closed(self):
         workflow = self._workflow(TELEPIPLEX_WORKFLOW)
         probe = self._step(
