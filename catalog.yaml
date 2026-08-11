@@ -409,5 +409,15 @@ plugins:
           branch: main
           commit: 1b6d55c3188b4a6503bcd45ee36fcca5b4dbde59
         url: https://github.com/countott/telepiplex/releases/download/sync-v1.0.3/sync-1.0.3.tpx
-release: search-v1.8.0
+      1.1.0:
+        host_api: '>=1.2,<2.0'
+        provides:
+        - library.sync
+        requires: []
+        sha256: 87e06f83b9b96a203d74b7c066eddb73807e49dfa534b0ed22473b24a02ed10a
+        source:
+          branch: main
+          commit: 94f1de14afd875902db996cf2c59e0e590a676ff
+        url: https://github.com/countott/telepiplex/releases/download/sync-v1.1.0/sync-1.1.0.tpx
+release: sync-v1.1.0
 schema_version: 1
