@@ -1070,7 +1070,7 @@ class SearchUsabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("TVDB缺少凭据", action["text"])
         self.assertNotIn("tvdb:credential_missing", action["text"])
 
-    async def test_japanese_animation_without_romanized_provider_field_uses_fallback(self):
+    async def test_japanese_animation_without_source_backed_latin_title_stays_unready(self):
         scenario = {
             "query": "オッドタクシー",
             "works": ({
@@ -1096,13 +1096,20 @@ class SearchUsabilityTest(unittest.IsolatedAsyncioTestCase):
             candidate_editor=_candidate_editor(scenario),
         )
 
-        identity = plan["candidates"][0]["media_metadata"]["identity"]
-        self.assertEqual(identity["search_title_policy"], "romanized_original")
-        self.assertEqual(
-            identity["romanized_original_title"],
-            "Oddotakushii",
+        candidate = plan["candidates"][0]
+        identity = candidate["media_metadata"]["identity"]
+        self.assertFalse(candidate["metadata_ready"])
+        self.assertEqual(candidate["metadata_error"]["code"], "metadata_incomplete")
+        self.assertIn(
+            "canonical_latin_title",
+            candidate["metadata_error"]["missing_fields"],
         )
-        self.assertEqual(identity["english_title"], "Oddotakushii")
+        self.assertEqual(
+            identity.get("romanized_original_title", ""),
+            "",
+        )
+        self.assertEqual(identity.get("english_title", ""), "オッドタクシー")
+        self.assertNotEqual(identity.get("english_title", ""), "Oddotakushii")
 
 
 if __name__ == "__main__":

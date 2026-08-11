@@ -132,6 +132,27 @@
             "timeout": {"type": "number", "minimum": 1, "maximum": 300, "title": "超时（秒）"}
           },
           "additionalProperties": true
+        },
+        "tmdb": {
+          "type": "object",
+          "title": "TMDB",
+          "properties": {
+            "enable": {"type": "boolean", "title": "启用"},
+            "api_key": {"type": "string", "title": "API Read Access Token", "writeOnly": true},
+            "base_url": {"type": "string", "title": "API 地址"},
+            "timeout": {"type": "number", "minimum": 1, "maximum": 300, "title": "超时（秒）"}
+          },
+          "additionalProperties": true
+        },
+        "anilist": {
+          "type": "object",
+          "title": "AniList",
+          "properties": {
+            "enable": {"type": "boolean", "title": "启用"},
+            "endpoint": {"type": "string", "title": "GraphQL 地址"},
+            "timeout": {"type": "number", "minimum": 1, "maximum": 300, "title": "超时（秒）"}
+          },
+          "additionalProperties": true
         }
       },
       "additionalProperties": true

@@ -71,6 +71,8 @@ _SUPPORTED_LINK_HOSTS = (
     "w.wiki",
     "thetvdb.com",
     "tvdb.com",
+    "themoviedb.org",
+    "anilist.co",
 )
 
 
@@ -114,6 +116,10 @@ def _supported_provider(raw_url: str) -> str:
         or _host_matches(host, "tvdb.com")
     ):
         return "tvdb"
+    if _host_matches(host, "themoviedb.org"):
+        return "tmdb"
+    if _host_matches(host, "anilist.co"):
+        return "anilist"
     return ""
 
 
@@ -211,11 +217,54 @@ def _wikipedia_link(raw_query: str) -> MetadataLink | None:
     )
 
 
+def _tmdb_link(raw_query: str) -> MetadataLink | None:
+    if _supported_provider(raw_query) != "tmdb":
+        return None
+    parsed = urlparse(raw_query)
+    match = re.fullmatch(
+        r"/(movie|tv)/(\d+)(?:-[^/?#]+)?/?",
+        parsed.path,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    kind, entity_id = match.groups()
+    return MetadataLink(
+        provider="tmdb",
+        media_type="series" if kind.casefold() == "tv" else "movie",
+        entity_id=entity_id,
+        scope="work",
+        url=raw_query,
+    )
+
+
+def _anilist_link(raw_query: str) -> MetadataLink | None:
+    if _supported_provider(raw_query) != "anilist":
+        return None
+    parsed = urlparse(raw_query)
+    match = re.fullmatch(
+        r"/anime/(\d+)(?:/[^/?#]+)?/?",
+        parsed.path,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return MetadataLink(
+        provider="anilist",
+        media_type="",
+        entity_id=match.group(1),
+        scope="work",
+        url=raw_query,
+    )
+
+
 def metadata_link_from_url(raw_url: str) -> MetadataLink | None:
     return (
         _douban_link(raw_url)
         or _tvdb_link(raw_url)
         or _wikipedia_link(raw_url)
+        or _tmdb_link(raw_url)
+        or _anilist_link(raw_url)
     )
 
 

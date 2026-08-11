@@ -56,6 +56,28 @@ def series_contract(
 
 
 class ReleaseGateTest(unittest.TestCase):
+    def test_alternative_verified_query_title_is_an_identity_alias(self):
+        contract = series_contract(
+            scope="season",
+            expected_seasons=(1,),
+            season=1,
+        )
+        contract["identity"]["query_titles"] = [
+            "The Office US",
+            "Das Buero",
+        ]
+        contract["retrieval"]["queries"] = [
+            "The Office US S01",
+            "Das Buero S01",
+        ]
+
+        result = gate_releases(
+            [release("Das.Buero.S01.1080p", "a")],
+            contract,
+        )
+
+        self.assertEqual(len(result.eligible), 1)
+
     def test_office_wife_does_not_match_the_office(self):
         contract = series_contract(
             scope="season",

@@ -1278,6 +1278,38 @@ class LibrarySyncServiceTest(unittest.TestCase):
         self.assertEqual(result["step_results"]["audio"]["status"], "warning")
         self.assertEqual(plex.audio_selections, [])
 
+    def test_frozen_original_language_skips_live_tmdb_details(self):
+        completion = make_media_metadata_completion("standalone")
+        identity = completion.event.metadata["media_metadata"]["identity"]
+        identity["original_language"] = "ja"
+        identity["external_ids"] = {"tmdb": "20"}
+        plex = FakePlex()
+        tmdb = FakeTmdb()
+        tmdb.details = Mock(side_effect=AssertionError("live details must not run"))
+        service = self.make_service(plex=plex, tmdb=tmdb)
+
+        result = service.run_job(service.enqueue_completion(completion)["id"])
+
+        self.assertEqual(result["step_results"]["audio"]["status"], "success")
+        tmdb.details.assert_not_called()
+        self.assertIn(("42", 11, 21), plex.audio_selections)
+
+    def test_missing_frozen_language_keeps_live_tmdb_fallback(self):
+        completion = make_media_metadata_completion("standalone")
+        identity = completion.event.metadata["media_metadata"]["identity"]
+        identity.pop("original_language", None)
+        identity["external_ids"] = {"tmdb": "20"}
+        tmdb = FakeTmdb()
+        tmdb.details = Mock(return_value={"original_language": "ja"})
+        plex = FakePlex()
+        service = self.make_service(plex=plex, tmdb=tmdb)
+
+        result = service.run_job(service.enqueue_completion(completion)["id"])
+
+        self.assertEqual(result["step_results"]["audio"]["status"], "success")
+        tmdb.details.assert_called_once_with("movie", "20")
+        self.assertIn(("42", 11, 21), plex.audio_selections)
+
     def test_ambiguous_subtitle_waits_then_applies_selected_stream(self):
         plex = FakePlex()
         plex.list_streams = Mock(return_value=[{

@@ -149,16 +149,20 @@ def _identity_aliases(contract: dict) -> tuple[tuple[str, ...], ...]:
         *((identity.get("aliases") or []) if isinstance(
             identity.get("aliases"), list
         ) else []),
+        *((identity.get("query_titles") or []) if isinstance(
+            identity.get("query_titles"), list
+        ) else []),
     ]
-    retrieval_query = str(
-        (contract.get("retrieval") or {}).get("query") or ""
-    )
-    retrieval_query = re.sub(
-        r"(?i)\bS\d{1,2}(?:E\d{1,3})?\b",
-        " ",
-        retrieval_query,
-    )
-    values.append(retrieval_query)
+    retrieval = contract.get("retrieval") or {}
+    retrieval_queries = retrieval.get("queries")
+    if not isinstance(retrieval_queries, list):
+        retrieval_queries = []
+    for retrieval_query in [retrieval.get("query"), *retrieval_queries]:
+        values.append(re.sub(
+            r"(?i)\bS\d{1,2}(?:E\d{1,3})?\b",
+            " ",
+            str(retrieval_query or ""),
+        ))
     aliases = []
     for value in values:
         if isinstance(value, dict):

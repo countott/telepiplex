@@ -17,6 +17,11 @@ class SearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
                     },
                 },
                 "metadata": {
+                    "tmdb": {
+                        "enable": True,
+                        "api_key": "old-tmdb-key",
+                        "timeout": 15,
+                    },
                     "tvdb": {
                         "enable": True,
                         "api_key": "old-tvdb-key",
@@ -58,12 +63,13 @@ class SearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
         buttons = result["actions"][0]["data"]["keyboard"]
         self.assertEqual(
             [button[0]["text"] for button in buttons],
-            ["Prowlarr", "TVDB", "AI", "退出"],
+            ["Prowlarr", "TMDB", "TVDB", "AI", "退出"],
         )
         for internal in ("timeout", "分类", "阈值", "MCP", "Indexer"):
             self.assertNotIn(internal, text)
         self.assertNotIn("old-prowlarr-key", text)
         self.assertNotIn("old-tvdb-key", text)
+        self.assertNotIn("old-tmdb-key", text)
         self.assertNotIn("old-ai-key", text)
 
     async def test_prowlarr_flow_returns_only_public_patch_and_forces_enabled(self):
@@ -118,6 +124,33 @@ class SearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
                     "enable": True,
                     "api_key": "old-tvdb-key",
                     "subscriber_pin": "new-pin",
+                },
+            },
+        })
+
+    async def test_tmdb_flow_supports_read_access_token(self):
+        await self._start()
+        await self.feature.callback({
+            **self.owner,
+            "namespace": "search",
+            "payload": "config:tmdb",
+        })
+        await self.feature.callback({
+            **self.owner,
+            "namespace": "search",
+            "payload": "config:boolean:on",
+        })
+        await self.feature.message({
+            **self.owner,
+            "text": "new-tmdb-read-access-token",
+        })
+        result = await self._confirm()
+
+        self.assertEqual(result["config_patch"], {
+            "metadata": {
+                "tmdb": {
+                    "enable": True,
+                    "api_key": "new-tmdb-read-access-token",
                 },
             },
         })

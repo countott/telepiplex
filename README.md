@@ -114,7 +114,7 @@ plugins:
 
 ## Feature 可视化配置
 
-Feature 安装后，在 Telegram 发送 `/config`，或在 `/plugin` 页面点击“配置 Feature”。telepiplex 会从当前 Feature 随包提供的 `config.schema.json` 动态生成配置区块，例如 search/rename 的 TVDB、AI，以及 search 的 Prowlarr。
+Feature 安装后，在 Telegram 发送 `/config`，或在 `/plugin` 页面点击“配置 Feature”。telepiplex 会从当前 Feature 随包提供的 `config.schema.json` 动态生成配置区块，例如 search 的 Prowlarr、TMDB、TVDB、AI，以及 rename 的 TVDB、AI。search 的 AniList 补全使用公共 API，不需要 API Key。
 
 选择区块后按提示发送需要修改的 `key=value` 行即可；未发送字段保持不变。API Key、Token、Subscriber PIN 等敏感字段只显示“已配置/未配置”，不会回显真实值，也不会进入日志。配置会先经过完整 schema 校验，再原子写入 `/config/plugins/<plugin_id>/config.yaml`；运行中的 Feature 会完成 drain、shadow 启动和原子切换，失败时恢复旧配置与旧路由。
 

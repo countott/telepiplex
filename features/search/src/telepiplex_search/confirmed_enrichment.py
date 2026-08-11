@@ -18,6 +18,9 @@ class ConfirmedIdentity:
     year: str
     media_type: str
     requested_scope: str
+    original_language: str
+    genres: tuple[str, ...]
+    external_ids: dict[str, str]
 
 
 def _text(value) -> str:
@@ -80,6 +83,47 @@ def build_wikipedia_queries(
     }
 
 
+def build_tmdb_query(identity: ConfirmedIdentity) -> dict | None:
+    if identity.media_type not in {"movie", "series"}:
+        return None
+    title = _text(
+        identity.english_title
+        or (
+            identity.original_title
+            if re.search(r"[A-Za-z]", identity.original_title)
+            else ""
+        )
+        or identity.chinese_title
+    )
+    if not title:
+        return None
+    return {
+        "title": title,
+        "year": identity.year,
+        "media_type": identity.media_type,
+    }
+
+
+def is_confirmed_japanese_animation(identity: ConfirmedIdentity) -> bool:
+    return bool(
+        identity.original_language == "ja"
+        and any(
+            signal in _text(genre).casefold()
+            for genre in identity.genres
+            for signal in ("animation", "animated", "anime", "动画", "動畫")
+        )
+    )
+
+
+def build_anilist_query(identity: ConfirmedIdentity) -> dict | None:
+    if not is_confirmed_japanese_animation(identity):
+        return None
+    title = _text(identity.english_title or identity.original_title)
+    if not title:
+        return None
+    return {"title": title, "year": identity.year}
+
+
 def _same_identity(
     raw: dict,
     identity: ConfirmedIdentity,
@@ -131,6 +175,70 @@ def select_unique_wikipedia_fact(
         for fact in matches
     }
     return dict(matches[0]) if len(stable_ids) == 1 else None
+
+
+def _select_unique_flat_fact(
+    result: dict,
+    identity: ConfirmedIdentity,
+    *,
+    provider: str,
+    id_key: str,
+) -> dict | None:
+    if not isinstance(result, dict) or result.get("status") != "ok":
+        return None
+    matches = [
+        fact
+        for fact in result.get("facts") or ()
+        if isinstance(fact, dict)
+        and _same_identity(
+            fact,
+            identity,
+            media_type=identity.media_type,
+            require_media_type=True,
+        )
+        and _text(
+            fact.get(id_key)
+            or fact.get("id")
+            or (
+                fact.get("external_ids")
+                if isinstance(fact.get("external_ids"), dict)
+                else {}
+            ).get(provider)
+        )
+    ]
+    stable_ids = {
+        _text(
+            fact.get(id_key)
+            or fact.get("id")
+            or (fact.get("external_ids") or {}).get(provider)
+        )
+        for fact in matches
+    }
+    return dict(matches[0]) if len(stable_ids) == 1 else None
+
+
+def select_unique_tmdb_fact(
+    result: dict,
+    identity: ConfirmedIdentity,
+) -> dict | None:
+    return _select_unique_flat_fact(
+        result,
+        identity,
+        provider="tmdb",
+        id_key="tmdb_id",
+    )
+
+
+def select_unique_anilist_fact(
+    result: dict,
+    identity: ConfirmedIdentity,
+) -> dict | None:
+    return _select_unique_flat_fact(
+        result,
+        identity,
+        provider="anilist",
+        id_key="anilist_id",
+    )
 
 
 def build_tvdb_query(

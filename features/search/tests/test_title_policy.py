@@ -84,7 +84,7 @@ class TitlePolicyTest(unittest.TestCase):
         with self.assertRaisesRegex(TitlePolicyError, "canonical_title_unavailable"):
             resolve_title_policy(candidate)
 
-    def test_japanese_animation_derives_romaji_from_canonical_title(self):
+    def test_japanese_animation_never_derives_romaji_locally(self):
         for media_type in ("series", "movie"):
             with self.subTest(media_type=media_type):
                 candidate = CandidateEntity(f"tvdb:{media_type}:3", (fact(
@@ -100,20 +100,14 @@ class TitlePolicyTest(unittest.TestCase):
 
                 titles = resolve_title_policy(candidate)
 
-                self.assertEqual(
-                    titles.romanized_original_title,
-                    "Hachimitsu to Kuroobaa",
-                )
-                self.assertEqual(
-                    titles.canonical_search_title,
-                    "Hachimitsu to Kuroobaa",
-                )
+                self.assertEqual(titles.romanized_original_title, "")
+                self.assertEqual(titles.canonical_search_title, "Honey and Clover")
                 self.assertEqual(
                     titles.search_title_policy,
-                    "romanized_original",
+                    "official_english_fallback",
                 )
 
-    def test_japanese_animation_romanization_handles_digraph_sokuon_and_long_vowel(self):
+    def test_kana_only_title_still_uses_source_backed_english(self):
         candidate = CandidateEntity("tvdb:movie:5", (fact(
             fact_id="tvdb:movie:5",
             titles=("キャット・ストーリー",),
@@ -127,10 +121,39 @@ class TitlePolicyTest(unittest.TestCase):
 
         titles = resolve_title_policy(candidate)
 
-        self.assertEqual(
-            titles.romanized_original_title,
-            "Kyatto Sutoorii",
-        )
+        self.assertEqual(titles.romanized_original_title, "")
+        self.assertEqual(titles.canonical_search_title, "Cat Story")
+
+    def test_anilist_romaji_is_trusted_for_japanese_animation(self):
+        candidate = CandidateEntity("anilist:1142", (
+            fact(
+                fact_id="tvdb:series:79044",
+                titles=("Honey and Clover",),
+                original_title="ハチミツとクローバー",
+                original_language="ja",
+                official_english_title="Honey and Clover",
+                romanized_original_title="",
+                media_type="series",
+                genres=("Anime",),
+            ),
+            fact(
+                fact_id="anilist:1142",
+                provider="anilist",
+                titles=("Hachimitsu to Clover",),
+                original_title="ハチミツとクローバー",
+                original_language="ja",
+                official_english_title="Honey and Clover",
+                romanized_original_title="Hachimitsu to Clover",
+                media_type="series",
+                external_ids={"anilist": "1142"},
+                genres=("Anime",),
+            ),
+        ))
+
+        titles = resolve_title_policy(candidate)
+
+        self.assertEqual(titles.romanized_original_title, "Hachimitsu to Clover")
+        self.assertEqual(titles.canonical_search_title, "Hachimitsu to Clover")
 
     def test_explicit_japanese_romaji_precedes_derived_value(self):
         candidate = CandidateEntity("tvdb:series:4", (fact(

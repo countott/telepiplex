@@ -90,6 +90,15 @@ metadata:
     base_url: https://api4.thetvdb.com/v4
     subscriber_pin: ""
     timeout: 15
+  tmdb:
+    enable: true
+    api_key: ""
+    base_url: https://api.themoviedb.org/3
+    timeout: 15
+  anilist:
+    enable: true
+    endpoint: https://graphql.anilist.co
+    timeout: 15
 ai:
   enable: true
   api_url: ""

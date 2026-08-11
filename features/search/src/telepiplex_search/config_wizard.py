@@ -56,6 +56,7 @@ class SearchConfigWizard:
         key = _owner(request)
         self._replace_session(key, {"stage": "choose"})
         search = (self.config.get("search") or {}).get("prowlarr") or {}
+        tmdb = (self.config.get("metadata") or {}).get("tmdb") or {}
         tvdb = (self.config.get("metadata") or {}).get("tvdb") or {}
         ai = self.config.get("ai") or {}
         return {
@@ -64,6 +65,8 @@ class SearchConfigWizard:
                 "text": (
                     "search 配置\n\n"
                     f"Prowlarr：{'已配置' if search.get('api_key') else '未配置'}\n"
+                    f"TMDB：{'启用' if tmdb.get('enable') else '停用'}，"
+                    f"{'已配置' if tmdb.get('api_key') else '未配置'}\n"
                     f"TVDB：{'启用' if tvdb.get('enable') else '停用'}，"
                     f"{'已配置' if tvdb.get('api_key') else '未配置'}\n"
                     f"AI：{'启用' if ai.get('enable') else '停用'}，"
@@ -72,6 +75,7 @@ class SearchConfigWizard:
                 ),
                 "data": {"keyboard": [
                     [{"text": "Prowlarr", "callback_data": "search:config:prowlarr"}],
+                    [{"text": "TMDB", "callback_data": "search:config:tmdb"}],
                     [{"text": "TVDB", "callback_data": "search:config:tvdb"}],
                     [{"text": "AI", "callback_data": "search:config:ai"}],
                     [{"text": "退出", "callback_data": "search:config:cancel"}],
@@ -105,7 +109,7 @@ class SearchConfigWizard:
                 "open",
                 edit=True,
             )
-        if session.get("stage") == "choose" and action in {"tvdb", "ai"}:
+        if session.get("stage") == "choose" and action in {"tmdb", "tvdb", "ai"}:
             self._replace_session(key, {
                 "stage": "boolean",
                 "section": action,
@@ -129,15 +133,23 @@ class SearchConfigWizard:
             section = session["section"]
             if not enabled:
                 patch = (
-                    {"metadata": {"tvdb": {"enable": False}}}
-                    if section == "tvdb"
+                    {"metadata": {section: {"enable": False}}}
+                    if section in {"tmdb", "tvdb"}
                     else {"ai": {"enable": False}}
                 )
                 return self._finish(key, patch)
             session["values"]["enable"] = True
-            session["stage"] = "tvdb_api_key" if section == "tvdb" else "ai_url"
+            session["stage"] = (
+                "tmdb_api_key"
+                if section == "tmdb"
+                else "tvdb_api_key"
+                if section == "tvdb"
+                else "ai_url"
+            )
             prompt = (
-                "请发送 TVDB API Key。发送 - 保留当前值。"
+                "请发送 TMDB API Read Access Token。发送 - 保留当前值。"
+                if section == "tmdb"
+                else "请发送 TVDB API Key。发送 - 保留当前值。"
                 if section == "tvdb"
                 else "请发送 AI API 地址，例如 https://api.example/v1。"
             )
@@ -176,6 +188,13 @@ class SearchConfigWizard:
                 return self._message(
                     "请发送 TVDB Subscriber PIN；发送 - 保留，发送 clear 清空。",
                     "open",
+                )
+            if stage == "tmdb_api_key":
+                current = ((self.config.get("metadata") or {}).get("tmdb") or {})
+                values["api_key"] = self._secret(raw, current.get("api_key"))
+                return self._finish(
+                    key,
+                    {"metadata": {"tmdb": deepcopy(values)}},
                 )
             if stage == "tvdb_pin":
                 current = ((self.config.get("metadata") or {}).get("tvdb") or {})

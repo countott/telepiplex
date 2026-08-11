@@ -23,6 +23,12 @@ from .ai import (
 from .adapters.douban import (
     lookup_douban_evidence,
 )
+from .adapters.anilist import (
+    AniListConfigError,
+    AniListRequestError,
+    get_anilist_media,
+    search_anilist,
+)
 from .adapters.prowlarr import (
     ProwlarrRequestError,
     get_prowlarr_indexer_summary,
@@ -38,12 +44,24 @@ from .adapters.tvdb import (
     get_tvdb_series,
     search_tvdb_series,
 )
+from .adapters.tmdb import (
+    TmdbAuthenticationError,
+    TmdbConfigError,
+    TmdbRequestError,
+    find_tmdb_by_external_id,
+    get_tmdb_entity,
+    search_tmdb,
+)
 from .adapters.wikipedia import lookup_wikipedia_evidence
 from .config_wizard import SearchConfigWizard
 from .confirmed_enrichment import (
     ConfirmedIdentity,
+    build_anilist_query,
+    build_tmdb_query,
     build_tvdb_query,
     build_wikipedia_queries,
+    select_unique_anilist_fact,
+    select_unique_tmdb_fact,
     select_unique_tvdb_series,
     select_unique_wikipedia_fact,
 )
@@ -3459,6 +3477,146 @@ class SearchFeature:
             ai_decider=infer_douban_search_decision_with_ai,
         )
 
+    @staticmethod
+    async def _resolve_confirmed_tmdb(
+        identity: ConfirmedIdentity,
+    ) -> tuple[dict | None, str]:
+        try:
+            async def verified_detail(tmdb_id: str):
+                detail = await asyncio.to_thread(
+                    get_tmdb_entity,
+                    identity.media_type,
+                    tmdb_id,
+                )
+                return select_unique_tmdb_fact({
+                    "source": "tmdb",
+                    "status": "ok" if detail else "not_found",
+                    "facts": [detail] if isinstance(detail, dict) else [],
+                }, identity)
+
+            direct_tmdb_id = _text(identity.external_ids.get("tmdb"))
+            if direct_tmdb_id:
+                verified = await verified_detail(direct_tmdb_id)
+                return (
+                    (verified, "ok")
+                    if verified
+                    else (None, "not_found")
+                )
+
+            exact_sources = [
+                (source, _text(identity.external_ids.get(source)))
+                for source in ("imdb", "tvdb", "wikidata")
+                if _text(identity.external_ids.get(source))
+            ]
+            for source, external_id in exact_sources:
+                candidates = await asyncio.to_thread(
+                    find_tmdb_by_external_id,
+                    source,
+                    external_id,
+                    identity.media_type,
+                )
+                selected = select_unique_tmdb_fact({
+                    "source": "tmdb",
+                    "status": "ok" if candidates else "not_found",
+                    "facts": candidates[:5],
+                }, identity)
+                if selected is None:
+                    continue
+                tmdb_id = _text(
+                    selected.get("tmdb_id")
+                    or selected.get("id")
+                    or (selected.get("external_ids") or {}).get("tmdb")
+                )
+                verified = await verified_detail(tmdb_id)
+                if verified:
+                    return verified, "ok"
+            if exact_sources:
+                return None, "not_found"
+
+            query = build_tmdb_query(identity)
+            if query is None:
+                return None, "unavailable"
+            candidates = await asyncio.to_thread(
+                search_tmdb,
+                query["title"],
+                query["media_type"],
+                query["year"],
+            )
+            result = {
+                "source": "tmdb",
+                "status": "ok" if candidates else "not_found",
+                "facts": candidates[:5],
+            }
+            selected = select_unique_tmdb_fact(result, identity)
+            if selected is None:
+                return None, (
+                    "not_unique" if candidates else "not_found"
+                )
+            tmdb_id = _text(
+                selected.get("tmdb_id")
+                or selected.get("id")
+                or (selected.get("external_ids") or {}).get("tmdb")
+            )
+            verified = await verified_detail(tmdb_id)
+            return (verified, "ok") if verified else (None, "not_found")
+        except TmdbConfigError as exc:
+            return None, exc.code
+        except TmdbAuthenticationError:
+            return None, "authentication_failed"
+        except TmdbRequestError as exc:
+            return None, exc.code
+        except OSError:
+            return None, "server_down"
+        except Exception:
+            return None, "unavailable"
+
+    @staticmethod
+    async def _resolve_confirmed_anilist(
+        identity: ConfirmedIdentity,
+    ) -> tuple[dict | None, str]:
+        query = build_anilist_query(identity)
+        if query is None:
+            return None, "not_applicable"
+        try:
+            candidates = await asyncio.to_thread(
+                search_anilist,
+                query["title"],
+                query["year"],
+            )
+            result = {
+                "source": "anilist",
+                "status": "ok" if candidates else "not_found",
+                "facts": candidates[:5],
+            }
+            selected = select_unique_anilist_fact(result, identity)
+            if selected is None:
+                return None, (
+                    "not_unique" if candidates else "not_found"
+                )
+            anilist_id = _text(
+                selected.get("anilist_id")
+                or selected.get("id")
+                or (selected.get("external_ids") or {}).get("anilist")
+            )
+            detail = await asyncio.to_thread(
+                get_anilist_media,
+                anilist_id,
+            )
+            verified = select_unique_anilist_fact({
+                "source": "anilist",
+                "status": "ok" if detail else "not_found",
+                "facts": [detail] if isinstance(detail, dict) else [],
+            }, identity)
+            return (verified, "ok") if verified else (None, "not_found")
+        except AniListConfigError as exc:
+            return None, exc.code
+        except AniListRequestError as exc:
+            return None, exc.code
+        except OSError:
+            return None, "server_down"
+        except Exception:
+            return None, "unavailable"
+
     async def _supplement_selected_candidate(
         self,
         candidate: dict,
@@ -3505,6 +3663,21 @@ class SearchFeature:
                 result.get("intended_scope")
                 or (contract.get("retrieval") or {}).get("scope")
             ).casefold(),
+            original_language=_text(
+                identity_value.get("original_language")
+            ).casefold(),
+            genres=tuple(
+                _text(item)
+                for item in identity_value.get("genres") or ()
+                if _text(item)
+            ),
+            external_ids={
+                _text(key): _text(value)
+                for key, value in (
+                    identity_value.get("external_ids") or {}
+                ).items()
+                if _text(key) and _text(value)
+            },
         )
         unresolved = [
             _text(item)
@@ -3520,6 +3693,7 @@ class SearchFeature:
             or result.get("candidate_id")
         )
         wikipedia_fact = None
+        tmdb_fact = None
         if "wikipedia" not in providers:
             queries = build_wikipedia_queries(confirmed)
             log_search_event(
@@ -3596,8 +3770,94 @@ class SearchFeature:
                 reason="already_confirmed_source",
             )
 
+        if "tmdb" not in providers:
+            tmdb_external_ids = dict(confirmed.external_ids)
+            if isinstance(wikipedia_fact, dict):
+                wikipedia_ids = (
+                    wikipedia_fact.get("external_ids")
+                    if isinstance(wikipedia_fact.get("external_ids"), dict)
+                    else {}
+                )
+                tmdb_external_ids.update({
+                    _text(key): _text(value)
+                    for key, value in wikipedia_ids.items()
+                    if _text(key) and _text(value)
+                })
+                wikidata_id = _text(wikipedia_fact.get("wikibase_item"))
+                if wikidata_id.startswith("Q"):
+                    tmdb_external_ids["wikidata"] = wikidata_id
+            tmdb_identity = replace(
+                confirmed,
+                external_ids=tmdb_external_ids,
+            )
+            tmdb_query = build_tmdb_query(tmdb_identity)
+            log_search_event(
+                runtime_context.logger,
+                "search.tmdb_started",
+                search_session_id=search_session_id,
+                query=tmdb_query or {},
+            )
+            tmdb_fact, tmdb_status = await self._resolve_confirmed_tmdb(
+                tmdb_identity
+            )
+            if tmdb_fact is not None:
+                tmdb_id = _text(
+                    tmdb_fact.get("tmdb_id")
+                    or tmdb_fact.get("id")
+                    or (tmdb_fact.get("external_ids") or {}).get("tmdb")
+                )
+                external_ids = {
+                    _text(key): _text(value)
+                    for key, value in (
+                        tmdb_fact.get("external_ids") or {}
+                    ).items()
+                    if _text(key) and _text(value)
+                }
+                external_ids["tmdb"] = tmdb_id
+                source_links.append({
+                    "provider": "tmdb",
+                    "fact_id": f"tmdb:{tmdb_id}",
+                    "url": _text(tmdb_fact.get("url")) or (
+                        "https://www.themoviedb.org/"
+                        f"{'movie' if confirmed.media_type == 'movie' else 'tv'}/"
+                        f"{tmdb_id}"
+                    ),
+                    "external_ids": external_ids,
+                    "role": (
+                        "movie"
+                        if confirmed.media_type == "movie"
+                        else "series_root"
+                    ),
+                    "season_number": None,
+                    "episode_number": None,
+                    "verification": "fact_verified",
+                    "proposed_season_number": None,
+                    "proposed_episode_number": None,
+                })
+                providers.add("tmdb")
+            if "tmdb" not in providers:
+                unresolved.append(f"tmdb:{tmdb_status}")
+            log_search_event(
+                runtime_context.logger,
+                "search.tmdb_completed",
+                search_session_id=search_session_id,
+                level="info" if "tmdb" in providers else "warning",
+                status="ok" if "tmdb" in providers else tmdb_status,
+                matched=bool("tmdb" in providers),
+            )
+        else:
+            log_search_event(
+                runtime_context.logger,
+                "search.tmdb_skipped",
+                search_session_id=search_session_id,
+                reason="already_confirmed_source",
+            )
+
         if confirmed.media_type == "series" and "tvdb" not in providers:
-            tvdb_query = build_tvdb_query(confirmed, wikipedia_fact)
+            tvdb_query = build_tvdb_query(
+                confirmed,
+                wikipedia_fact or tmdb_fact,
+            )
             log_search_event(
                 runtime_context.logger,
                 "search.tvdb_started",
@@ -3736,6 +3996,67 @@ class SearchFeature:
                 reason=(
                     "not_series"
                     if confirmed.media_type != "series"
+                    else "already_confirmed_source"
+                ),
+            )
+
+        anilist_query = build_anilist_query(confirmed)
+        if anilist_query is not None and "anilist" not in providers:
+            log_search_event(
+                runtime_context.logger,
+                "search.anilist_started",
+                search_session_id=search_session_id,
+                query=anilist_query,
+            )
+            anilist_fact, anilist_status = (
+                await self._resolve_confirmed_anilist(confirmed)
+            )
+            if anilist_fact is not None:
+                anilist_id = _text(
+                    anilist_fact.get("anilist_id")
+                    or anilist_fact.get("id")
+                    or (anilist_fact.get("external_ids") or {}).get(
+                        "anilist"
+                    )
+                )
+                source_links.append({
+                    "provider": "anilist",
+                    "fact_id": f"anilist:{anilist_id}",
+                    "url": _text(anilist_fact.get("url"))
+                    or f"https://anilist.co/anime/{anilist_id}",
+                    "external_ids": {"anilist": anilist_id},
+                    "role": (
+                        "movie"
+                        if confirmed.media_type == "movie"
+                        else "series_root"
+                    ),
+                    "season_number": None,
+                    "episode_number": None,
+                    "verification": "fact_verified",
+                    "proposed_season_number": None,
+                    "proposed_episode_number": None,
+                })
+                providers.add("anilist")
+            if "anilist" not in providers:
+                unresolved.append(f"anilist:{anilist_status}")
+            log_search_event(
+                runtime_context.logger,
+                "search.anilist_completed",
+                search_session_id=search_session_id,
+                level="info" if "anilist" in providers else "warning",
+                status=(
+                    "ok" if "anilist" in providers else anilist_status
+                ),
+                matched=bool("anilist" in providers),
+            )
+        else:
+            log_search_event(
+                runtime_context.logger,
+                "search.anilist_skipped",
+                search_session_id=search_session_id,
+                reason=(
+                    "not_japanese_animation"
+                    if anilist_query is None
                     else "already_confirmed_source"
                 ),
             )

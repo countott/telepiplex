@@ -1091,18 +1091,23 @@ class LibrarySyncService:
         tmdb_id = (metadata.get("external_ids") or {}).get("tmdb")
         media_type = "tv" if metadata.get("media_type") in {"show", "episode", "tv"} else "movie"
         warnings = self._persisted_target_warnings(job, "audio")
-        original_language = None
-        if self.tmdb and tmdb_id:
+        original_language = str(
+            metadata.get("original_language") or ""
+        ).strip() or None
+        language_source = "frozen_media_metadata" if original_language else ""
+        if not original_language and self.tmdb and tmdb_id:
             try:
                 original_language = self.tmdb.details(
                     media_type,
                     tmdb_id,
                 ).get("original_language")
+                if original_language:
+                    language_source = "live_tmdb_fallback"
             except Exception as exc:
                 message = self._safe_error(exc)
                 if message not in warnings:
                     warnings.append(message)
-        else:
+        elif not original_language:
             message = "TMDB original language is unavailable"
             if message not in warnings:
                 warnings.append(message)
@@ -1199,6 +1204,8 @@ class LibrarySyncService:
             "status": "warning" if warnings else "success",
             "parts": audio_results,
             "warnings": warnings,
+            "original_language": original_language or "",
+            "original_language_source": language_source or "unavailable",
         }
 
     def _subtitle_target(self, job):

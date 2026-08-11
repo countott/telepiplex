@@ -1,6 +1,6 @@
 plugin_id: search
 name: search
-version: 1.7.1
+version: 1.8.0
 host_api: ">=1.4,<2.0"
 entry_point: telepiplex_search.runtime:main
 provides:
@@ -25,6 +25,8 @@ direct_message_hosts:
   - w.wiki
   - thetvdb.com
   - tvdb.com
+  - themoviedb.org
+  - anilist.co
 config_schema_version: 1
 state_schema_version: 1
 source:

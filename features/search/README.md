@@ -1,14 +1,14 @@
 # search Feature
 
-search 1.7.1 使用“豆瓣发现、用户确认、确认后增强”的分阶段流程。豆瓣候选补充海报、国家/地区、类型与简介；最终身份通过独立消息确认，后续 Prowlarr 进度不会覆盖它。Prowlarr 搜索期间可直接选择已有结果并中止剩余搜索，结果按分辨率、来源、画面特性、版本和音频体验层级紧凑展示。
+search 1.8.0 使用“豆瓣发现、用户确认、同级来源收敛”的分阶段流程。豆瓣仍只负责首次候选发现；确认后由豆瓣、Wikipedia、TVDB、TMDB 共同形成字段级证据，日语动画再由 AniList 补充官方罗马字。最终身份通过独立消息确认，后续 Prowlarr 进度不会覆盖它。
 
 ## 发起搜索
 
 - `/s 片名` 或 `/search 片名` 只接受普通文本片名。
 - `/s <链接>` 不再兼容，系统会提示直接发送链接。
-- 可以把豆瓣、Wikipedia 或 TVDB 的 PC、手机、本地化页面、分享文本或短链接直接发送到当前 Telegram 对话；无需命令，适用于系统分享面板。
+- 可以把豆瓣、Wikipedia、TVDB、TMDB 或 AniList 的稳定作品链接直接发送到当前 Telegram 对话；无需命令，适用于系统分享面板。
 - 一条消息只能指向一个作品实体。多个不同作品链接会直接提示链接无效。
-- 豆瓣、Wikipedia 和 TVDB 的稳定作品链接会锁定该实体并跳过文本候选发现。无法从分享页提取稳定实体但能读取可靠页面标题时，标题才会回到普通文本搜索。
+- 上述来源的稳定作品链接会锁定该实体并跳过文本候选发现。无法从分享页提取稳定实体但能读取可靠页面标题时，标题才会回到普通文本搜索。
 
 ## 普通文本发现
 
@@ -43,13 +43,14 @@ Official English Title
 
 ## 确认后增强
 
-用户或程序确认一个作品后，search 锁定其稳定身份，再执行确定性的顺序增强：
+用户或程序确认一个作品后，search 锁定其稳定身份，再执行确定性的来源收敛：
 
-1. Wikipedia query 只使用已确认的简中标题、年份和媒体类型；只有唯一同作品结果才补简中/英文/原名、别名和 Wikidata 身份。
-2. 剧集随后使用 Wikipedia 验证的英文标题，或豆瓣已有的可靠英文/原名，加年份和 series 类型约束查询 TVDB。
-3. TVDB 只有唯一匹配时才补 Series ID 和季集 inventory。该阶段不调用 AI。
+1. Wikipedia query 只使用已确认的标题、年份和媒体类型；只有唯一同作品结果才进入证据图。
+2. TMDB 使用已确认英文/原名或中文标题，加年份和媒体类型约束唯一匹配，并补充 TMDB、IMDb、Wikidata、TVDB 跨站 ID、发行信息、演职员和制作信息。
+3. 剧集使用已确认的可靠英文标题查询 TVDB；TVDB 只有唯一匹配时才补 Series ID 和季集 inventory。
+4. 只有确认 `original_language=ja` 且类型属于动画时才查询 AniList；AniList 的公共 GraphQL API 不需要 API Key，其罗马字必须再次通过标题、年份和类型校验。
 
-Wikipedia 失败或歧义不阻断搜索。TVDB 不可用、无可靠英文身份或无法唯一匹配时，剧集降级为 `whole_series`，写入 `warning:tvdb_inventory_unavailable`，不展示季/单集选择，也不会把未经验证的季集号写入 Prowlarr query。
+各来源之间不使用总分或“后返回者覆盖前者”。外部 ID 一致，或规范标题、年份和媒体类型完全一致时才合并；`evidence.field_resolutions` 保存每个字段的选中值、所有来源和冲突状态。单个补充来源失败不改变已确认身份。TVDB 不可用时，剧集降级为 `whole_series`，不展示季/单集选择，也不会把未经验证的季集号写入 Prowlarr query。
 
 中文 Wikipedia 请求使用 `zh-cn` 显示变体，同时保留规范标题和 Wikidata
 身份；Wikipedia 标题不得覆盖已经确认的豆瓣简中标题。TVDB 英文标题只接受
@@ -60,8 +61,7 @@ Wikipedia 失败或歧义不阻断搜索。TVDB 不可用、无可靠英文身�
 
 ## Prowlarr 与下游
 
-严格 `media_metadata v1` 形成后，程序才生成唯一、来源已验证的 Prowlarr
-query；AI 不生成资源 query，来源别名和用户原始输入也不会混入 query：
+严格 `media_metadata v1` 形成后，程序才生成最多三条、来源已验证且去重的 Prowlarr query。英文标题单来源即可使用；日语动画优先使用 AniList 提供的罗马字，再使用正式英文标题。程序不再本地音译假名，AI 也不生成资源 query，用户原始输入不会混入 query：
 
 - 单电影：`Canonical Title YYYY`；
 - 多季全集：`Canonical Title`；
@@ -79,12 +79,11 @@ search 仍提供无状态的 `media.search.resolve_metadata` capability，并返
 提供的结构化 probe 会先按电影/剧集类型收窄候选；唯一候选直接补全元数据，
 歧义候选由用户确认后从同一个 Rename job 继续，不会重新下载或丢失文件树。
 probe 不修改作品标题或身份。运行配置位于
-`/config/plugins/search/config.yaml`；Wikipedia 和豆瓣无需 API Key，TVDB
-与 AI 使用服务端配置，凭据不会进入模型上下文或结构化日志。
+`/config/plugins/search/config.yaml`；Wikipedia、豆瓣和 AniList 无需 API Key。TMDB 使用 API Read Access Token，可通过 `/search_config` 配置；TVDB 与 AI 继续使用各自服务端配置。凭据不会进入模型上下文或结构化日志。
 
 ## 日志
 
-每个搜索会话使用稳定的 `search_session_id`。日志记录输入分类、直链解析、豆瓣 query 与结果摘要、硬匹配、统一 AI 请求/响应和原样技术重试、候选展示、用户确认或拒绝、Wikipedia/TVDB 增强、metadata probe 类型约束前后的候选数量、降级原因、最终 `search.prowlarr_query_built`、`search.release_gate_evaluated` 以及唯一终态 `search.completed`。日志不记录 API Key、Token、Cookie、Authorization、magnet 或完整 URL；TVDB inventory 只记录数量。
+每个搜索会话使用稳定的 `search_session_id`。日志记录输入分类、直链解析、候选确认、各元数据来源的开始/完成状态、最终 query 变体、release gate 结果和唯一终态。日志不记录 API Key、Token、Cookie、Authorization、magnet 或完整 provider payload。
 
 ## 测试与构建
 
@@ -98,7 +97,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
 构建示例：
 
 ```bash
-python tools/build_feature.py features/search /tmp/search-1.7.1.tpx \
+python tools/build_feature.py features/search /tmp/search-1.8.0.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

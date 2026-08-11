@@ -2,11 +2,11 @@
 
 `features/sync` 是独立 Feature 源码目录。telepiplex 将其构建为不可变 `.tpx`，并在 telepiplex 容器内以独立 venv/子进程运行。
 
-## 从 1.1.x 升级
+## 升级到 1.1.0
 
 1.0.0 删除了本地 AI 配置。更新 Feature 前，先编辑 `/config/plugins/sync/config.yaml`，删除整个 `ai:` 配置段并保留其他现有值，然后再执行更新。
 
-telepiplex 对删除或改名的配置字段采用 fail-closed 策略；如果旧 `ai:` 段仍在，更新会返回 `config_migration_required`，当前 1.1.x release 和配置保持不变。删除该段后，剩余 Plex、TMDB、Fanart.tv、分类目录和 MCP 配置可直接通过 1.0.0 schema 验证。
+telepiplex 对删除或改名的配置字段采用 fail-closed 策略；如果旧 `ai:` 段仍在，更新会返回 `config_migration_required`，当前 release 和配置保持不变。删除该段后，剩余 Plex、TMDB、Fanart.tv、分类目录和 MCP 配置可直接通过 schema 验证。
 
 ## 自动管线
 
@@ -17,6 +17,8 @@ scanning -> artwork -> audio -> subtitle -> completed
 ```
 
 部分文件定位失败时，已定位文件继续增强并记录 warning。任务只有完整执行后才标记 `completed`；进程停止时的活动任务标记 `interrupted`。原子 claim 和持久化步骤结果用于避免重复执行已经完成的工作。
+
+音轨阶段优先读取 search 已冻结在 `media_metadata v1.identity.original_language` 中的原始语言，不再为同一作品重复请求 TMDB。只有旧合同缺少该字段时才调用 TMDB details 作为兼容回退；无字海报仍可按运行时需要实时请求 TMDB/Fanart.tv。
 
 ## Telegram 命令
 
@@ -37,7 +39,7 @@ MCP 对外地址由 `mcp.host`、`mcp.port`、`mcp.path` 控制；非本机监�
 纯本地验证构建（不读取 Git 元数据）：
 
 ```bash
-python tools/build_feature.py features/sync /tmp/sync-1.0.3.tpx \
+python tools/build_feature.py features/sync /tmp/sync-1.1.0.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

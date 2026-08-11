@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .anchored_candidate import AnchoredCandidate
-from .entity_graph import CandidateEntity, EvidenceFact
+from .entity_graph import CandidateEntity, EvidenceFact, normalize_title
 from .prowlarr_query import build_prowlarr_query_chain
 from .title_policy import (
     CanonicalTitles,
@@ -35,6 +35,47 @@ def _unique(values) -> list[str]:
         if value and value not in result:
             result.append(value)
     return result
+
+
+def _unique_records(values) -> list[dict]:
+    result = []
+    seen = set()
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        key = tuple(sorted(
+            (str(item_key), repr(item_value))
+            for item_key, item_value in value.items()
+        ))
+        if key not in seen:
+            seen.add(key)
+            result.append(dict(value))
+    return result
+
+
+def _first_text(root: EvidenceFact, facts, field: str) -> str:
+    return _text(getattr(root, field, "")) or next(
+        (
+            _text(getattr(fact, field, ""))
+            for fact in facts
+            if _text(getattr(fact, field, ""))
+        ),
+        "",
+    )
+
+
+def _first_integer(root: EvidenceFact, facts, field: str) -> int | None:
+    values = (getattr(root, field, None), *(
+        getattr(fact, field, None) for fact in facts
+    ))
+    for value in values:
+        if value is None or value == "":
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _link_by_fact(candidate: AnchoredCandidate) -> dict[str, object]:
@@ -86,6 +127,58 @@ def _field_sources(
             for fact in facts
             if expected and _text(getattr(fact, fact_field, "")) == expected
         ]
+    return result
+
+
+def _field_resolutions(
+    facts: tuple[EvidenceFact, ...],
+    *,
+    values: dict,
+) -> dict[str, dict]:
+    fact_fields = {
+        "chinese_title": "chinese_title",
+        "official_english_title": "official_english_title",
+        "original_title": "original_title",
+        "romanized_original_title": "romanized_original_title",
+        "year": "year",
+        "original_language": "original_language",
+        "original_release_date": "original_release_date",
+        "runtime_minutes": "runtime_minutes",
+        "status": "status",
+        "season_count": "season_count",
+        "episode_count": "episode_count",
+    }
+    title_fields = {
+        "chinese_title",
+        "official_english_title",
+        "original_title",
+        "romanized_original_title",
+    }
+    result = {}
+    for target, fact_field in fact_fields.items():
+        sources = []
+        normalized = set()
+        for fact in facts:
+            value = getattr(fact, fact_field, None)
+            if value is None or value == "":
+                continue
+            sources.append({
+                "provider": fact.provider,
+                "fact_id": fact.fact_id,
+                "value": value,
+            })
+            normalized_value = (
+                normalize_title(value)
+                if target in title_fields
+                else _text(value).casefold()
+            )
+            if normalized_value:
+                normalized.add(normalized_value)
+        result[target] = {
+            "selected": values.get(target),
+            "sources": sources,
+            "conflict": len(normalized) > 1,
+        }
     return result
 
 
@@ -181,6 +274,8 @@ def _provider_statuses(candidate: AnchoredCandidate) -> dict[str, str]:
             "wikipedia",
             "douban",
             "tvdb",
+            "tmdb",
+            "anilist",
         }:
             statuses[parts[0]] = parts[1]
     return statuses
@@ -328,6 +423,27 @@ def build_media_metadata_v1(
     countries = _unique(
         country for fact in primary_facts for country in fact.countries
     )
+    genres = _unique(
+        genre for fact in primary_facts for genre in fact.genres
+    )
+    studios = _unique(
+        value for fact in primary_facts for value in fact.studios
+    )
+    networks = _unique(
+        value for fact in primary_facts for value in fact.networks
+    )
+    cast = _unique_records(
+        value for fact in primary_facts for value in fact.cast
+    )
+    crew = _unique_records(
+        value for fact in primary_facts for value in fact.crew
+    )
+    certifications = _unique(
+        value for fact in primary_facts for value in fact.certifications
+    )
+    backdrop_urls = _unique(
+        value for fact in primary_facts for value in fact.backdrop_urls
+    )
     external_ids = {}
     for fact in (root, *primary_facts):
         for key, value in fact.external_ids.items():
@@ -355,6 +471,39 @@ def build_media_metadata_v1(
         or titles.original_title
         or titles.canonical_latin_title
     )
+    original_release_date = _first_text(
+        root,
+        primary_facts,
+        "original_release_date",
+    )
+    runtime_minutes = _first_integer(
+        root,
+        primary_facts,
+        "runtime_minutes",
+    )
+    status = _first_text(root, primary_facts, "status")
+    season_count = _first_integer(
+        root,
+        primary_facts,
+        "season_count",
+    )
+    episode_count = _first_integer(
+        root,
+        primary_facts,
+        "episode_count",
+    )
+    query_titles = _unique((
+        titles.canonical_search_title,
+        titles.canonical_latin_title,
+        *(
+            fact.official_english_title
+            for fact in primary_facts
+        ),
+        *(
+            fact.romanized_original_title
+            for fact in primary_facts
+        ),
+    ))
     poster = candidate.primary_poster_url
     poster_source = next(
         (
@@ -368,11 +517,23 @@ def build_media_metadata_v1(
         **titles.identity_fields(),
         "chinese_title": chinese_title,
         "aliases": aliases,
+        "query_titles": query_titles,
         "countries": countries,
+        "genres": genres,
         "year": year,
         "content_kind": media_type,
         "summary": candidate.primary_summary,
-        "original_release_date": "",
+        "original_release_date": original_release_date,
+        "runtime_minutes": runtime_minutes,
+        "status": status,
+        "studios": studios,
+        "networks": networks,
+        "cast": cast,
+        "crew": crew,
+        "certifications": certifications,
+        "backdrop_urls": backdrop_urls,
+        "season_count": season_count,
+        "episode_count": episode_count,
         "poster_url": poster,
         "poster_source": poster_source,
         "external_ids": external_ids,
@@ -455,6 +616,18 @@ def build_media_metadata_v1(
                 "year": fact.year,
                 "media_type": fact.media_type,
                 "countries": list(fact.countries),
+                "genres": list(fact.genres),
+                "original_release_date": fact.original_release_date,
+                "runtime_minutes": fact.runtime_minutes,
+                "status": fact.status,
+                "studios": list(fact.studios),
+                "networks": list(fact.networks),
+                "cast": [dict(item) for item in fact.cast],
+                "crew": [dict(item) for item in fact.crew],
+                "certifications": list(fact.certifications),
+                "backdrop_urls": list(fact.backdrop_urls),
+                "season_count": fact.season_count,
+                "episode_count": fact.episode_count,
                 "external_ids": dict(fact.external_ids),
             } for fact in primary_facts],
             "provider_statuses": _provider_statuses(candidate),
@@ -463,6 +636,19 @@ def build_media_metadata_v1(
                 values={
                     **titles.identity_fields(),
                     "year": year,
+                },
+            ),
+            "field_resolutions": _field_resolutions(
+                primary_facts,
+                values={
+                    **titles.identity_fields(),
+                    "chinese_title": chinese_title,
+                    "year": year,
+                    "original_release_date": original_release_date,
+                    "runtime_minutes": runtime_minutes,
+                    "status": status,
+                    "season_count": season_count,
+                    "episode_count": episode_count,
                 },
             ),
             "tvdb_inventory": list(inventory),

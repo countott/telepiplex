@@ -65,6 +65,39 @@ def normalize_language(value) -> str:
     }.get(primary, primary)
 
 
+def _optional_integer(value) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _unique_records(values) -> tuple[dict, ...]:
+    records = {}
+    for value in values or ():
+        if not isinstance(value, dict):
+            continue
+        record = {
+            _text(key): item
+            for key, item in value.items()
+            if _text(key) and item not in (None, "", [], {})
+        }
+        if not record:
+            continue
+        key = json.dumps(
+            record,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        )
+        records[key] = record
+    return tuple(records[key] for key in sorted(records))
+
+
 @dataclass(frozen=True)
 class EvidenceFact:
     fact_id: str
@@ -85,6 +118,17 @@ class EvidenceFact:
     genres: tuple[str, ...] = ()
     countries: tuple[str, ...] = ()
     episodes: tuple[dict, ...] = ()
+    original_release_date: str = ""
+    runtime_minutes: int | None = None
+    status: str = ""
+    studios: tuple[str, ...] = ()
+    networks: tuple[str, ...] = ()
+    cast: tuple[dict, ...] = ()
+    crew: tuple[dict, ...] = ()
+    certifications: tuple[str, ...] = ()
+    backdrop_urls: tuple[str, ...] = ()
+    season_count: int | None = None
+    episode_count: int | None = None
     complex_signals: tuple[str, ...] = ()
     stable_fact_id: str = ""
 
@@ -139,41 +183,37 @@ class CandidateEntity:
 
     @property
     def poster_url(self) -> str:
-        original_language = next(
-            (
-                fact.original_language
-                for provider in ("tvdb", "douban", "wikipedia")
-                for fact in self.facts
-                if fact.provider == provider and fact.original_language
-            ),
-            "",
-        )
+        languages = sorted({
+            fact.original_language
+            for fact in self.facts
+            if fact.original_language
+        })
+        original_language = languages[0] if len(languages) == 1 else ""
         if original_language:
-            for provider in ("tvdb", "douban", "wikipedia"):
-                for fact in self.facts:
-                    if (
-                        fact.provider == provider
-                        and fact.poster_url
-                        and fact.poster_language == original_language
-                    ):
-                        return fact.poster_url
-        for provider in ("tvdb", "douban", "wikipedia"):
-            for fact in self.facts:
-                if (
-                    fact.provider == provider
-                    and fact.poster_url
-                    and not fact.poster_language
-                ):
-                    return fact.poster_url
-        return ""
+            matching = sorted({
+                fact.poster_url
+                for fact in self.facts
+                if fact.poster_url
+                and fact.poster_language == original_language
+            })
+            if matching:
+                return matching[0]
+        untagged = sorted({
+            fact.poster_url
+            for fact in self.facts
+            if fact.poster_url and not fact.poster_language
+        })
+        if untagged:
+            return untagged[0]
+        posters = sorted({
+            fact.poster_url for fact in self.facts if fact.poster_url
+        })
+        return posters[0] if posters else ""
 
     @property
     def summary(self) -> str:
-        for provider in ("tvdb", "douban", "wikipedia"):
-            for fact in self.facts:
-                if fact.provider == provider and fact.summary:
-                    return fact.summary
-        return ""
+        summaries = {fact.summary for fact in self.facts if fact.summary}
+        return max(summaries, key=lambda value: (len(value), value)) if summaries else ""
 
     @property
     def complex_signals(self) -> frozenset[str]:
@@ -245,6 +285,10 @@ def _provider_stable_id(
             or identifiers.get("wikipedia")
             or identifiers.get("wikibase_item")
         )
+    if provider == "tmdb":
+        return _text(raw.get("tmdb_id") or raw.get("id") or identifiers.get("tmdb"))
+    if provider == "anilist":
+        return _text(raw.get("anilist_id") or raw.get("id") or identifiers.get("anilist"))
     return ""
 
 
@@ -301,6 +345,8 @@ def _fact(
     if provider == "tvdb":
         if provider_stable_id:
             external_ids["tvdb"] = provider_stable_id
+    if provider in {"tmdb", "anilist"} and provider_stable_id:
+        external_ids[provider] = provider_stable_id
     source_url = _text(raw.get("url"))
     if (
         provider == "tvdb"
@@ -313,6 +359,13 @@ def _fact(
             f"{'movies' if resolved_type == 'movie' else 'series'}/"
             f"{external_ids['tvdb']}"
         )
+    if provider == "tmdb" and not source_url and provider_stable_id:
+        source_url = (
+            "https://www.themoviedb.org/"
+            f"{'movie' if resolved_type == 'movie' else 'tv'}/{provider_stable_id}"
+        )
+    if provider == "anilist" and not source_url and provider_stable_id:
+        source_url = f"https://anilist.co/anime/{provider_stable_id}"
     titles = _unique_text((
         raw.get("title"),
         raw.get("name"),
@@ -359,6 +412,17 @@ def _fact(
         genres=_unique_text(raw.get("genres") or []),
         countries=_unique_text(raw.get("countries") or []),
         episodes=tuple(dict(item) for item in (episodes or []) if isinstance(item, dict)),
+        original_release_date=_text(raw.get("original_release_date") or raw.get("release_date")),
+        runtime_minutes=_optional_integer(raw.get("runtime_minutes")),
+        status=_text(raw.get("status")),
+        studios=_unique_text(raw.get("studios") or []),
+        networks=_unique_text(raw.get("networks") or []),
+        cast=_unique_records(raw.get("cast") or []),
+        crew=_unique_records(raw.get("crew") or []),
+        certifications=_unique_text(raw.get("certifications") or []),
+        backdrop_urls=_unique_text(raw.get("backdrop_urls") or []),
+        season_count=_optional_integer(raw.get("season_count")),
+        episode_count=_optional_integer(raw.get("episode_count")),
         complex_signals=_unique_text(signals),
         stable_fact_id=fact_id,
     )
@@ -455,6 +519,15 @@ def _preferred_text(values, *, shortest: bool = False) -> str:
     if shortest:
         return min(unique, key=lambda value: (len(value), value.casefold(), value))
     return max(unique, key=lambda value: (len(value), value.casefold(), value))
+
+
+def _preferred_integer(values) -> int | None:
+    normalized = sorted({
+        parsed
+        for value in values
+        if (parsed := _optional_integer(value)) is not None
+    })
+    return normalized[-1] if normalized else None
 
 
 def _single_identity_value(
@@ -674,6 +747,17 @@ def _merge_fact_group(facts: list[EvidenceFact]) -> EvidenceFact:
                 "genres": fact.genres,
                 "countries": fact.countries,
                 "episodes": fact.episodes,
+                "original_release_date": fact.original_release_date,
+                "runtime_minutes": fact.runtime_minutes,
+                "status": fact.status,
+                "studios": fact.studios,
+                "networks": fact.networks,
+                "cast": fact.cast,
+                "crew": fact.crew,
+                "certifications": fact.certifications,
+                "backdrop_urls": fact.backdrop_urls,
+                "season_count": fact.season_count,
+                "episode_count": fact.episode_count,
                 "complex_signals": fact.complex_signals,
             },
             ensure_ascii=False,
@@ -751,6 +835,37 @@ def _merge_fact_group(facts: list[EvidenceFact]) -> EvidenceFact:
             country for fact in facts for country in fact.countries
         ),
         episodes=_merged_episodes(facts),
+        original_release_date=_preferred_text(
+            fact.original_release_date for fact in facts
+        ),
+        runtime_minutes=_preferred_integer(
+            fact.runtime_minutes for fact in facts
+        ),
+        status=_preferred_text(fact.status for fact in facts),
+        studios=_sorted_unique_text(
+            value for fact in facts for value in fact.studios
+        ),
+        networks=_sorted_unique_text(
+            value for fact in facts for value in fact.networks
+        ),
+        cast=_unique_records(
+            value for fact in facts for value in fact.cast
+        ),
+        crew=_unique_records(
+            value for fact in facts for value in fact.crew
+        ),
+        certifications=_sorted_unique_text(
+            value for fact in facts for value in fact.certifications
+        ),
+        backdrop_urls=_sorted_unique_text(
+            value for fact in facts for value in fact.backdrop_urls
+        ),
+        season_count=_preferred_integer(
+            fact.season_count for fact in facts
+        ),
+        episode_count=_preferred_integer(
+            fact.episode_count for fact in facts
+        ),
         complex_signals=_sorted_unique_text(
             signal for fact in facts for signal in fact.complex_signals
         ),
@@ -801,6 +916,17 @@ def _occurrence_fact(fact: EvidenceFact) -> EvidenceFact:
             "genres": fact.genres,
             "countries": fact.countries,
             "episodes": fact.episodes,
+            "original_release_date": fact.original_release_date,
+            "runtime_minutes": fact.runtime_minutes,
+            "status": fact.status,
+            "studios": fact.studios,
+            "networks": fact.networks,
+            "cast": fact.cast,
+            "crew": fact.crew,
+            "certifications": fact.certifications,
+            "backdrop_urls": fact.backdrop_urls,
+            "season_count": fact.season_count,
+            "episode_count": fact.episode_count,
             "complex_signals": fact.complex_signals,
         },
         ensure_ascii=False,
@@ -856,6 +982,8 @@ def _candidate_key(facts: list[EvidenceFact]) -> str:
         ("tvdb", "tvdb"),
         ("douban", "douban_subject"),
         ("wikipedia", "wikipedia"),
+        ("tmdb", "tmdb"),
+        ("anilist", "anilist"),
     ):
         for fact in facts:
             if fact.provider == provider and _text(fact.external_ids.get(key)):

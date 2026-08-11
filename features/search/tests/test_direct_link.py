@@ -4,6 +4,8 @@ from unittest.mock import patch
 from telepiplex_search.adapters.tvdb import TvdbConfigError
 from telepiplex_search.adapters.douban import DoubanSubjectLookupError
 from telepiplex_search.adapters.wikipedia import WikipediaPageLookupError
+from telepiplex_search.adapters.tmdb import TmdbConfigError
+from telepiplex_search.adapters.anilist import AniListRequestError
 from telepiplex_search.direct_link import (
     DirectLinkError,
     resolve_direct_link,
@@ -355,6 +357,84 @@ class DirectLinkTest(unittest.TestCase):
             failed.exception.details,
             ("douban:blocked",),
         )
+
+    @patch("telepiplex_search.direct_link.get_tmdb_entity")
+    def test_tmdb_movie_locks_tmdb_identity(self, get_entity):
+        get_entity.return_value = {
+            "tmdb_id": "438631",
+            "external_ids": {"tmdb": "438631", "imdb": "tt1160419"},
+            "title": "Dune",
+            "official_english_title": "Dune",
+            "year": "2021",
+            "media_type": "movie",
+            "url": "https://www.themoviedb.org/movie/438631",
+        }
+
+        direct = resolve_direct_link(MetadataLink(
+            provider="tmdb",
+            media_type="movie",
+            entity_id="438631",
+            scope="work",
+            url="https://www.themoviedb.org/movie/438631-dune",
+        ))
+
+        self.assertEqual(direct.stable_identity, ("tmdb", "438631"))
+        self.assertEqual(direct.media_type, "movie")
+        self.assertEqual(direct.query, "Dune")
+
+    @patch("telepiplex_search.direct_link.get_anilist_media")
+    def test_anilist_link_locks_anilist_identity(self, get_media):
+        get_media.return_value = {
+            "anilist_id": "1142",
+            "external_ids": {"anilist": "1142"},
+            "title": "Hachimitsu to Clover II",
+            "romanized_original_title": "Hachimitsu to Clover II",
+            "official_english_title": "Honey and Clover II",
+            "year": "2005",
+            "media_type": "series",
+            "url": "https://anilist.co/anime/1142",
+        }
+
+        direct = resolve_direct_link(MetadataLink(
+            provider="anilist",
+            media_type="",
+            entity_id="1142",
+            scope="work",
+            url="https://anilist.co/anime/1142/Honey-and-Clover-II/",
+        ))
+
+        self.assertEqual(direct.stable_identity, ("anilist", "1142"))
+        self.assertEqual(direct.title, "Hachimitsu to Clover II")
+
+    @patch("telepiplex_search.direct_link.get_tmdb_entity")
+    def test_tmdb_configuration_failure_is_a_fixed_link_error(self, get_entity):
+        get_entity.side_effect = TmdbConfigError("missing", "credential_missing")
+
+        with self.assertRaises(DirectLinkError) as failed:
+            resolve_direct_link(MetadataLink(
+                provider="tmdb",
+                media_type="movie",
+                entity_id="1",
+                scope="work",
+                url="https://www.themoviedb.org/movie/1",
+            ))
+
+        self.assertEqual(failed.exception.details, ("tmdb:credential_missing",))
+
+    @patch("telepiplex_search.direct_link.get_anilist_media")
+    def test_anilist_failure_is_a_fixed_link_error(self, get_media):
+        get_media.side_effect = AniListRequestError("rate limited", "rate_limited")
+
+        with self.assertRaises(DirectLinkError) as failed:
+            resolve_direct_link(MetadataLink(
+                provider="anilist",
+                media_type="",
+                entity_id="1",
+                scope="work",
+                url="https://anilist.co/anime/1",
+            ))
+
+        self.assertEqual(failed.exception.details, ("anilist:rate_limited",))
 
 
 if __name__ == "__main__":

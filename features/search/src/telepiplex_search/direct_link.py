@@ -25,6 +25,17 @@ from .adapters.wikipedia import (
     WikipediaPageLookupError,
     lookup_wikipedia_page,
 )
+from .adapters.tmdb import (
+    TmdbAuthenticationError,
+    TmdbConfigError,
+    TmdbRequestError,
+    get_tmdb_entity,
+)
+from .adapters.anilist import (
+    AniListConfigError,
+    AniListRequestError,
+    get_anilist_media,
+)
 from .input_contract import (
     MetadataLink,
     ParsedInput,
@@ -70,6 +81,8 @@ _DIRECT_LINK_HOSTS = (
     "w.wiki",
     "thetvdb.com",
     "tvdb.com",
+    "themoviedb.org",
+    "anilist.co",
 )
 
 
@@ -311,6 +324,87 @@ def resolve_direct_link(link: MetadataLink) -> DirectEntity:
                 "error": "",
             },
             stable_identity=("douban_subject", link.entity_id),
+            title=title,
+            year=_text(fact.get("year")),
+            media_type=media_type,
+            scope="work",
+        )
+    if link.provider == "tmdb":
+        try:
+            fact = get_tmdb_entity(link.media_type, link.entity_id)
+        except (
+            TmdbAuthenticationError,
+            TmdbConfigError,
+            TmdbRequestError,
+            OSError,
+        ) as exc:
+            detail = str(getattr(exc, "code", "") or "server_down")
+            raise DirectLinkError(
+                "fixed_link_read_failed",
+                (f"tmdb:{detail}",),
+            ) from exc
+        if not isinstance(fact, dict):
+            raise DirectLinkError("direct_link_not_found")
+        title = _text(
+            fact.get("official_english_title")
+            or fact.get("title")
+            or fact.get("original_title")
+        )
+        entity_id = _text(
+            fact.get("tmdb_id")
+            or (fact.get("external_ids") or {}).get("tmdb")
+        )
+        media_type = _text(fact.get("media_type"))
+        if not title or not entity_id or media_type not in {"movie", "series"}:
+            raise DirectLinkError("direct_link_invalid")
+        return DirectEntity(
+            provider="tmdb",
+            evidence={
+                "source": "tmdb",
+                "status": "ok",
+                "facts": [fact],
+                "source_urls": [fact.get("url") or link.url],
+                "error": "",
+            },
+            stable_identity=("tmdb", entity_id),
+            title=title,
+            year=_text(fact.get("year")),
+            media_type=media_type,
+            scope="work",
+        )
+    if link.provider == "anilist":
+        try:
+            fact = get_anilist_media(link.entity_id)
+        except (AniListConfigError, AniListRequestError, OSError) as exc:
+            detail = str(getattr(exc, "code", "") or "server_down")
+            raise DirectLinkError(
+                "fixed_link_read_failed",
+                (f"anilist:{detail}",),
+            ) from exc
+        if not isinstance(fact, dict):
+            raise DirectLinkError("direct_link_not_found")
+        title = _text(
+            fact.get("romanized_original_title")
+            or fact.get("official_english_title")
+            or fact.get("title")
+        )
+        entity_id = _text(
+            fact.get("anilist_id")
+            or (fact.get("external_ids") or {}).get("anilist")
+        )
+        media_type = _text(fact.get("media_type"))
+        if not title or not entity_id or media_type not in {"movie", "series"}:
+            raise DirectLinkError("direct_link_invalid")
+        return DirectEntity(
+            provider="anilist",
+            evidence={
+                "source": "anilist",
+                "status": "ok",
+                "facts": [fact],
+                "source_urls": [fact.get("url") or link.url],
+                "error": "",
+            },
+            stable_identity=("anilist", entity_id),
             title=title,
             year=_text(fact.get("year")),
             media_type=media_type,

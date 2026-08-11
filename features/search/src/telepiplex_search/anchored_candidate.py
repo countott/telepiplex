@@ -144,11 +144,14 @@ class AnchoredCandidate:
 
     @property
     def primary_summary(self) -> str:
-        for provider in ("tvdb", "douban", "wikipedia"):
-            for fact in self.facts:
-                if fact.provider == provider and fact.summary:
-                    return fact.summary
-        return ""
+        summaries = {
+            fact.summary for fact in self.facts if _text(fact.summary)
+        }
+        return (
+            max(summaries, key=lambda value: (len(value), value))
+            if summaries
+            else ""
+        )
 
     def to_dict(self) -> dict:
         return {

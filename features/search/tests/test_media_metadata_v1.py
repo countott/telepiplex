@@ -32,6 +32,17 @@ def _fact(
     genres=(),
     countries=(),
     episodes=(),
+    release_date="",
+    runtime=None,
+    status="",
+    studios=(),
+    networks=(),
+    cast=(),
+    crew=(),
+    certifications=(),
+    backdrops=(),
+    season_count=None,
+    episode_count=None,
 ):
     return EvidenceFact(
         fact_id=fact_id,
@@ -51,6 +62,17 @@ def _fact(
         genres=tuple(genres),
         countries=tuple(countries),
         episodes=tuple(episodes),
+        original_release_date=release_date,
+        runtime_minutes=runtime,
+        status=status,
+        studios=tuple(studios),
+        networks=tuple(networks),
+        cast=tuple(cast),
+        crew=tuple(crew),
+        certifications=tuple(certifications),
+        backdrop_urls=tuple(backdrops),
+        season_count=season_count,
+        episode_count=episode_count,
     )
 
 
@@ -190,6 +212,72 @@ class MediaMetadataV1Test(unittest.TestCase):
             "A young filmmaker encounters the unsettling Backrooms.",
         )
 
+    def test_contract_converges_peer_descriptive_metadata_with_field_evidence(self):
+        douban = _fact(
+            "douban:1295644",
+            "douban",
+            titles=("康斯坦丁", "Constantine"),
+            year="2005",
+            url="https://movie.douban.com/subject/1295644/",
+            external_ids={"douban_subject": "1295644"},
+            chinese="康斯坦丁",
+            original="Constantine",
+            english="Constantine",
+            genres=("Action",),
+            summary="A detective story.",
+        )
+        tmdb = _fact(
+            "tmdb:561",
+            "tmdb",
+            titles=("Constantine",),
+            year="2005",
+            url="https://www.themoviedb.org/movie/561",
+            external_ids={"tmdb": "561", "imdb": "tt0360486"},
+            original="Constantine",
+            english="Constantine",
+            release_date="2005-02-08",
+            runtime=121,
+            status="Released",
+            studios=("Warner Bros. Pictures",),
+            cast=({"name": "Keanu Reeves", "character": "John Constantine"},),
+            crew=({"name": "Francis Lawrence", "job": "Director"},),
+            certifications=("R",),
+            backdrops=("https://image.tmdb.org/backdrop.jpg",),
+            summary=(
+                "John Constantine investigates a supernatural mystery "
+                "that threatens the human world."
+            ),
+        )
+
+        contract = build_media_metadata_v1(
+            _candidate(facts=(douban, tmdb)),
+            metadata_id="constantine",
+            raw_query="康斯坦丁",
+        )
+
+        identity = contract["identity"]
+        self.assertEqual(identity["runtime_minutes"], 121)
+        self.assertEqual(
+            identity["summary"],
+            "John Constantine investigates a supernatural mystery that threatens the human world.",
+        )
+        self.assertEqual(identity["original_release_date"], "2005-02-08")
+        self.assertEqual(identity["studios"], ["Warner Bros. Pictures"])
+        self.assertEqual(identity["cast"][0]["name"], "Keanu Reeves")
+        self.assertEqual(identity["external_ids"]["tmdb"], "561")
+        self.assertEqual(
+            set(identity["query_titles"]),
+            {"Constantine"},
+        )
+        resolution = contract["evidence"]["field_resolutions"][
+            "official_english_title"
+        ]
+        self.assertFalse(resolution["conflict"])
+        self.assertEqual(
+            {item["provider"] for item in resolution["sources"]},
+            {"douban", "tmdb"},
+        )
+
     def test_tvdb_unavailable_series_degrades_to_whole_series(self):
         fact = _fact(
             "douban:20",
@@ -263,7 +351,7 @@ class MediaMetadataV1Test(unittest.TestCase):
         self.assertIn("wikipedia:not_found", evidence["unresolved"])
         self.assertIn("warning:source_unresolved", contract["warnings"])
 
-    def test_movie_query_uses_one_verified_canonical_title_with_year(self):
+    def test_movie_query_uses_bounded_verified_titles_with_year(self):
         contract = build_media_metadata_v1(
             _candidate(),
             metadata_id="m2",
@@ -274,7 +362,10 @@ class MediaMetadataV1Test(unittest.TestCase):
 
         self.assertEqual(
             queries,
-            ["Sen to Chihiro no Kamikakushi 2001"],
+            [
+                "Sen to Chihiro no Kamikakushi 2001",
+                "Spirited Away 2001",
+            ],
         )
         self.assertEqual(contract["retrieval"]["queries"], queries)
 
@@ -373,7 +464,7 @@ class MediaMetadataV1Test(unittest.TestCase):
         self.assertEqual(contract["evidence"]["decision"]["season_number"], 2)
         self.assertEqual(
             build_prowlarr_query_chain(contract, "蜂蜜与四叶草 第二季"),
-            ["Hachimitsu to Clover S02"],
+            ["Hachimitsu to Clover S02", "Honey and Clover S02"],
         )
 
     def test_query_ignores_unverified_aliases_and_raw_query_noise(self):
@@ -392,7 +483,33 @@ class MediaMetadataV1Test(unittest.TestCase):
                 contract,
                 "千与千寻 4K 国语 导演剪辑版",
             ),
-            ["Sen to Chihiro no Kamikakushi 2001"],
+            [
+                "Sen to Chihiro no Kamikakushi 2001",
+                "Spirited Away 2001",
+            ],
+        )
+
+    def test_query_chain_is_deduplicated_and_capped_at_three(self):
+        contract = build_media_metadata_v1(
+            _candidate(),
+            metadata_id="bounded-chain",
+            raw_query="千与千寻",
+        )
+        contract["identity"]["query_titles"] = [
+            "Sen to Chihiro no Kamikakushi",
+            "Spirited Away",
+            "Sen to Chihiro no Kamikakushi",
+            "Le Voyage de Chihiro",
+            "Chihiros Reise ins Zauberland",
+        ]
+
+        self.assertEqual(
+            build_prowlarr_query_chain(contract, "ignored raw noise"),
+            [
+                "Sen to Chihiro no Kamikakushi 2001",
+                "Spirited Away 2001",
+                "Le Voyage de Chihiro 2001",
+            ],
         )
 
     def test_media_type_conflict_and_incomplete_scope_fail_explicitly(self):

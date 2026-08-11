@@ -642,6 +642,75 @@ class SearchEntityGraphTest(unittest.TestCase):
             "https://art.example/en-poster.jpg",
         )
 
+    def test_tmdb_and_tvdb_merge_by_shared_external_id(self):
+        graph = build_search_graph([
+            {
+                "source": "tmdb",
+                "status": "ok",
+                "facts": [{
+                    "id": 438631,
+                    "title": "Dune",
+                    "year": "2021",
+                    "media_type": "movie",
+                    "external_ids": {
+                        "tmdb": "438631",
+                        "tvdb": "769",
+                        "imdb": "tt1160419",
+                    },
+                }],
+            },
+            {
+                "source": "tvdb",
+                "status": "ok",
+                "facts": [{
+                    "movies": [{
+                        "tvdb_movie_id": "769",
+                        "name": "Dune",
+                        "year": "2021",
+                    }],
+                    "series": [],
+                }],
+            },
+        ])
+
+        self.assertEqual(len(graph.candidates), 1)
+        candidate = graph.candidates[0]
+        self.assertEqual(candidate.providers, frozenset({"tmdb", "tvdb"}))
+        self.assertEqual(
+            dict(candidate.external_ids),
+            {"tmdb": "438631", "tvdb": "769", "imdb": "tt1160419"},
+        )
+        self.assertEqual(
+            {fact.fact_id for fact in candidate.facts},
+            {"tmdb:438631", "tvdb:movie:769"},
+        )
+
+    def test_anilist_uses_stable_id_and_keeps_descriptive_fields(self):
+        graph = build_search_graph([{
+            "source": "anilist",
+            "status": "ok",
+            "facts": [{
+                "id": 1142,
+                "title": "Hachimitsu to Clover",
+                "romanized_original_title": "Hachimitsu to Clover",
+                "original_title": "ハチミツとクローバー",
+                "year": "2005",
+                "media_type": "series",
+                "external_ids": {"anilist": "1142"},
+                "status": "FINISHED",
+                "season_count": 1,
+                "episode_count": 24,
+                "studios": ["J.C.STAFF"],
+            }],
+        }])
+
+        fact = graph.candidates[0].facts[0]
+        self.assertEqual(fact.fact_id, "anilist:1142")
+        self.assertEqual(fact.status, "FINISHED")
+        self.assertEqual(fact.season_count, 1)
+        self.assertEqual(fact.episode_count, 24)
+        self.assertEqual(fact.studios, ("J.C.STAFF",))
+
 
 if __name__ == "__main__":
     unittest.main()

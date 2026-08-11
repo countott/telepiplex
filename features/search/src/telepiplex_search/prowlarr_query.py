@@ -60,7 +60,7 @@ def build_prowlarr_query_chain(
     media_metadata: dict,
     raw_query: str,
 ) -> list[str]:
-    """Build one canonical query only from verified metadata v1."""
+    """Build at most three queries only from verified metadata v1 titles."""
 
     del raw_query
     if not isinstance(media_metadata, dict):
@@ -89,23 +89,38 @@ def build_prowlarr_query_chain(
     if scope == "episode" and episode_number is None:
         raise ValueError("bounded_scope_incomplete")
 
-    title = str(
-        identity.get("canonical_search_title")
-        or identity.get("official_english_title")
-        or identity.get("english_title")
-        or ""
-    ).strip()
-    if not title:
+    raw_titles = identity.get("query_titles")
+    if not isinstance(raw_titles, list):
+        raw_titles = []
+    titles = [
+        *raw_titles,
+        identity.get("canonical_search_title"),
+        identity.get("official_english_title"),
+        identity.get("english_title"),
+    ]
+    if not any(str(title or "").strip() for title in titles):
         raise ValueError("query_chain_empty")
-    if scope == "movie":
-        year = str(identity.get("year") or "")[:4]
-        if not re.fullmatch(r"(?:19|20)\d{2}", year):
-            raise ValueError("movie_year_missing")
-        title = f"{title} {year}"
-    query = build_prowlarr_query(
-        title,
-        scope,
-        season_number=season_number,
-        episode_number=episode_number,
-    )
-    return [query]
+    year = str(identity.get("year") or "")[:4]
+    if scope == "movie" and not re.fullmatch(r"(?:19|20)\d{2}", year):
+        raise ValueError("movie_year_missing")
+
+    queries = []
+    for raw_title in titles:
+        title = str(raw_title or "").strip()
+        if not title:
+            continue
+        if scope == "movie":
+            title = f"{title} {year}"
+        query = build_prowlarr_query(
+            title,
+            scope,
+            season_number=season_number,
+            episode_number=episode_number,
+        )
+        if query not in queries:
+            queries.append(query)
+        if len(queries) == 3:
+            break
+    if not queries:
+        raise ValueError("query_chain_empty")
+    return queries

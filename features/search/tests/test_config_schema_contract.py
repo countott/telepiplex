@@ -45,6 +45,35 @@ class ConfigSchemaContractTest(unittest.TestCase):
         self.assertTrue(tvdb["properties"]["subscriber_pin"]["writeOnly"])
         self.assertTrue(ai["properties"]["api_key"]["writeOnly"])
 
+    def test_tmdb_and_anilist_are_independent_metadata_sources(self):
+        schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))
+        default = yaml.safe_load((ROOT / "config.default.yaml").read_text(encoding="utf-8"))
+        metadata = schema["properties"]["metadata"]["properties"]
+
+        self.assertEqual(
+            set(metadata["tmdb"]["properties"]),
+            {"enable", "api_key", "base_url", "timeout"},
+        )
+        self.assertTrue(metadata["tmdb"]["properties"]["api_key"]["writeOnly"])
+        self.assertEqual(
+            default["metadata"]["tmdb"],
+            {
+                "enable": True,
+                "api_key": "",
+                "base_url": "https://api.themoviedb.org/3",
+                "timeout": 15,
+            },
+        )
+        self.assertEqual(
+            default["metadata"]["anilist"],
+            {
+                "enable": True,
+                "endpoint": "https://graphql.anilist.co",
+                "timeout": 15,
+            },
+        )
+        self.assertNotIn("api_key", metadata["anilist"]["properties"])
+
     def test_active_ai_and_metadata_defaults_are_bounded(self):
         schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))
         default = yaml.safe_load((ROOT / "config.default.yaml").read_text(encoding="utf-8"))

@@ -189,6 +189,27 @@ class InputContractTest(unittest.TestCase):
         self.assertEqual(parsed.link.provider, "wikipedia")
         self.assertTrue(parsed.link.entity_id.startswith("zh:繁花"))
 
+    def test_tmdb_movie_and_tv_links_are_supported_exact_anchors(self):
+        movie = classify_search_input("https://www.themoviedb.org/movie/438631-dune")
+        series = classify_search_input("https://www.themoviedb.org/tv/71912-the-witcher")
+
+        self.assertEqual(
+            (movie.kind, movie.link.provider, movie.link.media_type, movie.link.entity_id),
+            ("link", "tmdb", "movie", "438631"),
+        )
+        self.assertEqual(
+            (series.kind, series.link.provider, series.link.media_type, series.link.entity_id),
+            ("link", "tmdb", "series", "71912"),
+        )
+
+    def test_anilist_anime_link_is_a_supported_exact_anchor(self):
+        parsed = classify_search_input("https://anilist.co/anime/1142/Honey-and-Clover-II/")
+
+        self.assertEqual(parsed.kind, "link")
+        self.assertEqual(parsed.link.provider, "anilist")
+        self.assertEqual(parsed.link.media_type, "")
+        self.assertEqual(parsed.link.entity_id, "1142")
+
     def test_supported_non_entity_page_can_be_resolved_or_downgraded(self):
         parsed = classify_search_input("https://thetvdb.com/search?query=glory")
 
@@ -227,6 +248,8 @@ class InputContractTest(unittest.TestCase):
             "https://eviltvdb.com/series/411469",
             "https://movie.douban.com.evil.example/subject/35314632/",
             "https://fakedouban.com/subject/35314632/",
+            "https://www.themoviedb.org.evil.example/movie/438631",
+            "https://fakeanilist.co/anime/1142",
         ):
             with self.subTest(url=url):
                 parsed = classify_search_input(url)
