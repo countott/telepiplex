@@ -43,9 +43,11 @@ plugins:
   restart_limit: 3
 ```
 
-## Host API 1.4 and Telegram interactions
+## Host API 1.5 and configuration migrations
 
-Host API 1.4 remains startup-compatible with API 1.0–1.3 Features and adds the idempotent `operation.milestone` action, allowing a Feature to publish the final media identity as a standalone message that later status edits cannot overwrite. The Host also accepts running-result callbacks only during the Prowlarr stage when the current status message and keyboard both match, so selecting an available result can stop the remaining search. Features using these capabilities must declare `host_api: ">=1.4,<2.0"`. Both `/start` and Telegram's native command menu remain generated from currently enabled, routable Feature manifests.
+Host API 1.5 remains startup-compatible with API 1.0–1.4 Features and lets a Feature declare version-by-version configuration migrations in signed `.tpx` members named `migrations/config-<from>-to-<to>.json`. The v1 migration format only removes retired fields by path. The Host applies it before new-schema validation and shadow startup, restoring the complete old configuration if activation fails. Features that need this contract must declare `host_api: ">=1.5,<2.0"`, so an older Host cannot receive an incompatible update.
+
+The API 1.4 idempotent `operation.milestone` and running-result callback contracts remain unchanged: a Feature can publish the final media identity as a standalone message that later status edits cannot overwrite, and an available Prowlarr result can be selected while the current status message and keyboard match. Both `/start` and Telegram's native command menu remain generated from currently enabled, routable Feature manifests.
 
 Each user may own only one active interaction at a time. While input is requested, telepiplex accepts only ordinary text or callback IDs shown by the current status message. While work is running, cancelling, or rolling back, unrelated commands and stale buttons are blocked. Controls mean:
 

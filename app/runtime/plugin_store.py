@@ -184,6 +184,139 @@ def _fill_missing_defaults(
     return merged, added
 
 
+_CONFIG_MIGRATION_FORMAT = "telepiplex.config-migration.v1"
+_CONFIG_MIGRATION_NAME = re.compile(r"^config-([1-9][0-9]*)-to-([1-9][0-9]*)\.json$")
+_CONFIG_MIGRATION_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
+
+
+def _load_config_migrations(release_path: Path) -> dict[int, dict]:
+    migrations_root = release_path / "migrations"
+    if not migrations_root.is_dir():
+        return {}
+    migrations: dict[int, dict] = {}
+    for path in sorted(migrations_root.iterdir(), key=lambda item: item.name):
+        match = _CONFIG_MIGRATION_NAME.fullmatch(path.name)
+        if match is None:
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            raise StoreError(
+                "invalid_config_migration",
+                "plugin config migration declaration is invalid",
+            ) from None
+        from_version = int(match.group(1))
+        to_version = int(match.group(2))
+        if (
+            not isinstance(value, dict)
+            or set(value) != {
+                "format",
+                "from_version",
+                "to_version",
+                "operations",
+            }
+            or value.get("format") != _CONFIG_MIGRATION_FORMAT
+            or value.get("from_version") != from_version
+            or value.get("to_version") != to_version
+            or to_version != from_version + 1
+            or not isinstance(value.get("operations"), list)
+            or not value["operations"]
+        ):
+            raise StoreError(
+                "invalid_config_migration",
+                "plugin config migration declaration is invalid",
+            )
+        if from_version in migrations:
+            raise StoreError(
+                "invalid_config_migration",
+                "plugin config migration declaration is ambiguous",
+            )
+        for operation in value["operations"]:
+            if (
+                not isinstance(operation, dict)
+                or set(operation) != {"op", "path"}
+                or operation.get("op") != "remove"
+                or not isinstance(operation.get("path"), list)
+                or not operation["path"]
+                or len(operation["path"]) > 20
+                or any(
+                    not isinstance(part, str)
+                    or not _CONFIG_MIGRATION_KEY.fullmatch(part)
+                    for part in operation["path"]
+                )
+            ):
+                raise StoreError(
+                    "invalid_config_migration",
+                    "plugin config migration operation is invalid",
+                )
+        migrations[from_version] = value
+    return migrations
+
+
+def _apply_config_migrations(
+    current: dict,
+    release_path: Path,
+    *,
+    from_version: int,
+    to_version: int,
+) -> tuple[dict, list[str]]:
+    migrated = deepcopy(current)
+    removed: list[str] = []
+    if to_version < from_version:
+        raise StoreError(
+            "config_migration_required",
+            "plugin config schema cannot be downgraded automatically",
+        )
+    migrations = _load_config_migrations(release_path)
+    version = from_version
+    while version < to_version:
+        declaration = migrations.get(version)
+        if declaration is None:
+            raise StoreError(
+                "config_migration_required",
+                "plugin config migration declaration is missing",
+            )
+        for operation in declaration["operations"]:
+            path = operation["path"]
+            container = migrated
+            for part in path[:-1]:
+                nested = container.get(part) if isinstance(container, dict) else None
+                if nested is None:
+                    container = None
+                    break
+                if not isinstance(nested, dict):
+                    raise StoreError(
+                        "config_migration_required",
+                        "plugin config migration path is incompatible",
+                    )
+                container = nested
+            leaf = path[-1]
+            if isinstance(container, dict) and leaf in container:
+                del container[leaf]
+                removed.append(_join_config_path(path))
+        version = declaration["to_version"]
+    return migrated, removed
+
+
+def _migrate_config_value(
+    current: dict,
+    default: dict,
+    schema: dict,
+    release_path: Path,
+    *,
+    from_version: int,
+    to_version: int,
+) -> tuple[dict, list[str], list[str]]:
+    migrated, removed = _apply_config_migrations(
+        current,
+        release_path,
+        from_version=from_version,
+        to_version=to_version,
+    )
+    migrated, added = _fill_missing_defaults(migrated, default)
+    return _validate(schema, migrated), added, removed
+
+
 def _atomic_json(path: Path, value: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -241,6 +374,7 @@ class PluginStore:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(bundle.read(member))
 
+            _load_config_migrations(staged_path)
             schema = _schema_at(staged_path)
             default = _validate(schema, _default_at(staged_path))
             config_path = self._plugin_root(manifest.plugin_id) / "config.yaml"
@@ -263,10 +397,23 @@ class PluginStore:
                         migration_code,
                         "plugin config cannot be migrated automatically",
                     )
-                migrated, _ = _fill_missing_defaults(current, default)
                 try:
-                    _validate(schema, migrated)
+                    source_schema_version = (
+                        active_release.manifest.config_schema_version
+                        if active_release is not None
+                        else manifest.config_schema_version
+                    )
+                    _migrate_config_value(
+                        current,
+                        default,
+                        schema,
+                        staged_path,
+                        from_version=source_schema_version,
+                        to_version=manifest.config_schema_version,
+                    )
                 except StoreError as exc:
+                    if exc.code == "invalid_config_migration":
+                        raise
                     raise StoreError(
                         migration_code,
                         "plugin config cannot be migrated automatically",
@@ -363,8 +510,8 @@ class PluginStore:
     def migrate_config(
         self,
         release: ActiveRelease | StagedRelease,
-    ) -> tuple[dict, dict, list[str]]:
-        """Migrate live config by adding defaults, without replacing any value."""
+    ) -> tuple[dict, dict, list[str], list[str]]:
+        """Apply declared removals and defaults without replacing operator values."""
         config_path = self._plugin_root(release.plugin_id) / "config.yaml"
         try:
             current = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -378,11 +525,24 @@ class PluginStore:
                 "config_migration_required",
                 "plugin config cannot be migrated automatically",
             )
-        default = _default_at(release.path)
-        migrated, added = _fill_missing_defaults(current, default)
+        source_release = self.active(release.plugin_id)
+        if source_release is None:
+            raise StoreError(
+                "config_migration_required",
+                "active plugin release is missing",
+            )
         try:
-            validated = _validate(_schema_at(release.path), migrated)
+            validated, added, removed = _migrate_config_value(
+                current,
+                _default_at(release.path),
+                _schema_at(release.path),
+                release.path,
+                from_version=source_release.manifest.config_schema_version,
+                to_version=release.manifest.config_schema_version,
+            )
         except StoreError as exc:
+            if exc.code == "invalid_config_migration":
+                raise
             raise StoreError(
                 "config_migration_required",
                 "plugin config cannot be migrated automatically",
@@ -396,7 +556,7 @@ class PluginStore:
                     "config_write_failed",
                     f"cannot write plugin config: {type(exc).__name__}",
                 ) from None
-        return deepcopy(current), deepcopy(validated), added
+        return deepcopy(current), deepcopy(validated), added, removed
 
     def write_rollback_config(
         self,

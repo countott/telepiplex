@@ -153,9 +153,14 @@ def _config_migration_suffix(result) -> str:
     details = getattr(result, "details", {}) or {}
     keys = details.get("config_added_keys") or []
     safe_keys = [str(key)[:100] for key in keys if str(key).strip()][:20]
-    if not safe_keys:
-        return ""
-    return "\n新增配置项：" + "、".join(safe_keys)
+    removed = details.get("config_removed_keys") or []
+    safe_removed = [str(key)[:100] for key in removed if str(key).strip()][:20]
+    lines = []
+    if safe_keys:
+        lines.append("新增配置项：" + "、".join(safe_keys))
+    if safe_removed:
+        lines.append("已移除过期配置项：" + "、".join(safe_removed))
+    return ("\n" + "\n".join(lines)) if lines else ""
 
 
 def _config_error_suffix(error) -> str:

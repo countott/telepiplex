@@ -130,6 +130,8 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         commit="a" * 40,
         config_schema=None,
         config_default=None,
+        config_schema_version=1,
+        config_migrations=None,
     ):
         from app.runtime.plugin_artifact import build_tpx
 
@@ -153,6 +155,7 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
                 for name in commands
             ],
             "callbacks": [],
+            "config_schema_version": config_schema_version,
             "source": {
                 "repository": "origin",
                 "branch": f"feature/{plugin_id}",
@@ -172,6 +175,13 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
             yaml.safe_dump(config_default or {}, sort_keys=True),
             encoding="utf-8",
         )
+        for name, migration in (config_migrations or {}).items():
+            path = source / "migrations" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(migration, sort_keys=True),
+                encoding="utf-8",
+            )
         return build_tpx(source, self.root / f"{plugin_id}-{version}.tpx")
 
     @staticmethod
@@ -714,6 +724,144 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
             {"prefix": "operator-secret"},
         )
 
+    async def test_update_applies_declared_config_removal_and_rollback_restores_it(self):
+        old_schema = {
+            "type": "object",
+            "properties": {
+                "prefix": {"type": "string"},
+                "ai": {
+                    "type": "object",
+                    "properties": {"api_key": {"type": "string"}},
+                    "required": ["api_key"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["prefix", "ai"],
+            "additionalProperties": False,
+        }
+        new_schema = {
+            "type": "object",
+            "properties": {"prefix": {"type": "string"}},
+            "required": ["prefix"],
+            "additionalProperties": False,
+        }
+        await self.manager.install(self._artifact(
+            "echo",
+            "1.0.0",
+            config_schema=old_schema,
+            config_default={"prefix": "old", "ai": {"api_key": ""}},
+            config_schema_version=1,
+        ))
+        await self.manager.configure("echo", {
+            "prefix": "operator",
+            "ai": {"api_key": "operator-secret"},
+        })
+
+        result = await self.manager.update(self._artifact(
+            "echo",
+            "2.0.0",
+            commit="b" * 40,
+            config_schema=new_schema,
+            config_default={"prefix": "new"},
+            config_schema_version=2,
+            config_migrations={
+                "config-1-to-2.json": {
+                    "format": "telepiplex.config-migration.v1",
+                    "from_version": 1,
+                    "to_version": 2,
+                    "operations": [{"op": "remove", "path": ["ai"]}],
+                },
+            },
+        ))
+
+        active = self.store.active("echo")
+        self.assertEqual(self.store.read_config(active), {"prefix": "operator"})
+        self.assertEqual(result.details["config_removed_keys"], ["ai"])
+        self.assertNotIn("operator-secret", repr(result.details))
+
+        rolled_back = await self.manager.rollback("echo")
+
+        self.assertEqual(rolled_back.version, "1.0.0")
+        self.assertEqual(
+            self.store.read_config(self.store.active("echo")),
+            {"prefix": "operator", "ai": {"api_key": "operator-secret"}},
+        )
+
+    async def test_update_does_not_remove_config_without_declared_migration(self):
+        old_schema = {
+            "type": "object",
+            "properties": {
+                "prefix": {"type": "string"},
+                "legacy": {"type": "string"},
+            },
+            "required": ["prefix", "legacy"],
+            "additionalProperties": False,
+        }
+        new_schema = {
+            "type": "object",
+            "properties": {"prefix": {"type": "string"}},
+            "required": ["prefix"],
+            "additionalProperties": False,
+        }
+        await self.manager.install(self._artifact(
+            "echo",
+            "1.0.0",
+            config_schema=old_schema,
+            config_default={"prefix": "old", "legacy": "secret-value"},
+            config_schema_version=1,
+        ))
+
+        from app.runtime.plugin_manager import PluginOperationError
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.update(self._artifact(
+                "echo",
+                "2.0.0",
+                commit="b" * 40,
+                config_schema=new_schema,
+                config_default={"prefix": "new"},
+                config_schema_version=2,
+            ))
+
+        self.assertEqual(raised.exception.code, "config_migration_required")
+        self.assertEqual(self.store.active("echo").version, "1.0.0")
+        self.assertEqual(
+            self.store.read_config(self.store.active("echo")),
+            {"prefix": "old", "legacy": "secret-value"},
+        )
+        self.assertNotIn("secret-value", str(raised.exception))
+
+    async def test_update_rejects_invalid_config_migration_declaration(self):
+        schema, default = self._editable_config()
+        await self.manager.install(self._artifact(
+            "echo",
+            "1.0.0",
+            config_schema=schema,
+            config_default=default,
+            config_schema_version=1,
+        ))
+
+        from app.runtime.plugin_manager import PluginOperationError
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.update(self._artifact(
+                "echo",
+                "2.0.0",
+                commit="b" * 40,
+                config_schema=schema,
+                config_default=default,
+                config_schema_version=2,
+                config_migrations={
+                    "config-1-to-2.json": {
+                        "format": "unsupported-format",
+                        "from_version": 1,
+                        "to_version": 2,
+                        "operations": [{"op": "remove", "path": ["legacy"]}],
+                    },
+                },
+            ))
+
+        self.assertEqual(raised.exception.code, "invalid_config_migration")
+        self.assertEqual(self.store.active("echo").version, "1.0.0")
+
     async def test_update_reports_migration_required_for_damaged_active_config(self):
         old_schema, old_default = self._editable_config()
         await self.manager.install(self._artifact(
@@ -1087,7 +1235,7 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         updates = await self.manager.available_updates()
 
         self.assertEqual(len(updates), 1)
-        self.assertEqual(resolver.calls, [({"echo": "1.0.0"}, "1.4")])
+        self.assertEqual(resolver.calls, [({"echo": "1.0.0"}, "1.5")])
 
     async def test_available_updates_is_empty_for_basic_resolver(self):
         self.manager._artifact_resolver = SimpleNamespace(resolve=None)
@@ -1128,7 +1276,7 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolver.refreshed, 1)
         self.assertEqual(resolver.calls, [(
             {"echo"},
-            "1.4",
+            "1.5",
             {"demo.echo"},
         )])
 

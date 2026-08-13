@@ -139,6 +139,29 @@ def validate_plugin_dependencies(plugin_wheel: Path, wheelhouse: Path):
             )
 
 
+def copy_feature_migrations(source: Path, destination: Path):
+    source = Path(source)
+    destination = Path(destination)
+    if source.is_symlink() or not source.is_dir():
+        raise FeatureBuildError("Feature migrations must be a regular directory")
+    for path in sorted(source.rglob("*"), key=lambda item: item.as_posix()):
+        if path.is_symlink():
+            raise FeatureBuildError(
+                f"Feature migration must not be a symbolic link: {path}"
+            )
+        relative = path.relative_to(source)
+        target = destination / relative
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        if not path.is_file():
+            raise FeatureBuildError(
+                f"Feature migration must be a regular file: {path}"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+
+
 def validate_feature_imports(source_dir: Path):
     source_dir = Path(source_dir)
     own_packages = {
@@ -250,6 +273,9 @@ def build_feature_artifact(
         )
         shutil.copy2(source_dir / "config.schema.json", package / "config.schema.json")
         shutil.copy2(source_dir / "config.default.yaml", package / "config.default.yaml")
+        migrations = source_dir / "migrations"
+        if migrations.is_dir():
+            copy_feature_migrations(migrations, package / "migrations")
         output.parent.mkdir(parents=True, exist_ok=True)
         validate_wheelhouse(wheelhouse)
         validate_plugin_dependencies(package / "plugin.whl", wheelhouse)

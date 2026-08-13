@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-HOST_API_VERSION = "1.4"
+HOST_API_VERSION = "1.5"
 
 
 class ContractError(RuntimeError):

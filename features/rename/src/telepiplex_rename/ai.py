@@ -172,19 +172,45 @@ JSON结构：
 输入事实如下：
 """
 
+QUERY_RECOVERY_PROMPT = """你是媒体文件树查询恢复器。只返回JSON，不要返回Markdown或解释。
+
+任务：从程序提供的有界候选和代表路径中恢复一个用于影视元数据反查的作品标题。
+
+硬性规则：
+1. identity_query 必须能逐字对应输入中的 identity_candidates 或 query_evidence；可以去除字幕组、编码、集号、分集标题和站点噪声，但不得引入输入中不存在的作品。
+2. 不得修改 content_shape、季数、集数或视频数。
+3. year_hint 只能为空或复用输入 year_hint。
+4. 无法可靠恢复时返回 status=blocked 和空 identity_query。
+5. evidence_candidates 只列出实际支持结论的输入候选。
+
+JSON结构：
+{
+  "status": "ok|blocked",
+  "identity_query": "string",
+  "year_hint": "string",
+  "evidence_candidates": ["string"],
+  "reason": "string"
+}
+
+输入事实如下：
+"""
+
 def check_ai_api_available():
-    url = runtime_context.config.get("ai", {}).get("api_url", "")
+    ai_config = runtime_context.config.get("ai", {})
+    if ai_config.get("enable") is False:
+        return False
+    url = ai_config.get("api_url", "")
     if not url:
         if runtime_context.logger:
             runtime_context.logger.warn("AI API URL 未定义.")
         return False
-    model = runtime_context.config.get("ai", {}).get("model", "")
+    model = ai_config.get("model", "")
     if not model:
         if runtime_context.logger:
             runtime_context.logger.warn("AI 模型未定义.")
         return False
     
-    api_key = runtime_context.config.get("ai", {}).get("api_key", "")
+    api_key = ai_config.get("api_key", "")
     if not api_key:
         if runtime_context.logger:
             runtime_context.logger.warn("AI API Key 未定义.")
@@ -419,6 +445,35 @@ def infer_metadata_backfill_with_ai(context: dict):
             for key, value in external_ids.items()
             if str(value or "").strip()
         },
+    }
+
+
+def recover_query_with_ai(context: dict):
+    if not check_ai_api_available():
+        return None
+    prompt = QUERY_RECOVERY_PROMPT + json.dumps(
+        context or {}, ensure_ascii=False, indent=2
+    )
+    _log_ai_info(
+        f"AI文件树查询恢复输入 context={_compact_json_for_log(context)}"
+    )
+    result = chat_completion(prompt, max_tokens=1024)
+    plan = parse_ai_json_response(result)
+    if not isinstance(plan, dict):
+        return None
+    status = str(plan.get("status") or "blocked").strip().casefold()
+    query = " ".join(str(plan.get("identity_query") or "").split())
+    candidates = plan.get("evidence_candidates")
+    return {
+        "status": status if status in {"ok", "blocked"} else "blocked",
+        "identity_query": query,
+        "year_hint": " ".join(str(plan.get("year_hint") or "").split()),
+        "evidence_candidates": [
+            " ".join(str(item or "").split())
+            for item in candidates or ()
+            if " ".join(str(item or "").split())
+        ] if isinstance(candidates, list) else [],
+        "reason": " ".join(str(plan.get("reason") or "").split()),
     }
 
 def get_movie_tmdb_name_with_ai(movie_desc):

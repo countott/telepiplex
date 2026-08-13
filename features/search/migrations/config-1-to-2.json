@@ -1,0 +1,13 @@
+{
+  "format": "telepiplex.config-migration.v1",
+  "from_version": 1,
+  "to_version": 2,
+  "operations": [
+    {
+      "op": "remove",
+      "path": [
+        "ai"
+      ]
+    }
+  ]
+}

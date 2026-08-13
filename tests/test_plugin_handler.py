@@ -1841,6 +1841,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             message="Feature updated",
             details={
                 "config_added_keys": ["mcp.path", "service.timeout"],
+                "config_removed_keys": ["ai"],
                 "config_values": {"api_key": "operator-secret"},
             },
         ))
@@ -1850,6 +1851,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         message = update.callback_query.edit_message_text.await_args_list[-1].args[0]
         self.assertIn("新增配置项：mcp.path、service.timeout", message)
+        self.assertIn("已移除过期配置项：ai", message)
         self.assertNotIn("operator-secret", message)
 
     async def test_host_update_callback_sanitizes_manager_errors(self):

@@ -200,8 +200,8 @@ class UnraidPublishScriptTest(unittest.TestCase):
             [
                 "push origin refs/tags/telepiplex-v3.4.11",
                 "push origin refs/tags/download-v1.0.8",
-                "push origin refs/tags/search-v1.9.1",
-                "push origin refs/tags/rename-v1.2.2",
+                "push origin refs/tags/search-v1.9.2",
+                "push origin refs/tags/rename-v1.3.0",
                 "push origin refs/tags/sync-v1.1.0",
             ],
         )
@@ -223,8 +223,8 @@ class UnraidPublishScriptTest(unittest.TestCase):
                 (
                     "host refs/tags/telepiplex-v3.4.11",
                     "a refs/tags/download-v1.0.8",
-                    "b refs/tags/search-v1.9.1",
-                    "c refs/tags/rename-v1.2.2",
+                    "b refs/tags/search-v1.9.2",
+                    "c refs/tags/rename-v1.3.0",
                     "d refs/tags/sync-v1.1.0",
                     "e refs/tags/caption-v0.1.2",
                 )
@@ -244,7 +244,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
                     "host refs/tags/telepiplex-v3.4.11",
                     "a refs/tags/download-v1.0.8",
                     "b refs/tags/search-v1.8.1",
-                    "c refs/tags/rename-v1.2.2",
+                    "c refs/tags/rename-v1.3.0",
                     "d refs/tags/sync-v1.1.0",
                     "e refs/tags/caption-v0.1.2",
                 )
@@ -252,9 +252,9 @@ class UnraidPublishScriptTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("search-v1.9.1", result.stdout)
+        self.assertIn("search-v1.9.2", result.stdout)
         self.assertIn(
-            "push origin refs/tags/search-v1.9.1",
+            "push origin refs/tags/search-v1.9.2",
             git_log.read_text(encoding="utf-8"),
         )
 
@@ -269,8 +269,8 @@ class UnraidPublishScriptTest(unittest.TestCase):
                 (
                     "host refs/tags/telepiplex-v3.4.11",
                     "a refs/tags/download-v1.0.8",
-                    "b refs/tags/search-v1.9.1",
-                    "c refs/tags/rename-v1.2.2",
+                    "b refs/tags/search-v1.9.2",
+                    "c refs/tags/rename-v1.3.0",
                     "d refs/tags/sync-v1.1.0",
                     "e refs/tags/caption-v0.1.2",
                 )

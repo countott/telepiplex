@@ -164,6 +164,23 @@ class PluginArtifactTest(unittest.TestCase):
                 verify_tpx(artifact)
             self.assertEqual(raised.exception.code, "package_uncompressed_too_large")
 
+    def test_build_accepts_only_regular_migration_members(self):
+        from app.runtime.plugin_artifact import ArtifactError, build_tpx
+
+        source = self._source("migration-source")
+        nested = source / "migrations/nested"
+        nested.mkdir()
+        (nested / "step.json").write_text("{}\n", encoding="utf-8")
+
+        artifact = build_tpx(source, self.root / "with-migrations.tpx")
+
+        self.assertTrue(artifact.is_file())
+
+        (source / "migrations/link.json").symlink_to("001.json")
+        with self.assertRaises(ArtifactError) as raised:
+            build_tpx(source, self.root / "symlink-migration.tpx")
+        self.assertEqual(raised.exception.code, "unsafe_member")
+
 
 if __name__ == "__main__":
     unittest.main()

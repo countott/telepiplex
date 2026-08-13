@@ -16,6 +16,21 @@ def _write_wheel(path: Path, metadata: str):
 
 
 class FeatureBuilderTest(unittest.TestCase):
+    def test_config_migration_copy_rejects_symbolic_links(self):
+        from tools.build_feature import FeatureBuildError, copy_feature_migrations
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "migrations"
+            destination = root / "package/migrations"
+            source.mkdir()
+            outside = root / "outside.json"
+            outside.write_text("{}\n", encoding="utf-8")
+            (source / "config-1-to-2.json").symlink_to(outside)
+
+            with self.assertRaises(FeatureBuildError):
+                copy_feature_migrations(source, destination)
+
     def test_build_rejects_plugin_sdk_requirement_missing_from_wheelhouse(self):
         from tools.build_feature import FeatureBuildError, build_feature_artifact
 
@@ -181,6 +196,36 @@ class FeatureBuilderTest(unittest.TestCase):
             self.assertEqual(verified.manifest.plugin_id, "echo")
             self.assertEqual(verified.manifest.source.commit, "b" * 40)
             self.assertTrue(any(name.startswith("wheelhouse/telepiplex_plugin_sdk-") for name in verified.members))
+
+    def test_build_includes_declared_config_migrations(self):
+        from app.runtime.plugin_artifact import verify_tpx
+        from tools.build_feature import build_feature_artifact
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "feature"
+            shutil.copytree(ROOT / "examples/echo_feature", source)
+            migrations = source / "migrations"
+            migrations.mkdir()
+            (migrations / "config-1-to-2.json").write_text(
+                '{"format":"telepiplex.config-migration.v1",'
+                '"from_version":1,"to_version":2,'
+                '"operations":[{"op":"remove","path":["legacy"]}]}',
+                encoding="utf-8",
+            )
+            output = root / "echo.tpx"
+
+            build_feature_artifact(
+                source,
+                output,
+                sdk_source=ROOT / "sdk",
+                repository="local/telepiplex",
+                branch="main",
+                commit="b" * 40,
+            )
+
+            verified = verify_tpx(output)
+            self.assertIn("migrations/config-1-to-2.json", verified.members)
 
     def test_rejects_feature_source_importing_host_or_telegram(self):
         from tools.build_feature import FeatureBuildError, validate_feature_imports

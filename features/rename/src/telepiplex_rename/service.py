@@ -23,6 +23,7 @@ from .inventory import (
 from .models import DownloadCompletedEvent, PostDownloadResult
 from .operations import OperationCancelled, RenameOperationJournal
 from .processor import process_generic_media, process_tvdb_episode
+from .query_recovery import recover_metadata_probe
 
 
 _STORAGE_METHODS = {
@@ -1327,7 +1328,19 @@ class RenameFeature:
                     control="cancel",
                 )
                 try:
-                    probe = build_metadata_probe(payload)
+                    probe = await asyncio.to_thread(
+                        recover_metadata_probe,
+                        build_metadata_probe(payload),
+                    )
+                    if (
+                        not str(probe.get("identity_query") or "").strip()
+                        or probe.get("requires_recovery") is True
+                    ):
+                        raise FeatureError(
+                            "metadata_query_unresolved",
+                            "file tree did not provide an evidence-bound "
+                            "metadata query",
+                        )
                     resolved = await self.host.call_capability(
                         "media.search",
                         "resolve_metadata",

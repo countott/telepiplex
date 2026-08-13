@@ -10,14 +10,30 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSchemaContractTest(unittest.TestCase):
-    def test_search_release_version_is_1_9_1(self):
+    def test_search_release_version_is_1_9_2_with_config_schema_v2(self):
         manifest = yaml.safe_load(
             (ROOT / "manifest.yaml").read_text(encoding="utf-8")
         )
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.9.1")
-        self.assertIn('version = "1.9.1"', pyproject)
+        self.assertEqual(manifest["version"], "1.9.2")
+        self.assertEqual(manifest["config_schema_version"], 2)
+        self.assertIn('version = "1.9.2"', pyproject)
+
+    def test_config_schema_v2_declares_removal_of_legacy_ai_section(self):
+        migration = json.loads(
+            (ROOT / "migrations/config-1-to-2.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(
+            migration,
+            {
+                "format": "telepiplex.config-migration.v1",
+                "from_version": 1,
+                "to_version": 2,
+                "operations": [{"op": "remove", "path": ["ai"]}],
+            },
+        )
 
     def test_manifest_routes_wikidata_direct_links_to_search(self):
         manifest = yaml.safe_load(

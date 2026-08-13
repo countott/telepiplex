@@ -85,7 +85,7 @@ class PluginManager:
                     f"Feature is already installed: {verified.manifest.plugin_id}",
                 )
             release = await self._prepare_release(verified)
-            active, _ = await self._activate_release(release, None, None)
+            active, _, _ = await self._activate_release(release, None, None)
             return self._result("active", active, "Feature installed and active")
 
     async def update(self, reference: str | Path, expected_sha256: str = "") -> PluginOperationResult:
@@ -104,7 +104,7 @@ class PluginManager:
                 refresh_example=False,
             )
             old_process = self.supervisor.process(old_release.plugin_id)
-            active, added_keys = await self._activate_release(
+            active, added_keys, removed_keys = await self._activate_release(
                 release,
                 old_release,
                 old_process,
@@ -114,7 +114,10 @@ class PluginManager:
                 "active",
                 active,
                 "Feature updated",
-                extra_details={"config_added_keys": added_keys},
+                extra_details={
+                    "config_added_keys": added_keys,
+                    "config_removed_keys": removed_keys,
+                },
             )
 
     async def rollback(self, plugin_id: str) -> PluginOperationResult:
@@ -146,7 +149,7 @@ class PluginManager:
                     "Rollback config must be migrated manually",
                 ) from None
             old_process = self.supervisor.process(plugin_id)
-            active, _ = await self._activate_release(
+            active, _, _ = await self._activate_release(
                 target,
                 current,
                 old_process,
@@ -733,12 +736,13 @@ class PluginManager:
         *,
         migrate_config: bool = False,
         replacement_config: dict | None = None,
-    ) -> tuple[ActiveRelease, list[str]]:
+    ) -> tuple[ActiveRelease, list[str], list[str]]:
         new_process = None
         route_committed = False
         old_drained = False
         previous_config = None
         added_keys: list[str] = []
+        removed_keys: list[str] = []
         try:
             if migrate_config and replacement_config is not None:
                 raise PluginOperationError(
@@ -746,7 +750,7 @@ class PluginManager:
                     "Only one config transition may be requested",
                 )
             if migrate_config and old_release is not None:
-                previous_config, _, added_keys = await asyncio.to_thread(
+                previous_config, _, added_keys, removed_keys = await asyncio.to_thread(
                     self.store.migrate_config,
                     release,
                 )
@@ -799,7 +803,7 @@ class PluginManager:
             self._remember_active_config(active)
             if old_process is not None:
                 await self.supervisor.stop(old_process)
-            return active, added_keys
+            return active, added_keys, removed_keys
         except Exception as exc:
             rollback_errors: list[str] = []
             if route_committed:

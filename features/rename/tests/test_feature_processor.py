@@ -11,7 +11,9 @@ import yaml
 from telepiplex_plugin_sdk.media_metadata import attach_media_metadata
 
 from telepiplex_rename.content_probe import build_metadata_probe
+from telepiplex_rename.ai import recover_query_with_ai
 from telepiplex_rename.models import DownloadCompletedEvent
+from telepiplex_rename.query_recovery import recover_metadata_probe
 from telepiplex_rename.processor import (
     _deterministic_episode_plan,
     process_generic_media,
@@ -557,6 +559,407 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertEqual(probe["identity_query"], "Movie 2024")
         self.assertEqual(probe["content_shape"], "movie")
         self.assertEqual(probe["video_count"], 1)
+
+    def test_probe_exposes_bounded_high_confidence_identity_evidence(self):
+        probe = build_metadata_probe({
+            "resource_name": "The.Residence.S01.1080p.WEB-DL",
+            "file_tree": [{
+                "relative_path": (
+                    f"Season 01/The.Residence.S01E{episode:02d}.1080p.mkv"
+                ),
+                "is_dir": False,
+            } for episode in range(1, 9)],
+        })
+
+        self.assertEqual(probe["identity_candidates"], ["The Residence"])
+        self.assertEqual(probe["query_confidence"], "high")
+        self.assertFalse(probe["requires_recovery"])
+        self.assertEqual(probe["recovery_reasons"], [])
+        self.assertLessEqual(len(probe["query_evidence"]), 12)
+        self.assertTrue(any(
+            item["source"] == "filename_consensus"
+            and item["candidate"] == "The Residence"
+            for item in probe["query_evidence"]
+        ))
+
+    def test_probe_accepts_numeric_title_with_episode_evidence(self):
+        probe = build_metadata_probe({
+            "resource_name": "958271604",
+            "file_tree": [{
+                "relative_path": "24.S01E01.1080p.WEB-DL.mkv",
+                "is_dir": False,
+            }, {
+                "relative_path": "24.S01E02.1080p.WEB-DL.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "24")
+        self.assertEqual(probe["identity_candidates"], ["24"])
+        self.assertEqual(probe["query_confidence"], "medium")
+        self.assertFalse(probe["requires_recovery"])
+        self.assertIn("numeric_title", probe["recovery_reasons"])
+
+    def test_probe_strips_site_and_repeated_fansub_prefixes(self):
+        site = build_metadata_probe({
+            "resource_name": "3493771893368948098",
+            "file_tree": [{
+                "relative_path": (
+                    "www.Torrenting.com - The.Residence.S01E01.1080p.mkv"
+                ),
+                "is_dir": False,
+            }],
+        })
+        grouped = build_metadata_probe({
+            "resource_name": "3493771893368948098",
+            "file_tree": [{
+                "relative_path": (
+                    "[Jumonji-Giri]_[F-B]_Series_Title_Ep04_"
+                    "(0b0e2c10).mkv"
+                ),
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(site["identity_query"], "The Residence")
+        self.assertEqual(grouped["identity_query"], "Series Title")
+        self.assertEqual(grouped["content_shape"], "single_episode_unscoped")
+        self.assertEqual(grouped["observed_episodes"], [{
+            "season_number": None,
+            "episode_number": 4,
+        }])
+
+    def test_probe_skips_compact_group_in_bracket_only_release(self):
+        probe = build_metadata_probe({
+            "resource_name": "3493771893368948098",
+            "file_tree": [{
+                "relative_path": (
+                    "[BeanSub][Anime_Series_Title][01][GB][1080P]"
+                    "[x264_AAC].mkv"
+                ),
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "Anime Series Title")
+        self.assertNotIn("BeanSub", probe["identity_candidates"])
+
+    def test_probe_uses_title_directory_before_language_only_path_tail(self):
+        probe = build_metadata_probe({
+            "resource_name": "3493771893368948098",
+            "file_tree": [{
+                "relative_path": (
+                    "Босх: Спадок (S2E1) /Series: Legacy (S2E1) "
+                    "(2023) WEB-DL 1080p Ukr/Eng | sub Eng.mkv"
+                ),
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "Series: Legacy")
+        self.assertEqual(probe["content_shape"], "single_episode")
+
+    def test_probe_rejects_scope_only_filename_without_identity(self):
+        for raw in (
+            "S2009E09 [SDTV].avi",
+            "2009x09 [SDTV].avi",
+            "2x04x05.720p.BluRay-FUTV.mkv",
+        ):
+            with self.subTest(raw=raw):
+                probe = build_metadata_probe({
+                    "resource_name": "3493771893368948098",
+                    "file_tree": [{
+                        "relative_path": raw,
+                        "is_dir": False,
+                    }],
+                })
+                self.assertEqual(probe["identity_query"], "")
+                self.assertTrue(probe["requires_recovery"])
+
+    def test_probe_strips_generic_site_prefix_and_leading_movie_year(self):
+        site = build_metadata_probe({
+            "resource_name": "3493771893368948098",
+            "file_tree": [{
+                "relative_path": (
+                    "www.5MovieRulz.tc - Movie (2000) Malayalam HQ "
+                    "HDRip - x264 - AAC - 700MB.mkv"
+                ),
+                "is_dir": False,
+            }],
+        })
+        year_first = build_metadata_probe({
+            "resource_name": "3493771893368948098",
+            "file_tree": [{
+                "relative_path": "(1995) Movie Name.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(site["identity_query"], "Movie (2000) Malayalam HQ")
+        self.assertEqual(site["year_hint"], "2000")
+        self.assertEqual(year_first["identity_query"], "Movie Name")
+        self.assertEqual(year_first["year_hint"], "1995")
+
+    def test_probe_extracts_chinese_bracket_absolute_episode(self):
+        probe = build_metadata_probe({
+            "resource_name": "3493771893368948098",
+            "file_tree": [{
+                "relative_path": (
+                    "[风车字幕组][名侦探柯南][857][简体][720P][MP4].mp4"
+                ),
+                "is_dir": False,
+            }, {
+                "relative_path": (
+                    "[风车字幕组][名侦探柯南][858][简体][720P][MP4].mp4"
+                ),
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "名侦探柯南")
+        self.assertEqual(probe["content_shape"], "episode_pack_unscoped")
+        self.assertEqual(probe["observed_episodes"], [{
+            "season_number": None,
+            "episode_number": 857,
+        }, {
+            "season_number": None,
+            "episode_number": 858,
+        }])
+
+    def test_probe_preserves_four_digit_absolute_episode_numbers(self):
+        bracketed = build_metadata_probe({
+            "resource_name": "3493771893368948098",
+            "file_tree": [{
+                "relative_path": (
+                    "[Skymoon-Raws][One Piece][1008][1080p][MKV].mkv"
+                ),
+                "is_dir": False,
+            }],
+        })
+        scoped = build_metadata_probe({
+            "resource_name": "3493771893368948098",
+            "file_tree": [{
+                "relative_path": "One.Piece.S01E1008.1080p.WEB-DL.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(bracketed["identity_query"], "One Piece")
+        self.assertEqual(bracketed["observed_episodes"], [{
+            "season_number": None,
+            "episode_number": 1008,
+        }])
+        self.assertEqual(scoped["identity_query"], "One Piece")
+        self.assertEqual(scoped["observed_episodes"], [{
+            "season_number": 1,
+            "episode_number": 1008,
+        }])
+
+    def test_probe_does_not_treat_episode_resolution_as_absolute_number(self):
+        probe = build_metadata_probe({
+            "resource_name": "The.Residence.S01.1080p.WEB-DL",
+            "file_tree": [{
+                "relative_path": (
+                    "The.Residence.S01E01.Episode.1080p.WEB-DL.mkv"
+                ),
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["observed_episodes"], [{
+            "season_number": 1,
+            "episode_number": 1,
+        }])
+
+    def test_probe_expands_chained_and_ranged_episodes(self):
+        chained = build_metadata_probe({
+            "resource_name": "3493771893368948098",
+            "file_tree": [{
+                "relative_path": (
+                    "Series.Title.S07E22E23.720p.HDTV.mkv"
+                ),
+                "is_dir": False,
+            }],
+        })
+        ranged = build_metadata_probe({
+            "resource_name": "3493771893368948098",
+            "file_tree": [{
+                "relative_path": "Series.Title.S03E01-06.BDRip.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(chained["identity_query"], "Series Title")
+        self.assertEqual(chained["content_shape"], "season_pack")
+        self.assertEqual(
+            [item["episode_number"] for item in chained["observed_episodes"]],
+            [22, 23],
+        )
+        self.assertEqual(ranged["identity_query"], "Series Title")
+        self.assertEqual(ranged["content_shape"], "season_pack")
+        self.assertEqual(
+            [item["episode_number"] for item in ranged["observed_episodes"]],
+            [1, 2, 3, 4, 5, 6],
+        )
+
+    @patch("telepiplex_rename.query_recovery.recover_query_with_ai")
+    def test_probe_recovery_accepts_only_evidence_bound_ai_query(self, ai_mock):
+        ai_mock.return_value = {
+            "status": "ok",
+            "identity_query": "名侦探柯南",
+            "evidence_candidates": ["名侦探柯南"],
+            "year_hint": "",
+        }
+        probe = {
+            "identity_query": "",
+            "identity_candidates": ["名侦探柯南"],
+            "query_confidence": "low",
+            "query_evidence": [{
+                "source": "bracket_identity",
+                "candidate": "名侦探柯南",
+                "relative_path": "x" * 2000 + ".mp4",
+            }],
+            "requires_recovery": True,
+            "recovery_reasons": ["unsupported_release_syntax"],
+            "year_hint": "",
+            "content_shape": "single_episode_unscoped",
+            "observed_seasons": [],
+            "observed_episodes": [{
+                "season_number": None,
+                "episode_number": 857,
+            }],
+            "video_count": 1,
+        }
+
+        recovered = recover_metadata_probe(probe)
+
+        self.assertEqual(recovered["identity_query"], "名侦探柯南")
+        self.assertEqual(recovered["query_confidence"], "medium")
+        self.assertFalse(recovered["requires_recovery"])
+        self.assertEqual(recovered["recovery_source"], "ai_evidence_bound")
+        context = ai_mock.call_args.args[0]
+        self.assertNotIn("file_tree", context)
+        self.assertLessEqual(len(context["representative_paths"]), 8)
+        self.assertLessEqual(
+            max(map(len, context["representative_paths"]), default=0),
+            512,
+        )
+        self.assertLessEqual(
+            max(
+                (
+                    len(item.get("relative_path", ""))
+                    for item in context["query_evidence"]
+                ),
+                default=0,
+            ),
+            512,
+        )
+
+    @patch("telepiplex_rename.ai.chat_completion")
+    def test_query_recovery_respects_disabled_ai_config(self, chat_mock):
+        from telepiplex_rename.context import runtime_context
+
+        runtime_context.configure({
+            "ai": {
+                "enable": False,
+                "api_url": "https://ai.example/v1",
+                "api_key": "secret",
+                "model": "model",
+            },
+        })
+
+        result = recover_query_with_ai({
+            "identity_candidates": ["The Residence"],
+        })
+
+        self.assertIsNone(result)
+        chat_mock.assert_not_called()
+
+    @patch("telepiplex_rename.query_recovery.recover_query_with_ai")
+    def test_probe_recovery_rejects_ai_title_outside_evidence(self, ai_mock):
+        ai_mock.return_value = {
+            "status": "ok",
+            "identity_query": "One Piece",
+            "evidence_candidates": ["One Piece"],
+            "year_hint": "",
+        }
+        probe = {
+            "identity_query": "",
+            "identity_candidates": ["名侦探柯南"],
+            "query_confidence": "low",
+            "query_evidence": [{
+                "source": "bracket_identity",
+                "candidate": "名侦探柯南",
+                "relative_path": "[字幕组][名侦探柯南][857].mp4",
+            }],
+            "requires_recovery": True,
+            "recovery_reasons": ["unsupported_release_syntax"],
+            "year_hint": "",
+            "content_shape": "single_episode_unscoped",
+            "observed_seasons": [],
+            "observed_episodes": [],
+            "video_count": 1,
+        }
+
+        recovered = recover_metadata_probe(probe)
+
+        self.assertEqual(recovered["identity_query"], "")
+        self.assertTrue(recovered["requires_recovery"])
+        self.assertEqual(recovered["recovery_status"], "rejected")
+
+    @patch("telepiplex_rename.query_recovery.recover_query_with_ai")
+    def test_probe_recovery_rejects_generic_evidence_substring(self, ai_mock):
+        ai_mock.return_value = {
+            "status": "ok",
+            "identity_query": "Series",
+            "evidence_candidates": ["Anime Series Title"],
+            "year_hint": "",
+        }
+        probe = {
+            "identity_query": "Anime Series Title [CHT]",
+            "identity_candidates": ["Anime Series Title"],
+            "query_confidence": "low",
+            "query_evidence": [{
+                "source": "bracket_identity",
+                "candidate": "Anime Series Title",
+            }],
+            "requires_recovery": True,
+            "recovery_reasons": ["unsupported_release_syntax"],
+            "year_hint": "",
+            "content_shape": "single_episode_unscoped",
+            "observed_seasons": [],
+            "observed_episodes": [],
+            "video_count": 1,
+        }
+
+        recovered = recover_metadata_probe(probe)
+
+        self.assertEqual(recovered["identity_query"], probe["identity_query"])
+        self.assertTrue(recovered["requires_recovery"])
+        self.assertEqual(recovered["recovery_status"], "rejected")
+
+    @patch("telepiplex_rename.query_recovery.recover_query_with_ai")
+    def test_probe_recovery_never_overrides_identity_conflict(self, ai_mock):
+        probe = build_metadata_probe({
+            "resource_name": "958271604",
+            "file_tree": [{
+                "relative_path": "First.Show.S01E01.1080p.mkv",
+                "is_dir": False,
+            }, {
+                "relative_path": "Second.Show.S01E02.1080p.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        recovered = recover_metadata_probe(probe)
+
+        ai_mock.assert_not_called()
+        self.assertEqual(recovered["identity_query"], "")
+        self.assertTrue(recovered["requires_recovery"])
+        self.assertEqual(
+            recovered["recovery_status"],
+            "blocked_identity_conflict",
+        )
 
     def test_ordinary_movie_keeps_largest_video_and_deletes_everything_else(self):
         storage = FakeStorage([
@@ -2248,6 +2651,178 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             "/Downloads/Movie.2024.mkv",
         )
 
+    @patch("telepiplex_rename.query_recovery.recover_query_with_ai")
+    async def test_low_confidence_probe_recovers_before_search_metadata(
+        self, ai_mock
+    ):
+        ai_mock.return_value = {
+            "status": "ok",
+            "identity_query": "Anime Series Title",
+            "evidence_candidates": ["Anime Series Title"],
+            "year_hint": "",
+        }
+        host = FakeHost()
+        feature = RenameFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            host=host,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+
+        await feature.download_completed({
+            "event_id": "event-query-recovery",
+            "payload": {
+                "job_id": "job-query-recovery",
+                "selected_path": "/Series",
+                "user_id": 123,
+                "chat_id": 10,
+                "operation_id": "op-query-recovery",
+                "operation_revision": 2,
+                "download_root": "/Downloads/958271604",
+                "final_path": "/Downloads/958271604",
+                "resource_name": "958271604",
+                "file_tree": [{
+                    "relative_path": (
+                        "【DHR百合組】[天使降臨到我身邊！_Anime Series "
+                        "Title][05][繁體][1080P10][WebRip][HEVC][MP4].mp4"
+                    ),
+                    "is_dir": False,
+                }],
+            },
+        })
+        await runtime.wait()
+
+        self.assertEqual(host.metadata_payload["query"], "Anime Series Title")
+        self.assertEqual(
+            host.metadata_payload["probe"]["recovery_source"],
+            "ai_evidence_bound",
+        )
+        self.assertFalse(
+            host.metadata_payload["probe"]["requires_recovery"]
+        )
+
+    @patch("telepiplex_rename.query_recovery.recover_query_with_ai")
+    async def test_invalid_query_recovery_blocks_before_search_or_storage(
+        self, ai_mock
+    ):
+        ai_mock.return_value = {
+            "status": "ok",
+            "identity_query": "Fabricated Show",
+            "evidence_candidates": ["Fabricated Show"],
+            "year_hint": "",
+        }
+
+        class NoCallHost(FakeHost):
+            def __init__(self):
+                super().__init__()
+                self.capability_calls = []
+
+            async def call_capability(
+                self, capability, method, payload, **kwargs
+            ):
+                self.capability_calls.append((capability, method))
+                return await super().call_capability(
+                    capability, method, payload, **kwargs
+                )
+
+        host = NoCallHost()
+        feature = RenameFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            host=host,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+
+        await feature.download_completed({
+            "event_id": "event-query-blocked",
+            "payload": {
+                "job_id": "job-query-blocked",
+                "selected_path": "/Series",
+                "user_id": 123,
+                "chat_id": 10,
+                "operation_id": "op-query-blocked",
+                "operation_revision": 2,
+                "download_root": "/Downloads/958271604",
+                "final_path": "/Downloads/958271604",
+                "resource_name": "958271604",
+                "file_tree": [{
+                    "relative_path": (
+                        "【DHR百合組】[天使降臨到我身邊！_Anime Series "
+                        "Title][05][繁體][1080P10][WebRip][HEVC][MP4].mp4"
+                    ),
+                    "is_dir": False,
+                }],
+            },
+        })
+        await runtime.wait()
+
+        self.assertEqual(host.capability_calls, [])
+        self.assertEqual(host.storage.renamed, [])
+        self.assertEqual(host.storage.moved, [])
+        self.assertEqual(host.reports[-1]["state"], "failed")
+        self.assertEqual(
+            host.reports[-1]["details"]["error_code"],
+            "metadata_query_unresolved",
+        )
+
+    @patch("telepiplex_rename.query_recovery.recover_query_with_ai")
+    async def test_unavailable_recovery_blocks_nonempty_low_confidence_query(
+        self, ai_mock
+    ):
+        ai_mock.return_value = None
+
+        class NoCallHost(FakeHost):
+            def __init__(self):
+                super().__init__()
+                self.capability_calls = []
+
+            async def call_capability(
+                self, capability, method, payload, **kwargs
+            ):
+                self.capability_calls.append((capability, method))
+                return await super().call_capability(
+                    capability, method, payload, **kwargs
+                )
+
+        host = NoCallHost()
+        feature = RenameFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            host=host,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+
+        await feature.download_completed({
+            "event_id": "event-query-unavailable",
+            "payload": {
+                "job_id": "job-query-unavailable",
+                "selected_path": "/Series",
+                "user_id": 123,
+                "chat_id": 10,
+                "operation_id": "op-query-unavailable",
+                "operation_revision": 2,
+                "download_root": "/Downloads/958271604",
+                "final_path": "/Downloads/958271604",
+                "resource_name": "958271604",
+                "file_tree": [{
+                    "relative_path": (
+                        "【DHR百合組】[天使降臨到我身邊！_Anime Series "
+                        "Title][05][繁體][1080P10][WebRip][HEVC][MP4].mp4"
+                    ),
+                    "is_dir": False,
+                }],
+            },
+        })
+        await runtime.wait()
+
+        self.assertEqual(host.capability_calls, [])
+        self.assertEqual(host.storage.renamed, [])
+        self.assertEqual(host.storage.moved, [])
+        self.assertEqual(
+            host.reports[-1]["details"]["error_code"],
+            "metadata_query_unresolved",
+        )
+
     async def test_download_event_calls_storage_rpc_and_publishes_media_organized(self):
         host = FakeHost()
         feature = RenameFeature(
@@ -2641,9 +3216,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.2.2")
+        self.assertEqual(manifest["version"], "1.3.0")
         self.assertEqual(manifest["host_api"], ">=1.4,<2.0")
-        self.assertIn('version = "1.2.2"', project)
+        self.assertIn('version = "1.3.0"', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
         manifest = yaml.safe_load(
@@ -2658,8 +3233,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.2.2.tpx", source)
-        self.assertNotIn("dist/rename-1.2.2.tpx", source)
+        self.assertIn("/tmp/rename-1.3.0.tpx", source)
+        self.assertNotIn("dist/rename-1.3.0.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []
