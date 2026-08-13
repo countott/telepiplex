@@ -454,6 +454,9 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(started["operation"]["stage"], "prowlarr_search")
 
         await self.runtime.run("search-releases-")
+        identity_stage_index = self.host.timeline.index(
+            ("report", "running", "identity_confirmation")
+        )
         milestone_index = next(
             index for index, item in enumerate(self.host.timeline)
             if item[:2] == ("milestone", "identity")
@@ -462,6 +465,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             index for index, item in enumerate(self.host.timeline)
             if item == ("report", "running", "prowlarr_search")
         )
+        self.assertLess(identity_stage_index, milestone_index)
         self.assertLess(milestone_index, prowlarr_index)
 
     async def test_prowlarr_failure_keeps_plan_and_offers_retry_exit(self):
@@ -609,6 +613,46 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.code, "identity_delivery_failed")
         self.assertEqual(release_calls, [])
+
+    async def test_lost_identity_response_retries_same_milestone(self):
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        stored["selected_path"] = "/Movies"
+        original_publish = self.host.publish_operation_milestone
+        attempts = []
+
+        async def accept_then_lose(
+            operation_id,
+            milestone_id,
+            text,
+            *,
+            mode="identity",
+            photo_url="",
+            deadline=10,
+        ):
+            attempts.append(milestone_id)
+            response = await original_publish(
+                operation_id,
+                milestone_id,
+                text,
+                mode=mode,
+                photo_url=photo_url,
+                deadline=deadline,
+            )
+            if len(attempts) == 1:
+                raise RuntimeError("identity response lost")
+            return {**response, "accepted": False, "duplicate": True}
+
+        self.host.publish_operation_milestone = accept_then_lose
+
+        await self.feature._confirm_and_search(plan_id, stored)
+
+        self.assertEqual(attempts, [attempts[0], attempts[0]])
+        self.assertTrue(self.search_queries)
+        self.assertEqual(
+            stored["identity_milestone_id"],
+            attempts[0],
+        )
 
     async def test_no_exact_scope_reports_counts_without_fallback_buttons(self):
         from telepiplex_search.series_scope import apply_series_scope
@@ -3699,9 +3743,9 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "1.9.3")
+        self.assertEqual(manifest["version"], "1.9.5")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertEqual(project["project"]["version"], "1.9.3")
+        self.assertEqual(project["project"]["version"], "1.9.5")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.2.2",
@@ -3735,14 +3779,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.9.3.tpx", source)
+        self.assertIn("/tmp/search-1.9.5.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-1.9.3.tpx", source)
+        self.assertNotIn("dist/search-1.9.5.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

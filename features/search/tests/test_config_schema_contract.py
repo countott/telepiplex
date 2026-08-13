@@ -16,9 +16,9 @@ class ConfigSchemaContractTest(unittest.TestCase):
         )
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.9.3")
+        self.assertEqual(manifest["version"], "1.9.5")
         self.assertEqual(manifest["config_schema_version"], 2)
-        self.assertIn('version = "1.9.3"', pyproject)
+        self.assertIn('version = "1.9.5"', pyproject)
 
     def test_config_schema_v2_declares_removal_of_legacy_ai_section(self):
         migration = json.loads(

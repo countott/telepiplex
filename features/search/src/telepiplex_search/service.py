@@ -2645,25 +2645,45 @@ class SearchFeature:
             stored.get("identity_milestone_id")
             != presentation["milestone_id"]
         ):
-            try:
-                response = await self.host.publish_operation_milestone(
+            if stored["operation_id"] in self.operations:
+                await self._report_operation(
                     stored["operation_id"],
-                    presentation["milestone_id"],
-                    presentation["text"],
-                    photo_url=presentation["photo_url"],
-                    deadline=45,
+                    state="running",
+                    stage="identity_confirmation",
+                    status_text=(
+                        "正在确认媒体身份："
+                        f"{_text(presentation.get('title')) or '未知作品'}"
+                    ),
+                    control="cancel",
+                    details={},
                 )
-            except Exception as exc:
-                if runtime_context.logger:
-                    runtime_context.logger.warning(
-                        "search_identity_milestone "
-                        f"status=failed error={type(exc).__name__}"
+            for attempt in range(3):
+                try:
+                    response = await self.host.publish_operation_milestone(
+                        stored["operation_id"],
+                        presentation["milestone_id"],
+                        presentation["text"],
+                        photo_url=presentation["photo_url"],
+                        deadline=45,
                     )
-                raise FeatureError(
-                    "identity_delivery_failed",
-                    "Host did not deliver the confirmed media identity",
-                ) from exc
-            else:
+                except Exception as exc:
+                    if (
+                        _ambiguous_host_report_error(exc)
+                        and attempt < 2
+                    ):
+                        await asyncio.sleep(0.25 * (2 ** attempt))
+                        continue
+                    if runtime_context.logger:
+                        runtime_context.logger.warning(
+                            "search_identity_milestone "
+                            "status=failed "
+                            f"error_code={getattr(exc, 'code', type(exc).__name__)} "
+                            f"error_type={type(exc).__name__}"
+                        )
+                    raise FeatureError(
+                        "identity_delivery_failed",
+                        "Host did not deliver the confirmed media identity",
+                    ) from exc
                 delivered = bool(
                     isinstance(response, dict)
                     and (
@@ -2679,6 +2699,7 @@ class SearchFeature:
                 stored["identity_milestone_id"] = (
                     presentation["milestone_id"]
                 )
+                break
         if stored["operation_id"] in self.operations:
             await self._report_operation(
                 stored["operation_id"],

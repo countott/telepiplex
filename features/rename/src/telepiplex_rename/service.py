@@ -269,7 +269,8 @@ class RenameFeature:
                 logger.warning(
                     "durable_job_resume_deferred "
                     f"job_id={job.get('job_id') or ''} "
-                    f"error={type(exc).__name__}"
+                    f"error_code={getattr(exc, 'code', type(exc).__name__)} "
+                    f"error_type={type(exc).__name__}"
                 )
 
     async def command(self, request: dict) -> dict:
@@ -1702,19 +1703,30 @@ class RenameFeature:
                             "operation_rejected",
                             "Host rejected rename handoff ownership",
                         )
-                seal_response = await self.host.seal_operation_stage(
-                    operation_id,
-                    f"rename-stage-complete:{job_id}",
-                    (
-                        "✅ 媒体整理已完成。\n"
-                        f"目标目录：{outcome.get('final_path') or ''}"
-                    ),
-                    deadline=45,
-                )
-                if not isinstance(seal_response, dict) or not (
-                    seal_response.get("accepted") is True
-                    or seal_response.get("duplicate") is True
-                ):
+                for attempt in range(3):
+                    try:
+                        seal_response = await self.host.seal_operation_stage(
+                            operation_id,
+                            f"rename-stage-complete:{job_id}",
+                            (
+                                "✅ 媒体整理已完成。\n"
+                                f"目标目录：{outcome.get('final_path') or ''}"
+                            ),
+                            deadline=45,
+                        )
+                    except Exception as exc:
+                        if (
+                            _ambiguous_host_report_error(exc)
+                            and attempt < 2
+                        ):
+                            await asyncio.sleep(0.25 * (2 ** attempt))
+                            continue
+                        raise
+                    if isinstance(seal_response, dict) and (
+                        seal_response.get("accepted") is True
+                        or seal_response.get("duplicate") is True
+                    ):
+                        break
                     raise FeatureError(
                         "stage_seal_failed",
                         "Host did not seal the completed rename stage",
@@ -1787,18 +1799,44 @@ class RenameFeature:
         text = str(presentation.get("text") or "").strip()
         if not milestone_id or not text:
             return False
-        response = await self.host.publish_operation_milestone(
-            operation_id,
-            milestone_id,
-            text,
-            mode="identity",
-            photo_url=str(presentation.get("photo_url") or ""),
-            deadline=45,
-        )
-        if not isinstance(response, dict) or not (
-            response.get("accepted") is True
-            or response.get("duplicate") is True
-        ):
+        operation = self.operations.get(operation_id)
+        if operation is not None:
+            if operation.get("state") in {
+                "completed", "cancelled", "rolled_back",
+                "partially_rolled_back", "failed",
+            }:
+                return False
+            await self._report_operation(
+                operation_id,
+                state="running",
+                stage="identity_confirmation",
+                status_text="正在确认媒体身份。",
+                control="cancel",
+                details={},
+            )
+        for attempt in range(3):
+            try:
+                response = await self.host.publish_operation_milestone(
+                    operation_id,
+                    milestone_id,
+                    text,
+                    mode="identity",
+                    photo_url=str(presentation.get("photo_url") or ""),
+                    deadline=45,
+                )
+            except Exception as exc:
+                if (
+                    _ambiguous_host_report_error(exc)
+                    and attempt < 2
+                ):
+                    await asyncio.sleep(0.25 * (2 ** attempt))
+                    continue
+                raise
+            if isinstance(response, dict) and (
+                response.get("accepted") is True
+                or response.get("duplicate") is True
+            ):
+                break
             raise FeatureError(
                 "identity_delivery_failed",
                 "Host did not deliver the confirmed media identity",

@@ -787,6 +787,38 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
             self.host.milestones[0]["text"],
         )
 
+    async def test_lost_download_stage_response_retries_same_milestone(self):
+        original_seal = self.host.seal_operation_stage
+        attempts = []
+
+        async def accept_then_lose(
+            operation_id,
+            milestone_id,
+            text,
+            *,
+            deadline=10,
+        ):
+            attempts.append(milestone_id)
+            response = await original_seal(
+                operation_id,
+                milestone_id,
+                text,
+                deadline=deadline,
+            )
+            if len(attempts) == 1:
+                raise RuntimeError("download stage response lost")
+            return {**response, "accepted": False, "duplicate": True}
+
+        self.host.seal_operation_stage = accept_then_lose
+
+        await self.feature._seal_download_stage(
+            "op-download-lost-stage",
+            "job-download-lost-stage",
+            {"final_path": "/Downloads/Show.S01E01.mkv"},
+        )
+
+        self.assertEqual(attempts, [attempts[0], attempts[0]])
+
     async def test_download_completes_and_skips_organization_when_rename_is_inactive(self):
         async def reject_missing_target(report, **_kwargs):
             self.host.reports.append(dict(report))
@@ -2250,17 +2282,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.0.9")
+        self.assertEqual(manifest["version"], "1.0.10")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.0.9")
+        self.assertEqual(project["project"]["version"], "1.0.10")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.2.2",
         )
-        self.assertIn("/tmp/download-1.0.9.tpx", readme)
-        self.assertNotIn("dist/download-1.0.9.tpx", readme)
+        self.assertIn("/tmp/download-1.0.10.tpx", readme)
+        self.assertNotIn("dist/download-1.0.10.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)

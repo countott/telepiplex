@@ -1,6 +1,6 @@
 plugin_id: search
 name: search
-version: 1.9.3
+version: 1.9.5
 host_api: ">=1.6,<2.0"
 entry_point: telepiplex_search.runtime:main
 provides:

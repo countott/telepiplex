@@ -235,6 +235,36 @@ class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
             },
         )])
 
+    async def test_operation_milestone_preserves_coordinator_error_code(self):
+        from app.runtime.interaction_coordinator import InteractionError
+        from telepiplex_plugin_sdk import FeatureError, HostClient
+
+        def reject_milestone(_plugin_id, _payload):
+            raise InteractionError(
+                "owner_mismatch",
+                "operation belongs to another Feature",
+            )
+
+        self.broker.milestone_sink = reject_milestone
+        self.broker.register("search", "milestone-error-token", manifest("search"))
+
+        with self.assertRaises(FeatureError) as raised:
+            await HostClient(
+                self.broker.socket_path,
+                "milestone-error-token",
+            ).publish_operation_milestone(
+                "op-1",
+                "media-owner-check",
+                "媒体身份",
+                deadline=1,
+            )
+
+        self.assertEqual(raised.exception.code, "owner_mismatch")
+        self.assertEqual(
+            raised.exception.message,
+            "operation belongs to another Feature",
+        )
+
     async def test_operation_report_uses_authenticated_feature_identity(self):
         from telepiplex_plugin_sdk import HostClient
 

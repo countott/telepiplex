@@ -1,6 +1,6 @@
 plugin_id: rename
 name: rename
-version: 1.4.1
+version: 1.4.3
 host_api: ">=1.6,<2.0"
 entry_point: telepiplex_rename.runtime:main
 provides: []

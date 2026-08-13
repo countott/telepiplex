@@ -20,7 +20,10 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
         from app.runtime.event_dispatcher import EventDispatcher
         from app.runtime.event_journal import EventJournal
         from app.runtime.interaction_coordinator import InteractionCoordinator
-        from app.handlers.interaction_handler import OperationReportSink
+        from app.handlers.interaction_handler import (
+            OperationMilestoneSink,
+            OperationReportSink,
+        )
 
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -40,11 +43,32 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
         self.operation_sink.attach(
             lambda record: self.ownership.append(record.plugin_id)
         )
+        self.milestone_deliveries = []
+
+        async def deliver_milestone(record, mode, photo_url, text):
+            self.milestone_deliveries.append({
+                "plugin_id": record.plugin_id,
+                "operation_id": record.operation_id,
+                "mode": mode,
+                "photo_url": photo_url,
+                "text": text,
+            })
+            return {
+                "accepted": True,
+                "message_id": 100 + len(self.milestone_deliveries),
+                "message_kind": "photo" if mode == "identity" else "text",
+            }
+
+        self.milestone_sink = OperationMilestoneSink(
+            self.coordinator,
+            deliver_milestone,
+        )
         self.broker = RuntimeBroker(
             self.router,
             self.journal,
             self.root / "runtime/host.sock",
             dispatcher=self.dispatcher,
+            milestone_sink=self.milestone_sink,
             operation_sink=self.operation_sink,
         )
         self.runtimes = []
@@ -181,6 +205,32 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
             }}
 
         async def confirm_callback(_request):
+            await media_host.report_operation({
+                "operation_id": operation_id,
+                "chat_id": 10,
+                "user_id": 1,
+                "state": "running",
+                "stage": "identity_confirmation",
+                "status_text": "正在确认媒体身份。",
+                "control": "cancel",
+                "revision": 2,
+            })
+            await media_host.publish_operation_milestone(
+                operation_id,
+                "media-real-pipeline",
+                "🎬 Movie (Movie)",
+                photo_url="https://img.example/movie.jpg",
+            )
+            await media_host.report_operation({
+                "operation_id": operation_id,
+                "chat_id": 10,
+                "user_id": 1,
+                "state": "running",
+                "stage": "prowlarr_search",
+                "status_text": "正在搜索资源。",
+                "control": "cancel",
+                "revision": 3,
+            })
             handoff = {
                 "operation_id": operation_id,
                 "chat_id": 10,
@@ -189,16 +239,21 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
                 "stage": "handoff_download",
                 "status_text": "搜索已确认，交给 download。",
                 "control": "cancel",
-                "revision": 2,
+                "revision": 4,
                 "next_plugin_id": "download",
             }
             await media_host.report_operation(handoff)
+            await media_host.seal_operation_stage(
+                operation_id,
+                "search-stage-complete:real-pipeline",
+                "✅ 资源搜索已完成。",
+            )
             await media_host.call_capability(
                 "download.provider",
                 "submit",
                 {
                     "operation_id": operation_id,
-                    "operation_revision": 2,
+                    "operation_revision": 4,
                     "chat_id": 10,
                     "user_id": 1,
                     "final_path": "/Downloads/Movie",
@@ -232,6 +287,11 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
                 "next_plugin_id": "rename",
             }
             await open_host.report_operation(handoff)
+            await open_host.seal_operation_stage(
+                payload["operation_id"],
+                "download-stage-complete:real-pipeline",
+                "✅ 115 下载已完成。",
+            )
             await open_host.publish_event(
                 "download.completed",
                 {
@@ -267,6 +327,11 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
                 "revision": handoff_revision,
                 "next_plugin_id": "sync",
             })
+            await rename_host.seal_operation_stage(
+                payload["operation_id"],
+                "rename-stage-complete:real-pipeline",
+                "✅ 媒体整理已完成。",
+            )
             await rename_host.publish_event(
                 "media.organized",
                 {
@@ -383,6 +448,18 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             owners,
             ["search", "download", "rename", "sync"],
+        )
+        self.assertEqual(
+            [
+                (item["plugin_id"], item["mode"])
+                for item in self.milestone_deliveries
+            ],
+            [
+                ("search", "identity"),
+                ("search", "stage"),
+                ("download", "stage"),
+                ("rename", "stage"),
+            ],
         )
 
         bot = SimpleNamespace(

@@ -1801,19 +1801,30 @@ class DownloadFeature:
         job_id: str,
         payload: dict,
     ) -> None:
-        seal_response = await self.host.seal_operation_stage(
-            operation_id,
-            f"download-stage-complete:{job_id}",
-            (
-                "✅ 115 下载已完成。\n"
-                f"保存目录：{payload.get('final_path')}"
-            ),
-            deadline=45,
-        )
-        if not isinstance(seal_response, dict) or not (
-            seal_response.get("accepted") is True
-            or seal_response.get("duplicate") is True
-        ):
+        for attempt in range(3):
+            try:
+                seal_response = await self.host.seal_operation_stage(
+                    operation_id,
+                    f"download-stage-complete:{job_id}",
+                    (
+                        "✅ 115 下载已完成。\n"
+                        f"保存目录：{payload.get('final_path')}"
+                    ),
+                    deadline=45,
+                )
+            except Exception as exc:
+                if (
+                    _ambiguous_host_report_error(exc)
+                    and attempt < 2
+                ):
+                    await asyncio.sleep(0.25 * (2 ** attempt))
+                    continue
+                raise
+            if isinstance(seal_response, dict) and (
+                seal_response.get("accepted") is True
+                or seal_response.get("duplicate") is True
+            ):
+                return
             raise FeatureError(
                 "stage_seal_failed",
                 "Host did not seal the completed download stage",

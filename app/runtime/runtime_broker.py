@@ -9,6 +9,7 @@ from pathlib import Path
 
 from app.runtime.capability_router import CapabilityRouter, RoutingError
 from app.runtime.event_journal import EventJournal
+from app.runtime.interaction_coordinator import InteractionError
 from app.runtime.plugin_manifest import PluginManifest
 
 
@@ -109,6 +110,13 @@ class RuntimeBroker:
                 result = await self._dispatch(identity, request, params, call_deadline)
             response = {"type": "response", "id": request_id, "ok": True, "result": result}
         except BrokerError as exc:
+            response = {
+                "type": "response",
+                "id": request_id,
+                "ok": False,
+                "error": {"code": exc.code, "message": exc.message},
+            }
+        except InteractionError as exc:
             response = {
                 "type": "response",
                 "id": request_id,

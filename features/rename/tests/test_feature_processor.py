@@ -2566,11 +2566,16 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         feature._finish_operation = fail
 
-        await feature._resume_durable_job({
-            "job_id": "job-retry-later",
-            "state": "processed",
-            "result": {"event_payload": {}},
-        })
+        with self.assertLogs("telepiplex.rename", level="WARNING") as captured:
+            await feature._resume_durable_job({
+                "job_id": "job-retry-later",
+                "state": "processed",
+                "result": {"event_payload": {}},
+            })
+
+        output = "\n".join(captured.output)
+        self.assertIn("error_code=RuntimeError", output)
+        self.assertIn("error_type=RuntimeError", output)
 
     async def test_resume_durable_inventory_job_requires_a_fresh_scan(self):
         from telepiplex_rename.jobs import RenameJobStore
@@ -3005,10 +3010,63 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             index for index, item in enumerate(host.timeline)
             if item[:2] == ("milestone", "identity")
         )
+        identity_stage_index = host.timeline.index(
+            ("report", "running", "identity_confirmation")
+        )
         organizing_index = host.timeline.index(
             ("report", "running", "organizing")
         )
+        self.assertLess(identity_stage_index, identity_index)
         self.assertLess(identity_index, organizing_index)
+
+    async def test_lost_rename_identity_response_retries_same_milestone(self):
+        host = FakeHost()
+        feature = RenameFeature(
+            config={"unorganized_path": "/Unorganized"},
+            host=host,
+        )
+        original_publish = host.publish_operation_milestone
+        attempts = []
+
+        async def accept_then_lose(
+            operation_id,
+            milestone_id,
+            text,
+            *,
+            photo_url="",
+            mode="identity",
+            deadline=10,
+        ):
+            attempts.append(milestone_id)
+            response = await original_publish(
+                operation_id,
+                milestone_id,
+                text,
+                photo_url=photo_url,
+                mode=mode,
+                deadline=deadline,
+            )
+            if len(attempts) == 1:
+                raise RuntimeError("rename identity response lost")
+            return {**response, "accepted": False, "duplicate": True}
+
+        host.publish_operation_milestone = accept_then_lose
+        payload = {
+            "_metadata_presentation": {
+                "milestone_id": "rename-identity-lost-response",
+                "text": "🎬 中文电影 (English Movie)",
+                "photo_url": "https://img.example/movie.jpg",
+            },
+        }
+
+        published = await feature._publish_metadata_identity(
+            payload,
+            "op-rename-identity-lost-response",
+        )
+
+        self.assertTrue(published)
+        self.assertEqual(attempts, [attempts[0], attempts[0]])
+        self.assertTrue(payload["_metadata_identity_published"])
 
     async def test_rename_stage_seals_before_plex_event_is_published(self):
         host = FakeHost()
@@ -3045,6 +3103,59 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         event_index = host.timeline.index(("event", "media.organized"))
         self.assertLess(handoff_index, seal_index)
         self.assertLess(seal_index, event_index)
+
+    async def test_lost_rename_stage_response_retries_same_milestone(self):
+        host = FakeHost()
+        runtime = FakeRuntime()
+        feature = RenameFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            host=host,
+        )
+        feature.bind_runtime(runtime)
+        original_seal = host.seal_operation_stage
+        attempts = []
+
+        async def accept_then_lose(
+            operation_id,
+            milestone_id,
+            text,
+            *,
+            deadline=10,
+        ):
+            attempts.append(milestone_id)
+            response = await original_seal(
+                operation_id,
+                milestone_id,
+                text,
+                deadline=deadline,
+            )
+            if len(attempts) == 1:
+                raise RuntimeError("rename stage response lost")
+            return {**response, "accepted": False, "duplicate": True}
+
+        host.seal_operation_stage = accept_then_lose
+
+        await feature.download_completed({
+            "event_id": "event-rename-lost-stage",
+            "payload": {
+                "job_id": "job-rename-lost-stage",
+                "selected_path": "/Movies",
+                "user_id": 123,
+                "chat_id": 10,
+                "final_path": "/Downloads/Release",
+                "resource_name": "Movie.2024",
+                "media_metadata": movie_contract(),
+                "operation_id": "op-rename-lost-stage",
+                "operation_revision": 8,
+            },
+        })
+        await runtime.wait()
+
+        self.assertEqual(attempts, [attempts[0], attempts[0]])
+        self.assertEqual(
+            [item[0] for item in host.events],
+            ["media.organized"],
+        )
 
     async def test_completed_rename_skips_plex_when_sync_is_inactive(self):
         host = FakeHost()
@@ -3751,9 +3862,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.4.1")
+        self.assertEqual(manifest["version"], "1.4.3")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertIn('version = "1.4.1"', project)
+        self.assertIn('version = "1.4.3"', project)
         self.assertIn('telepiplex-plugin-sdk==1.2.2', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
@@ -3769,8 +3880,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.4.1.tpx", source)
-        self.assertNotIn("dist/rename-1.4.1.tpx", source)
+        self.assertIn("/tmp/rename-1.4.3.tpx", source)
+        self.assertNotIn("dist/rename-1.4.3.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []
