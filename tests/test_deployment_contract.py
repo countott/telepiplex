@@ -3,6 +3,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -111,18 +112,21 @@ class DeploymentContractTest(unittest.TestCase):
             ):
                 self.assertIn(term, source, f"{name}: {term}")
 
-    def test_config_migrations_are_declared_as_host_api_1_5(self):
+    def test_operation_milestones_are_declared_as_host_api_1_6(self):
         from app.runtime.plugin_contract import HOST_API_VERSION
 
-        self.assertEqual(HOST_API_VERSION, "1.5")
-        self.assertIn(
-            "Host API 1.5",
-            (ROOT / "README.md").read_text(encoding="utf-8"),
+        self.assertEqual(HOST_API_VERSION, "1.6")
+        for name in ("README.md", "README_EN.md"):
+            source = (ROOT / name).read_text(encoding="utf-8")
+            self.assertIn("Host API 1.5", source)
+            self.assertIn("Host API 1.6", source)
+
+    def test_plugin_sdk_release_identity_is_1_2_2(self):
+        project = tomllib.loads(
+            (ROOT / "sdk" / "pyproject.toml").read_text(encoding="utf-8")
         )
-        self.assertIn(
-            "Host API 1.5",
-            (ROOT / "README_EN.md").read_text(encoding="utf-8"),
-        )
+
+        self.assertEqual(project["project"]["version"], "1.2.2")
 
     def test_build_script_only_references_existing_dockerfiles(self):
         source = (ROOT / "build.sh").read_text(encoding="utf-8")

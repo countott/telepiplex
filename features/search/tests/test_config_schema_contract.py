@@ -10,15 +10,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSchemaContractTest(unittest.TestCase):
-    def test_search_release_version_is_1_9_2_with_config_schema_v2(self):
+    def test_search_release_version_is_1_9_3_with_config_schema_v2(self):
         manifest = yaml.safe_load(
             (ROOT / "manifest.yaml").read_text(encoding="utf-8")
         )
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.9.2")
+        self.assertEqual(manifest["version"], "1.9.3")
         self.assertEqual(manifest["config_schema_version"], 2)
-        self.assertIn('version = "1.9.2"', pyproject)
+        self.assertIn('version = "1.9.3"', pyproject)
 
     def test_config_schema_v2_declares_removal_of_legacy_ai_section(self):
         migration = json.loads(

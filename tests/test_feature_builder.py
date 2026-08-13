@@ -41,7 +41,7 @@ class FeatureBuilderTest(unittest.TestCase):
             pyproject = source / "pyproject.toml"
             pyproject.write_text(
                 pyproject.read_text(encoding="utf-8").replace(
-                    "telepiplex-plugin-sdk==1.2.1",
+                    "telepiplex-plugin-sdk==1.2.2",
                     "telepiplex-plugin-sdk==1.1.0",
                 ),
                 encoding="utf-8",
@@ -107,13 +107,13 @@ class FeatureBuilderTest(unittest.TestCase):
                 "Metadata-Version: 2.4\n"
                 "Name: telepiplex-download\n"
                 "Version: 1.0.8\n"
-                "Requires-Dist: telepiplex-plugin-sdk==1.2.1\n",
+                "Requires-Dist: telepiplex-plugin-sdk==1.2.2\n",
             )
             _write_wheel(
                 wheelhouse / "sdk.whl",
                 "Metadata-Version: 2.4\n"
                 "Name: telepiplex-plugin-sdk\n"
-                "Version: 1.2.1\n",
+                "Version: 1.2.2\n",
             )
 
             validator(plugin, wheelhouse)

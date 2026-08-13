@@ -13,7 +13,7 @@
 - Do not run Git or create `.git` or `.worktrees` in the Mac workspace.
 - Keep product-facing prose lowercase `telepiplex` while preserving technical identifiers.
 - Preserve the existing `media_metadata v1` authority chain and operation ownership rules.
-- Keep rename at version `1.4.0`; preserve all external subtitle planning, naming, preflight, execution and cleanup semantics.
+- Release rename as `1.4.1`; preserve all `1.4.0` external subtitle planning, naming, preflight, execution and cleanup semantics.
 - A failed milestone must not rotate the message cursor or start the downstream Feature.
 - Candidate poster enrichment is bounded and best effort; missing posters never block candidate selection.
 
@@ -107,13 +107,13 @@
 - [x] Apply only compatibility changes required by the tests; sync production code remains unchanged.
 - [x] Run the ordering and sync tests and confirm they pass.
 
-### Task 6: rename 1.4.0 subtitle regression and full verification
+### Task 6: release identities, rename subtitle regression and full verification
 
 **Files:**
 - Test only; no subtitle production changes expected.
 
 **Interfaces:**
-- Verifies: rename manifest/pyproject remain `1.4.0`; `.srt/.ass/.sup/.vtt`, bilingual preference, sparse mapping, subtitle-only plans and conflict guards remain intact.
+- Verifies: Host/Core `3.4.24`, Host API `1.6`, SDK `1.2.2`, search `1.9.3`, download `1.0.9` and rename `1.4.1`; `.srt/.ass/.sup/.vtt`, bilingual preference, sparse mapping, subtitle-only plans and conflict guards remain intact.
 
 - [x] Run `features/rename/tests/test_subtitles.py`, subtitle cases in `test_tvdb_rename.py`, and the full rename Feature suite.
 - [x] Run Host, SDK, search, download and sync focused suites.

@@ -81,9 +81,9 @@ rename 所有权接力已经使 Host 新建 Plex 消息。sync 在同一消息�
 - 全部 Provider 失败时继续使用标题占位宫格。
 - Wikipedia/Wikidata `instance_of`、genre 和已交叉验证的 Provider 类型可作为动画证据。缺少动画证据不等于真人，因此统一退化为电影或剧集；本次不展示真人分类。
 
-## rename 1.4.0 不回归基线
+## rename 1.4.0 字幕能力不回归基线
 
-本次实现以当前 `features/rename/manifest.yaml` 与 `pyproject.toml` 的 `1.4.0` 为版本基线，不进行版本升级。必须保持已有外挂字幕能力：
+本次实现以 rename `1.4.0` 的外挂字幕能力为不回归基线；交付版本提升为 `1.4.1`，但不得修改已有外挂字幕语义：
 
 - 支持 `.srt`、`.ass`、`.sup`、`.vtt`。
 - 简体中文加英文双语优先，简体中文单语次选，输出 `.chi` 后缀并保留扩展名。
@@ -109,4 +109,14 @@ rename 所有权接力已经使 Host 新建 Plex 消息。sync 在同一消息�
 - rename：自动匹配和候选确认均生成身份卡；上游同身份不重复；整理封口先于 sync 接力。
 - sync：handoff 后新建消息，Plex 生命周期在单条消息内结束。
 - 端到端：`search -> download -> rename -> sync` 的消息顺序。
-- rename：完整 Feature 测试以及字幕专属测试，确认 `1.4.0` 字幕能力不回归。
+- rename：完整 Feature 测试以及字幕专属测试，确认 `1.4.1` 继续保持 `1.4.0` 的字幕能力。
+
+## 发布身份
+
+- Host/Core：`3.4.24`
+- Host API：`1.6`
+- Plugin SDK：`1.2.2`
+- search：`1.9.3`，要求 `host_api >=1.6` 与 SDK `1.2.2`
+- download：`1.0.9`，要求 `host_api >=1.6` 与 SDK `1.2.2`
+- rename：`1.4.1`，要求 `host_api >=1.6` 与 SDK `1.2.2`
+- sync 与 caption 没有生产代码改动，版本保持不变。
