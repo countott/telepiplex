@@ -93,7 +93,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn(gate_name, step_names)
         self.assertLess(
             step_names.index(gate_name),
-            step_names.index("Run telepiplex tests"),
+            step_names.index("Run Host tests"),
         )
 
         gate = self._step(
@@ -171,7 +171,13 @@ class ReleaseWorkflowTest(unittest.TestCase):
         )["run"]
         self.assertIn("^telepiplex-v", validate)
         self.assertNotIn("platform-v", validate)
-        self._step(workflow, "validate-telepiplex", "Run telepiplex tests")
+        self._step(workflow, "validate-telepiplex", "Run Host tests")
+        for module in ("download", "search", "rename", "sync", "caption"):
+            self._step(
+                workflow,
+                "validate-telepiplex",
+                f"Run {module} Feature tests",
+            )
         self._step(workflow, "validate-telepiplex", "Compile tracked Python")
 
         build = jobs["build-telepiplex-image"]
@@ -237,7 +243,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         )
 
         tests = self._step(
-            workflow, "validate-telepiplex", "Run telepiplex tests"
+            workflow, "validate-telepiplex", "Run Host tests"
         )["run"]
         self.assertIn(
             "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:sdk/src", tests
@@ -245,14 +251,81 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn(
             "python -m pytest -q -p no:cacheprovider tests", tests
         )
-        self.assertIn(
-            "for module in download search rename sync caption; do", tests
+        self.assertNotIn("features/", tests)
+
+        for module in ("download", "search", "rename", "sync", "caption"):
+            feature_tests = self._step(
+                workflow,
+                "validate-telepiplex",
+                f"Run {module} Feature tests",
+            )["run"]
+            self.assertIn(f'cd "features/{module}"', feature_tests)
+            self.assertIn(
+                "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src",
+                feature_tests,
+            )
+            self.assertIn(
+                "python -m pytest -q -p no:cacheprovider tests",
+                feature_tests,
+            )
+
+    def test_feature_tests_do_not_depend_on_ignored_build_metadata(self):
+        offenders = []
+        for path in ROOT.glob("features/*/tests/**/*.py"):
+            source = path.read_text(encoding="utf-8")
+            if ".egg-info" in source or "PKG-INFO" in source:
+                offenders.append(str(path.relative_to(ROOT)))
+
+        self.assertEqual(
+            offenders,
+            [],
+            "Feature tests must pass from a clean checkout without ignored build metadata",
         )
-        self.assertIn('cd "features/$module"', tests)
-        self.assertIn(
-            "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src", tests
+
+    def test_feature_release_runs_selected_feature_tests_before_build(self):
+        workflow = self._workflow(FEATURE_WORKFLOW)
+        steps = workflow["jobs"]["build-feature"]["steps"]
+        names = [step.get("name") for step in steps]
+
+        install_name = "Install selected Feature test dependencies"
+        system_name = "Install selected Feature system test dependencies"
+        test_name = "Run selected Feature tests"
+        build_name = "Build new Feature artifact"
+        self.assertLess(names.index(install_name), names.index(test_name))
+        self.assertLess(names.index(system_name), names.index(test_name))
+        self.assertLess(names.index(test_name), names.index(build_name))
+
+        install = self._step(
+            workflow, "build-feature", install_name
         )
-        self.assertNotEqual(tests.strip(), "python -m pytest -q")
+        self.assertEqual(
+            install["env"]["FEATURE_DIR"],
+            "${{ steps.feature.outputs.source_dir }}",
+        )
+        self.assertIn("python -m pip install ./sdk pytest", install["run"])
+        self.assertIn(
+            'python -m pip install -r "$FEATURE_DIR/requirements-feature.txt"',
+            install["run"],
+        )
+
+        system = self._step(
+            workflow, "build-feature", system_name
+        )
+        self.assertEqual(
+            system["if"], "steps.feature.outputs.plugin_id == 'search'"
+        )
+        self.assertIn("fonts-noto-cjk", system["run"])
+
+        tests = self._step(workflow, "build-feature", test_name)
+        self.assertEqual(
+            tests["env"]["FEATURE_DIR"],
+            "${{ steps.feature.outputs.source_dir }}",
+        )
+        self.assertIn('cd "$FEATURE_DIR"', tests["run"])
+        self.assertIn(
+            "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src",
+            tests["run"],
+        )
 
     def test_telepiplex_release_installs_cjk_font_before_poster_grid_tests(self):
         workflow = self._workflow(TELEPIPLEX_WORKFLOW)
@@ -263,7 +336,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn(install_name, step_names)
         self.assertLess(
             step_names.index(install_name),
-            step_names.index("Run telepiplex tests"),
+            step_names.index("Run Host tests"),
         )
         install = self._step(
             workflow,

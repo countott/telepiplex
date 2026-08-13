@@ -68,6 +68,27 @@ jobs:
           print(f"artifact_name=feature-{plugin_id}-{version}")
           PY
 
+      - name: Install selected Feature system test dependencies
+        if: steps.feature.outputs.plugin_id == 'search'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+
+      - name: Install selected Feature test dependencies
+        env:
+          FEATURE_DIR: ${{ steps.feature.outputs.source_dir }}
+        run: |
+          python -m pip install ./sdk pytest
+          python -m pip install -r "$FEATURE_DIR/requirements-feature.txt"
+
+      - name: Run selected Feature tests
+        env:
+          FEATURE_DIR: ${{ steps.feature.outputs.source_dir }}
+        run: |
+          cd "$FEATURE_DIR"
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
+            python -m pytest -q -p no:cacheprovider tests
+
       - name: Probe immutable Feature Release
         id: release
         env:

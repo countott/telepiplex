@@ -65,18 +65,41 @@ jobs:
           fi
           echo "Confirmed telepiplex release commit belongs to main: $RELEASE_COMMIT"
 
-      - name: Run telepiplex tests
+      - name: Run Host tests
         run: |
           set -euo pipefail
           PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:sdk/src \
             python -m pytest -q -p no:cacheprovider tests
-          for module in download search rename sync caption; do
-            (
-              cd "features/$module"
-              PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
-                python -m pytest -q -p no:cacheprovider tests
-            )
-          done
+
+      - name: Run download Feature tests
+        run: |
+          cd "features/download"
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
+            python -m pytest -q -p no:cacheprovider tests
+
+      - name: Run search Feature tests
+        run: |
+          cd "features/search"
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
+            python -m pytest -q -p no:cacheprovider tests
+
+      - name: Run rename Feature tests
+        run: |
+          cd "features/rename"
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
+            python -m pytest -q -p no:cacheprovider tests
+
+      - name: Run sync Feature tests
+        run: |
+          cd "features/sync"
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
+            python -m pytest -q -p no:cacheprovider tests
+
+      - name: Run caption Feature tests
+        run: |
+          cd "features/caption"
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
+            python -m pytest -q -p no:cacheprovider tests
 
       - name: Compile tracked Python
         env:

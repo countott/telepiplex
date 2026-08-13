@@ -15,13 +15,9 @@ class ConfigSchemaContractTest(unittest.TestCase):
             (ROOT / "manifest.yaml").read_text(encoding="utf-8")
         )
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        package_info = (
-            ROOT / "src/telepiplex_search.egg-info/PKG-INFO"
-        ).read_text(encoding="utf-8")
 
         self.assertEqual(manifest["version"], "1.9.1")
         self.assertIn('version = "1.9.1"', pyproject)
-        self.assertIn("Version: 1.9.1", package_info)
 
     def test_manifest_routes_wikidata_direct_links_to_search(self):
         manifest = yaml.safe_load(
