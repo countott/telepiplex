@@ -10,7 +10,10 @@ from urllib.parse import quote
 import requests
 
 
-USER_AGENT = "telepiplex/1.0 (media metadata lookup)"
+USER_AGENT = (
+    "telepiplex/1.9 (media metadata lookup; "
+    "https://github.com/openai/codex)"
+)
 _RATE_LIMIT_LOCK = threading.Lock()
 _RATE_LIMIT_STATE = {
     "last_request_at": 0.0,
@@ -265,6 +268,13 @@ def lookup_wikipedia_evidence(
             pages = ((payload or {}).get("query") or {}).get("pages") or []
             if isinstance(pages, dict):
                 pages = list(pages.values())
+            pages = sorted(
+                (page for page in pages if isinstance(page, dict)),
+                key=lambda page: (
+                    int(page.get("index") or 1_000_000),
+                    int(page.get("pageid") or 0),
+                ),
+            )
             for page in pages:
                 if not isinstance(page, dict):
                     continue
@@ -283,16 +293,24 @@ def lookup_wikipedia_evidence(
                     page,
                     language,
                 )
+                pageprops = page.get("pageprops") or {}
                 facts.append(
                     {
                         "language": language,
                         "query": query,
+                        "search_rank": int(
+                            page.get("index") or len(facts) + 1
+                        ),
+                        "page_id": int(page.get("pageid") or 0),
+                        "is_disambiguation": (
+                            "disambiguation" in pageprops
+                        ),
                         "title": title,
                         "canonical_title": canonical_title,
                         "extract": extract,
                         "url": page_url,
                         "wikibase_item": str(
-                            (page.get("pageprops") or {}).get("wikibase_item") or ""
+                            pageprops.get("wikibase_item") or ""
                         ),
                         "year": year,
                         "media_type": media_type,
@@ -394,14 +412,17 @@ def lookup_wikipedia_page(
         else ""
     )
     official_english_title = _english_work_title(page, language)
+    pageprops = page.get("pageprops") or {}
     return {
         "language": language,
+        "page_id": int(page.get("pageid") or 0),
+        "is_disambiguation": "disambiguation" in pageprops,
         "title": resolved_title,
         "canonical_title": canonical_title,
         "extract": extract,
         "url": page_url,
         "wikibase_item": str(
-            (page.get("pageprops") or {}).get("wikibase_item") or ""
+            pageprops.get("wikibase_item") or ""
         ),
         "year": year,
         "media_type": media_type,

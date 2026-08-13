@@ -1,6 +1,9 @@
+import asyncio
+import inspect
 import tempfile
 import time
 import unittest
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -138,7 +141,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         from app.handlers.interaction_handler import OperationReportSink
 
         sink = OperationReportSink(self.coordinator)
-        self.assertTrue(sink("search", self.report())["accepted"])
+        self.assertTrue((await sink("search", self.report()))["accepted"])
         terminal = self.report(
             state="cancelled",
             stage="cancelled",
@@ -146,7 +149,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             control="",
             revision=2,
         )
-        self.assertTrue(sink("search", terminal)["accepted"])
+        self.assertTrue((await sink("search", terminal))["accepted"])
 
         stale = self.report(
             state="running",
@@ -155,7 +158,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             control="cancel",
             revision=2,
         )
-        response = sink("search", stale)
+        response = await sink("search", stale)
 
         self.assertFalse(response["accepted"])
         self.assertEqual(response["state"], "cancelled")
@@ -166,9 +169,9 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         router = Mock()
         router.plugin_route.return_value = None
         sink = OperationReportSink(self.coordinator, router=router)
-        self.assertTrue(sink("rename", self.report())["accepted"])
+        self.assertTrue((await sink("rename", self.report()))["accepted"])
 
-        response = sink("rename", self.report(
+        response = await sink("rename", self.report(
             state="handed_off",
             stage="handoff_plex",
             status_text="已交给 Plex",
@@ -186,6 +189,122 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((current.plugin_id, current.state, current.revision), (
             "rename", "running", 1,
         ))
+
+    async def test_operation_sink_waits_for_attached_renderer(self):
+        from app.handlers.interaction_handler import OperationReportSink
+
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def render(_record):
+            started.set()
+            await release.wait()
+
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(render)
+        pending = sink("download", self.report(
+            state="handed_off",
+            stage="handoff_rename",
+            status_text="✅ 115 下载完成\n保存目录：/真人剧集/Veep.S01",
+            next_plugin_id="rename",
+        ))
+
+        self.assertTrue(inspect.isawaitable(pending))
+        task = asyncio.create_task(pending)
+        await started.wait()
+        self.assertFalse(task.done())
+        release.set()
+        response = await task
+        self.assertTrue(response["accepted"])
+
+    async def test_operation_sink_does_not_block_running_report_on_renderer(self):
+        from app.handlers.interaction_handler import OperationReportSink
+
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def render(_record):
+            started.set()
+            await release.wait()
+
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(render)
+        task = asyncio.create_task(
+            sink("search", self.report())
+        )
+
+        await started.wait()
+        await asyncio.sleep(0)
+        self.assertTrue(task.done())
+        self.assertTrue((await task)["accepted"])
+        release.set()
+        await asyncio.gather(*sink._tasks)
+
+    async def test_download_handoff_freezes_before_rename_uses_new_message(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+
+        context = self.context()
+        context.application.bot.send_message.side_effect = [
+            SimpleNamespace(message_id=41),
+            SimpleNamespace(message_id=42),
+        ]
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(
+            lambda record: render_operation(
+                context.application,
+                Mock(),
+                record,
+            )
+        )
+
+        await sink("download", self.report(
+            stage="downloading",
+            status_text="正在下载。",
+        ))
+        await asyncio.gather(*sink._tasks)
+        self.assertEqual(self.coordinator.get("op-1").message_id, 41)
+
+        await sink("download", self.report(
+            state="handed_off",
+            stage="handoff_rename",
+            status_text=(
+                "✅ 115 下载完成\n"
+                "保存目录：/真人剧集/Veep.S01"
+            ),
+            revision=2,
+            next_plugin_id="rename",
+        ))
+        self.assertEqual(self.coordinator.get("op-1").message_id, 41)
+        self.assertEqual(
+            context.application.bot.edit_message_text.await_args.kwargs["text"],
+            "✅ 115 下载完成\n保存目录：/真人剧集/Veep.S01",
+        )
+
+        await sink("rename", self.report(
+            stage="organizing",
+            status_text="正在移动媒体文件。",
+            revision=3,
+        ))
+        await asyncio.gather(*sink._tasks)
+        self.assertEqual(self.coordinator.get("op-1").message_id, 42)
+        self.assertEqual(
+            context.application.bot.send_message.await_args.kwargs["text"],
+            "正在移动媒体文件。",
+        )
+
+        await sink("rename", self.report(
+            stage="organizing",
+            status_text="正在重命名媒体文件。",
+            revision=4,
+        ))
+        await asyncio.gather(*sink._tasks)
+        edited = context.application.bot.edit_message_text.await_args.kwargs
+        self.assertEqual(edited["chat_id"], 10)
+        self.assertEqual(edited["message_id"], 42)
+        self.assertEqual(edited["text"], "正在重命名媒体文件。")
 
     async def test_operation_milestone_is_idempotent_and_photo_falls_back_to_text(self):
         from app.handlers.interaction_handler import OperationMilestoneSink
@@ -205,8 +324,8 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             "photo_url": "https://img.example/blossoms.jpg",
         }
 
-        first = sink("search", payload)
-        duplicate = sink("search", payload)
+        first = await sink("search", payload)
+        duplicate = await sink("search", payload)
 
         self.assertEqual(first, {"accepted": True, "duplicate": False})
         self.assertEqual(duplicate, {"accepted": True, "duplicate": True})
@@ -219,6 +338,174 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             (10, None, "繁花 (Blossoms Shanghai)"),
         ])
         self.assertIsNone(self.coordinator.get("op-1").message_id)
+
+    async def test_operation_milestone_waits_for_async_delivery(self):
+        from app.handlers.interaction_handler import OperationMilestoneSink
+
+        self.coordinator.report("search", self.report())
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def deliver(_chat_id, _photo_url, _text):
+            started.set()
+            await release.wait()
+            return True
+
+        sink = OperationMilestoneSink(self.coordinator, deliver)
+        pending = sink("search", {
+            "operation_id": "op-1",
+            "milestone_id": "media-wait",
+            "text": "繁花 (Blossoms Shanghai)",
+            "photo_url": "https://img.example/blossoms.jpg",
+        })
+
+        self.assertTrue(inspect.isawaitable(pending))
+        task = asyncio.create_task(pending)
+        await started.wait()
+        self.assertFalse(task.done())
+        release.set()
+        self.assertEqual(
+            await task,
+            {"accepted": True, "duplicate": False},
+        )
+
+    async def test_cancelled_operation_milestone_can_be_retried(self):
+        from app.handlers.interaction_handler import OperationMilestoneSink
+
+        self.coordinator.report("search", self.report())
+        started = asyncio.Event()
+
+        async def deliver(_chat_id, _photo_url, _text):
+            started.set()
+            await asyncio.Event().wait()
+
+        sink = OperationMilestoneSink(self.coordinator, deliver)
+        payload = {
+            "operation_id": "op-1",
+            "milestone_id": "media-cancelled",
+            "text": "繁花 (Blossoms Shanghai)",
+            "photo_url": "",
+        }
+        task = asyncio.create_task(sink("search", payload))
+        await started.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertIsNotNone(
+            self.coordinator.claim_milestone(
+                "search",
+                "op-1",
+                "media-cancelled",
+            )
+        )
+
+    @patch("app.handlers.interaction_handler.build_poster_grid")
+    async def test_identity_delivery_without_remote_url_sends_title_placeholder(
+        self,
+        build_grid,
+    ):
+        from app.handlers.interaction_handler import deliver_operation_milestone
+
+        placeholder = BytesIO(b"placeholder")
+        placeholder.name = "telepiplex-candidates.jpg"
+        build_grid.return_value = placeholder
+        context = self.context()
+        context.application.bot.send_photo = AsyncMock(
+            return_value=SimpleNamespace(message_id=92)
+        )
+
+        accepted = await deliver_operation_milestone(
+            context.application,
+            10,
+            None,
+            "🎬 繁花 (Blossoms Shanghai)\n2023｜中国大陆｜剧集｜全剧",
+        )
+
+        self.assertTrue(accepted)
+        self.assertEqual(
+            build_grid.call_args.args[0],
+            [{
+                "number": 1,
+                "title": "繁花 (Blossoms Shanghai)",
+                "poster_url": "",
+            }],
+        )
+        self.assertIs(
+            context.application.bot.send_photo.await_args.kwargs["photo"],
+            placeholder,
+        )
+        context.application.bot.send_message.assert_not_awaited()
+
+    @patch("app.handlers.interaction_handler.build_poster_grid")
+    async def test_identity_delivery_reuses_title_placeholder_when_remote_fails(
+        self,
+        build_grid,
+    ):
+        from app.handlers.interaction_handler import deliver_operation_milestone
+        from app.runtime.poster_grid import PosterGridUnavailable
+
+        placeholder = BytesIO(b"placeholder")
+        placeholder.name = "telepiplex-candidates.jpg"
+        build_grid.side_effect = [
+            PosterGridUnavailable("poster_grid_no_images"),
+            placeholder,
+        ]
+        context = self.context()
+        context.application.bot.send_photo = AsyncMock(
+            return_value=SimpleNamespace(message_id=91)
+        )
+
+        accepted = await deliver_operation_milestone(
+            context.application,
+            10,
+            "https://img9.doubanio.com/poster.jpg",
+            "🎬 繁花 (Blossoms Shanghai)\n2023｜中国大陆｜剧集｜全剧",
+        )
+
+        self.assertTrue(accepted)
+        self.assertEqual(build_grid.call_count, 2)
+        self.assertEqual(
+            build_grid.call_args_list[1].args[0],
+            [{
+                "number": 1,
+                "title": "繁花 (Blossoms Shanghai)",
+                "poster_url": "",
+            }],
+        )
+        self.assertIs(
+            context.application.bot.send_photo.await_args.kwargs["photo"],
+            placeholder,
+        )
+        context.application.bot.send_message.assert_not_awaited()
+
+    @patch("app.handlers.interaction_handler.build_poster_grid")
+    async def test_identity_delivery_falls_back_to_text_when_local_photo_fails(
+        self,
+        build_grid,
+    ):
+        from app.handlers.interaction_handler import deliver_operation_milestone
+
+        local_photo = BytesIO(b"photo")
+        local_photo.name = "telepiplex-candidates.jpg"
+        build_grid.return_value = local_photo
+        context = self.context()
+        context.application.bot.send_photo = AsyncMock(
+            side_effect=BadRequest("photo failed")
+        )
+
+        accepted = await deliver_operation_milestone(
+            context.application,
+            10,
+            "https://img.example/poster.jpg",
+            "🎬 繁花 (Blossoms Shanghai)\n2023｜中国大陆｜剧集｜全剧",
+        )
+
+        self.assertTrue(accepted)
+        context.application.bot.send_message.assert_awaited_once_with(
+            chat_id=10,
+            text="🎬 繁花 (Blossoms Shanghai)\n2023｜中国大陆｜剧集｜全剧",
+        )
 
     async def test_running_operation_rejects_unrelated_callback_with_toast(self):
         from app.handlers.interaction_handler import operation_gate

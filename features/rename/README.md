@@ -1,15 +1,35 @@
 # rename Feature
 
-该分支只包含媒体整理 Feature。它消费 durable `download.completed`，优先使用 download 提供的真实下载根、完整文件树和 Prowlarr 片源证据，通过 `storage.provider` 操作 115 文件，并在成功后发布 `media.organized`。direct magnet 没有 canonical contract 时，只用下载根生成身份查询，并把文件树压缩为独立的结构化内容探针，再调用 `media.search.resolve_metadata`；唯一结果直接补全元数据，歧义结果等待用户确认后从同一个 job 恢复，不会把片源名和每个文件拼成搜索句。
+该分支只包含媒体整理 Feature。它消费 durable `download.completed`，优先使用 download 提供的真实下载根、完整文件树和 Prowlarr 片源证据，通过 `storage.provider` 操作 115 文件，并在成功后发布 `media.organized`。direct magnet 没有 canonical contract 时，会从下载根、主视频文件名和嵌套标题目录形成有界的身份候选共识，并把季集范围压缩为独立的结构化内容探针，再调用 `media.search.resolve_metadata`；唯一结果直接补全元数据，歧义结果等待用户确认后从同一个 job 恢复，不会把文件树拼成搜索句，也不会在候选冲突时猜测标题。
 
 普通电影按计划文件名、唯一候选、AI 证据、可解释大小兜底的固定顺序选择主视频；剧集的未匹配大视频必须由 AI 明确判定。所有目标冲突在第一次写操作前预检，映射冲突或证据不足时整个下载根进入 `/未整理`，不执行部分业务移动。完成整理后只保留已确认目标视频；字幕、NFO、海报及其他下载附属文件随源下载根清理。
 
-rename 1.1.0 接入 search 1.6.0 的完整元数据解析合同，并通过独立消息保留最终作品身份。它同时继续对旧版搜索合同做防御性规范化：英语作品优先采用来源原名，并从混合中文标题末尾移除已经重复的英文标题，避免生成 `后室 Backrooms (Backrooms)` 一类目录。
+rename 1.2.2 使用 search 1.9.1 的完整元数据解析合同，并通过独立消息保留最终作品身份。`content_probe` 会排除 sample、预告片和花絮目录，识别 `.webm`、中文季集、动漫 `- 01` 及有季目录约束的裸集号；根目录无意义或与多文件共识冲突时改用文件树身份，候选彼此冲突时返回空查询并阻断自动整理。对于只具备已验证季数、尚无集级清单的整季下载，它会在下载后只接受同一季、可从真实文件名证明的集号；跨季或无季集标记仍拒绝整理。它同时继续对旧版搜索合同做防御性规范化：英语作品优先采用来源原名，并从混合中文标题末尾移除已经重复的英文标题，避免生成 `后室 Backrooms (Backrooms)` 一类目录。
+
+Telegram `/rename` 用于补整理 115 中已有的媒体。入口先让用户选择四个分类目录之一或 `/未整理`，扫描单位是所选目录的每个直接子项。子项是文件夹时，按 115 列表接口分页、递归读取完整后代文件树，不会把季目录或单集再拆成任务；子项是视频文件时，作为一个裸视频任务处理。扫描结果只有“已完成”和“未完成”两类：只有直接子文件夹的实时完整文件树完全符合下述 rename 终态规范才算已完成。根目录裸视频即使文件名已经规范，也因缺少作品容器文件夹而属于未完成；执行时会创建正确的作品目录、重命名视频并移动进去。其他情况（包括无视频、附属文件残留、层级错误和历史 Job 成功但当前结构不符）也全部算未完成。统一确认后逐项串行执行。
+
+每个未完成项复用 `content_probe -> media.search.resolve_metadata -> 歧义确认 -> rename`。从 `/未整理` 发起时，按确认元数据中的 `placement.category_kind` 路由到四个分类目录之一；歧义项暂停批次，用户确认后从当前项继续。115 `file_id` 仍作为稳定 Job 身份，但 Job 只负责恢复和重试，不能覆盖实时结构判定。
+
+## rename 终态规则
+
+所有下列 `中文名`、`English Title`、合集名、季目录名和文件名都会先经过跨平台目标清洗：统一为 Unicode NFC，全角括号转半角，连续空白合并；移除控制字符、Windows 禁止字符 `\\ / : * ? " < > |` 及其常见全角形式；移除路径段末尾的空格和点；并把 Windows 保留设备名 `CON`、`PRN`、`AUX`、`NUL`、`COM1`–`COM9`、`LPT1`–`LPT9`、`CONIN$`、`CONOUT$` 改成带 `_` 后缀的安全名称。源路径、Job ID、callback 和元数据身份不预清洗，只在实际生成目标目录和目标文件名时应用。
+
+| 内容 | 目标结构 | 关键约束 |
+| --- | --- | --- |
+| 单部电影 | `分类/中文名 (English Title)/English Title.ext` | 只有一个目标视频；文件名只保留确认的英文名和原扩展名 |
+| 分类根目录裸视频 | 先创建 `分类/中文名 (English Title)/`，再生成 `English Title.ext` 并移入 | 永远视为未完成；不能因为文件名看起来规范就跳过作品目录 |
+| 电影合集 | `分类/合集中文名 (Collection Title)/电影中文名 (English Title)/English Title.ext` | 合集中文名去掉末尾“系列”，英文名去掉末尾 `Collection`；每部电影目录只含一个同名视频 |
+| 单集、整季、全剧 | `分类/中文名 (English Title)/English Title Season NN/English Title SxxExx.ext` | 季号两位；集号小于 100 时两位，100 起三位；季目录与文件 `Sxx` 必须一致；每个目标集号唯一 |
+| 特别篇 | `分类/中文名 (English Title)/English Title Season 00/English Title S00Exx.ext` | 统一进入 `Season 00` |
+
+英语原作优先采用确认元数据中的原始英文标题；如果中文标题末尾已经重复英文标题，会去掉重复部分再生成 `中文名 (English Title)`。电影主视频按“确认元数据 `source_hint` → 唯一视频 → 下载片源名 → AI 完整取舍 → 可解释的大小比例兜底”顺序选择。剧集优先按已确认的集号与 `source_hint` 确定性映射，确定性映射不完整时才让 AI 在锁定作品身份和允许集号内补映射；未匹配的大视频必须由 AI 明确列入丢弃。
+
+rename 会在任何写操作前预检全部目标冲突。确认映射冲突或证据不足时，整个源根进入 `/未整理`；批量写入中途失败时停止自动重试并要求人工检查。成功终态会删除未采用的视频并清理源下载根，不能残留字幕、NFO、海报或其他下载附属文件；只要清理不完整，结果就不会标记为成功。
 
 如果 Host 在交接前确认 sync/Plex 管理未安装或未启用，rename 会保留已经完成的整理结果并收敛为成功终态，明确通知“已跳过后续处理”，且不会发布无人消费的 `media.organized`。用户通知使用纯文本，文件名和路径不会依赖 Telegram Markdown 转义。
 
 ```bash
-python tools/build_feature.py features/rename /tmp/rename-1.1.0.tpx \
+python tools/build_feature.py features/rename /tmp/rename-1.2.2.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

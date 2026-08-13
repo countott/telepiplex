@@ -12,7 +12,11 @@ from telepiplex_plugin_sdk.media_metadata import attach_media_metadata
 
 from telepiplex_rename.content_probe import build_metadata_probe
 from telepiplex_rename.models import DownloadCompletedEvent
-from telepiplex_rename.processor import process_generic_media, process_tvdb_episode
+from telepiplex_rename.processor import (
+    _deterministic_episode_plan,
+    process_generic_media,
+    process_tvdb_episode,
+)
 from telepiplex_rename.service import RenameFeature
 
 
@@ -153,6 +157,25 @@ def series_contract():
     }
 
 
+def wikipedia_bounded_season_contract():
+    value = series_contract()
+    value["identity"]["season_count"] = 7
+    value["retrieval"] = {
+        "media_type": "series",
+        "scope": "season",
+        "query": "English Series S01",
+        "queries": ["English Series S01"],
+    }
+    value["items"] = []
+    value["evidence"] = {"decision": {
+        "scope": "season",
+        "season_number": 1,
+        "episode_number": None,
+    }}
+    value["warnings"] = ["warning:episode_inventory_unavailable"]
+    return value
+
+
 class RenamingProcessorTest(unittest.TestCase):
     def setUp(self):
         from telepiplex_rename.context import runtime_context
@@ -167,6 +190,26 @@ class RenamingProcessorTest(unittest.TestCase):
             "ai": {},
             "metadata": {},
         })
+
+    def test_wikipedia_bounded_season_derives_only_same_season_filename_markers(self):
+        plan = _deterministic_episode_plan(
+            wikipedia_bounded_season_contract(),
+            [
+                {"relative_path": "Show.S01E01.mkv", "is_dir": False},
+                {"relative_path": "Show.S01E02.mkv", "is_dir": False},
+            ],
+        )
+        self.assertEqual(
+            [
+                (item["season_number"], item["episode_number"])
+                for item in plan["episode_map"]
+            ],
+            [(1, 1), (1, 2)],
+        )
+        self.assertIsNone(_deterministic_episode_plan(
+            wikipedia_bounded_season_contract(),
+            [{"relative_path": "Show.S02E01.mkv", "is_dir": False}],
+        ))
 
     def test_probe_uses_root_identity_and_separates_content_shape(self):
         probe = build_metadata_probe({
@@ -186,6 +229,18 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertEqual(probe["content_shape"], "multi_season_pack")
         self.assertEqual(probe["observed_seasons"], [1, 9])
         self.assertNotIn("S09E23", probe["identity_query"])
+
+    def test_probe_keeps_more_specific_related_root_for_single_episode(self):
+        probe = build_metadata_probe({
+            "resource_name": "The.Office.US",
+            "file_tree": [{
+                "relative_path": "The.Office.S01E01.1080p.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "The Office US")
+        self.assertEqual(probe["content_shape"], "single_episode")
 
     def test_probe_strips_scope_and_quality_but_keeps_movie_year(self):
         probe = build_metadata_probe({
@@ -239,6 +294,269 @@ class RenamingProcessorTest(unittest.TestCase):
             ],
         )
         self.assertEqual(probe["video_count"], 14)
+
+    def test_probe_uses_video_filename_consensus_when_root_has_no_identity(self):
+        probe = build_metadata_probe({
+            "resource_name": "Raw.Release",
+            "file_tree": [{
+                "relative_path": (
+                    "Season 01/The.Residence.S01E01.1080p.WEB-DL.mkv"
+                ),
+                "is_dir": False,
+            }, {
+                "relative_path": (
+                    "Season 01/The.Residence.S01E02.1080p.WEB-DL.mkv"
+                ),
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "The Residence")
+        self.assertEqual(probe["content_shape"], "season_pack")
+        self.assertEqual(probe["observed_seasons"], [1])
+
+    def test_probe_uses_single_webm_filename_when_root_is_numeric(self):
+        probe = build_metadata_probe({
+            "resource_name": "958271604",
+            "file_tree": [{
+                "relative_path": (
+                    "The.Grand.Budapest.Hotel.2014.1080p.WEB-DL.webm"
+                ),
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(
+            probe["identity_query"],
+            "The Grand Budapest Hotel 2014",
+        )
+        self.assertEqual(probe["year_hint"], "2014")
+        self.assertEqual(probe["content_shape"], "movie")
+        self.assertEqual(probe["video_count"], 1)
+
+    def test_probe_extracts_chinese_season_and_episode_markers(self):
+        probe = build_metadata_probe({
+            "resource_name": "庆余年 第二季",
+            "file_tree": [{
+                "relative_path": "庆余年 第二季/庆余年 第二季 第1集.mkv",
+                "is_dir": False,
+            }, {
+                "relative_path": "庆余年 第二季/庆余年 第二季 第十二集.webm",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "庆余年")
+        self.assertEqual(probe["content_shape"], "season_pack")
+        self.assertEqual(probe["observed_seasons"], [2])
+        self.assertEqual(probe["observed_episodes"], [{
+            "season_number": 2,
+            "episode_number": 1,
+        }, {
+            "season_number": 2,
+            "episode_number": 12,
+        }])
+        self.assertEqual(probe["video_count"], 2)
+
+    def test_probe_treats_anime_dash_numbers_as_unscoped_episodes(self):
+        probe = build_metadata_probe({
+            "resource_name": "[SubsPlease] Sousou no Frieren",
+            "file_tree": [{
+                "relative_path": (
+                    "[SubsPlease] Sousou no Frieren - 01 (1080p) [A1].mkv"
+                ),
+                "is_dir": False,
+            }, {
+                "relative_path": (
+                    "[SubsPlease] Sousou no Frieren - 02 (1080p) [A2].mkv"
+                ),
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "Sousou no Frieren")
+        self.assertEqual(
+            probe["content_shape"],
+            "episode_pack_unscoped",
+        )
+        self.assertEqual(probe["observed_seasons"], [])
+        self.assertEqual(probe["observed_episodes"], [{
+            "season_number": None,
+            "episode_number": 1,
+        }, {
+            "season_number": None,
+            "episode_number": 2,
+        }])
+
+    def test_probe_returns_empty_query_when_tree_has_only_scope_markers(self):
+        probe = build_metadata_probe({
+            "resource_name": "Season 01",
+            "file_tree": [{
+                "relative_path": "Season 01/E01.mkv",
+                "is_dir": False,
+            }, {
+                "relative_path": "Season 01/E02.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "")
+        self.assertEqual(probe["content_shape"], "season_pack")
+        self.assertEqual(probe["observed_seasons"], [1])
+        self.assertEqual(probe["observed_episodes"], [{
+            "season_number": 1,
+            "episode_number": 1,
+        }, {
+            "season_number": 1,
+            "episode_number": 2,
+        }])
+
+    def test_probe_uses_nested_title_and_scoped_bare_episode_numbers(self):
+        probe = build_metadata_probe({
+            "resource_name": "958271604",
+            "file_tree": [{
+                "relative_path": "The Residence/Season 01/01.mkv",
+                "is_dir": False,
+            }, {
+                "relative_path": "The Residence/Season 01/02.webm",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "The Residence")
+        self.assertEqual(probe["content_shape"], "season_pack")
+        self.assertEqual(probe["observed_seasons"], [1])
+        self.assertEqual(probe["observed_episodes"], [{
+            "season_number": 1,
+            "episode_number": 1,
+        }, {
+            "season_number": 1,
+            "episode_number": 2,
+        }])
+
+    def test_probe_prefers_repeated_file_identity_over_unrelated_root(self):
+        probe = build_metadata_probe({
+            "resource_name": "Mislabeled Folder",
+            "file_tree": [{
+                "relative_path": "The.Residence.S01E01.1080p.mkv",
+                "is_dir": False,
+            }, {
+                "relative_path": "The.Residence.S01E02.1080p.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "The Residence")
+
+    def test_probe_prefers_strong_single_file_identity_over_unrelated_root(self):
+        probe = build_metadata_probe({
+            "resource_name": "Mislabeled Folder",
+            "file_tree": [{
+                "relative_path": "The.Residence.S01E01.1080p.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "The Residence")
+        self.assertEqual(probe["content_shape"], "single_episode")
+
+    def test_probe_does_not_guess_when_file_identities_conflict(self):
+        probe = build_metadata_probe({
+            "resource_name": "Mislabeled Folder",
+            "file_tree": [{
+                "relative_path": "First.Show.S01E01.1080p.mkv",
+                "is_dir": False,
+            }, {
+                "relative_path": "Second.Show.S01E01.1080p.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "")
+
+    def test_probe_does_not_treat_prefix_titles_as_the_same_identity(self):
+        probe = build_metadata_probe({
+            "resource_name": "Aliens",
+            "file_tree": [{
+                "relative_path": f"Alien.S01E{episode:02d}.1080p.mkv",
+                "is_dir": False,
+            } for episode in (1, 2)],
+        })
+
+        self.assertEqual(probe["identity_query"], "Alien")
+
+    def test_probe_treats_hyphen_and_space_as_the_same_file_identity(self):
+        probe = build_metadata_probe({
+            "resource_name": "Raw.Release",
+            "file_tree": [{
+                "relative_path": "Spider-Man.S01E01.1080p.mkv",
+                "is_dir": False,
+            }, {
+                "relative_path": "Spider.Man.S01E02.1080p.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "Spider-Man")
+
+    def test_probe_uses_nested_title_for_one_scoped_bare_episode(self):
+        probe = build_metadata_probe({
+            "resource_name": "958271604",
+            "file_tree": [{
+                "relative_path": "The Residence/Season 01/01.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "The Residence")
+        self.assertEqual(probe["content_shape"], "single_episode")
+        self.assertEqual(probe["observed_episodes"], [{
+            "season_number": 1,
+            "episode_number": 1,
+        }])
+
+    def test_probe_preserves_title_hyphens_in_identity_query(self):
+        probe = build_metadata_probe({
+            "resource_name": "Spider-Man.2024.1080p.WEB-DL.mkv",
+            "file_tree": [{
+                "relative_path": "Spider-Man.2024.1080p.WEB-DL.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "Spider-Man 2024")
+
+    def test_probe_excludes_sample_video_from_identity_and_shape(self):
+        probe = build_metadata_probe({
+            "resource_name": "Raw.Release",
+            "file_tree": [{
+                "relative_path": "Movie.2024.1080p.WEB-DL.mkv",
+                "is_dir": False,
+            }, {
+                "relative_path": "Sample/sample.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "Movie 2024")
+        self.assertEqual(probe["content_shape"], "movie")
+        self.assertEqual(probe["video_count"], 1)
+
+    def test_probe_excludes_release_named_sample_video(self):
+        probe = build_metadata_probe({
+            "resource_name": "Movie.2024",
+            "file_tree": [{
+                "relative_path": "Movie.2024.1080p.WEB-DL.mkv",
+                "is_dir": False,
+            }, {
+                "relative_path": "Movie.2024.sample.mkv",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "Movie 2024")
+        self.assertEqual(probe["content_shape"], "movie")
+        self.assertEqual(probe["video_count"], 1)
 
     def test_ordinary_movie_keeps_largest_video_and_deletes_everything_else(self):
         storage = FakeStorage([
@@ -636,7 +954,672 @@ class FakeRuntime:
 
 
 class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
-    async def test_ambiguous_magnet_waits_for_confirmation_and_resumes_same_job(self):
+    def test_confirmed_failure_already_in_unorganized_stays_in_place(self):
+        from telepiplex_rename.context import runtime_context
+        from telepiplex_rename.processor import (
+            _move_confirmed_failure_to_unorganized,
+        )
+
+        runtime_context.configure({
+            "media": {"unorganized_path": "/未整理"},
+            "selection": {},
+            "ai": {},
+            "metadata": {},
+        })
+        storage = FakeStorage([])
+        event = DownloadCompletedEvent(
+            link="",
+            selected_path="/真人电影",
+            user_id=123,
+            final_path="/未整理/Raw.Release",
+            resource_name="Raw.Release",
+            storage=storage,
+        )
+
+        self.assertEqual(
+            _move_confirmed_failure_to_unorganized(event),
+            "/未整理/Raw.Release",
+        )
+        self.assertEqual(storage.moved, [])
+
+    async def test_inventory_confirm_routes_unorganized_movie_and_completes_batch(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        class InventoryMovieStorage(FakeStorage):
+            def __init__(self):
+                super().__init__([])
+
+            def get_file_list(self, params):
+                if params.get("cid") == "root-unorganized":
+                    return [{
+                        "file_id": "raw-movie-1",
+                        "name": "Movie.2024.1080p",
+                        "is_dir": True,
+                    }]
+                if params.get("cid") == "raw-movie-1":
+                    return [{
+                        "name": "Movie.2024.mkv",
+                        "file_id": "movie-video-1",
+                        "is_dir": False,
+                        "size": 1000,
+                    }]
+                return []
+
+            def get_file_info(self, path):
+                if path == "/未整理":
+                    return {"file_id": "root-unorganized", "file_category": "0"}
+                return super().get_file_info(path)
+
+        config = {
+            "category_folder": [{
+                "kind": "live_action_movie",
+                "name": "真人电影",
+                "path": "/真人电影",
+                "plex_library_id": "",
+            }, {
+                "kind": "animated_movie",
+                "name": "动画电影",
+                "path": "/动画电影",
+                "plex_library_id": "",
+            }, {
+                "kind": "live_action_series",
+                "name": "真人剧集",
+                "path": "/真人剧集",
+                "plex_library_id": "",
+            }, {
+                "kind": "animated_series",
+                "name": "动画剧集",
+                "path": "/动画剧集",
+                "plex_library_id": "",
+            }],
+            "unorganized_path": "/未整理",
+            "storage_timeout": 3,
+            "metadata_timeout": 3,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = FakeHost(InventoryMovieStorage())
+            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
+            feature = RenameFeature(config=config, host=host, jobs=jobs)
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+            owner = {"chat_id": 10, "user_id": 123}
+
+            await feature.command({**owner, "command": "rename", "args": []})
+            await feature.callback({
+                **owner,
+                "payload": "inventory:root:4",
+            })
+            await runtime.wait()
+            started = await feature.callback({
+                **owner,
+                "payload": "inventory:confirm",
+            })
+            self.assertEqual(started["operation"]["stage"], "inventory_batch")
+            await runtime.wait()
+
+            self.assertEqual(
+                host.metadata_payload["probe"]["content_shape"],
+                "movie",
+            )
+            self.assertEqual(
+                host.storage.created[-1],
+                "/真人电影/中文电影 (English Movie)",
+            )
+            self.assertEqual(len(host.events), 1)
+            self.assertEqual(
+                host.events[0][2]["idempotency_key"],
+                "inventory:raw-movie-1:organized:"
+                f"{started['operation']['operation_id']}",
+            )
+            self.assertEqual(
+                host.events[0][1]["final_path"],
+                "/真人电影/中文电影 (English Movie)",
+            )
+            self.assertEqual(host.reports[-1]["state"], "completed")
+            self.assertIn("成功：1", host.reports[-1]["status_text"])
+            self.assertTrue(
+                jobs.get("inventory:raw-movie-1")["result"]["organized"]
+            )
+
+    async def test_inventory_wraps_root_video_and_uses_portable_target_names(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        class LooseVideoStorage(FakeStorage):
+            def __init__(self):
+                super().__init__([])
+
+            def get_file_info(self, path):
+                if path == "/真人电影":
+                    return {"file_id": "root-movies", "file_category": "0"}
+                return super().get_file_info(path)
+
+            def get_file_list(self, params):
+                if params.get("cid") == "root-movies":
+                    return [{
+                        "file_id": "loose-video-1",
+                        "name": "Loose:<Movie>?.mkv",
+                        "is_dir": False,
+                        "size": 1000,
+                    }]
+                return []
+
+        class PortableNameHost(FakeHost):
+            async def call_capability(
+                self, capability, method, payload, **kwargs
+            ):
+                if capability == "media.search" and method == "resolve_metadata":
+                    contract = movie_contract()
+                    contract["identity"].update({
+                        "chinese_title": "设<备>：名?",
+                        "english_title": "CON",
+                    })
+                    self.metadata_payload = payload
+                    return {
+                        "status": "resolved",
+                        "media_metadata": contract,
+                        "naming_metadata": {
+                            "source": "search",
+                            "media_type": "movie",
+                            "chinese_title": "设<备>：名?",
+                            "english_title": "CON",
+                            "year": "2024",
+                        },
+                    }
+                return await super().call_capability(
+                    capability, method, payload, **kwargs
+                )
+
+        config = {
+            "category_folder": [{
+                "kind": "live_action_movie",
+                "name": "真人电影",
+                "path": "/真人电影",
+                "plex_library_id": "",
+            }],
+            "unorganized_path": "/未整理",
+            "storage_timeout": 3,
+            "metadata_timeout": 3,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = LooseVideoStorage()
+            host = PortableNameHost(storage)
+            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
+            feature = RenameFeature(config=config, host=host, jobs=jobs)
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+            owner = {"chat_id": 10, "user_id": 123}
+
+            await feature.command({**owner, "command": "rename", "args": []})
+            await feature.callback({**owner, "payload": "inventory:root:0"})
+            await runtime.wait()
+
+            preview = host.reports[-1]
+            self.assertEqual(
+                preview["details"]["counts"],
+                {"pending": 1, "completed": 0},
+            )
+
+            started = await feature.callback({
+                **owner,
+                "payload": "inventory:confirm",
+            })
+            await runtime.wait()
+
+            target_dir = "/真人电影/设备 名 (CON_)"
+            self.assertEqual(storage.created[-1], target_dir)
+            self.assertEqual(
+                storage.renamed,
+                [("/真人电影/Loose:<Movie>?.mkv", "CON_.mkv")],
+            )
+            self.assertEqual(
+                storage.moved,
+                [("/真人电影/CON_.mkv", target_dir)],
+            )
+            self.assertEqual(host.events[0][1]["final_path"], target_dir)
+            self.assertEqual(host.reports[-1]["state"], "completed")
+            self.assertTrue(
+                jobs.get("inventory:loose-video-1")["result"]["organized"]
+            )
+            self.assertEqual(
+                host.events[0][2]["idempotency_key"],
+                "inventory:loose-video-1:organized:"
+                f"{started['operation']['operation_id']}",
+            )
+
+    async def test_inventory_batch_pauses_for_metadata_and_resumes_serially(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        class InventoryStorage(FakeStorage):
+            def __init__(self):
+                super().__init__([])
+
+            def get_file_info(self, path):
+                if path == "/真人电影":
+                    return {"file_id": "root-movies", "file_category": "0"}
+                return super().get_file_info(path)
+
+            def get_file_list(self, params):
+                cid = params.get("cid")
+                if cid == "root-movies":
+                    return [{
+                        "file_id": "ambiguous-1",
+                        "name": "Ambiguous.2024",
+                        "is_dir": True,
+                    }, {
+                        "file_id": "resolved-2",
+                        "name": "Resolved.2024",
+                        "is_dir": True,
+                    }]
+                names = {
+                    "ambiguous-1": "Ambiguous.2024",
+                    "resolved-2": "Resolved.2024",
+                }
+                if cid in names:
+                    name = names[cid]
+                    return [{
+                        "name": f"{name}.Source.1080p.mkv",
+                        "file_id": f"video-{name}",
+                        "is_dir": False,
+                        "size": 1000,
+                    }]
+                return []
+
+        class AmbiguousFirstHost(FakeHost):
+            def __init__(self, storage):
+                super().__init__(storage)
+                self.resolve_calls = 0
+
+            async def call_capability(
+                self, capability, method, payload, **kwargs
+            ):
+                if capability == "media.search" and method == "resolve_metadata":
+                    self.resolve_calls += 1
+                    if self.resolve_calls == 1:
+                        return {
+                            "status": "confirmation_required",
+                            "query": payload["query"],
+                            "probe": payload["probe"],
+                            "candidates": [{
+                                "ref": "douban:inventory-1",
+                                "title": "中文电影",
+                                "original_title": "English Movie",
+                                "year": "2024",
+                                "countries": ["美国"],
+                                "media_type": "movie",
+                            }],
+                        }
+                if capability == "media.search" and method == "confirm_metadata":
+                    return {
+                        "status": "resolved",
+                        "media_metadata": movie_contract(),
+                        "naming_metadata": {
+                            "source": "search",
+                            "media_type": "movie",
+                            "chinese_title": "中文电影",
+                            "english_title": "English Movie",
+                            "year": "2024",
+                        },
+                    }
+                return await super().call_capability(
+                    capability, method, payload, **kwargs
+                )
+
+        config = {
+            "category_folder": [{
+                "kind": "live_action_movie",
+                "name": "真人电影",
+                "path": "/真人电影",
+                "plex_library_id": "",
+            }, {
+                "kind": "animated_movie",
+                "name": "动画电影",
+                "path": "/动画电影",
+                "plex_library_id": "",
+            }, {
+                "kind": "live_action_series",
+                "name": "真人剧集",
+                "path": "/真人剧集",
+                "plex_library_id": "",
+            }, {
+                "kind": "animated_series",
+                "name": "动画剧集",
+                "path": "/动画剧集",
+                "plex_library_id": "",
+            }],
+            "unorganized_path": "/未整理",
+            "storage_timeout": 3,
+            "metadata_timeout": 3,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = AmbiguousFirstHost(InventoryStorage())
+            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
+            feature = RenameFeature(config=config, host=host, jobs=jobs)
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+            owner = {"chat_id": 10, "user_id": 123}
+
+            await feature.command({**owner, "command": "rename", "args": []})
+            await feature.callback({**owner, "payload": "inventory:root:0"})
+            await runtime.wait()
+            await feature.callback({**owner, "payload": "inventory:confirm"})
+            await runtime.wait()
+
+            waiting = host.reports[-1]
+            self.assertEqual(waiting["state"], "awaiting_input")
+            self.assertEqual(waiting["stage"], "metadata_confirmation")
+            self.assertEqual(len(host.events), 0)
+            callback_data = waiting["details"]["keyboard"][0][0][
+                "callback_data"
+            ]
+
+            await feature.callback({
+                **owner,
+                "payload": callback_data.split("rename:", 1)[1],
+            })
+            await runtime.wait()
+
+            self.assertEqual(host.resolve_calls, 2)
+            self.assertEqual(len(host.events), 2)
+            self.assertEqual(host.reports[-1]["state"], "completed")
+            self.assertIn("成功：2", host.reports[-1]["status_text"])
+            self.assertEqual(
+                jobs.get("inventory:ambiguous-1")["state"], "completed"
+            )
+            self.assertEqual(
+                jobs.get("inventory:resolved-2")["state"], "completed"
+            )
+
+    async def test_inventory_command_scans_one_selected_root_and_previews_direct_children(self):
+        class InventoryStorage(FakeStorage):
+            def __init__(self):
+                super().__init__([])
+                self.list_calls = []
+
+            def get_file_info(self, path):
+                if path == "/真人剧集":
+                    return {"file_id": "root-series", "file_category": "0"}
+                return None
+
+            def get_file_list(self, params):
+                self.list_calls.append(dict(params))
+                cid = params.get("cid")
+                if cid == "root-series":
+                    return [{
+                        "file_id": "organized-1",
+                        "name": "白宫杀人事件 (The Residence)",
+                        "is_dir": True,
+                    }, {
+                        "file_id": "raw-1",
+                        "name": "Veep.2012.S01-S07.1080p",
+                        "is_dir": True,
+                    }, {
+                        "file_id": "empty-1",
+                        "name": "Empty.Release",
+                        "is_dir": True,
+                    }]
+                if cid == "organized-1":
+                    return [{
+                        "name": "The Residence Season 01",
+                        "is_dir": True,
+                        "file_id": "organized-season-1",
+                    }]
+                if cid == "organized-season-1":
+                    return [{
+                        "name": "The Residence S01E01.mkv",
+                        "is_dir": False,
+                        "file_id": "video-organized",
+                    }]
+                if cid == "raw-1":
+                    return [{
+                        "name": "Season 1",
+                        "is_dir": True,
+                        "file_id": "raw-season-1",
+                    }]
+                if cid == "raw-season-1":
+                    return [{
+                        "name": "Veep.S01E01.mkv",
+                        "is_dir": False,
+                        "file_id": "video-raw",
+                    }]
+                if cid == "empty-1":
+                    return [{
+                        "name": "poster.jpg",
+                        "is_dir": False,
+                        "file_id": "poster",
+                    }]
+                return []
+
+        host = FakeHost(InventoryStorage())
+        feature = RenameFeature(
+            config={
+                "category_folder": [{
+                    "kind": "live_action_movie",
+                    "name": "真人电影",
+                    "path": "/真人电影",
+                    "plex_library_id": "",
+                }, {
+                    "kind": "animated_movie",
+                    "name": "动画电影",
+                    "path": "/动画电影",
+                    "plex_library_id": "",
+                }, {
+                    "kind": "live_action_series",
+                    "name": "真人剧集",
+                    "path": "/真人剧集",
+                    "plex_library_id": "",
+                }, {
+                    "kind": "animated_series",
+                    "name": "动画剧集",
+                    "path": "/动画剧集",
+                    "plex_library_id": "",
+                }],
+                "unorganized_path": "/未整理",
+                "storage_timeout": 3,
+            },
+            host=host,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+        owner = {"chat_id": 10, "user_id": 123}
+
+        menu = await feature.command({
+            **owner,
+            "command": "rename",
+            "args": [],
+        })
+        self.assertEqual(
+            [row[0]["text"] for row in menu["actions"][0]["data"]["keyboard"]],
+            ["真人电影", "动画电影", "真人剧集", "动画剧集", "未整理", "退出"],
+        )
+
+        scanning = await feature.callback({
+            **owner,
+            "payload": "inventory:root:2",
+        })
+        self.assertEqual(scanning["operation"]["stage"], "inventory_scan")
+        await runtime.wait()
+
+        preview = host.reports[-1]
+        self.assertEqual(preview["state"], "awaiting_input")
+        self.assertEqual(preview["stage"], "inventory_confirmation")
+        self.assertIn("未完成：2", preview["status_text"])
+        self.assertIn("已完成：1", preview["status_text"])
+        self.assertEqual(
+            preview["details"]["counts"],
+            {"pending": 2, "completed": 1},
+        )
+        self.assertEqual(
+            [call["cid"] for call in host.storage.list_calls],
+            [
+                "root-series",
+                "organized-1",
+                "organized-season-1",
+                "raw-1",
+                "raw-season-1",
+                "empty-1",
+            ],
+        )
+        self.assertTrue(all(
+            call["offset"] == 0 and call["limit"] == 1000
+            for call in host.storage.list_calls
+        ))
+        self.assertEqual(
+            preview["details"]["keyboard"][0][0]["callback_data"],
+            "rename:inventory:confirm",
+        )
+
+    async def test_inventory_classification_uses_live_structure_in_unorganized(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        class InventoryStorage(FakeStorage):
+            def __init__(self):
+                super().__init__([])
+
+            def get_file_info(self, path):
+                if path == "/未整理":
+                    return {"file_id": "root-unorganized", "file_category": "0"}
+                return None
+
+            def get_file_list(self, params):
+                cid = params.get("cid")
+                if cid == "root-unorganized":
+                    return [{
+                        "file_id": "normalized-1",
+                        "name": "中文电影 (English Movie)",
+                        "is_dir": True,
+                    }, {
+                        "file_id": "raw-1",
+                        "name": "Raw.Movie.2024.1080p",
+                        "is_dir": True,
+                    }, {
+                        "file_id": "empty-1",
+                        "name": "Empty.Release",
+                        "is_dir": True,
+                    }]
+                if cid == "normalized-1":
+                    return [{
+                        "name": "English Movie.mkv",
+                        "is_dir": False,
+                        "file_id": "normalized-video",
+                    }]
+                if cid == "raw-1":
+                    return [{
+                        "name": "Raw.Movie.2024.Source.mkv",
+                        "is_dir": False,
+                        "file_id": "raw-video",
+                    }]
+                if cid == "empty-1":
+                    return [{
+                        "name": "poster.jpg",
+                        "is_dir": False,
+                        "file_id": "poster",
+                    }]
+                return []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
+            self.assertTrue(jobs.claim("inventory:raw-1"))
+            jobs.update(
+                "inventory:raw-1",
+                "completed",
+                {"organized": True},
+            )
+            host = FakeHost(InventoryStorage())
+            feature = RenameFeature(
+                config={
+                    "category_folder": [],
+                    "unorganized_path": "/未整理",
+                    "storage_timeout": 3,
+                },
+                host=host,
+                jobs=jobs,
+            )
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+            owner = {"chat_id": 10, "user_id": 123}
+
+            await feature.command({**owner, "command": "rename", "args": []})
+            await feature.callback({**owner, "payload": "inventory:root:0"})
+            await runtime.wait()
+
+            preview = host.reports[-1]
+            self.assertEqual(
+                preview["details"]["counts"],
+                {"pending": 2, "completed": 1},
+            )
+            self.assertEqual(
+                [
+                    item["resource_name"]
+                    for item in feature.inventory_sessions[(10, 123)]["pending"]
+                ],
+                ["Raw.Movie.2024.1080p", "Empty.Release"],
+            )
+
+    async def test_inventory_scan_paginates_past_one_thousand_tree_nodes(self):
+        class GuardrailStorage(FakeStorage):
+            def __init__(self):
+                super().__init__([])
+                self.offsets = []
+
+            def get_file_info(self, path):
+                return {"file_id": "root-series", "file_category": "0"}
+
+            def get_file_list(self, params):
+                cid = params.get("cid")
+                if cid == "root-series":
+                    return [{
+                        "file_id": "large-1",
+                        "name": "Large.Release",
+                        "is_dir": True,
+                    }]
+                if cid != "large-1":
+                    return []
+                offset = int(params.get("offset") or 0)
+                self.offsets.append(offset)
+                if offset == 0:
+                    return [{
+                        "name": f"poster-{index}.jpg",
+                        "is_dir": False,
+                        "file_id": f"poster-{index}",
+                    } for index in range(1000)]
+                if offset == 1000:
+                    return [{
+                        "name": "Movie.Source.mkv",
+                        "is_dir": False,
+                        "file_id": "movie-video",
+                    }]
+                return []
+
+        host = FakeHost(GuardrailStorage())
+        feature = RenameFeature(
+            config={
+                "category_folder": [{
+                    "kind": "live_action_series",
+                    "name": "真人剧集",
+                    "path": "/真人剧集",
+                    "plex_library_id": "",
+                }],
+                "unorganized_path": "/未整理",
+                "storage_timeout": 3,
+            },
+            host=host,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+        owner = {"chat_id": 10, "user_id": 123}
+
+        await feature.command({**owner, "command": "rename", "args": []})
+        await feature.callback({**owner, "payload": "inventory:root:0"})
+        await runtime.wait()
+
+        self.assertEqual(host.reports[-1]["state"], "awaiting_input")
+        self.assertEqual(
+            host.reports[-1]["details"]["counts"],
+            {"pending": 1, "completed": 0},
+        )
+        self.assertEqual(host.storage.offsets, [0, 1000])
+
+    async def test_ambiguous_magnet_with_colon_job_id_resumes_same_job(self):
         from telepiplex_rename.jobs import RenameJobStore
 
         class AmbiguousHost(FakeHost):
@@ -705,7 +1688,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             await feature.download_completed({
                 "event_id": "event-ambiguous",
                 "payload": {
-                    "job_id": "job-ambiguous",
+                    "job_id": "telegram:219358366",
                     "selected_path": "/Movies",
                     "user_id": 123,
                     "chat_id": 10,
@@ -725,7 +1708,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             })
             await runtime.wait()
 
-            waiting = jobs.get("job-ambiguous")
+            waiting = jobs.get("telegram:219358366")
             self.assertEqual(waiting["state"], "awaiting_metadata")
             self.assertEqual(host.storage.renamed, [])
             self.assertEqual(host.reports[-1]["state"], "awaiting_input")
@@ -747,7 +1730,10 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 host.storage.renamed[0][0],
                 "/Downloads/Movie.2024.mkv",
             )
-            self.assertEqual(jobs.get("job-ambiguous")["state"], "completed")
+            self.assertEqual(
+                jobs.get("telegram:219358366")["state"],
+                "completed",
+            )
 
     async def test_resume_durable_job_defers_transient_failure(self):
         feature = RenameFeature(
@@ -765,6 +1751,34 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             "state": "processed",
             "result": {"event_payload": {}},
         })
+
+    async def test_resume_durable_inventory_job_requires_a_fresh_scan(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
+            jobs.claim("inventory:restart-1")
+            jobs.update("inventory:restart-1", "processed", {
+                "organized": True,
+                "inventory_batch_id": "batch-before-restart",
+                "event_payload": {
+                    "job_id": "inventory:restart-1",
+                    "final_path": "/真人电影/Movie",
+                },
+            })
+            feature = RenameFeature(
+                config={"unorganized_path": "/未整理"},
+                host=FakeHost(),
+                jobs=jobs,
+            )
+
+            await feature._resume_durable_job(
+                jobs.get("inventory:restart-1")
+            )
+
+            stored = jobs.get("inventory:restart-1")
+            self.assertEqual(stored["state"], "failed")
+            self.assertIn("重新执行 /rename", stored["result"]["message"])
 
     async def test_unresolved_media_search_moves_release_to_unorganized(self):
         class UnresolvedHost(FakeHost):
@@ -1261,6 +2275,11 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.events[0][0], "media.organized")
         self.assertEqual(host.events[0][1]["job_id"], "job-1")
         self.assertEqual(host.events[0][1]["final_path"], "/Movies/中文电影 (English Movie)")
+        self.assertTrue(host.events[0][1]["media_metadata"]["confirmed"])
+        self.assertEqual(
+            host.events[0][1]["media_metadata"]["identity"]["english_title"],
+            "English Movie",
+        )
         self.assertIn("整理完成", host.notifications[0][1])
         self.assertNotIn("`", host.notifications[0][1])
 
@@ -1622,14 +2641,25 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.1.0")
+        self.assertEqual(manifest["version"], "1.2.2")
         self.assertEqual(manifest["host_api"], ">=1.4,<2.0")
-        self.assertIn('version = "1.1.0"', project)
+        self.assertIn('version = "1.2.2"', project)
+
+    def test_inventory_command_is_visible_and_config_command_is_hidden(self):
+        manifest = yaml.safe_load(
+            (ROOT / "manifest.yaml").read_text(encoding="utf-8")
+        )
+        commands = {
+            item["name"]: item for item in manifest["commands"]
+        }
+
+        self.assertTrue(commands["rename"]["menu_visible"])
+        self.assertFalse(commands["rename_config"]["menu_visible"])
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.1.0.tpx", source)
-        self.assertNotIn("dist/rename-1.1.0.tpx", source)
+        self.assertIn("/tmp/rename-1.2.2.tpx", source)
+        self.assertNotIn("dist/rename-1.2.2.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

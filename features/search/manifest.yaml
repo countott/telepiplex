@@ -1,6 +1,6 @@
 plugin_id: search
 name: search
-version: 1.8.0
+version: 1.9.1
 host_api: ">=1.4,<2.0"
 entry_point: telepiplex_search.runtime:main
 provides:
@@ -23,6 +23,7 @@ direct_message_hosts:
   - douban.com
   - wikipedia.org
   - w.wiki
+  - wikidata.org
   - thetvdb.com
   - tvdb.com
   - themoviedb.org

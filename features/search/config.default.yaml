@@ -99,10 +99,3 @@ metadata:
     enable: true
     endpoint: https://graphql.anilist.co
     timeout: 15
-ai:
-  enable: true
-  api_url: ""
-  api_key: ""
-  model: ""
-  timeout: 60
-  thinking_mode: enabled

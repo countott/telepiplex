@@ -177,7 +177,10 @@ class InteractionCoordinator:
                     self._connection.execute(
                         "UPDATE operations SET plugin_id = ?, state = ?, stage = ?, "
                         "status_text = ?, control = ?, revision = ?, next_plugin_id = ?, "
-                        "details_json = ?, updated_at = ? WHERE operation_id = ?",
+                        "details_json = ?, "
+                        "message_id = CASE WHEN ? THEN NULL ELSE message_id END, "
+                        "message_kind = CASE WHEN ? THEN '' ELSE message_kind END, "
+                        "updated_at = ? WHERE operation_id = ?",
                         (
                             values["plugin_id"],
                             values["state"],
@@ -187,6 +190,8 @@ class InteractionCoordinator:
                             values["revision"],
                             next_plugin_id,
                             values["details_json"],
+                            owner_changed,
+                            owner_changed,
                             time.time(),
                             values["operation_id"],
                         ),

@@ -28,6 +28,28 @@ class RenameJobStore:
             cursor = db.execute("INSERT OR IGNORE INTO rename_jobs(job_id,state,updated_at) VALUES (?,'processing',?)", (str(job_id), time.time()))
             return cursor.rowcount == 1
 
+    def claim_retryable(self, job_id, *, reopen_completed=False):
+        """Claim a new inventory job or reopen a terminal retryable one."""
+        now = time.time()
+        with sqlite3.connect(self.path) as db:
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO rename_jobs(job_id,state,updated_at) "
+                "VALUES (?,'processing',?)",
+                (str(job_id), now),
+            )
+            if cursor.rowcount == 1:
+                return True
+            retryable_states = ["failed", "cancelled"]
+            if reopen_completed:
+                retryable_states.append("completed")
+            placeholders = ",".join("?" for _ in retryable_states)
+            cursor = db.execute(
+                "UPDATE rename_jobs SET state='processing', result_json='{}', "
+                f"updated_at=? WHERE job_id=? AND state IN ({placeholders})",
+                (now, str(job_id), *retryable_states),
+            )
+            return cursor.rowcount == 1
+
     def update(self, job_id, state, result):
         with sqlite3.connect(self.path) as db:
             db.execute("UPDATE rename_jobs SET state=?, result_json=?, updated_at=? WHERE job_id=?", (str(state), json.dumps(result or {}, ensure_ascii=False, sort_keys=True), time.time(), str(job_id)))

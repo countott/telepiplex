@@ -320,7 +320,11 @@ def hydrate_frozen_candidate(
     verified_scope_fact_ids = {
         link.fact_id
         for link in anchored.source_links
-        if link.verification == "tvdb_inventory_verified"
+        if link.verification in {
+            "tvdb_inventory_verified",
+            "tmdb_inventory_verified",
+            "wikipedia_season_count_verified",
+        }
     }
     previous_unresolved = [
         item
@@ -360,7 +364,9 @@ def hydrate_frozen_candidate(
         "prowlarr_queries": list(
             (contract.get("retrieval") or {}).get("queries") or []
         ),
-        "poster_url": anchored.primary_poster_url,
+        "poster_url": _text(
+            (contract.get("identity") or {}).get("poster_url")
+        ),
         "poster_assets": [
             poster.to_dict() for poster in anchored.poster_assets
         ],

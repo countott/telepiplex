@@ -63,6 +63,17 @@ def series_inventory(contract: dict, *, today: date | None = None) -> SeriesInve
     )
 
 
+def series_seasons(contract: dict) -> tuple[int, ...]:
+    inventory = series_inventory(contract)
+    if inventory.seasons:
+        return inventory.seasons
+    try:
+        count = int((contract.get("identity") or {}).get("season_count"))
+    except (TypeError, ValueError):
+        return ()
+    return tuple(range(1, count + 1)) if count > 0 else ()
+
+
 def series_scope_options(contract: dict) -> tuple[str, ...]:
     decision = ((contract.get("evidence") or {}).get("decision") or {})
     scope = str(decision.get("scope") or "movie_or_series")
@@ -73,8 +84,11 @@ def series_scope_options(contract: dict) -> tuple[str, ...]:
     if scope == "whole_series":
         return ()
     inventory = series_inventory(contract)
-    if len(inventory.seasons) <= 1:
-        return ("whole_series", "episode")
+    seasons = series_seasons(contract)
+    if len(seasons) <= 1:
+        return ("whole_series",)
+    if not inventory.seasons:
+        return ("whole_series", "season")
     return ("whole_series", "season", "episode")
 
 
@@ -110,11 +124,12 @@ def apply_series_scope(
         episode_number = None
     elif choice in {"season", "episode"}:
         season_number = _integer(season_number)
-        if season_number not in inventory.seasons:
+        known_seasons = series_seasons(result)
+        if season_number not in known_seasons:
             raise SeriesScopeError("season_not_found")
         if choice == "season":
             aired = inventory.aired_by_season.get(season_number, ())
-            if not aired:
+            if inventory.seasons and not aired:
                 raise SeriesScopeError("season_not_aired")
             query = build_prowlarr_query(
                 search_title,

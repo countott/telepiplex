@@ -48,10 +48,22 @@ class ParsedInput:
 
 
 _TRAILING_BARE_NUMBER = re.compile(r"(?<!\d)(\d{1,3})\s*$")
+_LEADING_QUOTED_NUMERIC_TITLE = re.compile(
+    r'^\s*(?:"(?P<ascii>(?:19|20)\d{2})"|'
+    r'“(?P<curly>(?:19|20)\d{2})”)'
+    r'(?=\s|$)'
+)
 _MEDIA_TYPE_TOKEN = re.compile(
     r"(?i)(?<!\S)"
     r"(电影|電影|movie|film|电视剧|電視劇|剧集|劇集|series|tv\s*show)"
     r"(?!\S)"
+)
+_NATURAL_LANGUAGE_REQUEST = re.compile(
+    r"(?:帮我|請幫我|请帮我)(?:找|搜|推荐)|"
+    r"我想(?:看|找|搜)|"
+    r"有没有.*(?:电影|電影|电视剧|電視劇|剧集|劇集|美剧|日剧|韩剧|动画|動畫)|"
+    r"类似.+的(?:电影|電影|电视剧|電視劇|剧|劇|动画|動畫)",
+    re.IGNORECASE,
 )
 _MESSAGE_URL = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
 _TRAILING_URL_PUNCTUATION = ".,;:!?，。；：！？"
@@ -68,6 +80,7 @@ _TRAILING_URL_CLOSERS = {
 _SUPPORTED_LINK_HOSTS = (
     "douban.com",
     "wikipedia.org",
+    "wikidata.org",
     "w.wiki",
     "thetvdb.com",
     "tvdb.com",
@@ -111,6 +124,8 @@ def _supported_provider(raw_url: str) -> str:
         return "douban"
     if _host_matches(host, "wikipedia.org") or host == "w.wiki":
         return "wikipedia"
+    if _host_matches(host, "wikidata.org"):
+        return "wikidata"
     if (
         _host_matches(host, "thetvdb.com")
         or _host_matches(host, "tvdb.com")
@@ -238,6 +253,22 @@ def _tmdb_link(raw_query: str) -> MetadataLink | None:
     )
 
 
+def _wikidata_link(raw_query: str) -> MetadataLink | None:
+    if _supported_provider(raw_query) != "wikidata":
+        return None
+    parsed = urlparse(raw_query)
+    match = re.fullmatch(r"/wiki/(Q\d+)/?", parsed.path, re.IGNORECASE)
+    if not match:
+        return None
+    return MetadataLink(
+        provider="wikidata",
+        media_type="",
+        entity_id=match.group(1).upper(),
+        scope="work",
+        url=raw_query,
+    )
+
+
 def _anilist_link(raw_query: str) -> MetadataLink | None:
     if _supported_provider(raw_query) != "anilist":
         return None
@@ -263,6 +294,7 @@ def metadata_link_from_url(raw_url: str) -> MetadataLink | None:
         _douban_link(raw_url)
         or _tvdb_link(raw_url)
         or _wikipedia_link(raw_url)
+        or _wikidata_link(raw_url)
         or _tmdb_link(raw_url)
         or _anilist_link(raw_url)
     )
@@ -338,7 +370,24 @@ def classify_search_input(raw_query: str) -> ParsedInput:
             raw_query=collapsed_query,
             reason="unsupported_scope_syntax",
         )
+    if _NATURAL_LANGUAGE_REQUEST.search(collapsed_query):
+        return ParsedInput(
+            kind="unsupported_text",
+            raw_query=collapsed_query,
+            reason="natural_language_not_supported",
+        )
 
+    leading_numeric_match = _LEADING_QUOTED_NUMERIC_TITLE.match(
+        collapsed_query
+    )
+    leading_numeric_title = (
+        (
+            leading_numeric_match.group("ascii")
+            or leading_numeric_match.group("curly")
+        )
+        if leading_numeric_match
+        else ""
+    )
     explicit_numeric_title = quoted_numeric_title(collapsed_query)
     raw_query = (
         explicit_numeric_title
@@ -364,6 +413,15 @@ def classify_search_input(raw_query: str) -> ParsedInput:
     if scope in {"whole_series", "season", "episode"}:
         media_type = "series"
     year = str(intent.get("year") or "").strip()
+    if leading_numeric_title:
+        remainder = collapsed_query[leading_numeric_match.end():]
+        release_year = re.search(
+            r"(?<!\d)((?:19|20)\d{2})(?!\d)",
+            remainder,
+        )
+        if release_year:
+            year = release_year.group(1)
+            title = leading_numeric_title
     if year:
         title = re.sub(
             rf"(?<!\d){re.escape(year)}(?!\d)",

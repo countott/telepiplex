@@ -184,10 +184,12 @@ def _fact_registry(graph: SearchGraph) -> dict[str, EvidenceFact]:
     return registry
 
 
-def _tvdb_inventory(facts: tuple[EvidenceFact, ...]) -> set[tuple[int, int]]:
-    result = set()
+def _regular_inventories(
+    facts: tuple[EvidenceFact, ...],
+) -> dict[str, set[tuple[int, int]]]:
+    result = {"tvdb": set(), "tmdb": set()}
     for fact in facts:
-        if fact.provider != "tvdb" or fact.media_type != "series":
+        if fact.provider not in result or fact.media_type != "series":
             continue
         for raw in fact.episodes:
             if not isinstance(raw, dict):
@@ -198,34 +200,66 @@ def _tvdb_inventory(facts: tuple[EvidenceFact, ...]) -> set[tuple[int, int]]:
             except (TypeError, ValueError):
                 continue
             if season > 0 and episode > 0:
-                result.add((season, episode))
+                result[fact.provider].add((season, episode))
     return result
+
+
+def _wikipedia_season_counts(
+    facts: tuple[EvidenceFact, ...],
+) -> tuple[int, ...]:
+    counts = set()
+    for fact in facts:
+        if (
+            fact.provider not in {"wikipedia", "wikidata"}
+            or fact.media_type != "series"
+        ):
+            continue
+        try:
+            count = int(fact.season_count)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            counts.add(count)
+    return tuple(sorted(counts))
 
 
 def _verified_scope(
     role: str,
     season_number: int | None,
     episode_number: int | None,
-    inventory: set[tuple[int, int]],
+    inventories: dict[str, set[tuple[int, int]]],
+    wikipedia_season_counts: tuple[int, ...],
 ) -> tuple[int | None, int | None, str]:
     if role == "season":
+        for provider in ("tvdb", "tmdb"):
+            inventory = inventories.get(provider, set())
+            if (
+                season_number is not None
+                and any(
+                    season == season_number
+                    for season, _episode in inventory
+                )
+            ):
+                return season_number, None, f"{provider}_inventory_verified"
         if (
             season_number is not None
-            and any(season == season_number for season, _episode in inventory)
+            and any(season_number <= count for count in wikipedia_season_counts)
         ):
-            return season_number, None, "tvdb_inventory_verified"
+            return season_number, None, "wikipedia_season_count_verified"
         return None, None, "unresolved_scope_link"
     if role == "episode":
-        if (
-            season_number is not None
-            and episode_number is not None
-            and (season_number, episode_number) in inventory
-        ):
-            return (
-                season_number,
-                episode_number,
-                "tvdb_inventory_verified",
-            )
+        for provider in ("tvdb", "tmdb"):
+            inventory = inventories.get(provider, set())
+            if (
+                season_number is not None
+                and episode_number is not None
+                and (season_number, episode_number) in inventory
+            ):
+                return (
+                    season_number,
+                    episode_number,
+                    f"{provider}_inventory_verified",
+                )
         return None, None, "unresolved_scope_link"
     return season_number, episode_number, (
         "ai_related_fact" if role == "related_work" else "fact_verified"
@@ -297,7 +331,8 @@ def _candidate_from_payload(
         raise CandidateBindingError("ai_output_invalid")
 
     selected_facts = tuple(value[0] for value in binding_values)
-    inventory = _tvdb_inventory(selected_facts)
+    inventories = _regular_inventories(selected_facts)
+    wikipedia_season_counts = _wikipedia_season_counts(selected_facts)
     source_links = []
     posters = []
     unresolved = []
@@ -308,7 +343,8 @@ def _candidate_from_payload(
             role,
             season_number,
             episode_number,
-            inventory,
+            inventories,
+            wikipedia_season_counts,
         )
         if verification == "unresolved_scope_link":
             unresolved.append(f"{fact.fact_id}:unresolved_scope_link")

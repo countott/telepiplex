@@ -327,7 +327,7 @@ class MediaMetadataV1Test(unittest.TestCase):
             contract["warnings"],
         )
 
-    def test_contract_keeps_every_link_poster_field_source_and_ai_decision(self):
+    def test_contract_keeps_sources_and_uses_deterministic_decision(self):
         contract = build_media_metadata_v1(
             _candidate(unresolved=("wikipedia:not_found",)),
             metadata_id="m1",
@@ -340,9 +340,10 @@ class MediaMetadataV1Test(unittest.TestCase):
             {"douban", "tvdb"},
         )
         self.assertEqual(len(evidence["poster_assets"]), 2)
+        self.assertNotIn("ai", evidence)
         self.assertEqual(
-            evidence["ai"]["reason"],
-            "Verified sources describe the same film.",
+            evidence["decision"]["mode"],
+            "deterministic_fact_binding",
         )
         self.assertEqual(
             contract["identity"]["root_fact_id"],
@@ -350,6 +351,64 @@ class MediaMetadataV1Test(unittest.TestCase):
         )
         self.assertIn("wikipedia:not_found", evidence["unresolved"])
         self.assertIn("warning:source_unresolved", contract["warnings"])
+
+    def test_poster_priority_is_tmdb_then_douban_then_wikipedia_and_ignores_anilist(self):
+        facts = (
+            _fact(
+                "wikipedia:Q1",
+                "wikipedia",
+                titles=("Spirited Away",),
+                year="2001",
+                url="https://en.wikipedia.org/wiki/Spirited_Away",
+                external_ids={"wikipedia": "Q1"},
+                poster="https://art.example/wikipedia.jpg",
+                english="Spirited Away",
+            ),
+            _fact(
+                "douban:1",
+                "douban",
+                titles=("千与千寻", "Spirited Away"),
+                year="2001",
+                url="https://movie.douban.com/subject/1/",
+                external_ids={"douban_subject": "1"},
+                poster="https://art.example/douban.jpg",
+                chinese="千与千寻",
+                english="Spirited Away",
+            ),
+            _fact(
+                "tmdb:129",
+                "tmdb",
+                titles=("Spirited Away",),
+                year="2001",
+                url="https://www.themoviedb.org/movie/129",
+                external_ids={"tmdb": "129"},
+                poster="https://art.example/tmdb.jpg",
+                english="Spirited Away",
+            ),
+            _fact(
+                "anilist:199",
+                "anilist",
+                titles=("Sen to Chihiro no Kamikakushi",),
+                year="2001",
+                url="https://anilist.co/anime/199",
+                external_ids={"anilist": "199"},
+                poster="https://art.example/anilist.jpg",
+                romanized="Sen to Chihiro no Kamikakushi",
+                english="Spirited Away",
+            ),
+        )
+
+        contract = build_media_metadata_v1(
+            _candidate(facts=facts),
+            metadata_id="poster-priority",
+            raw_query="千与千寻",
+        )
+
+        self.assertEqual(
+            contract["identity"]["poster_url"],
+            "https://art.example/tmdb.jpg",
+        )
+        self.assertEqual(contract["identity"]["poster_source"], "tmdb")
 
     def test_movie_query_uses_bounded_verified_titles_with_year(self):
         contract = build_media_metadata_v1(
@@ -464,7 +523,11 @@ class MediaMetadataV1Test(unittest.TestCase):
         self.assertEqual(contract["evidence"]["decision"]["season_number"], 2)
         self.assertEqual(
             build_prowlarr_query_chain(contract, "蜂蜜与四叶草 第二季"),
-            ["Hachimitsu to Clover S02", "Honey and Clover S02"],
+            [
+                "Hachimitsu to Clover S02",
+                "Honey and Clover S02",
+                "Hachimitsu to Clover Season 02",
+            ],
         )
 
     def test_query_ignores_unverified_aliases_and_raw_query_noise(self):
@@ -487,6 +550,86 @@ class MediaMetadataV1Test(unittest.TestCase):
                 "Sen to Chihiro no Kamikakushi 2001",
                 "Spirited Away 2001",
             ],
+        )
+
+    def test_verified_veep_season_uses_root_title_query_variants(self):
+        episodes = ({
+            "season_number": 1,
+            "episode_number": 1,
+            "aired": "2012-04-22",
+        },)
+        douban = _fact(
+            "douban:5379824",
+            "douban",
+            titles=("副总统 第一季", "Veep Season 1"),
+            year="2012",
+            media_type="series",
+            url="https://movie.douban.com/subject/5379824/",
+            external_ids={"douban_subject": "5379824"},
+            chinese="副总统 第一季",
+            original="Veep Season 1",
+            language="en",
+            english="Veep Season 1",
+        )
+        tvdb = _fact(
+            "tvdb:series:75978",
+            "tvdb",
+            titles=("Veep",),
+            year="2012",
+            media_type="series",
+            url="https://thetvdb.com/series/veep",
+            external_ids={"tvdb": "75978"},
+            original="Veep",
+            language="en",
+            english="Veep",
+            episodes=episodes,
+        )
+        candidate = AnchoredCandidate(
+            candidate_id="douban:5379824",
+            anchor_fact_id=douban.fact_id,
+            identity_role="season",
+            intended_scope="season",
+            source_links=(
+                SourceLink(
+                    provider="douban",
+                    fact_id=douban.fact_id,
+                    url=douban.source_url,
+                    external_ids=douban.external_ids,
+                    role="season",
+                    season_number=1,
+                    episode_number=None,
+                    verification="tvdb_inventory_verified",
+                ),
+                SourceLink(
+                    provider="tvdb",
+                    fact_id=tvdb.fact_id,
+                    url=tvdb.source_url,
+                    external_ids=tvdb.external_ids,
+                    role="series_root",
+                    season_number=None,
+                    episode_number=None,
+                    verification="fact_verified",
+                ),
+            ),
+            poster_assets=(),
+            unresolved_sources=(),
+            ai_confidence=1,
+            ai_reason="Douban season verified against TVDB inventory.",
+            facts=(douban, tvdb),
+        )
+
+        contract = build_media_metadata_v1(
+            candidate,
+            metadata_id="veep-season-1",
+            raw_query="veep",
+        )
+
+        self.assertEqual(contract["identity"]["english_title"], "Veep")
+        self.assertEqual(contract["retrieval"]["scope"], "season")
+        self.assertEqual(contract["evidence"]["decision"]["season_number"], 1)
+        self.assertEqual(
+            build_prowlarr_query_chain(contract, "veep"),
+            ["Veep S01", "Veep Season 01"],
         )
 
     def test_query_chain_is_deduplicated_and_capped_at_three(self):

@@ -6,10 +6,9 @@ from pathlib import PurePosixPath
 
 from telepiplex_plugin_sdk.media_metadata import (
     merge_resolved_items,
-    series_folder_name,
     series_titles,
 )
-from .media_naming import sanitize_path_name
+from .media_naming import sanitize_path_name, sanitize_target_name
 
 
 VIDEO_EXTENSIONS = {
@@ -117,23 +116,23 @@ def _episode_marker_text(season: int, episode: int) -> str:
 
 
 def _display_folder(chinese_title: str, english_title: str) -> str:
-    chinese_title = sanitize_path_name(chinese_title)
-    english_title = sanitize_path_name(english_title)
+    chinese_title = sanitize_target_name(chinese_title)
+    english_title = sanitize_target_name(english_title)
     if chinese_title and english_title and chinese_title != english_title:
         return f"{chinese_title} ({english_title})"
     return chinese_title or english_title
 
 
 def _target_root(selected_path: str, metadata: dict, ai_plan: dict) -> str:
-    series_name = sanitize_path_name(ai_plan.get("series_name") or metadata.get("english_title") or metadata.get("query"))
-    chinese_title = sanitize_path_name(metadata.get("chinese_title"))
+    series_name = sanitize_target_name(ai_plan.get("series_name") or metadata.get("english_title") or metadata.get("query"))
+    chinese_title = sanitize_target_name(metadata.get("chinese_title"))
     if not series_name:
         return ""
     return _join_path(selected_path, _display_folder(chinese_title, series_name))
 
 
 def _target_relative_path(item: dict, source_relative_path: str, series_name: str) -> str:
-    series_name = sanitize_path_name(series_name)
+    series_name = sanitize_target_name(series_name)
     season = _safe_season_int(item.get("season_number"))
     episode = _safe_episode_int(item.get("episode_number"))
     if not series_name or season is None or episode is None:
@@ -168,7 +167,7 @@ def build_tvdb_rename_plan(
     target_root = _target_root(selected_path, metadata, ai_plan)
     if not target_root:
         return None
-    series_name = sanitize_path_name(ai_plan.get("series_name") or metadata.get("english_title") or metadata.get("query"))
+    series_name = sanitize_target_name(ai_plan.get("series_name") or metadata.get("english_title") or metadata.get("query"))
 
     operations = []
     seen_sources = set()
@@ -227,7 +226,7 @@ def build_tvdb_rename_plan(
     return {
         "target_root": target_root,
         "tvdb_series_id": tvdb_series_id,
-        "series_name": sanitize_path_name(ai_plan.get("series_name") or ""),
+        "series_name": sanitize_target_name(ai_plan.get("series_name") or ""),
         "operations": operations,
         "unmatched_sources": sorted(discard_sources),
         "warnings": [str(item) for item in ai_plan.get("warnings") or [] if str(item).strip()],
@@ -258,26 +257,50 @@ def build_confirmed_rename_plan(
         episode = _safe_episode_int(item.get("episode_number"))
         if season is not None and episode is not None:
             allowed_targets.add((season, episode))
+    bounded_season = None
+    if (
+        not allowed_targets
+        and "warning:episode_inventory_unavailable"
+        in (media_metadata.get("warnings") or ())
+        and str(
+            (media_metadata.get("retrieval") or {}).get("scope") or ""
+        ) == "season"
+    ):
+        decision = (
+            (media_metadata.get("evidence") or {}).get("decision") or {}
+        )
+        bounded_season = _safe_season_int(decision.get("season_number"))
+        if bounded_season is None or bounded_season < 1:
+            return None
     if not allowed_targets:
-        if (
+        if bounded_season is not None:
+            pass
+        elif (
             placement.get("season_number") is None
             or str(placement.get("season_number")).strip() == ""
         ):
             return None
-        season = _safe_season_int(placement.get("season_number"))
-        episode = _safe_episode_int(placement.get("episode_number"))
-        if season is None or episode is None:
-            return None
-        allowed_targets.add((season, episode))
+        else:
+            season = _safe_season_int(placement.get("season_number"))
+            episode = _safe_episode_int(placement.get("episode_number"))
+            if season is None or episode is None:
+                return None
+            allowed_targets.add((season, episode))
 
     source_lookup = _source_index(file_tree)
     source_video_paths = {node["relative_path"] for node in _video_file_nodes(file_tree)}
-    chinese_title, english_title = series_titles(media_metadata)
+    chinese_title, english_title = (
+        sanitize_target_name(title)
+        for title in series_titles(media_metadata)
+    )
     series_name = english_title or chinese_title
     if not series_name:
         return None
 
-    target_root = _join_path(selected_path, series_folder_name(media_metadata))
+    target_root = _join_path(
+        selected_path,
+        _display_folder(chinese_title, english_title),
+    )
     operations = []
     seen_sources = set()
     seen_targets = set()
@@ -289,7 +312,12 @@ def build_confirmed_rename_plan(
         source_node = source_lookup.get(_clean_path(item.get("source_file") or ""))
         season = _safe_season_int(item.get("season_number"))
         episode = _safe_episode_int(item.get("episode_number"))
-        if not source_node or (season, episode) not in allowed_targets:
+        allowed = (
+            (season, episode) in allowed_targets
+            if bounded_season is None
+            else season == bounded_season and episode is not None
+        )
+        if not source_node or not allowed:
             continue
 
         source_relative_path = source_node["relative_path"]
@@ -326,7 +354,9 @@ def build_confirmed_rename_plan(
         (operation["season_number"], operation["episode_number"])
         for operation in operations
     }
-    if not operations or mapped_targets != allowed_targets:
+    if not operations or (
+        bounded_season is None and mapped_targets != allowed_targets
+    ):
         return None
     return {
         "target_root": target_root,

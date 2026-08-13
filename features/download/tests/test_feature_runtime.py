@@ -206,6 +206,11 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "user_id": 123,
                 "target_folder_name": "中文名 (English)",
                 "media_metadata": {"schema_version": 1, "metadata_id": "m1"},
+                "naming_metadata": {
+                    "source": "search-live",
+                    "chinese_title": "中文名",
+                    "english_title": "English",
+                },
                 "release": {"title": "Show.S01E01.1080p", "indexer": "Prowlarr"},
             },
             "context": {"idempotency_key": "plan-1"},
@@ -223,6 +228,8 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["file_tree"][0]["path"], payload["download_root"])
         self.assertEqual(payload["release"]["title"], "Show.S01E01.1080p")
         self.assertEqual(payload["media_metadata"]["metadata_id"], "m1")
+        self.assertEqual(payload["naming_metadata"]["source"], "search-live")
+        self.assertEqual(payload["naming_metadata"]["chinese_title"], "中文名")
         self.assertEqual(kwargs["idempotency_key"], "plan-1:completed")
         self.assertEqual(self.client.renamed, [])
         self.assertEqual(self.client.moved, [])
@@ -718,8 +725,13 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn(stage, stages)
         self.assertEqual(self.host.reports[-1]["state"], "handed_off")
         self.assertEqual(self.host.reports[-1]["next_plugin_id"], "rename")
+        self.assertEqual(
+            self.host.reports[-1]["status_text"],
+            "✅ 115 下载完成\n保存目录：/Downloads/Show.S01E01.mkv",
+        )
         self.assertEqual(self.host.events[0][1]["operation_id"], "op-download-1")
         self.assertEqual(self.host.events[0][1]["chat_id"], 10)
+        self.assertEqual(self.host.notifications, [])
 
     async def test_download_completes_and_skips_organization_when_rename_is_inactive(self):
         async def reject_missing_target(report, **_kwargs):
@@ -2110,7 +2122,7 @@ class RuntimeStartupTest(unittest.TestCase):
     @staticmethod
     def _context(root: Path):
         return SimpleNamespace(
-            manifest={"plugin_id": "download", "version": "1.0.6"},
+            manifest={"plugin_id": "download", "version": "1.0.7"},
             token="runtime-token",
             socket_path=root / "runtime.sock",
             host_socket_path=root / "host.sock",
@@ -2184,17 +2196,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.0.6")
+        self.assertEqual(manifest["version"], "1.0.7")
         self.assertEqual(manifest["host_api"], ">=1.1,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.0.6")
+        self.assertEqual(project["project"]["version"], "1.0.7")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.1.0",
         )
-        self.assertIn("/tmp/download-1.0.6.tpx", readme)
-        self.assertNotIn("dist/download-1.0.6.tpx", readme)
+        self.assertIn("/tmp/download-1.0.7.tpx", readme)
+        self.assertNotIn("dist/download-1.0.7.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)

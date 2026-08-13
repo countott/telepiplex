@@ -285,6 +285,11 @@ def _provider_stable_id(
             or identifiers.get("wikipedia")
             or identifiers.get("wikibase_item")
         )
+    if provider == "wikidata":
+        return _text(
+            raw.get("wikibase_item")
+            or identifiers.get("wikidata")
+        )
     if provider == "tmdb":
         return _text(raw.get("tmdb_id") or raw.get("id") or identifiers.get("tmdb"))
     if provider == "anilist":
@@ -342,6 +347,8 @@ def _fact(
         external_ids["douban_subject"] = provider_stable_id
     if provider == "wikipedia" and provider_stable_id:
         external_ids["wikipedia"] = provider_stable_id
+    if provider == "wikidata" and provider_stable_id:
+        external_ids["wikidata"] = provider_stable_id
     if provider == "tvdb":
         if provider_stable_id:
             external_ids["tvdb"] = provider_stable_id
@@ -437,7 +444,16 @@ def _facts_from_source(source: dict) -> list[EvidenceFact]:
         if not isinstance(raw, dict):
             continue
         if provider != "tvdb":
-            result.append(_fact(provider, raw, index))
+            result.append(_fact(
+                provider,
+                raw,
+                index,
+                episodes=(
+                    raw.get("episodes")
+                    if isinstance(raw.get("episodes"), list)
+                    else None
+                ),
+            ))
             continue
         episodes_by_series = raw.get("episodes_by_series") or {}
         for media_type, key in (("movie", "movies"), ("series", "series")):

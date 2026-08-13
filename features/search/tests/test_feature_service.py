@@ -438,14 +438,14 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed["state"], "awaiting_input")
         self.assertEqual(failed["stage"], "prowlarr_recovery")
         keyboard = failed["details"]["keyboard"]
-        self.assertEqual(keyboard[0][0]["text"], "重试 Prowlarr")
+        self.assertEqual(keyboard[0][0]["text"], "重试搜索")
         self.assertEqual(
             keyboard[0][0]["callback_data"],
             f"search:confirm:{plan_id}",
         )
         self.assertEqual(
             [button["text"] for row in keyboard for button in row],
-            ["重试 Prowlarr", "退出"],
+            ["重试搜索", "退出"],
         )
         self.assertEqual(
             len({
@@ -456,7 +456,36 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             2,
         )
         self.assertIn("已等待 200 秒", failed["status_text"])
+        self.assertIn("搜索词：English Title", failed["status_text"])
+        self.assertNotIn("Prowlarr", failed["status_text"])
         self.assertIn(plan_id, self.feature.plans)
+
+    async def test_related_movie_prompt_hides_search_backend_name(self):
+        plan = search_plan()
+        plan["media_metadata"]["relation"] = {
+            "type": "衍生电影",
+            "target_series": {
+                "chinese_title": "目标剧集",
+                "english_title": "Target Series",
+            },
+        }
+        operation = self.feature._new_operation(
+            {"chat_id": 10, "user_id": 1},
+            state="running",
+            stage="planning",
+            status_text="正在准备。",
+            control="cancel",
+            kind="search",
+        )
+
+        action = self.feature._related_placement_action(
+            plan["plan_id"],
+            {"plan": plan, "operation_id": operation["operation_id"]},
+        )
+
+        text = action["actions"][0]["text"]
+        self.assertIn("资源搜索都按电影标题和年份检索", text)
+        self.assertNotIn("Prowlarr", text)
 
     async def test_wrong_scope_never_enters_release_rank(self):
         from telepiplex_search.series_scope import apply_series_scope
@@ -471,6 +500,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         plan_id = "scope-gate"
         stored = {
+            "operation_id": "op-scope-gate",
             "plan": {
                 "plan_id": plan_id,
                 "media_metadata": contract,
@@ -505,6 +535,27 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             ["The.Glory.S01"],
         )
 
+    async def test_rejected_identity_delivery_stops_before_release_lookup(self):
+        from telepiplex_plugin_sdk import FeatureError
+
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        stored["selected_path"] = "/Movies"
+        self.host.publish_operation_milestone = AsyncMock(return_value={
+            "accepted": False,
+            "duplicate": False,
+        })
+        release_calls = []
+        self.feature.release_search = (
+            lambda *args: release_calls.append(args) or []
+        )
+
+        with self.assertRaises(FeatureError) as raised:
+            await self.feature._confirm_and_search(plan_id, stored)
+
+        self.assertEqual(raised.exception.code, "identity_delivery_failed")
+        self.assertEqual(release_calls, [])
+
     async def test_no_exact_scope_reports_counts_without_fallback_buttons(self):
         from telepiplex_search.series_scope import apply_series_scope
 
@@ -518,6 +569,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         plan_id = "scope-zero"
         stored = {
+            "operation_id": "op-scope-zero",
             "plan": {
                 "plan_id": plan_id,
                 "media_metadata": contract,
@@ -551,6 +603,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         plan_id = "scope-twelve"
         stored = {
+            "operation_id": "op-scope-twelve",
             "plan": {
                 "plan_id": plan_id,
                 "media_metadata": contract,
@@ -729,12 +782,11 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(plan_id, self.feature.plans)
 
     async def test_planning_failure_uses_safe_specific_reason(self):
-        from telepiplex_search.planner import SearchPlanningError
+        from telepiplex_search.errors import SearchPlanningError
 
         async def blocked(_raw_query, _plan_id):
             raise SearchPlanningError(
-                "ai_unavailable_after_gate_failure",
-                ["ambiguous_candidates"],
+                "ambiguous_candidates",
             )
 
         self.feature.plan_builder = blocked
@@ -748,14 +800,14 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["operation"]["state"], "running")
         await self.runtime.run("search-plan-")
         self.assertIn("多个候选", self.host.reports[-1]["status_text"])
-        self.assertIn("AI 当前不可用", self.host.reports[-1]["status_text"])
+        self.assertNotIn("AI", self.host.reports[-1]["status_text"])
         self.assertEqual(self.host.reports[-1]["state"], "failed")
         self.assertEqual(self.feature.plans, {})
         self.assertEqual(self.search_queries, [])
 
     async def test_candidate_binding_failure_logs_correlation_without_raw_query(self):
         from telepiplex_search.context import runtime_context
-        from telepiplex_search.planner import SearchPlanningError
+        from telepiplex_search.errors import SearchPlanningError
 
         async def blocked(_raw_query, _plan_id):
             raise SearchPlanningError(
@@ -790,13 +842,12 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("ODDTAXI", warning)
 
     async def test_recoverable_planning_errors_have_retry_and_single_exit_ui(self):
-        from telepiplex_search.planner import SearchPlanningError
+        from telepiplex_search.errors import SearchPlanningError
 
         for code in (
             "source_failure",
             "source_rate_limited",
             "source_fact_conflict",
-            "ai_candidate_failure",
             "candidate_binding_failed",
             "fixed_link_read_failed",
             "metadata_conflict",
@@ -833,7 +884,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                     self.feature._release_plan(stored_plan_id)
 
     async def test_source_fact_conflict_ui_is_human_readable_and_keeps_retry(self):
-        from telepiplex_search.planner import SearchPlanningError
+        from telepiplex_search.errors import SearchPlanningError
 
         async def blocked(_raw_query, _plan_id):
             raise SearchPlanningError(
@@ -1912,7 +1963,10 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLessEqual(len(visible), 1024)
         self.assertEqual(len(action["data"]["poster_items"]), 5)
-        self.assertEqual(action["text"].count("来源：豆瓣"), 5)
+        self.assertEqual(
+            action["text"].count("来源：维基百科、豆瓣、TVDB"),
+            5,
+        )
         self.assertNotIn("<a ", action["text"])
         self.assertNotIn("维基百科暂时不可用", action["text"])
         self.assertNotIn("wikipedia:server_down", action["text"])
@@ -1945,6 +1999,23 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             action["text"],
         )
         self.assertIn("国家/地区：美国", action["text"])
+
+    def test_single_candidate_without_remote_poster_uses_grid_placeholder(self):
+        plan = ranked_search_plan()
+        candidate = plan["candidates"][0]
+        candidate["poster_url"] = ""
+        candidate["media_metadata"]["identity"]["poster_url"] = ""
+
+        action = self.feature._candidate_grid_action({
+            "candidates": [candidate],
+            "plan": {"plan_id": "placeholder"},
+        })
+
+        self.assertEqual(action["kind"], "send_photo_grid")
+        self.assertEqual(
+            action["data"]["poster_items"][0]["poster_url"],
+            "",
+        )
 
     def test_candidate_detail_uses_human_media_and_relation_labels(self):
         plan = series_ranked_search_plan()
@@ -2054,7 +2125,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 for row in report["details"]["keyboard"]
                 for button in row
             ],
-            ["就是它", "都不是"],
+            ["1. 中文标题1 2024", "都不是"],
         )
 
     @patch("telepiplex_search.service.hydrate_frozen_candidate")
@@ -2114,6 +2185,147 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             [],
         )
 
+    @patch("telepiplex_search.service.hydrate_frozen_candidate")
+    async def test_tvdb_unavailable_season_never_degrades_to_whole_series(
+        self,
+        hydrate,
+    ):
+        from telepiplex_search.candidate_hydration import (
+            CandidateHydrationError,
+        )
+        from telepiplex_search.series_scope import apply_series_scope
+
+        plan_id = "season-verification-required"
+        plan = series_ranked_search_plan()
+        plan.update({
+            "plan_id": plan_id,
+            "raw_query": "副总统 第一季",
+            "links_frozen": True,
+            "auto_confirm": False,
+        })
+        candidate = plan["candidates"][0]
+        candidate.update({
+            "links_frozen": True,
+            "identity_role": "season",
+            "intended_scope": "season",
+            "requested_season_number": 1,
+            "source_links": [{
+                "provider": "douban",
+                "fact_id": "douban:5379824",
+                "url": "https://movie.douban.com/subject/5379824/",
+                "external_ids": {"douban_subject": "5379824"},
+                "role": "season",
+                "season_number": None,
+                "episode_number": None,
+                "verification": "unresolved_scope_link",
+                "proposed_season_number": 1,
+                "proposed_episode_number": None,
+            }, {
+                "provider": "tvdb",
+                "fact_id": "tvdb:series:75978",
+                "url": "https://thetvdb.com/series/veep",
+                "external_ids": {"tvdb": "75978"},
+                "role": "series_root",
+                "season_number": None,
+                "episode_number": None,
+                "verification": "fact_verified",
+                "proposed_season_number": None,
+                "proposed_episode_number": None,
+            }],
+        })
+        candidate["media_metadata"] = apply_series_scope(
+            candidate["media_metadata"],
+            "season",
+            season_number=1,
+        )
+        self.feature.selected_candidate_supplementer = AsyncMock(
+            return_value=deepcopy(candidate)
+        )
+        hydrate.side_effect = CandidateHydrationError(
+            "metadata_incomplete",
+            ("verified_scope",),
+        )
+        operation = self.feature._new_operation(
+            {"chat_id": 10, "user_id": 1},
+            state="awaiting_input",
+            stage="candidate_selection",
+            status_text="等待选择。",
+            control="exit",
+            kind="search",
+        )
+
+        result = await self.feature._select_candidate(
+            plan_id,
+            {
+                "plan": plan,
+                "candidates": (candidate,),
+                "selected_path": "",
+                "operation_id": operation["operation_id"],
+            },
+            "0",
+        )
+
+        self.assertEqual(hydrate.call_count, 1)
+        self.assertIn("已验证季集范围", result["actions"][0]["text"])
+        self.assertNotIn("operation", result)
+
+    @patch("telepiplex_search.service.hydrate_frozen_candidate")
+    async def test_wikipedia_bounded_season_offers_whole_season_without_fake_episode_count(
+        self,
+        hydrate,
+    ):
+        plan_id = "wikipedia-bounded-season"
+        plan = series_ranked_search_plan()
+        plan.update({
+            "plan_id": plan_id,
+            "raw_query": "Veep S01",
+            "links_frozen": True,
+            "auto_confirm": False,
+        })
+        candidate = plan["candidates"][0]
+        candidate["links_frozen"] = True
+        contract = candidate["media_metadata"]
+        contract["identity"]["season_count"] = 7
+        contract["items"] = []
+        contract["retrieval"] = {
+            "media_type": "series",
+            "scope": "season",
+            "query": "Veep S01",
+            "queries": ["Veep S01", "Veep Season 01"],
+        }
+        contract["evidence"]["decision"].update({
+            "scope": "season",
+            "season_number": 1,
+            "episode_number": None,
+        })
+        contract["warnings"] = ["warning:episode_inventory_unavailable"]
+        hydrate.return_value = deepcopy(candidate)
+        operation = self.feature._new_operation(
+            {"chat_id": 10, "user_id": 1},
+            state="awaiting_input",
+            stage="candidate_selection",
+            status_text="等待选择。",
+            control="exit",
+            kind="search",
+        )
+        stored = {
+            "plan": plan,
+            "candidates": (candidate,),
+            "selected_path": "",
+            "operation_id": operation["operation_id"],
+        }
+
+        result = await self.feature._select_candidate(plan_id, stored, "0")
+
+        self.assertEqual(result["operation"]["stage"], "series_scope")
+        self.assertIn("未获取集数明细", result["actions"][0]["text"])
+        labels = [
+            button["text"]
+            for row in result["actions"][0]["data"]["keyboard"]
+            for button in row
+        ]
+        self.assertEqual(labels, ["第一季 全季", "返回"])
+
     async def test_unique_hard_match_announces_identity_before_auto_confirmation(self):
         async def planner(_raw_query, plan_id):
             result = ranked_search_plan()
@@ -2142,6 +2354,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "🎬 中文标题1 (English Title)",
             self.host.milestones[0]["text"],
         )
+        self.assertEqual(self.host.milestones[0]["deadline"], 45)
         self.assertNotIn("已识别为", self.host.reports[-1]["status_text"])
 
     async def test_multi_candidate_exact_read_retry_keeps_selected_index(self):
@@ -2461,7 +2674,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         ])
 
     async def test_retry_after_locked_clarification_failure_keeps_identity(self):
-        from telepiplex_search.planner import SearchPlanningError
+        from telepiplex_search.errors import SearchPlanningError
 
         calls = []
 
@@ -2618,8 +2831,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "English Title 2024",
         )
 
-    @patch("telepiplex_search.service.infer_relation_hypotheses_with_ai")
-    async def test_relation_ai_runs_only_after_selected_movie(self, relation_ai):
+    async def test_related_movie_is_not_mapped_into_specials(self):
         async def planner(_raw_query, plan_id):
             result = ranked_search_plan()
             result["plan_id"] = plan_id
@@ -2651,12 +2863,6 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             }]
             return result
 
-        relation_ai.return_value = {"hypotheses": [{
-            "candidate_key": "tvdb:movie:1",
-            "target_candidate_key": "tvdb:series:100",
-            "relation_type": "extension_movie",
-            "fact_ids": ["douban:movie", "tvdb:series"],
-        }]}
         self.feature.plan_builder = planner
         await self.feature.command({
             "command": "s",
@@ -2665,7 +2871,6 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "chat_id": 10,
         })
         await self.runtime.run("search-plan-")
-        self.assertFalse(relation_ai.called)
         callback = self.host.reports[-1]["details"]["keyboard"][0][0]["callback_data"]
         plan_id = callback.split(":")[2]
 
@@ -2675,11 +2880,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "chat_id": 10,
         })
 
-        relation_ai.assert_called_once()
-        self.assertIn(
-            "Specials",
-            selected["actions"][0]["data"]["keyboard"][0][0]["text"],
-        )
+        self.assertEqual(selected["operation"]["stage"], "prowlarr_search")
         self.assertEqual(
             self.feature.plans[plan_id]["plan"]["media_metadata"]["retrieval"]["query"],
             "English Title 2024",
@@ -2713,8 +2914,8 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             row[0]["text"]
             for row in scope["actions"][0]["data"]["keyboard"]
         ]
-        self.assertIn("全剧（推荐）", labels)
-        self.assertIn("指定集", labels)
+        self.assertIn("全剧（共 1 季）", labels)
+        self.assertNotIn("指定集", labels)
         self.assertNotIn("指定季", labels)
 
         started = await self.feature.callback({
@@ -2730,6 +2931,88 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             ("The Glory Season 01", "series"),
             ("The Glory Complete", "series"),
         ])
+
+    def test_multi_season_menu_lists_each_season_directly(self):
+        plan = series_ranked_search_plan()
+        contract = plan["media_metadata"]
+        contract["items"].extend({
+            "item_id": f"s2e{number}",
+            "content_role": "main_episode",
+            "season_number": 2,
+            "episode_number": number,
+            "aired": "2023-01-01",
+        } for number in range(1, 4))
+        operation = self.feature._new_operation(
+            {"chat_id": 10, "user_id": 1},
+            state="awaiting_input",
+            stage="series_scope",
+            status_text="等待选择。",
+            control="exit",
+            kind="search",
+        )
+
+        action = self.feature._series_scope_action("seasons", {
+            "plan": {"plan_id": "seasons", "media_metadata": contract},
+            "operation_id": operation["operation_id"],
+        })["actions"][0]
+        labels = [row[0]["text"] for row in action["data"]["keyboard"]]
+
+        self.assertEqual(labels[:3], ["全剧", "第一季", "第二季"])
+        self.assertEqual(
+            action["data"]["keyboard"][1][0]["callback_data"],
+            "search:scope:seasons:season:1",
+        )
+
+    def test_multi_season_menu_formats_double_digit_chinese_ordinals(self):
+        plan = series_ranked_search_plan()
+        contract = plan["media_metadata"]
+        contract["identity"]["season_count"] = 11
+        contract["items"] = []
+        operation = self.feature._new_operation(
+            {"chat_id": 10, "user_id": 1},
+            state="awaiting_input",
+            stage="series_scope",
+            status_text="等待选择。",
+            control="exit",
+            kind="search",
+        )
+
+        action = self.feature._series_scope_action("season-eleven", {
+            "plan": {"plan_id": "season-eleven", "media_metadata": contract},
+            "operation_id": operation["operation_id"],
+        })["actions"][0]
+        labels = [row[0]["text"] for row in action["data"]["keyboard"]]
+
+        self.assertIn("第十一季", labels)
+
+    def test_explicit_season_menu_lists_each_regular_episode(self):
+        plan = series_ranked_search_plan()
+        contract = plan["media_metadata"]
+        contract["evidence"]["decision"].update({
+            "scope": "season",
+            "season_number": 1,
+        })
+        operation = self.feature._new_operation(
+            {"chat_id": 10, "user_id": 1},
+            state="awaiting_input",
+            stage="series_scope",
+            status_text="等待选择。",
+            control="exit",
+            kind="search",
+        )
+
+        action = self.feature._series_scope_action("episodes", {
+            "plan": {"plan_id": "episodes", "media_metadata": contract},
+            "operation_id": operation["operation_id"],
+        })["actions"][0]
+        labels = [row[0]["text"] for row in action["data"]["keyboard"]]
+
+        self.assertEqual(labels[0], "第一季 全季")
+        self.assertEqual(labels[1:4], ["第一集", "第二集", "第三集"])
+        self.assertEqual(
+            action["data"]["keyboard"][1][0]["callback_data"],
+            "search:scope:episodes:episode:1:1",
+        )
 
     async def test_metadata_capability_resolves_once_without_registry(self):
         planner_queries = []
@@ -3140,9 +3423,9 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "1.8.0")
+        self.assertEqual(manifest["version"], "1.9.1")
         self.assertEqual(manifest["host_api"], ">=1.4,<2.0")
-        self.assertEqual(project["project"]["version"], "1.8.0")
+        self.assertEqual(project["project"]["version"], "1.9.1")
 
     def test_default_config_enables_free_and_configured_sources(self):
         config = yaml.safe_load((ROOT / "config.default.yaml").read_text())
@@ -3150,9 +3433,7 @@ class FeatureSourceContractTest(unittest.TestCase):
         self.assertTrue(config["metadata"]["wikipedia"]["enable"])
         self.assertTrue(config["metadata"]["douban"]["enable"])
         self.assertTrue(config["metadata"]["tvdb"]["enable"])
-        self.assertTrue(config["ai"]["enable"])
-        self.assertNotIn("source_orchestration", config["ai"])
-        self.assertEqual(config["ai"]["thinking_mode"], "enabled")
+        self.assertNotIn("ai", config)
 
     def test_prowlarr_is_not_disabled_by_legacy_hidden_search_flag(self):
         from telepiplex_search.adapters.prowlarr import _get_prowlarr_config
@@ -3174,14 +3455,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.8.0.tpx", source)
+        self.assertIn("/tmp/search-1.9.1.tpx", source)
         self.assertIn("豆瓣", source)
-        self.assertIn("都不是", source)
-        self.assertIn("统一 AI", source)
+        self.assertIn("用户确认", source)
+        self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
-        self.assertIn("rename", source)
-        self.assertNotIn("dist/search-1.8.0.tpx", source)
+        self.assertIn("Rename", source)
+        self.assertNotIn("dist/search-1.9.1.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

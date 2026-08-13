@@ -116,7 +116,8 @@ class InteractionCoordinatorTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, "owner_mismatch")
 
     def test_handoff_changes_owner_without_releasing_gate(self):
-        self.coordinator.report("search", self.report())
+        initial = self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id(initial.operation_id, 55, "text")
         handed_off = self.coordinator.report(
             "search",
             self.report(
@@ -133,6 +134,7 @@ class InteractionCoordinatorTest(unittest.TestCase):
         )
         self.assertEqual(record.plugin_id, "download")
         self.assertEqual(record.next_plugin_id, "")
+        self.assertIsNone(record.message_id)
         self.assertEqual(self.coordinator.active(10, 1).operation_id, "op-1")
 
     def test_full_feature_handoff_chain_keeps_one_gate_until_plex_completes(self):

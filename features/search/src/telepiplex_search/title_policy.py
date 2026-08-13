@@ -93,11 +93,30 @@ def _chinese_title(
         and normalize_title(preferred) in candidate.normalized_titles
     ):
         return preferred
+    for provider in ("wikipedia",):
+        for fact in candidate.facts:
+            title = _text(fact.chinese_title)
+            if (
+                fact.provider == provider
+                and title
+                and _CJK.search(title)
+                and title not in original_titles
+            ):
+                return title
     for title in _chinese_values(candidate, "douban"):
         if title not in original_titles:
             return title
     for title in _chinese_values(candidate, "douban"):
         return title
+    for fact in candidate.facts:
+        title = _text(fact.chinese_title)
+        if (
+            fact.provider == "tmdb"
+            and title
+            and _CJK.search(title)
+            and title not in original_titles
+        ):
+            return title
     return ""
 
 

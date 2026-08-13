@@ -9,12 +9,15 @@ from telepiplex_search.confirmed_enrichment import (
     build_wikipedia_queries,
     is_confirmed_japanese_animation,
     select_unique_anilist_fact,
+    select_unique_douban_fact,
     select_unique_tmdb_fact,
     select_unique_tvdb_series,
     select_unique_wikipedia_fact,
 )
-from telepiplex_search.discovery_flow import build_douban_first_search_plan
+from telepiplex_search.direct_link import DirectEntity
+from telepiplex_search.direct_plan import build_direct_entity_plan
 from telepiplex_search.service import SearchFeature
+from telepiplex_search.work_discovery import build_root_work_search_plan
 
 
 def identity(**overrides):
@@ -109,6 +112,40 @@ class ConfirmedEnrichmentTest(unittest.TestCase):
             select_unique_anilist_fact(result, anime)["anilist_id"],
             "1142",
         )
+
+    def test_douban_chinese_fallback_requires_one_exact_identity(self):
+        english_only = identity(
+            provider="wikipedia",
+            stable_id="Q74801",
+            chinese_title="Veep",
+            english_title="Veep",
+            year="2012",
+            external_ids={"wikidata": "Q74801"},
+        )
+        result = {
+            "source": "douban",
+            "status": "ok",
+            "facts": [{
+                "subject_id": "1",
+                "title": "副总统",
+                "chinese_title": "副总统",
+                "english_title": "Veep",
+                "year": "2012",
+                "media_type": "series",
+                "url": "https://movie.douban.com/subject/1/",
+            }],
+        }
+
+        self.assertEqual(
+            select_unique_douban_fact(result, english_only)["subject_id"],
+            "1",
+        )
+        result["facts"].append({
+            **result["facts"][0],
+            "subject_id": "2",
+            "url": "https://movie.douban.com/subject/2/",
+        })
+        self.assertIsNone(select_unique_douban_fact(result, english_only))
 
     def test_wikipedia_queries_use_only_confirmed_identity(self):
         queries = build_wikipedia_queries(identity())
@@ -251,10 +288,10 @@ class ConfirmedEnrichmentIntegrationTest(unittest.IsolatedAsyncioTestCase):
         search_mock.assert_not_called()
 
     async def _candidate(self):
-        plan = await build_douban_first_search_plan(
-            "繁花",
-            "enrichment-1",
-            lambda _payload: {
+        plan = build_direct_entity_plan(
+            DirectEntity(
+                provider="douban",
+                evidence={
                 "source": "douban",
                 "status": "ok",
                 "facts": [{
@@ -268,8 +305,15 @@ class ConfirmedEnrichmentIntegrationTest(unittest.IsolatedAsyncioTestCase):
                         "https://movie.douban.com/subject/36490422/"
                     ),
                 }],
-            },
-            ai_decider=lambda _payload: None,
+                },
+                stable_identity=("douban_subject", "36490422"),
+                title="繁花",
+                year="2023",
+                media_type="series",
+                scope="work",
+            ),
+            raw_query="繁花",
+            plan_id="enrichment-1",
         )
         return plan["candidates"][0]
 
@@ -370,7 +414,7 @@ class ConfirmedEnrichmentIntegrationTest(unittest.IsolatedAsyncioTestCase):
         "telepiplex_search.service.search_tvdb_series",
         return_value=[],
     )
-    async def test_tvdb_failure_rewrites_requested_scope_to_whole_series(
+    async def test_tvdb_failure_preserves_requested_season_scope(
         self,
         _search,
     ):
@@ -389,8 +433,8 @@ class ConfirmedEnrichmentIntegrationTest(unittest.IsolatedAsyncioTestCase):
             "繁花 第一季",
         )
 
-        self.assertEqual(enriched["intended_scope"], "whole_series")
-        self.assertIsNone(enriched["requested_season_number"])
+        self.assertEqual(enriched["intended_scope"], "season")
+        self.assertEqual(enriched["requested_season_number"], 1)
         self.assertIn("tvdb:not_found", enriched["unresolved_sources"])
         self.assertNotIn(
             "tvdb",
@@ -507,6 +551,76 @@ class ConfirmedEnrichmentIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 item["provider"]
                 for item in enriched["source_links"]
             },
+        )
+
+    @patch("telepiplex_search.service.search_tvdb_series", return_value=[])
+    @patch("telepiplex_search.service.search_tmdb", return_value=[])
+    async def test_english_wikipedia_identity_uses_unique_douban_chinese_fallback(
+        self,
+        _tmdb,
+        _tvdb,
+    ):
+        plan = build_root_work_search_plan(
+            "Veep",
+            "english-wiki",
+            lambda _payload: {
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [{
+                    "language": "en",
+                    "search_rank": 1,
+                    "page_id": 1,
+                    "is_disambiguation": False,
+                    "title": "Veep",
+                    "english_title": "Veep",
+                    "official_english_title": "Veep",
+                    "extract": "American television series",
+                    "url": "https://en.wikipedia.org/wiki/Veep",
+                    "wikibase_item": "Q74801",
+                }],
+            },
+            lambda _qids: {
+                "Q74801": {
+                    "wikibase_item": "Q74801",
+                    "chinese_title": "",
+                    "english_title": "Veep",
+                    "aliases": [],
+                    "media_type": "series",
+                    "year": "2012",
+                    "countries": [],
+                    "season_count": 7,
+                    "episode_count": 65,
+                },
+            },
+        )
+        feature = SearchFeature(config={}, host=None)
+        feature._douban_provider = lambda payload: {
+            "source": "douban",
+            "status": "ok",
+            "facts": [{
+                "subject_id": "5379824",
+                "title": "副总统",
+                "chinese_title": "副总统",
+                "english_title": "Veep",
+                "year": "2012",
+                "media_type": "series",
+                "url": "https://movie.douban.com/subject/5379824/",
+                "cover_url": "https://img.example/veep.jpg",
+            }],
+        }
+
+        enriched = await feature._supplement_selected_candidate(
+            plan["candidates"][0],
+            "Veep",
+        )
+
+        douban_link = next(
+            item for item in enriched["source_links"]
+            if item["provider"] == "douban"
+        )
+        self.assertEqual(
+            douban_link["external_ids"]["douban_subject"],
+            "5379824",
         )
 
 

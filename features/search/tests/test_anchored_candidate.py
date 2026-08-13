@@ -272,6 +272,106 @@ class AnchoredCandidateTest(unittest.TestCase):
             candidates[0].unresolved_sources,
         )
 
+    def test_tmdb_regular_inventory_can_verify_season_scope(self):
+        graph = build_search_graph([{
+            "source": "tmdb",
+            "status": "ok",
+            "facts": [{
+                "tmdb_id": "2370",
+                "title": "Veep",
+                "official_english_title": "Veep",
+                "year": "2012",
+                "media_type": "series",
+                "url": "https://www.themoviedb.org/tv/2370",
+                "episodes": [{
+                    "tmdb_episode_id": "1001",
+                    "season_number": 1,
+                    "episode_number": 1,
+                }],
+            }],
+        }])
+        fact = graph.candidates[0].facts[0]
+
+        candidate = materialize_anchored_candidates(
+            graph,
+            {
+                "status": "resolved",
+                "candidates": [{
+                    "candidate_id": "tmdb:2370:s1",
+                    "anchor_fact_id": fact.fact_id,
+                    "identity_role": "season",
+                    "intended_scope": "season",
+                    "fact_bindings": [{
+                        "fact_id": fact.fact_id,
+                        "role": "season",
+                        "season_number": 1,
+                        "episode_number": None,
+                    }],
+                    "ai_confidence": 0.0,
+                    "ai_reason": "deterministic_tmdb_scope",
+                }],
+            },
+        )[0]
+
+        self.assertEqual(candidate.source_links[0].season_number, 1)
+        self.assertEqual(
+            candidate.source_links[0].verification,
+            "tmdb_inventory_verified",
+        )
+
+    def test_wikipedia_season_count_verifies_only_a_bounded_season(self):
+        graph = build_search_graph([{
+            "source": "wikipedia",
+            "status": "ok",
+            "facts": [{
+                "wikibase_item": "Q74801",
+                "title": "Veep",
+                "official_english_title": "Veep",
+                "year": "2012",
+                "media_type": "series",
+                "url": "https://en.wikipedia.org/wiki/Veep",
+                "season_count": 7,
+            }],
+        }])
+        fact = graph.candidates[0].facts[0]
+
+        def materialize(role, season, episode):
+            return materialize_anchored_candidates(graph, {
+                "status": "resolved",
+                "candidates": [{
+                    "candidate_id": f"wikipedia:Q74801:{role}",
+                    "anchor_fact_id": fact.fact_id,
+                    "identity_role": role,
+                    "intended_scope": role,
+                    "fact_bindings": [{
+                        "fact_id": fact.fact_id,
+                        "role": role,
+                        "season_number": season,
+                        "episode_number": episode,
+                    }],
+                    "ai_confidence": 0.0,
+                    "ai_reason": "deterministic_wikipedia_scope",
+                }],
+            })[0]
+
+        season = materialize("season", 7, None)
+        self.assertEqual(season.source_links[0].season_number, 7)
+        self.assertEqual(
+            season.source_links[0].verification,
+            "wikipedia_season_count_verified",
+        )
+        episode = materialize("episode", 7, 1)
+        self.assertEqual(
+            episode.source_links[0].verification,
+            "unresolved_scope_link",
+        )
+
+        outside = materialize("season", 8, None)
+        self.assertEqual(
+            outside.source_links[0].verification,
+            "unresolved_scope_link",
+        )
+
     def test_direct_link_anchor_cannot_be_changed_or_split(self):
         payload = _series_binding_payload()
         payload["candidates"][0]["anchor_fact_id"] = "douban:102"

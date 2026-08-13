@@ -372,10 +372,12 @@ class ReleaseReportTest(unittest.TestCase):
                 "down_indexers": [],
                 "error": "status unavailable",
             },
+            search_queries=["Veep S01", "Veep Season 01"],
         )
 
         self.assertEqual(text.splitlines(), [
             "✅ Title S01",
+            "搜索词：Veep S01 / Veep Season 01",
             "搜索器 0/0，失败 0",
             "没有同身份、同范围的可用片源。",
         ])

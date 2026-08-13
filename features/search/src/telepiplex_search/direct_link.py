@@ -25,6 +25,7 @@ from .adapters.wikipedia import (
     WikipediaPageLookupError,
     lookup_wikipedia_page,
 )
+from .adapters.wikidata import enrich_wikidata_entities
 from .adapters.tmdb import (
     TmdbAuthenticationError,
     TmdbConfigError,
@@ -266,7 +267,30 @@ def resolve_direct_link(link: MetadataLink) -> DirectEntity:
             ) from exc
         if not isinstance(fact, dict):
             raise DirectLinkError("direct_link_not_found")
+        if fact.get("is_disambiguation") is True:
+            raise DirectLinkError(
+                "wikipedia_disambiguation",
+                (_text(fact.get("title") or title_hint),),
+            )
         stable_id = _text(fact.get("wikibase_item"))
+        if stable_id:
+            try:
+                structural = enrich_wikidata_entities([stable_id]).get(
+                    stable_id
+                )
+            except Exception:
+                structural = None
+            if isinstance(structural, dict):
+                fact = {
+                    **fact,
+                    **{
+                        key: value
+                        for key, value in structural.items()
+                        if value not in (None, "", [], {})
+                    },
+                    "url": fact.get("url") or link.url,
+                    "cover_url": fact.get("cover_url") or "",
+                }
         title = _text(
             fact.get("official_english_title")
             or fact.get("title")
@@ -289,6 +313,46 @@ def resolve_direct_link(link: MetadataLink) -> DirectEntity:
                 "error": "",
             },
             stable_identity=("wikipedia", stable_id),
+            title=title,
+            year=_text(fact.get("year")),
+            media_type=media_type,
+            scope="work",
+        )
+    if link.provider == "wikidata":
+        try:
+            fact = enrich_wikidata_entities([link.entity_id]).get(
+                link.entity_id
+            )
+        except Exception as exc:
+            raise DirectLinkError(
+                "fixed_link_read_failed",
+                (f"wikidata:{type(exc).__name__}",),
+            ) from exc
+        if not isinstance(fact, dict):
+            raise DirectLinkError("direct_link_not_found")
+        title = _text(
+            fact.get("english_title")
+            or fact.get("chinese_title")
+        )
+        media_type = _text(fact.get("media_type"))
+        if not title or media_type not in {"movie", "series"}:
+            raise DirectLinkError("direct_link_invalid")
+        fact = {
+            **fact,
+            "url": link.url,
+            "title": fact.get("chinese_title") or title,
+            "official_english_title": fact.get("english_title") or "",
+        }
+        return DirectEntity(
+            provider="wikidata",
+            evidence={
+                "source": "wikidata",
+                "status": "ok",
+                "facts": [fact],
+                "source_urls": [link.url],
+                "error": "",
+            },
+            stable_identity=("wikidata", link.entity_id),
             title=title,
             year=_text(fact.get("year")),
             media_type=media_type,

@@ -156,21 +156,8 @@
         }
       },
       "additionalProperties": true
-    },
-    "ai": {
-      "type": "object",
-      "title": "AI",
-      "properties": {
-        "enable": {"type": "boolean", "title": "启用"},
-        "api_url": {"type": "string", "title": "API 地址"},
-        "api_key": {"type": "string", "title": "API Key", "writeOnly": true},
-        "model": {"type": "string", "title": "模型"},
-        "timeout": {"type": "number", "minimum": 1, "maximum": 600, "title": "超时（秒）"},
-        "thinking_mode": {"type": "string", "enum": ["enabled", "disabled"], "title": "思考模式"}
-      },
-      "additionalProperties": true
     }
   },
-  "required": ["category_folder", "search", "metadata", "ai"],
+  "required": ["category_folder", "search", "metadata"],
   "additionalProperties": false
 }

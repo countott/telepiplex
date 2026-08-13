@@ -10,6 +10,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSchemaContractTest(unittest.TestCase):
+    def test_inventory_category_routes_define_four_canonical_targets(self):
+        schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))
+        default = yaml.safe_load((ROOT / "config.default.yaml").read_text(encoding="utf-8"))
+
+        self.assertIn("category_folder", schema["properties"])
+        self.assertEqual(
+            [item["kind"] for item in default["category_folder"]],
+            [
+                "live_action_movie",
+                "animated_movie",
+                "live_action_series",
+                "animated_series",
+            ],
+        )
+
     def test_schema_declares_independent_rename_config_wizard(self):
         schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))
 

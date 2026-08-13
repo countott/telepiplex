@@ -366,6 +366,10 @@ def _move_confirmed_failure_to_unorganized(event):
         raise RuntimeError("确认方案映射失败，但 media.unorganized_path 未配置")
     storage = _storage(event)
     source_path = str(event.final_path or "").rstrip("/")
+    if source_path == unorganized_root or source_path.startswith(
+        f"{unorganized_root}/"
+    ):
+        return source_path
     source_leaf = source_path.rsplit("/", 1)[-1]
     if not storage.create_dir_recursive(unorganized_root):
         raise RuntimeError(f"无法创建未整理目录 {unorganized_root}")
@@ -397,6 +401,21 @@ def _deterministic_episode_plan(media_metadata: dict, file_tree: list[dict]):
     }
     if not allowed and placement.get("season_number") is not None and placement.get("episode_number") is not None:
         allowed.add((int(placement["season_number"]), int(placement["episode_number"])))
+    bounded_season = None
+    if (
+        not allowed
+        and "warning:episode_inventory_unavailable"
+        in (media_metadata.get("warnings") or ())
+        and str((media_metadata.get("retrieval") or {}).get("scope") or "")
+        == "season"
+    ):
+        decision = ((media_metadata.get("evidence") or {}).get("decision") or {})
+        try:
+            bounded_season = int(decision.get("season_number"))
+        except (TypeError, ValueError):
+            return None
+        if bounded_season < 1:
+            return None
     mapped = {}
     nodes_by_path = {
         str(node.get("relative_path") or "").strip("/"): node
@@ -414,8 +433,21 @@ def _deterministic_episode_plan(media_metadata: dict, file_tree: list[dict]):
         if node.get("is_dir"):
             continue
         marker = parse_episode_marker(node.get("relative_path") or node.get("name"))
-        if marker in allowed and marker not in mapped:
+        if (
+            marker is not None
+            and (
+                marker in allowed
+                or (
+                    bounded_season is not None
+                    and marker[0] == bounded_season
+                    and marker[1] > 0
+                )
+            )
+            and marker not in mapped
+        ):
             mapped[marker] = node
+    if bounded_season is not None:
+        allowed = set(mapped)
     if not allowed or set(mapped) != allowed:
         return None
     return {

@@ -75,6 +75,21 @@ class InputContractTest(unittest.TestCase):
                 self.assertEqual(parsed.kind, "unsupported_text")
                 self.assertEqual(parsed.reason, "unsupported_scope_syntax")
 
+    def test_descriptive_natural_language_is_rejected(self):
+        for query in (
+            "帮我找一部讲美国副总统的喜剧",
+            "我想看一个发生在白宫的电视剧",
+            "有没有类似副总统的美剧",
+        ):
+            with self.subTest(query=query):
+                parsed = classify_search_input(query)
+
+                self.assertEqual(parsed.kind, "unsupported_text")
+                self.assertEqual(
+                    parsed.reason,
+                    "natural_language_not_supported",
+                )
+
     def test_1x02_is_not_a_supported_user_scope(self):
         parsed = classify_search_input("Title 1x02")
 
@@ -95,6 +110,16 @@ class InputContractTest(unittest.TestCase):
                 self.assertEqual(parsed.raw_query, "1917")
                 self.assertEqual(parsed.title, "1917")
                 self.assertEqual(parsed.year, "")
+
+    def test_numeric_title_followed_by_release_year_is_not_reversed(self):
+        for query in ('"1917" 2019 电影', "“1917” 2019 电影"):
+            with self.subTest(query=query):
+                parsed = classify_search_input(query)
+
+                self.assertEqual(parsed.kind, "text")
+                self.assertEqual(parsed.title, "1917")
+                self.assertEqual(parsed.year, "2019")
+                self.assertEqual(parsed.media_type, "movie")
 
     def test_unverified_title_suffix_is_recorded_without_guessing_its_role(self):
         batman = classify_search_input("蝙蝠侠1")

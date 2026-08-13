@@ -60,6 +60,9 @@ class AniListAdapterTest(unittest.TestCase):
         self.assertEqual(result[0]["official_english_title"], "Honey and Clover II")
         self.assertIn("Honey & Clover II", result[0]["aliases"])
         self.assertEqual(result[0]["media_type"], "series")
+        self.assertNotIn("cover_url", result[0])
+        self.assertNotIn("episode_count", result[0])
+        self.assertNotIn("genres", result[0])
 
     @patch.object(anilist, "_anilist_post")
     def test_get_media_by_id_uses_stable_identity(self, post):

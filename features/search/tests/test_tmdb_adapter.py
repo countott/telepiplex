@@ -8,6 +8,38 @@ from telepiplex_search.context import runtime_context
 
 
 class TmdbAdapterTest(unittest.TestCase):
+    @patch.object(tmdb, "_tmdb_get")
+    def test_series_inventory_excludes_specials_and_reads_regular_episodes(self, get):
+        get.side_effect = [
+            {
+                "seasons": [
+                    {"season_number": 0},
+                    {"season_number": 1},
+                    {"season_number": 2},
+                ],
+            },
+            {
+                "episodes": [
+                    {"id": 101, "episode_number": 1, "air_date": "2012-04-22"},
+                    {"id": 102, "episode_number": 2, "air_date": "2012-04-29"},
+                ],
+            },
+            {
+                "episodes": [
+                    {"id": 201, "episode_number": 1, "air_date": "2013-04-14"},
+                ],
+            },
+        ]
+
+        items = tmdb.get_tmdb_series_inventory("123")
+
+        self.assertEqual(
+            [(item["season_number"], item["episode_number"]) for item in items],
+            [(1, 1), (1, 2), (2, 1)],
+        )
+        self.assertTrue(all(item["content_role"] == "main_episode" for item in items))
+        self.assertEqual(get.call_count, 3)
+
     def test_disabled_and_missing_credentials_have_distinct_codes(self):
         runtime_context.configure({"metadata": {"tmdb": {"enable": False}}})
         with self.assertRaises(tmdb.TmdbConfigError) as disabled:

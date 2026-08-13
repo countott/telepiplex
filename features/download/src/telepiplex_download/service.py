@@ -1735,7 +1735,10 @@ class DownloadFeature:
                         operation_id,
                         state="handed_off",
                         stage="handoff_rename",
-                        status_text="115 下载完成，正在交给媒体整理。",
+                        status_text=(
+                            "✅ 115 下载完成\n"
+                            f"保存目录：{payload.get('final_path')}"
+                        ),
                         control="cancel",
                         next_plugin_id="rename",
                     )
@@ -1781,12 +1784,6 @@ class DownloadFeature:
         )
         if self.jobs:
             self.jobs.update(job_id, "completed", result=payload)
-        user_id = int(payload.get("user_id") or 0)
-        if user_id:
-            try:
-                await self.host.notify_user(user_id, f"✅ 115 下载完成，已交给整理管线。\n保存目录：{payload.get('final_path')}", idempotency_key=f"{job_id}:download-notice")
-            except Exception:
-                pass
 
     async def operation_control(self, request: dict) -> dict:
         operation_id = str(request.get("operation_id") or "")

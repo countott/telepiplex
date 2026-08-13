@@ -667,6 +667,10 @@ class LibrarySyncServiceTest(unittest.TestCase):
         )
         self.assertEqual(job["payload"]["operation_id"], "op-series")
         self.assertEqual(job["payload"]["operation_revision"], 7)
+        self.assertEqual(
+            job["payload"]["metadata"]["media_metadata"]["metadata_id"],
+            contract["metadata_id"],
+        )
 
     def test_one_organized_job_scans_once_then_locates_each_final_path(self):
         completion = make_unresolved_standalone_series_completion()

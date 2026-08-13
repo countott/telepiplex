@@ -5,6 +5,7 @@ from datetime import date
 from telepiplex_search.series_scope import (
     SeriesScopeError,
     apply_series_scope,
+    series_seasons,
     series_scope_options,
 )
 
@@ -43,12 +44,29 @@ class SeriesScopeTest(unittest.TestCase):
     def test_one_and_multiple_season_options(self):
         self.assertEqual(
             series_scope_options(contract(seasons=(1,))),
-            ("whole_series", "episode"),
+            ("whole_series",),
         )
         self.assertEqual(
             series_scope_options(contract(seasons=(1, 2))),
             ("whole_series", "season", "episode"),
         )
+
+    def test_season_count_only_allows_season_search_but_not_episode_search(self):
+        value = contract(seasons=())
+        value["identity"]["season_count"] = 3
+
+        self.assertEqual(series_seasons(value), (1, 2, 3))
+        self.assertEqual(
+            series_scope_options(value),
+            ("whole_series", "season"),
+        )
+        scoped = apply_series_scope(
+            value,
+            "season",
+            season_number=2,
+        )
+        self.assertEqual(scoped["retrieval"]["query"], "The Glory S02")
+        self.assertEqual(scoped["items"], [])
 
     def test_explicit_season_requires_all_or_single_episode_choice(self):
         self.assertEqual(

@@ -183,40 +183,48 @@ def _field_resolutions(
 
 
 def _inventory(facts: tuple[EvidenceFact, ...]) -> list[dict]:
-    items = []
-    seen = set()
-    for fact in facts:
-        if fact.provider != "tvdb" or fact.media_type != "series":
-            continue
-        for raw in fact.episodes:
-            if not isinstance(raw, dict):
+    for provider in ("tvdb", "tmdb"):
+        items = []
+        seen = set()
+        for fact in facts:
+            if fact.provider != provider or fact.media_type != "series":
                 continue
-            try:
-                season = int(raw.get("season_number"))
-                episode = int(raw.get("episode_number"))
-            except (TypeError, ValueError):
-                continue
-            if season < 0 or episode < 1 or (season, episode) in seen:
-                continue
-            seen.add((season, episode))
-            items.append({
-                "item_id": _text(
-                    raw.get("tvdb_episode_id") or raw.get("id")
-                ) or f"S{season:02d}E{episode:03d}",
-                "content_role": "main_episode",
-                "season_number": season,
-                "episode_number": episode,
-                "aired": _text(
-                    raw.get("aired") or raw.get("firstAired")
+            for raw in fact.episodes:
+                if not isinstance(raw, dict):
+                    continue
+                try:
+                    season = int(raw.get("season_number"))
+                    episode = int(raw.get("episode_number"))
+                except (TypeError, ValueError):
+                    continue
+                if season < 1 or episode < 1 or (season, episode) in seen:
+                    continue
+                seen.add((season, episode))
+                items.append({
+                    "item_id": _text(
+                        raw.get("tvdb_episode_id")
+                        or raw.get("tmdb_episode_id")
+                        or raw.get("id")
+                    ) or f"S{season:02d}E{episode:03d}",
+                    "content_role": "main_episode",
+                    "season_number": season,
+                    "episode_number": episode,
+                    "aired": _text(
+                        raw.get("aired")
+                        or raw.get("firstAired")
+                        or raw.get("air_date")
+                    ),
+                    "inventory_source": provider,
+                })
+        if items:
+            return sorted(
+                items,
+                key=lambda item: (
+                    item["season_number"],
+                    item["episode_number"],
                 ),
-            })
-    return sorted(
-        items,
-        key=lambda item: (
-            item["season_number"],
-            item["episode_number"],
-        ),
-    )
+            )
+    return []
 
 
 def _scope(candidate: AnchoredCandidate, media_type: str) -> tuple[
@@ -231,6 +239,12 @@ def _scope(candidate: AnchoredCandidate, media_type: str) -> tuple[
         scope = "whole_series"
     season = episode = None
     if scope in {"season", "episode"}:
+        verified_inventory = {
+            "tvdb_inventory_verified",
+            "tmdb_inventory_verified",
+        }
+        if scope == "season":
+            verified_inventory.add("wikipedia_season_count_verified")
         anchor_link = next(
             (
                 link
@@ -244,14 +258,14 @@ def _scope(candidate: AnchoredCandidate, media_type: str) -> tuple[
             link
             for link in candidate.source_links
             if link.role == scope
-            and link.verification == "tvdb_inventory_verified"
+            and link.verification in verified_inventory
         ]
         selected = anchor_link or (
             scoped_links[0] if len(scoped_links) == 1 else None
         )
         if (
             selected is None
-            or selected.verification != "tvdb_inventory_verified"
+            or selected.verification not in verified_inventory
             or selected.season_number is None
             or (scope == "episode" and selected.episode_number is None)
         ):
@@ -264,6 +278,31 @@ def _scope(candidate: AnchoredCandidate, media_type: str) -> tuple[
     return scope, season, episode
 
 
+def _poster_selection(candidate: AnchoredCandidate) -> tuple[str, str]:
+    priority = {
+        "tmdb": 0,
+        "douban": 1,
+        "wikipedia": 2,
+        "wikidata": 3,
+    }
+    eligible = [
+        item for item in candidate.poster_assets
+        if item.provider in priority and _text(item.url)
+    ]
+    if not eligible:
+        return "", ""
+    selected = min(
+        eligible,
+        key=lambda item: (
+            priority[item.provider],
+            0 if item.fact_id == candidate.anchor_fact_id else 1,
+            item.fact_id,
+            item.url,
+        ),
+    )
+    return selected.url, selected.provider
+
+
 def _provider_statuses(candidate: AnchoredCandidate) -> dict[str, str]:
     statuses = {
         link.provider: "ok" for link in candidate.source_links
@@ -272,6 +311,7 @@ def _provider_statuses(candidate: AnchoredCandidate) -> dict[str, str]:
         parts = unresolved.split(":", 1)
         if len(parts) == 2 and parts[0] in {
             "wikipedia",
+            "wikidata",
             "douban",
             "tvdb",
             "tmdb",
@@ -380,27 +420,23 @@ def build_media_metadata_v1(
     degraded_tvdb_inventory = bool(
         media_type == "series"
         and scope == "whole_series"
+        and not inventory
         and any(
             _text(item).startswith("tvdb:")
             and not _text(item).endswith(":ok")
             for item in candidate.unresolved_sources
         )
     )
-    if media_type == "series":
-        if not any(
-            fact.provider == "tvdb"
-            and _text(fact.external_ids.get("tvdb"))
-            for fact in primary_facts
-        ) and not degraded_tvdb_inventory:
-            raise MetadataV1Error(
-                "metadata_incomplete",
-                ("tvdb_root",),
-            )
-        if not inventory and not degraded_tvdb_inventory:
-            raise MetadataV1Error(
-                "metadata_incomplete",
-                ("tvdb_inventory",),
-            )
+    degraded_episode_inventory = bool(
+        media_type == "series"
+        and scope == "season"
+        and not inventory
+        and any(
+            link.role == "season"
+            and link.verification == "wikipedia_season_count_verified"
+            for link in candidate.source_links
+        )
+    )
     if not candidate.source_links or not any(
         _text(link.url) for link in candidate.source_links
     ):
@@ -504,15 +540,7 @@ def build_media_metadata_v1(
             for fact in primary_facts
         ),
     ))
-    poster = candidate.primary_poster_url
-    poster_source = next(
-        (
-            item.provider
-            for item in candidate.poster_assets
-            if item.url == poster
-        ),
-        "",
-    )
+    poster, poster_source = _poster_selection(candidate)
     identity = {
         **titles.identity_fields(),
         "chinese_title": chinese_title,
@@ -557,6 +585,8 @@ def build_media_metadata_v1(
         warnings.append("warning:source_unresolved")
     if degraded_tvdb_inventory:
         warnings.append("warning:tvdb_inventory_unavailable")
+    if degraded_episode_inventory:
+        warnings.append("warning:episode_inventory_unavailable")
     anchor_link = next(
         (
             link for link in candidate.source_links
@@ -652,13 +682,9 @@ def build_media_metadata_v1(
                 },
             ),
             "tvdb_inventory": list(inventory),
-            "ai": {
-                "confidence": candidate.ai_confidence,
-                "reason": candidate.ai_reason,
-            },
             "unresolved": list(candidate.unresolved_sources),
             "decision": {
-                "mode": "ai_fact_binding",
+                "mode": "deterministic_fact_binding",
                 "scope": scope,
                 "season_number": season_number,
                 "episode_number": episode_number,

@@ -56,6 +56,31 @@ def series_contract(
 
 
 class ReleaseGateTest(unittest.TestCase):
+    def test_veep_s01_passes_root_identity_and_season_scope(self):
+        contract = series_contract(
+            scope="season",
+            expected_seasons=(1,),
+            season=1,
+        )
+        contract["identity"].update({
+            "english_title": "Veep",
+            "official_english_title": "Veep",
+            "aliases": ["Veep", "Veep Season 1"],
+            "query_titles": ["Veep"],
+        })
+        contract["retrieval"].update({
+            "query": "Veep S01",
+            "queries": ["Veep S01", "Veep Season 01"],
+        })
+
+        result = gate_releases(
+            [release("Veep.S01.1080p.WEB-DL", "a")],
+            contract,
+        )
+
+        self.assertEqual(len(result.eligible), 1)
+        self.assertEqual(result.rejection_counts, {})
+
     def test_alternative_verified_query_title_is_an_identity_alias(self):
         contract = series_contract(
             scope="season",

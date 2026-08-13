@@ -176,7 +176,12 @@ class SearchPipelineLoggingTest(unittest.IsolatedAsyncioTestCase):
             "evidence": {"decision": {}, "source_links": []},
         }
         confirm.return_value = contract
-        feature = SearchFeature(config={}, host=Mock())
+        host = Mock()
+        host.publish_operation_milestone = AsyncMock(return_value={
+            "accepted": True,
+            "duplicate": False,
+        })
+        feature = SearchFeature(config={}, host=host)
         feature.indexer_loader = lambda: []
         feature._confirm_and_search_aggregate = AsyncMock(
             return_value={"actions": []},
@@ -184,7 +189,13 @@ class SearchPipelineLoggingTest(unittest.IsolatedAsyncioTestCase):
         try:
             await feature._confirm_and_search(
                 "query-log",
-                {"plan": {"media_metadata": contract, "raw_query": "后室"}},
+                {
+                    "operation_id": "op-query-log",
+                    "plan": {
+                        "media_metadata": contract,
+                        "raw_query": "后室",
+                    },
+                },
             )
         finally:
             runtime_context.logger = original

@@ -144,6 +144,22 @@ class HostMediaMetadataTest(unittest.TestCase):
             validate_media_metadata(value, require_confirmed=True)
         )
 
+    def test_official_english_fallback_policy_matches_search_contract(self):
+        value = self._value()
+        value["identity"].update({
+            "chinese_title": "千与千寻",
+            "english_title": "Spirited Away",
+            "original_language": "ja",
+            "official_english_title": "Spirited Away",
+            "romanized_original_title": "",
+            "canonical_search_title": "Spirited Away",
+            "search_title_policy": "official_english_fallback",
+        })
+
+        self.assertIsNotNone(
+            validate_media_metadata(value, require_confirmed=True)
+        )
+
     def test_rejects_wrong_category_pair_and_old_public_key(self):
         value = self._value()
         value["placement"]["category_kind"] = "animated_movie"
@@ -256,6 +272,43 @@ class HostMediaMetadataTest(unittest.TestCase):
             validate_media_metadata(value, require_confirmed=True)
         )
         value["warnings"] = []
+        self.assertIsNone(
+            validate_media_metadata(value, require_confirmed=True)
+        )
+
+    def test_wikipedia_bounded_season_allows_empty_episode_inventory(self):
+        value = self._value()
+        value["identity"].update({
+            "content_kind": "series",
+            "season_count": 7,
+            "external_ids": {"wikipedia": "Q74801"},
+        })
+        value["relation"]["target_series"] = {}
+        value["placement"].update({
+            "library_type": "series",
+            "category_kind": "live_action_series",
+            "mapping_kind": "standalone",
+            "season_number": None,
+            "episode_number": None,
+        })
+        value["retrieval"] = {
+            "media_type": "series",
+            "scope": "season",
+            "query": "Veep S01",
+            "queries": ["Veep S01"],
+        }
+        value["evidence"] = {"decision": {
+            "scope": "season",
+            "season_number": 1,
+            "episode_number": None,
+        }}
+        value["items"] = []
+        value["warnings"] = ["warning:episode_inventory_unavailable"]
+
+        self.assertIsNotNone(
+            validate_media_metadata(value, require_confirmed=True)
+        )
+        value["evidence"]["decision"]["season_number"] = 8
         self.assertIsNone(
             validate_media_metadata(value, require_confirmed=True)
         )

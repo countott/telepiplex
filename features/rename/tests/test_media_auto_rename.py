@@ -6,7 +6,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "app"))
 
-from telepiplex_rename.media_naming import build_media_naming_plan, infer_english_title_from_release, parse_episode_marker
+from telepiplex_rename.media_naming import (
+    build_media_naming_plan,
+    infer_english_title_from_release,
+    parse_episode_marker,
+    sanitize_target_name,
+)
 
 
 class MediaAutoRenameTest(unittest.TestCase):
@@ -112,7 +117,7 @@ class MediaAutoRenameTest(unittest.TestCase):
 
         self.assertEqual(
             plan.target_relative_dir,
-            "碟中谍 (Mission Impossible)/碟中谍7: 致命清算(上) (Mission Impossible Dead Reckoning Part One)",
+            "碟中谍 (Mission Impossible)/碟中谍7 致命清算(上) (Mission Impossible Dead Reckoning Part One)",
         )
         self.assertEqual(plan.file_name, "Mission Impossible Dead Reckoning Part One.mkv")
 
@@ -129,9 +134,9 @@ class MediaAutoRenameTest(unittest.TestCase):
 
         self.assertEqual(
             plan.target_relative_dir,
-            "随心所欲(十二章) - 导演版 (Vivre sa vie: Film en douze tableaux)",
+            "随心所欲(十二章) - 导演版 (Vivre sa vie Film en douze tableaux)",
         )
-        self.assertEqual(plan.file_name, "Vivre sa vie: Film en douze tableaux.mkv")
+        self.assertEqual(plan.file_name, "Vivre sa vie Film en douze tableaux.mkv")
 
     def test_build_episode_plan_formats_sxxexx_from_release_title(self):
         plan = build_media_naming_plan(
@@ -224,8 +229,24 @@ class MediaAutoRenameTest(unittest.TestCase):
             "movie.mkv",
         )
 
-        self.assertEqual(plan.target_relative_dir, "异形契约: 导演剪辑版 (Alien: Covenant Director Cut)")
-        self.assertEqual(plan.file_name, "Alien: Covenant Director Cut.mkv")
+        self.assertEqual(plan.target_relative_dir, "异形契约 导演剪辑版 (Alien Covenant Director Cut)")
+        self.assertEqual(plan.file_name, "Alien Covenant Director Cut.mkv")
+
+    def test_target_name_cleans_cross_platform_special_cases(self):
+        self.assertEqual(
+            sanitize_target_name(' \x00设<备>：名"/\\|?*\x1f. '),
+            "设备 名",
+        )
+        self.assertEqual(sanitize_target_name("CON"), "CON_")
+        self.assertEqual(sanitize_target_name("nul.txt"), "nul_.txt")
+        self.assertEqual(sanitize_target_name("LPT9"), "LPT9_")
+        self.assertEqual(sanitize_target_name("LPT10"), "LPT10")
+        self.assertEqual(
+            sanitize_target_name(
+                "Ａ＜Ｂ＞：Ｃ＂／" + chr(0xFF3C) + "｜？＊"
+            ),
+            "ＡＢ Ｃ",
+        )
 
     def test_infer_english_title_keeps_clean_release_title_last_word(self):
         self.assertEqual(

@@ -1,6 +1,6 @@
 plugin_id: rename
 name: rename
-version: 1.1.0
+version: 1.2.2
 host_api: ">=1.4,<2.0"
 entry_point: telepiplex_rename.runtime:main
 provides: []
@@ -12,8 +12,12 @@ subscribes:
 publishes:
   - media.organized
 commands:
+  - name: rename
+    description: 扫描并补整理 115 存量媒体
+    menu_visible: true
   - name: rename_config
     description: 配置媒体整理
+    menu_visible: false
 callbacks:
   - rename
 config_schema_version: 1

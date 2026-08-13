@@ -1,91 +1,81 @@
 # search Feature
 
-search 1.8.0 使用“豆瓣发现、用户确认、同级来源收敛”的分阶段流程。豆瓣仍只负责首次候选发现；确认后由豆瓣、Wikipedia、TVDB、TMDB 共同形成字段级证据，日语动画再由 AniList 补充官方罗马字。最终身份通过独立消息确认，后续 Prowlarr 进度不会覆盖它。
+search 1.9.1 使用 Wikipedia/Wikidata 确定根作品、用户确认身份、同级来源补全元数据的分阶段流程。Search 不调用 AI，也不支持自然语言描述搜索；用户需要提供明确片名，或直接发送受支持的稳定作品链接。作品身份消息先完整保留，后续资源搜索进度不会覆盖它。
 
 ## 发起搜索
 
-- `/s 片名` 或 `/search 片名` 只接受普通文本片名。
+- `/s 片名` 或 `/search 片名` 接受明确的中文或英文影视名称，可附年份、电影/剧集类型以及明确的 `S01`、`S01E01` 范围。
+- 描述性需求、口语改写、错别字推断和特殊内容检索会被拒绝；请改用准确片名。
 - `/s <链接>` 不再兼容，系统会提示直接发送链接。
-- 可以把豆瓣、Wikipedia、TVDB、TMDB 或 AniList 的稳定作品链接直接发送到当前 Telegram 对话；无需命令，适用于系统分享面板。
-- 一条消息只能指向一个作品实体。多个不同作品链接会直接提示链接无效。
-- 上述来源的稳定作品链接会锁定该实体并跳过文本候选发现。无法从分享页提取稳定实体但能读取可靠页面标题时，标题才会回到普通文本搜索。
+- 豆瓣、Wikipedia、Wikidata、TVDB、TMDB 或 AniList 的稳定作品链接可以直接发送到 Telegram 对话。精确链接锁定作品身份并跳过根作品发现。
+- Wikipedia 消歧义链接不会被当成作品；页面标题会回到确定性根作品菜单。
+- Season 0、Special、OVA、OAD 和其他附加内容不进入 Search。
 
-## 普通文本发现
+## Wikipedia 根作品发现
 
-普通文本只由豆瓣承载作品发现。程序先清理标题、年份、电影/剧集类型和季集范围，再生成第一轮豆瓣 query；Wikipedia 和 TVDB 不参与首次召回。
+普通片名由 Wikipedia 的简中搜索优先发现，并以英文 Wikipedia 作为补充。程序读取 MediaWiki 返回的页面标题、摘要、搜索顺序和 Wikidata QID，再由 Wikidata `P31` 判断电影或剧集；人物、列表、组织和其他非影视实体会被过滤。
 
-豆瓣结果先按 subject ID 去重并过滤用户明确指定的媒体类型。只有标题、年份和类型形成唯一硬匹配时才自动确认，并且不调用 AI。其他情况进入一次保留完整上下文的统一 AI 搜索裁决：
+结果按以下规则展示，而不做跨作品复杂映射：
 
-- AI 只能引用本轮真实豆瓣 subject ID，不能生成作品或修改来源事实。
-- AI 最多返回 1–5 个候选；原始池有多个结果时不得缩成一个来取得自动确认权。
-- 第一轮零结果或全部不相关时，AI 只能改写一次业务 query；第二轮不能再次改写。
-- AI 超时、服务错误或结构不合规时，程序用完全相同的上下文原样重试一次，不重新调用豆瓣。
-- AI 技术重试仍失败但豆瓣已有结果时，按豆瓣原始顺序展示前 5 个；豆瓣为零时提示修改关键词。
+1. 用户明确的年份、电影/剧集类型和季集范围是硬条件；
+2. 同一 Wikidata QID 的中英文页面合并为一个根作品；
+3. 精确标题优先，其余结果保持 Wikipedia 的稳定相关性顺序；
+4. 同名且仍然有效的电影/剧集全部交给用户选择，程序不会代选；
+5. 即使只有一个结果，也必须先显示身份海报卡片并等待用户确认。
 
-一个非硬匹配候选仍显示 `就是它 / 都不是`；多个候选逐项选择，并提供 `都不是`。用户点击 `都不是` 后立即结束，不重搜、不改写，也不调用后续来源。
+候选以简中标题为主；没有可靠简中标题时直接显示英文，不做机器硬翻译。卡片包含年份、电影/剧集类型、国家/地区和实际来源。远程海报不可用时使用 Host 的既有占位图；图片投递失败时回退为同内容文本。
 
-候选文案显示：
+## 身份确认后的元数据补全
 
-```text
-简中标题（年份）
-Official English Title
-国家/地区：中国大陆
-类型：电影 / 剧集
-来源：豆瓣
-总览：来源提供的作品简介（存在时）
-```
+用户选择候选或发送唯一稳定链接后，search 才进入多维度元数据补全。锚点稳定 ID 不允许被补充来源改写：
 
-英文标题只有豆瓣提供可靠字段时才显示。界面不显示 AI 置信度、理由、内部评分、候选版本或未补全来源。
+1. Wikipedia/Wikidata 提供根作品身份、简中/英文标题、年份、国家和可用的结构事实；
+2. TMDB 补充 TMDB、IMDb、Wikidata、TVDB 跨站 ID、海报、发行信息、演职员、制作信息以及剧集清单；
+3. TVDB 补充唯一 Series ID 和常规季集清单；
+4. 仅当 Wikipedia 没有可靠简中标题时，唯一匹配的豆瓣条目可补简中显示名和海报；豆瓣不提供季集结构；
+5. 仅当作品已确认是日本动画电影或剧集时，AniList 补充官方罗马字标题和 AniList ID，不提供海报或季集结构。
 
-豆瓣混合标题会按来源字段拆分：`后室 Backrooms` 的简中主标题只保留
-`后室`，`蜂蜜与四叶草 ハチミツとクローバー` 的日文部分进入原名字段。
-不同文字系统不得整体写入简中标题。
+字段以来源事实逐项收敛，不使用后返回覆盖，也不记录 Search AI 决策。海报优先级为 TMDB、豆瓣、Wikipedia、占位图、纯文本。最终形成严格 `media_metadata v1`；相同合同会随选中片源进入 Download，由 Rename 使用确认身份、目录类型和季集项目完成整理，再经 `media.organized` 交给 Sync/Plex。
 
-## 确认后增强
+## 剧集范围菜单
 
-用户或程序确认一个作品后，search 锁定其稳定身份，再执行确定性的来源收敛：
+正剧结构按 TVDB、TMDB、Wikipedia 明确季数的顺序选择。TVDB/TMDB 清单会排除 Season 0；Wikipedia 只在存在明确季数时作为范围回退，不根据豆瓣分季结果猜整剧季数。
 
-1. Wikipedia query 只使用已确认的标题、年份和媒体类型；只有唯一同作品结果才进入证据图。
-2. TMDB 使用已确认英文/原名或中文标题，加年份和媒体类型约束唯一匹配，并补充 TMDB、IMDb、Wikidata、TVDB 跨站 ID、发行信息、演职员和制作信息。
-3. 剧集使用已确认的可靠英文标题查询 TVDB；TVDB 只有唯一匹配时才补 Series ID 和季集 inventory。
-4. 只有确认 `original_language=ja` 且类型属于动画时才查询 AniList；AniList 的公共 GraphQL API 不需要 API Key，其罗马字必须再次通过标题、年份和类型校验。
-
-各来源之间不使用总分或“后返回者覆盖前者”。外部 ID 一致，或规范标题、年份和媒体类型完全一致时才合并；`evidence.field_resolutions` 保存每个字段的选中值、所有来源和冲突状态。单个补充来源失败不改变已确认身份。TVDB 不可用时，剧集降级为 `whole_series`，不展示季/单集选择，也不会把未经验证的季集号写入 Prowlarr query。
-
-中文 Wikipedia 请求使用 `zh-cn` 显示变体，同时保留规范标题和 Wikidata
-身份；Wikipedia 标题不得覆盖已经确认的豆瓣简中标题。TVDB 英文标题只接受
-明确的 `eng/en` 翻译，或 `original_language=en` 的主标题；没有可靠语言
-标签的拉丁别名不再当作英文。
-
-选中后只精确读取已保存的固定来源链接。豆瓣锚点必须保持可读且稳定 ID 一致；其他来源冲突会隔离并记录，不得改变用户确认的作品。
+- 未指定范围：显示“全剧”，随后列出每一季；确认只有一季时只显示“全剧（共 1 季）”。
+- 已指定季度：显示该季度“全季”，随后列出常规单集。
+- 已指定单集：验证季集坐标后直接进入对应资源查询。
+- 没有可靠结构：不编造季集菜单，也不把未经验证的季集号写入资源 query。
 
 ## Prowlarr 与下游
 
-严格 `media_metadata v1` 形成后，程序才生成最多三条、来源已验证且去重的 Prowlarr query。英文标题单来源即可使用；日语动画优先使用 AniList 提供的罗马字，再使用正式英文标题。程序不再本地音译假名，AI 也不生成资源 query，用户原始输入不会混入 query：
+严格 `media_metadata v1` 形成后，程序生成最多三条、来源已验证且去重的最终 query，并在 Telegram 进度消息中显示 query；界面不暴露 Prowlarr 产品名。日语动画优先使用 AniList 罗马字，再使用正式英文标题。程序不本地音译假名，用户描述性噪声不会混入 query：
 
 - 单电影：`Canonical Title YYYY`；
 - 多季全集：`Canonical Title`；
 - 单季：`Canonical Title Sxx`；
 - 单集：`Canonical Title SxxExx`。
 
-Prowlarr 继续按 Indexer 和 query 有界并发搜索，执行身份与范围硬门禁、去重
-和质量排序，最多展示 12 个结果。电影片源标题必须包含匹配年份；多季全集、
-单季和单集不要求年份。整剧或单季标题出现年份时，只使用已验证的剧集播出
-区间或目标季年份判断；单集年份只作为软证据。选中片源后继续交给
-`download.provider`，下载完成后由 rename 复用确认过的 `media_metadata v1`。
+Prowlarr 仍按 Indexer 和 query 有界并发搜索，执行身份与范围硬门禁、去重和质量排序，最多展示 12 个结果。电影片源标题必须包含匹配年份；剧集资源按已确认范围验证。特殊内容在进入资源搜索前即被排除。
 
-search 仍提供无状态的 `media.search.resolve_metadata` capability，并返回
-`resolved`、`confirmation_required` 或 `unresolved` 结构化状态。rename
-提供的结构化 probe 会先按电影/剧集类型收窄候选；唯一候选直接补全元数据，
-歧义候选由用户确认后从同一个 Rename job 继续，不会重新下载或丢失文件树。
-probe 不修改作品标题或身份。运行配置位于
-`/config/plugins/search/config.yaml`；Wikipedia、豆瓣和 AniList 无需 API Key。TMDB 使用 API Read Access Token，可通过 `/search_config` 配置；TVDB 与 AI 继续使用各自服务端配置。凭据不会进入模型上下文或结构化日志。
+search 提供无状态的 `media.search.resolve_metadata` capability。Rename 的结构化 probe 只用于补全已存在文件的确定身份；Rename 自身约束式文件映射能力不属于 search 1.9.1 的 AI 移除范围。
 
-## 日志
+## 配置与日志
 
-每个搜索会话使用稳定的 `search_session_id`。日志记录输入分类、直链解析、候选确认、各元数据来源的开始/完成状态、最终 query 变体、release gate 结果和唯一终态。日志不记录 API Key、Token、Cookie、Authorization、magnet 或完整 provider payload。
+运行配置位于 `/config/plugins/search/config.yaml`。Wikipedia、Wikidata、豆瓣和 AniList 无需 API Key；TMDB 使用 API Read Access Token，TVDB 使用自身凭据，均可通过 `/search_config` 配置。Search 不再包含 AI 配置项。
+
+每个搜索会话使用稳定的 `search_session_id`。日志记录输入分类、直链解析、候选确认、元数据来源状态、最终 query 变体、片源门禁结果和唯一终态；不记录 API Key、Token、Cookie、Authorization、magnet 或完整来源 payload。
 
 ## 测试与构建
+
+大范围真实来源审计（默认只对精选样本跑完整链；加 `--all-full` 可让全部样本进入下游 dry-run，仍不会调用 Prowlarr 或提交下载）：
+
+```bash
+PY=/Users/young/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=features/search/src:sdk/src \
+  "$PY" features/search/tools/run_live_pipeline_audit.py \
+  --output /tmp/search-live-audit.json --all-full
+```
 
 ```bash
 PY=/Users/young/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
@@ -97,7 +87,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
 构建示例：
 
 ```bash
-python tools/build_feature.py features/search /tmp/search-1.8.0.tpx \
+python tools/build_feature.py features/search /tmp/search-1.9.1.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

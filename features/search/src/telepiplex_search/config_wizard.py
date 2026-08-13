@@ -58,7 +58,6 @@ class SearchConfigWizard:
         search = (self.config.get("search") or {}).get("prowlarr") or {}
         tmdb = (self.config.get("metadata") or {}).get("tmdb") or {}
         tvdb = (self.config.get("metadata") or {}).get("tvdb") or {}
-        ai = self.config.get("ai") or {}
         return {
             "actions": [{
                 "kind": "send_message",
@@ -69,15 +68,13 @@ class SearchConfigWizard:
                     f"{'已配置' if tmdb.get('api_key') else '未配置'}\n"
                     f"TVDB：{'启用' if tvdb.get('enable') else '停用'}，"
                     f"{'已配置' if tvdb.get('api_key') else '未配置'}\n"
-                    f"AI：{'启用' if ai.get('enable') else '停用'}，"
-                    f"{'已配置' if ai.get('api_key') else '未配置'}\n\n"
+                    "\n"
                     "请选择要修改的配置。内部参数请直接编辑 YAML。"
                 ),
                 "data": {"keyboard": [
                     [{"text": "Prowlarr", "callback_data": "search:config:prowlarr"}],
                     [{"text": "TMDB", "callback_data": "search:config:tmdb"}],
                     [{"text": "TVDB", "callback_data": "search:config:tvdb"}],
-                    [{"text": "AI", "callback_data": "search:config:ai"}],
                     [{"text": "退出", "callback_data": "search:config:cancel"}],
                 ]},
             }],
@@ -109,7 +106,7 @@ class SearchConfigWizard:
                 "open",
                 edit=True,
             )
-        if session.get("stage") == "choose" and action in {"tmdb", "tvdb", "ai"}:
+        if session.get("stage") == "choose" and action in {"tmdb", "tvdb"}:
             self._replace_session(key, {
                 "stage": "boolean",
                 "section": action,
@@ -132,11 +129,7 @@ class SearchConfigWizard:
             enabled = action.endswith(":on")
             section = session["section"]
             if not enabled:
-                patch = (
-                    {"metadata": {section: {"enable": False}}}
-                    if section in {"tmdb", "tvdb"}
-                    else {"ai": {"enable": False}}
-                )
+                patch = {"metadata": {section: {"enable": False}}}
                 return self._finish(key, patch)
             session["values"]["enable"] = True
             session["stage"] = (
@@ -144,14 +137,14 @@ class SearchConfigWizard:
                 if section == "tmdb"
                 else "tvdb_api_key"
                 if section == "tvdb"
-                else "ai_url"
+                else "tmdb_api_key"
             )
             prompt = (
                 "请发送 TMDB API Read Access Token。发送 - 保留当前值。"
                 if section == "tmdb"
                 else "请发送 TVDB API Key。发送 - 保留当前值。"
                 if section == "tvdb"
-                else "请发送 AI API 地址，例如 https://api.example/v1。"
+                else "请发送 TMDB API Read Access Token。发送 - 保留当前值。"
             )
             return self._message(prompt, "open", edit=True)
         return self._message("⚠️ 配置操作与当前步骤不匹配。", "open")
@@ -202,21 +195,6 @@ class SearchConfigWizard:
                     raw, current.get("subscriber_pin")
                 )
                 return self._finish(key, {"metadata": {"tvdb": deepcopy(values)}})
-            if stage == "ai_url":
-                values["api_url"] = _url(raw)
-                session["stage"] = "ai_api_key"
-                return self._message(
-                    "请发送 AI API Key。发送 - 保留当前值。",
-                    "open",
-                )
-            if stage == "ai_api_key":
-                current = self.config.get("ai") or {}
-                values["api_key"] = self._secret(raw, current.get("api_key"))
-                session["stage"] = "ai_model"
-                return self._message("请发送 AI 模型名称。", "open")
-            if stage == "ai_model":
-                values["model"] = _text(raw)
-                return self._finish(key, {"ai": deepcopy(values)})
         except ValueError:
             return self._message("⚠️ 输入无效，请按提示重新发送。", "open")
         return self._message("⚠️ 配置会话已失效，请重新打开 /config。", "close")

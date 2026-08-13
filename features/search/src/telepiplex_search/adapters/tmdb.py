@@ -34,6 +34,13 @@ def _text(value) -> str:
     return " ".join(str(value or "").replace("\xa0", " ").split())
 
 
+def _integer(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _get_tmdb_config() -> dict:
     config = ((runtime_context.config.get("metadata") or {}).get("tmdb") or {})
     if not config.get("enable", False):
@@ -355,4 +362,48 @@ def get_tmdb_entity(media_type: str, entity_id: str) -> dict | None:
             "include_image_language": "zh,en,null",
         },
     )
-    return _normalize_entity(payload, media_type)
+    fact = _normalize_entity(payload, media_type)
+    if fact is not None and media_type == "series":
+        fact["episodes"] = get_tmdb_series_inventory(entity_id)
+    return fact
+
+
+def get_tmdb_series_inventory(entity_id: str) -> list[dict]:
+    """Return regular numbered episodes only; TMDB season zero is excluded."""
+
+    entity_id = _text(entity_id)
+    if not entity_id:
+        return []
+    root = _tmdb_get(
+        f"/tv/{quote(entity_id)}",
+        params={"language": "en-US"},
+    )
+    season_numbers = sorted({
+        number
+        for raw in root.get("seasons") or ()
+        if isinstance(raw, dict)
+        and (number := _integer(raw.get("season_number"))) is not None
+        and number > 0
+    })
+    items = []
+    for season_number in season_numbers:
+        season = _tmdb_get(
+            f"/tv/{quote(entity_id)}/season/{season_number}",
+            params={"language": "en-US"},
+        )
+        for raw in season.get("episodes") or ():
+            if not isinstance(raw, dict):
+                continue
+            episode_number = _integer(raw.get("episode_number"))
+            if episode_number is None or episode_number < 1:
+                continue
+            items.append({
+                "item_id": _text(raw.get("id"))
+                or f"tmdb:{entity_id}:S{season_number:02d}E{episode_number:03d}",
+                "content_role": "main_episode",
+                "season_number": season_number,
+                "episode_number": episode_number,
+                "aired": _text(raw.get("air_date")),
+                "tmdb_episode_id": _text(raw.get("id")),
+            })
+    return items

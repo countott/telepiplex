@@ -94,7 +94,10 @@ class OperationMilestoneSink:
         self.coordinator = coordinator
         self.delivery = delivery
 
-    def __call__(self, plugin_id: str, payload: dict) -> dict:
+    def attach(self, delivery):
+        self.delivery = delivery
+
+    async def __call__(self, plugin_id: str, payload: dict) -> dict:
         operation_id = str(payload.get("operation_id") or "")
         milestone_id = str(payload.get("milestone_id") or "")
         record = self.coordinator.claim_milestone(
@@ -108,9 +111,13 @@ class OperationMilestoneSink:
         photo_url = str(payload.get("photo_url") or "") or None
         try:
             accepted = self.delivery(record.chat_id, photo_url, text)
+            if inspect.isawaitable(accepted):
+                accepted = await accepted
             if accepted is False and photo_url:
                 accepted = self.delivery(record.chat_id, None, text)
-        except Exception:
+                if inspect.isawaitable(accepted):
+                    accepted = await accepted
+        except BaseException:
             self.coordinator.release_milestone(
                 plugin_id,
                 operation_id,
@@ -127,6 +134,65 @@ class OperationMilestoneSink:
         return {"accepted": True, "duplicate": False}
 
 
+def _milestone_title(text: str) -> str:
+    first_line = str(text or "").splitlines()[0].strip()
+    return first_line.removeprefix("🎬").strip() or "未知作品"
+
+
+async def deliver_operation_milestone(
+    application,
+    chat_id: int,
+    photo_url: str | None,
+    text: str,
+) -> bool:
+    poster_items = [{
+        "number": 1,
+        "title": _milestone_title(text),
+        "poster_url": str(photo_url or ""),
+    }]
+    try:
+        try:
+            photo = await asyncio.to_thread(
+                build_poster_grid,
+                poster_items,
+            )
+        except Exception:
+            if photo_url:
+                poster_items[0]["poster_url"] = ""
+                photo = await asyncio.to_thread(
+                    build_poster_grid,
+                    poster_items,
+                )
+            else:
+                raise
+        caption, _parse_mode = bounded_photo_caption(text, None)
+        await application.bot.send_photo(
+            chat_id=chat_id,
+            photo=photo,
+            caption=caption,
+        )
+        return True
+    except Exception as exc:
+        _log(
+            "warn",
+            "任务身份海报发送失败，降级为文本："
+            f"chat_id={chat_id}, error={_render_error(exc)}",
+        )
+    try:
+        await application.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+        )
+    except Exception as exc:
+        _log(
+            "error",
+            "任务身份消息发送失败："
+            f"chat_id={chat_id}, error={_render_error(exc)}",
+        )
+        return False
+    return True
+
+
 class OperationReportSink:
     def __init__(self, coordinator, router=None):
         self.coordinator = coordinator
@@ -138,17 +204,16 @@ class OperationReportSink:
     def attach(self, listener):
         self._listener = listener
 
-    def __call__(self, plugin_id: str, report: dict) -> dict:
+    async def __call__(self, plugin_id: str, report: dict) -> dict:
         unavailable = self._unavailable_handoff(report)
         if unavailable is not None:
             return unavailable
         record = self.coordinator.report(plugin_id, report)
         if self._listener is not None:
-            try:
+            if record.state == "handed_off":
+                await self._notify(record)
+            else:
                 task = asyncio.create_task(self._notify(record))
-            except RuntimeError:
-                task = None
-            if task is not None:
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
         try:

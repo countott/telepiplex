@@ -10,6 +10,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSchemaContractTest(unittest.TestCase):
+    def test_search_release_version_is_1_9_1(self):
+        manifest = yaml.safe_load(
+            (ROOT / "manifest.yaml").read_text(encoding="utf-8")
+        )
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        package_info = (
+            ROOT / "src/telepiplex_search.egg-info/PKG-INFO"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(manifest["version"], "1.9.1")
+        self.assertIn('version = "1.9.1"', pyproject)
+        self.assertIn("Version: 1.9.1", package_info)
+
+    def test_manifest_routes_wikidata_direct_links_to_search(self):
+        manifest = yaml.safe_load(
+            (ROOT / "manifest.yaml").read_text(encoding="utf-8")
+        )
+
+        self.assertIn("wikidata.org", manifest["direct_message_hosts"])
+
     def test_schema_declares_independent_search_config_wizard(self):
         schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))
 
@@ -18,32 +38,19 @@ class ConfigSchemaContractTest(unittest.TestCase):
             "search_config",
         )
 
-    def test_ai_and_tvdb_are_visual_form_sections_with_write_only_keys(self):
+    def test_tvdb_is_visual_form_section_with_write_only_keys(self):
         schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))
 
         metadata = schema["properties"]["metadata"]
         tvdb = metadata["properties"]["tvdb"]
-        ai = schema["properties"]["ai"]
         self.assertEqual(tvdb["title"], "TVDB")
-        self.assertEqual(ai["title"], "AI")
         self.assertEqual(
             set(tvdb["properties"]),
             {"enable", "api_key", "base_url", "subscriber_pin", "timeout"},
         )
-        self.assertEqual(
-            set(ai["properties"]),
-            {
-                "enable",
-                "api_url",
-                "api_key",
-                "model",
-                "timeout",
-                "thinking_mode",
-            },
-        )
         self.assertTrue(tvdb["properties"]["api_key"]["writeOnly"])
         self.assertTrue(tvdb["properties"]["subscriber_pin"]["writeOnly"])
-        self.assertTrue(ai["properties"]["api_key"]["writeOnly"])
+        self.assertNotIn("ai", schema["properties"])
 
     def test_tmdb_and_anilist_are_independent_metadata_sources(self):
         schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))
@@ -74,7 +81,7 @@ class ConfigSchemaContractTest(unittest.TestCase):
         )
         self.assertNotIn("api_key", metadata["anilist"]["properties"])
 
-    def test_active_ai_and_metadata_defaults_are_bounded(self):
+    def test_active_metadata_defaults_are_bounded(self):
         schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))
         default = yaml.safe_load((ROOT / "config.default.yaml").read_text(encoding="utf-8"))
 
@@ -115,16 +122,8 @@ class ConfigSchemaContractTest(unittest.TestCase):
                 "rate_limit_cooldown",
             },
         )
-        self.assertNotIn("source_orchestration", default["ai"])
-        self.assertNotIn(
-            "source_orchestration",
-            schema["properties"]["ai"]["properties"],
-        )
-        self.assertEqual(default["ai"]["thinking_mode"], "enabled")
-        self.assertEqual(
-            schema["properties"]["ai"]["properties"]["thinking_mode"]["enum"],
-            ["enabled", "disabled"],
-        )
+        self.assertNotIn("ai", default)
+        self.assertNotIn("ai", schema["required"])
 
     def test_search_scoring_is_part_of_public_config_contract(self):
         schema = json.loads((ROOT / "config.schema.json").read_text(encoding="utf-8"))

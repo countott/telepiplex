@@ -174,6 +174,68 @@ class DirectLinkTest(unittest.TestCase):
         self.assertEqual(direct.media_type, "movie")
         self.assertEqual(direct.query, "The Grand Budapest Hotel")
 
+    @patch("telepiplex_search.direct_link.enrich_wikidata_entities")
+    @patch("telepiplex_search.direct_link.lookup_wikipedia_page")
+    def test_wikipedia_exact_read_restores_structural_wikidata_fields(
+        self,
+        lookup,
+        enrich,
+    ):
+        lookup.return_value = {
+            "wikibase_item": "Q74801",
+            "title": "Veep",
+            "official_english_title": "Veep",
+            "year": "2012",
+            "media_type": "series",
+            "url": "https://en.wikipedia.org/wiki/Veep",
+        }
+        enrich.return_value = {"Q74801": {
+            "wikibase_item": "Q74801",
+            "chinese_title": "副人之仁",
+            "english_title": "Veep",
+            "aliases": ["副总统"],
+            "year": "2012",
+            "media_type": "series",
+            "countries": ["Q30"],
+            "season_count": 7,
+            "episode_count": 65,
+        }}
+
+        direct = resolve_direct_link(MetadataLink(
+            provider="wikipedia",
+            media_type="",
+            entity_id="en:Veep",
+            scope="work",
+            url="https://en.wikipedia.org/wiki/Veep",
+        ))
+
+        fact = direct.evidence["facts"][0]
+        self.assertEqual(fact["chinese_title"], "副人之仁")
+        self.assertEqual(fact["season_count"], 7)
+        self.assertEqual(fact["episode_count"], 65)
+
+    @patch("telepiplex_search.direct_link.lookup_wikipedia_page")
+    def test_wikipedia_disambiguation_page_is_not_a_frozen_identity(self, lookup):
+        lookup.return_value = {
+            "wikibase_item": "Q-disambiguation",
+            "title": "副总统",
+            "is_disambiguation": True,
+            "extract": "副总统可以指多个条目。",
+            "url": "https://zh.wikipedia.org/wiki/副总统",
+        }
+
+        with self.assertRaises(DirectLinkError) as failed:
+            resolve_direct_link(MetadataLink(
+                provider="wikipedia",
+                media_type="",
+                entity_id="zh:副总统",
+                scope="work",
+                url="https://zh.wikipedia.org/wiki/副总统",
+            ))
+
+        self.assertEqual(failed.exception.code, "wikipedia_disambiguation")
+        self.assertEqual(failed.exception.details, ("副总统",))
+
     @patch("telepiplex_search.direct_link.lookup_douban_subject")
     def test_douban_subject_locks_stable_identity(self, lookup):
         lookup.return_value = {

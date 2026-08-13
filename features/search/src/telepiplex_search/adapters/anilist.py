@@ -106,7 +106,6 @@ def _normalize_media(item: dict) -> dict | None:
         return None
     media_type = "movie" if _text(item.get("format")).casefold() == "movie" else "series"
     release_date = _date(item)
-    cover = item.get("coverImage") if isinstance(item.get("coverImage"), dict) else {}
     return {
         "anilist_id": entity_id,
         "external_ids": {"anilist": entity_id},
@@ -122,15 +121,7 @@ def _normalize_media(item: dict) -> dict | None:
         "year": release_date[:4],
         "media_type": media_type,
         "aliases": _unique((native, romaji, english, *(item.get("synonyms") or []))),
-        "genres": _unique(item.get("genres") or []),
-        "countries": ["JP"] if _text(item.get("countryOfOrigin")) == "JP" else [],
-        "cover_url": _text(cover.get("extraLarge") or cover.get("large")),
-        "poster_language": "ja",
         "summary": "",
-        "original_release_date": release_date,
-        "runtime_minutes": item.get("duration"),
-        "status": _text(item.get("status")),
-        "episode_count": item.get("episodes"),
     }
 
 

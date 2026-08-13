@@ -29,13 +29,6 @@ class SearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
                         "timeout": 15,
                     },
                 },
-                "ai": {
-                    "enable": True,
-                    "api_url": "https://old-ai.example/v1",
-                    "api_key": "old-ai-key",
-                    "model": "old-model",
-                    "timeout": 60,
-                },
             },
             host=None,
         )
@@ -63,14 +56,13 @@ class SearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
         buttons = result["actions"][0]["data"]["keyboard"]
         self.assertEqual(
             [button[0]["text"] for button in buttons],
-            ["Prowlarr", "TMDB", "TVDB", "AI", "退出"],
+            ["Prowlarr", "TMDB", "TVDB", "退出"],
         )
         for internal in ("timeout", "分类", "阈值", "MCP", "Indexer"):
             self.assertNotIn(internal, text)
         self.assertNotIn("old-prowlarr-key", text)
         self.assertNotIn("old-tvdb-key", text)
         self.assertNotIn("old-tmdb-key", text)
-        self.assertNotIn("old-ai-key", text)
 
     async def test_prowlarr_flow_returns_only_public_patch_and_forces_enabled(self):
         await self._start()
@@ -154,52 +146,6 @@ class SearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
                 },
             },
         })
-
-    async def test_ai_flow_only_returns_enable_url_key_and_model(self):
-        await self._start()
-        await self.feature.callback({
-            **self.owner,
-            "namespace": "search",
-            "payload": "config:ai",
-        })
-        await self.feature.callback({
-            **self.owner,
-            "namespace": "search",
-            "payload": "config:boolean:on",
-        })
-        await self.feature.message({
-            **self.owner, "text": "https://ai.example/v1"
-        })
-        await self.feature.message({**self.owner, "text": "new-ai-key"})
-        await self.feature.message({**self.owner, "text": "gpt-example"})
-        result = await self._confirm()
-
-        self.assertEqual(result["config_patch"], {
-            "ai": {
-                "enable": True,
-                "api_url": "https://ai.example/v1",
-                "api_key": "new-ai-key",
-                "model": "gpt-example",
-            },
-        })
-
-    async def test_disable_finishes_without_requesting_hidden_fields(self):
-        await self._start()
-        await self.feature.callback({
-            **self.owner,
-            "namespace": "search",
-            "payload": "config:ai",
-        })
-        pending = await self.feature.callback({
-            **self.owner,
-            "namespace": "search",
-            "payload": "config:boolean:off",
-        })
-        self.assertNotIn("config_patch", pending)
-        result = await self._confirm()
-
-        self.assertEqual(result["config_patch"], {"ai": {"enable": False}})
-        self.assertEqual(result["session"]["state"], "close")
 
     async def test_cancel_at_confirmation_does_not_submit_patch(self):
         await self._start()

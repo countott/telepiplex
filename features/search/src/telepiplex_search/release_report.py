@@ -295,6 +295,8 @@ def format_release_report(
     gate,
     ranked: list[dict],
     indexer_summary: dict,
+    *,
+    search_queries: list[str] | None = None,
 ) -> str:
     del gate
     summary = indexer_summary if isinstance(indexer_summary, dict) else {}
@@ -328,10 +330,15 @@ def format_release_report(
         title = f"{_clip(query, title_limit) or '未知作品'} · {scope}"
     else:
         title = _clip(query, 120) or "未知作品"
-    lines = [
-        f"{'✅' if final else '🔍'} {title}",
-        f"搜索器 {successful_completed}/{available}，失败 {failed}",
-    ]
+    lines = [f"{'✅' if final else '🔍'} {title}"]
+    visible_queries = list(dict.fromkeys(
+        _clip(item, 120)
+        for item in search_queries or ()
+        if _clip(item, 120)
+    ))
+    if visible_queries:
+        lines.append("搜索词：" + " / ".join(visible_queries))
+    lines.append(f"搜索器 {successful_completed}/{available}，失败 {failed}")
     if displayed:
         lines.append("")
     if not displayed:

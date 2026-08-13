@@ -18,9 +18,20 @@ _DISAMBIGUATION_SUFFIX = re.compile(
 
 def _clean_title(value: str) -> str:
     title = _DISAMBIGUATION_SUFFIX.sub("", str(value or ""))
-    title = re.sub(r"[^\w]+", " ", title, flags=re.UNICODE)
+    title = re.sub(r"[^\w%]+", " ", title, flags=re.UNICODE)
     title = title.replace("_", " ")
     return " ".join(title.split())
+
+
+def _strip_season_title(value: str) -> tuple[str, bool]:
+    original = str(value or "")
+    title = re.sub(
+        r"(?i)\s+season[ ._-]*\d{1,2}\s*$",
+        "",
+        original,
+    ).strip()
+    title = re.sub(r"(?i)\s+S\d{1,2}\s*$", "", title).strip()
+    return title, title != original.strip()
 
 
 def build_prowlarr_query(
@@ -105,10 +116,15 @@ def build_prowlarr_query_chain(
         raise ValueError("movie_year_missing")
 
     queries = []
+    season_bases = []
     for raw_title in titles:
         title = str(raw_title or "").strip()
         if not title:
             continue
+        if scope == "season":
+            title, _stripped = _strip_season_title(title)
+            if title and title not in season_bases:
+                season_bases.append(title)
         if scope == "movie":
             title = f"{title} {year}"
         query = build_prowlarr_query(
@@ -121,6 +137,16 @@ def build_prowlarr_query_chain(
             queries.append(query)
         if len(queries) == 3:
             break
+    if scope == "season" and len(queries) < 3:
+        for title in season_bases:
+            textual = build_prowlarr_query(
+                f"{title} Season {int(season_number):02d}",
+                "work",
+            )
+            if textual not in queries:
+                queries.append(textual)
+            if len(queries) == 3:
+                break
     if not queries:
         raise ValueError("query_chain_empty")
     return queries

@@ -168,7 +168,7 @@ def _valid_title_policy(identity: dict) -> bool:
 
     canonical_title = _text(identity.get("canonical_search_title"))
     compatibility_title = _text(identity.get("english_title"))
-    if policy == "official_english":
+    if policy in {"official_english", "official_english_fallback"}:
         official_title = _text(identity.get("official_english_title"))
         return bool(
             official_title
@@ -287,17 +287,35 @@ def validate_media_metadata(value: object, require_confirmed: bool = False):
         ):
             return None
         if library_type == "series":
+            retrieval = value.get("retrieval") or {}
+            decision = evidence.get("decision") or {}
             degraded_whole_series = bool(
                 not items
                 and _text(
-                    (value.get("retrieval") or {}).get("scope")
+                    retrieval.get("scope")
                 ) == "whole_series"
                 and "warning:tvdb_inventory_unavailable" in warnings
                 and not _text(
                     (identity.get("external_ids") or {}).get("tvdb")
                 )
             )
-            if (not items and not degraded_whole_series) or any(
+            try:
+                bounded_season = int(decision.get("season_number"))
+                season_count = int(identity.get("season_count"))
+            except (TypeError, ValueError):
+                bounded_season = season_count = 0
+            degraded_bounded_season = bool(
+                not items
+                and _text(retrieval.get("scope")) == "season"
+                and 1 <= bounded_season <= season_count
+                and decision.get("episode_number") is None
+                and "warning:episode_inventory_unavailable" in warnings
+            )
+            if (
+                not items
+                and not degraded_whole_series
+                and not degraded_bounded_season
+            ) or any(
                 item.get("season_number") is None or item.get("episode_number") is None
                 for item in items
             ):
@@ -350,13 +368,33 @@ def merge_resolved_items(value: dict, resolved_items: list[dict]) -> dict:
             for item in contract.get("items") or []
             if item.get("season_number") is not None and item.get("episode_number") is not None
         }
+    bounded_season = None
+    if (
+        not allowed
+        and "warning:episode_inventory_unavailable"
+        in (contract.get("warnings") or ())
+        and _text((contract.get("retrieval") or {}).get("scope")) == "season"
+    ):
+        decision = ((contract.get("evidence") or {}).get("decision") or {})
+        bounded_season = _integer(decision.get("season_number"))
+        if bounded_season is None or bounded_season < 1:
+            raise ValueError("bounded season is invalid")
 
     items = deepcopy(contract.get("items") or [])
     for resolved in resolved_items or []:
         season = _integer(resolved.get("season_number"))
         episode = _integer(resolved.get("episode_number"))
-        if (season, episode) not in allowed:
+        if (
+            (season, episode) not in allowed
+            and not (
+                bounded_season is not None
+                and season == bounded_season
+                and episode is not None
+                and episode > 0
+            )
+        ):
             raise ValueError("resolved item changes locked target")
+        allowed.add((season, episode))
         match = next((
             item for item in items
             if _integer(item.get("season_number")) == season

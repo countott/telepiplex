@@ -241,6 +241,18 @@ def select_unique_anilist_fact(
     )
 
 
+def select_unique_douban_fact(
+    result: dict,
+    identity: ConfirmedIdentity,
+) -> dict | None:
+    return _select_unique_flat_fact(
+        result,
+        identity,
+        provider="douban_subject",
+        id_key="subject_id",
+    )
+
+
 def build_tvdb_query(
     identity: ConfirmedIdentity,
     wikipedia_fact: dict | None,

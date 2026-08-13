@@ -11,6 +11,49 @@ from telepiplex_search.adapters.wikipedia import (
 
 
 class WikipediaAdapterTest(unittest.TestCase):
+    @patch("telepiplex_search.adapters.wikipedia.requests.get")
+    def test_preserves_mediawiki_rank_and_marks_disambiguation(self, get_mock):
+        response = Mock()
+        response.status_code = 200
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "query": {
+                "pages": [
+                    {
+                        "pageid": 20,
+                        "index": 2,
+                        "title": "副总统 (消歧义)",
+                        "extract": "副总统可以指不同作品。",
+                        "pageprops": {
+                            "wikibase_item": "Q117437549",
+                            "disambiguation": "",
+                        },
+                    },
+                    {
+                        "pageid": 10,
+                        "index": 1,
+                        "title": "副人之仁",
+                        "extract": "2012年开播美国电视剧。",
+                        "pageprops": {"wikibase_item": "Q74801"},
+                    },
+                ]
+            }
+        }
+        get_mock.return_value = response
+
+        result = lookup_wikipedia_evidence(
+            ["副总统 电视剧"], languages=("zh",)
+        )
+
+        self.assertEqual(
+            [fact["wikibase_item"] for fact in result["facts"]],
+            ["Q74801", "Q117437549"],
+        )
+        self.assertEqual(result["facts"][0]["search_rank"], 1)
+        self.assertEqual(result["facts"][0]["page_id"], 10)
+        self.assertFalse(result["facts"][0]["is_disambiguation"])
+        self.assertTrue(result["facts"][1]["is_disambiguation"])
+
     def test_empty_expanded_queries_are_unavailable_not_not_found(self):
         result = lookup_wikipedia_evidence([], languages=("zh",))
 

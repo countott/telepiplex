@@ -53,6 +53,7 @@ from app.handlers.interaction_handler import (
     OPERATION_RECOVERY_TASK_KEY,
     OperationMilestoneSink,
     OperationReportSink,
+    deliver_operation_milestone,
     operation_control_callback,
     operation_gate,
     reconcile_deferred_operations,
@@ -90,7 +91,7 @@ DEFAULT_PLUGIN_CATALOG_URL = (
 
 
 def get_version(md_format=False):
-    version = "v3.4.18-host"
+    version = "v3.4.20-host"
     if md_format:
         return escape_markdown(version, version=2)
     return version
@@ -619,6 +620,20 @@ def configure_application(application, manager):
         if hasattr(operation_sink, "attach"):
             operation_sink.attach(
                 lambda record: render_operation(application, manager.router, record)
+            )
+        milestone_sink = getattr(
+            getattr(manager, "broker", None),
+            "milestone_sink",
+            None,
+        )
+        if hasattr(milestone_sink, "attach"):
+            milestone_sink.attach(
+                lambda chat_id, photo_url, text: deliver_operation_milestone(
+                    application,
+                    chat_id,
+                    photo_url,
+                    text,
+                )
             )
         async def reconcile_after_feature_restart(_process):
             recovery = await recover_active_operations(

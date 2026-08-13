@@ -107,6 +107,81 @@ class TvdbRenamePlanTest(unittest.TestCase):
 
         self.assertIsNone(plan)
 
+    def test_wikipedia_bounded_season_accepts_only_filename_verified_episodes(self):
+        media_metadata = self._confirmed_media_metadata()
+        media_metadata.update({
+            "identity": {
+                "chinese_title": "副人之仁",
+                "english_title": "Veep",
+                "year": "2012",
+                "content_kind": "series",
+                "season_count": 7,
+                "external_ids": {"wikipedia": "Q74801"},
+            },
+            "relation": {"type": "standalone", "target_series": {}, "source": "wikipedia"},
+            "placement": {
+                "library_type": "series",
+                "category_kind": "live_action_series",
+                "season_number": None,
+                "episode_number": None,
+                "mapping_kind": "standalone",
+                "mapping_source": "media_metadata_v1",
+                "tvdb_episode_id": "",
+            },
+            "retrieval": {
+                "media_type": "series",
+                "scope": "season",
+                "query": "Veep S01",
+                "queries": ["Veep S01"],
+            },
+            "items": [],
+            "evidence": {"decision": {
+                "scope": "season",
+                "season_number": 1,
+                "episode_number": None,
+            }},
+            "warnings": ["warning:episode_inventory_unavailable"],
+        })
+        file_tree = [
+            {"name": "Veep.S01E01.mkv", "relative_path": "Veep.S01E01.mkv", "is_dir": False},
+            {"name": "Veep.S01E02.mkv", "relative_path": "Veep.S01E02.mkv", "is_dir": False},
+        ]
+
+        plan = build_confirmed_rename_plan(
+            final_path="/Downloads/Veep.S01",
+            selected_path="/真人剧集",
+            metadata={},
+            media_metadata=media_metadata,
+            ai_plan={"episode_map": [
+                {"source_file": item["relative_path"], "season_number": 1, "episode_number": index}
+                for index, item in enumerate(file_tree, 1)
+            ]},
+            file_tree=file_tree,
+        )
+        self.assertEqual(len(plan["operations"]), 2)
+        enriched = enrich_media_metadata_with_rename_plan(media_metadata, plan)
+        self.assertEqual(
+            [
+                (item["season_number"], item["episode_number"])
+                for item in enriched["items"]
+            ],
+            [(1, 1), (1, 2)],
+        )
+
+        media_metadata["evidence"]["decision"]["season_number"] = 2
+        self.assertIsNone(build_confirmed_rename_plan(
+            final_path="/Downloads/Veep.S01",
+            selected_path="/真人剧集",
+            metadata={},
+            media_metadata=media_metadata,
+            ai_plan={"episode_map": [{
+                "source_file": "Veep.S01E01.mkv",
+                "season_number": 1,
+                "episode_number": 1,
+            }]},
+            file_tree=file_tree[:1],
+        ))
+
     def test_confirmed_metadata_allows_partial_mapping_and_reports_unmatched(self):
         media_metadata = self._confirmed_media_metadata()
         media_metadata.update({
@@ -176,6 +251,73 @@ class TvdbRenamePlanTest(unittest.TestCase):
             {"Test Show S01E01.mkv", "Test Show S00E03.mkv"},
         )
         self.assertEqual(plan["unmatched_sources"], ["Unknown.mkv"])
+
+    def test_confirmed_plan_preserves_source_colons_and_cleans_targets(self):
+        media_metadata = self._confirmed_media_metadata()
+        media_metadata.update({
+            "identity": {
+                "chinese_title": "嗜血法医：源罪",
+                "english_title": "Dexter: Original Sin",
+                "year": "2024",
+                "content_kind": "series",
+                "external_ids": {},
+            },
+            "relation": {"type": "primary", "target_series": {}, "source": "user"},
+            "placement": {
+                "library_type": "series",
+                "category_kind": "live_action_series",
+                "season_number": None,
+                "episode_number": None,
+                "mapping_kind": "standalone",
+                "mapping_source": "user",
+                "tvdb_episode_id": "",
+            },
+            "items": [{
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": 1,
+            }],
+        })
+        source_relative_path = (
+            "Season: 01/Dexter: Original Sin.S01E01.mkv"
+        )
+        source_path = f"/Downloads/Release: Name/{source_relative_path}"
+
+        plan = build_confirmed_rename_plan(
+            final_path="/Downloads/Release: Name",
+            selected_path="/真人剧集",
+            metadata={},
+            media_metadata=media_metadata,
+            ai_plan={
+                "episode_map": [{
+                    "source_file": source_relative_path,
+                    "season_number": 1,
+                    "episode_number": 1,
+                }]
+            },
+            file_tree=[{
+                "name": "Dexter: Original Sin.S01E01.mkv",
+                "relative_path": source_relative_path,
+                "path": source_path,
+                "is_dir": False,
+            }],
+        )
+
+        self.assertEqual(
+            plan["operations"][0]["source_relative_path"],
+            source_relative_path,
+        )
+        self.assertEqual(plan["operations"][0]["source_path"], source_path)
+        self.assertEqual(
+            plan["target_root"],
+            "/真人剧集/嗜血法医 源罪 (Dexter Original Sin)",
+        )
+        self.assertEqual(
+            plan["operations"][0]["target_relative_path"],
+            "Dexter Original Sin Season 01/Dexter Original Sin S01E01.mkv",
+        )
+        for key in ("rename_to", "target_dir", "target_relative_path", "final_path"):
+            self.assertNotIn(":", plan["operations"][0][key])
 
     def test_build_plan_uses_tvdb_season_folder_and_chinese_parent(self):
         plan = build_tvdb_rename_plan(
@@ -304,7 +446,7 @@ class TvdbRenamePlanTest(unittest.TestCase):
 
         self.assertEqual(
             plan["target_root"],
-            "/真人剧集/嗜血法医: 源罪(前传) - 第一季 (Dexter Original Sin)",
+            "/真人剧集/嗜血法医 源罪(前传) - 第一季 (Dexter Original Sin)",
         )
 
     def test_build_plan_rejects_invented_source_file(self):

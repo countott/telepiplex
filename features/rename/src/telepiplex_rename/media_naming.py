@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
 
 INVALID_NAME_CHARS = re.compile(r'[\\/*?"<>|]+')
+CONTROL_NAME_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+FULLWIDTH_INVALID_NAME_TRANSLATION = str.maketrans({
+    **{character: "" for character in "＜＞＂／｜？＊"},
+    chr(0xFF3C): "",
+})
+WINDOWS_RESERVED_BASENAME = re.compile(
+    r"(?i)^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]|CONIN\$|CONOUT\$)$"
+)
 CHINESE_DASH_PATTERN = re.compile(r"\s*(?:——|—|–|－)\s*")
 RELEASE_GROUP_PATTERN = re.compile(r"-[A-Za-z0-9]+$")
 QUALITY_START_PATTERN = re.compile(
@@ -38,16 +47,35 @@ def sanitize_path_name(name: str) -> str:
     return " ".join(name.split()).strip().strip(".")
 
 
-def _strip_collection_suffix(name: str, suffix: str) -> str:
+def sanitize_target_name(name: str) -> str:
+    """Return a generated target component safe for shared filesystems."""
+
+    name = unicodedata.normalize("NFC", str(name or ""))
+    name = CONTROL_NAME_CHARS.sub("", name)
     name = sanitize_path_name(name)
+    name = name.translate(FULLWIDTH_INVALID_NAME_TRANSLATION)
+    name = name.replace(":", "").replace("：", "")
+    name = " ".join(name.split()).strip().strip(".").rstrip(" .")
+    if not name:
+        return ""
+
+    basename, separator, extension = name.partition(".")
+    normalized_basename = basename.rstrip(" .")
+    if WINDOWS_RESERVED_BASENAME.fullmatch(normalized_basename):
+        name = f"{normalized_basename}_{separator}{extension}"
+    return name
+
+
+def _strip_collection_suffix(name: str, suffix: str) -> str:
+    name = sanitize_target_name(name)
     if name.lower().endswith(suffix.lower()):
         name = name[: -len(suffix)].strip()
-    return sanitize_path_name(name)
+    return sanitize_target_name(name)
 
 
 def _display_folder(chinese_title: str, english_title: str) -> str:
-    chinese_title = sanitize_path_name(chinese_title)
-    english_title = sanitize_path_name(english_title)
+    chinese_title = sanitize_target_name(chinese_title)
+    english_title = sanitize_target_name(english_title)
     if (
         chinese_title
         and english_title
@@ -57,7 +85,7 @@ def _display_folder(chinese_title: str, english_title: str) -> str:
             " \t-–—:：/／|｜·・"
         )
         if prefix and CJK_PATTERN.search(prefix):
-            chinese_title = sanitize_path_name(prefix)
+            chinese_title = sanitize_target_name(prefix)
     if chinese_title and english_title and chinese_title != english_title:
         return f"{chinese_title} ({english_title})"
     return chinese_title or english_title
@@ -118,12 +146,12 @@ def infer_english_title_from_release(release_title: str) -> str:
 def build_media_naming_plan(metadata: dict | None, release_title: str, original_file_name: str):
     metadata = metadata or {}
     source = str(metadata.get("source") or "").strip()
-    chinese_folder = sanitize_path_name(metadata.get("chinese_title"))
-    english_folder = sanitize_path_name(metadata.get("english_title"))
+    chinese_folder = sanitize_target_name(metadata.get("chinese_title"))
+    english_folder = sanitize_target_name(metadata.get("english_title"))
     original_language = str(
         metadata.get("original_language") or ""
     ).strip().casefold().replace("_", "-").split("-", 1)[0]
-    original_title = sanitize_path_name(metadata.get("original_title"))
+    original_title = sanitize_target_name(metadata.get("original_title"))
     if (
         source == "media_metadata"
         and original_language in {"en", "eng"}
@@ -131,7 +159,9 @@ def build_media_naming_plan(metadata: dict | None, release_title: str, original_
     ):
         english_folder = original_title
     if not english_folder and source in {"search_query", "filename"}:
-        english_folder = infer_english_title_from_release(release_title)
+        english_folder = sanitize_target_name(
+            infer_english_title_from_release(release_title)
+        )
     if not chinese_folder and source == "filename":
         chinese_folder = english_folder
     if not chinese_folder or not english_folder:

@@ -2,30 +2,76 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import PurePosixPath
 import re
 import unicodedata
 
 
-_VIDEO = re.compile(r"(?i)\.(?:mkv|mp4|avi|mov|m4v|ts|m2ts|wmv)$")
+_VIDEO = re.compile(
+    r"(?i)\.(?:mkv|mp4|avi|mov|m4v|ts|m2ts|wmv|flv|webm)$"
+)
 _EPISODE = re.compile(r"(?i)\bS(\d{1,2})E(\d{1,3})\b")
 _X_EPISODE = re.compile(r"(?i)\b(\d{1,2})x(\d{1,3})\b")
 _UNSCOPED_EPISODE = re.compile(r"(?i)(?<![A-Z0-9])E(\d{1,3})(?!\d)")
+_DASH_EPISODE = re.compile(
+    r"(?<!\S)-\s*(\d{1,3})(?=\s*(?:\(|\[|$))"
+)
+_BARE_EPISODE_STEM = re.compile(r"^(\d{1,3})$")
 _SEASON_RANGE = re.compile(
     r"(?i)\bS(\d{1,2})\s*(?:-|~|TO)\s*S?(\d{1,2})\b"
 )
 _SEASON = re.compile(r"(?i)\bS(\d{1,2})\b|\bSeason[ ._-]+(\d{1,2})\b")
+_CHINESE_NUMBER = r"[0-9零〇一二三四五六七八九十百两]+"
+_CHINESE_SEASON = re.compile(rf"第\s*({_CHINESE_NUMBER})\s*季")
+_CHINESE_EPISODE = re.compile(rf"第\s*({_CHINESE_NUMBER})\s*[集话]")
 _IDENTITY_MARKERS = (
     re.compile(r"(?i)\bS\d{1,2}(?:E\d{1,3})?(?:\s*(?:-|~)\s*S?\d{1,2})?\b"),
     re.compile(r"(?i)\bSeason\s+\d{1,2}\b"),
     re.compile(r"(?i)\bEpisode\s+\d{1,3}\b"),
+    re.compile(r"(?i)\b\d{1,2}x\d{1,3}\b"),
     re.compile(r"(?i)(?<![A-Z0-9])E\d{1,3}(?!\d)"),
+    _DASH_EPISODE,
+    _CHINESE_SEASON,
+    _CHINESE_EPISODE,
     re.compile(r"(?i)\b(?:2160p|1080p|720p|576p|480p|4K|8K)\b"),
     re.compile(
-        r"(?i)\b(?:WEB\s*DL|WEBRip|BluRay|BDRip|REMUX|HDTV|"
-        r"x26[45]|H\s*26[45]|HEVC|AVC|HDR10?|DoVi|DV)\b"
+        r"(?i)\b(?:WEB(?:[ ._-]?DL|Rip)|BluRay|BDRip|REMUX|HDTV|"
+        r"x26[45]|H[ ._-]*26[45]|HEVC|AVC|HDR10?|DoVi|DV|"
+        r"AAC|DTS|DDP?|EAC3|Atmos|TrueHD)\b"
     ),
 )
+_NON_PRIMARY_VIDEO_PART = re.compile(
+    r"(?i)^(?:samples?|trailers?|extras?|featurettes?|"
+    r"behind[ ._-]*the[ ._-]*scenes?|花絮|预告片?)$"
+)
+_GENERIC_IDENTITIES = {
+    "raw",
+    "raw release",
+    "release",
+    "download",
+    "downloads",
+    "movie",
+    "series",
+    "season",
+    "tv",
+    "video",
+    "未整理",
+}
+_CHINESE_DIGITS = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
 
 
 def _text(value) -> str:
@@ -52,16 +98,11 @@ def _root_name(payload: dict) -> str:
     return ""
 
 
-def _identity_query(payload: dict) -> str:
-    value = _text(_root_name(payload))
+def _identity_query_value(raw_value: str) -> str:
+    value = _text(raw_value)
     value = re.sub(r"^(?:\s*\[[^\]]+\]\s*)+", "", value)
-    value = re.sub(
-        r"(?i)\.(?:mkv|mp4|avi|mov|m4v|ts|m2ts|wmv)$",
-        "",
-        value,
-    )
+    value = _VIDEO.sub("", value)
     value = re.sub(r"[._]+", " ", value)
-    value = re.sub(r"\s*-\s*", " ", value)
     value = " ".join(value.split())
     marker_positions = [
         match.start()
@@ -70,7 +111,198 @@ def _identity_query(payload: dict) -> str:
     ]
     if marker_positions:
         value = value[:min(marker_positions)]
-    return " ".join(value.split()).strip(" -")
+    value = re.sub(r"(?:\s*\[[^\]]+\]\s*)+$", "", value)
+    return " ".join(value.split()).strip(" -([")
+
+
+def _is_usable_identity(value: str) -> bool:
+    normalized = " ".join(_text(value).casefold().split()).strip(" -")
+    if not normalized or normalized in _GENERIC_IDENTITIES:
+        return False
+    if re.fullmatch(r"(?:raw\s+)?release(?:\s+\d+)?", normalized):
+        return False
+    if re.fullmatch(r"(?:season\s*\d+|s\d{1,2})", normalized):
+        return False
+    if re.fullmatch(r"\d{5,}", normalized):
+        return False
+    if re.fullmatch(r"[0-9a-f]{12,}", normalized):
+        return False
+    if re.fullmatch(r"\d{1,3}", normalized):
+        return False
+    return True
+
+
+def _identity_key(value: str) -> str:
+    return "".join(
+        character
+        for character in _text(value).casefold()
+        if character.isalnum()
+    )
+
+
+def _identity_tokens(value: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[\w]+", _text(value).casefold()))
+
+
+def _is_primary_video(path: str) -> bool:
+    relative = PurePosixPath(path)
+    if any(
+        _NON_PRIMARY_VIDEO_PART.fullmatch(part.rsplit(".", 1)[0])
+        for part in relative.parts
+    ):
+        return False
+    return not any(
+        token in {
+            "sample",
+            "samples",
+            "trailer",
+            "trailers",
+            "extra",
+            "extras",
+            "featurette",
+            "featurettes",
+            "花絮",
+            "预告",
+            "预告片",
+        }
+        for token in re.split(
+            r"[ ._\-]+",
+            relative.stem.casefold(),
+        )
+    )
+
+
+def _file_identity_consensus(
+    video_paths: list[str],
+) -> tuple[str, bool]:
+    def consensus(candidates: list[str]) -> tuple[str, bool]:
+        candidates = [
+            candidate for candidate in candidates
+            if _is_usable_identity(candidate)
+        ]
+        if not candidates:
+            return "", False
+        counts = Counter(_identity_key(candidate) for candidate in candidates)
+        normalized, count = counts.most_common(1)[0]
+        if count != len(candidates):
+            if count > len(candidates) / 2 and all(
+                _identity_key(candidate).startswith(
+                    _identity_key(normalized)
+                )
+                for candidate in candidates
+            ):
+                return next(
+                    candidate
+                    for candidate in candidates
+                    if _identity_key(candidate) == normalized
+                ), False
+            return "", True
+        return next(
+            candidate
+            for candidate in candidates
+            if _identity_key(candidate) == normalized
+        ), False
+
+    filename_consensus, filename_conflict = consensus([
+        _identity_query_value(PurePosixPath(path).name)
+        for path in video_paths
+    ])
+    if filename_consensus:
+        return filename_consensus, False
+    if filename_conflict:
+        return "", True
+
+    directory_candidates = []
+    for path in video_paths:
+        parent_parts = PurePosixPath(path).parent.parts
+        candidate = ""
+        for part in reversed(parent_parts):
+            query = _identity_query_value(part)
+            if _is_usable_identity(query):
+                candidate = query
+                break
+        if candidate:
+            directory_candidates.append(candidate)
+    if len(directory_candidates) != len(video_paths):
+        return "", False
+    return consensus(directory_candidates)
+
+
+def _has_strong_file_identity_evidence(path: str) -> bool:
+    name = PurePosixPath(path).name
+    return any(
+        pattern.search(name)
+        for pattern in (
+            _EPISODE,
+            _X_EPISODE,
+            _UNSCOPED_EPISODE,
+            _DASH_EPISODE,
+            _CHINESE_EPISODE,
+            *_IDENTITY_MARKERS[-2:],
+        )
+    )
+
+
+def _identity_query(payload: dict, video_paths: list[str]) -> str:
+    root_query = _identity_query_value(_root_name(payload))
+    file_query, file_conflict = _file_identity_consensus(video_paths)
+    if file_conflict:
+        return ""
+    if file_query and _is_usable_identity(root_query):
+        root_key = _identity_key(root_query)
+        file_key = _identity_key(file_query)
+        if root_key == file_key:
+            return root_query
+        root_tokens = _identity_tokens(root_query)
+        file_tokens = _identity_tokens(file_query)
+        if (
+            root_tokens[:len(file_tokens)] == file_tokens
+            or file_tokens[:len(root_tokens)] == root_tokens
+        ):
+            return max((root_query, file_query), key=lambda item: len(
+                _identity_key(item)
+            ))
+    if file_query and (
+        len(video_paths) > 1
+        or (
+            len(video_paths) == 1
+            and _has_strong_file_identity_evidence(video_paths[0])
+        )
+    ):
+        return file_query
+    if _is_usable_identity(root_query):
+        return root_query
+    if file_query:
+        return file_query
+    release = payload.get("release")
+    if isinstance(release, dict):
+        release_query = _identity_query_value(release.get("title") or "")
+        if _is_usable_identity(release_query):
+            return release_query
+    return ""
+
+
+def _parse_chinese_number(value: str) -> int | None:
+    value = _text(value).strip()
+    if value.isdigit():
+        return int(value)
+    if not value or any(
+        character not in _CHINESE_DIGITS and character not in "十百"
+        for character in value
+    ):
+        return None
+    total = 0
+    current = 0
+    for character in value:
+        if character in _CHINESE_DIGITS:
+            current = _CHINESE_DIGITS[character]
+        elif character == "十":
+            total += (current or 1) * 10
+            current = 0
+        elif character == "百":
+            total += (current or 1) * 100
+            current = 0
+    return total + current
 
 
 def _observed_markers(
@@ -81,24 +313,47 @@ def _observed_markers(
     unscoped_episodes: set[int] = set()
     for value in values:
         value = _text(value)
+        local_seasons: set[int] = set()
         for pattern in (_EPISODE, _X_EPISODE):
             for match in pattern.finditer(value):
                 season, episode = int(match.group(1)), int(match.group(2))
-                seasons.add(season)
+                local_seasons.add(season)
                 episodes.add((season, episode))
-        if not _EPISODE.search(value):
-            unscoped_episodes.update(
-                int(match.group(1))
-                for match in _UNSCOPED_EPISODE.finditer(value)
-            )
         for match in _SEASON_RANGE.finditer(value):
             start, end = int(match.group(1)), int(match.group(2))
             if 0 <= start <= end and end - start <= 100:
-                seasons.update(range(start, end + 1))
+                local_seasons.update(range(start, end + 1))
         for match in _SEASON.finditer(value):
             season = match.group(1) or match.group(2)
             if season is not None:
-                seasons.add(int(season))
+                local_seasons.add(int(season))
+        for match in _CHINESE_SEASON.finditer(value):
+            season = _parse_chinese_number(match.group(1))
+            if season is not None:
+                local_seasons.add(season)
+        seasons.update(local_seasons)
+
+        unscoped = {
+            int(match.group(1))
+            for pattern in (_UNSCOPED_EPISODE, _DASH_EPISODE)
+            for match in pattern.finditer(value)
+        }
+        unscoped.update(
+            episode
+            for match in _CHINESE_EPISODE.finditer(value)
+            if (episode := _parse_chinese_number(match.group(1))) is not None
+        )
+        if len(local_seasons) == 1:
+            bare_match = _BARE_EPISODE_STEM.fullmatch(
+                PurePosixPath(value).stem
+            )
+            if bare_match:
+                unscoped.add(int(bare_match.group(1)))
+        if len(local_seasons) == 1:
+            season = next(iter(local_seasons))
+            episodes.update((season, episode) for episode in unscoped)
+        else:
+            unscoped_episodes.update(unscoped)
     return seasons, episodes, unscoped_episodes
 
 
@@ -118,9 +373,9 @@ def build_metadata_probe(payload: dict) -> dict:
         if not path:
             continue
         paths.append(path)
-        if _VIDEO.search(path):
+        if _VIDEO.search(path) and _is_primary_video(path):
             video_paths.append(path)
-    marker_values = paths or [
+    marker_values = video_paths or paths or [
         _root_name(payload),
         str(
             (payload.get("release") or {}).get("title") or ""
@@ -143,10 +398,13 @@ def build_metadata_probe(payload: dict) -> dict:
         shape = "movie"
     else:
         shape = "unknown"
-    identity_query = _identity_query(payload)
+    identity_query = _identity_query(payload, video_paths)
     year_match = re.search(
         r"(?<!\d)(19\d{2}|20\d{2})(?!\d)",
-        _text(_root_name(payload)),
+        " ".join((
+            _text(_root_name(payload)),
+            identity_query,
+        )),
     )
     return {
         "identity_query": identity_query,

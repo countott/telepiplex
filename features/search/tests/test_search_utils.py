@@ -53,6 +53,9 @@ class SearchUtilsTest(unittest.TestCase):
             "Joker",
         )
 
+    def test_semantic_percent_sign_is_preserved(self):
+        self.assertEqual(build_prowlarr_query("3%", "whole_series"), "3%")
+
     def test_candidate_to_prowlarr_query_preserves_episode_scope(self):
         query = candidate_to_prowlarr_query(
             {

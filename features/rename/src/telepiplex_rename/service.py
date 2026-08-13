@@ -10,11 +10,16 @@ from telepiplex_plugin_sdk.media_metadata import (
     MEDIA_METADATA_KEY,
     attach_media_metadata,
     extract_confirmed_media_metadata,
+    resolve_category_route,
 )
 
 from .config_wizard import RenameConfigWizard
 from .content_probe import build_metadata_probe
 from .context import runtime_context
+from .inventory import (
+    inventory_job_id,
+    looks_organized_release,
+)
 from .models import DownloadCompletedEvent, PostDownloadResult
 from .operations import OperationCancelled, RenameOperationJournal
 from .processor import process_generic_media, process_tvdb_episode
@@ -22,6 +27,7 @@ from .processor import process_generic_media, process_tvdb_episode
 
 _STORAGE_METHODS = {
     "get_file_info", "get_file_info_by_id", "get_file_list",
+    "get_file_tree",
     "create_directory", "create_dir_recursive", "rename", "copy_file",
     "delete_single_file", "move_file", "is_directory", "get_files_from_dir",
     "move_file_detailed",
@@ -32,6 +38,7 @@ _STORAGE_STAGES = {
     "get_file_info": ("conflict_validation", "正在验证目标文件冲突。"),
     "get_file_info_by_id": ("planning", "正在读取文件身份。"),
     "get_file_list": ("planning", "正在构建整理计划。"),
+    "get_file_tree": ("planning", "正在读取媒体文件树。"),
     "get_files_from_dir": ("planning", "正在构建整理计划。"),
     "is_directory": ("planning", "正在验证目录结构。"),
     "create_directory": ("directory_preparation", "正在准备目标目录。"),
@@ -194,6 +201,7 @@ class RenameFeature:
         self.runtime = None
         self.operations = {}
         self.owner_operations = {}
+        self.inventory_sessions = {}
 
     def bind_runtime(self, runtime):
         self.runtime = runtime
@@ -207,6 +215,18 @@ class RenameFeature:
     async def _resume_durable_job(self, job):
         try:
             outcome = job.get("result") or {}
+            event_payload = outcome.get("event_payload") or {}
+            if (
+                outcome.get("inventory_batch_id")
+                or event_payload.get("_inventory_batch_id")
+            ):
+                outcome["message"] = (
+                    "存量整理批次在 Feature 重启时中断；"
+                    "请重新执行 /rename 扫描，当前项可安全重试。"
+                )
+                if self.jobs:
+                    self.jobs.update(job["job_id"], "failed", outcome)
+                return
             if job.get("state") == "awaiting_metadata":
                 await self._restore_metadata_confirmation(
                     job["job_id"],
@@ -225,7 +245,6 @@ class RenameFeature:
                     operation["operation_id"] if operation else "",
                 )
                 return
-            event_payload = outcome.get("event_payload") or {}
             operation_id = str(event_payload.get("operation_id") or "")
             if job.get("state") == "published":
                 await self._complete_published_job(job["job_id"], outcome)
@@ -253,7 +272,10 @@ class RenameFeature:
                 )
 
     async def command(self, request: dict) -> dict:
-        if str(request.get("command") or "") != "rename_config":
+        command = str(request.get("command") or "")
+        if command == "rename":
+            return self._inventory_menu(request)
+        if command != "rename_config":
             raise FeatureError("not_found", "unknown rename command")
         result = self.config_wizard.start(request)
         result["operation"] = self._new_operation(
@@ -268,15 +290,619 @@ class RenameFeature:
 
     async def callback(self, request: dict) -> dict:
         payload = str(request.get("payload") or "")
+        if payload.startswith("inventory:"):
+            return await self._inventory_callback(request, payload)
         if payload.startswith("metadata:"):
             return await self._metadata_callback(request, payload)
         return self._decorate_config_result(
             request, self.config_wizard.callback(request)
         )
 
+    def _inventory_roots(self) -> list[dict]:
+        roots = [{
+            "kind": str(item.get("kind") or ""),
+            "name": str(item.get("name") or item.get("path") or ""),
+            "path": "/" + str(item.get("path") or "").strip("/"),
+            "source_kind": "category",
+        } for item in self.config.get("category_folder") or [] if (
+            isinstance(item, dict) and str(item.get("path") or "").strip("/")
+        )]
+        unorganized_path = "/" + str(
+            self.config.get("unorganized_path") or ""
+        ).strip("/")
+        if unorganized_path != "/":
+            roots.append({
+                "kind": "unorganized",
+                "name": "未整理",
+                "path": unorganized_path,
+                "source_kind": "unorganized",
+            })
+        return roots
+
+    def _inventory_menu(self, request: dict) -> dict:
+        if request.get("args"):
+            return {
+                "actions": [{"kind": "send_message", "text": "用法：/rename"}],
+            }
+        roots = self._inventory_roots()
+        if not roots:
+            return {
+                "actions": [{
+                    "kind": "send_message",
+                    "text": "⚠️ rename 没有可扫描的分类目录或未整理目录。",
+                }],
+            }
+        operation = self._new_operation(
+            request,
+            state="awaiting_input",
+            stage="inventory_root_selection",
+            status_text="等待选择要扫描的 115 目录。",
+            control="exit",
+            kind="inventory",
+        )
+        owner = self._owner_key(request)
+        self.inventory_sessions[owner] = {
+            "stage": "root_selection",
+            "roots": roots,
+            "operation_id": operation["operation_id"],
+        }
+        keyboard = [[{
+            "text": root["name"],
+            "callback_data": f"rename:inventory:root:{index}",
+        }] for index, root in enumerate(roots)]
+        keyboard.append([{
+            "text": "退出",
+            "callback_data": "rename:inventory:cancel",
+        }])
+        return {
+            "actions": [{
+                "kind": "send_message",
+                "text": "请选择要扫描的 115 目录：",
+                "data": {"keyboard": keyboard},
+            }],
+            "session": {"state": "open"},
+            "operation": operation,
+        }
+
+    async def _inventory_callback(
+        self, request: dict, payload: str
+    ) -> dict:
+        owner = self._owner_key(request)
+        session = self.inventory_sessions.get(owner)
+        if not session:
+            raise FeatureError(
+                "invalid_state", "rename inventory session is no longer active"
+            )
+        operation_id = str(session.get("operation_id") or "")
+        if payload == "inventory:cancel":
+            operation = self.operations.get(operation_id) or {}
+            cancel_event = operation.get("cancel_event")
+            if cancel_event is not None:
+                cancel_event.set()
+            task = operation.get("task")
+            if (
+                task is not None
+                and hasattr(task, "cancel")
+                and not task.done()
+                and not operation.get("thread_started")
+            ):
+                task.cancel()
+            current_job_id = str(session.get("current_job_id") or "")
+            current_job = (
+                self.jobs.get(current_job_id)
+                if self.jobs and current_job_id
+                else None
+            )
+            if current_job and current_job.get("state") in {
+                "awaiting_metadata", "ready_metadata", "processing"
+            }:
+                outcome = dict(current_job.get("result") or {})
+                outcome["message"] = "用户已退出存量媒体补整理。"
+                self.jobs.update(current_job_id, "cancelled", outcome)
+            self.inventory_sessions.pop(owner, None)
+            terminal = self._advance_operation(
+                operation_id,
+                state="cancelled",
+                stage="inventory_cancelled",
+                status_text="已退出存量媒体扫描。",
+                control="",
+            )
+            return {
+                "actions": [{
+                    "kind": "edit_message",
+                    "text": "已退出存量媒体扫描。",
+                }],
+                "session": {"state": "close"},
+                "operation": terminal,
+            }
+        if payload.startswith("inventory:root:"):
+            if session.get("stage") != "root_selection":
+                raise FeatureError(
+                    "invalid_state", "rename inventory root is already selected"
+                )
+            try:
+                root = session["roots"][int(payload.rsplit(":", 1)[1])]
+            except (ValueError, IndexError):
+                raise FeatureError(
+                    "invalid_callback", "rename inventory root is invalid"
+                ) from None
+            session.update({
+                "stage": "scanning",
+                "root": dict(root),
+            })
+            operation = self.operations[operation_id]
+            operation["cancel_event"] = threading.Event()
+            view = self._advance_operation(
+                operation_id,
+                state="running",
+                stage="inventory_scan",
+                status_text=f"正在扫描 {root['name']} 的直接子项。",
+                control="cancel",
+            )
+            task = self.runtime.spawn(
+                self._scan_inventory(owner, operation_id),
+                task_id=f"rename-inventory-scan-{operation_id}",
+            )
+            operation["task"] = task
+            return {
+                "actions": [{
+                    "kind": "edit_message",
+                    "text": view["status_text"],
+                }],
+                "session": {"state": "open"},
+                "operation": view,
+            }
+        if payload == "inventory:confirm":
+            if session.get("stage") != "confirmation":
+                raise FeatureError(
+                    "invalid_state", "rename inventory is not ready to start"
+                )
+            pending = list(session.get("pending") or [])
+            if not pending:
+                raise FeatureError(
+                    "invalid_state", "rename inventory has no pending media"
+                )
+            session.update({
+                "stage": "batch",
+                "index": 0,
+                "success": 0,
+                "failed": 0,
+            })
+            view = self._advance_operation(
+                operation_id,
+                state="running",
+                stage="inventory_batch",
+                status_text=f"开始串行补整理，共 {len(pending)} 项。",
+                control="cancel",
+                details={
+                    "total": len(pending),
+                    "completed": 0,
+                    "success": 0,
+                    "failed": 0,
+                },
+            )
+            task = self.runtime.spawn(
+                self._run_inventory_batch(owner, operation_id),
+                task_id=f"rename-inventory-batch-{operation_id}",
+            )
+            self.operations[operation_id]["task"] = task
+            return {
+                "actions": [{
+                    "kind": "edit_message",
+                    "text": view["status_text"],
+                }],
+                "session": {"state": "open"},
+                "operation": view,
+            }
+        raise FeatureError(
+            "invalid_callback", "rename inventory action is invalid"
+        )
+
+    async def _storage_value(self, method: str, *args, **kwargs):
+        response = await self.host.call_capability(
+            "storage.provider",
+            method,
+            {"args": list(args), "kwargs": kwargs},
+            deadline=float(self.config.get("storage_timeout") or 120),
+        )
+        return response.get("value") if isinstance(response, dict) else None
+
+    @staticmethod
+    def _storage_items(value) -> list[dict]:
+        if isinstance(value, list):
+            return [dict(item) for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            for candidate in (
+                value.get("data"), value.get("list"), value.get("items")
+            ):
+                if isinstance(candidate, list):
+                    return [
+                        dict(item) for item in candidate
+                        if isinstance(item, dict)
+                    ]
+                if isinstance(candidate, dict) and isinstance(
+                    candidate.get("list"), list
+                ):
+                    return [
+                        dict(item) for item in candidate["list"]
+                        if isinstance(item, dict)
+                    ]
+        return []
+
+    @staticmethod
+    def _inventory_item_name(item: dict) -> str:
+        return str(
+            item.get("name") or item.get("file_name")
+            or item.get("fn") or item.get("n") or ""
+        ).strip()
+
+    @staticmethod
+    def _inventory_item_is_dir(item: dict) -> bool:
+        if "is_dir" in item:
+            return bool(item.get("is_dir"))
+        if "file_category" in item:
+            return str(item.get("file_category")) == "0"
+        if "fc" in item:
+            return str(item.get("fc")) != "1"
+        return False
+
+    @staticmethod
+    def _inventory_item_id(item: dict) -> str:
+        return str(
+            item.get("file_id") or item.get("fid")
+            or item.get("cid") or item.get("id") or ""
+        ).strip()
+
+    @staticmethod
+    def _inventory_item_size(item: dict):
+        return (
+            item.get("size") or item.get("fs")
+            or item.get("size_byte") or 0
+        )
+
+    async def _inventory_directory_items(self, parent_id: str) -> list[dict]:
+        page_size = 1000
+        offset = 0
+        items = []
+        seen_page_items = set()
+        while True:
+            page = self._storage_items(await self._storage_value(
+                "get_file_list",
+                {
+                    "cid": str(parent_id),
+                    "offset": offset,
+                    "limit": page_size,
+                    "show_dir": 1,
+                },
+            ))
+            if not page:
+                return items
+            new_items = []
+            for item in page:
+                identity = (
+                    self._inventory_item_id(item),
+                    self._inventory_item_name(item),
+                    self._inventory_item_is_dir(item),
+                )
+                if identity in seen_page_items:
+                    continue
+                seen_page_items.add(identity)
+                new_items.append(item)
+            if not new_items:
+                raise FeatureError(
+                    "inventory_tree_incomplete",
+                    "storage pagination did not advance",
+                )
+            items.extend(new_items)
+            if len(page) < page_size:
+                return items
+            offset += len(page)
+
+    async def _inventory_file_tree(
+        self,
+        child: dict,
+        source_path: str,
+    ) -> list[dict]:
+        root_id = self._inventory_item_id(child)
+        if not root_id:
+            raise FeatureError(
+                "inventory_tree_incomplete",
+                f"inventory folder has no file identity: {source_path}",
+            )
+        tree = []
+        stack = [(root_id, "")]
+        visited_directories = set()
+        while stack:
+            parent_id, prefix = stack.pop()
+            if parent_id in visited_directories:
+                raise FeatureError(
+                    "inventory_tree_incomplete",
+                    f"inventory folder cycle detected: {source_path}",
+                )
+            visited_directories.add(parent_id)
+            descendants = await self._inventory_directory_items(parent_id)
+            nested_directories = []
+            for item in descendants:
+                name = self._inventory_item_name(item)
+                if not name:
+                    continue
+                relative_path = f"{prefix}/{name}".strip("/")
+                is_dir = self._inventory_item_is_dir(item)
+                file_id = self._inventory_item_id(item)
+                tree.append({
+                    **item,
+                    "name": name,
+                    "relative_path": relative_path,
+                    "path": f"{source_path.rstrip('/')}/{relative_path}",
+                    "is_dir": is_dir,
+                    "file_id": file_id,
+                    "size": self._inventory_item_size(item),
+                })
+                if is_dir:
+                    if not file_id:
+                        raise FeatureError(
+                            "inventory_tree_incomplete",
+                            f"inventory subfolder has no file identity: "
+                            f"{source_path}/{relative_path}",
+                        )
+                    nested_directories.append((file_id, relative_path))
+            stack.extend(reversed(nested_directories))
+        return tree
+
+    async def _scan_inventory(self, owner, operation_id):
+        session = self.inventory_sessions.get(owner) or {}
+        root = session.get("root") or {}
+        counts = {"pending": 0, "completed": 0}
+        pending = []
+        try:
+            root_info = await self._storage_value(
+                "get_file_info", root.get("path")
+            )
+            root_id = str(
+                (root_info or {}).get("file_id")
+                or (root_info or {}).get("cid")
+                or (root_info or {}).get("fid")
+                or ""
+            ).strip()
+            if not root_id:
+                raise FeatureError(
+                    "storage_unavailable", "inventory root has no file identity"
+                )
+            children = await self._inventory_directory_items(root_id)
+            for child in children:
+                self._raise_if_cancelled(operation_id)
+                name = self._inventory_item_name(child)
+                if not name:
+                    continue
+                source_path = (
+                    f"{str(root.get('path') or '').rstrip('/')}/{name}"
+                )
+                child_is_directory = self._inventory_item_is_dir(child)
+                if child_is_directory:
+                    file_tree = await self._inventory_file_tree(
+                        child,
+                        source_path,
+                    )
+                else:
+                    file_tree = [{
+                        **child,
+                        "name": name,
+                        "relative_path": name,
+                        "path": source_path,
+                        "is_dir": False,
+                    }]
+                job_id = inventory_job_id(child, source_path)
+                if (
+                    child_is_directory
+                    and looks_organized_release(name, file_tree)
+                ):
+                    counts["completed"] += 1
+                    continue
+                pending.append({
+                    "job_id": job_id,
+                    "source_path": source_path,
+                    "resource_name": name,
+                    "file_tree": file_tree,
+                    "source_file_id": str(
+                        child.get("file_id") or child.get("fid")
+                        or child.get("cid") or ""
+                    ),
+                })
+                counts["pending"] += 1
+            session.update({
+                "stage": "confirmation",
+                "pending": pending,
+                "counts": counts,
+            })
+            keyboard = []
+            if pending:
+                keyboard.append([{
+                    "text": f"开始补整理（{len(pending)}）",
+                    "callback_data": "rename:inventory:confirm",
+                }])
+            keyboard.append([{
+                "text": "取消",
+                "callback_data": "rename:inventory:cancel",
+            }])
+            text = (
+                f"{root.get('name') or '所选目录'}扫描完成：\n"
+                f"未完成：{counts['pending']}\n"
+                f"已完成：{counts['completed']}"
+            )
+            await self._report_if_active(
+                operation_id,
+                state="awaiting_input",
+                stage="inventory_confirmation",
+                status_text=text,
+                control="exit",
+                details={"keyboard": keyboard, "counts": counts},
+            )
+        except (asyncio.CancelledError, OperationCancelled):
+            self.inventory_sessions.pop(owner, None)
+            await self._report_if_active(
+                operation_id,
+                state="cancelled",
+                stage="inventory_scan",
+                status_text="存量媒体扫描已取消。",
+                control="",
+                details={"counts": counts},
+            )
+        except Exception as exc:
+            self.inventory_sessions.pop(owner, None)
+            await self._report_if_active(
+                operation_id,
+                state="failed",
+                stage="inventory_scan",
+                status_text=(
+                    "存量媒体扫描失败："
+                    f"{getattr(exc, 'code', type(exc).__name__)}。"
+                ),
+                control="",
+                details={"counts": counts},
+            )
+
+    def _inventory_item_payload(
+        self, owner, operation_id: str, session: dict, item: dict
+    ) -> dict:
+        root = session.get("root") or {}
+        return {
+            "job_id": str(item.get("job_id") or ""),
+            "chat_id": int(owner[0]),
+            "user_id": int(owner[1]),
+            "provider": "inventory",
+            "source_path": str(item.get("source_path") or ""),
+            "selected_path": (
+                str(root.get("path") or "")
+                if root.get("source_kind") == "category"
+                else ""
+            ),
+            "download_root": str(item.get("source_path") or ""),
+            "final_path": str(item.get("source_path") or ""),
+            "resource_name": str(item.get("resource_name") or ""),
+            "file_tree": list(item.get("file_tree") or []),
+            "operation_id": operation_id,
+            "operation_revision": int(
+                (self.operations.get(operation_id) or {}).get("revision") or 0
+            ),
+            "_inventory_batch_id": operation_id,
+            "_inventory_index": int(session.get("index") or 0),
+            "_inventory_source_kind": str(root.get("source_kind") or ""),
+        }
+
+    async def _run_inventory_batch(self, owner, operation_id: str) -> None:
+        session = self.inventory_sessions.get(owner)
+        if not session or session.get("operation_id") != operation_id:
+            return
+        pending = list(session.get("pending") or [])
+        try:
+            while int(session.get("index") or 0) < len(pending):
+                self._raise_if_cancelled(operation_id)
+                index = int(session.get("index") or 0)
+                item = pending[index]
+                job_id = str(item.get("job_id") or "")
+                job = self.jobs.get(job_id) if self.jobs else None
+                if job and job.get("state") == "awaiting_metadata":
+                    session["stage"] = "awaiting_metadata"
+                    return
+                if job and job.get("state") == "ready_metadata":
+                    payload = dict(
+                        (job.get("result") or {}).get("event_payload") or {}
+                    )
+                else:
+                    if self.jobs and not self.jobs.claim_retryable(
+                        job_id,
+                        reopen_completed=True,
+                    ):
+                        session["failed"] = int(session.get("failed") or 0) + 1
+                        session["index"] = index + 1
+                        continue
+                    payload = self._inventory_item_payload(
+                        owner, operation_id, session, item
+                    )
+                session["stage"] = "batch"
+                session["current_job_id"] = job_id
+                await self._report_if_active(
+                    operation_id,
+                    state="running",
+                    stage="inventory_batch",
+                    status_text=(
+                        f"正在补整理 {index + 1}/{len(pending)}："
+                        f"{item.get('resource_name') or item.get('source_path')}"
+                    ),
+                    control="cancel",
+                    details={
+                        "total": len(pending),
+                        "completed": index,
+                        "success": int(session.get("success") or 0),
+                        "failed": int(session.get("failed") or 0),
+                    },
+                )
+                await self._run_organization(job_id, payload, operation_id)
+                current = self.jobs.get(job_id) if self.jobs else None
+                if current and current.get("state") == "awaiting_metadata":
+                    session["stage"] = "awaiting_metadata"
+                    return
+                result = (current or {}).get("result") or {}
+                if current and current.get("state") == "completed" and result.get(
+                    "organized"
+                ):
+                    session["success"] = int(session.get("success") or 0) + 1
+                else:
+                    session["failed"] = int(session.get("failed") or 0) + 1
+                session["index"] = index + 1
+            session["stage"] = "completed"
+            total = len(pending)
+            success = int(session.get("success") or 0)
+            failed = int(session.get("failed") or 0)
+            text = (
+                "存量媒体补整理完成。\n"
+                f"成功：{success}\n失败：{failed}\n"
+                f"总计：{total}"
+            )
+            await self._report_if_active(
+                operation_id,
+                state="completed",
+                stage="completed",
+                status_text=text,
+                control="",
+                details={
+                    "total": total,
+                    "completed": total,
+                    "success": success,
+                    "failed": failed,
+                },
+            )
+            self.inventory_sessions.pop(owner, None)
+        except (asyncio.CancelledError, OperationCancelled):
+            self.inventory_sessions.pop(owner, None)
+            await self._report_if_active(
+                operation_id,
+                state="cancelled",
+                stage="inventory_batch",
+                status_text="存量媒体补整理已停止；已完成的文件变更保持不变。",
+                control="",
+            )
+        except Exception as exc:
+            self.inventory_sessions.pop(owner, None)
+            await self._report_if_active(
+                operation_id,
+                state="failed",
+                stage="inventory_batch",
+                status_text=(
+                    "存量媒体补整理异常终止："
+                    f"{getattr(exc, 'code', type(exc).__name__)}。"
+                ),
+                control="",
+                details={"manual_check_required": True},
+            )
+
     async def _metadata_callback(self, request: dict, payload: str) -> dict:
         try:
-            _prefix, job_id, raw_index = payload.split(":", 2)
+            job_id, raw_index = payload.removeprefix("metadata:").rsplit(
+                ":", 1
+            )
+            if not job_id:
+                raise ValueError
             index = int(raw_index)
         except (TypeError, ValueError):
             raise FeatureError(
@@ -315,6 +941,19 @@ class RenameFeature:
                 "forbidden",
                 "rename metadata confirmation belongs to another user",
             )
+        is_inventory = bool(
+            event_payload.get("_inventory_batch_id") == operation_id
+        )
+        if is_inventory:
+            session = self.inventory_sessions.get(owner)
+            if (
+                not session
+                or session.get("operation_id") != operation_id
+                or session.get("current_job_id") != job_id
+            ):
+                raise FeatureError(
+                    "invalid_state", "rename inventory batch is no longer active"
+                )
         resolved = await self.host.call_capability(
             "media.search",
             "confirm_metadata",
@@ -352,12 +991,20 @@ class RenameFeature:
         running = await self._report_if_active(
             operation_id,
             state="running",
-            stage="metadata_resolution",
+            stage="inventory_batch" if is_inventory else "metadata_resolution",
             status_text="已确认媒体身份，正在恢复整理任务。",
             control="cancel",
             details={},
         )
-        self._spawn_organization(job_id, event_payload, operation_id)
+        if is_inventory:
+            session["stage"] = "batch"
+            task = self.runtime.spawn(
+                self._run_inventory_batch(owner, operation_id),
+                task_id=f"rename-inventory-batch-{operation_id}",
+            )
+            self.operations[operation_id]["task"] = task
+        else:
+            self._spawn_organization(job_id, event_payload, operation_id)
         return {
             "actions": [{
                 "kind": "edit_message",
@@ -481,6 +1128,14 @@ class RenameFeature:
             return self._decorate_config_result(
                 request, self.config_wizard.message(request)
             )
+        if self._owner_key(request) in self.inventory_sessions:
+            return {
+                "actions": [{
+                    "kind": "send_message",
+                    "text": "请使用当前 rename 存量整理面板中的按钮。",
+                }],
+                "session": {"state": "open"},
+            }
         return {
             "actions": [{"kind": "send_message", "text": "⚠️ rename 配置会话已失效。"}],
             "session": {"state": "close"},
@@ -643,6 +1298,9 @@ class RenameFeature:
 
     async def _run_organization(self, job_id, payload, operation_id):
         user_id = int(payload.get("user_id") or 0)
+        is_inventory = bool(
+            payload.get("_inventory_batch_id") == operation_id
+        )
         event = None
         processing_complete = False
         try:
@@ -706,6 +1364,27 @@ class RenameFeature:
                     presentation = resolved.get("presentation")
                     if isinstance(presentation, dict):
                         payload["_metadata_presentation"] = presentation
+            if (
+                is_inventory
+                and payload.get("_inventory_source_kind") == "unorganized"
+                and metadata
+            ):
+                contract = extract_confirmed_media_metadata(metadata)
+                placement = (
+                    contract.get("placement")
+                    if isinstance(contract, dict)
+                    else None
+                )
+                route = resolve_category_route(
+                    {"category_folder": self.config.get("category_folder") or []},
+                    str((placement or {}).get("category_kind") or ""),
+                )
+                if not route:
+                    raise FeatureError(
+                        "category_route_missing",
+                        "confirmed metadata has no configured category route",
+                    )
+                payload["selected_path"] = route["path"]
             presentation = payload.get("_metadata_presentation")
             if metadata and isinstance(presentation, dict) and operation_id:
                 try:
@@ -769,7 +1448,12 @@ class RenameFeature:
             )
             if operation_id:
                 operation_state["thread_started"] = True
-            processor = self._process if metadata else self._fallback_unorganized
+            if metadata:
+                processor = self._process
+            elif is_inventory:
+                processor = self._inventory_unresolved
+            else:
+                processor = self._fallback_unorganized
             result = await asyncio.to_thread(processor, event)
             self._raise_if_cancelled(operation_id)
             organized = bool(
@@ -780,30 +1464,41 @@ class RenameFeature:
             contract = extract_confirmed_media_metadata(
                 result.metadata or event.metadata
             )
+            event_payload = {
+                "job_id": job_id,
+                "user_id": user_id,
+                "chat_id": int(payload.get("chat_id") or user_id or 0),
+                "provider": event.provider,
+                "source_path": (
+                    payload.get("source_path") or payload.get("final_path")
+                ),
+                "final_path": result.final_path,
+                "media_metadata": contract,
+            }
+            if not is_inventory:
+                event_payload.update({
+                    "operation_id": operation_id,
+                    "operation_revision": int(
+                        operation_state.get("revision") or 0
+                    ),
+                })
             outcome = {
                 "organized": organized,
                 "final_path": result.final_path or event.final_path,
                 "message": result.message or "",
                 "user_id": user_id,
                 "job_id": job_id,
-                "event_payload": {
-                    "job_id": job_id,
-                    "user_id": user_id,
-                    "chat_id": int(payload.get("chat_id") or user_id or 0),
-                    "provider": event.provider,
-                    "source_path": payload.get("final_path"),
-                    "final_path": result.final_path,
-                    "media_metadata": contract,
-                    "operation_id": operation_id,
-                    "operation_revision": int(
-                        operation_state.get("revision") or 0
-                    ),
-                },
+                "event_payload": event_payload,
             }
+            if is_inventory:
+                outcome["inventory_batch_id"] = operation_id
             if self.jobs:
                 self.jobs.update(job_id, "processed", outcome)
             processing_complete = True
-            await self._finish_operation(job_id, outcome, operation_id)
+            if is_inventory:
+                await self._finish_inventory_item(job_id, outcome)
+            else:
+                await self._finish_operation(job_id, outcome, operation_id)
         except (asyncio.CancelledError, OperationCancelled):
             stopped_at = (
                 (self.operations.get(operation_id) or {}).get("stage")
@@ -894,6 +1589,8 @@ class RenameFeature:
             }
             if self.jobs:
                 self.jobs.update(job_id, "failed", outcome)
+            if is_inventory:
+                return
             await self._report_if_active(
                 operation_id,
                 state="failed",
@@ -911,6 +1608,30 @@ class RenameFeature:
                     )
                 except Exception:
                     pass
+
+    async def _finish_inventory_item(self, job_id: str, outcome: dict) -> None:
+        if outcome.get("organized"):
+            try:
+                await self.host.publish_event(
+                    "media.organized",
+                    outcome["event_payload"],
+                    idempotency_key=(
+                        f"{job_id}:organized:"
+                        f"{outcome.get('inventory_batch_id') or 'inventory'}"
+                    ),
+                )
+            except Exception as exc:
+                outcome["downstream_error"] = type(exc).__name__
+                outcome["message"] = (
+                    str(outcome.get("message") or "").rstrip()
+                    + "\nPlex 事件发布失败，请人工检查。"
+                ).lstrip()
+        if self.jobs:
+            self.jobs.update(
+                job_id,
+                "completed" if outcome.get("organized") else "failed",
+                outcome,
+            )
 
     async def _finish_operation(self, job_id, outcome, operation_id):
         if outcome.get("organized"):
@@ -1115,6 +1836,25 @@ class RenameFeature:
         owner = (operation["chat_id"], operation["user_id"])
         if action == "exit" and operation.get("state") == "awaiting_input":
             self.config_wizard.sessions.pop(owner, None)
+            inventory_session = self.inventory_sessions.pop(owner, None)
+            if inventory_session:
+                cancel_event = operation.get("cancel_event")
+                if cancel_event is not None:
+                    cancel_event.set()
+                current_job_id = str(
+                    inventory_session.get("current_job_id") or ""
+                )
+                current_job = (
+                    self.jobs.get(current_job_id)
+                    if self.jobs and current_job_id
+                    else None
+                )
+                if current_job and current_job.get("state") in {
+                    "awaiting_metadata", "ready_metadata", "processing"
+                }:
+                    outcome = dict(current_job.get("result") or {})
+                    outcome["message"] = "用户已退出存量媒体补整理。"
+                    self.jobs.update(current_job_id, "cancelled", outcome)
             terminal = self._advance_operation(
                 operation_id,
                 state="cancelled",
@@ -1419,6 +2159,18 @@ class RenameFeature:
         if result.handled or result.should_stop:
             return result
         return self._fallback_unorganized(event)
+
+    @staticmethod
+    def _inventory_unresolved(
+        event: DownloadCompletedEvent,
+    ) -> PostDownloadResult:
+        return PostDownloadResult(
+            True,
+            final_path=event.final_path,
+            message="⚠️ 元数据反查未确认媒体身份，文件保持原位。",
+            should_stop=True,
+            metadata=event.metadata,
+        )
 
     def _fallback_unorganized(self, event: DownloadCompletedEvent) -> PostDownloadResult:
         root = str(self.config.get("unorganized_path") or "").rstrip("/")
