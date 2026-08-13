@@ -98,6 +98,17 @@ plugins:
           branch: main
           commit: f3f2359746498394c36c5b992daef0afcebe16ed
         url: https://github.com/countott/telepiplex/releases/download/download-v1.0.7/download-1.0.7.tpx
+      1.0.8:
+        host_api: '>=1.1,<2.0'
+        provides:
+        - download.provider
+        - storage.provider
+        requires: []
+        sha256: 0f30cd5491c5d9e96fc2a4fee337527546a9b4e5443f729f6cadfe57adcc011b
+        source:
+          branch: main
+          commit: cd324ee7d105de2f6cd4ca3d0249d6958eea0939
+        url: https://github.com/countott/telepiplex/releases/download/download-v1.0.8/download-1.0.8.tpx
   rename:
     versions:
       1.0.0:
@@ -452,5 +463,5 @@ plugins:
           branch: main
           commit: 94f1de14afd875902db996cf2c59e0e590a676ff
         url: https://github.com/countott/telepiplex/releases/download/sync-v1.1.0/sync-1.1.0.tpx
-release: rename-v1.2.2
+release: download-v1.0.8
 schema_version: 1
