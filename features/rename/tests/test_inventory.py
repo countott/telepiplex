@@ -57,6 +57,70 @@ class InventoryClassificationTest(unittest.TestCase):
             tree,
         ))
 
+    def test_normalized_series_accepts_all_supported_external_subtitles(self):
+        tree = [{
+            "name": "The Residence Season 01",
+            "relative_path": "The Residence Season 01",
+            "is_dir": True,
+        }, {
+            "name": "The Residence S01E01.mkv",
+            "relative_path": (
+                "The Residence Season 01/The Residence S01E01.mkv"
+            ),
+            "is_dir": False,
+        }]
+        for extension in ("srt", "ass", "sup", "vtt"):
+            tree.append({
+                "name": f"The Residence S01E01.chi.{extension}",
+                "relative_path": (
+                    "The Residence Season 01/"
+                    f"The Residence S01E01.chi.{extension}"
+                ),
+                "is_dir": False,
+            })
+
+        self.assertTrue(looks_organized_release(
+            "白宫杀人事件 (The Residence)",
+            tree,
+        ))
+
+    def test_normalized_series_subtitle_only_folder_is_recognized(self):
+        self.assertTrue(looks_organized_release(
+            "白宫杀人事件 (The Residence)",
+            [{
+                "name": "The Residence Season 03",
+                "relative_path": "The Residence Season 03",
+                "is_dir": True,
+            }, {
+                "name": "The Residence S03E02.chi.vtt",
+                "relative_path": (
+                    "The Residence Season 03/"
+                    "The Residence S03E02.chi.vtt"
+                ),
+                "is_dir": False,
+            }],
+        ))
+
+    def test_raw_or_traditional_series_subtitle_is_not_complete(self):
+        for subtitle in (
+            "The Residence S01E01.CHS.srt",
+            "The Residence S01E01.cht.srt",
+            "The Residence S01E01.srt",
+        ):
+            with self.subTest(subtitle=subtitle):
+                self.assertFalse(looks_organized_release(
+                    "白宫杀人事件 (The Residence)",
+                    [{
+                        "name": "The Residence Season 01",
+                        "relative_path": "The Residence Season 01",
+                        "is_dir": True,
+                    }, {
+                        "name": subtitle,
+                        "relative_path": f"The Residence Season 01/{subtitle}",
+                        "is_dir": False,
+                    }],
+                ))
+
     def test_series_folder_rejects_extra_nesting(self):
         self.assertFalse(looks_organized_release(
             "白宫杀人事件 (The Residence)",
@@ -100,6 +164,30 @@ class InventoryClassificationTest(unittest.TestCase):
             [{
                 "name": "The Grand Budapest Hotel.mkv",
                 "relative_path": "The Grand Budapest Hotel.mkv",
+                "is_dir": False,
+            }],
+        ))
+
+    def test_normalized_movie_with_subtitle_is_recognized(self):
+        self.assertTrue(looks_organized_release(
+            "布达佩斯大饭店 (The Grand Budapest Hotel)",
+            [{
+                "name": "The Grand Budapest Hotel.mkv",
+                "relative_path": "The Grand Budapest Hotel.mkv",
+                "is_dir": False,
+            }, {
+                "name": "The Grand Budapest Hotel.chi.sup",
+                "relative_path": "The Grand Budapest Hotel.chi.sup",
+                "is_dir": False,
+            }],
+        ))
+
+    def test_normalized_movie_subtitle_only_folder_is_recognized(self):
+        self.assertTrue(looks_organized_release(
+            "布达佩斯大饭店 (The Grand Budapest Hotel)",
+            [{
+                "name": "The Grand Budapest Hotel.chi.ass",
+                "relative_path": "The Grand Budapest Hotel.chi.ass",
                 "is_dir": False,
             }],
         ))

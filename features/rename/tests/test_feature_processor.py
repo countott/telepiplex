@@ -107,6 +107,22 @@ class SeriesTargetConflictStorage(FakeStorage):
         return super().get_file_info(path)
 
 
+class SubtitleTargetConflictStorage(FakeStorage):
+    def get_file_info(self, path):
+        if path.endswith("/English Movie.chi.srt"):
+            return {"file_id": "existing-subtitle", "file_category": "1"}
+        return super().get_file_info(path)
+
+
+class IdenticalSubtitleTargetStorage(FakeStorage):
+    def get_file_info(self, path):
+        if path.endswith("/English Movie.chi.srt"):
+            return {"file_id": "existing-subtitle", "sha1": "same"}
+        if path.endswith("/Movie.2024.CHS.srt"):
+            return {"file_id": "source-subtitle", "sha1": "same"}
+        return super().get_file_info(path)
+
+
 def movie_contract():
     return {
         "schema_version": 1,
@@ -231,6 +247,40 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertEqual(probe["content_shape"], "multi_season_pack")
         self.assertEqual(probe["observed_seasons"], [1, 9])
         self.assertNotIn("S09E23", probe["identity_query"])
+
+    def test_probe_uses_subtitle_paths_when_tree_has_no_video(self):
+        probe = build_metadata_probe({
+            "resource_name": "Raw.Subtitles",
+            "file_tree": [{
+                "relative_path": "Veep.S03E01.CHS&ENG.ass",
+                "is_dir": False,
+            }, {
+                "relative_path": "Veep.S03E02.CHS.vtt",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "Veep")
+        self.assertEqual(probe["content_shape"], "season_pack")
+        self.assertEqual(probe["observed_seasons"], [3])
+        self.assertEqual(probe["subtitle_count"], 2)
+        self.assertEqual(probe["video_count"], 0)
+
+    def test_probe_video_identity_remains_authoritative_over_subtitle_name(self):
+        probe = build_metadata_probe({
+            "resource_name": "Raw.Release",
+            "file_tree": [{
+                "relative_path": "Season 01/Veep.S01E01.mkv",
+                "is_dir": False,
+            }, {
+                "relative_path": "Wrong.Show.S01E01.CHS.srt",
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["identity_query"], "Veep")
+        self.assertEqual(probe["video_count"], 1)
+        self.assertEqual(probe["subtitle_count"], 1)
 
     def test_probe_keeps_more_specific_related_root_for_single_episode(self):
         probe = build_metadata_probe({
@@ -965,7 +1015,7 @@ class RenamingProcessorTest(unittest.TestCase):
         storage = FakeStorage([
             {"fn": "Movie.2024.1080p.mkv", "fid": "1", "fc": "1", "fs": 1_000_000},
             {"fn": "sample.mp4", "fid": "2", "fc": "1", "fs": 1_000},
-            {"fn": "subtitle.srt", "fid": "3", "fc": "1", "fs": 100},
+            {"fn": "subtitle.ENG.srt", "fid": "3", "fc": "1", "fs": 100},
         ])
         event = DownloadCompletedEvent(
             link="magnet:?x", selected_path="/Movies", user_id=1,
@@ -982,6 +1032,127 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertIn("/Downloads/Release", storage.deleted)
         self.assertNotIn("/Downloads/Release/Movie.2024.1080p.mkv", storage.deleted)
         self.assertEqual(storage.moved[-1][1], "/Movies/中文电影 (English Movie)")
+
+    def test_movie_video_and_subtitle_share_one_preflighted_plan(self):
+        storage = FakeStorage([
+            {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1_000_000},
+            {"fn": "Subs/Movie.2024.CHS&ENG.sup", "fid": "2", "fc": "1", "fs": 100},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Movies", user_id=1,
+            final_path="/Downloads/Release", resource_name="Movie.2024",
+            metadata=attach_media_metadata({}, movie_contract()),
+            file_tree=[{
+                "name": "Movie.2024.mkv",
+                "relative_path": "Movie.2024.mkv",
+                "is_dir": False,
+                "size": 1_000_000,
+            }, {
+                "name": "Movie.2024.CHS&ENG.sup",
+                "relative_path": "Subs/Movie.2024.CHS&ENG.sup",
+                "is_dir": False,
+                "size": 100,
+            }],
+            storage=storage,
+        )
+
+        result = process_generic_media(event)
+
+        self.assertTrue(result.handled)
+        self.assertEqual(storage.renamed, [
+            ("/Downloads/Release/Movie.2024.mkv", "English Movie.mkv"),
+            (
+                "/Downloads/Release/Subs/Movie.2024.CHS&ENG.sup",
+                "English Movie.chi.sup",
+            ),
+        ])
+        self.assertEqual(
+            [target for _source, target in storage.moved],
+            [
+                "/Movies/中文电影 (English Movie)",
+                "/Movies/中文电影 (English Movie)",
+            ],
+        )
+
+    def test_movie_subtitle_only_input_merges_into_canonical_target(self):
+        storage = FakeStorage([
+            {"fn": "Movie.2024.CHS.vtt", "fid": "1", "fc": "1", "fs": 100},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Movies", user_id=1,
+            final_path="/Downloads/Release", resource_name="Movie.2024.Subtitles",
+            metadata=attach_media_metadata({}, movie_contract()), storage=storage,
+        )
+
+        result = process_generic_media(event)
+
+        self.assertTrue(result.handled)
+        self.assertEqual(result.final_path, "/Movies/中文电影 (English Movie)")
+        self.assertEqual(storage.renamed, [(
+            "/Downloads/Release/Movie.2024.CHS.vtt",
+            "English Movie.chi.vtt",
+        )])
+        self.assertEqual(storage.moved, [(
+            "/Downloads/Release/English Movie.chi.vtt",
+            "/Movies/中文电影 (English Movie)",
+        )])
+
+    def test_unknown_movie_subtitle_blocks_before_video_write(self):
+        storage = FakeStorage([
+            {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1_000_000},
+            {"fn": "Movie.2024.srt", "fid": "2", "fc": "1", "fs": 100},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Movies", user_id=1,
+            final_path="/Downloads/Release", resource_name="Movie.2024",
+            metadata=attach_media_metadata({}, movie_contract()), storage=storage,
+        )
+
+        result = process_generic_media(event)
+
+        self.assertTrue(result.handled)
+        self.assertEqual(result.final_path, "/Downloads/Release")
+        self.assertIn("字幕语言或归属无法确定", result.message)
+        self.assertEqual(storage.created, [])
+        self.assertEqual(storage.renamed, [])
+        self.assertEqual(storage.moved, [])
+        self.assertEqual(storage.deleted, [])
+
+    def test_existing_different_subtitle_blocks_whole_movie_plan(self):
+        storage = SubtitleTargetConflictStorage([
+            {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1_000_000},
+            {"fn": "Movie.2024.CHS.srt", "fid": "2", "fc": "1", "fs": 100},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Movies", user_id=1,
+            final_path="/Downloads/Release", resource_name="Movie.2024",
+            metadata=attach_media_metadata({}, movie_contract()), storage=storage,
+        )
+
+        result = process_generic_media(event)
+
+        self.assertEqual(result.final_path, "/Downloads/Release")
+        self.assertIn("字幕目标冲突", result.message)
+        self.assertEqual(storage.renamed, [])
+        self.assertEqual(storage.moved, [])
+
+    def test_identical_existing_subtitle_is_idempotently_skipped(self):
+        storage = IdenticalSubtitleTargetStorage([
+            {"fn": "Movie.2024.CHS.srt", "fid": "1", "fc": "1", "fs": 100},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Movies", user_id=1,
+            final_path="/Downloads/Release", resource_name="Movie.2024.Subtitles",
+            metadata=attach_media_metadata({}, movie_contract()), storage=storage,
+        )
+
+        result = process_generic_media(event)
+
+        self.assertTrue(result.handled)
+        self.assertEqual(result.final_path, "/Movies/中文电影 (English Movie)")
+        self.assertEqual(storage.renamed, [])
+        self.assertEqual(storage.moved, [])
+        self.assertIn("/Downloads/Release", storage.deleted)
 
     def test_source_cleanup_failure_is_reported_as_incomplete(self):
         storage = CleanupFailureStorage([
@@ -1081,7 +1252,7 @@ class RenamingProcessorTest(unittest.TestCase):
         storage = FakeStorage([
             {"fn": "English.Series.S01E01.mkv", "fid": "1", "fc": "1", "fs": 1_000_000},
             {"fn": "sample.S00E99.mp4", "fid": "2", "fc": "1", "fs": 1_000},
-            {"fn": "English.Series.S01E01.srt", "fid": "3", "fc": "1", "fs": 100},
+            {"fn": "English.Series.S01E01.ENG.srt", "fid": "3", "fc": "1", "fs": 100},
         ])
         event = DownloadCompletedEvent(
             link="magnet:?x", selected_path="/Series", user_id=1,
@@ -1102,6 +1273,223 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertIn("/Downloads/Series.Release/sample.S00E99.mp4", storage.deleted)
         self.assertIn("/Downloads/Series.Release", storage.deleted)
         self.assertTrue(storage.moved[-1][1].endswith("English Series Season 01"))
+
+    @patch("telepiplex_rename.processor.infer_tvdb_episode_plan_with_ai")
+    def test_series_video_and_flat_subtitle_share_one_plan(self, ai_mock):
+        storage = FakeStorage([
+            {"fn": "English.Series.S01E01.mkv", "fid": "1", "fc": "1", "fs": 1000},
+            {"fn": "English.Series.S01E01.CHS&ENG.ass", "fid": "2", "fc": "1", "fs": 100},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Series", user_id=1,
+            final_path="/Downloads/Series.Release",
+            resource_name="English.Series.S01E01",
+            naming_metadata={"english_title": "English Series"},
+            metadata=attach_media_metadata({}, series_contract()), storage=storage,
+        )
+
+        result = process_tvdb_episode(event)
+
+        self.assertTrue(result.handled)
+        ai_mock.assert_not_called()
+        self.assertEqual(storage.renamed, [
+            (
+                "/Downloads/Series.Release/English.Series.S01E01.mkv",
+                "English Series S01E01.mkv",
+            ),
+            (
+                "/Downloads/Series.Release/English.Series.S01E01.CHS&ENG.ass",
+                "English Series S01E01.chi.ass",
+            ),
+        ])
+        self.assertEqual(len(storage.moved), 2)
+        self.assertTrue(all(
+            target.endswith("/English Series Season 01")
+            for _source, target in storage.moved
+        ))
+
+    def test_series_subtitle_only_input_is_organized(self):
+        contract = series_contract()
+        storage = FakeStorage([
+            {"fn": "English.Series.S01E01.CHS.vtt", "fid": "1", "fc": "1", "fs": 100},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Series", user_id=1,
+            final_path="/Downloads/Series.Release",
+            resource_name="English.Series.S01E01.Subtitles",
+            naming_metadata={"english_title": "English Series"},
+            metadata=attach_media_metadata({}, contract), storage=storage,
+        )
+
+        result = process_tvdb_episode(event)
+
+        self.assertTrue(result.handled)
+        self.assertEqual(result.final_path, "/Series/中文剧集 (English Series)")
+        self.assertEqual(storage.moved, [(
+            "/Downloads/Series.Release/English Series S01E01.chi.vtt",
+            "/Series/中文剧集 (English Series)/English Series Season 01",
+        )])
+
+    def test_partial_series_rename_keeps_canonical_video_as_anchor(self):
+        target_root = "/Series/中文剧集 (English Series)"
+        storage = FakeStorage([])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Series", user_id=1,
+            final_path=target_root,
+            resource_name="中文剧集 (English Series)",
+            naming_metadata={"english_title": "English Series"},
+            metadata=attach_media_metadata({}, series_contract()),
+            file_tree=[{
+                "name": "English Series Season 01",
+                "relative_path": "English Series Season 01",
+                "path": f"{target_root}/English Series Season 01",
+                "is_dir": True,
+            }, {
+                "name": "English Series S01E01.mkv",
+                "relative_path": (
+                    "English Series Season 01/"
+                    "English Series S01E01.mkv"
+                ),
+                "path": (
+                    f"{target_root}/English Series Season 01/"
+                    "English Series S01E01.mkv"
+                ),
+                "is_dir": False,
+                "size": 1000,
+            }, {
+                "name": "English.Series.S01E01.CHS.srt",
+                "relative_path": "English.Series.S01E01.CHS.srt",
+                "path": f"{target_root}/English.Series.S01E01.CHS.srt",
+                "is_dir": False,
+                "size": 100,
+            }],
+            storage=storage,
+        )
+
+        result = process_tvdb_episode(event)
+
+        self.assertTrue(result.handled)
+        self.assertEqual(storage.renamed, [(
+            f"{target_root}/English.Series.S01E01.CHS.srt",
+            "English Series S01E01.chi.srt",
+        )])
+        self.assertEqual(storage.moved, [(
+            f"{target_root}/English Series S01E01.chi.srt",
+            f"{target_root}/English Series Season 01",
+        )])
+        self.assertNotIn(target_root, storage.deleted)
+
+    def test_unknown_series_subtitle_blocks_before_any_write(self):
+        storage = FakeStorage([
+            {"fn": "English.Series.S01E01.mkv", "fid": "1", "fc": "1", "fs": 1000},
+            {"fn": "English.Series.S01E01.srt", "fid": "2", "fc": "1", "fs": 100},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Series", user_id=1,
+            final_path="/Downloads/Series.Release",
+            resource_name="English.Series.S01E01",
+            naming_metadata={"english_title": "English Series"},
+            metadata=attach_media_metadata({}, series_contract()), storage=storage,
+        )
+
+        result = process_tvdb_episode(event)
+
+        self.assertEqual(result.final_path, "/Downloads/Series.Release")
+        self.assertIn("字幕语言或归属无法确定", result.message)
+        self.assertEqual(storage.created, [])
+        self.assertEqual(storage.renamed, [])
+        self.assertEqual(storage.moved, [])
+        self.assertEqual(storage.deleted, [])
+
+    @patch("telepiplex_rename.processor.infer_tvdb_episode_plan_with_ai")
+    def test_unknown_unscoped_subtitle_never_asks_ai_to_guess_language(
+        self, ai_mock
+    ):
+        from telepiplex_rename.context import runtime_context
+
+        runtime_context.config["ai"] = {
+            "enable": True,
+            "api_url": "https://ai.example/v1",
+            "api_key": "secret",
+            "model": "test",
+        }
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Series", user_id=1,
+            final_path="/Downloads/Series.Release",
+            resource_name="English.Series.S01E01",
+            naming_metadata={"english_title": "English Series"},
+            metadata=attach_media_metadata({}, series_contract()),
+            file_tree=[{
+                "name": "English.Series.S01E01.mkv",
+                "relative_path": "English.Series.S01E01.mkv",
+                "is_dir": False,
+                "size": 1000,
+            }, {
+                "name": "subtitle.srt",
+                "relative_path": "Subs/subtitle.srt",
+                "is_dir": False,
+                "size": 100,
+            }],
+            storage=FakeStorage([]),
+        )
+
+        result = process_tvdb_episode(event)
+
+        self.assertTrue(result.handled)
+        self.assertIn("字幕语言或归属无法确定", result.message)
+        ai_mock.assert_not_called()
+
+    @patch("telepiplex_rename.processor.infer_tvdb_episode_plan_with_ai")
+    def test_ai_only_backfills_unscoped_subtitle_episode_mapping(self, ai_mock):
+        from telepiplex_rename.context import runtime_context
+
+        runtime_context.config["ai"] = {
+            "enable": True,
+            "api_url": "https://ai.example/v1",
+            "api_key": "secret",
+            "model": "test",
+        }
+        ai_mock.return_value = {
+            "episode_map": [],
+            "subtitle_map": [{
+                "source_file": "Subs/01.CHS.ass",
+                "season_number": 1,
+                "episode_number": 1,
+            }],
+            "warnings": [],
+        }
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Series", user_id=1,
+            final_path="/Downloads/Series.Release",
+            resource_name="English.Series.S01E01",
+            naming_metadata={"english_title": "English Series"},
+            metadata=attach_media_metadata({}, series_contract()),
+            file_tree=[{
+                "name": "English.Series.S01E01.mkv",
+                "relative_path": "English.Series.S01E01.mkv",
+                "is_dir": False,
+                "size": 1000,
+            }, {
+                "name": "01.CHS.ass",
+                "relative_path": "Subs/01.CHS.ass",
+                "is_dir": False,
+                "size": 100,
+            }],
+            storage=FakeStorage([]),
+        )
+
+        result = process_tvdb_episode(event)
+
+        self.assertTrue(result.handled)
+        ai_mock.assert_called_once()
+        self.assertIn("Subs/01.CHS.ass", {
+            item["relative_path"]
+            for item in ai_mock.call_args.args[0]["file_tree"]
+            if not item.get("is_dir")
+        })
+        self.assertIn("English Series S01E01.chi.ass", {
+            name for _path, name in event.storage.renamed
+        })
 
     @patch("telepiplex_rename.processor.infer_tvdb_episode_plan_with_ai")
     def test_missing_confirmed_metadata_never_runs_legacy_identity_fallback(
@@ -1281,6 +1669,7 @@ class FakeHost:
         self.notifications = []
         self.reports = []
         self.milestones = []
+        self.timeline = []
         self.fail_notification = False
 
     async def call_capability(self, capability, method, payload, **_kwargs):
@@ -1308,6 +1697,7 @@ class FakeHost:
         return {"value": value}
 
     async def publish_event(self, event_type, payload, **kwargs):
+        self.timeline.append(("event", event_type))
         self.events.append((event_type, payload, kwargs))
         return {"event_id": "organized-1"}
 
@@ -1318,6 +1708,9 @@ class FakeHost:
         return {"accepted": True}
 
     async def report_operation(self, operation):
+        self.timeline.append(
+            ("report", operation["state"], operation["stage"])
+        )
         self.reports.append(operation)
         return {"accepted": True, "revision": operation["revision"]}
 
@@ -1328,16 +1721,35 @@ class FakeHost:
         text,
         *,
         photo_url="",
+        mode="identity",
         deadline=10,
     ):
+        self.timeline.append(("milestone", mode, milestone_id))
         self.milestones.append({
             "operation_id": operation_id,
             "milestone_id": milestone_id,
             "text": text,
             "photo_url": photo_url,
             "deadline": deadline,
+            "mode": mode,
         })
         return {"accepted": True, "duplicate": False}
+
+    async def seal_operation_stage(
+        self,
+        operation_id,
+        milestone_id,
+        text,
+        *,
+        deadline=10,
+    ):
+        return await self.publish_operation_milestone(
+            operation_id,
+            milestone_id,
+            text,
+            mode="stage",
+            deadline=deadline,
+        )
 
 
 class FakeRuntime:
@@ -2128,7 +2540,12 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             await runtime.wait()
 
             self.assertEqual(host.confirm_payload["candidate_ref"], "douban:2")
-            self.assertEqual(len(host.milestones), 1)
+            identity_milestones = [
+                item
+                for item in host.milestones
+                if item["mode"] == "identity"
+            ]
+            self.assertEqual(len(identity_milestones), 1)
             self.assertEqual(
                 host.storage.renamed[0][0],
                 "/Downloads/Movie.2024.mkv",
@@ -2518,6 +2935,117 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cancelled["operation"]["state"], "cancelled")
         self.assertIn("后续 Plex", cancelled["operation"]["status_text"])
 
+    async def test_upstream_identity_starts_new_rename_message_without_repeat(self):
+        host = FakeHost()
+        runtime = FakeRuntime()
+        feature = RenameFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            host=host,
+        )
+        feature.bind_runtime(runtime)
+
+        await feature.download_completed({
+            "event_id": "event-upstream-identity",
+            "payload": {
+                "job_id": "job-upstream-identity",
+                "selected_path": "/Movies",
+                "user_id": 123,
+                "chat_id": 10,
+                "final_path": "/Downloads/Release",
+                "resource_name": "Movie.2024",
+                "media_metadata": movie_contract(),
+                "operation_id": "op-upstream-identity",
+                "operation_revision": 8,
+            },
+        })
+        await runtime.wait()
+
+        self.assertFalse(any(
+            item[:2] == ("milestone", "identity")
+            for item in host.timeline
+        ))
+        self.assertEqual(
+            host.timeline[0],
+            ("report", "running", "organizing"),
+        )
+
+    async def test_resolved_identity_seals_before_new_organization_message(self):
+        host = FakeHost()
+        runtime = FakeRuntime()
+        feature = RenameFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            host=host,
+        )
+        feature.bind_runtime(runtime)
+
+        await feature.download_completed({
+            "event_id": "event-local-identity",
+            "payload": {
+                "job_id": "job-local-identity",
+                "selected_path": "/Movies",
+                "user_id": 123,
+                "chat_id": 10,
+                "download_root": "/Downloads/Movie.2024.mkv",
+                "final_path": "/Downloads/Movie.2024.mkv",
+                "resource_name": "Movie.2024.mkv",
+                "operation_id": "op-local-identity",
+                "operation_revision": 2,
+                "file_tree": [{
+                    "name": "Movie.2024.mkv",
+                    "relative_path": "Movie.2024.mkv",
+                    "path": "/Downloads/Movie.2024.mkv",
+                    "is_dir": False,
+                    "size": 1000,
+                }],
+            },
+        })
+        await runtime.wait()
+
+        identity_index = next(
+            index for index, item in enumerate(host.timeline)
+            if item[:2] == ("milestone", "identity")
+        )
+        organizing_index = host.timeline.index(
+            ("report", "running", "organizing")
+        )
+        self.assertLess(identity_index, organizing_index)
+
+    async def test_rename_stage_seals_before_plex_event_is_published(self):
+        host = FakeHost()
+        runtime = FakeRuntime()
+        feature = RenameFeature(
+            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+            host=host,
+        )
+        feature.bind_runtime(runtime)
+
+        await feature.download_completed({
+            "event_id": "event-rename-seal",
+            "payload": {
+                "job_id": "job-rename-seal",
+                "selected_path": "/Movies",
+                "user_id": 123,
+                "chat_id": 10,
+                "final_path": "/Downloads/Release",
+                "resource_name": "Movie.2024",
+                "media_metadata": movie_contract(),
+                "operation_id": "op-rename-seal",
+                "operation_revision": 8,
+            },
+        })
+        await runtime.wait()
+
+        handoff_index = host.timeline.index(
+            ("report", "handed_off", "handoff_plex")
+        )
+        seal_index = next(
+            index for index, item in enumerate(host.timeline)
+            if item[:2] == ("milestone", "stage")
+        )
+        event_index = host.timeline.index(("event", "media.organized"))
+        self.assertLess(handoff_index, seal_index)
+        self.assertLess(seal_index, event_index)
+
     async def test_completed_rename_skips_plex_when_sync_is_inactive(self):
         host = FakeHost()
 
@@ -2644,7 +3172,14 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("|", host.metadata_payload["query"])
         self.assertNotIn("1080p", host.metadata_payload["query"])
-        self.assertEqual(len(host.milestones), 1)
+        self.assertEqual(
+            len([
+                item
+                for item in host.milestones
+                if item["mode"] == "identity"
+            ]),
+            1,
+        )
         self.assertIn("中文电影 (English Movie)", host.milestones[0]["text"])
         self.assertEqual(
             host.storage.renamed[0][0],
@@ -3216,9 +3751,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.3.0")
+        self.assertEqual(manifest["version"], "1.4.0")
         self.assertEqual(manifest["host_api"], ">=1.4,<2.0")
-        self.assertIn('version = "1.3.0"', project)
+        self.assertIn('version = "1.4.0"', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
         manifest = yaml.safe_load(
@@ -3233,8 +3768,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.3.0.tpx", source)
-        self.assertNotIn("dist/rename-1.3.0.tpx", source)
+        self.assertIn("/tmp/rename-1.4.0.tpx", source)
+        self.assertNotIn("dist/rename-1.4.0.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

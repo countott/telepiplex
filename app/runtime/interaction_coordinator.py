@@ -108,6 +108,10 @@ class InteractionCoordinator:
                 operation_id TEXT NOT NULL,
                 milestone_id TEXT NOT NULL,
                 plugin_id TEXT NOT NULL,
+                delivered INTEGER NOT NULL DEFAULT 0,
+                delivery_started INTEGER NOT NULL DEFAULT 0,
+                delivered_message_id INTEGER,
+                delivered_message_kind TEXT NOT NULL DEFAULT '',
                 created_at REAL NOT NULL,
                 PRIMARY KEY(operation_id, milestone_id),
                 FOREIGN KEY(operation_id) REFERENCES operations(operation_id)
@@ -123,6 +127,40 @@ class InteractionCoordinator:
             self._connection.execute(
                 "ALTER TABLE operations ADD COLUMN "
                 "message_kind TEXT NOT NULL DEFAULT 'text'"
+            )
+        milestone_columns = {
+            str(row["name"])
+            for row in self._connection.execute(
+                "PRAGMA table_info(operation_milestones)"
+            ).fetchall()
+        }
+        migrated_legacy_milestones = "delivered" not in milestone_columns
+        if migrated_legacy_milestones:
+            self._connection.execute(
+                "ALTER TABLE operation_milestones ADD COLUMN "
+                "delivered INTEGER NOT NULL DEFAULT 0"
+            )
+            self._connection.execute(
+                "UPDATE operation_milestones SET delivered = 1"
+            )
+        if "delivered_message_id" not in milestone_columns:
+            self._connection.execute(
+                "ALTER TABLE operation_milestones ADD COLUMN "
+                "delivered_message_id INTEGER"
+            )
+        if "delivery_started" not in milestone_columns:
+            self._connection.execute(
+                "ALTER TABLE operation_milestones ADD COLUMN "
+                "delivery_started INTEGER NOT NULL DEFAULT 0"
+            )
+            if migrated_legacy_milestones:
+                self._connection.execute(
+                    "UPDATE operation_milestones SET delivery_started = 1"
+                )
+        if "delivered_message_kind" not in milestone_columns:
+            self._connection.execute(
+                "ALTER TABLE operation_milestones ADD COLUMN "
+                "delivered_message_kind TEXT NOT NULL DEFAULT ''"
             )
 
     def close(self):
@@ -263,8 +301,8 @@ class InteractionCoordinator:
                     )
                 cursor = self._connection.execute(
                     "INSERT OR IGNORE INTO operation_milestones("
-                    "operation_id, milestone_id, plugin_id, created_at"
-                    ") VALUES (?, ?, ?, ?)",
+                    "operation_id, milestone_id, plugin_id, delivered, created_at"
+                    ") VALUES (?, ?, ?, 0, ?)",
                     (
                         normalized_operation,
                         normalized_milestone,
@@ -272,8 +310,202 @@ class InteractionCoordinator:
                         time.time(),
                     ),
                 )
+                if cursor.rowcount != 1:
+                    milestone = self._connection.execute(
+                        "SELECT plugin_id, delivered FROM operation_milestones "
+                        "WHERE operation_id = ? AND milestone_id = ?",
+                        (normalized_operation, normalized_milestone),
+                    ).fetchone()
+                    if (
+                        milestone is None
+                        or str(milestone["plugin_id"]) != normalized_plugin
+                    ):
+                        raise InteractionError(
+                            "owner_mismatch",
+                            "operation milestone belongs to another Feature",
+                        )
+                    if int(milestone["delivered"]) == 1:
+                        self._connection.execute("COMMIT")
+                        return None
                 self._connection.execute("COMMIT")
-                return record if cursor.rowcount == 1 else None
+                return record
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+
+    def complete_milestone(
+        self,
+        plugin_id: str,
+        operation_id: str,
+        milestone_id: str,
+    ) -> OperationRecord:
+        normalized_plugin = str(plugin_id or "").strip()
+        normalized_operation = str(operation_id or "").strip()
+        normalized_milestone = str(milestone_id or "").strip()
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                milestone = self._connection.execute(
+                    "SELECT plugin_id FROM operation_milestones "
+                    "WHERE operation_id = ? AND milestone_id = ?",
+                    (normalized_operation, normalized_milestone),
+                ).fetchone()
+                if milestone is None:
+                    raise InteractionError(
+                        "milestone_not_found",
+                        "operation milestone was not found",
+                    )
+                if str(milestone["plugin_id"]) != normalized_plugin:
+                    raise InteractionError(
+                        "owner_mismatch",
+                        "operation milestone belongs to another Feature",
+                    )
+                now = time.time()
+                self._connection.execute(
+                    "UPDATE operation_milestones SET delivered = 1 "
+                    "WHERE operation_id = ? AND milestone_id = ?",
+                    (normalized_operation, normalized_milestone),
+                )
+                cursor = self._connection.execute(
+                    "UPDATE operations SET message_id = NULL, message_kind = '', "
+                    "updated_at = ? WHERE operation_id = ? AND plugin_id = ?",
+                    (now, normalized_operation, normalized_plugin),
+                )
+                if cursor.rowcount != 1:
+                    raise InteractionError(
+                        "owner_mismatch",
+                        "operation belongs to another Feature",
+                    )
+                row = self._connection.execute(
+                    "SELECT * FROM operations WHERE operation_id = ?",
+                    (normalized_operation,),
+                ).fetchone()
+                self._connection.execute("COMMIT")
+                return self._from_row(row)
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+
+    def milestone_delivery_target(
+        self,
+        plugin_id: str,
+        operation_id: str,
+        milestone_id: str,
+    ) -> tuple[int, str] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT plugin_id, delivered_message_id, "
+                "delivered_message_kind FROM operation_milestones "
+                "WHERE operation_id = ? AND milestone_id = ?",
+                (str(operation_id), str(milestone_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        if str(row["plugin_id"]) != str(plugin_id):
+            raise InteractionError(
+                "owner_mismatch",
+                "operation milestone belongs to another Feature",
+            )
+        message_id = row["delivered_message_id"]
+        if message_id is None:
+            return None
+        return int(message_id), str(row["delivered_message_kind"] or "text")
+
+    def milestone_delivery_started(
+        self,
+        plugin_id: str,
+        operation_id: str,
+        milestone_id: str,
+    ) -> bool:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT plugin_id, delivery_started FROM operation_milestones "
+                "WHERE operation_id = ? AND milestone_id = ?",
+                (str(operation_id), str(milestone_id)),
+            ).fetchone()
+        if row is None:
+            return False
+        if str(row["plugin_id"]) != str(plugin_id):
+            raise InteractionError(
+                "owner_mismatch",
+                "operation milestone belongs to another Feature",
+            )
+        return int(row["delivery_started"]) == 1
+
+    def begin_milestone_delivery(
+        self,
+        plugin_id: str,
+        operation_id: str,
+        milestone_id: str,
+    ) -> None:
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE operation_milestones SET delivery_started = 1 "
+                "WHERE operation_id = ? AND milestone_id = ? "
+                "AND plugin_id = ? AND delivered = 0",
+                (
+                    str(operation_id),
+                    str(milestone_id),
+                    str(plugin_id),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise InteractionError(
+                    "milestone_not_found",
+                    "undelivered operation milestone was not found",
+                )
+
+    def record_milestone_delivery(
+        self,
+        plugin_id: str,
+        operation_id: str,
+        milestone_id: str,
+        message_id: int,
+        message_kind: str,
+    ) -> OperationRecord:
+        normalized_kind = str(message_kind or "text").strip().casefold()
+        if normalized_kind not in {"text", "photo"}:
+            raise InteractionError(
+                "invalid_message_kind",
+                "milestone message kind is invalid",
+            )
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = self._connection.execute(
+                    "UPDATE operation_milestones SET delivered_message_id = ?, "
+                    "delivered_message_kind = ? WHERE operation_id = ? "
+                    "AND milestone_id = ? AND plugin_id = ? AND delivered = 0",
+                    (
+                        int(message_id),
+                        normalized_kind,
+                        str(operation_id),
+                        str(milestone_id),
+                        str(plugin_id),
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise InteractionError(
+                        "milestone_not_found",
+                        "undelivered operation milestone was not found",
+                    )
+                now = time.time()
+                cursor = self._connection.execute(
+                    "UPDATE operations SET message_id = NULL, message_kind = '', "
+                    "updated_at = ? WHERE operation_id = ? AND plugin_id = ?",
+                    (now, str(operation_id), str(plugin_id)),
+                )
+                if cursor.rowcount != 1:
+                    raise InteractionError(
+                        "owner_mismatch",
+                        "operation belongs to another Feature",
+                    )
+                row = self._connection.execute(
+                    "SELECT * FROM operations WHERE operation_id = ?",
+                    (str(operation_id),),
+                ).fetchone()
+                self._connection.execute("COMMIT")
+                return self._from_row(row)
             except Exception:
                 self._connection.execute("ROLLBACK")
                 raise
@@ -290,7 +522,8 @@ class InteractionCoordinator:
         with self._lock, self._connection:
             self._connection.execute(
                 "DELETE FROM operation_milestones "
-                "WHERE operation_id = ? AND milestone_id = ? AND plugin_id = ?",
+                "WHERE operation_id = ? AND milestone_id = ? AND plugin_id = ? "
+                "AND delivered = 0",
                 (
                     normalized_operation,
                     normalized_milestone,
@@ -353,6 +586,21 @@ class InteractionCoordinator:
                     "WHERE operation_id = ?",
                     (normalized, time.time(), str(operation_id)),
                 )
+            if cursor.rowcount != 1:
+                raise InteractionError("not_found", "operation was not found")
+            row = self._connection.execute(
+                "SELECT * FROM operations WHERE operation_id = ?",
+                (str(operation_id),),
+            ).fetchone()
+        return self._from_row(row)
+
+    def clear_message_id(self, operation_id: str) -> OperationRecord:
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE operations SET message_id = NULL, message_kind = '', "
+                "updated_at = ? WHERE operation_id = ?",
+                (time.time(), str(operation_id)),
+            )
             if cursor.rowcount != 1:
                 raise InteractionError("not_found", "operation was not found")
             row = self._connection.execute(

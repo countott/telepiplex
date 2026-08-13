@@ -11,6 +11,7 @@ import unicodedata
 _VIDEO = re.compile(
     r"(?i)\.(?:mkv|mp4|avi|mov|m4v|ts|m2ts|wmv|flv|webm)$"
 )
+_SUBTITLE = re.compile(r"(?i)\.(?:srt|ass|sup|vtt)$")
 _EPISODE = re.compile(r"(?i)\bS(\d{1,2})E(\d{1,4})\b")
 _EPISODE_CHAIN = re.compile(
     r"(?i)\bS(\d{1,2})((?:E\d{1,4}){2,})(?!\d)"
@@ -127,6 +128,7 @@ def _root_name(payload: dict) -> str:
 def _identity_query_value(raw_value: str) -> str:
     value = _text(raw_value)
     value = _VIDEO.sub("", value)
+    value = _SUBTITLE.sub("", value)
     value = _SITE_PREFIX.sub("", value)
     value = re.sub(r"^\s*[（(](?:19|20)\d{2}[）)]\s*", "", value)
     bracket_identity = _bracket_release_identity(value)
@@ -608,6 +610,7 @@ def build_metadata_probe(payload: dict) -> dict:
 
     paths = []
     video_paths = []
+    subtitle_paths = []
     for node in payload.get("file_tree") or []:
         if not isinstance(node, dict) or node.get("is_dir"):
             continue
@@ -621,7 +624,10 @@ def build_metadata_probe(payload: dict) -> dict:
         paths.append(path)
         if _VIDEO.search(path) and _is_primary_video(path):
             video_paths.append(path)
-    marker_values = video_paths or paths or [
+        elif _SUBTITLE.search(path):
+            subtitle_paths.append(path)
+    identity_paths = video_paths or subtitle_paths
+    marker_values = identity_paths or paths or [
         _root_name(payload),
         str(
             (payload.get("release") or {}).get("title") or ""
@@ -644,10 +650,10 @@ def build_metadata_probe(payload: dict) -> dict:
         shape = "movie"
     else:
         shape = "unknown"
-    identity_query = _identity_query(payload, video_paths)
+    identity_query = _identity_query(payload, identity_paths)
     identity_contract = _probe_identity_contract(
         payload,
-        video_paths,
+        identity_paths,
         identity_query,
     )
     year_match = re.search(
@@ -657,7 +663,7 @@ def build_metadata_probe(payload: dict) -> dict:
             identity_query,
             *(
                 _text(PurePosixPath(path).name)
-                for path in video_paths[:8]
+                for path in identity_paths[:8]
             ),
         )),
     )
@@ -675,4 +681,5 @@ def build_metadata_probe(payload: dict) -> dict:
             "episode_number": episode,
         } for episode in sorted(unscoped_episodes)],
         "video_count": len(video_paths),
+        "subtitle_count": len(subtitle_paths),
     }

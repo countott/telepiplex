@@ -5,6 +5,7 @@ from pathlib import PurePosixPath
 import re
 
 from .media_naming import sanitize_target_name
+from .subtitles import SUBTITLE_EXTENSIONS
 
 
 VIDEO_EXTENSIONS = {
@@ -51,6 +52,29 @@ def _video_nodes(file_tree: list[dict]) -> list[dict]:
     ]
 
 
+def _media_nodes(file_tree: list[dict]) -> list[dict]:
+    return [
+        item
+        for item in file_tree or []
+        if isinstance(item, dict)
+        and not item.get("is_dir")
+        and PurePosixPath(
+            str(item.get("relative_path") or item.get("name") or "")
+        ).suffix.lower() in (VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS)
+    ]
+
+
+def _normalized_media_identity(
+    relative: PurePosixPath,
+) -> tuple[str, str] | None:
+    extension = relative.suffix.lower()
+    if extension in VIDEO_EXTENSIONS:
+        return relative.stem, "video"
+    if extension in SUBTITLE_EXTENSIONS and relative.stem.endswith(".chi"):
+        return relative.stem[:-4], extension
+    return None
+
+
 def contains_video(file_tree: list[dict]) -> bool:
     return bool(_video_nodes(file_tree))
 
@@ -73,7 +97,9 @@ def _has_only_target_safe_media(file_tree: list[dict]) -> bool:
             return False
         if item.get("is_dir"):
             continue
-        if relative.suffix.lower() not in VIDEO_EXTENSIONS:
+        if relative.suffix.lower() not in (
+            VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
+        ):
             return False
     return True
 
@@ -81,8 +107,9 @@ def _has_only_target_safe_media(file_tree: list[dict]) -> bool:
 def looks_organized_release(root_name: str, file_tree: list[dict]) -> bool:
     nodes = [item for item in file_tree or [] if isinstance(item, dict)]
     videos = _video_nodes(file_tree)
+    media = _media_nodes(file_tree)
     if (
-        not videos
+        not media
         or sanitize_target_name(root_name) != str(root_name or "").strip()
         or not _has_only_target_safe_media(file_tree)
     ):
@@ -91,21 +118,34 @@ def looks_organized_release(root_name: str, file_tree: list[dict]) -> bool:
     if not english_title:
         return False
 
-    if len(videos) == 1:
+    direct_media = []
+    direct_media_kinds = set()
+    for item in media:
         relative = PurePosixPath(str(
-            videos[0].get("relative_path") or videos[0].get("name") or ""
+            item.get("relative_path") or item.get("name") or ""
         ))
+        identity = _normalized_media_identity(relative)
         if (
-            len(nodes) == 1
-            and len(relative.parts) == 1
-            and relative.stem == english_title
-            and not _RAW_RELEASE_MARKER.search(english_title)
+            identity is None
+            or len(relative.parts) != 1
+            or identity[0] != english_title
+            or identity[1] in direct_media_kinds
         ):
-            return True
+            direct_media = []
+            break
+        direct_media.append(relative)
+        direct_media_kinds.add(identity[1])
+    if (
+        direct_media
+        and len(nodes) == len(media)
+        and not _RAW_RELEASE_MARKER.search(english_title)
+    ):
+        return True
 
     movie_children = []
     movie_video_counts = {}
-    for item in videos:
+    movie_media_kinds = {}
+    for item in media:
         relative = PurePosixPath(str(
             item.get("relative_path") or item.get("name") or ""
         ))
@@ -113,13 +153,26 @@ def looks_organized_release(root_name: str, file_tree: list[dict]) -> bool:
             movie_children = []
             break
         child_english_title = _display_english_title(relative.parts[0])
-        if not child_english_title or relative.stem != child_english_title:
+        identity = _normalized_media_identity(relative)
+        if (
+            not child_english_title
+            or identity is None
+            or identity[0] != child_english_title
+        ):
             movie_children = []
             break
+        target_key = (relative.parts[0], identity[1])
+        if target_key in movie_media_kinds:
+            movie_children = []
+            break
+        movie_media_kinds[target_key] = True
         movie_children.append(child_english_title)
-        movie_video_counts[relative.parts[0]] = (
-            movie_video_counts.get(relative.parts[0], 0) + 1
-        )
+        if identity[1] == "video":
+            movie_video_counts[relative.parts[0]] = (
+                movie_video_counts.get(relative.parts[0], 0) + 1
+            )
+        else:
+            movie_video_counts.setdefault(relative.parts[0], 0)
     actual_movie_directories = {
         relative.parts[0]
         for item in nodes
@@ -132,21 +185,24 @@ def looks_organized_release(root_name: str, file_tree: list[dict]) -> bool:
     if (
         movie_children
         and actual_movie_directories == set(movie_video_counts)
-        and all(count == 1 for count in movie_video_counts.values())
-        and len(nodes) == len(videos) + len(actual_movie_directories)
+        and all(count <= 1 for count in movie_video_counts.values())
+        and len(nodes) == len(media) + len(actual_movie_directories)
     ):
         return True
 
     season_directories = set()
     episode_targets = set()
-    for item in videos:
+    for item in media:
         relative = PurePosixPath(str(
             item.get("relative_path") or item.get("name") or ""
         ))
         if len(relative.parts) != 2:
             return False
         directory_match = _SEASON_DIR.fullmatch(relative.parts[-2])
-        file_match = _SERIES_FILE.fullmatch(relative.stem)
+        identity = _normalized_media_identity(relative)
+        file_match = (
+            _SERIES_FILE.fullmatch(identity[0]) if identity else None
+        )
         if (
             not directory_match
             or not file_match
@@ -157,7 +213,11 @@ def looks_organized_release(root_name: str, file_tree: list[dict]) -> bool:
         ):
             return False
         season_directories.add(relative.parts[-2])
-        episode_target = (relative.parts[-2], relative.stem.casefold())
+        episode_target = (
+            relative.parts[-2],
+            identity[0].casefold(),
+            identity[1],
+        )
         if episode_target in episode_targets:
             return False
         episode_targets.add(episode_target)
@@ -172,5 +232,5 @@ def looks_organized_release(root_name: str, file_tree: list[dict]) -> bool:
     }
     return (
         actual_season_directories == season_directories
-        and len(nodes) == len(videos) + len(actual_season_directories)
+        and len(nodes) == len(media) + len(actual_season_directories)
     )

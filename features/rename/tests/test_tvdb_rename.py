@@ -252,6 +252,147 @@ class TvdbRenamePlanTest(unittest.TestCase):
         )
         self.assertEqual(plan["unmatched_sources"], ["Unknown.mkv"])
 
+    def test_confirmed_series_plan_adds_sparse_flat_subtitles(self):
+        media_metadata = self._confirmed_media_metadata()
+        media_metadata.update({
+            "identity": {
+                "chinese_title": "副人之仁",
+                "english_title": "Veep",
+                "year": "2012",
+                "content_kind": "series",
+                "external_ids": {},
+            },
+            "relation": {"type": "standalone", "target_series": {}, "source": "user"},
+            "placement": {
+                "library_type": "series",
+                "category_kind": "live_action_series",
+                "season_number": None,
+                "episode_number": None,
+                "mapping_kind": "standalone",
+                "mapping_source": "user",
+                "tvdb_episode_id": "",
+            },
+            "items": [{
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": 1,
+            }, {
+                "content_role": "main_episode",
+                "season_number": 4,
+                "episode_number": 7,
+            }],
+        })
+        file_tree = [{
+            "name": "Veep.S01E01.mkv",
+            "relative_path": "Season 01/Veep.S01E01.mkv",
+            "is_dir": False,
+        }, {
+            "name": "Veep.S04E07.mkv",
+            "relative_path": "Season 04/Veep.S04E07.mkv",
+            "is_dir": False,
+        }, {
+            "name": "Veep.S04E07.CHS&ENG.ass",
+            "relative_path": "Veep.S04E07.CHS&ENG.ass",
+            "is_dir": False,
+        }]
+
+        plan = build_confirmed_rename_plan(
+            final_path="/未整理/Veep",
+            selected_path="/真人剧集",
+            metadata={},
+            media_metadata=media_metadata,
+            ai_plan={"episode_map": [{
+                "source_file": "Season 01/Veep.S01E01.mkv",
+                "season_number": 1,
+                "episode_number": 1,
+            }, {
+                "source_file": "Season 04/Veep.S04E07.mkv",
+                "season_number": 4,
+                "episode_number": 7,
+            }]},
+            file_tree=file_tree,
+        )
+
+        self.assertEqual(
+            [operation.get("media_kind") for operation in plan["operations"]],
+            ["video", "video", "subtitle"],
+        )
+        self.assertEqual(
+            plan["operations"][-1]["rename_to"],
+            "Veep S04E07.chi.ass",
+        )
+        self.assertEqual(plan["unresolved_sources"], [])
+
+    def test_confirmed_series_plan_supports_subtitle_only_input(self):
+        media_metadata = self._confirmed_media_metadata()
+        media_metadata.update({
+            "identity": {
+                "chinese_title": "副人之仁",
+                "english_title": "Veep",
+                "year": "2012",
+                "content_kind": "series",
+                "external_ids": {},
+            },
+            "relation": {"type": "standalone", "target_series": {}, "source": "user"},
+            "placement": {
+                "library_type": "series",
+                "category_kind": "live_action_series",
+                "season_number": None,
+                "episode_number": None,
+                "mapping_kind": "standalone",
+                "mapping_source": "user",
+                "tvdb_episode_id": "",
+            },
+            "items": [{
+                "content_role": "main_episode",
+                "season_number": 3,
+                "episode_number": 2,
+            }],
+        })
+
+        plan = build_confirmed_rename_plan(
+            final_path="/未整理/Veep.Subtitles",
+            selected_path="/真人剧集",
+            metadata={},
+            media_metadata=media_metadata,
+            ai_plan={},
+            file_tree=[{
+                "name": "Veep.S03E02.CHS.vtt",
+                "relative_path": "Veep.S03E02.CHS.vtt",
+                "is_dir": False,
+            }],
+        )
+
+        self.assertEqual(len(plan["operations"]), 1)
+        self.assertEqual(plan["operations"][0]["media_kind"], "subtitle")
+        self.assertEqual(plan["operations"][0]["rename_to"], "Veep S03E02.chi.vtt")
+
+    def test_confirmed_series_plan_reports_unknown_subtitle_language(self):
+        media_metadata = self._confirmed_media_metadata()
+
+        plan = build_confirmed_rename_plan(
+            final_path="/真人剧集/Raw.Release",
+            selected_path="/真人剧集",
+            metadata={},
+            media_metadata=media_metadata,
+            ai_plan={"episode_map": [{
+                "source_file": "Movie.mkv",
+                "season_number": 0,
+                "episode_number": 100,
+            }]},
+            file_tree=[{
+                "name": "Movie.mkv",
+                "relative_path": "Movie.mkv",
+                "is_dir": False,
+            }, {
+                "name": "Movie.S00E100.srt",
+                "relative_path": "Movie.S00E100.srt",
+                "is_dir": False,
+            }],
+        )
+
+        self.assertEqual(plan["unresolved_sources"], ["Movie.S00E100.srt"])
+
     def test_confirmed_plan_preserves_source_colons_and_cleans_targets(self):
         media_metadata = self._confirmed_media_metadata()
         media_metadata.update({

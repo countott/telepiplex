@@ -222,16 +222,19 @@ class RuntimeBroker:
         if method == "operation.milestone":
             operation_id = str(params.get("operation_id") or "").strip()
             milestone_id = str(params.get("milestone_id") or "").strip()
+            mode = str(params.get("mode") or "identity").strip().casefold()
             text = str(params.get("text") or "").strip()
             photo_url = str(params.get("photo_url") or "").strip()
             text_limit = 1024 if photo_url else 4096
             if (
                 not operation_id
                 or not milestone_id
+                or mode not in {"identity", "stage"}
                 or not text
                 or len(text) > text_limit
                 or len(photo_url) > 2048
                 or (photo_url and not photo_url.startswith("https://"))
+                or (mode == "stage" and photo_url)
             ):
                 raise BrokerError(
                     "invalid_milestone",
@@ -245,6 +248,7 @@ class RuntimeBroker:
             payload = {
                 "operation_id": operation_id,
                 "milestone_id": milestone_id,
+                "mode": mode,
                 "text": text,
                 "photo_url": photo_url,
             }

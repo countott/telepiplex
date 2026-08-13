@@ -28,6 +28,11 @@ from .tvdb_rename import (
     build_confirmed_rename_plan,
     enrich_media_metadata_with_rename_plan,
 )
+from .subtitles import (
+    SUBTITLE_EXTENSIONS,
+    build_movie_subtitle_plan,
+    collect_subtitle_evidence,
+)
 
 
 def _storage(event: DownloadCompletedEvent):
@@ -132,7 +137,9 @@ def collect_storage_file_tree(storage, root_path, max_depth=4, limit=1000):
                 child_id = node["file_id"]
                 if child_id:
                     walk(child_id, relative_path, depth + 1)
-            elif Path(name).suffix.lower() in VIDEO_EXTENSIONS:
+            elif Path(name).suffix.lower() in (
+                VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
+            ):
                 tree.append(node)
 
     walk(root_id)
@@ -164,7 +171,9 @@ def _video_nodes(file_tree):
     return [
         item for item in file_tree
         if not item.get("is_dir")
-        and Path(str(item.get("name") or "")).suffix.lower() in VIDEO_EXTENSIONS
+        and Path(str(
+            item.get("relative_path") or item.get("name") or ""
+        )).suffix.lower() in VIDEO_EXTENSIONS
     ]
 
 
@@ -382,6 +391,14 @@ class ConfirmedPlanConflict(RuntimeError):
     pass
 
 
+class SubtitlePlanBlocked(RuntimeError):
+    pass
+
+
+class SubtitleTargetConflict(RuntimeError):
+    pass
+
+
 class BatchRenameInterrupted(RuntimeError):
     def __init__(self, *, completed, total, target_root, failed_path, cause):
         super().__init__(str(cause))
@@ -417,9 +434,10 @@ def _deterministic_episode_plan(media_metadata: dict, file_tree: list[dict]):
         if bounded_season < 1:
             return None
     mapped = {}
+    video_nodes = _video_nodes(file_tree)
     nodes_by_path = {
         str(node.get("relative_path") or "").strip("/"): node
-        for node in file_tree if not node.get("is_dir")
+        for node in video_nodes
     }
     for item in media_metadata.get("items") or []:
         hint = str(item.get("source_hint") or "").strip("/")
@@ -429,9 +447,7 @@ def _deterministic_episode_plan(media_metadata: dict, file_tree: list[dict]):
         node = nodes_by_path.get(hint)
         if marker in allowed and node is not None and marker not in mapped:
             mapped[marker] = node
-    for node in file_tree:
-        if node.get("is_dir"):
-            continue
+    for node in video_nodes:
         marker = parse_episode_marker(node.get("relative_path") or node.get("name"))
         if (
             marker is not None
@@ -446,9 +462,34 @@ def _deterministic_episode_plan(media_metadata: dict, file_tree: list[dict]):
             and marker not in mapped
         ):
             mapped[marker] = node
-    if bounded_season is not None:
+    if bounded_season is not None and video_nodes:
         allowed = set(mapped)
-    if not allowed or set(mapped) != allowed:
+    if video_nodes and (not allowed or set(mapped) != allowed):
+        return None
+    subtitle_evidence = collect_subtitle_evidence(file_tree)
+    subtitle_map = []
+    subtitle_mapping_incomplete = False
+    for item in subtitle_evidence:
+        if item.get("language_profile") in {"traditional", "other"}:
+            continue
+        if item.get("language_profile") == "unknown":
+            continue
+        marker = item.get("episode_key")
+        if marker is None:
+            subtitle_mapping_incomplete = True
+            continue
+        if allowed and marker not in allowed:
+            subtitle_mapping_incomplete = True
+            continue
+        if bounded_season is not None and marker[0] != bounded_season:
+            subtitle_mapping_incomplete = True
+            continue
+        subtitle_map.append({
+            "source_file": item["relative_path"],
+            "season_number": marker[0],
+            "episode_number": marker[1],
+        })
+    if not video_nodes and not subtitle_evidence:
         return None
     return {
         "episode_map": [{
@@ -457,6 +498,8 @@ def _deterministic_episode_plan(media_metadata: dict, file_tree: list[dict]):
             "episode_number": episode,
             "content_role": media_metadata.get("identity", {}).get("content_kind"),
         } for (season, episode), node in sorted(mapped.items())],
+        "subtitle_map": subtitle_map,
+        "subtitle_mapping_incomplete": subtitle_mapping_incomplete,
         "warnings": [],
     }
 
@@ -527,7 +570,30 @@ def _assert_no_target_conflicts(storage, rename_plan):
             f"{str(operation['target_dir']).rstrip('/')}/"
             f"{operation['rename_to']}"
         )
-        if storage.get_file_info(target_path):
+        if str(operation.get("source_path") or "").rstrip("/") == (
+            target_path.rstrip("/")
+        ):
+            operation["skip_write"] = True
+            continue
+        target_info = storage.get_file_info(target_path)
+        if not target_info:
+            continue
+        if operation.get("media_kind") == "subtitle":
+            source_info = storage.get_file_info(operation["source_path"]) or {}
+            source_sha1 = str(
+                operation.get("source_sha1")
+                or source_info.get("sha1") or source_info.get("sha") or ""
+            ).strip().lower()
+            target_sha1 = str(
+                target_info.get("sha1") or target_info.get("sha") or ""
+            ).strip().lower()
+            if source_sha1 and source_sha1 == target_sha1:
+                operation["skip_write"] = True
+                continue
+            raise SubtitleTargetConflict(
+                f"字幕目标冲突：{operation['rename_to']}"
+            )
+        if target_info:
             raise ConfirmedPlanConflict(
                 f"已确认目标编号发生冲突：{operation['rename_to']}"
             )
@@ -549,9 +615,15 @@ def _attempt_confirmed_series_rename(
         )
         return None
 
-    ai_plan = _deterministic_episode_plan(media_metadata, file_tree)
+    deterministic_plan = _deterministic_episode_plan(
+        media_metadata, file_tree
+    )
+    ai_plan = deterministic_plan
     ai_was_used = False
-    if ai_plan is None and _has_ai_episode_inference_config():
+    if (
+        ai_plan is None
+        or ai_plan.get("subtitle_mapping_incomplete") is True
+    ) and _has_ai_episode_inference_config():
         context = {
             "metadata": metadata,
             "confirmed_media_metadata": media_metadata,
@@ -561,7 +633,17 @@ def _attempt_confirmed_series_rename(
             "file_tree": file_tree,
             **_locked_ai_context(media_metadata),
         }
-        ai_plan = infer_tvdb_episode_plan_with_ai(context)
+        inferred_plan = infer_tvdb_episode_plan_with_ai(context)
+        if deterministic_plan is not None:
+            ai_plan = dict(inferred_plan or deterministic_plan)
+            ai_plan["episode_map"] = list(
+                deterministic_plan.get("episode_map") or []
+            )
+            ai_plan["subtitle_map"] = list(
+                (inferred_plan or {}).get("subtitle_map") or []
+            )
+        else:
+            ai_plan = inferred_plan
         ai_was_used = True
     rename_plan = build_confirmed_rename_plan(
         final_path=event.final_path,
@@ -576,6 +658,12 @@ def _attempt_confirmed_series_rename(
             f"确认方案整理跳过：AI文件映射未通过锁定校验 path={event.final_path}"
         )
         return None
+
+    unresolved_sources = rename_plan.get("unresolved_sources") or []
+    if unresolved_sources:
+        raise SubtitlePlanBlocked(
+            "字幕语言或归属无法确定：" + ", ".join(unresolved_sources[:3])
+        )
 
     unmatched_sources = rename_plan.get("unmatched_sources") or []
     if unmatched_sources:
@@ -641,6 +729,9 @@ def _attempt_confirmed_series_rename(
     completed = 0
     root_source_deleted = None
     for operation in operations:
+        if operation.get("skip_write"):
+            completed += 1
+            continue
         current_source_path = operation["source_path"]
         try:
             if not storage.create_dir_recursive(operation["target_dir"]):
@@ -670,7 +761,10 @@ def _attempt_confirmed_series_rename(
             ) from exc
         completed += 1
 
-    unmatched_sources = rename_plan.get("unmatched_sources") or []
+    unmatched_sources = sorted(set(
+        (rename_plan.get("unmatched_sources") or [])
+        + (rename_plan.get("discard_sources") or [])
+    ))
     try:
         unmatched_dir = _move_unmatched_to_unorganized(event, unmatched_sources)
     except Exception as exc:
@@ -727,6 +821,14 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
     confirmed_series = _confirmed_series_metadata(event)
     try:
         rename_plan = _attempt_tvdb_ai_episode_rename(event, metadata)
+    except (SubtitlePlanBlocked, SubtitleTargetConflict) as exc:
+        return PostDownloadResult(
+            True,
+            final_path=event.final_path,
+            message=f"⚠️ {exc}\n文件保持原位，未执行任何写操作。",
+            should_stop=True,
+            metadata=event.metadata,
+        )
     except ConfirmedPlanConflict as exc:
         unorganized_target = _move_confirmed_failure_to_unorganized(event)
         return PostDownloadResult(
@@ -776,7 +878,7 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
         message += f"\n提示：{'; '.join(rename_plan['warnings'][:2])}"
     if not rename_plan.get("cleanup_complete", True):
         message = (
-            "⚠️ 视频已完成整理，但源目录清理未完成，请人工检查。\n\n"
+            "⚠️ 媒体已完成整理，但源目录清理未完成，请人工检查。\n\n"
             f"保存目录：`{rename_plan['target_root']}`"
         )
     result_metadata = event.metadata
@@ -805,11 +907,14 @@ def _attempt_media_auto_rename(event: DownloadCompletedEvent, naming_metadata):
         naming_metadata,
         file_tree,
     )
-    if not main_video:
-        runtime_context.logger.warn(f"自动整理跳过：目录中未找到视频文件 {event.final_path}")
+    subtitle_evidence = collect_subtitle_evidence(file_tree)
+    if not main_video and not subtitle_evidence:
+        runtime_context.logger.warning(
+            f"自动整理跳过：目录中未找到媒体文件 {event.final_path}"
+        )
         return None
 
-    original_file_name = main_video["name"]
+    original_file_name = main_video["name"] if main_video else "placeholder.mkv"
     release_title = naming_metadata.get("release_title") or event.resource_name
     plan = build_media_naming_plan(naming_metadata, release_title, original_file_name)
     if not plan:
@@ -817,29 +922,66 @@ def _attempt_media_auto_rename(event: DownloadCompletedEvent, naming_metadata):
         return None
 
     target_path = f"{event.selected_path}/{plan.target_relative_dir}"
-    target_file = f"{target_path.rstrip('/')}/{plan.file_name}"
-    if storage.get_file_info(target_file):
-        raise ConfirmedPlanConflict(f"目标文件发生冲突：{target_file}")
+    operations = []
+    if main_video:
+        original_file_path = _source_path(event, main_video)
+        source_root = str(original_file_path).rsplit("/", 1)[0]
+        operations.append({
+            "media_kind": "video",
+            "source_path": original_file_path,
+            "rename_to": plan.file_name,
+            "renamed_source_path": f"{source_root}/{plan.file_name}",
+            "target_dir": target_path,
+        })
+    subtitle_plan = build_movie_subtitle_plan(
+        final_path=event.final_path,
+        target_dir=target_path,
+        target_stem=Path(plan.file_name).stem,
+        file_tree=file_tree,
+    )
+    if subtitle_plan["unresolved_sources"]:
+        raise SubtitlePlanBlocked(
+            "字幕语言或归属无法确定："
+            + ", ".join(subtitle_plan["unresolved_sources"][:3])
+        )
+    operations.extend(subtitle_plan["operations"])
+    shared_plan = {"operations": operations}
+    _assert_no_target_conflicts(storage, shared_plan)
     if not storage.create_dir_recursive(target_path):
         raise RuntimeError(f"自动整理失败：无法创建目标目录 {target_path}")
 
-    original_file_path = _source_path(event, main_video)
-    source_root = str(original_file_path).rsplit("/", 1)[0]
-    renamed_file_path = f"{source_root}/{plan.file_name}"
-    if original_file_name != plan.file_name:
-        if storage.rename(original_file_path, plan.file_name) is not True:
-            raise RuntimeError(f"自动整理失败：重命名失败 {original_file_path}")
-
-    outcome = _move_file_with_outcome(storage, renamed_file_path, target_path)
-    if not outcome.get("copied"):
-        raise RuntimeError(f"自动整理失败：移动失败 {renamed_file_path}")
     cleanup_complete = True
-    if str(event.final_path).rstrip("/") == str(original_file_path).rstrip("/"):
-        cleanup_complete = bool(outcome.get("source_deleted"))
-    elif event.final_path != target_path:
+    root_source_deleted = None
+    for operation in operations:
+        if operation.get("skip_write"):
+            continue
+        current_source_path = operation["source_path"]
+        if Path(current_source_path).name != operation["rename_to"]:
+            if storage.rename(current_source_path, operation["rename_to"]) is not True:
+                raise RuntimeError(f"自动整理失败：重命名失败 {current_source_path}")
+            current_source_path = operation["renamed_source_path"]
+        outcome = _move_file_with_outcome(
+            storage, current_source_path, operation["target_dir"]
+        )
+        if not outcome.get("copied"):
+            raise RuntimeError(f"自动整理失败：移动失败 {current_source_path}")
+        if str(event.final_path).rstrip("/") == str(operation["source_path"]).rstrip("/"):
+            root_source_deleted = bool(outcome.get("source_deleted"))
+    for relative_path in subtitle_plan["discard_sources"]:
+        source_path = f"{str(event.final_path).rstrip('/')}/{relative_path}"
+        if storage.delete_single_file(source_path) is not True:
+            raise RuntimeError(f"自动整理失败：无法删除排除字幕 {source_path}")
+    if root_source_deleted is False:
+        cleanup_complete = False
+    elif root_source_deleted is None and event.final_path != target_path:
         cleanup_complete = _cleanup_source_directory(storage, event.final_path)
 
-    return target_path, plan, cleanup_complete, selection_reason
+    return (
+        target_path,
+        plan,
+        cleanup_complete,
+        selection_reason or "subtitle_only",
+    )
 
 
 def _standalone_contract_naming_metadata(event: DownloadCompletedEvent):
@@ -866,6 +1008,14 @@ def process_generic_media(event: DownloadCompletedEvent) -> PostDownloadResult:
     )
     try:
         result = _attempt_media_auto_rename(event, naming_auto_metadata)
+    except (SubtitlePlanBlocked, SubtitleTargetConflict) as exc:
+        return PostDownloadResult(
+            True,
+            final_path=event.final_path,
+            message=f"⚠️ {exc}\n文件保持原位，未执行任何写操作。",
+            should_stop=True,
+            metadata=event.metadata,
+        )
     except ConfirmedPlanConflict as exc:
         unorganized_target = _move_confirmed_failure_to_unorganized(event)
         return PostDownloadResult(
@@ -886,7 +1036,7 @@ def process_generic_media(event: DownloadCompletedEvent) -> PostDownloadResult:
         f"主视频依据：{selection_reason}\n\n保存目录：`{target_path}`"
         if cleanup_complete
         else (
-            "⚠️ 视频已完成整理，但源目录清理未完成，请人工检查。\n\n"
+            "⚠️ 媒体已完成整理，但源目录清理未完成，请人工检查。\n\n"
             f"保存目录：`{target_path}`"
         )
     )

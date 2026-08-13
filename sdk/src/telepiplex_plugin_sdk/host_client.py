@@ -85,6 +85,7 @@ class HostClient:
         milestone_id: str,
         text: str,
         *,
+        mode: str = "identity",
         photo_url: str = "",
         deadline: float = 10,
     ) -> dict:
@@ -93,6 +94,7 @@ class HostClient:
             {
                 "operation_id": str(operation_id),
                 "milestone_id": str(milestone_id),
+                "mode": str(mode),
                 "text": str(text),
                 "photo_url": str(photo_url or ""),
             },
@@ -100,6 +102,22 @@ class HostClient:
             idempotency_key=(
                 f"{str(operation_id)}:{str(milestone_id)}"
             ),
+        )
+
+    async def seal_operation_stage(
+        self,
+        operation_id: str,
+        milestone_id: str,
+        text: str,
+        *,
+        deadline: float = 10,
+    ) -> dict:
+        return await self.publish_operation_milestone(
+            operation_id,
+            milestone_id,
+            text,
+            mode="stage",
+            deadline=deadline,
         )
 
     async def _request(

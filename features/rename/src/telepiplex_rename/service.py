@@ -982,6 +982,7 @@ class RenameFeature:
             event_payload["_metadata_presentation"] = resolved[
                 "presentation"
             ]
+        await self._publish_metadata_identity(event_payload, operation_id)
         ready = {
             **outcome,
             "event_payload": event_payload,
@@ -992,8 +993,12 @@ class RenameFeature:
         running = await self._report_if_active(
             operation_id,
             state="running",
-            stage="inventory_batch" if is_inventory else "metadata_resolution",
-            status_text="已确认媒体身份，正在恢复整理任务。",
+            stage="inventory_batch" if is_inventory else "organizing",
+            status_text=(
+                "正在恢复存量媒体整理任务。"
+                if is_inventory
+                else "正在规划媒体目录。"
+            ),
             control="cancel",
             details={},
         )
@@ -1007,10 +1012,7 @@ class RenameFeature:
         else:
             self._spawn_organization(job_id, event_payload, operation_id)
         return {
-            "actions": [{
-                "kind": "edit_message",
-                "text": "已确认媒体身份，正在恢复整理任务。",
-            }],
+            "actions": [],
             "session": {"state": "close"},
             "operation": running,
         }
@@ -1037,11 +1039,17 @@ class RenameFeature:
                 for item in candidate.get("countries") or []
                 if str(item).strip()
             ) or "地区未知"
-            media_type = (
-                "电影"
-                if candidate.get("media_type") == "movie"
-                else "剧集"
-            )
+            media_type = str(
+                candidate.get("media_type_label") or ""
+            ).strip()
+            if media_type not in {
+                "电影", "剧集", "动画电影", "动画剧集",
+            }:
+                media_type = (
+                    "电影"
+                    if candidate.get("media_type") == "movie"
+                    else "剧集"
+                )
             lines.append(
                 f"{index + 1}. {display_title}\n"
                 f"   {candidate.get('year') or '年份未知'}"
@@ -1398,25 +1406,14 @@ class RenameFeature:
                         "confirmed metadata has no configured category route",
                     )
                 payload["selected_path"] = route["path"]
-            presentation = payload.get("_metadata_presentation")
-            if metadata and isinstance(presentation, dict) and operation_id:
-                try:
-                    await self.host.publish_operation_milestone(
-                        operation_id,
-                        str(presentation.get("milestone_id") or ""),
-                        str(presentation.get("text") or ""),
-                        photo_url=str(
-                            presentation.get("photo_url") or ""
-                        ),
-                    )
-                except Exception:
-                    pass
+            if metadata:
+                await self._publish_metadata_identity(payload, operation_id)
             self._raise_if_cancelled(operation_id)
             await self._report_if_active(
                 operation_id,
                 state="running",
                 stage="organizing",
-                status_text="正在构建并执行媒体整理计划。",
+                status_text="正在规划媒体目录。",
                 control="cancel",
             )
             loop = asyncio.get_running_loop()
@@ -1649,7 +1646,7 @@ class RenameFeature:
     async def _finish_operation(self, job_id, outcome, operation_id):
         if outcome.get("organized"):
             event_payload = outcome["event_payload"]
-            if operation_id and not outcome.get("handoff_reported"):
+            if operation_id:
                 handoff = outcome.get("handoff_operation")
                 if not isinstance(handoff, dict):
                     handoff = self._advance_operation(
@@ -1665,44 +1662,62 @@ class RenameFeature:
                     outcome["handoff_operation"] = dict(handoff)
                     if self.jobs:
                         self.jobs.update(job_id, "processed", outcome)
-                response = await self.host.report_operation(handoff)
-                if (
-                    not isinstance(response, dict)
-                    or response.get("accepted") is not True
-                ):
+                if not outcome.get("handoff_reported"):
+                    response = await self.host.report_operation(handoff)
                     if (
-                        isinstance(response, dict)
-                        and response.get("error_code")
-                        == "handoff_target_unavailable"
-                        and response.get("target_plugin_id") == "sync"
+                        not isinstance(response, dict)
+                        or response.get("accepted") is not True
                     ):
-                        outcome.pop("handoff_operation", None)
-                        outcome["downstream_skipped"] = "sync"
-                        outcome["message"] = (
-                            str(outcome.get("message") or "").rstrip()
-                            + "\nPlex 管理未安装，已跳过后续处理。"
-                        ).lstrip()
-                        await self._report_operation(
-                            operation_id,
-                            state="completed",
-                            stage="completed",
-                            status_text=(
-                                "媒体整理完成；Plex 管理未安装，"
-                                "已跳过后续处理。"
-                            ),
-                            control="",
-                            details={"downstream_skipped": "sync"},
-                        )
-                        if self.jobs:
-                            self.jobs.update(
-                                job_id, "published", outcome
+                        if (
+                            isinstance(response, dict)
+                            and response.get("error_code")
+                            == "handoff_target_unavailable"
+                            and response.get("target_plugin_id") == "sync"
+                        ):
+                            outcome.pop("handoff_operation", None)
+                            outcome["downstream_skipped"] = "sync"
+                            outcome["message"] = (
+                                str(outcome.get("message") or "").rstrip()
+                                + "\nPlex 管理未安装，已跳过后续处理。"
+                            ).lstrip()
+                            await self._report_operation(
+                                operation_id,
+                                state="completed",
+                                stage="completed",
+                                status_text=(
+                                    "媒体整理完成；Plex 管理未安装，"
+                                    "已跳过后续处理。"
+                                ),
+                                control="",
+                                details={"downstream_skipped": "sync"},
                             )
-                        return await self._complete_published_job(
-                            job_id, outcome
+                            if self.jobs:
+                                self.jobs.update(
+                                    job_id, "published", outcome
+                                )
+                            return await self._complete_published_job(
+                                job_id, outcome
+                            )
+                        raise FeatureError(
+                            "operation_rejected",
+                            "Host rejected rename handoff ownership",
                         )
+                seal_response = await self.host.seal_operation_stage(
+                    operation_id,
+                    f"rename-stage-complete:{job_id}",
+                    (
+                        "✅ 媒体整理已完成。\n"
+                        f"目标目录：{outcome.get('final_path') or ''}"
+                    ),
+                    deadline=45,
+                )
+                if not isinstance(seal_response, dict) or not (
+                    seal_response.get("accepted") is True
+                    or seal_response.get("duplicate") is True
+                ):
                     raise FeatureError(
-                        "operation_rejected",
-                        "Host rejected rename handoff ownership",
+                        "stage_seal_failed",
+                        "Host did not seal the completed rename stage",
                     )
                 outcome["handoff_reported"] = True
                 if self.jobs:
@@ -1758,6 +1773,39 @@ class RenameFeature:
             "replayed": True,
         }
 
+    async def _publish_metadata_identity(
+        self,
+        payload: dict,
+        operation_id: str,
+    ) -> bool:
+        if not operation_id or payload.get("_metadata_identity_published"):
+            return False
+        presentation = payload.get("_metadata_presentation")
+        if not isinstance(presentation, dict):
+            return False
+        milestone_id = str(presentation.get("milestone_id") or "").strip()
+        text = str(presentation.get("text") or "").strip()
+        if not milestone_id or not text:
+            return False
+        response = await self.host.publish_operation_milestone(
+            operation_id,
+            milestone_id,
+            text,
+            mode="identity",
+            photo_url=str(presentation.get("photo_url") or ""),
+            deadline=45,
+        )
+        if not isinstance(response, dict) or not (
+            response.get("accepted") is True
+            or response.get("duplicate") is True
+        ):
+            raise FeatureError(
+                "identity_delivery_failed",
+                "Host did not deliver the confirmed media identity",
+            )
+        payload["_metadata_identity_published"] = True
+        return True
+
     async def _accept_event_operation(self, payload, job_id):
         operation_id = str(payload.get("operation_id") or "")
         if not operation_id:
@@ -1789,11 +1837,16 @@ class RenameFeature:
         }
         self.operations[operation_id] = operation
         self.owner_operations[(chat_id, user_id)] = operation_id
+        has_metadata = isinstance(payload.get("media_metadata"), dict)
         return await self._report_operation(
             operation_id,
             state="running",
-            stage="metadata_resolution",
-            status_text="rename 已接受任务，正在检查媒体元数据。",
+            stage="organizing" if has_metadata else "metadata_resolution",
+            status_text=(
+                "正在规划媒体目录。"
+                if has_metadata
+                else "rename 已接受任务，正在解析媒体元数据。"
+            ),
             control="cancel",
         )
 

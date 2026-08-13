@@ -1729,6 +1729,11 @@ class DownloadFeature:
             current = self.operations[operation_id]
             if current.get("state") == "handed_off":
                 operation = self._operation_view(current)
+                await self._seal_download_stage(
+                    operation_id,
+                    job_id,
+                    payload,
+                )
             else:
                 try:
                     operation = await self._report_operation(
@@ -1741,6 +1746,11 @@ class DownloadFeature:
                         ),
                         control="cancel",
                         next_plugin_id="rename",
+                    )
+                    await self._seal_download_stage(
+                        operation_id,
+                        job_id,
+                        payload,
                     )
                 except FeatureError as exc:
                     if exc.code != "handoff_target_unavailable":
@@ -1784,6 +1794,30 @@ class DownloadFeature:
         )
         if self.jobs:
             self.jobs.update(job_id, "completed", result=payload)
+
+    async def _seal_download_stage(
+        self,
+        operation_id: str,
+        job_id: str,
+        payload: dict,
+    ) -> None:
+        seal_response = await self.host.seal_operation_stage(
+            operation_id,
+            f"download-stage-complete:{job_id}",
+            (
+                "✅ 115 下载已完成。\n"
+                f"保存目录：{payload.get('final_path')}"
+            ),
+            deadline=45,
+        )
+        if not isinstance(seal_response, dict) or not (
+            seal_response.get("accepted") is True
+            or seal_response.get("duplicate") is True
+        ):
+            raise FeatureError(
+                "stage_seal_failed",
+                "Host did not seal the completed download stage",
+            )
 
     async def operation_control(self, request: dict) -> dict:
         operation_id = str(request.get("operation_id") or "")

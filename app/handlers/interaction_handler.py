@@ -90,14 +90,33 @@ def operation_render_lock(application, operation_id: str) -> asyncio.Lock:
 
 
 class OperationMilestoneSink:
-    def __init__(self, coordinator, delivery):
+    def __init__(self, coordinator, delivery, lock_factory=None):
         self.coordinator = coordinator
         self.delivery = delivery
+        self.lock_factory = lock_factory
+        self._milestone_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
-    def attach(self, delivery):
+    def attach(self, delivery, lock_factory=None):
         self.delivery = delivery
+        self.lock_factory = lock_factory
 
     async def __call__(self, plugin_id: str, payload: dict) -> dict:
+        operation_id = str(payload.get("operation_id") or "")
+        milestone_id = str(payload.get("milestone_id") or "")
+        key = (operation_id, milestone_id)
+        milestone_lock = self._milestone_locks.setdefault(key, asyncio.Lock())
+        async with milestone_lock:
+            operation_lock = (
+                self.lock_factory(operation_id)
+                if self.lock_factory is not None
+                else None
+            )
+            if operation_lock is None:
+                return await self._deliver(plugin_id, payload)
+            async with operation_lock:
+                return await self._deliver(plugin_id, payload)
+
+    async def _deliver(self, plugin_id: str, payload: dict) -> dict:
         operation_id = str(payload.get("operation_id") or "")
         milestone_id = str(payload.get("milestone_id") or "")
         record = self.coordinator.claim_milestone(
@@ -107,14 +126,48 @@ class OperationMilestoneSink:
         )
         if record is None:
             return {"accepted": True, "duplicate": True}
+        delivered_target = self.coordinator.milestone_delivery_target(
+            plugin_id,
+            operation_id,
+            milestone_id,
+        )
+        if delivered_target is not None:
+            self.coordinator.complete_milestone(
+                plugin_id,
+                operation_id,
+                milestone_id,
+            )
+            return {"accepted": True, "duplicate": False, "recovered": True}
+        if self.coordinator.milestone_delivery_started(
+            plugin_id,
+            operation_id,
+            milestone_id,
+        ):
+            self.coordinator.complete_milestone(
+                plugin_id,
+                operation_id,
+                milestone_id,
+            )
+            return {
+                "accepted": True,
+                "duplicate": False,
+                "recovered": True,
+                "delivery_uncertain": True,
+            }
+        mode = str(payload.get("mode") or "identity").strip().casefold()
         text = str(payload.get("text") or "")
         photo_url = str(payload.get("photo_url") or "") or None
+        self.coordinator.begin_milestone_delivery(
+            plugin_id,
+            operation_id,
+            milestone_id,
+        )
         try:
-            accepted = self.delivery(record.chat_id, photo_url, text)
+            accepted = self.delivery(record, mode, photo_url, text)
             if inspect.isawaitable(accepted):
                 accepted = await accepted
-            if accepted is False and photo_url:
-                accepted = self.delivery(record.chat_id, None, text)
+            if _milestone_delivery_failed(accepted) and photo_url and mode == "identity":
+                accepted = self.delivery(record, mode, None, text)
                 if inspect.isawaitable(accepted):
                     accepted = await accepted
         except BaseException:
@@ -124,14 +177,58 @@ class OperationMilestoneSink:
                 milestone_id,
             )
             raise
-        if accepted is False:
+        if _milestone_delivery_failed(accepted):
             self.coordinator.release_milestone(
                 plugin_id,
                 operation_id,
                 milestone_id,
             )
             return {"accepted": False, "duplicate": False}
+        target = _milestone_delivery_target(accepted, record)
+        if target is not None:
+            self.coordinator.record_milestone_delivery(
+                plugin_id,
+                operation_id,
+                milestone_id,
+                target[0],
+                target[1],
+            )
+        self.coordinator.complete_milestone(
+            plugin_id,
+            operation_id,
+            milestone_id,
+        )
         return {"accepted": True, "duplicate": False}
+
+
+def _milestone_delivery_failed(result) -> bool:
+    if isinstance(result, Mapping):
+        return result.get("accepted") is not True
+    return result is False
+
+
+def _milestone_delivery_target(
+    result,
+    record: OperationRecord,
+) -> tuple[int, str] | None:
+    del record
+    if isinstance(result, Mapping):
+        message_id = result.get("message_id")
+        message_kind = str(result.get("message_kind") or "").casefold()
+        if message_id is not None and message_kind in {"text", "photo"}:
+            return int(message_id), message_kind
+    return None
+
+
+def _milestone_delivery_result(
+    message_id: int | None,
+    message_kind: str,
+) -> dict:
+    return {
+        "accepted": True,
+        "message_id": int(message_id) if message_id is not None else None,
+        "message_kind": str(message_kind),
+    }
 
 
 def _milestone_title(text: str) -> str:
@@ -141,13 +238,79 @@ def _milestone_title(text: str) -> str:
 
 async def deliver_operation_milestone(
     application,
-    chat_id: int,
-    photo_url: str | None,
-    text: str,
-) -> bool:
+    record_or_chat_id,
+    mode_or_photo_url,
+    photo_url_or_text,
+    text: str | None = None,
+) -> bool | dict:
+    if isinstance(record_or_chat_id, OperationRecord):
+        record = record_or_chat_id
+        chat_id = record.chat_id
+        mode = str(mode_or_photo_url or "identity").casefold()
+        photo_url = str(photo_url_or_text or "") or None
+        rendered_text = str(text or "")
+    else:
+        record = None
+        chat_id = int(record_or_chat_id)
+        mode = "identity"
+        photo_url = str(mode_or_photo_url or "") or None
+        rendered_text = str(photo_url_or_text or "")
+
+    if mode == "stage":
+        if record is not None and record.message_id is not None:
+            try:
+                if record.message_kind == "photo":
+                    await application.bot.edit_message_caption(
+                        chat_id=chat_id,
+                        message_id=record.message_id,
+                        caption=rendered_text[:1024],
+                        reply_markup=None,
+                    )
+                else:
+                    await application.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=record.message_id,
+                        text=rendered_text,
+                        reply_markup=None,
+                    )
+                return _milestone_delivery_result(
+                    record.message_id,
+                    record.message_kind or "text",
+                )
+            except Exception as exc:
+                if _message_not_modified(exc):
+                    return _milestone_delivery_result(
+                        record.message_id,
+                        record.message_kind or "text",
+                    )
+                _log(
+                    "warn",
+                    "任务阶段封口编辑失败，改发新消息："
+                    f"operation_id={record.operation_id}, "
+                    f"message_id={record.message_id}, "
+                    f"error={_render_error(exc)}",
+                )
+                await _clear_message_keyboard(application, record)
+        try:
+            sent = await application.bot.send_message(
+                chat_id=chat_id,
+                text=rendered_text,
+            )
+            return _milestone_delivery_result(
+                getattr(sent, "message_id", None),
+                "text",
+            )
+        except Exception as exc:
+            _log(
+                "error",
+                "任务阶段封口消息发送失败："
+                f"chat_id={chat_id}, error={_render_error(exc)}",
+            )
+            return False
+
     poster_items = [{
         "number": 1,
-        "title": _milestone_title(text),
+        "title": _milestone_title(rendered_text),
         "poster_url": str(photo_url or ""),
     }]
     try:
@@ -165,13 +328,43 @@ async def deliver_operation_milestone(
                 )
             else:
                 raise
-        caption, _parse_mode = bounded_photo_caption(text, None)
-        await application.bot.send_photo(
+        caption, _parse_mode = bounded_photo_caption(rendered_text, None)
+        if record is not None and record.message_id is not None:
+            if record.message_kind == "photo":
+                try:
+                    await application.bot.edit_message_media(
+                        chat_id=chat_id,
+                        message_id=record.message_id,
+                        media=InputMediaPhoto(media=photo, caption=caption),
+                        reply_markup=None,
+                    )
+                    return _milestone_delivery_result(
+                        record.message_id,
+                        "photo",
+                    )
+                except Exception as exc:
+                    if _message_not_modified(exc):
+                        return _milestone_delivery_result(
+                            record.message_id,
+                            "photo",
+                        )
+                    _log(
+                        "warn",
+                        "任务身份海报编辑失败，改发新消息："
+                        f"operation_id={record.operation_id}, "
+                        f"message_id={record.message_id}, "
+                        f"error={_render_error(exc)}",
+                    )
+            await _clear_message_keyboard(application, record)
+        sent = await application.bot.send_photo(
             chat_id=chat_id,
             photo=photo,
             caption=caption,
         )
-        return True
+        return _milestone_delivery_result(
+            getattr(sent, "message_id", None),
+            "photo",
+        )
     except Exception as exc:
         _log(
             "warn",
@@ -179,9 +372,9 @@ async def deliver_operation_milestone(
             f"chat_id={chat_id}, error={_render_error(exc)}",
         )
     try:
-        await application.bot.send_message(
+        sent = await application.bot.send_message(
             chat_id=chat_id,
-            text=text,
+            text=rendered_text,
         )
     except Exception as exc:
         _log(
@@ -190,7 +383,10 @@ async def deliver_operation_milestone(
             f"chat_id={chat_id}, error={_render_error(exc)}",
         )
         return False
-    return True
+    return _milestone_delivery_result(
+        getattr(sent, "message_id", None),
+        "text",
+    )
 
 
 class OperationReportSink:

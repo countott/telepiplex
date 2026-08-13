@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 
 
@@ -45,12 +46,23 @@ class InteractionCoordinatorTest(unittest.TestCase):
         self.assertEqual(terminal.state, "completed")
         self.assertIsNone(self.coordinator.active(10, 1))
 
-    def test_operation_milestone_is_owned_and_claimed_once(self):
+    def test_operation_milestone_is_duplicate_only_after_atomic_completion(self):
         from app.runtime.interaction_coordinator import InteractionError
 
-        self.coordinator.report("search", self.report())
+        created = self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id(created.operation_id, 77, "photo")
 
         first = self.coordinator.claim_milestone(
+            "search",
+            "op-1",
+            "media-douban-35981510",
+        )
+        retry_before_completion = self.coordinator.claim_milestone(
+            "search",
+            "op-1",
+            "media-douban-35981510",
+        )
+        completed = self.coordinator.complete_milestone(
             "search",
             "op-1",
             "media-douban-35981510",
@@ -62,6 +74,8 @@ class InteractionCoordinatorTest(unittest.TestCase):
         )
 
         self.assertEqual(first.operation_id, "op-1")
+        self.assertEqual(retry_before_completion.operation_id, "op-1")
+        self.assertIsNone(completed.message_id)
         self.assertIsNone(duplicate)
         with self.assertRaises(InteractionError) as raised:
             self.coordinator.claim_milestone(
@@ -82,6 +96,49 @@ class InteractionCoordinatorTest(unittest.TestCase):
         self.assertIsNotNone(
             self.coordinator.claim_milestone("search", "op-1", "media-1")
         )
+
+    def test_existing_milestone_table_gains_delivery_state(self):
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        legacy_path = Path(self.temp.name) / "legacy-host.db"
+        connection = sqlite3.connect(legacy_path)
+        connection.execute(
+            "CREATE TABLE operation_milestones ("
+            "operation_id TEXT NOT NULL, milestone_id TEXT NOT NULL, "
+            "plugin_id TEXT NOT NULL, created_at REAL NOT NULL, "
+            "PRIMARY KEY(operation_id, milestone_id))"
+        )
+        connection.execute(
+            "INSERT INTO operation_milestones VALUES (?, ?, ?, ?)",
+            ("op-legacy", "media-complete", "search", 1.0),
+        )
+        connection.commit()
+        connection.close()
+
+        migrated = InteractionCoordinator(legacy_path)
+        try:
+            columns = {
+                row["name"]
+                for row in migrated._connection.execute(
+                    "PRAGMA table_info(operation_milestones)"
+                ).fetchall()
+            }
+            migrated.report(
+                "search",
+                self.report(operation_id="op-legacy"),
+            )
+            duplicate = migrated.claim_milestone(
+                "search",
+                "op-legacy",
+                "media-complete",
+            )
+        finally:
+            migrated.close()
+
+        self.assertIn("delivered", columns)
+        self.assertIn("delivery_started", columns)
+        self.assertIn("delivered_message_id", columns)
+        self.assertIsNone(duplicate)
 
     def test_only_one_non_terminal_operation_may_own_a_user(self):
         from app.runtime.interaction_coordinator import InteractionError
@@ -282,6 +339,15 @@ class InteractionCoordinatorTest(unittest.TestCase):
         self.assertEqual(reloaded.operation_id, "op-1")
         self.assertEqual(reloaded.message_id, 77)
         self.assertEqual(reloaded.message_kind, "photo")
+
+    def test_clear_message_id_seals_current_message_segment(self):
+        created = self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id(created.operation_id, 77, "photo")
+
+        sealed = self.coordinator.clear_message_id(created.operation_id)
+
+        self.assertIsNone(sealed.message_id)
+        self.assertIsNone(self.coordinator.get("op-1").message_id)
 
     def test_interrupt_unowned_releases_only_missing_feature_operations(self):
         self.coordinator.report("search", self.report())

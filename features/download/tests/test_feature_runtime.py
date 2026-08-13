@@ -21,10 +21,13 @@ class FakeHost:
         self.notifications = []
         self.fail_publish = False
         self.reports = []
+        self.milestones = []
+        self.timeline = []
 
     async def publish_event(self, event_type, payload, **kwargs):
         if self.fail_publish:
             raise RuntimeError("host unavailable")
+        self.timeline.append(("event", event_type))
         self.events.append((event_type, payload, kwargs))
         return {"event_id": "event-1"}
 
@@ -33,6 +36,7 @@ class FakeHost:
         return {"accepted": True}
 
     async def report_operation(self, report, **kwargs):
+        self.timeline.append(("report", report["state"], report["stage"]))
         self.reports.append(dict(report))
         return {
             "accepted": True,
@@ -40,6 +44,23 @@ class FakeHost:
             "state": report["state"],
             "revision": report["revision"],
         }
+
+    async def seal_operation_stage(
+        self,
+        operation_id,
+        milestone_id,
+        text,
+        *,
+        deadline=10,
+    ):
+        self.timeline.append(("milestone", "stage", milestone_id))
+        self.milestones.append({
+            "operation_id": operation_id,
+            "milestone_id": milestone_id,
+            "text": text,
+            "deadline": deadline,
+        })
+        return {"accepted": True, "duplicate": False}
 
 
 class FakeRuntime:
@@ -732,6 +753,39 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host.events[0][1]["operation_id"], "op-download-1")
         self.assertEqual(self.host.events[0][1]["chat_id"], 10)
         self.assertEqual(self.host.notifications, [])
+
+    async def test_download_stage_seals_before_rename_event_is_published(self):
+        await self.feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "7" * 40,
+                "selected_path": "/Downloads",
+                "operation_id": "op-download-seal",
+                "operation_revision": 0,
+                "chat_id": 10,
+                "user_id": 1,
+            },
+            "context": {"idempotency_key": "download-stage-seal"},
+        })
+
+        await self.runtime.tasks.pop("download-stage-seal")
+
+        handoff_index = self.host.timeline.index(
+            ("report", "handed_off", "handoff_rename")
+        )
+        seal_index = next(
+            index for index, item in enumerate(self.host.timeline)
+            if item[:2] == ("milestone", "stage")
+        )
+        event_index = self.host.timeline.index(
+            ("event", "download.completed")
+        )
+        self.assertLess(handoff_index, seal_index)
+        self.assertLess(seal_index, event_index)
+        self.assertIn(
+            "保存目录：/Downloads/Show.S01E01.mkv",
+            self.host.milestones[0]["text"],
+        )
 
     async def test_download_completes_and_skips_organization_when_rename_is_inactive(self):
         async def reject_missing_target(report, **_kwargs):

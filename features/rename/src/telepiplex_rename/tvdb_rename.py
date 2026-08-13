@@ -9,6 +9,7 @@ from telepiplex_plugin_sdk.media_metadata import (
     series_titles,
 )
 from .media_naming import sanitize_path_name, sanitize_target_name
+from .subtitles import build_series_subtitle_plan
 
 
 VIDEO_EXTENSIONS = {
@@ -55,7 +56,7 @@ def _video_file_nodes(file_tree: list[dict]) -> list[dict]:
         if not name or not relative_path:
             continue
         suffix = PurePosixPath(relative_path).suffix.lower()
-        if suffix and suffix not in VIDEO_EXTENSIONS:
+        if suffix not in VIDEO_EXTENSIONS:
             continue
         node = dict(item)
         node["name"] = name
@@ -338,6 +339,7 @@ def build_confirmed_rename_plan(
         )
         source_parent = source_path.rsplit("/", 1)[0]
         operations.append({
+            "media_kind": "video",
             "content_role": item.get("content_role") or identity.get("content_kind"),
             "season_number": season,
             "episode_number": episode,
@@ -350,19 +352,59 @@ def build_confirmed_rename_plan(
             "final_path": resolved_path,
         })
 
-    mapped_targets = {
+    mapped_video_targets = {
         (operation["season_number"], operation["episode_number"])
         for operation in operations
     }
-    if not operations or (
-        bounded_season is None and mapped_targets != allowed_targets
+    if source_video_paths and (
+        not operations
+        or (bounded_season is None and mapped_video_targets != allowed_targets)
     ):
+        return None
+
+    subtitle_assignments = {}
+    for item in ai_plan.get("subtitle_map") or []:
+        if not isinstance(item, dict):
+            continue
+        source_file = str(item.get("source_file") or "").replace(
+            "\\", "/"
+        ).strip("/")
+        season = _safe_season_int(item.get("season_number"))
+        episode = _safe_episode_int(item.get("episode_number"))
+        if source_file and season is not None and episode is not None:
+            subtitle_assignments[source_file] = (season, episode)
+    subtitle_plan = build_series_subtitle_plan(
+        final_path=final_path,
+        target_root=target_root,
+        series_name=series_name,
+        file_tree=file_tree,
+        allowed_targets=allowed_targets or None,
+        episode_assignments=subtitle_assignments,
+    )
+    if bounded_season is not None:
+        invalid_bounded_sources = [
+            operation["source_relative_path"]
+            for operation in subtitle_plan["operations"]
+            if operation.get("season_number") != bounded_season
+        ]
+        if invalid_bounded_sources:
+            subtitle_plan = {
+                "operations": [],
+                "discard_sources": [],
+                "unresolved_sources": invalid_bounded_sources,
+            }
+    operations.extend(subtitle_plan["operations"])
+    unmatched_video_sources = sorted(source_video_paths - seen_sources)
+    discard_sources = sorted(set(subtitle_plan["discard_sources"]))
+    if not operations and not discard_sources and not subtitle_plan["unresolved_sources"]:
         return None
     return {
         "target_root": target_root,
         "series_name": series_name,
         "operations": operations,
-        "unmatched_sources": sorted(source_video_paths - seen_sources),
+        "unmatched_sources": unmatched_video_sources,
+        "discard_sources": discard_sources,
+        "unresolved_sources": subtitle_plan["unresolved_sources"],
         "warnings": [
             str(item)
             for item in media_metadata.get("warnings") or []
@@ -381,5 +423,11 @@ def enrich_media_metadata_with_rename_plan(
         "episode_number": operation["episode_number"],
         "source_relative_path": operation["source_relative_path"],
         "final_path": operation["final_path"],
-    } for operation in rename_plan.get("operations") or []]
-    return merge_resolved_items(media_metadata, resolved)
+    } for operation in rename_plan.get("operations") or []
+        if operation.get("media_kind") != "subtitle"
+    ]
+    return (
+        merge_resolved_items(media_metadata, resolved)
+        if resolved
+        else media_metadata
+    )

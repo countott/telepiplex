@@ -36,6 +36,7 @@ from .adapters.tvdb import (
     TvdbConfigError,
     TvdbRequestError,
     get_tvdb_series,
+    search_tvdb_movies,
     search_tvdb_series,
 )
 from .adapters.tmdb import (
@@ -210,6 +211,36 @@ def _candidate_media_type(candidate: dict) -> str:
     return library_type if library_type in {"movie", "series"} else ""
 
 
+def _candidate_media_type_label(candidate: dict) -> str:
+    media_type = _candidate_media_type(candidate)
+    contract = (
+        candidate.get("media_metadata")
+        if isinstance(candidate, dict)
+        else {}
+    ) or {}
+    identity = contract.get("identity") or {}
+    genres = {
+        _text(item).casefold()
+        for item in identity.get("genres") or ()
+        if _text(item)
+    }
+    category_kind = _text(
+        (contract.get("placement") or {}).get("category_kind")
+    ).casefold()
+    is_animation = (
+        category_kind.startswith("animated_")
+        or any(
+            label in genres
+            for label in {"animation", "anime", "动画", "アニメ"}
+        )
+    )
+    if media_type == "movie":
+        return "动画电影" if is_animation else "电影"
+    if media_type == "series":
+        return "动画剧集" if is_animation else "剧集"
+    return "未知"
+
+
 def _metadata_candidate_ref(candidate: dict) -> str:
     value = _text(
         candidate.get("candidate_key")
@@ -255,6 +286,7 @@ def _metadata_candidate_preview(candidate: dict) -> dict:
         "year": _text(identity.get("year")),
         "countries": countries,
         "media_type": _candidate_media_type(candidate),
+        "media_type_label": _candidate_media_type_label(candidate),
         "poster_url": _text(
             candidate.get("poster_url")
             or identity.get("poster_url")
@@ -471,6 +503,7 @@ class SearchFeature:
         indexer_search=None,
         exact_link_resolver=None,
         selected_candidate_supplementer=None,
+        candidate_poster_lookup=None,
     ):
         self.config = config
         self.host = host
@@ -489,6 +522,10 @@ class SearchFeature:
             selected_candidate_supplementer
             or self._supplement_selected_candidate
         )
+        self.candidate_poster_lookup = (
+            candidate_poster_lookup or self._lookup_candidate_poster
+        )
+        self.candidate_poster_timeout = 12.0
         self.plans = {}
         self.awaiting_queries = set()
         self.awaiting_scope_inputs = {}
@@ -597,6 +634,9 @@ class SearchFeature:
                     "reason_code": "invalid_candidate_ref",
                 }
         elif len(candidates) != 1:
+            preview_store = {"candidates": tuple(deepcopy(candidates[:5]))}
+            await self._supplement_candidate_posters(preview_store)
+            candidates = list(preview_store["candidates"])
             previews = [
                 preview
                 for item in candidates[:5]
@@ -1155,17 +1195,6 @@ class SearchFeature:
 
     def _start_release_search_task(self, plan_id: str, stored: dict) -> dict:
         operation_id = stored["operation_id"]
-        title = _text(
-            (stored.get("identity_presentation") or {}).get("title")
-        ) or "未知作品"
-        operation_view = self._advance_operation(
-            operation_id,
-            state="running",
-            stage="prowlarr_search",
-            status_text=f"🔍 {title}",
-            control="cancel",
-            details=self._prowlarr_status_details(operation_id),
-        )
         task_id = f"search-releases-{operation_id}"
         task = self.runtime.spawn(
             self._release_search_task(plan_id, stored, operation_id),
@@ -1173,11 +1202,10 @@ class SearchFeature:
         )
         self.operations[operation_id].update({"task": task, "task_id": task_id})
         return {
-            "actions": [{
-                "kind": "edit_message",
-                "text": f"🔍 {title}",
-            }],
-            "operation": operation_view,
+            "actions": [],
+            "operation": self._operation_view(
+                self.operations[operation_id]
+            ),
         }
 
     async def _release_search_task(self, plan_id, stored, operation_id):
@@ -1641,6 +1669,7 @@ class SearchFeature:
             "results": [],
             "operation_id": operation_id,
         }
+        await self._supplement_candidate_posters(self.plans[plan_id])
         if plan.get("links_frozen") and plan.get("auto_confirm") is True:
             log_search_event(
                 runtime_context.logger,
@@ -1878,7 +1907,7 @@ class SearchFeature:
             lines.extend([
                 "类型："
                 + html.escape(
-                    _human_media_type(placement.get("library_type"))
+                    _candidate_media_type_label(candidate)
                 ),
                 "国家/地区："
                 + html.escape(
@@ -2650,6 +2679,19 @@ class SearchFeature:
                 stored["identity_milestone_id"] = (
                     presentation["milestone_id"]
                 )
+        if stored["operation_id"] in self.operations:
+            await self._report_operation(
+                stored["operation_id"],
+                state="running",
+                stage="prowlarr_search",
+                status_text=(
+                    f"🔍 {_text(presentation.get('title')) or '未知作品'}"
+                ),
+                control="cancel",
+                details=self._prowlarr_status_details(
+                    stored["operation_id"]
+                ),
+            )
         evidence = contract.get("evidence") or {}
         if isinstance(evidence.get("source_links"), list):
             queries = build_prowlarr_query_chain(
@@ -3335,6 +3377,10 @@ class SearchFeature:
                 "Host rejected search handoff ownership",
             )
         operation["handoff_pending"] = False
+        await self._seal_search_stage(
+            operation_id,
+            f"search-stage-complete:{plan_id}:{release_id}",
+        )
         try:
             result = await self.host.call_capability(
                 "download.provider",
@@ -3379,6 +3425,34 @@ class SearchFeature:
                 "text": f"✅ 已提交下载任务：{result.get('job_id') or plan_id}",
             }]
         }
+
+    async def _seal_search_stage(
+        self,
+        operation_id: str,
+        milestone_id: str,
+    ) -> None:
+        for attempt in range(3):
+            try:
+                response = await self.host.seal_operation_stage(
+                    operation_id,
+                    milestone_id,
+                    "✅ 资源搜索已完成，已选定片源。",
+                    deadline=45,
+                )
+            except Exception as exc:
+                if not _ambiguous_host_report_error(exc) or attempt == 2:
+                    raise
+                await asyncio.sleep(0.25 * (2 ** attempt))
+                continue
+            if isinstance(response, dict) and (
+                response.get("accepted") is True
+                or response.get("duplicate") is True
+            ):
+                return
+            raise FeatureError(
+                "stage_seal_failed",
+                "Host did not seal the completed search stage",
+            )
 
     async def _build_plan(
         self,
@@ -3599,6 +3673,215 @@ class SearchFeature:
             return None, "server_down"
         except Exception:
             return None, "unavailable"
+
+    @staticmethod
+    def _candidate_confirmed_identity(candidate: dict) -> ConfirmedIdentity:
+        contract = candidate.get("media_metadata") or {}
+        identity = contract.get("identity") or {}
+        source_links = [
+            item
+            for item in candidate.get("source_links") or ()
+            if isinstance(item, dict)
+        ]
+        external_ids = {
+            _text(key): _text(value)
+            for key, value in (identity.get("external_ids") or {}).items()
+            if _text(key) and _text(value)
+        }
+        for link in source_links:
+            for key, value in (link.get("external_ids") or {}).items():
+                if _text(key) and _text(value):
+                    external_ids.setdefault(_text(key), _text(value))
+        anchor = source_links[0] if source_links else {}
+        anchor_ids = anchor.get("external_ids") or {}
+        return ConfirmedIdentity(
+            provider=_text(anchor.get("provider")).casefold(),
+            stable_id=_text(next(iter(anchor_ids.values()), "")),
+            chinese_title=_text(identity.get("chinese_title")),
+            english_title=_text(
+                identity.get("official_english_title")
+                or identity.get("english_title")
+            ),
+            original_title=_text(identity.get("original_title")),
+            year=_text(identity.get("year"))[:4],
+            media_type=_candidate_media_type(candidate),
+            requested_scope="work",
+            original_language=_text(
+                identity.get("original_language")
+            ).casefold(),
+            genres=tuple(
+                _text(item)
+                for item in identity.get("genres") or ()
+                if _text(item)
+            ),
+            external_ids=external_ids,
+        )
+
+    @staticmethod
+    def _select_unique_tvdb_poster_fact(
+        facts: list[dict],
+        identity: ConfirmedIdentity,
+    ) -> dict | None:
+        tvdb_id = _text(identity.external_ids.get("tvdb"))
+        if tvdb_id:
+            exact = [
+                item
+                for item in facts
+                if _text(
+                    item.get("tvdb_id")
+                    or item.get("tvdb_series_id")
+                    or item.get("tvdb_movie_id")
+                    or item.get("id")
+                ) == tvdb_id
+            ]
+            if len(exact) == 1:
+                return exact[0]
+        expected_titles = {
+            value
+            for value in (
+                _normalized_title(identity.chinese_title),
+                _normalized_title(identity.english_title),
+                _normalized_title(identity.original_title),
+            )
+            if value
+        }
+        matches = []
+        for item in facts:
+            titles = {
+                value
+                for value in (
+                    _normalized_title(item.get("name")),
+                    _normalized_title(item.get("english_title")),
+                    _normalized_title(item.get("original_title")),
+                    *(
+                        _normalized_title(alias)
+                        for alias in item.get("aliases") or ()
+                    ),
+                )
+                if value
+            }
+            item_year = _text(item.get("year"))[:4]
+            if not expected_titles.intersection(titles):
+                continue
+            if identity.year and item_year and identity.year != item_year:
+                continue
+            matches.append(item)
+        ids = {
+            _text(
+                item.get("tvdb_id")
+                or item.get("tvdb_series_id")
+                or item.get("tvdb_movie_id")
+                or item.get("id")
+            )
+            for item in matches
+        }
+        return matches[0] if len(ids - {""}) == 1 else None
+
+    async def _lookup_candidate_poster(
+        self,
+        candidate: dict,
+        provider: str,
+    ) -> str:
+        identity = self._candidate_confirmed_identity(candidate)
+        if identity.media_type not in {"movie", "series"}:
+            return ""
+        if provider == "tmdb":
+            fact, _status = await self._resolve_confirmed_tmdb(identity)
+        elif provider == "douban":
+            query = _text(" ".join(filter(None, (
+                identity.chinese_title
+                or identity.english_title
+                or identity.original_title,
+                identity.year,
+            ))))
+            if not query:
+                return ""
+            result = await asyncio.to_thread(
+                self._douban_provider,
+                {"source_queries": {"douban": [query]}},
+            )
+            fact = select_unique_douban_fact(result, identity)
+        elif provider == "tvdb":
+            query = (
+                identity.english_title
+                or identity.original_title
+                or identity.chinese_title
+            )
+            if not query:
+                return ""
+            loader = (
+                search_tvdb_series
+                if identity.media_type == "series"
+                else search_tvdb_movies
+            )
+            facts = await asyncio.to_thread(loader, query, identity.year)
+            fact = self._select_unique_tvdb_poster_fact(facts, identity)
+        else:
+            return ""
+        poster_url = _text(
+            fact.get("cover_url") if isinstance(fact, dict) else ""
+        )
+        return poster_url if poster_url.startswith("https://") else ""
+
+    async def _supplement_candidate_posters(self, stored: dict) -> None:
+        candidates = [
+            deepcopy(item)
+            for item in stored.get("candidates") or ()
+            if isinstance(item, dict)
+        ]
+        tasks = {}
+        for index, candidate in enumerate(candidates[:5]):
+            contract = candidate.get("media_metadata") or {}
+            identity = contract.get("identity") or {}
+            current = _text(
+                candidate.get("poster_url") or identity.get("poster_url")
+            )
+            if current.startswith("https://"):
+                candidate["poster_url"] = current
+                continue
+            for provider in ("tmdb", "douban", "tvdb"):
+                task = asyncio.create_task(
+                    self.candidate_poster_lookup(candidate, provider)
+                )
+                tasks[task] = (index, provider)
+        if not tasks:
+            stored["candidates"] = tuple(candidates)
+            return
+        done, pending = await asyncio.wait(
+            tasks,
+            timeout=max(0.01, float(self.candidate_poster_timeout)),
+        )
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        found = {}
+        for task in done:
+            index, provider = tasks[task]
+            try:
+                url = _text(task.result())
+            except Exception:
+                continue
+            if url.startswith("https://"):
+                found[(index, provider)] = url
+        for index, candidate in enumerate(candidates[:5]):
+            selected = next(
+                (
+                    (provider, found[(index, provider)])
+                    for provider in ("tmdb", "douban", "tvdb")
+                    if (index, provider) in found
+                ),
+                None,
+            )
+            if selected is None:
+                continue
+            provider, poster_url = selected
+            candidate["poster_url"] = poster_url
+            contract = candidate.get("media_metadata") or {}
+            identity = contract.get("identity") or {}
+            identity["poster_url"] = poster_url
+            identity["poster_source"] = provider
+        stored["candidates"] = tuple(candidates)
 
     async def _supplement_selected_candidate(
         self,

@@ -41,7 +41,10 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
     def context(self, *, router=None):
         bot = SimpleNamespace(
             send_message=AsyncMock(return_value=SimpleNamespace(message_id=90)),
+            send_photo=AsyncMock(return_value=SimpleNamespace(message_id=91)),
             edit_message_text=AsyncMock(),
+            edit_message_media=AsyncMock(),
+            edit_message_caption=AsyncMock(),
             edit_message_reply_markup=AsyncMock(),
         )
         application = SimpleNamespace(
@@ -309,11 +312,12 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
     async def test_operation_milestone_is_idempotent_and_photo_falls_back_to_text(self):
         from app.handlers.interaction_handler import OperationMilestoneSink
 
-        self.coordinator.report("search", self.report())
+        record = self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id(record.operation_id, 42, "photo")
         deliveries = []
 
-        def deliver(chat_id, photo_url, text):
-            deliveries.append((chat_id, photo_url, text))
+        def deliver(delivery_record, mode, photo_url, text):
+            deliveries.append((delivery_record.chat_id, mode, photo_url, text))
             return not photo_url
 
         sink = OperationMilestoneSink(self.coordinator, deliver)
@@ -332,10 +336,11 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deliveries, [
             (
                 10,
+                "identity",
                 "https://img.example/blossoms.jpg",
                 "繁花 (Blossoms Shanghai)",
             ),
-            (10, None, "繁花 (Blossoms Shanghai)"),
+            (10, "identity", None, "繁花 (Blossoms Shanghai)"),
         ])
         self.assertIsNone(self.coordinator.get("op-1").message_id)
 
@@ -346,7 +351,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         release = asyncio.Event()
         started = asyncio.Event()
 
-        async def deliver(_chat_id, _photo_url, _text):
+        async def deliver(_record, _mode, _photo_url, _text):
             started.set()
             await release.wait()
             return True
@@ -369,13 +374,169 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             {"accepted": True, "duplicate": False},
         )
 
+    @patch("app.handlers.interaction_handler.build_poster_grid")
+    async def test_milestone_retry_reuses_new_message_after_completion_failure(
+        self,
+        build_grid,
+    ):
+        from app.handlers.interaction_handler import (
+            OperationMilestoneSink,
+            deliver_operation_milestone,
+        )
+
+        created = self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id(created.operation_id, 42, "text")
+        photo = BytesIO(b"identity")
+        photo.name = "telepiplex-identity.jpg"
+        build_grid.return_value = photo
+        context = self.context()
+        original_complete = self.coordinator.complete_milestone
+        completion_lost = True
+
+        def complete_then_lose(*args):
+            nonlocal completion_lost
+            if completion_lost:
+                completion_lost = False
+                raise RuntimeError("completion interrupted")
+            return original_complete(*args)
+
+        self.coordinator.complete_milestone = complete_then_lose
+        sink = OperationMilestoneSink(
+            self.coordinator,
+            lambda current, mode, photo_url, text: deliver_operation_milestone(
+                context.application,
+                current,
+                mode,
+                photo_url,
+                text,
+            ),
+        )
+        payload = {
+            "operation_id": "op-1",
+            "milestone_id": "media-recover",
+            "mode": "identity",
+            "text": "🎬 繁花 (Blossoms Shanghai)",
+            "photo_url": "https://img.example/poster.jpg",
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "completion interrupted"):
+            await sink("search", payload)
+        self.assertIsNone(self.coordinator.get("op-1").message_id)
+        context.application.bot.send_photo.assert_awaited_once()
+
+        recovered = await sink("search", payload)
+        duplicate = await sink("search", payload)
+
+        self.assertEqual(recovered, {
+            "accepted": True,
+            "duplicate": False,
+            "recovered": True,
+        })
+        self.assertEqual(duplicate, {"accepted": True, "duplicate": True})
+        context.application.bot.send_photo.assert_awaited_once()
+        self.assertIsNone(self.coordinator.get("op-1").message_id)
+
+    @patch("app.handlers.interaction_handler.build_poster_grid")
+    async def test_milestone_retry_does_not_resend_when_target_record_fails(
+        self,
+        build_grid,
+    ):
+        from app.handlers.interaction_handler import (
+            OperationMilestoneSink,
+            deliver_operation_milestone,
+        )
+
+        created = self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id(created.operation_id, 42, "text")
+        photo = BytesIO(b"identity")
+        photo.name = "telepiplex-identity.jpg"
+        build_grid.return_value = photo
+        context = self.context()
+        original_record = self.coordinator.record_milestone_delivery
+        record_lost = True
+
+        def record_then_lose(*args):
+            nonlocal record_lost
+            if record_lost:
+                record_lost = False
+                raise RuntimeError("delivery target record interrupted")
+            return original_record(*args)
+
+        self.coordinator.record_milestone_delivery = record_then_lose
+        sink = OperationMilestoneSink(
+            self.coordinator,
+            lambda current, mode, photo_url, text: deliver_operation_milestone(
+                context.application,
+                current,
+                mode,
+                photo_url,
+                text,
+            ),
+        )
+        payload = {
+            "operation_id": "op-1",
+            "milestone_id": "media-record-recover",
+            "mode": "identity",
+            "text": "🎬 繁花 (Blossoms Shanghai)",
+            "photo_url": "https://img.example/poster.jpg",
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "delivery target record interrupted",
+        ):
+            await sink("search", payload)
+        context.application.bot.send_photo.assert_awaited_once()
+
+        recovered = await sink("search", payload)
+        duplicate = await sink("search", payload)
+
+        self.assertEqual(recovered, {
+            "accepted": True,
+            "duplicate": False,
+            "recovered": True,
+            "delivery_uncertain": True,
+        })
+        self.assertEqual(duplicate, {"accepted": True, "duplicate": True})
+        context.application.bot.send_photo.assert_awaited_once()
+        self.assertIsNone(self.coordinator.get("op-1").message_id)
+
+    async def test_operation_milestone_shares_operation_render_lock(self):
+        from app.handlers.interaction_handler import OperationMilestoneSink
+
+        self.coordinator.report("search", self.report())
+        render_lock = asyncio.Lock()
+        delivery = AsyncMock(return_value=True)
+        sink = OperationMilestoneSink(
+            self.coordinator,
+            delivery,
+            lambda _operation_id: render_lock,
+        )
+        await render_lock.acquire()
+        task = asyncio.create_task(sink("search", {
+            "operation_id": "op-1",
+            "milestone_id": "media-locked",
+            "mode": "stage",
+            "text": "资源搜索已完成。",
+        }))
+
+        await asyncio.sleep(0)
+        delivery.assert_not_awaited()
+        render_lock.release()
+
+        self.assertEqual(
+            await task,
+            {"accepted": True, "duplicate": False},
+        )
+        delivery.assert_awaited_once()
+
     async def test_cancelled_operation_milestone_can_be_retried(self):
         from app.handlers.interaction_handler import OperationMilestoneSink
 
         self.coordinator.report("search", self.report())
         started = asyncio.Event()
 
-        async def deliver(_chat_id, _photo_url, _text):
+        async def deliver(_record, _mode, _photo_url, _text):
             started.set()
             await asyncio.Event().wait()
 
@@ -399,6 +560,109 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
                 "media-cancelled",
             )
         )
+
+    @patch("app.handlers.interaction_handler.build_poster_grid")
+    async def test_identity_milestone_replaces_current_photo_then_rotates_cursor(
+        self,
+        build_grid,
+    ):
+        from app.handlers.interaction_handler import (
+            OperationMilestoneSink,
+            deliver_operation_milestone,
+        )
+
+        photo = BytesIO(b"identity")
+        photo.name = "telepiplex-identity.jpg"
+        build_grid.return_value = photo
+        record = self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id(record.operation_id, 42, "photo")
+        context = self.context()
+        sink = OperationMilestoneSink(
+            self.coordinator,
+            lambda current, mode, photo_url, text: deliver_operation_milestone(
+                context.application,
+                current,
+                mode,
+                photo_url,
+                text,
+            ),
+        )
+
+        result = await sink("search", {
+            "operation_id": "op-1",
+            "milestone_id": "media-identity",
+            "mode": "identity",
+            "text": "🎬 繁花 (Blossoms Shanghai)",
+            "photo_url": "https://img.example/poster.jpg",
+        })
+
+        self.assertEqual(result, {"accepted": True, "duplicate": False})
+        context.application.bot.edit_message_media.assert_awaited_once()
+        edited = context.application.bot.edit_message_media.await_args.kwargs
+        self.assertEqual(edited["chat_id"], 10)
+        self.assertEqual(edited["message_id"], 42)
+        self.assertIsNone(edited["reply_markup"])
+        context.application.bot.send_photo.assert_not_awaited()
+        self.assertIsNone(self.coordinator.get("op-1").message_id)
+
+    async def test_stage_milestone_edits_current_text_then_rotates_cursor(self):
+        from app.handlers.interaction_handler import (
+            OperationMilestoneSink,
+            deliver_operation_milestone,
+        )
+
+        record = self.coordinator.report("download", self.report())
+        self.coordinator.set_message_id(record.operation_id, 43, "text")
+        context = self.context()
+        sink = OperationMilestoneSink(
+            self.coordinator,
+            lambda current, mode, photo_url, text: deliver_operation_milestone(
+                context.application,
+                current,
+                mode,
+                photo_url,
+                text,
+            ),
+        )
+
+        result = await sink("download", {
+            "operation_id": "op-1",
+            "milestone_id": "download-completed",
+            "mode": "stage",
+            "text": "✅ 115 下载完成",
+            "photo_url": "",
+        })
+
+        self.assertEqual(result, {"accepted": True, "duplicate": False})
+        context.application.bot.edit_message_text.assert_awaited_once_with(
+            chat_id=10,
+            message_id=43,
+            text="✅ 115 下载完成",
+            reply_markup=None,
+        )
+        context.application.bot.send_message.assert_not_awaited()
+        self.assertIsNone(self.coordinator.get("op-1").message_id)
+
+    async def test_failed_milestone_delivery_preserves_message_cursor(self):
+        from app.handlers.interaction_handler import OperationMilestoneSink
+
+        record = self.coordinator.report("download", self.report())
+        self.coordinator.set_message_id(record.operation_id, 43, "text")
+        sink = OperationMilestoneSink(
+            self.coordinator,
+            lambda _record, _mode, _photo_url, _text: False,
+        )
+
+        result = await sink("download", {
+            "operation_id": "op-1",
+            "milestone_id": "download-completed",
+            "mode": "stage",
+            "text": "✅ 115 下载完成",
+            "photo_url": "",
+        })
+
+        self.assertEqual(result, {"accepted": False, "duplicate": False})
+        self.assertEqual(self.coordinator.get("op-1").message_id, 43)
 
     @patch("app.handlers.interaction_handler.build_poster_grid")
     async def test_identity_delivery_without_remote_url_sends_title_placeholder(

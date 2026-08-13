@@ -22,6 +22,8 @@ TVDB_EPISODE_PLAN_PROMPT = """你是媒体库剧集整理助手。根据输入�
 9. temporary_related_special 可以没有 TVDB episode ID，但必须复用输入中的可定位 source_entry。
 10. 只映射能够从 file_tree 精确定位的文件；无法可靠映射的文件不要写入 episode_map。
 11. 对确认不是目标正片的额外视频，在 discard_files 中列出其精确相对路径；不确定的文件禁止丢弃。
+12. 外挂字幕只允许写入 subtitle_map，且只补 season_number 和 episode_number；禁止判断字幕语言、禁止决定保留或丢弃字幕。
+13. subtitle_map 的 source_file 必须精确等于 file_tree 中的 .srt、.ass、.sup 或 .vtt 相对路径；无法可靠归属时不要映射。
 
 JSON结构：
 {
@@ -40,6 +42,13 @@ JSON结构：
       "target_relative_path": "Series Name Season 01/Series Name S01E01.ext",
       "target_name": "string",
       "tvdb_episode_id": 0,
+      "season_number": 1,
+      "episode_number": 1
+    }
+  ],
+  "subtitle_map": [
+    {
+      "source_file": "relative/path/subtitle.srt",
       "season_number": 1,
       "episode_number": 1
     }
@@ -319,6 +328,9 @@ def infer_tvdb_episode_plan_with_ai(context: dict):
     episode_map = plan.get("episode_map")
     if not isinstance(episode_map, list):
         plan["episode_map"] = []
+    subtitle_map = plan.get("subtitle_map")
+    if not isinstance(subtitle_map, list):
+        plan["subtitle_map"] = []
     warnings = plan.get("warnings")
     if not isinstance(warnings, list):
         plan["warnings"] = []

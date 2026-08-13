@@ -24,12 +24,16 @@ class FakeHost:
     def __init__(self):
         self.notifications = []
         self.reports = []
+        self.timeline = []
 
     async def notify_user(self, user_id, text, **kwargs):
         self.notifications.append((user_id, text, kwargs))
         return {"accepted": True}
 
     async def report_operation(self, operation):
+        self.timeline.append(
+            ("report", operation["state"], operation["stage"])
+        )
         self.reports.append(operation)
         return {"accepted": True, "revision": operation["revision"]}
 
@@ -296,6 +300,14 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "subtitle", "completed",
         }.issubset(stages))
         self.assertEqual(self.feature.host.reports[-1]["state"], "completed")
+        self.assertEqual(
+            self.feature.host.timeline[0],
+            ("report", "running", "scan_preparing"),
+        )
+        self.assertEqual(
+            self.feature.host.timeline[-1],
+            ("report", "completed", "completed"),
+        )
 
     async def test_rejected_operation_claim_never_enqueues_or_scans(self):
         class RejectedHost(FakeHost):

@@ -203,11 +203,37 @@ class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
                 {
                     "operation_id": "op-1",
                     "milestone_id": "media-douban-35981510",
+                    "mode": "identity",
                     "text": "繁花 (Blossoms Shanghai)\n2023｜中国大陆｜剧集｜全剧",
                     "photo_url": "https://img.example/blossoms.jpg",
                 },
             )],
         )
+
+    async def test_feature_can_seal_operation_stage_with_semantic_mode(self):
+        from telepiplex_plugin_sdk import HostClient
+
+        self.broker.register("download", "seal-token", manifest("download"))
+        client = HostClient(self.broker.socket_path, "seal-token")
+
+        result = await client.seal_operation_stage(
+            "op-1",
+            "download-completed",
+            "✅ 115 下载完成",
+            deadline=1,
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(self.milestones, [(
+            "download",
+            {
+                "operation_id": "op-1",
+                "milestone_id": "download-completed",
+                "mode": "stage",
+                "text": "✅ 115 下载完成",
+                "photo_url": "",
+            },
+        )])
 
     async def test_operation_report_uses_authenticated_feature_identity(self):
         from telepiplex_plugin_sdk import HostClient

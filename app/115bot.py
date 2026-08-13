@@ -159,9 +159,9 @@ def build_plugin_manager(config=None, host_database=None):
     operation_sink = OperationReportSink(coordinator, router=router)
     milestone_sink = OperationMilestoneSink(
         coordinator,
-        lambda chat_id, photo_url, text: add_task_to_queue(
-            chat_id,
-            photo_url,
+        lambda record, mode, photo_url, text: add_task_to_queue(
+            record.chat_id,
+            photo_url if mode == "identity" else None,
             message=text,
         ),
     )
@@ -628,12 +628,17 @@ def configure_application(application, manager):
         )
         if hasattr(milestone_sink, "attach"):
             milestone_sink.attach(
-                lambda chat_id, photo_url, text: deliver_operation_milestone(
+                lambda record, mode, photo_url, text: deliver_operation_milestone(
                     application,
-                    chat_id,
+                    record,
+                    mode,
                     photo_url,
                     text,
-                )
+                ),
+                lambda operation_id: operation_render_lock(
+                    application,
+                    operation_id,
+                ),
             )
         async def reconcile_after_feature_restart(_process):
             recovery = await recover_active_operations(
