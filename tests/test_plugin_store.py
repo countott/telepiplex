@@ -199,6 +199,61 @@ class PluginStoreTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, "invalid_config")
         self.assertNotIn("top-secret-value", str(raised.exception))
 
+    def test_schema_validation_error_reports_paths_without_values(self):
+        from app.runtime.plugin_store import PluginStore, StoreError
+
+        store = PluginStore(self.plugins_root)
+        active = store.activate(store.stage(self._artifact()))
+        schema = {
+            "type": "object",
+            "properties": {
+                "service": {
+                    "type": "object",
+                    "properties": {
+                        "api_key": {"type": "string"},
+                        "timeout": {"type": "integer"},
+                        "endpoint": {"type": "string"},
+                    },
+                    "required": ["api_key", "timeout", "endpoint"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["service"],
+            "additionalProperties": False,
+        }
+        (active.path / "config.schema.json").write_text(
+            json.dumps(schema), encoding="utf-8"
+        )
+
+        with self.assertRaises(StoreError) as raised:
+            store.validate_config(active, {
+                "service": {
+                    "api_key": "top-secret-value",
+                    "timeout": "secret-timeout-value",
+                    "legacy": "secret-legacy-value",
+                },
+                "root_secret": "secret-root-value",
+            })
+
+        self.assertEqual(raised.exception.code, "invalid_config")
+        self.assertEqual(
+            raised.exception.details["config_error_paths"],
+            [
+                "root_secret",
+                "service.endpoint",
+                "service.legacy",
+                "service.timeout",
+            ],
+        )
+        rendered = str(raised.exception) + repr(raised.exception.details)
+        for secret in (
+            "top-secret-value",
+            "secret-timeout-value",
+            "secret-legacy-value",
+            "secret-root-value",
+        ):
+            self.assertNotIn(secret, rendered)
+
     def test_config_api_reads_copies_and_writes_validated_private_yaml(self):
         from app.runtime.plugin_store import PluginStore, StoreError
 

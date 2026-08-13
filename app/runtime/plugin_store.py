@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import uuid
 import zipfile
@@ -11,17 +12,18 @@ from pathlib import Path
 
 import yaml
 from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError, ValidationError
+from jsonschema.exceptions import SchemaError
 
 from app.runtime.plugin_artifact import VerifiedArtifact, verify_tpx
 from app.runtime.plugin_manifest import PluginManifest
 
 
 class StoreError(RuntimeError):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, details: dict | None = None):
         super().__init__(message)
         self.code = str(code)
         self.message = str(message)
+        self.details = deepcopy(details or {})
 
 
 @dataclass(frozen=True)
@@ -74,19 +76,80 @@ def _default_at(path: Path) -> dict:
     return value
 
 
+def _safe_path_segment(value) -> str:
+    if isinstance(value, int):
+        return f"[{value}]"
+    text = str(value)
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", text):
+        return text
+    return ""
+
+
+def _join_config_path(parts) -> str:
+    rendered = ""
+    for part in parts:
+        segment = _safe_path_segment(part)
+        if not segment:
+            return ""
+        if segment.startswith("["):
+            rendered += segment
+        else:
+            rendered += ("." if rendered else "") + segment
+    return rendered[:100]
+
+
+def _config_error_paths(schema: dict, value: dict) -> list[str]:
+    paths: set[str] = set()
+    validator = Draft202012Validator(schema)
+    for error in validator.iter_errors(value):
+        base = list(error.absolute_path)
+        if error.validator == "required" and isinstance(error.instance, dict):
+            for key in error.validator_value or []:
+                if key not in error.instance:
+                    path = _join_config_path([*base, key])
+                    if path:
+                        paths.add(path)
+        elif error.validator == "additionalProperties" and isinstance(
+            error.instance, dict
+        ):
+            properties = error.schema.get("properties") or {}
+            patterns = tuple(
+                re.compile(pattern)
+                for pattern in (error.schema.get("patternProperties") or {})
+            )
+            for key in error.instance:
+                if key not in properties and not any(
+                    pattern.search(str(key)) for pattern in patterns
+                ):
+                    path = _join_config_path([*base, key])
+                    if path:
+                        paths.add(path)
+        else:
+            path = _join_config_path(base)
+            if path:
+                paths.add(path)
+    return sorted(paths)[:20]
+
+
 def _validate(schema: dict, value: dict) -> dict:
     if not isinstance(value, dict):
         raise StoreError("invalid_config", "plugin config must be a mapping")
     try:
         Draft202012Validator.check_schema(schema)
-        Draft202012Validator(schema).validate(value)
-    except (SchemaError, ValidationError):
+    except SchemaError:
         # jsonschema messages may echo the rejected instance. Config values can
         # contain credentials, so only expose a stable, non-sensitive error.
         raise StoreError(
             "invalid_config",
             "plugin config does not match schema",
         ) from None
+    errors = list(Draft202012Validator(schema).iter_errors(value))
+    if errors:
+        raise StoreError(
+            "invalid_config",
+            "plugin config does not match schema",
+            {"config_error_paths": _config_error_paths(schema, value)},
+        )
     return deepcopy(value)
 
 
@@ -203,10 +266,11 @@ class PluginStore:
                 migrated, _ = _fill_missing_defaults(current, default)
                 try:
                     _validate(schema, migrated)
-                except StoreError:
+                except StoreError as exc:
                     raise StoreError(
                         migration_code,
                         "plugin config cannot be migrated automatically",
+                        exc.details,
                     ) from None
             else:
                 if active_release is not None:
@@ -318,10 +382,11 @@ class PluginStore:
         migrated, added = _fill_missing_defaults(current, default)
         try:
             validated = _validate(_schema_at(release.path), migrated)
-        except StoreError:
+        except StoreError as exc:
             raise StoreError(
                 "config_migration_required",
                 "plugin config cannot be migrated automatically",
+                exc.details,
             ) from None
         if validated != current:
             try:

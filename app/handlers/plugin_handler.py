@@ -158,6 +158,24 @@ def _config_migration_suffix(result) -> str:
     return "\n新增配置项：" + "、".join(safe_keys)
 
 
+def _config_error_suffix(error) -> str:
+    details = getattr(error, "details", {}) or {}
+    paths = details.get("config_error_paths") or []
+    safe_paths = []
+    for path in paths:
+        text = str(path).strip()
+        if (
+            text not in safe_paths
+            and re.fullmatch(r"[A-Za-z0-9_.\-\[\]]{1,100}", text)
+        ):
+            safe_paths.append(text)
+        if len(safe_paths) >= 20:
+            break
+    if not safe_paths:
+        return ""
+    return "\n请检查配置项：" + "、".join(safe_paths)
+
+
 async def plugin_command(update, context):
     message = update.effective_message
     if not init.check_user(update.effective_user.id):
@@ -215,7 +233,9 @@ async def plugin_command(update, context):
             return
         await message.reply_text(_USAGE)
     except PluginOperationError as exc:
-        await message.reply_text(f"❌ {exc.code}：{_safe_error(exc)}")
+        await message.reply_text(
+            f"❌ {exc.code}：{_safe_error(exc)}{_config_error_suffix(exc)}"
+        )
     except Exception as exc:
         await message.reply_text(f"❌ plugin_operation_failed：{type(exc).__name__}")
 
@@ -351,7 +371,9 @@ async def plugin_install_callback(update, context):
             **kwargs,
         )
     except PluginOperationError as exc:
-        await query.edit_message_text(f"❌ {exc.code}：{_safe_error(exc)}")
+        await query.edit_message_text(
+            f"❌ {exc.code}：{_safe_error(exc)}{_config_error_suffix(exc)}"
+        )
     except Exception as exc:
         await query.edit_message_text(
             f"❌ plugin_operation_failed：{type(exc).__name__}"
@@ -400,7 +422,9 @@ async def plugin_update_callback(update, context):
             **kwargs,
         )
     except PluginOperationError as exc:
-        await query.edit_message_text(f"❌ {exc.code}：{_safe_error(exc)}")
+        await query.edit_message_text(
+            f"❌ {exc.code}：{_safe_error(exc)}{_config_error_suffix(exc)}"
+        )
     except Exception as exc:
         await query.edit_message_text(
             f"❌ plugin_operation_failed：{type(exc).__name__}"

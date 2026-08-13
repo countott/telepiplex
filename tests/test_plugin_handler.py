@@ -1873,6 +1873,32 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("update_failed", message)
         self.assertNotIn("secret-value", message)
 
+    async def test_host_update_callback_reports_safe_config_error_paths(self):
+        from app.runtime.plugin_manager import PluginOperationError
+        from app.handlers.plugin_handler import plugin_update_callback
+
+        update, context, manager = self._request([], user_id=1)
+        update.callback_query = Mock()
+        update.callback_query.data = "host-plugin-update:confirm:echo@2.0.0"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        manager.update = AsyncMock(side_effect=PluginOperationError(
+            "config_migration_required",
+            "plugin config cannot be migrated automatically",
+            {
+                "config_error_paths": ["legacy", "service.timeout"],
+                "config_value": "operator-secret",
+            },
+        ))
+
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await plugin_update_callback(update, context)
+
+        message = update.callback_query.edit_message_text.await_args_list[-1].args[0]
+        self.assertIn("config_migration_required", message)
+        self.assertIn("请检查配置项：legacy、service.timeout", message)
+        self.assertNotIn("operator-secret", message)
+
     async def test_plugin_overview_lists_ready_and_blocked_candidates(self):
         from app.handlers.plugin_handler import plugin_command
 

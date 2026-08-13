@@ -976,7 +976,11 @@ class PluginManager:
         if isinstance(exc, PluginOperationError):
             return exc
         if isinstance(exc, (ArtifactError, StoreError, RoutingError, SupervisorError)):
-            return PluginOperationError(exc.code, self._sanitize(str(exc)))
+            return PluginOperationError(
+                exc.code,
+                self._sanitize(str(exc)),
+                getattr(exc, "details", None),
+            )
         return PluginOperationError(fallback_code, type(exc).__name__)
 
     @staticmethod

@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import zipfile
 import os
+import shutil
 from pathlib import Path
 from unittest import mock
 
@@ -15,6 +16,93 @@ def _write_wheel(path: Path, metadata: str):
 
 
 class FeatureBuilderTest(unittest.TestCase):
+    def test_build_rejects_plugin_sdk_requirement_missing_from_wheelhouse(self):
+        from tools.build_feature import FeatureBuildError, build_feature_artifact
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "feature"
+            shutil.copytree(ROOT / "examples/echo_feature", source)
+            pyproject = source / "pyproject.toml"
+            pyproject.write_text(
+                pyproject.read_text(encoding="utf-8").replace(
+                    "telepiplex-plugin-sdk==1.2.1",
+                    "telepiplex-plugin-sdk==1.1.0",
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(FeatureBuildError):
+                build_feature_artifact(
+                    source,
+                    root / "echo.tpx",
+                    sdk_source=ROOT / "sdk",
+                    repository="local/telepiplex",
+                    branch="main",
+                    commit="a" * 40,
+                )
+
+    def test_plugin_dependencies_must_be_satisfied_by_packaged_wheels(self):
+        from tools import build_feature
+
+        validator = getattr(
+            build_feature,
+            "validate_plugin_dependencies",
+            None,
+        )
+        self.assertIsNotNone(validator)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            plugin = root / "plugin.whl"
+            wheelhouse = root / "wheelhouse"
+            wheelhouse.mkdir()
+            _write_wheel(
+                plugin,
+                "Metadata-Version: 2.4\n"
+                "Name: telepiplex-download\n"
+                "Version: 1.0.8\n"
+                "Requires-Dist: telepiplex-plugin-sdk==1.1.0\n",
+            )
+            _write_wheel(
+                wheelhouse / "sdk.whl",
+                "Metadata-Version: 2.4\n"
+                "Name: telepiplex-plugin-sdk\n"
+                "Version: 1.2.1\n",
+            )
+
+            with self.assertRaises(build_feature.FeatureBuildError):
+                validator(plugin, wheelhouse)
+
+    def test_plugin_dependencies_accept_matching_packaged_wheels(self):
+        from tools import build_feature
+
+        validator = getattr(
+            build_feature,
+            "validate_plugin_dependencies",
+            None,
+        )
+        self.assertIsNotNone(validator)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            plugin = root / "plugin.whl"
+            wheelhouse = root / "wheelhouse"
+            wheelhouse.mkdir()
+            _write_wheel(
+                plugin,
+                "Metadata-Version: 2.4\n"
+                "Name: telepiplex-download\n"
+                "Version: 1.0.8\n"
+                "Requires-Dist: telepiplex-plugin-sdk==1.2.1\n",
+            )
+            _write_wheel(
+                wheelhouse / "sdk.whl",
+                "Metadata-Version: 2.4\n"
+                "Name: telepiplex-plugin-sdk\n"
+                "Version: 1.2.1\n",
+            )
+
+            validator(plugin, wheelhouse)
+
     def test_cli_uses_explicit_source_identity_without_git_metadata(self):
         from tools import build_feature
 

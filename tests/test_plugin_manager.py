@@ -684,6 +684,36 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
             {"prefix": "operator-secret"},
         )
 
+    async def test_update_reports_incompatible_config_paths_without_values(self):
+        old_schema, old_default = self._editable_config()
+        new_schema = deepcopy(old_schema)
+        new_schema["properties"]["prefix"] = {"type": "integer"}
+        await self.manager.install(self._artifact(
+            "echo", "1.0.0", config_schema=old_schema,
+            config_default=old_default,
+        ))
+        await self.manager.configure("echo", {"prefix": "operator-secret"})
+
+        from app.runtime.plugin_manager import PluginOperationError
+        with self.assertRaises(PluginOperationError) as raised:
+            await self.manager.update(self._artifact(
+                "echo", "2.0.0", commit="b" * 40,
+                config_schema=new_schema, config_default={"prefix": 1},
+            ))
+
+        self.assertEqual(raised.exception.code, "config_migration_required")
+        self.assertEqual(
+            raised.exception.details["config_error_paths"],
+            ["prefix"],
+        )
+        self.assertNotIn("operator-secret", str(raised.exception))
+        self.assertNotIn("operator-secret", repr(raised.exception.details))
+        self.assertEqual(self.store.active("echo").version, "1.0.0")
+        self.assertEqual(
+            self.store.read_config(self.store.active("echo")),
+            {"prefix": "operator-secret"},
+        )
+
     async def test_update_reports_migration_required_for_damaged_active_config(self):
         old_schema, old_default = self._editable_config()
         await self.manager.install(self._artifact(

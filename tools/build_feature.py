@@ -14,6 +14,7 @@ import yaml
 from packaging.metadata import InvalidMetadata, Metadata
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import InvalidName, canonicalize_name
+from packaging.version import InvalidVersion, Version
 
 for _root in (Path(__file__).resolve().parents[1], Path("/")):
     if (_root / "app/runtime/plugin_artifact.py").is_file():
@@ -109,6 +110,33 @@ def validate_plugin_wheel(path: Path):
 def validate_wheelhouse(path: Path):
     for wheel in sorted(path.glob("*.whl")):
         _validate_wheel_metadata(_wheel_metadata(wheel))
+
+
+def validate_plugin_dependencies(plugin_wheel: Path, wheelhouse: Path):
+    plugin_metadata = _wheel_metadata(plugin_wheel)
+    packaged: dict[str, list[Version]] = {}
+    for wheel in sorted(Path(wheelhouse).glob("*.whl")):
+        metadata = _wheel_metadata(wheel)
+        try:
+            name = canonicalize_name(metadata.name, validate=True)
+            version = Version(str(metadata.version))
+        except (ExceptionGroup, InvalidMetadata, InvalidName, InvalidVersion) as exc:
+            raise FeatureBuildError("wheelhouse identity is invalid") from exc
+        packaged.setdefault(name, []).append(version)
+
+    try:
+        requirements = plugin_metadata.requires_dist or []
+    except (ExceptionGroup, InvalidMetadata) as exc:
+        raise FeatureBuildError("plugin wheel metadata is invalid") from exc
+    for requirement in requirements:
+        if requirement.marker is not None and not requirement.marker.evaluate():
+            continue
+        name = canonicalize_name(requirement.name)
+        versions = packaged.get(name, [])
+        if not any(requirement.specifier.contains(version) for version in versions):
+            raise FeatureBuildError(
+                f"plugin dependency is not satisfied by wheelhouse: {requirement}"
+            )
 
 
 def validate_feature_imports(source_dir: Path):
@@ -224,6 +252,7 @@ def build_feature_artifact(
         shutil.copy2(source_dir / "config.default.yaml", package / "config.default.yaml")
         output.parent.mkdir(parents=True, exist_ok=True)
         validate_wheelhouse(wheelhouse)
+        validate_plugin_dependencies(package / "plugin.whl", wheelhouse)
         return build_tpx(package, output)
 
 
