@@ -3907,10 +3907,10 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.4.5")
+        self.assertEqual(manifest["version"], "1.4.6")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertIn('version = "1.4.5"', project)
-        self.assertIn('telepiplex-plugin-sdk==1.3.0', project)
+        self.assertIn('version = "1.4.6"', project)
+        self.assertIn('telepiplex-plugin-sdk==1.3.1', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
         manifest = yaml.safe_load(
@@ -3925,8 +3925,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.4.5.tpx", source)
-        self.assertNotIn("dist/rename-1.4.5.tpx", source)
+        self.assertIn("/tmp/rename-1.4.6.tpx", source)
+        self.assertNotIn("dist/rename-1.4.6.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

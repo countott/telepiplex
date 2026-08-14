@@ -9,7 +9,7 @@ telepiplex 的每次 Host 启动创建一个独立日志会话目录。该目录
 生产环境使用以下结构：
 
 ```text
-/config/logs/sessions/20260814T231530+0800-a83f2c/
+/config/logs/20260814T231530+0800-a83f2c/
   telepiplex.human.log
   telepiplex.machine.jsonl
   feature-search.human.log
@@ -26,7 +26,7 @@ telepiplex 的每次 Host 启动创建一个独立日志会话目录。该目录
 
 会话目录名由本地启动时间和随机 `session_id` 组成，不复用、不追加上次启动的文件。Feature 重启仍写入当前 Host 会话目录，并通过 `instance_id`、PID 和 restart count 区分进程实例。
 
-会话目录保留最近 30 次启动且最长 30 天，任一条件命中即清理整个旧会话目录。既有固定文件 `telepiplex.log` 与 Feature `runtime.log` 不再写入，但不在升级时自动删除。
+会话目录直接位于 `/config/logs/`，保留最近 30 次启动且最长 30 天，任一条件命中即清理整个旧会话目录。清理器只识别符合启动时间命名规则的目录；既有固定文件 `telepiplex.log`、历史 `sessions/` 目录与 Feature `runtime.log` 不再写入，也不在升级时自动删除。
 
 ## 单一事实源与双格式输出
 
@@ -57,9 +57,9 @@ telepiplex 的每次 Host 启动创建一个独立日志会话目录。该目录
 
 ## 人类日志契约
 
-人类日志使用中文叙事块。首行说明何时、哪个组件、发生了什么；后续按业务含义展示链路、输入、结果、状态变化、耗时、重试、用户实际看到的脱敏文案、异常调用路径和下一步。所有已有事实都必须呈现，只允许改变组织和标签，不允许为了简短而丢弃 populated fields。
+人类日志使用中文叙事块。首行使用本地时间且只精确到秒，随后用一行合并组件、级别和记录器；其余内容按业务含义展示输入、结果、状态变化、耗时、重试、收到的 Telegram 指令/消息/回调、实际返回的脱敏文案、异常调用路径和下一步。
 
-人类日志避免 JSON、固定字段空值和连续 `key=value`。每个事件保留短 `event_id`，错误保留完整 `incident_id`，用于和 JSONL 精确互查。
+人类日志避免 JSON、固定字段空值和连续 `key=value`，不显示 PID、线程、会话/链路/请求/事件 ID、事件序号、Unix/单调时钟、RPC 传输参数等机器诊断字段。错误事件保留完整 `incident_id`、异常类型、异常说明、调用路径和异常链。被省略的机器事实必须完整保留在同目录 JSONL 中。
 
 ## 链路上下文
 
@@ -84,13 +84,13 @@ Feature SDK 通过带版本前缀的单行 JSON transport 把标准 logging reco
 
 ## 版本
 
-- Host `v3.5.0-host`
-- SDK `1.3.0`
-- search `1.9.7`
-- download `1.0.12`
-- rename `1.4.5`
-- sync `1.1.1`
-- caption `0.1.3`
+- Host `v3.5.1-host`
+- SDK `1.3.1`
+- search `1.9.8`
+- download `1.0.13`
+- rename `1.4.6`
+- sync `1.1.2`
+- caption `0.1.4`
 
 ## 验收
 

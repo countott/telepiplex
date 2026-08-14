@@ -55,6 +55,54 @@ def _log(level: str, message: str):
         method(message)
 
 
+def _log_incoming_telegram_interaction(update) -> None:
+    logger = getattr(init, "logger", None)
+    method = getattr(logger, "info", None) if logger is not None else None
+    if not callable(method):
+        return
+    query = getattr(update, "callback_query", None)
+    message = getattr(update, "effective_message", None)
+    callback_data = str(getattr(query, "data", "") or "") or None
+    text = str(
+        getattr(message, "text", "")
+        or getattr(message, "caption", "")
+        or ""
+    ) or None
+    kind = (
+        "callback"
+        if query is not None
+        else "command"
+        if text and text.lstrip().startswith("/")
+        else "message"
+        if text
+        else "update"
+    )
+    method(
+        "收到 Telegram 交互",
+        event_name="telegram.interaction.received",
+        diagnostic_fields={
+            "stage": "telegram_update",
+            "status": "received",
+            "input": {
+                "update_id": getattr(update, "update_id", None),
+                "chat_id": getattr(
+                    getattr(update, "effective_chat", None), "id", None
+                ),
+                "user_id": getattr(
+                    getattr(update, "effective_user", None), "id", None
+                ),
+                "message_id": getattr(message, "message_id", None),
+            },
+            "user_surface": {
+                "direction": "incoming",
+                "kind": kind,
+                "text": text,
+                "callback_data": callback_data,
+            },
+        },
+    )
+
+
 def operation_accepts_text(bot_data: dict, record, chat_id: int, user_id: int) -> bool:
     if record is None or str(getattr(record, "state", "")) != "awaiting_input":
         return False
@@ -277,6 +325,7 @@ async def deliver_operation_milestone(
                 ),
             },
             "user_surface": {
+                "direction": "outgoing",
                 "action": action,
                 "text": rendered_text,
                 "photo_url": photo_url,
@@ -568,6 +617,7 @@ async def operation_gate(update, context):
         trace_id=f"TG-{update_id}" if update_id is not None else new_trace_id(),
         request_id=f"telegram-update:{update_id}" if update_id is not None else None,
     )
+    _log_incoming_telegram_interaction(update)
     chat = getattr(update, "effective_chat", None)
     user = getattr(update, "effective_user", None)
     if chat is None or user is None:

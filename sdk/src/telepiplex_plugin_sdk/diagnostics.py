@@ -67,6 +67,15 @@ _EVENT_TITLES = {
     "feature.dispatch.completed": "Feature 请求处理完成",
     "feature.dispatch.failed": "Feature 请求处理失败",
     "feature.process_output": "Feature 进程输出",
+    "telegram.interaction.received": "收到 Telegram 交互",
+    "telegram.feature_action.delivered": "已回复 Telegram 用户",
+    "telegram.feedback.delivered": "已回复 Telegram 用户",
+    "telegram.api.delivered": "已回复 Telegram 用户",
+    "telegram.milestone.delivery.started": "准备更新 Telegram 进度",
+    "telegram.milestone.delivery.completed": "已更新 Telegram 进度",
+    "telegram.milestone.delivery.failed": "Telegram 进度更新失败",
+    "telegram.update.failed": "Telegram 请求处理失败",
+    "telegram.error_notice.failed": "Telegram 错误通知发送失败",
     "diagnostics.event_gap": "诊断事件序号出现缺口",
     "log.message": "运行日志",
 }
@@ -86,6 +95,42 @@ _HUMAN_FIELD_NAMES = {
     "inventory_count": "库存数量",
     "action": "动作",
     "text": "文案",
+}
+_HUMAN_TECHNICAL_FACT_KEYS = {
+    "async_task",
+    "chat_id",
+    "deadline_ms",
+    "event_id",
+    "existing_message_id",
+    "idempotency_key_present",
+    "instance_id",
+    "message_id",
+    "operation_id",
+    "parent_span_id",
+    "pid",
+    "plugin_id",
+    "request_id",
+    "session_id",
+    "span_id",
+    "thread_id",
+    "trace_id",
+    "update_id",
+    "user_id",
+}
+_HUMAN_OMITTED_FACT_KEYS = {"transport"}
+_HUMAN_MACHINE_ONLY_EVENTS = {
+    "telegram.feature_action.delivered",
+    "telegram.feedback.delivered",
+    "telegram.milestone.delivery.started",
+    "telegram.milestone.delivery.completed",
+}
+_HUMAN_ACTION_NAMES = {
+    "edit_message": "编辑消息",
+    "edit_photo": "编辑图片消息",
+    "send_message": "发送消息",
+    "send_photo": "发送图片消息",
+    "send_photo_grid": "发送海报墙",
+    "answer_callback": "回应按钮操作",
 }
 
 
@@ -409,41 +454,102 @@ def _human_value(value: object) -> str:
     return _human_scalar(value)
 
 
+def _human_business_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            str(key): filtered
+            for key, item in value.items()
+            if str(key) not in _HUMAN_TECHNICAL_FACT_KEYS
+            if (filtered := _human_business_value(item)) not in (None, "", {}, [])
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            filtered
+            for item in value
+            if (filtered := _human_business_value(item)) not in (None, "", {}, [])
+        ]
+    return value
+
+
+def _human_user_surface_lines(value: object) -> list[str]:
+    if not isinstance(value, Mapping):
+        return []
+    direction = str(value.get("direction") or "outgoing").casefold()
+    kind = str(value.get("kind") or "message").casefold()
+    text = value.get("text")
+    callback_data = value.get("callback_data")
+    if direction in {"planned", "delivery_contract"}:
+        return []
+    if direction == "incoming":
+        if kind == "command" and text not in (None, ""):
+            return [f"收到指令：{text}"]
+        if kind == "callback" and callback_data not in (None, ""):
+            return [f"收到回调：{callback_data}"]
+        if text not in (None, ""):
+            return [f"收到消息：{text}"]
+        return ["收到交互：Telegram 更新未包含文字或回调数据"]
+
+    lines = []
+    if text not in (None, ""):
+        lines.append(f"回复内容：{text}")
+    action = str(value.get("action") or "")
+    if action:
+        lines.append(f"回复方式：{_HUMAN_ACTION_NAMES.get(action, action)}")
+    data = _human_business_value(value.get("data"))
+    if data not in (None, "", {}, []):
+        lines.append(f"界面内容：{_human_value(data)}")
+    return lines
+
+
 def render_human_event(event: Mapping[str, object]) -> str:
     event_data = event.get("event") if isinstance(event.get("event"), Mapping) else {}
     identity = event.get("identity") if isinstance(event.get("identity"), Mapping) else {}
-    runtime = event.get("runtime") if isinstance(event.get("runtime"), Mapping) else {}
     facts = event.get("facts") if isinstance(event.get("facts"), Mapping) else {}
     error = event.get("error") if isinstance(event.get("error"), Mapping) else {}
     privacy = event.get("privacy") if isinstance(event.get("privacy"), Mapping) else {}
     time_data = event.get("time") if isinstance(event.get("time"), Mapping) else {}
     local = str(time_data.get("local") or "")
-    clock = local[11:23] if len(local) >= 23 else local
+    local_second = local[:19].replace("T", " ") if len(local) >= 19 else local
     event_name = str(event_data.get("name") or "log.message")
-    title = _EVENT_TITLES.get(event_name, str(event_data.get("message") or event_name))
-    lines = [f"[{clock}] {title}", ""]
+    if event_name in _HUMAN_MACHINE_ONLY_EVENTS:
+        return ""
+    message = str(event_data.get("message") or "")
+    title = (
+        message or "运行日志"
+        if event_name == "log.message"
+        else _EVENT_TITLES.get(event_name, message or event_name)
+    )
+    lines = [f"[{local_second}] {title}", ""]
     if event_data.get("message") and str(event_data.get("message")) != title:
         lines.append(f"说明：{event_data['message']}")
-    lines.append(f"组件：{event.get('component')}")
-    lines.append(f"级别：{event.get('level')}")
-    lines.append(f"记录器：{event.get('logger')}")
-    if time_data.get("local"):
-        lines.append(
-            "时间："
-            f"{time_data.get('local')}（UTC {time_data.get('utc')}；"
-            f"时区 {time_data.get('timezone')}）"
-        )
+    lines.append(
+        f"组件 {event.get('component')}｜级别 {event.get('level')}｜"
+        f"记录器 {event.get('logger')}"
+    )
+    processing = []
     if event_data.get("stage") is not None:
-        lines.append(f"阶段：{event_data['stage']}")
+        processing.append(f"阶段 {_human_scalar(event_data['stage'])}")
     if event_data.get("status") is not None:
-        lines.append(f"状态：{event_data['status']}")
+        processing.append(f"状态 {_human_scalar(event_data['status'])}")
     if event_data.get("duration_ms") is not None:
-        lines.append(f"耗时：{_human_scalar(event_data['duration_ms'])} ms")
+        processing.append(f"耗时 {_human_scalar(event_data['duration_ms'])} ms")
+    if processing:
+        lines.append("处理：" + "｜".join(processing))
     for key, value in facts.items():
-        if value in (None, "", {}, []):
+        if key in _HUMAN_OMITTED_FACT_KEYS or value in (None, "", {}, []):
             continue
-        lines.append(f"{_HUMAN_FIELD_NAMES.get(str(key), str(key))}：{_human_value(value)}")
+        if key == "user_surface":
+            lines.extend(_human_user_surface_lines(value))
+            continue
+        filtered = _human_business_value(value)
+        if filtered in (None, "", {}, []):
+            continue
+        lines.append(
+            f"{_HUMAN_FIELD_NAMES.get(str(key), str(key))}：{_human_value(filtered)}"
+        )
     if error.get("type"):
+        if identity.get("incident_id"):
+            lines.append(f"问题编号：{identity.get('incident_id')}")
         lines.extend([
             f"错误代码：{error.get('code')}",
             f"异常类型：{error.get('type')}",
@@ -453,48 +559,8 @@ def render_human_event(event: Mapping[str, object]) -> str:
             lines.append(f"异常调用路径：\n{error.get('stack')}")
         if error.get("causes"):
             lines.append(f"异常链：{_human_value(error.get('causes'))}")
-    runtime_parts = []
-    for key, label in (
-        ("host_version", "Host"),
-        ("plugin_id", "Feature"),
-        ("plugin_version", "Feature版本"),
-        ("instance_id", "实例"),
-        ("pid", "PID"),
-        ("thread_name", "线程"),
-        ("thread_id", "线程编号"),
-        ("async_task", "异步任务"),
-    ):
-        if runtime.get(key) not in (None, ""):
-            runtime_parts.append(f"{label} {runtime[key]}")
-    if runtime_parts:
-        lines.append("运行位置：" + " · ".join(runtime_parts))
-    identity_parts = []
-    for key, label in (
-        ("session_id", "会话"),
-        ("trace_id", "链路"),
-        ("span_id", "调用"),
-        ("parent_span_id", "父调用"),
-        ("operation_id", "操作"),
-        ("request_id", "请求"),
-        ("incident_id", "问题编号"),
-    ):
-        if identity.get(key) not in (None, ""):
-            identity_parts.append(f"{label} {identity[key]}")
-    identity_parts.append(f"事件 {event.get('event_id')}")
-    lines.append("关联信息：" + " · ".join(identity_parts))
-    sequence = event.get("sequence") if isinstance(event.get("sequence"), Mapping) else {}
-    lines.append(
-        "事件顺序："
-        f"生产 {sequence.get('producer')} · 汇入 {sequence.get('ingest')}"
-    )
-    lines.append(
-        "诊断时钟："
-        f"Unix纳秒 {time_data.get('unix_ns')} · 单调纳秒 {time_data.get('monotonic_ns')}"
-    )
     if privacy.get("redaction_count"):
-        lines.append(
-            "脱敏字段：" + "、".join(str(path) for path in privacy.get("redacted_paths") or [])
-        )
+        lines.append("敏感信息：已按脱敏规则隐藏")
     return "\n".join(lines).rstrip() + "\n"
 
 

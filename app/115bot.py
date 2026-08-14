@@ -45,6 +45,7 @@ from app.runtime.plugin_manager import PluginManager
 from app.runtime.plugin_store import PluginStore
 from app.runtime.plugin_supervisor import PluginSupervisor
 from app.runtime.plugin_update_monitor import PluginUpdateMonitor
+from app.runtime.telegram_diagnostics import build_diagnostic_ext_bot
 from app.handlers.plugin_handler import (
     dynamic_callback_gateway,
     dynamic_command_gateway,
@@ -62,6 +63,7 @@ from app.handlers.interaction_handler import (
     deliver_operation_milestone,
     operation_control_callback,
     operation_gate,
+    operation_render_lock,
     reconcile_deferred_operations,
     recover_active_operations,
     render_operation,
@@ -97,7 +99,7 @@ DEFAULT_PLUGIN_CATALOG_URL = (
 
 
 def get_version(md_format=False):
-    version = "v3.5.0-host"
+    version = "v3.5.2-host"
     if md_format:
         return escape_markdown(version, version=2)
     return version
@@ -542,12 +544,8 @@ async def post_init(application):
 def build_application(token):
     return (
         Application.builder()
-        .token(token)
+        .bot(build_diagnostic_ext_bot(token, timeout=TELEGRAM_API_TIMEOUT))
         .post_init(post_init)
-        .connect_timeout(TELEGRAM_API_TIMEOUT)
-        .read_timeout(TELEGRAM_API_TIMEOUT)
-        .write_timeout(TELEGRAM_API_TIMEOUT)
-        .pool_timeout(TELEGRAM_API_TIMEOUT)
         .build()
     )
 
@@ -590,6 +588,7 @@ async def telepiplex_error_handler(update, context):
                         "message_id": getattr(message, "message_id", None),
                     },
                     "user_surface": {
+                        "direction": "planned",
                         "action": "send_message",
                         "text": frontend,
                     },
@@ -609,6 +608,7 @@ async def telepiplex_error_handler(update, context):
                             "stage": "telegram_send",
                             "status": "failed",
                             "user_surface": {
+                                "direction": "planned",
                                 "action": "send_message",
                                 "text": frontend,
                             },

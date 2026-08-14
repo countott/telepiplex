@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Create one log-session directory per Host start containing lossless machine JSONL and information-complete Chinese human logs, with global and per-Feature views sharing event identities.
+**Goal:** Create one direct log directory per Host start containing lossless machine JSONL and a compact Chinese business timeline, with global and per-Feature views sharing event identities.
 
 **Architecture:** `telepiplex_plugin_sdk.diagnostics` owns the canonical event, context propagation, schema, sanitization metadata, renderers and feature transport. Host logging owns session-directory lifecycle and fans each canonical event into global and optional per-Feature dual files. RPC and Telegram boundaries bind correlation data so foreground error references and backend exceptions share one incident identity.
 
@@ -12,7 +12,7 @@
 
 - Work only in `/Users/young/Documents/telepiplex`; do not run Git or create `.git`/`.worktrees`.
 - Product-facing text uses lowercase `telepiplex`.
-- Every Host start creates one new directory below `/config/logs/sessions`.
+- Every Host start creates one new directory directly below `/config/logs`.
 - Human and machine logs, including Feature-classified views, live in that same session directory.
 - Retain the newest 30 sessions and sessions no older than 30 days.
 - Redact before every persistent or stdout output.
@@ -34,7 +34,7 @@
 
 - [ ] Write failing tests using literal JSON and Chinese output expectations for stable schema, populated-field preservation, exception chains and nested redaction.
 - [ ] Run `pytest -q tests/test_diagnostics.py` and verify failure because the module and schema do not exist.
-- [ ] Implement the smallest canonical model, recursive sanitizer, machine renderer and exhaustive human renderer.
+- [ ] Implement the smallest canonical model, recursive sanitizer, lossless machine renderer and business-focused human renderer.
 - [ ] Run the focused tests and verify green.
 - [ ] Add a failing test for oversized sanitized text chunk reconstruction, then implement ordered `payload.chunk` output and verify green.
 
@@ -48,7 +48,7 @@
 
 **Interfaces:**
 - Produces `LogSession`, `create_log_session(config_root, now=None, session_id=None)`, `current_log_session()`, and dual logging handlers.
-- Session paths are `/config/logs/sessions/<local timestamp>-<session_id>/telepiplex.{human.log,machine.jsonl}`.
+- Session paths are `/config/logs/<local timestamp>-<session_id>/telepiplex.{human.log,machine.jsonl}`.
 
 - [ ] Write failing real-filesystem tests for unique startup directories, same-directory dual files, and no append into a previous session.
 - [ ] Run focused tests and confirm current fixed `telepiplex.log` behavior fails them.
@@ -155,7 +155,7 @@
 - Modify: `tests/test_unraid_publish_script.py`
 
 **Interfaces:**
-- Host `v3.5.0-host`, SDK `1.3.0`, search `1.9.7`, download `1.0.12`, rename `1.4.5`, sync `1.1.1`, caption `0.1.3`.
+- Host `v3.5.1-host`, SDK `1.3.1`, search `1.9.8`, download `1.0.13`, rename `1.4.6`, sync `1.1.2`, caption `0.1.4`.
 
 - [ ] Update test expectations first and verify they fail on old versions and paths.
 - [ ] Update versions, exact SDK pins and documentation.

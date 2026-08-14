@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import threading
@@ -26,7 +27,6 @@ from telepiplex_plugin_sdk.diagnostics import (
 
 
 DEFAULT_HOST_LOG_NAME = "telepiplex"
-DEFAULT_LOG_SESSIONS_DIRNAME = "sessions"
 DEFAULT_SESSION_KEEP_COUNT = 30
 DEFAULT_SESSION_KEEP_DAYS = 30
 DEFAULT_FEATURE_LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -34,6 +34,9 @@ DEFAULT_LOG_BACKUP_COUNT = 5
 _TELEPIPLEX_HANDLER_MARKER = "_telepiplex_handler_kind"
 _TELEPIPLEX_HANDLER_PATH = "_telepiplex_handler_path"
 _CURRENT_LOG_SESSION: "LogSession | None" = None
+_SESSION_DIRECTORY_RE = re.compile(
+    r"^\d{8}T\d{6}[+-]\d{4}-.+$"
+)
 
 
 @dataclass
@@ -67,7 +70,8 @@ class LogSession:
 
 
 def log_sessions_root(config_root: str | Path) -> Path:
-    return Path(config_root) / "logs" / DEFAULT_LOG_SESSIONS_DIRNAME
+    """Return the directory whose direct children are Host startup logs."""
+    return Path(config_root) / "logs"
 
 
 def host_log_path(
@@ -110,7 +114,12 @@ def prune_log_sessions(
         current = current.replace(tzinfo=timezone.utc)
     cutoff = current.timestamp() - timedelta(days=max(0, int(keep_days))).total_seconds()
     directories = sorted(
-        (path for path in root.iterdir() if path.is_dir() or path.is_symlink()),
+        (
+            path
+            for path in root.iterdir()
+            if (path.is_dir() or path.is_symlink())
+            and _SESSION_DIRECTORY_RE.fullmatch(path.name) is not None
+        ),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
@@ -286,12 +295,14 @@ class DualDiagnosticHandler(logging.Handler):
                 )
                 setattr(record, "diagnostic_event", event)
             machine = render_machine_event(event) + "\n"
-            human = render_human_event(event) + "\n"
+            rendered_human = render_human_event(event)
+            human = rendered_human + "\n" if rendered_human else ""
             self._machine.write(machine)
-            self._human.write(human)
+            if human:
+                self._human.write(human)
             self._machine.flush()
             self._human.flush()
-            if self.stream is not None:
+            if self.stream is not None and human:
                 self.stream.write(human)
                 self.stream.flush()
         except Exception as exc:

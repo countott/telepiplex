@@ -47,7 +47,7 @@ def _fixed_event(**overrides):
             },
         },
         "runtime": {
-            "host_version": "v3.5.0-host",
+            "host_version": "v3.5.1-host",
             "plugin_id": "search",
             "plugin_version": "1.9.7",
             "instance_id": "search@1.9.7-a1b2c3d4",
@@ -91,16 +91,16 @@ def test_machine_event_has_a_stable_schema_and_complete_typed_facts():
     assert event["time"]["monotonic_ns"] == 123456789
 
 
-def test_human_renderer_preserves_every_populated_diagnostic_fact_without_json_noise():
+def test_human_renderer_is_a_compact_business_timeline_without_machine_metadata():
     from telepiplex_plugin_sdk.diagnostics import render_human_event
 
     output = render_human_event(_fixed_event())
 
     for expected in (
+        "[2026-08-14 23:15:42]",
         "搜索来源查询已完成",
-        "级别：INFO",
+        "组件 search｜级别 INFO｜记录器 telepiplex.feature.search",
         "TVDB 搜索完成",
-        "search",
         "source_resolution",
         "matched",
         "621 ms",
@@ -108,16 +108,87 @@ def test_human_renderer_preserves_every_populated_diagnostic_fact_without_json_n
         "tvdb",
         "79044",
         "38",
-        "已找到 38 条候选",
+        "回复内容：已找到 38 条候选",
+    ):
+        assert expected in output
+    for machine_only in (
+        ".381",
+        "UTC",
+        "时区",
+        "运行位置",
+        "关联信息",
+        "事件顺序",
+        "诊断时钟",
+        "session-a83f2c",
         "trace-8f31d2",
         "operation-019",
         "request-c316",
         "event-004218",
         "search@1.9.7-a1b2c3d4",
+        "Unix纳秒",
+        "单调纳秒",
     ):
-        assert expected in output
-    assert '"schema_version"' not in output
-    assert "trace_id=" not in output
+        assert machine_only not in output
+
+
+def test_human_renderer_labels_real_incoming_commands_and_callbacks():
+    from telepiplex_plugin_sdk.diagnostics import render_human_event
+
+    command = _fixed_event(
+        event_name="telegram.interaction.received",
+        message="收到 Telegram 交互",
+        fields={
+            "user_surface": {
+                "direction": "incoming",
+                "kind": "command",
+                "text": "/search 蜂蜜与四叶草",
+            },
+        },
+    )
+    callback = _fixed_event(
+        event_name="telegram.interaction.received",
+        message="收到 Telegram 交互",
+        fields={
+            "user_surface": {
+                "direction": "incoming",
+                "kind": "callback",
+                "callback_data": "search:select:p1:0",
+            },
+        },
+    )
+
+    assert "收到指令：/search 蜂蜜与四叶草" in render_human_event(command)
+    assert "收到回调：search:select:p1:0" in render_human_event(callback)
+
+
+def test_human_renderer_shows_only_the_confirmed_api_delivery_copy():
+    from telepiplex_plugin_sdk.diagnostics import render_human_event
+
+    delivery_contract = _fixed_event(
+        event_name="telegram.feature_action.delivered",
+        message="Feature 前台消息已送达",
+        fields={
+            "user_surface": {
+                "direction": "outgoing",
+                "action": "send_message",
+                "text": "完整前台回复",
+            },
+        },
+    )
+    confirmed_delivery = _fixed_event(
+        event_name="telegram.api.delivered",
+        message="Telegram API 内容已送达",
+        fields={
+            "user_surface": {
+                "direction": "outgoing",
+                "action": "send_message",
+                "text": "完整前台回复",
+            },
+        },
+    )
+
+    assert render_human_event(delivery_contract) == ""
+    assert "回复内容：完整前台回复" in render_human_event(confirmed_delivery)
 
 
 def test_nested_secrets_and_exception_stack_are_redacted_before_rendering():

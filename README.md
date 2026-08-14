@@ -64,23 +64,23 @@ API 1.4 的幂等 `operation.milestone` 和运行中结果按钮合同保持不�
 
 ## 日志
 
-`docker logs -f telepiplex` 会持续显示面向人的中文诊断日志。每次 Host 启动都会在 `/config/logs/sessions/` 下新建一个独立会话目录；同一次启动的 telepiplex 与全部 Feature 日志都只写入这个目录，Feature 子进程重启不会另开目录。
+`docker logs -f telepiplex` 会持续显示面向人的中文诊断日志。每次 Host 启动都会直接在 `/config/logs/` 下新建一个独立会话目录；同一次启动的 telepiplex 与全部 Feature 日志都只写入这个目录，Feature 子进程重启不会另开目录。
 
 每个启动目录同时保存两种等价视图：
 
-- `telepiplex.human.log`：面向人的完整中文链路说明。
+- `telepiplex.human.log`：面向人的中文业务时间线，使用秒级时间和紧凑排布，明确记录收到的指令、消息、回调及实际回复内容；PID、线程、链路 ID、事件序号和诊断时钟等机器字段只保留在 JSONL。
 - `telepiplex.machine.jsonl`：固定 `diagnostic-event-v1` 契约的逐行 JSON，保存事件、时间、顺序、运行实例、链路、请求、操作、前台文案、输入输出、耗时、异常栈和脱敏清单。
 - `feature-<plugin_id>.human.log` 与 `feature-<plugin_id>.machine.jsonl`：同一事件的 Feature 分类视图；事件 ID 与 telepiplex 全局视图保持一致。
 
-Token、API Key、密码、Cookie、磁力链接和 URL 等敏感字段会递归脱敏，且 Host 会对 Feature 传入事件再次脱敏。其余信息不会为了“人类易读”而删减。启动目录按整体保留，最多保存最近 30 次且不超过 30 天；触发任一边界时删除完整旧目录，不会留下残缺的人类版或机器版。
+Token、API Key、密码、Cookie、磁力链接和 URL 等敏感字段会递归脱敏，且 Host 会对 Feature 传入事件再次脱敏。机器日志保留完整诊断事实和脱敏路径；人类日志只隐藏对人工排查无帮助的机器元数据，业务输入、输出、前台交互、状态、耗时和异常仍会呈现。启动目录按整体保留，最多保存最近 30 次且不超过 30 天；触发任一边界时删除完整旧目录，不会留下残缺的人类版或机器版。
 
 常用排查命令：
 
 ```bash
 docker logs -f telepiplex
-docker exec telepiplex sh -lc 'latest=$(ls -1dt /config/logs/sessions/* | head -1); printf "%s\n" "$latest"; tail -f "$latest/telepiplex.human.log"'
-docker exec telepiplex sh -lc 'latest=$(ls -1dt /config/logs/sessions/* | head -1); tail -f "$latest/telepiplex.machine.jsonl"'
-docker exec telepiplex sh -lc 'latest=$(ls -1dt /config/logs/sessions/* | head -1); tail -f "$latest/feature-search.human.log"'
+docker exec telepiplex sh -lc 'latest=$(ls -1dt /config/logs/20*T* | head -1); printf "%s\n" "$latest"; tail -f "$latest/telepiplex.human.log"'
+docker exec telepiplex sh -lc 'latest=$(ls -1dt /config/logs/20*T* | head -1); tail -f "$latest/telepiplex.machine.jsonl"'
+docker exec telepiplex sh -lc 'latest=$(ls -1dt /config/logs/20*T* | head -1); tail -f "$latest/feature-search.human.log"'
 ```
 
 ## Feature 安装与升级

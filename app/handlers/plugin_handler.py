@@ -189,6 +189,7 @@ def _log_delivered_feature_action(
                 ) or None,
             },
             "user_surface": {
+                "direction": "outgoing",
                 "action": str(delivered_action),
                 "text": str(text),
                 "parse_mode": parse_mode,
@@ -1483,15 +1484,46 @@ def _poster_items(data):
 
 async def _feature_feedback(update, text: str, *, prefer_edit: bool = False):
     query = getattr(update, "callback_query", None)
+    action = "send_message"
     if (
         prefer_edit
         and query is not None
         and hasattr(query, "edit_message_text")
         and not _message_has_photo(update.effective_message)
     ):
-        await query.edit_message_text(text)
-        return
-    await update.effective_message.reply_text(text)
+        delivered = await query.edit_message_text(text)
+        action = "edit_message"
+    else:
+        delivered = await update.effective_message.reply_text(text)
+    logger = getattr(init, "logger", None)
+    method = getattr(logger, "info", None) if logger is not None else None
+    if callable(method):
+        message = getattr(query, "message", None) if action == "edit_message" else delivered
+        method(
+            "Telegram 提示消息已送达",
+            event_name="telegram.feedback.delivered",
+            diagnostic_fields={
+                "stage": "telegram_delivery",
+                "status": "completed",
+                "input": {
+                    "update_id": getattr(update, "update_id", None),
+                    "chat_id": getattr(
+                        getattr(update, "effective_chat", None), "id", None
+                    ),
+                    "user_id": getattr(
+                        getattr(update, "effective_user", None), "id", None
+                    ),
+                },
+                "user_surface": {
+                    "direction": "outgoing",
+                    "action": action,
+                    "text": str(text),
+                },
+                "output": {
+                    "message_id": getattr(message, "message_id", None),
+                },
+            },
+        )
 
 
 def _session_key(update):

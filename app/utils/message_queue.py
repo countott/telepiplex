@@ -2,10 +2,11 @@
 
 import asyncio
 import init
-from telegram import Bot
+from app.runtime.telegram_diagnostics import DiagnosticBot
 from app.utils.log_sanitizer import sanitize_log_value
 
 # 全局消息队列
+Bot = DiagnosticBot
 message_queue = asyncio.Queue()
 # 全局变量，用于存储事件循环
 global_loop = None

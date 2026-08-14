@@ -40,8 +40,9 @@ def test_each_start_creates_one_new_folder_with_human_and_machine_logs(tmp_path)
     _close(second.logger)
 
     assert first_session.directory != second_session.directory
-    assert first_session.directory.parent == tmp_path / "logs" / "sessions"
-    assert second_session.directory.parent == tmp_path / "logs" / "sessions"
+    assert first_session.directory.parent == tmp_path / "logs"
+    assert second_session.directory.parent == tmp_path / "logs"
+    assert not (tmp_path / "logs" / "sessions").exists()
     assert first_session.human_path.parent == first_session.machine_path.parent
     assert first_session.human_path.name == "telepiplex.human.log"
     assert first_session.machine_path.name == "telepiplex.machine.jsonl"
@@ -51,16 +52,20 @@ def test_each_start_creates_one_new_folder_with_human_and_machine_logs(tmp_path)
     first_human = first_session.human_path.read_text(encoding="utf-8")
     assert first_event["identity"]["session_id"] == "ABC123"
     assert first_event["event"]["name"] == "runtime.started"
-    assert first_event["event_id"] in first_human
+    assert first_event["event_id"] not in first_human
 
 
 def test_session_retention_removes_whole_old_folders_by_age_and_start_count(tmp_path):
     from app.utils.logger import prune_log_sessions
 
-    sessions_root = tmp_path / "logs" / "sessions"
+    sessions_root = tmp_path / "logs"
     sessions_root.mkdir(parents=True)
     now = datetime(2026, 8, 14, 16, 0, tzinfo=timezone.utc)
-    old = sessions_root / "old-session"
+    unrelated = sessions_root / "exports"
+    unrelated.mkdir()
+    unrelated_timestamp = (now - timedelta(days=90)).timestamp()
+    os.utime(unrelated, (unrelated_timestamp, unrelated_timestamp))
+    old = sessions_root / "20260701T000000+0000-OLD"
     old.mkdir()
     (old / "telepiplex.human.log").write_text("old", encoding="utf-8")
     old_timestamp = (now - timedelta(days=31)).timestamp()
@@ -68,7 +73,7 @@ def test_session_retention_removes_whole_old_folders_by_age_and_start_count(tmp_
 
     recent = []
     for index in range(31):
-        directory = sessions_root / f"recent-{index:02d}"
+        directory = sessions_root / f"20260814T15{index:02d}00+0000-RECENT{index:02d}"
         directory.mkdir()
         timestamp = (now - timedelta(minutes=31 - index)).timestamp()
         os.utime(directory, (timestamp, timestamp))
@@ -77,9 +82,10 @@ def test_session_retention_removes_whole_old_folders_by_age_and_start_count(tmp_
     removed = prune_log_sessions(sessions_root, now=now, keep_sessions=30, keep_days=30)
 
     remaining = sorted(path.name for path in sessions_root.iterdir())
-    assert "old-session" not in remaining
-    assert "recent-00" not in remaining
-    assert len(remaining) == 30
+    assert old.name not in remaining
+    assert recent[0].name not in remaining
+    assert "exports" in remaining
+    assert len(remaining) == 31
     assert set(removed) == {old, recent[0]}
     assert not old.exists()
     assert not recent[0].exists()
@@ -97,7 +103,7 @@ def test_level_reconfiguration_reuses_the_current_startup_folder(tmp_path):
     )
     _close(wrapper.logger)
 
-    session_dirs = list((tmp_path / "logs" / "sessions").iterdir())
+    session_dirs = list((tmp_path / "logs").iterdir())
     assert session_dirs == [directory]
     assert "调试级别已经启用" in wrapper.session.human_path.read_text(encoding="utf-8")
 
@@ -115,7 +121,7 @@ def test_init_creates_the_host_session_directly_under_config_logs(tmp_path, monk
     finally:
         init.logger = original_logger
 
-    assert session.directory.parent == tmp_path / "logs" / "sessions"
+    assert session.directory.parent == tmp_path / "logs"
     assert "日志系统启动完成" in session.human_path.read_text(encoding="utf-8")
     event = json.loads(session.machine_path.read_text(encoding="utf-8"))
     assert event["event"]["name"] == "diagnostics.session.started"

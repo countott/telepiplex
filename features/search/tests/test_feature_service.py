@@ -3806,12 +3806,12 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "1.9.7")
+        self.assertEqual(manifest["version"], "1.9.8")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertEqual(project["project"]["version"], "1.9.7")
+        self.assertEqual(project["project"]["version"], "1.9.8")
         self.assertEqual(
             project["project"]["dependencies"][0],
-            "telepiplex-plugin-sdk==1.3.0",
+            "telepiplex-plugin-sdk==1.3.1",
         )
 
     def test_default_config_enables_free_and_configured_sources(self):
@@ -3842,14 +3842,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.9.7.tpx", source)
+        self.assertIn("/tmp/search-1.9.8.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-1.9.7.tpx", source)
+        self.assertNotIn("dist/search-1.9.8.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

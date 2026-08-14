@@ -26,10 +26,10 @@ def load_bot_module():
 
 
 class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
-    async def test_core_runtime_version_is_v3_5_0_host(self):
+    async def test_core_runtime_version_is_v3_5_2_host(self):
         bot_module = await asyncio.to_thread(load_bot_module)
 
-        self.assertEqual(bot_module.get_version(), "v3.5.0-host")
+        self.assertEqual(bot_module.get_version(), "v3.5.2-host")
 
     async def test_uncaught_telegram_error_uses_the_same_sanitized_incident_in_frontend_and_machine_log(self):
         from app.utils.logger import Logger
@@ -176,6 +176,30 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
 
             await manager.start()
             self.assertTrue(manager.broker.socket_path.exists())
+
+    async def test_configured_milestone_sink_uses_host_operation_render_lock(self):
+        bot_module = await asyncio.to_thread(load_bot_module)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manager = bot_module.build_plugin_manager({
+                "plugins": {
+                    "root": str(root / "plugins"),
+                    "runtime_root": str(root / "plugins" / ".runtime"),
+                }
+            }, host_database=root / "host.db")
+            self.addAsyncCleanup(manager.close)
+            application = SimpleNamespace(
+                bot_data={},
+                add_handler=Mock(),
+                add_error_handler=Mock(),
+            )
+
+            bot_module.configure_application(application, manager)
+            first_lock = manager.broker.milestone_sink.lock_factory("op-lock")
+            second_lock = manager.broker.milestone_sink.lock_factory("op-lock")
+
+            self.assertIsInstance(first_lock, asyncio.Lock)
+            self.assertIs(first_lock, second_lock)
 
     async def test_build_plugin_manager_preserves_remote_catalog_url(self):
         bot_module = await asyncio.to_thread(load_bot_module)

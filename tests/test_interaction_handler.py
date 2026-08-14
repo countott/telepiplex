@@ -1,5 +1,7 @@
 import asyncio
 import inspect
+import json
+import logging
 import tempfile
 import time
 import unittest
@@ -96,6 +98,67 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             await operation_gate(self.message_update("/search test"), context)
 
         router.command_route.assert_not_called()
+
+    async def test_operation_gate_records_the_actual_incoming_command_before_routing(self):
+        from app.handlers import interaction_handler
+        from app.handlers.interaction_handler import operation_gate
+        from app.utils.logger import Logger
+
+        logger = Logger(
+            config_root=Path(self.temp.name) / "diagnostics",
+            session_id="INCOMING-COMMAND",
+        )
+        update = self.message_update(
+            "/search 蜂蜜与四叶草 access_token=command-secret"
+        )
+        try:
+            with patch.object(interaction_handler.init, "logger", logger):
+                await operation_gate(update, self.context())
+        finally:
+            for handler in list(logging.getLogger().handlers):
+                if getattr(handler, "_telepiplex_handler_kind", ""):
+                    logging.getLogger().removeHandler(handler)
+                    handler.close()
+
+        event = json.loads(logger.session.machine_path.read_text(encoding="utf-8"))
+        assert event["event"]["name"] == "telegram.interaction.received"
+        assert event["facts"]["user_surface"] == {
+            "direction": "incoming",
+            "kind": "command",
+            "text": "/search 蜂蜜与四叶草 access_token=***redacted***",
+            "callback_data": None,
+        }
+        human = logger.session.human_path.read_text(encoding="utf-8")
+        assert "收到指令：/search 蜂蜜与四叶草 access_token=***redacted***" in human
+        assert "command-secret" not in human
+
+    async def test_operation_gate_records_the_actual_incoming_callback(self):
+        from app.handlers import interaction_handler
+        from app.handlers.interaction_handler import operation_gate
+        from app.utils.logger import Logger
+
+        logger = Logger(
+            config_root=Path(self.temp.name) / "diagnostics-callback",
+            session_id="INCOMING-CALLBACK",
+        )
+        try:
+            with patch.object(interaction_handler.init, "logger", logger):
+                await operation_gate(
+                    self.callback_update("search:select:p1:0"),
+                    self.context(),
+                )
+        finally:
+            for handler in list(logging.getLogger().handlers):
+                if getattr(handler, "_telepiplex_handler_kind", ""):
+                    logging.getLogger().removeHandler(handler)
+                    handler.close()
+
+        event = json.loads(logger.session.machine_path.read_text(encoding="utf-8"))
+        assert event["facts"]["user_surface"]["kind"] == "callback"
+        assert event["facts"]["user_surface"]["callback_data"] == "search:select:p1:0"
+        assert "收到回调：search:select:p1:0" in logger.session.human_path.read_text(
+            encoding="utf-8"
+        )
 
     def test_terminal_control_dedup_keeps_navigation_duplicates(self):
         from app.handlers.interaction_handler import operation_markup

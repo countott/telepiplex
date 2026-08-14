@@ -2,7 +2,7 @@
 
 `features/sync` 是独立 Feature 源码目录。telepiplex 将其构建为不可变 `.tpx`，并在 telepiplex 容器内以独立 venv/子进程运行。
 
-## 升级到 1.1.1
+## 升级到 1.1.2
 
 1.0.0 删除了本地 AI 配置。更新 Feature 前，先编辑 `/config/plugins/sync/config.yaml`，删除整个 `ai:` 配置段并保留其他现有值，然后再执行更新。
 
@@ -39,7 +39,7 @@ MCP 对外地址由 `mcp.host`、`mcp.port`、`mcp.path` 控制；非本机监�
 纯本地验证构建（不读取 Git 元数据）：
 
 ```bash
-python tools/build_feature.py features/sync /tmp/sync-1.1.1.tpx \
+python tools/build_feature.py features/sync /tmp/sync-1.1.2.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

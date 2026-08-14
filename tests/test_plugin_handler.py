@@ -1370,6 +1370,24 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fields["output"]["message_id"], 912)
         self.assertEqual(fields["input"]["plugin_id"], "search")
 
+    async def test_feature_feedback_logs_the_exact_frontend_reply(self):
+        from app.handlers import plugin_handler
+        from app.handlers.plugin_handler import _feature_feedback
+
+        update, _context, _manager = self._request([], user_id=1)
+        logger = Mock()
+
+        with patch.object(plugin_handler.init, "logger", logger):
+            await _feature_feedback(update, "❌ Feature 返回了无效响应。")
+
+        call = logger.info.call_args
+        self.assertEqual(call.kwargs["event_name"], "telegram.feedback.delivered")
+        self.assertEqual(call.kwargs["diagnostic_fields"]["user_surface"], {
+            "direction": "outgoing",
+            "action": "send_message",
+            "text": "❌ Feature 返回了无效响应。",
+        })
+
     @patch("app.handlers.plugin_handler.build_poster_grid")
     async def test_feature_send_photo_grid_action(self, build_grid):
         from io import BytesIO
