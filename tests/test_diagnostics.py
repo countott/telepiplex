@@ -94,7 +94,10 @@ def test_machine_event_has_a_stable_schema_and_complete_typed_facts():
 def test_human_renderer_is_a_compact_business_timeline_without_machine_metadata():
     from telepiplex_plugin_sdk.diagnostics import render_human_event
 
-    output = render_human_event(_fixed_event())
+    event = _fixed_event()
+    event["time"]["local"] = "2026-08-14T23:15:42.381000+08:00"
+    event["time"]["timezone"] = "CST"
+    output = render_human_event(event)
 
     for expected in (
         "[2026-08-14 23:15:42]",
