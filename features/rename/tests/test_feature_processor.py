@@ -19,10 +19,35 @@ from telepiplex_rename.processor import (
     process_generic_media,
     process_tvdb_episode,
 )
-from telepiplex_rename.service import RenameFeature
+from telepiplex_rename.service import (
+    RenameFeature,
+    _inventory_completion_text,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class InventoryCompletionCopyTest(unittest.TestCase):
+    def test_already_standard_files_are_not_reported_as_actual_changes(self):
+        text = _inventory_completion_text(
+            total=1,
+            success=1,
+            failed=0,
+            file_counts={
+                "media_files_total": 65,
+                "organized_files": 0,
+                "canonical_no_ops": 65,
+                "kept_unresolved": 0,
+                "target_conflicts": 0,
+                "failed_files": 0,
+                "verified_work_groups": 1,
+            },
+        )
+
+        self.assertIn("实际改动：0", text)
+        self.assertIn("本来已规范：65", text)
+        self.assertNotIn("成功重命名", text)
 
 
 class FakeStorage:
@@ -1115,7 +1140,7 @@ class RenamingProcessorTest(unittest.TestCase):
             "/Movies/中文电影 (English Movie)",
         )])
 
-    def test_unknown_movie_subtitle_stays_while_video_organizes(self):
+    def test_unmarked_movie_subtitle_uses_fixed_chi_suffix(self):
         storage = FakeStorage([
             {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1_000_000},
             {"fn": "Movie.2024.srt", "fid": "2", "fc": "1", "fs": 100},
@@ -1130,14 +1155,26 @@ class RenamingProcessorTest(unittest.TestCase):
 
         self.assertTrue(result.handled)
         self.assertEqual(result.final_path, "/Movies/中文电影 (English Movie)")
-        self.assertEqual(storage.renamed, [(
-            "/Downloads/Release/Movie.2024.mkv",
-            "English Movie.mkv",
-        )])
-        self.assertEqual(storage.moved, [(
-            "/Downloads/Release/English Movie.mkv",
-            "/Movies/中文电影 (English Movie)",
-        )])
+        self.assertEqual(storage.renamed, [
+            (
+                "/Downloads/Release/Movie.2024.mkv",
+                "English Movie.mkv",
+            ),
+            (
+                "/Downloads/Release/Movie.2024.srt",
+                "English Movie.chi.srt",
+            ),
+        ])
+        self.assertEqual(storage.moved, [
+            (
+                "/Downloads/Release/English Movie.mkv",
+                "/Movies/中文电影 (English Movie)",
+            ),
+            (
+                "/Downloads/Release/English Movie.chi.srt",
+                "/Movies/中文电影 (English Movie)",
+            ),
+        ])
         self.assertNotIn("/Downloads/Release", storage.deleted)
 
     def test_existing_different_subtitle_conflict_is_local_to_subtitle(self):
@@ -1417,7 +1454,7 @@ class RenamingProcessorTest(unittest.TestCase):
         )])
         self.assertNotIn(target_root, storage.deleted)
 
-    def test_unknown_series_subtitle_stays_while_video_organizes(self):
+    def test_unmarked_series_subtitle_uses_fixed_chi_suffix(self):
         storage = FakeStorage([
             {"fn": "English.Series.S01E01.mkv", "fid": "1", "fc": "1", "fs": 1000},
             {"fn": "English.Series.S01E01.srt", "fid": "2", "fc": "1", "fs": 100},
@@ -1433,18 +1470,30 @@ class RenamingProcessorTest(unittest.TestCase):
         result = process_tvdb_episode(event)
 
         self.assertEqual(result.final_path, "/Series/中文剧集 (English Series)")
-        self.assertEqual(storage.renamed, [(
-            "/Downloads/Series.Release/English.Series.S01E01.mkv",
-            "English Series S01E01.mkv",
-        )])
-        self.assertEqual(storage.moved, [(
-            "/Downloads/Series.Release/English Series S01E01.mkv",
-            "/Series/中文剧集 (English Series)/English Series Season 01",
-        )])
+        self.assertEqual(storage.renamed, [
+            (
+                "/Downloads/Series.Release/English.Series.S01E01.mkv",
+                "English Series S01E01.mkv",
+            ),
+            (
+                "/Downloads/Series.Release/English.Series.S01E01.srt",
+                "English Series S01E01.chi.srt",
+            ),
+        ])
+        self.assertEqual(storage.moved, [
+            (
+                "/Downloads/Series.Release/English Series S01E01.mkv",
+                "/Series/中文剧集 (English Series)/English Series Season 01",
+            ),
+            (
+                "/Downloads/Series.Release/English Series S01E01.chi.srt",
+                "/Series/中文剧集 (English Series)/English Series Season 01",
+            ),
+        ])
         self.assertNotIn("/Downloads/Series.Release", storage.deleted)
 
     @patch("telepiplex_rename.processor.infer_tvdb_episode_plan_with_ai")
-    def test_unknown_unscoped_subtitle_never_asks_ai_to_guess_language(
+    def test_unscoped_subtitle_only_asks_ai_for_episode_mapping(
         self, ai_mock
     ):
         from telepiplex_rename.context import runtime_context
@@ -1454,6 +1503,11 @@ class RenamingProcessorTest(unittest.TestCase):
             "api_url": "https://ai.example/v1",
             "api_key": "secret",
             "model": "test",
+        }
+        ai_mock.return_value = {
+            "episode_map": [],
+            "subtitle_map": [],
+            "warnings": [],
         }
         event = DownloadCompletedEvent(
             link="magnet:?x", selected_path="/Series", user_id=1,
@@ -1480,7 +1534,7 @@ class RenamingProcessorTest(unittest.TestCase):
 
         self.assertTrue(result.handled)
         self.assertNotIn("字幕语言或归属无法确定", result.message)
-        ai_mock.assert_not_called()
+        ai_mock.assert_called_once()
 
     @patch("telepiplex_rename.processor.infer_tvdb_episode_plan_with_ai")
     def test_ai_only_backfills_unscoped_subtitle_episode_mapping(self, ai_mock):
@@ -1929,9 +1983,9 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "movie-video-1",
             )
             self.assertEqual(host.reports[-1]["state"], "completed")
-            self.assertIn("成功：1", host.reports[-1]["status_text"])
+            self.assertIn("作品组完成：1", host.reports[-1]["status_text"])
             self.assertIn("文件总数：1", host.reports[-1]["status_text"])
-            self.assertIn("已整理：1", host.reports[-1]["status_text"])
+            self.assertIn("实际改动：1", host.reports[-1]["status_text"])
             self.assertTrue(
                 jobs.get(inventory_job_id)["result"]["organized"]
             )
@@ -2185,6 +2239,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             callback_data = waiting["details"]["keyboard"][0][0][
                 "callback_data"
             ]
+            self.assertLessEqual(len(callback_data.encode("utf-8")), 64)
+            self.assertNotIn("inventory:file-first-v1:", callback_data)
 
             await feature.callback({
                 **owner,
@@ -2203,8 +2259,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 1,
             )
             self.assertEqual(host.reports[-1]["state"], "completed")
-            self.assertIn("成功：1", host.reports[-1]["status_text"])
-            self.assertIn("失败：1", host.reports[-1]["status_text"])
+            self.assertIn("作品组完成：1", host.reports[-1]["status_text"])
+            self.assertIn("作品组失败：1", host.reports[-1]["status_text"])
             self.assertEqual(
                 [jobs.get(job_id)["state"] for job_id in inventory_job_ids],
                 ["completed", "failed"],
@@ -2554,7 +2610,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             host = AmbiguousHost()
-            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
+            jobs_path = Path(tmpdir) / "jobs.db"
+            jobs = RenameJobStore(jobs_path)
             feature = RenameFeature(
                 config={
                     "unorganized_path": "/Unorganized",
@@ -2596,14 +2653,38 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             callback_data = host.reports[-1]["details"]["keyboard"][1][0][
                 "callback_data"
             ]
+            self.assertLessEqual(len(callback_data.encode("utf-8")), 64)
+            self.assertNotIn("telegram:219358366", callback_data)
+            original_token = callback_data.removeprefix(
+                "rename:metadata:"
+            ).rsplit(":", 1)[0]
 
-            resumed = await feature.callback({
-                "payload": callback_data.split("rename:", 1)[1],
+            restored = RenameFeature(
+                config={
+                    "unorganized_path": "/Unorganized",
+                    "storage_timeout": 3,
+                },
+                host=host,
+                jobs=RenameJobStore(jobs_path),
+            )
+            restored_runtime = FakeRuntime()
+            restored.bind_runtime(restored_runtime)
+            await restored_runtime.wait()
+            restored_callback = host.reports[-1]["details"]["keyboard"][1][
+                0
+            ]["callback_data"]
+            restored_token = restored_callback.removeprefix(
+                "rename:metadata:"
+            ).rsplit(":", 1)[0]
+            self.assertEqual(restored_token, original_token)
+
+            resumed = await restored.message({
+                "text": "2",
                 "chat_id": 10,
                 "user_id": 123,
             })
             self.assertEqual(resumed["operation"]["state"], "running")
-            await runtime.wait()
+            await restored_runtime.wait()
 
             self.assertEqual(host.confirm_payload["candidate_ref"], "douban:2")
             identity_milestones = [
@@ -2617,7 +2698,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "/Downloads/Movie.2024.mkv",
             )
             self.assertEqual(
-                jobs.get("telegram:219358366")["state"],
+                restored.jobs.get("telegram:219358366")["state"],
                 "completed",
             )
 
@@ -3975,9 +4056,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.5.0")
+        self.assertEqual(manifest["version"], "1.5.1")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertIn('version = "1.5.0"', project)
+        self.assertIn('version = "1.5.1"', project)
         self.assertIn('telepiplex-plugin-sdk==1.3.1', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
@@ -3993,8 +4074,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.5.0.tpx", source)
-        self.assertNotIn("dist/rename-1.5.0.tpx", source)
+        self.assertIn("/tmp/rename-1.5.1.tpx", source)
+        self.assertNotIn("dist/rename-1.5.1.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

@@ -554,10 +554,6 @@ def _deterministic_episode_plan(media_metadata: dict, file_tree: list[dict]):
     subtitle_map = []
     subtitle_mapping_incomplete = False
     for item in subtitle_evidence:
-        if item.get("language_profile") in {"traditional", "other"}:
-            continue
-        if item.get("language_profile") == "unknown":
-            continue
         marker = item.get("episode_key")
         if marker is None:
             subtitle_mapping_incomplete = True

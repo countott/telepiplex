@@ -132,7 +132,7 @@ class SubtitlePlanningTest(unittest.TestCase):
         )
         self.assertEqual(plan["discard_sources"], [])
 
-    def test_traditional_and_other_known_languages_are_preserved(self):
+    def test_all_original_language_markers_use_fixed_chi_suffix(self):
         tree = [{
             "name": "Show.S01E01.CHT.ass",
             "relative_path": "Show.S01E01.CHT.ass",
@@ -159,14 +159,14 @@ class SubtitlePlanningTest(unittest.TestCase):
             {item["rename_to"] for item in plan["operations"]},
             {
                 "Show S01E01.chi.ass",
-                "Show S01E01.eng.srt",
-                "Show S01E01.jpn.sup",
+                "Show S01E01.chi.srt",
+                "Show S01E01.chi.sup",
             },
         )
         self.assertEqual(plan["discard_sources"], [])
         self.assertEqual(plan["unresolved_sources"], [])
 
-    def test_unknown_language_or_ambiguous_episode_stays_in_place(self):
+    def test_unmarked_language_is_renamed_but_ambiguous_episode_stays(self):
         tree = [{
             "name": "Show.S01E01.srt",
             "relative_path": "Show.S01E01.srt",
@@ -185,11 +185,12 @@ class SubtitlePlanningTest(unittest.TestCase):
             allowed_targets={(1, 1), (1, 2), (2, 2)},
         )
 
-        self.assertEqual(plan["operations"], [])
+        self.assertEqual(
+            [item["rename_to"] for item in plan["operations"]],
+            ["Show S01E01.chi.srt"],
+        )
         self.assertEqual(plan["discard_sources"], [])
-        self.assertEqual(plan["kept_sources"], [
-            "02.CHS.ass", "Show.S01E01.srt",
-        ])
+        self.assertEqual(plan["kept_sources"], ["02.CHS.ass"])
         self.assertEqual(plan["unresolved_sources"], [])
 
     def test_movie_subtitles_share_the_confirmed_movie_stem(self):

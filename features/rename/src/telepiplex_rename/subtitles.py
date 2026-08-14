@@ -18,39 +18,7 @@ _SEASON = re.compile(
 _BARE_EPISODE = re.compile(
     r"(?i)^(?:E|EP|Episode[ ._-]*)?(\d{1,4})(?=$|[ ._\-])"
 )
-_SIMPLIFIED = re.compile(
-    r"(?i)(?:^|[ ._\-\[\]()])(?:CHS|SC|GB|GBK|GB2312|ZH[ ._-]*HANS|"
-    r"ZH[ ._-]*CN|CHI)(?:$|[ ._\-\[\]()&+])|简体|簡體|简中|簡中"
-)
-_TRADITIONAL = re.compile(
-    r"(?i)(?:^|[ ._\-\[\]()])(?:CHT|TC|BIG5|ZH[ ._-]*HANT|"
-    r"ZH[ ._-]*(?:TW|HK))(?:$|[ ._\-\[\]()&+])|繁体|繁體|繁中"
-)
-_ENGLISH = re.compile(
-    r"(?i)(?:^|[ ._\-\[\]()&+])(?:ENG|EN)(?:$|[ ._\-\[\]()&+])|英文"
-)
-_ENGLISH_TAIL = re.compile(
-    r"(?i)(?:^|[ ._\-\[\]()&+])ENGLISH"
-    r"(?:[ ._\-\[\]()&+]*(?:FORCED|SDH|DEFAULT))*$"
-)
-_OTHER_LANGUAGE = re.compile(
-    r"(?i)(?:^|[ ._\-\[\]()])(?:JPN|JA|JAPANESE|KOR|KO|KOREAN|"
-    r"FRE|FRA|FR|GER|DEU|DE|SPA|ESP|ES|ITA|IT|RUS|RU|ARA|AR|"
-    r"THA|TH|VIE|VI)(?:$|[ ._\-\[\]()&+])|日文|日语|日語|韩文|"
-    r"韩语|韓文|韓語|法文|德文|西班牙文|俄文"
-)
-_KNOWN_LANGUAGE_CODES = (
-    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:JPN|JA|JAPANESE)(?:$|[ ._\-\[\]()&+])|日文|日语|日語"), "jpn"),
-    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:KOR|KO|KOREAN)(?:$|[ ._\-\[\]()&+])|韩文|韩语|韓文|韓語"), "kor"),
-    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:FRE|FRA|FR)(?:$|[ ._\-\[\]()&+])|法文"), "fre"),
-    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:GER|DEU|DE)(?:$|[ ._\-\[\]()&+])|德文"), "ger"),
-    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:SPA|ESP|ES)(?:$|[ ._\-\[\]()&+])|西班牙文"), "spa"),
-    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:ITA|IT)(?:$|[ ._\-\[\]()&+])|意大利文"), "ita"),
-    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:RUS|RU)(?:$|[ ._\-\[\]()&+])|俄文"), "rus"),
-    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:ARA|AR)(?:$|[ ._\-\[\]()&+])|阿拉伯文"), "ara"),
-    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:THA|TH)(?:$|[ ._\-\[\]()&+])|泰文|泰语|泰語"), "tha"),
-    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:VIE|VI)(?:$|[ ._\-\[\]()&+])|越南文|越南语|越南語"), "vie"),
-)
+SUBTITLE_FILENAME_LANGUAGE = "chi"
 
 
 def _text(value: str) -> str:
@@ -102,41 +70,15 @@ def _episode_key(relative_path: str) -> tuple[int, int] | None:
     return (next(iter(seasons)), episode) if episode > 0 else None
 
 
-def _language_details(relative_path: str) -> tuple[str, str, str]:
-    value = _text(relative_path)
-    simplified = bool(_SIMPLIFIED.search(value))
-    traditional = bool(_TRADITIONAL.search(value))
-    english = bool(_ENGLISH.search(value) or _ENGLISH_TAIL.search(
-        PurePosixPath(value).stem
-    ))
-    other = bool(_OTHER_LANGUAGE.search(value))
-    if simplified and not traditional:
-        if english:
-            return "chi", "simplified_bilingual", "bilingual"
-        return "chi", "simplified", "simplified"
-    if traditional:
-        return "chi", "traditional", "traditional"
-    if english:
-        return "eng", "english", "general"
-    if other:
-        for pattern, code in _KNOWN_LANGUAGE_CODES:
-            if pattern.search(value):
-                return code, "other", "general"
-    return "unknown", "unknown", "unknown"
-
-
 def collect_subtitle_evidence(file_tree: list[dict]) -> list[dict]:
     evidence = []
     for node in _subtitle_nodes(file_tree):
-        language_code, language_profile, subtitle_variant = (
-            _language_details(node["relative_path"])
-        )
         evidence.append({
             **node,
             "episode_key": _episode_key(node["relative_path"]),
-            "language_code": language_code,
-            "language_profile": language_profile,
-            "subtitle_variant": subtitle_variant,
+            "language_code": "unknown",
+            "language_profile": "unknown",
+            "subtitle_variant": "unknown",
         })
     return evidence
 
@@ -153,7 +95,7 @@ def _operation(
     target_stem = sanitize_target_name(target_stem)
     variant = f".variant-{variant_index:02d}" if variant_index > 1 else ""
     rename_to = (
-        f"{target_stem}{variant}.{node['language_code']}"
+        f"{target_stem}{variant}.{SUBTITLE_FILENAME_LANGUAGE}"
         f"{node['extension']}"
     )
     source_path = str(node.get("path") or "") or (
@@ -171,9 +113,9 @@ def _operation(
         "target_dir": target_dir,
         "target_relative_path": rename_to,
         "final_path": f"{str(target_dir).rstrip('/')}/{rename_to}",
-        "language_profile": node["language_profile"],
-        "language_code": node["language_code"],
-        "subtitle_variant": node["subtitle_variant"],
+        "language_profile": "unknown",
+        "language_code": "unknown",
+        "subtitle_variant": "unknown",
         "extension": node["extension"],
         "source_sha1": str(
             node.get("sha1") or node.get("sha") or ""
@@ -196,17 +138,16 @@ def _plan_subtitles(
     kept = [
         item["relative_path"]
         for item in evidence
-        if item["language_code"] == "unknown" or grouping_key(item) is None
+        if grouping_key(item) is None
     ]
     eligible = [
         item for item in evidence
-        if item["language_code"] != "unknown" and grouping_key(item) is not None
+        if grouping_key(item) is not None
     ]
     grouped = defaultdict(list)
     for item in eligible:
         grouped[(
             grouping_key(item),
-            item["language_code"],
             item["extension"],
         )].append(item)
 

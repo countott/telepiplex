@@ -15,7 +15,7 @@ def _series_plan(tree):
     )
 
 
-def test_known_subtitle_languages_are_all_preserved_with_iso_639_2b_suffix():
+def test_all_original_language_markers_use_fixed_chi_suffix():
     markers = [
         ("CHS", "chi"),
         ("CHT", "chi"),
@@ -41,9 +41,10 @@ def test_known_subtitle_languages_are_all_preserved_with_iso_639_2b_suffix():
     plan = _series_plan(tree)
 
     assert len(plan["operations"]) == len(markers)
-    assert sorted(item["language_code"] for item in plan["operations"]) == sorted(
-        code for _marker, code in markers
-    )
+    assert {item["language_code"] for item in plan["operations"]} == {
+        "unknown"
+    }
+    assert all(".chi.srt" in item["rename_to"] for item in plan["operations"])
     assert plan["discard_sources"] == []
     assert plan["kept_sources"] == []
     assert plan["unresolved_sources"] == []
@@ -57,8 +58,8 @@ def test_forced_sdh_and_cc_markers_are_removed_from_target_name():
     }])
 
     operation = plan["operations"][0]
-    assert operation["rename_to"] == "Show S01E01.eng.ass"
-    assert operation["language_code"] == "eng"
+    assert operation["rename_to"] == "Show S01E01.chi.ass"
+    assert operation["language_code"] == "unknown"
     assert "forced" not in operation["rename_to"].casefold()
     assert "sdh" not in operation["rename_to"].casefold()
     assert "cc" not in operation["rename_to"].casefold()
@@ -99,7 +100,7 @@ def test_duplicate_language_and_extension_get_stable_variant_names():
     }
 
 
-def test_unknown_language_and_missing_episode_stay_in_place_independently():
+def test_unmarked_language_is_planned_and_missing_episode_stays_in_place():
     plan = _series_plan([{
         "file_id": "unknown-language",
         "relative_path": "Show.S01E01.commentary.srt",
@@ -114,11 +115,18 @@ def test_unknown_language_and_missing_episode_stay_in_place_independently():
         "is_dir": False,
     }])
 
-    assert [item["source_id"] for item in plan["operations"]] == ["resolved"]
-    assert plan["kept_sources"] == [
-        "Show.CHS.ass",
-        "Show.S01E01.commentary.srt",
+    assert [item["source_id"] for item in plan["operations"]] == [
+        "resolved",
+        "unknown-language",
     ]
+    assert {
+        item["source_id"]: item["rename_to"]
+        for item in plan["operations"]
+    } == {
+        "resolved": "Show S01E01.chi.srt",
+        "unknown-language": "Show S01E01.variant-02.chi.srt",
+    }
+    assert plan["kept_sources"] == ["Show.CHS.ass"]
     assert plan["discard_sources"] == []
     assert plan["unresolved_sources"] == []
 
@@ -153,7 +161,7 @@ def test_movie_subtitle_duplicates_keep_real_extensions_and_variants():
     }
 
 
-def test_language_evidence_retains_chinese_variant_for_audit():
+def test_language_evidence_never_claims_detected_language():
     evidence = collect_subtitle_evidence([{
         "file_id": "traditional",
         "relative_path": "Show.S01E01.CHT.srt",
@@ -164,8 +172,11 @@ def test_language_evidence_retains_chinese_variant_for_audit():
         "is_dir": False,
     }])
 
-    assert [item["language_code"] for item in evidence] == ["chi", "chi"]
+    assert [item["language_code"] for item in evidence] == [
+        "unknown",
+        "unknown",
+    ]
     assert [item["subtitle_variant"] for item in evidence] == [
-        "traditional",
-        "bilingual",
+        "unknown",
+        "unknown",
     ]

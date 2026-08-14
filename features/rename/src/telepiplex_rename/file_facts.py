@@ -31,7 +31,7 @@ _QUALITY_START = re.compile(
     r"bluray|bdrip|remux|hdtv|x26[45]|h[ ._-]*26[45]|hevc|avc|"
     r"aac|dts|ddp?|eac3|atmos|truehd)\b"
 )
-_SUBTITLE_MARKER = re.compile(
+_SUBTITLE_SUFFIX_NOISE = re.compile(
     r"(?i)(?:^|[ ._-])(?:chs|cht|chi|sc|tc|gb|big5|zh[ ._-]*(?:cn|tw|"
     r"hans|hant)|eng|en|jpn|ja|kor|ko|fre|fra|fr|ger|deu|de|spa|"
     r"esp|es|ita|it|rus|ru|ara|ar|tha|th|vie|vi|forced|sdh|cc)"
@@ -177,7 +177,7 @@ def _filename_title(fact: FileFact) -> tuple[str, int | None]:
             _YEAR.search(value),
             _EPISODE_START.search(value),
             _QUALITY_START.search(value),
-            _SUBTITLE_MARKER.search(value),
+            _SUBTITLE_SUFFIX_NOISE.search(value),
         )
         if match is not None
     ]
@@ -186,19 +186,6 @@ def _filename_title(fact: FileFact) -> tuple[str, int | None]:
     value = re.sub(r"[._]+", " ", value)
     value = " ".join(value.split()).strip(" -–—([{")
     return value, year
-
-
-def _subtitle_language(value: str) -> tuple[str, str]:
-    normalized = unicodedata.normalize("NFKC", value)
-    if re.search(r"(?i)(?:chs|sc|gb|zh[ ._-]*(?:cn|hans)|简体|簡體|简中|簡中)", normalized):
-        return "chi", "simplified"
-    if re.search(r"(?i)(?:cht|tc|big5|zh[ ._-]*(?:tw|hk|hant)|繁体|繁體|繁中)", normalized):
-        return "chi", "traditional"
-    if re.search(r"(?i)(?:^|[ ._-])(?:eng|en)(?:$|[ ._-])|英文", normalized):
-        return "eng", "general"
-    if re.search(r"(?i)(?:^|[ ._-])chi(?:$|[ ._-])", normalized):
-        return "chi", "general"
-    return "unknown", "unknown"
 
 
 def _content_role(fact: FileFact) -> str:
@@ -245,11 +232,7 @@ def parse_file_evidence(fact: FileFact) -> ParsedFileEvidence:
 
     title, year = _filename_title(fact)
     marker = parse_episode_marker(PurePosixPath(fact.basename).stem)
-    language, variant = (
-        _subtitle_language(PurePosixPath(fact.basename).stem)
-        if fact.media_kind == "subtitle"
-        else ("unknown", "unknown")
-    )
+    language, variant = "unknown", "unknown"
     evidence = []
     if title:
         evidence.append("filename:title")
@@ -257,8 +240,6 @@ def parse_file_evidence(fact: FileFact) -> ParsedFileEvidence:
         evidence.append("filename:year")
     if marker is not None:
         evidence.append("filename:episode")
-    if language != "unknown":
-        evidence.append("filename:subtitle_language")
     confidence = "high" if title and marker is not None else (
         "medium" if title else "low"
     )

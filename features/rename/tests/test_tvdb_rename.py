@@ -367,7 +367,7 @@ class TvdbRenamePlanTest(unittest.TestCase):
         self.assertEqual(plan["operations"][0]["media_kind"], "subtitle")
         self.assertEqual(plan["operations"][0]["rename_to"], "Veep S03E02.chi.vtt")
 
-    def test_confirmed_series_plan_keeps_unknown_subtitle_language(self):
+    def test_confirmed_series_plan_renames_unmarked_subtitle_with_chi_suffix(self):
         media_metadata = self._confirmed_media_metadata()
 
         plan = build_confirmed_rename_plan(
@@ -391,7 +391,15 @@ class TvdbRenamePlanTest(unittest.TestCase):
             }],
         )
 
-        self.assertEqual(plan["kept_sources"], ["Movie.S00E100.srt"])
+        subtitle_operations = [
+            item for item in plan["operations"]
+            if item.get("media_kind") == "subtitle"
+        ]
+        self.assertEqual(
+            [item["rename_to"] for item in subtitle_operations],
+            ["Someday or One Day S00E100.chi.srt"],
+        )
+        self.assertEqual(plan["kept_sources"], [])
         self.assertEqual(plan["unresolved_sources"], [])
 
     def test_confirmed_plan_preserves_source_colons_and_cleans_targets(self):

@@ -178,3 +178,36 @@ def test_legacy_probe_does_not_conflict_on_missing_versus_explicit_year():
         None,
         2012,
     }
+
+
+def test_subtitle_filename_never_produces_language_evidence():
+    discovered, marked = _facts(
+        {
+            "file_id": "discovery",
+            "relative_path": (
+                "Veep.S07E02.Discovery.Weekend."
+                "1080p.BluRay.x265.Silence.srt"
+            ),
+            "is_dir": False,
+        },
+        {
+            "file_id": "marked",
+            "relative_path": "Veep.S07E03.CHS&ENG.forced.sdh.cc.ass",
+            "is_dir": False,
+        },
+    )
+
+    evidence = [parse_file_evidence(discovered), parse_file_evidence(marked)]
+
+    assert [item.subtitle_language for item in evidence] == [
+        "unknown",
+        "unknown",
+    ]
+    assert [item.subtitle_variant for item in evidence] == [
+        "unknown",
+        "unknown",
+    ]
+    assert all(
+        "filename:subtitle_language" not in item.evidence
+        for item in evidence
+    )

@@ -256,6 +256,58 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.moved, [])
         self.assertEqual(self.client.deleted_tasks, [("hash-1", 0)])
 
+    async def test_completion_event_preserves_subtitles_in_full_file_tree(self):
+        def file_tree(path):
+            return [{
+                "name": "Show.S01E01.mkv",
+                "relative_path": "Show.S01E01.mkv",
+                "path": path,
+                "is_dir": False,
+                "file_id": "video-1",
+                "size": 1024,
+            }, {
+                "name": "subs/Show.S01E01.ass",
+                "relative_path": "subs/Show.S01E01.ass",
+                "path": f"{path}/subs/Show.S01E01.ass",
+                "is_dir": False,
+                "file_id": "subtitle-1",
+                "size": 256,
+            }, {
+                "name": "subs/Show.S01E01.ENG.forced.srt",
+                "relative_path": "subs/Show.S01E01.ENG.forced.srt",
+                "path": f"{path}/subs/Show.S01E01.ENG.forced.srt",
+                "is_dir": False,
+                "file_id": "subtitle-2",
+                "size": 256,
+            }]
+
+        self.client.get_file_tree = file_tree
+        await self.feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "b" * 40,
+                "selected_path": "/Downloads",
+                "user_id": 123,
+            },
+            "context": {"idempotency_key": "plan-with-subtitle"},
+        })
+
+        await self.runtime.tasks.pop("plan-with-subtitle")
+
+        _event_type, payload, _kwargs = self.host.events[0]
+        self.assertEqual(
+            [item["name"] for item in payload["file_tree"]],
+            [
+                "Show.S01E01.mkv",
+                "subs/Show.S01E01.ass",
+                "subs/Show.S01E01.ENG.forced.srt",
+            ],
+        )
+        self.assertEqual(
+            payload["file_tree"][1]["file_id"],
+            "subtitle-1",
+        )
+
     def test_open115_error_preserves_provider_context(self):
         from telepiplex_download.client import Open115Error
 

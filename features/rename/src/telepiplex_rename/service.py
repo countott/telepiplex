@@ -62,6 +62,34 @@ _FILE_RESULT_COUNTERS = (
 )
 
 
+def _metadata_callback_token(job_id: str) -> str:
+    return uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"telepiplex.rename.metadata:{str(job_id)}",
+    ).hex[:16]
+
+
+def _inventory_completion_text(
+    *,
+    total: int,
+    success: int,
+    failed: int,
+    file_counts: dict,
+) -> str:
+    return (
+        "存量媒体补整理完成。\n"
+        f"作品组完成：{success}\n作品组失败：{failed}\n"
+        f"作品组总计：{total}\n"
+        f"文件总数：{file_counts['media_files_total']}\n"
+        f"实际改动：{file_counts['organized_files']}，"
+        f"本来已规范：{file_counts['canonical_no_ops']}，"
+        f"原位保留：{file_counts['kept_unresolved']}，"
+        f"目标冲突：{file_counts['target_conflicts']}，"
+        f"失败：{file_counts['failed_files']}，"
+        f"已验证作品组：{file_counts['verified_work_groups']}"
+    )
+
+
 def _verified_event_identity(payload: dict) -> str:
     contract = payload.get("media_metadata")
     if not isinstance(contract, dict):
@@ -1079,17 +1107,11 @@ class RenameFeature:
             file_counts["verified_work_groups"] = int(
                 session.get("published_verified_work_groups") or 0
             )
-            text = (
-                "存量媒体补整理完成。\n"
-                f"成功：{success}\n失败：{failed}\n"
-                f"总计：{total}\n"
-                f"文件总数：{file_counts['media_files_total']}\n"
-                f"已整理：{file_counts['organized_files']}，"
-                f"已规范：{file_counts['canonical_no_ops']}，"
-                f"原位保留：{file_counts['kept_unresolved']}，"
-                f"目标冲突：{file_counts['target_conflicts']}，"
-                f"失败：{file_counts['failed_files']}，"
-                f"已验证作品组：{file_counts['verified_work_groups']}"
+            text = _inventory_completion_text(
+                total=total,
+                success=success,
+                failed=failed,
+                file_counts=file_counts,
             )
             if downstream_failures:
                 text += (
@@ -1141,10 +1163,10 @@ class RenameFeature:
 
     async def _metadata_callback(self, request: dict, payload: str) -> dict:
         try:
-            job_id, raw_index = payload.removeprefix("metadata:").rsplit(
+            selector, raw_index = payload.removeprefix("metadata:").rsplit(
                 ":", 1
             )
-            if not job_id:
+            if not selector:
                 raise ValueError
             index = int(raw_index)
         except (TypeError, ValueError):
@@ -1152,12 +1174,16 @@ class RenameFeature:
                 "invalid_callback",
                 "rename metadata candidate is invalid",
             ) from None
-        job = self.jobs.get(job_id) if self.jobs else None
+        job = (
+            self.jobs.find_awaiting_metadata(selector)
+            if self.jobs else None
+        )
         if not job or job.get("state") != "awaiting_metadata":
             raise FeatureError(
                 "invalid_state",
                 "rename metadata confirmation is no longer active",
             )
+        job_id = str(job.get("job_id") or "")
         outcome = job.get("result") or {}
         candidates = outcome.get("candidates") or []
         try:
@@ -1264,6 +1290,10 @@ class RenameFeature:
         lines = ["请选择文件树对应的作品："]
         keyboard = []
         poster_items = []
+        callback_token = str(
+            outcome.get("metadata_callback_token")
+            or _metadata_callback_token(job_id)
+        )
         for index, candidate in enumerate(
             (outcome.get("candidates") or [])[:5]
         ):
@@ -1299,7 +1329,9 @@ class RenameFeature:
             )
             keyboard.append([{
                 "text": f"{index + 1}. {title[:24]}",
-                "callback_data": f"rename:metadata:{job_id}:{index}",
+                "callback_data": (
+                    f"rename:metadata:{callback_token}:{index}"
+                ),
             }])
             poster_items.append({
                 "number": index + 1,
@@ -1314,6 +1346,14 @@ class RenameFeature:
             for item in poster_items
         ):
             details["poster_items"] = poster_items
+        if any(
+            len(button[0]["callback_data"].encode("utf-8")) > 64
+            for button in keyboard
+        ):
+            raise FeatureError(
+                "invalid_callback",
+                "rename metadata callback exceeds platform limit",
+            )
         return "\n".join(lines), details
 
     async def _restore_metadata_confirmation(
@@ -1321,6 +1361,13 @@ class RenameFeature:
         job_id: str,
         outcome: dict,
     ) -> None:
+        outcome = dict(outcome)
+        outcome.setdefault(
+            "metadata_callback_token",
+            _metadata_callback_token(job_id),
+        )
+        if self.jobs:
+            self.jobs.update(job_id, "awaiting_metadata", outcome)
         payload = outcome.get("event_payload") or {}
         operation_id = str(payload.get("operation_id") or "")
         if operation_id not in self.operations:
@@ -1358,6 +1405,7 @@ class RenameFeature:
             ),
             "user_id": int(payload.get("user_id") or 0),
             "job_id": job_id,
+            "metadata_callback_token": _metadata_callback_token(job_id),
         }
         if self.jobs:
             self.jobs.update(job_id, "awaiting_metadata", outcome)
@@ -1379,11 +1427,47 @@ class RenameFeature:
             return self._decorate_config_result(
                 request, self.config_wizard.message(request)
             )
-        if self._owner_key(request) in self.inventory_sessions:
+        owner = self._owner_key(request)
+        text = str(request.get("text") or "").strip()
+        if text.isdigit() and 1 <= int(text) <= 5 and self.jobs:
+            waiting = None
+            inventory = self.inventory_sessions.get(owner) or {}
+            current_job_id = str(inventory.get("current_job_id") or "")
+            if current_job_id:
+                candidate = self.jobs.get(current_job_id)
+                if candidate and candidate.get("state") == "awaiting_metadata":
+                    waiting = candidate
+            if waiting is None:
+                matches = []
+                for candidate in self.jobs.resumable():
+                    if candidate.get("state") != "awaiting_metadata":
+                        continue
+                    payload = (
+                        (candidate.get("result") or {}).get("event_payload")
+                        or {}
+                    )
+                    if self._owner_key(payload) == owner:
+                        matches.append(candidate)
+                if len(matches) == 1:
+                    waiting = matches[0]
+            if waiting is not None:
+                result = waiting.get("result") or {}
+                token = str(
+                    result.get("metadata_callback_token")
+                    or _metadata_callback_token(waiting["job_id"])
+                )
+                return await self._metadata_callback(
+                    request,
+                    f"metadata:{token}:{int(text) - 1}",
+                )
+        if owner in self.inventory_sessions:
             return {
                 "actions": [{
                     "kind": "send_message",
-                    "text": "请使用当前 rename 存量整理面板中的按钮。",
+                    "text": (
+                        "请点击当前 rename 存量整理面板中的按钮，"
+                        "或直接回复候选编号。"
+                    ),
                 }],
                 "session": {"state": "open"},
             }
