@@ -11,6 +11,7 @@ from app.runtime.capability_router import CapabilityRouter, RoutingError
 from app.runtime.event_journal import EventJournal
 from app.runtime.interaction_coordinator import InteractionError
 from app.runtime.plugin_manifest import PluginManifest
+from telepiplex_plugin_sdk.diagnostics import bind_diagnostic_context
 
 
 class BrokerError(RuntimeError):
@@ -37,6 +38,7 @@ class RuntimeBroker:
         notification_sink=None,
         milestone_sink=None,
         operation_sink=None,
+        logger=None,
         max_frame_bytes: int = 1024 * 1024,
         max_deadline: float = 300,
     ):
@@ -47,6 +49,7 @@ class RuntimeBroker:
         self.notification_sink = notification_sink
         self.milestone_sink = milestone_sink
         self.operation_sink = operation_sink
+        self.logger = logger
         self.max_frame_bytes = int(max_frame_bytes)
         self.max_deadline = max(1, float(max_deadline))
         self._identities: dict[str, BrokerIdentity] = {}
@@ -86,6 +89,10 @@ class RuntimeBroker:
 
     async def _handle_connection(self, reader, writer):
         request_id = ""
+        identity = None
+        method = ""
+        started_ns = time.monotonic_ns()
+        transport = None
         try:
             frame = await reader.readline()
             if not frame or len(frame) > self.max_frame_bytes:
@@ -106,8 +113,50 @@ class RuntimeBroker:
             if not isinstance(params, dict):
                 raise BrokerError("invalid_request", "request params must be an object")
             call_deadline = min(remaining, self.max_deadline)
-            async with asyncio.timeout(call_deadline):
-                result = await self._dispatch(identity, request, params, call_deadline)
+            method = str(request.get("method") or "")
+            transport = {
+                "direction": "feature_to_host",
+                "plugin_id": identity.plugin_id,
+                "method": method,
+                "request_id": request_id,
+                "deadline_ms": call_deadline * 1000,
+                "idempotency_key_present": bool(request.get("idempotency_key")),
+            }
+            self._diagnostic_log(
+                "info",
+                "Host 收到 Feature RPC",
+                event_name="rpc.host.received",
+                diagnostic_fields={
+                    "stage": "rpc",
+                    "status": "received",
+                    "input": {"params": params},
+                    "transport": transport,
+                },
+            )
+            diagnostics = request.get("diagnostics")
+            if not isinstance(diagnostics, dict):
+                diagnostics = {}
+            bound_diagnostics = dict(diagnostics)
+            bound_diagnostics["request_id"] = request_id
+            bound_diagnostics["operation_id"] = (
+                params.get("operation_id")
+                or diagnostics.get("operation_id")
+            )
+            with bind_diagnostic_context(**bound_diagnostics):
+                async with asyncio.timeout(call_deadline):
+                    result = await self._dispatch(identity, request, params, call_deadline)
+            self._diagnostic_log(
+                "info",
+                "Host 完成 Feature RPC",
+                event_name="rpc.host.completed",
+                diagnostic_fields={
+                    "stage": "rpc",
+                    "status": "completed",
+                    "duration_ms": (time.monotonic_ns() - started_ns) / 1_000_000,
+                    "transport": transport,
+                    "output": {"result": result},
+                },
+            )
             response = {"type": "response", "id": request_id, "ok": True, "result": result}
         except BrokerError as exc:
             response = {
@@ -134,6 +183,47 @@ class RuntimeBroker:
                 "error": {"code": "invalid_request", "message": "invalid request"},
             }
         except Exception as exc:
+            if self.logger is not None:
+                error = getattr(self.logger, "error", None)
+                if error is not None:
+                    safe_message = (
+                        "event=runtime_broker.internal_error "
+                        f"request_id={request_id or '-'} "
+                        f"plugin_id={getattr(identity, 'plugin_id', '-') or '-'} "
+                        f"method={method or '-'} "
+                        f"error_type={type(exc).__name__}"
+                    )
+                    fields = {
+                        "stage": "rpc",
+                        "status": "failed",
+                        "duration_ms": (time.monotonic_ns() - started_ns) / 1_000_000,
+                        "transport": transport or {
+                            "direction": "feature_to_host",
+                            "plugin_id": getattr(identity, "plugin_id", None),
+                            "method": method or None,
+                            "request_id": request_id or None,
+                        },
+                        "output": {
+                            "error_code": "internal_error",
+                            "error_type": type(exc).__name__,
+                        },
+                    }
+                    try:
+                        error(
+                            safe_message,
+                            exc_info=(type(exc), exc, exc.__traceback__),
+                            event_name="runtime_broker.internal_error",
+                            diagnostic_fields=fields,
+                        )
+                    except TypeError:
+                        error(
+                            safe_message,
+                            exc_info=(type(exc), exc, exc.__traceback__),
+                            extra={
+                                "event_name": "runtime_broker.internal_error",
+                                "diagnostic_fields": fields,
+                            },
+                        )
             response = {
                 "type": "response", "id": request_id, "ok": False,
                 "error": {"code": "internal_error", "message": type(exc).__name__},
@@ -153,6 +243,34 @@ class RuntimeBroker:
                 await writer.wait_closed()
             except OSError:
                 pass
+
+    def _diagnostic_log(
+        self,
+        level: str,
+        message: str,
+        *,
+        event_name: str,
+        diagnostic_fields: dict,
+    ):
+        if self.logger is None:
+            return
+        emit = getattr(self.logger, str(level), None)
+        if emit is None:
+            return
+        try:
+            emit(
+                message,
+                event_name=event_name,
+                diagnostic_fields=diagnostic_fields,
+            )
+        except TypeError:
+            emit(
+                message,
+                extra={
+                    "event_name": event_name,
+                    "diagnostic_fields": diagnostic_fields,
+                },
+            )
 
     async def _dispatch(
         self,

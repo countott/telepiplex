@@ -22,6 +22,12 @@ from telegram.ext import (
     filters,
 )
 from telegram.helpers import escape_markdown
+from telepiplex_plugin_sdk.diagnostics import (
+    bind_diagnostic_context,
+    current_diagnostic_context,
+    new_incident_id,
+    new_trace_id,
+)
 
 import init
 from app.runtime.capability_router import CapabilityRouter
@@ -91,7 +97,7 @@ DEFAULT_PLUGIN_CATALOG_URL = (
 
 
 def get_version(md_format=False):
-    version = "v3.4.25-host"
+    version = "v3.5.0-host"
     if md_format:
         return escape_markdown(version, version=2)
     return version
@@ -186,6 +192,7 @@ def build_plugin_manager(config=None, host_database=None):
         ),
         milestone_sink=milestone_sink,
         operation_sink=operation_sink,
+        logger=init.logger,
     )
     supervisor = PluginSupervisor(
         startup_timeout=float(plugin_config.get("startup_timeout") or 30),
@@ -193,6 +200,7 @@ def build_plugin_manager(config=None, host_database=None):
         runtime_root=runtime_root,
         broker=broker,
         log_level=str((config or {}).get("log_level") or "info"),
+        log_session=getattr(init.logger, "session", None),
     )
     catalog_source = resolve_plugin_catalog_source(plugin_config, root)
     catalog = PluginCatalog(catalog_source, root / ".cache")
@@ -544,6 +552,70 @@ def build_application(token):
     )
 
 
+async def telepiplex_error_handler(update, context):
+    error = getattr(context, "error", None)
+    if not isinstance(error, BaseException):
+        error = RuntimeError(type(error).__name__ if error is not None else "UnknownError")
+    update_id = getattr(update, "update_id", None)
+    active = current_diagnostic_context()
+    trace_id = active.get("trace_id") or (
+        f"TG-{update_id}" if update_id is not None else new_trace_id()
+    )
+    incident_id = new_incident_id()
+    frontend = (
+        "❌ telepiplex 处理请求时发生错误。\n"
+        f"问题编号：{incident_id}\n"
+        "请保留该编号以便从日志中定位完整链路。"
+    )
+    chat = getattr(update, "effective_chat", None)
+    user = getattr(update, "effective_user", None)
+    message = getattr(update, "effective_message", None)
+    with bind_diagnostic_context(
+        trace_id=trace_id,
+        incident_id=incident_id,
+        request_id=f"telegram-update:{update_id}" if update_id is not None else None,
+    ):
+        if init.logger is not None:
+            init.logger.error(
+                "Telegram 更新处理失败",
+                exc_info=(type(error), error, error.__traceback__),
+                event_name="telegram.update.failed",
+                diagnostic_fields={
+                    "stage": "telegram_update",
+                    "status": "failed",
+                    "input": {
+                        "update_id": update_id,
+                        "chat_id": getattr(chat, "id", None),
+                        "user_id": getattr(user, "id", None),
+                        "message_id": getattr(message, "message_id", None),
+                    },
+                    "user_surface": {
+                        "action": "send_message",
+                        "text": frontend,
+                    },
+                },
+            )
+        reply_text = getattr(message, "reply_text", None)
+        if callable(reply_text):
+            try:
+                await reply_text(text=frontend)
+            except Exception as send_error:
+                if init.logger is not None:
+                    init.logger.error(
+                        "Telegram 错误编号通知发送失败",
+                        exc_info=(type(send_error), send_error, send_error.__traceback__),
+                        event_name="telegram.error_notice.failed",
+                        diagnostic_fields={
+                            "stage": "telegram_send",
+                            "status": "failed",
+                            "user_surface": {
+                                "action": "send_message",
+                                "text": frontend,
+                            },
+                        },
+                    )
+
+
 async def initialize_application_with_retry(application, max_retries=5, retry_delay=5):
     for attempt in range(max_retries + 1):
         try:
@@ -674,6 +746,7 @@ def configure_application(application, manager):
     application.add_handler(CallbackQueryHandler(dynamic_callback_gateway))
     application.add_handler(MessageHandler(filters.COMMAND, dynamic_command_gateway))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, dynamic_message_gateway))
+    application.add_error_handler(telepiplex_error_handler)
 
 
 async def start_host_runtime(application, manager):

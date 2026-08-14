@@ -13,11 +13,11 @@ from telepiplex_plugin_sdk import FeatureRuntime
 
 ROOT = Path(__file__).resolve().parents[1]
 FEATURES = {
-    "search": ("telepiplex_search", "1.9.5"),
-    "download": ("telepiplex_download", "1.0.10"),
-    "rename": ("telepiplex_rename", "1.4.3"),
-    "sync": ("telepiplex_sync", "1.1.0"),
-    "caption": ("telepiplex_caption", "0.1.2"),
+    "search": ("telepiplex_search", "1.9.7"),
+    "download": ("telepiplex_download", "1.0.12"),
+    "rename": ("telepiplex_rename", "1.4.5"),
+    "sync": ("telepiplex_sync", "1.1.1"),
+    "caption": ("telepiplex_caption", "0.1.3"),
 }
 LEGACY_FEATURE_DIRS = (
     "media-search",
@@ -53,6 +53,7 @@ def test_features_use_only_the_new_technical_identities():
         )
         assert project["project"]["name"] == f"telepiplex-{plugin_id}"
         assert project["project"]["version"] == version
+        assert "telepiplex-plugin-sdk==1.3.0" in project["project"]["dependencies"]
         assert (feature_dir / "src" / package).is_dir()
 
 
@@ -168,6 +169,6 @@ def test_runtime_protocol_uses_host_not_legacy_name():
 
 
 def test_persistent_runtime_log_uses_telepiplex_identity():
-    from app.utils.logger import host_log_path
+    from app.utils.logger import log_sessions_root
 
-    assert host_log_path("/config") == Path("/config/logs/telepiplex.log")
+    assert log_sessions_root("/config") == Path("/config/logs/sessions")

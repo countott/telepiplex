@@ -54,7 +54,7 @@ def _redact_text(value: str) -> str:
     text = re.sub(r"Bearer\s+[A-Za-z0-9._~+\-/=]+", f"Bearer {REDACTED}", value)
     text = re.sub(r"sk-[A-Za-z0-9._~+\-/=]{8,}", f"sk-{REDACTED}", text)
     text = re.sub(
-        r"(?i)(access_token|refresh_token|api_key|token|secret)=([^&\s]+)",
+        r"(?i)(access_token|refresh_token|api_key|token|secret)=([^&\s\"'`,;}\]\)]+)",
         lambda match: f"{match.group(1)}={REDACTED}",
         text,
     )

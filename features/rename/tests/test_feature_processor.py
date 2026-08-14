@@ -3020,6 +3020,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(identity_index, organizing_index)
 
     async def test_lost_rename_identity_response_retries_same_milestone(self):
+        from telepiplex_plugin_sdk import FeatureError
+
         host = FakeHost()
         feature = RenameFeature(
             config={"unorganized_path": "/Unorganized"},
@@ -3047,7 +3049,10 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 deadline=deadline,
             )
             if len(attempts) == 1:
-                raise RuntimeError("rename identity response lost")
+                raise FeatureError(
+                    "internal_error",
+                    "Host milestone bookkeeping was interrupted",
+                )
             return {**response, "accepted": False, "duplicate": True}
 
         host.publish_operation_milestone = accept_then_lose
@@ -3067,6 +3072,41 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(published)
         self.assertEqual(attempts, [attempts[0], attempts[0]])
         self.assertTrue(payload["_metadata_identity_published"])
+
+    async def test_rejected_rename_identity_milestone_is_not_retried(self):
+        from telepiplex_plugin_sdk import FeatureError
+
+        host = FakeHost()
+        feature = RenameFeature(
+            config={"unorganized_path": "/Unorganized"},
+            host=host,
+        )
+        attempts = []
+
+        async def reject_owner(*_args, **_kwargs):
+            attempts.append("owner_mismatch")
+            raise FeatureError(
+                "owner_mismatch",
+                "operation belongs to another Feature",
+            )
+
+        host.publish_operation_milestone = reject_owner
+        payload = {
+            "_metadata_presentation": {
+                "milestone_id": "rename-identity-rejected",
+                "text": "🎬 中文电影 (English Movie)",
+                "photo_url": "https://img.example/movie.jpg",
+            },
+        }
+
+        with self.assertRaises(FeatureError) as raised:
+            await feature._publish_metadata_identity(
+                payload,
+                "op-rename-identity-rejected",
+            )
+
+        self.assertEqual(raised.exception.code, "owner_mismatch")
+        self.assertEqual(attempts, ["owner_mismatch"])
 
     async def test_rename_stage_seals_before_plex_event_is_published(self):
         host = FakeHost()
@@ -3105,6 +3145,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(seal_index, event_index)
 
     async def test_lost_rename_stage_response_retries_same_milestone(self):
+        from telepiplex_plugin_sdk import FeatureError
+
         host = FakeHost()
         runtime = FakeRuntime()
         feature = RenameFeature(
@@ -3130,7 +3172,10 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 deadline=deadline,
             )
             if len(attempts) == 1:
-                raise RuntimeError("rename stage response lost")
+                raise FeatureError(
+                    "internal_error",
+                    "Host milestone bookkeeping was interrupted",
+                )
             return {**response, "accepted": False, "duplicate": True}
 
         host.seal_operation_stage = accept_then_lose
@@ -3862,10 +3907,10 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.4.3")
+        self.assertEqual(manifest["version"], "1.4.5")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertIn('version = "1.4.3"', project)
-        self.assertIn('telepiplex-plugin-sdk==1.2.2', project)
+        self.assertIn('version = "1.4.5"', project)
+        self.assertIn('telepiplex-plugin-sdk==1.3.0', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
         manifest = yaml.safe_load(
@@ -3880,8 +3925,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.4.3.tpx", source)
-        self.assertNotIn("dist/rename-1.4.3.tpx", source)
+        self.assertIn("/tmp/rename-1.4.5.tpx", source)
+        self.assertNotIn("dist/rename-1.4.5.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

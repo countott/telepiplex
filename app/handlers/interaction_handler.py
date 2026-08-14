@@ -8,6 +8,7 @@ from collections.abc import Mapping
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import ApplicationHandlerStop
+from telepiplex_plugin_sdk.diagnostics import new_trace_id, set_diagnostic_context
 
 try:
     import init
@@ -256,6 +257,71 @@ async def deliver_operation_milestone(
         photo_url = str(mode_or_photo_url or "") or None
         rendered_text = str(photo_url_or_text or "")
 
+    operation_id = record.operation_id if record is not None else ""
+    if operation_id:
+        set_diagnostic_context(operation_id=operation_id)
+
+    def log_delivery(event_name, status, action, *, result=None, error=None):
+        logger = init.logger
+        if logger is None:
+            return
+        fields = {
+            "stage": "telegram_milestone",
+            "status": status,
+            "input": {
+                "operation_id": operation_id or None,
+                "chat_id": chat_id,
+                "mode": mode,
+                "existing_message_id": (
+                    record.message_id if record is not None else None
+                ),
+            },
+            "user_surface": {
+                "action": action,
+                "text": rendered_text,
+                "photo_url": photo_url,
+            },
+        }
+        if result is not None:
+            fields["output"] = dict(result) if isinstance(result, dict) else {"accepted": result}
+        if error is not None:
+            fields.setdefault("output", {})["error_type"] = type(error).__name__
+        method = logger.error if status == "failed" else logger.info
+        method(
+            "Telegram 里程碑消息发送失败"
+            if status == "failed" else
+            "Telegram 里程碑消息已送达"
+            if status == "completed" else
+            "开始投递 Telegram 里程碑消息",
+            event_name=event_name,
+            diagnostic_fields=fields,
+        )
+
+    def complete_delivery(message_id, message_kind, action):
+        result = _milestone_delivery_result(message_id, message_kind)
+        log_delivery(
+            "telegram.milestone.delivery.completed",
+            "completed",
+            action,
+            result=result,
+        )
+        return result
+
+    initial_action = (
+        "edit_message"
+        if mode == "stage" and record is not None and record.message_id is not None
+        else "send_message"
+        if mode == "stage"
+        else "edit_photo"
+        if record is not None and record.message_id is not None
+        else "send_photo"
+    )
+    log_delivery(
+        "telegram.milestone.delivery.started",
+        "started",
+        initial_action,
+    )
+
     if mode == "stage":
         if record is not None and record.message_id is not None:
             try:
@@ -273,15 +339,17 @@ async def deliver_operation_milestone(
                         text=rendered_text,
                         reply_markup=None,
                     )
-                return _milestone_delivery_result(
+                return complete_delivery(
                     record.message_id,
                     record.message_kind or "text",
+                    "edit_message",
                 )
             except Exception as exc:
                 if _message_not_modified(exc):
-                    return _milestone_delivery_result(
+                    return complete_delivery(
                         record.message_id,
                         record.message_kind or "text",
+                        "edit_message",
                     )
                 _log(
                     "warn",
@@ -296,15 +364,23 @@ async def deliver_operation_milestone(
                 chat_id=chat_id,
                 text=rendered_text,
             )
-            return _milestone_delivery_result(
+            return complete_delivery(
                 getattr(sent, "message_id", None),
                 "text",
+                "send_message",
             )
         except Exception as exc:
             _log(
                 "error",
                 "任务阶段封口消息发送失败："
                 f"chat_id={chat_id}, error={_render_error(exc)}",
+            )
+            log_delivery(
+                "telegram.milestone.delivery.failed",
+                "failed",
+                "send_message",
+                result=False,
+                error=exc,
             )
             return False
 
@@ -338,15 +414,17 @@ async def deliver_operation_milestone(
                         media=InputMediaPhoto(media=photo, caption=caption),
                         reply_markup=None,
                     )
-                    return _milestone_delivery_result(
+                    return complete_delivery(
                         record.message_id,
                         "photo",
+                        "edit_photo",
                     )
                 except Exception as exc:
                     if _message_not_modified(exc):
-                        return _milestone_delivery_result(
+                        return complete_delivery(
                             record.message_id,
                             "photo",
+                            "edit_photo",
                         )
                     _log(
                         "warn",
@@ -361,9 +439,10 @@ async def deliver_operation_milestone(
             photo=photo,
             caption=caption,
         )
-        return _milestone_delivery_result(
+        return complete_delivery(
             getattr(sent, "message_id", None),
             "photo",
+            "send_photo",
         )
     except Exception as exc:
         _log(
@@ -382,10 +461,18 @@ async def deliver_operation_milestone(
             "任务身份消息发送失败："
             f"chat_id={chat_id}, error={_render_error(exc)}",
         )
+        log_delivery(
+            "telegram.milestone.delivery.failed",
+            "failed",
+            "send_message",
+            result=False,
+            error=exc,
+        )
         return False
-    return _milestone_delivery_result(
+    return complete_delivery(
         getattr(sent, "message_id", None),
         "text",
+        "send_message",
     )
 
 
@@ -476,6 +563,11 @@ class OperationReportSink:
 
 
 async def operation_gate(update, context):
+    update_id = getattr(update, "update_id", None)
+    set_diagnostic_context(
+        trace_id=f"TG-{update_id}" if update_id is not None else new_trace_id(),
+        request_id=f"telegram-update:{update_id}" if update_id is not None else None,
+    )
     chat = getattr(update, "effective_chat", None)
     user = getattr(update, "effective_user", None)
     if chat is None or user is None:
@@ -487,6 +579,7 @@ async def operation_gate(update, context):
     record = coordinator.active(int(chat.id), int(user.id))
     if record is None:
         return
+    set_diagnostic_context(operation_id=record.operation_id)
 
     query = getattr(update, "callback_query", None)
     if query is not None:

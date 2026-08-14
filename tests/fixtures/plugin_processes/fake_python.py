@@ -26,6 +26,66 @@ async def main():
         print("[2026-07-26 08:00:02] [CRITICAL] [feature.example] structured critical", flush=True)
         print("plain stdout", flush=True)
         print("plain stderr", file=sys.stderr, flush=True)
+    if PLUGIN_ID == "diagnosticlog":
+        event = {
+            "schema_version": "1.0",
+            "event_id": "EVT-FEATURE-TRANSPORT-1",
+            "sequence": {"producer": 9, "ingest": None},
+            "time": {
+                "utc": "2026-08-14T15:15:42.381000+00:00",
+                "local": "2026-08-14T23:15:42.381000+08:00",
+                "timezone": "CST",
+                "unix_ns": 1786720542381000000,
+                "monotonic_ns": 123456789,
+            },
+            "level": "INFO",
+            "logger": "telepiplex.feature.diagnosticlog",
+            "component": "diagnosticlog",
+            "identity": {
+                "session_id": "feature-placeholder",
+                "trace_id": "TRC-FEATURE-1",
+                "span_id": "SPN-FEATURE-1",
+                "parent_span_id": None,
+                "operation_id": "operation-feature-1",
+                "request_id": "request-feature-1",
+                "incident_id": None,
+            },
+            "event": {
+                "name": "feature.dispatch.completed",
+                "message": "Feature 诊断传输完成",
+                "stage": "dispatch",
+                "status": "completed",
+                "duration_ms": 12.5,
+            },
+            "runtime": {
+                "host_version": None,
+                "plugin_id": "diagnosticlog",
+                "plugin_version": "1.0.0",
+                "instance_id": "diagnosticlog",
+                "pid": os.getpid(),
+                "thread_name": "MainThread",
+                "thread_id": 1,
+                "async_task": "fixture",
+            },
+            "facts": {
+                "input": {"args": ["access_token=transport-secret-value"]},
+                "output": {"value": "safe"},
+            },
+            "error": {
+                "code": None,
+                "type": None,
+                "message": None,
+                "retryable": None,
+                "stack": None,
+                "causes": [],
+            },
+            "privacy": {
+                "redacted_paths": [],
+                "redaction_count": 0,
+                "sanitized": True,
+            },
+        }
+        print("@tpx-event-v1 " + json.dumps(event, ensure_ascii=False), flush=True)
 
     stop = asyncio.Event()
     state = {"value": "healthy", "drain_started": 0.0}

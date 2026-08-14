@@ -10,7 +10,7 @@ import requests
 
 WIKIDATA_ENDPOINT = "https://www.wikidata.org/w/api.php"
 USER_AGENT = (
-    "telepiplex/1.9.5 (media metadata lookup; "
+    "telepiplex/1.9.7 (media metadata lookup; "
     "https://github.com/openai/codex)"
 )
 

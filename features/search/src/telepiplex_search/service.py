@@ -365,6 +365,12 @@ def _ambiguous_host_report_error(exc: Exception) -> bool:
         "host_unavailable", "deadline_exceeded", "invalid_response",
     }
 
+
+def _ambiguous_milestone_error(exc: Exception) -> bool:
+    return _ambiguous_host_report_error(exc) or (
+        isinstance(exc, FeatureError) and exc.code == "internal_error"
+    )
+
 _PLANNING_ERROR_MESSAGES = {
     "ambiguous_candidates": "存在多个候选，请补充年份或电影/剧集类型。",
     "evidence_conflict": "不同来源的年份或媒体类型冲突，请补充更明确的信息。",
@@ -1283,7 +1289,7 @@ class SearchFeature:
                 plan_id,
                 stored,
                 terminal_status="source_unavailable",
-                error=type(exc).__name__,
+                error=error_code,
             )
             self._release_plan(plan_id)
             if not (self.operations.get(operation_id) or {}).get(
@@ -1295,7 +1301,7 @@ class SearchFeature:
                         state="failed",
                         stage="prowlarr_search",
                         status_text=(
-                            f"资源搜索失败：{type(exc).__name__}"
+                            f"资源搜索失败：{error_code}"
                         ),
                         control="",
                         details=self._prowlarr_status_details(
@@ -1412,7 +1418,7 @@ class SearchFeature:
                 plan_id,
                 stored,
                 terminal_status="source_unavailable",
-                error=type(exc).__name__,
+                error=error_code,
             )
             self._release_plan(plan_id)
             if (
@@ -1427,7 +1433,7 @@ class SearchFeature:
                         state="failed",
                         stage="resolving_release",
                         status_text=(
-                            f"片源提交失败：{type(exc).__name__}"
+                            f"片源提交失败：{error_code}"
                         ),
                         control="",
                     )
@@ -2668,7 +2674,7 @@ class SearchFeature:
                     )
                 except Exception as exc:
                     if (
-                        _ambiguous_host_report_error(exc)
+                        _ambiguous_milestone_error(exc)
                         and attempt < 2
                     ):
                         await asyncio.sleep(0.25 * (2 ** attempt))
@@ -3461,7 +3467,7 @@ class SearchFeature:
                     deadline=45,
                 )
             except Exception as exc:
-                if not _ambiguous_host_report_error(exc) or attempt == 2:
+                if not _ambiguous_milestone_error(exc) or attempt == 2:
                     raise
                 await asyncio.sleep(0.25 * (2 ** attempt))
                 continue

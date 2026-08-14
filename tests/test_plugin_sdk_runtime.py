@@ -1,4 +1,9 @@
 import asyncio
+import contextlib
+import io
+import json
+import logging
+import os
 import sys
 import tempfile
 import unittest
@@ -122,6 +127,58 @@ class FeatureSdkRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(context.host, host)
 
+    def test_feature_logging_emits_versioned_machine_transport_with_runtime_identity(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from telepiplex_plugin_sdk.logging_utils import configure_feature_logging
+
+        output = io.StringIO()
+        context = SimpleNamespace(
+            manifest={"plugin_id": "search", "version": "1.9.7"},
+            config_path=Path("/config/plugins/search/config.yaml"),
+            state_path=Path("/config/plugins/search/state"),
+        )
+        environment = {
+            "TPX_LOG_LEVEL": "info",
+            "TPX_LOG_SESSION_ID": "HOST-SESSION-1",
+            "TPX_INSTANCE_ID": "search@1.9.7-a1b2c3d4",
+        }
+        with patch.dict(os.environ, environment, clear=False), contextlib.redirect_stdout(output):
+            logger = configure_feature_logging(context)
+            logger.info(
+                "来源查询结束 access_token=secret-value",
+                extra={
+                    "event_name": "search.source.completed",
+                    "diagnostic_fields": {
+                        "stage": "source_resolution",
+                        "status": "matched",
+                        "output": {"count": 38},
+                    },
+                },
+            )
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+
+        lines = [
+            line.removeprefix("@tpx-event-v1 ")
+            for line in output.getvalue().splitlines()
+            if line.startswith("@tpx-event-v1 ")
+        ]
+        events = [json.loads(line) for line in lines]
+        event = next(
+            item for item in events
+            if item["event"]["name"] == "search.source.completed"
+        )
+        self.assertEqual(event["identity"]["session_id"], "HOST-SESSION-1")
+        self.assertEqual(event["runtime"]["plugin_id"], "search")
+        self.assertEqual(event["runtime"]["plugin_version"], "1.9.7")
+        self.assertEqual(event["runtime"]["instance_id"], "search@1.9.7-a1b2c3d4")
+        self.assertEqual(event["event"]["stage"], "source_resolution")
+        self.assertEqual(event["facts"]["output"]["count"], 38)
+        self.assertIn("***redacted***", event["event"]["message"])
+        self.assertNotIn("secret-value", output.getvalue())
+
     async def test_message_dispatch_uses_session_handler(self):
         from app.runtime.plugin_rpc import RpcClient
 
@@ -138,6 +195,44 @@ class FeatureSdkRuntimeTest(unittest.IsolatedAsyncioTestCase):
             deadline=1,
         )
         self.assertEqual(result["actions"][0]["text"], "follow up")
+
+    async def test_dispatch_completion_carries_typed_duration_and_result_facts(self):
+        from app.runtime.plugin_rpc import RpcClient
+
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        async def echo(request):
+            await asyncio.sleep(0.01)
+            return request["payload"]
+
+        capture = Capture()
+        runtime_logger = logging.getLogger("telepiplex.runtime")
+        original_level = runtime_logger.level
+        runtime_logger.setLevel(logging.INFO)
+        runtime_logger.addHandler(capture)
+        self.addCleanup(runtime_logger.removeHandler, capture)
+        self.addCleanup(runtime_logger.setLevel, original_level)
+        await self._start(echo)
+
+        result = await RpcClient(self.socket_path, "token").request(
+            "capability.call",
+            {"capability": "demo.echo", "method": "run", "payload": {"value": 7}},
+            deadline=1,
+        )
+
+        completed = next(
+            record for record in records
+            if getattr(record, "event_name", "") == "feature.dispatch.completed"
+        )
+        fields = completed.diagnostic_fields
+        self.assertEqual(result, {"value": 7})
+        self.assertEqual(fields["status"], "completed")
+        self.assertGreaterEqual(fields["duration_ms"], 5)
+        self.assertEqual(fields["output"]["result"], {"value": 7})
 
     async def test_spawned_background_work_is_visible_to_drain_and_health(self):
         from app.runtime.plugin_rpc import RpcClient

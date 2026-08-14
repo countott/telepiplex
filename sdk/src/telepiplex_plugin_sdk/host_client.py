@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from pathlib import Path
 
 from .types import FeatureError
+from .diagnostics import outbound_diagnostic_context
 
 
 class HostClient:
@@ -131,6 +133,10 @@ class HostClient:
         if deadline <= 0:
             raise FeatureError("deadline_exceeded", "Host RPC deadline must be positive")
         request_id = uuid.uuid4().hex
+        diagnostics = outbound_diagnostic_context(
+            request_id=request_id,
+            operation_id=params.get("operation_id") if isinstance(params, dict) else None,
+        )
         envelope = {
             "type": "request",
             "id": request_id,
@@ -139,7 +145,29 @@ class HostClient:
             "token": self.token,
             "deadline_at": time.time() + float(deadline),
             "idempotency_key": str(idempotency_key or ""),
+            "diagnostics": diagnostics,
         }
+        started_ns = time.monotonic_ns()
+        rpc_logger = logging.getLogger("telepiplex.rpc.host")
+        transport = {
+            "direction": "feature_to_host",
+            "method": str(method),
+            "request_id": request_id,
+            "deadline_ms": float(deadline) * 1000,
+            "idempotency_key_present": bool(idempotency_key),
+        }
+        rpc_logger.info(
+            "Feature 开始调用 Host RPC",
+            extra={
+                "event_name": "rpc.host.started",
+                "diagnostic_fields": {
+                    "stage": "rpc",
+                    "status": "started",
+                    "input": {"params": params},
+                    "transport": transport,
+                },
+            },
+        )
         try:
             frame = (json.dumps(
                 envelope,
@@ -166,10 +194,37 @@ class HostClient:
                     raise FeatureError("invalid_response", "Host RPC response is empty or too large")
                 response = json.loads(response_frame.decode("utf-8"))
         except TimeoutError:
+            rpc_logger.error(
+                "Host RPC 调用超时",
+                extra={
+                    "event_name": "rpc.host.failed",
+                    "diagnostic_fields": {
+                        "stage": "rpc",
+                        "status": "failed",
+                        "duration_ms": (time.monotonic_ns() - started_ns) / 1_000_000,
+                        "transport": transport,
+                        "output": {"error_code": "deadline_exceeded"},
+                    },
+                },
+            )
             raise FeatureError("deadline_exceeded", "Host RPC deadline exceeded") from None
         except FeatureError:
             raise
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            rpc_logger.error(
+                "Host RPC 不可用",
+                exc_info=(type(exc), exc, exc.__traceback__),
+                extra={
+                    "event_name": "rpc.host.failed",
+                    "diagnostic_fields": {
+                        "stage": "rpc",
+                        "status": "failed",
+                        "duration_ms": (time.monotonic_ns() - started_ns) / 1_000_000,
+                        "transport": transport,
+                        "output": {"error_code": "host_unavailable"},
+                    },
+                },
+            )
             raise FeatureError("host_unavailable", f"Host RPC unavailable: {type(exc).__name__}") from None
         finally:
             if writer is not None:
@@ -185,8 +240,37 @@ class HostClient:
             result = response.get("result")
             if not isinstance(result, dict):
                 raise FeatureError("invalid_response", "Host RPC result must be an object")
+            rpc_logger.info(
+                "Host RPC 调用完成",
+                extra={
+                    "event_name": "rpc.host.completed",
+                    "diagnostic_fields": {
+                        "stage": "rpc",
+                        "status": "completed",
+                        "duration_ms": (time.monotonic_ns() - started_ns) / 1_000_000,
+                        "transport": transport,
+                        "output": {"result": result},
+                    },
+                },
+            )
             return result
         error = response.get("error") or {}
+        rpc_logger.error(
+            "Host RPC 返回失败",
+            extra={
+                "event_name": "rpc.host.failed",
+                "diagnostic_fields": {
+                    "stage": "rpc",
+                    "status": "failed",
+                    "duration_ms": (time.monotonic_ns() - started_ns) / 1_000_000,
+                    "transport": transport,
+                    "output": {
+                        "error_code": str(error.get("code") or "internal_error"),
+                        "error_message": str(error.get("message") or "Host request failed"),
+                    },
+                },
+            },
+        )
         raise FeatureError(
             str(error.get("code") or "internal_error"),
             str(error.get("message") or "Host request failed"),

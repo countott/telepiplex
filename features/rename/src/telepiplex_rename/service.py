@@ -61,6 +61,12 @@ def _ambiguous_host_report_error(exc: Exception) -> bool:
     }
 
 
+def _ambiguous_milestone_error(exc: Exception) -> bool:
+    return _ambiguous_host_report_error(exc) or (
+        isinstance(exc, FeatureError) and exc.code == "internal_error"
+    )
+
+
 def _plain_notification(value) -> str:
     return str(value or "").replace("`", "")
 
@@ -1716,7 +1722,7 @@ class RenameFeature:
                         )
                     except Exception as exc:
                         if (
-                            _ambiguous_host_report_error(exc)
+                            _ambiguous_milestone_error(exc)
                             and attempt < 2
                         ):
                             await asyncio.sleep(0.25 * (2 ** attempt))
@@ -1826,7 +1832,7 @@ class RenameFeature:
                 )
             except Exception as exc:
                 if (
-                    _ambiguous_host_report_error(exc)
+                    _ambiguous_milestone_error(exc)
                     and attempt < 2
                 ):
                     await asyncio.sleep(0.25 * (2 ** attempt))

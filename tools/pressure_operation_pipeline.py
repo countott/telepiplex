@@ -26,10 +26,23 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--pipelines", type=int, default=200)
     parser.add_argument("--concurrency", type=int, default=32)
+    parser.add_argument(
+        "--milestone-faults",
+        type=int,
+        default=0,
+        help=(
+            "Inject this many Host milestone completion interruptions and "
+            "verify same-ID recovery over real RPC."
+        ),
+    )
     return parser.parse_args()
 
 
-async def _run(pipelines: int, concurrency: int) -> dict:
+async def _run(
+    pipelines: int,
+    concurrency: int,
+    milestone_faults: int = 0,
+) -> dict:
     from telepiplex_plugin_sdk.host_client import HostClient
     from tests.test_operation_pipeline_e2e import (
         OperationPipelineEndToEndTest,
@@ -39,6 +52,8 @@ async def _run(pipelines: int, concurrency: int) -> dict:
         raise ValueError("pipelines must be positive")
     if concurrency <= 0:
         raise ValueError("concurrency must be positive")
+    if milestone_faults < 0:
+        raise ValueError("milestone_faults must not be negative")
 
     harness = OperationPipelineEndToEndTest(
         methodName="test_full_pipeline_handoff_control_and_menu_use_real_rpc_events"
@@ -47,7 +62,26 @@ async def _run(pipelines: int, concurrency: int) -> dict:
     event_deliveries = []
     host_api_calls = 0
     duplicate_milestones = 0
+    recovered_milestones = 0
     semaphore = asyncio.Semaphore(concurrency)
+    original_complete_milestone = harness.coordinator.complete_milestone
+    remaining_milestone_faults = milestone_faults
+    interrupted_milestones = set()
+
+    def complete_then_interrupt(*args):
+        nonlocal remaining_milestone_faults
+        milestone_key = tuple(str(value) for value in args[:3])
+        if (
+            remaining_milestone_faults > 0
+            and milestone_key not in interrupted_milestones
+        ):
+            interrupted_milestones.add(milestone_key)
+            remaining_milestone_faults -= 1
+            raise RuntimeError("injected milestone completion interruption")
+        return original_complete_milestone(*args)
+
+    if milestone_faults:
+        harness.coordinator.complete_milestone = complete_then_interrupt
 
     async def record_event(owner: str, request: dict) -> dict:
         event_deliveries.append((
@@ -126,7 +160,9 @@ async def _run(pipelines: int, concurrency: int) -> dict:
             *,
             identity: bool = False,
         ) -> None:
-            nonlocal duplicate_milestones, host_api_calls
+            nonlocal duplicate_milestones
+            nonlocal host_api_calls
+            nonlocal recovered_milestones
             client = clients[plugin_id]
             if identity:
                 call = client.publish_operation_milestone
@@ -136,23 +172,37 @@ async def _run(pipelines: int, concurrency: int) -> dict:
             else:
                 call = client.seal_operation_stage
                 kwargs = {}
-            first = await call(
-                operation_id,
-                milestone_id,
-                f"pressure milestone {milestone_id}",
-                **kwargs,
-            )
+            for attempt in range(3):
+                try:
+                    first = await call(
+                        operation_id,
+                        milestone_id,
+                        f"pressure milestone {milestone_id}",
+                        **kwargs,
+                    )
+                    host_api_calls += 1
+                    break
+                except Exception as exc:
+                    host_api_calls += 1
+                    if (
+                        getattr(exc, "code", "") != "internal_error"
+                        or attempt == 2
+                    ):
+                        raise
+                    await asyncio.sleep(0.01 * (2 ** attempt))
             replay = await call(
                 operation_id,
                 milestone_id,
                 f"pressure milestone {milestone_id}",
                 **kwargs,
             )
-            host_api_calls += 2
+            host_api_calls += 1
             if first.get("accepted") is not True:
                 raise AssertionError(
                     f"first milestone delivery was not accepted: {first}"
                 )
+            if first.get("recovered") is True:
+                recovered_milestones += 1
             if replay.get("duplicate") is not True:
                 raise AssertionError(
                     f"milestone replay was not idempotent: {replay}"
@@ -328,6 +378,12 @@ async def _run(pipelines: int, concurrency: int) -> dict:
                 f"event_deliveries={len(event_deliveries)}; "
                 f"host_api_calls={host_api_calls}"
             )
+        expected_milestone_deliveries = pipelines * 4
+        expected_faults = min(milestone_faults, expected_milestone_deliveries)
+        expected_host_api_calls = pipelines * 21 + expected_faults
+        async with asyncio.timeout(2):
+            while host_api_calls < expected_host_api_calls:
+                await asyncio.sleep(0.001)
         elapsed = time.perf_counter() - started
 
         expected_operations = {
@@ -347,8 +403,6 @@ async def _run(pipelines: int, concurrency: int) -> dict:
             and record.state == "completed"
             for record in final_records
         )
-        expected_host_api_calls = pipelines * 21
-        expected_milestone_deliveries = pipelines * 4
         if host_api_calls != expected_host_api_calls:
             raise AssertionError(
                 f"host API call count {host_api_calls} != {expected_host_api_calls}"
@@ -361,6 +415,13 @@ async def _run(pipelines: int, concurrency: int) -> dict:
             )
         if duplicate_milestones != expected_milestone_deliveries:
             raise AssertionError("not every milestone replay was deduplicated")
+        if recovered_milestones != expected_faults:
+            raise AssertionError(
+                "milestone recovery count "
+                f"{recovered_milestones} != {expected_faults}"
+            )
+        if remaining_milestone_faults != milestone_faults - expected_faults:
+            raise AssertionError("unexpected milestone fault injection count")
         if delivered_by_owner != Counter({
             "rename": pipelines,
             "sync": pipelines,
@@ -379,9 +440,11 @@ async def _run(pipelines: int, concurrency: int) -> dict:
             "pipelines": pipelines,
             "concurrency": concurrency,
             "host_api_calls": host_api_calls,
-            "milestone_requests": pipelines * 8,
+            "milestone_requests": pipelines * 8 + expected_faults,
             "milestone_deliveries": len(harness.milestone_deliveries),
             "duplicate_milestones": duplicate_milestones,
+            "injected_milestone_faults": expected_faults,
+            "recovered_milestones": recovered_milestones,
             "event_deliveries": len(event_deliveries),
             "completed_operations": completed,
             "failures": 0,
@@ -394,7 +457,11 @@ async def _run(pipelines: int, concurrency: int) -> dict:
 
 def main() -> None:
     args = _parse_args()
-    result = asyncio.run(_run(args.pipelines, args.concurrency))
+    result = asyncio.run(_run(
+        args.pipelines,
+        args.concurrency,
+        args.milestone_faults,
+    ))
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 

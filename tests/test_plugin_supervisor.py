@@ -1,4 +1,6 @@
 import os
+import json
+import logging
 import shutil
 import sys
 import tempfile
@@ -20,6 +22,10 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         for supervisor in self.supervisors:
             await supervisor.close_all()
+        for handler in list(logging.getLogger().handlers):
+            if getattr(handler, "_telepiplex_handler_kind", ""):
+                logging.getLogger().removeHandler(handler)
+                handler.close()
         self.temp.cleanup()
 
     def _release(self, plugin_id, root_name="plugins"):
@@ -70,6 +76,13 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
         self.supervisors.append(supervisor)
         return supervisor
 
+    def _log_session(self, session_id="SUPERVISOR"):
+        from app.utils.logger import create_log_session, configure_root_logger
+
+        session = create_log_session(self.root, session_id=session_id)
+        configure_root_logger(session=session)
+        return session
+
     async def test_starts_real_child_health_drains_and_stops(self):
         import asyncio
 
@@ -104,9 +117,10 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("***redacted***", output)
 
     async def test_captured_logs_are_persisted_to_runtime_log(self):
-        supervisor = self._supervisor()
+        session = self._log_session()
+        supervisor = self._supervisor(log_session=session)
         process = await supervisor.start(self._release("healthy"))
-        runtime_log = self.root / "plugins" / "healthy" / "state" / "logs" / "runtime.log"
+        runtime_log = session.directory / "feature-healthy.human.log"
 
         await self._wait_for(runtime_log.exists)
         await self._wait_for(lambda: runtime_log.read_text(encoding="utf-8").strip() != "")
@@ -116,9 +130,10 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("plugin_id=healthy", output)
 
     async def test_structured_feature_log_levels_are_preserved_in_runtime_log(self):
-        supervisor = self._supervisor()
+        session = self._log_session()
+        supervisor = self._supervisor(log_session=session)
         process = await supervisor.start(self._release("severitylogs"))
-        runtime_log = self.root / "plugins" / "severitylogs" / "state" / "logs" / "runtime.log"
+        runtime_log = session.directory / "feature-severitylogs.machine.jsonl"
 
         await self._wait_for(lambda: len(process.logs) >= 5)
         await self._wait_for(runtime_log.exists)
@@ -127,23 +142,64 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
         )
 
         output = runtime_log.read_text(encoding="utf-8")
-        self.assertRegex(
-            output,
-            r"\[WARNING\].*\[stdout\] \[2026-07-26 08:00:00\] \[WARNING\] "
-            r"\[feature\.example\] structured warning",
+        events = [json.loads(line) for line in output.splitlines() if line.strip()]
+        by_message = {event["event"]["message"]: event for event in events}
+        self.assertEqual(by_message["[2026-07-26 08:00:00] [WARNING] [feature.example] structured warning"]["level"], "WARNING")
+        self.assertEqual(by_message["[2026-07-26 08:00:01] [ERROR] [feature.example] structured error"]["level"], "ERROR")
+        self.assertEqual(by_message["[2026-07-26 08:00:02] [CRITICAL] [feature.example] structured critical"]["level"], "CRITICAL")
+        self.assertEqual(by_message["plain stdout"]["level"], "INFO")
+        self.assertEqual(by_message["plain stderr"]["level"], "WARNING")
+
+    async def test_feature_transport_is_fanned_out_with_the_same_event_id_in_one_session_folder(self):
+        session = self._log_session("TRANSPORT")
+        supervisor = self._supervisor(log_session=session)
+        process = await supervisor.start(self._release("diagnosticlog"))
+        feature_machine = session.directory / "feature-diagnosticlog.machine.jsonl"
+
+        await self._wait_for(feature_machine.exists)
+        await self._wait_for(
+            lambda: "EVT-FEATURE-TRANSPORT-1" in feature_machine.read_text(encoding="utf-8")
         )
-        self.assertRegex(
-            output,
-            r"\[ERROR\].*\[stdout\] \[2026-07-26 08:00:01\] \[ERROR\] "
-            r"\[feature\.example\] structured error",
+
+        feature_events = [
+            json.loads(line)
+            for line in feature_machine.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        global_events = [
+            json.loads(line)
+            for line in session.machine_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        feature_event = next(
+            event for event in feature_events
+            if event["event_id"] == "EVT-FEATURE-TRANSPORT-1"
         )
-        self.assertRegex(
-            output,
-            r"\[CRITICAL\].*\[stdout\] \[2026-07-26 08:00:02\] \[CRITICAL\] "
-            r"\[feature\.example\] structured critical",
+        global_event = next(
+            event for event in global_events
+            if event["event_id"] == "EVT-FEATURE-TRANSPORT-1"
         )
-        self.assertRegex(output, r"\[INFO\].*\[stdout\] plain stdout")
-        self.assertRegex(output, r"\[WARNING\].*\[stderr\] plain stderr")
+        self.assertEqual(feature_event["event_id"], global_event["event_id"])
+        self.assertEqual(feature_event["identity"]["session_id"], "TRANSPORT")
+        self.assertEqual(global_event["identity"]["session_id"], "TRANSPORT")
+        self.assertEqual(feature_event["identity"]["trace_id"], "TRC-FEATURE-1")
+        self.assertEqual(
+            feature_event["facts"]["input"]["args"],
+            ["access_token=***redacted***"],
+        )
+        self.assertNotIn(
+            "transport-secret-value",
+            feature_machine.read_text(encoding="utf-8"),
+        )
+        self.assertNotIn("transport-secret-value", "\n".join(process.logs))
+        self.assertEqual(feature_machine.parent, session.directory)
+        self.assertTrue((session.directory / "feature-diagnosticlog.human.log").is_file())
+        gap = next(
+            event for event in feature_events
+            if event["event"]["name"] == "diagnostics.event_gap"
+        )
+        self.assertEqual(gap["facts"]["input"]["expected_sequence"], 1)
+        self.assertEqual(gap["facts"]["input"]["received_sequence"], 9)
 
     async def test_startup_timeout_terminates_child_and_leaves_no_registration(self):
         from app.runtime.plugin_supervisor import SupervisorError

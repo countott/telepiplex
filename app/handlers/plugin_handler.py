@@ -149,6 +149,59 @@ def _log_invalid_feature_response(
     )
 
 
+def _log_delivered_feature_action(
+    update,
+    route,
+    *,
+    operation_record,
+    action_index: int,
+    requested_action: str,
+    delivered_action: str,
+    text: str,
+    parse_mode: str | None,
+    action_data,
+    message_id: int | None,
+    message_kind: str,
+) -> None:
+    logger = getattr(init, "logger", None)
+    method = getattr(logger, "info", None) if logger is not None else None
+    if not callable(method):
+        return
+    method(
+        "Feature 前台消息已送达",
+        event_name="telegram.feature_action.delivered",
+        diagnostic_fields={
+            "stage": "telegram_delivery",
+            "status": "completed",
+            "input": {
+                "plugin_id": str(getattr(route, "plugin_id", "") or ""),
+                "action_index": int(action_index),
+                "requested_action": str(requested_action),
+                "update_id": getattr(update, "update_id", None),
+                "chat_id": getattr(
+                    getattr(update, "effective_chat", None), "id", None
+                ),
+                "user_id": getattr(
+                    getattr(update, "effective_user", None), "id", None
+                ),
+                "operation_id": str(
+                    getattr(operation_record, "operation_id", "") or ""
+                ) or None,
+            },
+            "user_surface": {
+                "action": str(delivered_action),
+                "text": str(text),
+                "parse_mode": parse_mode,
+                "data": deepcopy(action_data),
+            },
+            "output": {
+                "message_id": message_id,
+                "message_kind": str(message_kind),
+            },
+        },
+    )
+
+
 def _config_migration_suffix(result) -> str:
     details = getattr(result, "details", {}) or {}
     keys = details.get("config_added_keys") or []
@@ -387,7 +440,16 @@ async def plugin_install_callback(update, context):
 
 async def plugin_update_callback(update, context):
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception as exc:
+        _log_feature_event(
+            "warning",
+            "feature.update_callback_answer_failed",
+            update,
+            None,
+            error_code=type(exc).__name__,
+        )
     if not init.check_user(update.effective_user.id):
         await query.edit_message_text("⚠️ 当前账号无权管理 Feature 插件。")
         return
@@ -1191,6 +1253,7 @@ async def _render_actions(
                 prefer_edit=bool(getattr(update, "callback_query", None)),
             )
             return False, None, None
+        delivered_action = str(action["kind"])
         if action["kind"] == "send_message":
             sent = await update.effective_message.reply_text(text, **kwargs)
             rendered_kind = "text"
@@ -1205,6 +1268,7 @@ async def _render_actions(
                     pass
                 sent = await update.effective_message.reply_text(text, **kwargs)
                 edited_source = False
+                delivered_action = "send_message"
             else:
                 sent = await update.effective_message.edit_text(text, **kwargs)
                 edited_source = True
@@ -1262,6 +1326,7 @@ async def _render_actions(
                 sent = await update.effective_message.reply_text(text, **kwargs)
                 rendered_kind = "text"
                 edited_source = False
+                delivered_action = "send_message"
         if (
             getattr(update, "callback_query", None) is not None
             and not source_keyboard_resolved
@@ -1277,6 +1342,19 @@ async def _render_actions(
         if isinstance(candidate, int) and candidate > 0:
             last_message_id = candidate
             last_message_kind = rendered_kind
+        _log_delivered_feature_action(
+            update,
+            route,
+            operation_record=operation_record,
+            action_index=index,
+            requested_action=str(action["kind"]),
+            delivered_action=delivered_action,
+            text=text,
+            parse_mode=parse_mode,
+            action_data=action_data,
+            message_id=candidate if isinstance(candidate, int) and candidate > 0 else None,
+            message_kind=rendered_kind,
+        )
     return True, last_message_id, last_message_kind
 
 

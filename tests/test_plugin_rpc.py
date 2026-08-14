@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import sys
 import tempfile
 import unittest
@@ -141,6 +142,83 @@ class PluginRpcClientTest(unittest.IsolatedAsyncioTestCase):
         ])
 
         self.assertEqual([item["value"] for item in results], list(range(10)))
+
+    async def test_rpc_envelope_binds_trace_parent_span_operation_and_request_in_feature(self):
+        from app.runtime.plugin_rpc import RpcClient
+        from telepiplex_plugin_sdk.diagnostics import (
+            bind_diagnostic_context,
+            current_diagnostic_context,
+        )
+
+        observed = {}
+
+        async def inspect_context(request):
+            observed.update(current_diagnostic_context())
+            return {"payload": request["payload"]}
+
+        await self._server({"demo.inspect": inspect_context})
+        client = RpcClient(self.socket_path, "secret-token")
+        with bind_diagnostic_context(
+            trace_id="TRC-RPC-1",
+            span_id="SPN-PARENT-1",
+            operation_id="operation-rpc-1",
+        ):
+            result = await client.request(
+                "capability.call",
+                {"capability": "demo.inspect", "method": "run", "payload": {"value": 9}},
+                deadline=1,
+            )
+
+        self.assertEqual(result, {"payload": {"value": 9}})
+        self.assertEqual(observed["trace_id"], "TRC-RPC-1")
+        self.assertEqual(observed["parent_span_id"], "SPN-PARENT-1")
+        self.assertEqual(observed["operation_id"], "operation-rpc-1")
+        self.assertTrue(observed["span_id"].startswith("SPN-"))
+        self.assertTrue(observed["request_id"])
+        self.assertNotEqual(observed["span_id"], observed["parent_span_id"])
+
+    async def test_rpc_client_logs_typed_start_and_completion_with_duration(self):
+        from app.runtime.plugin_rpc import RpcClient
+        from telepiplex_plugin_sdk.diagnostics import bind_diagnostic_context
+
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        await self._server()
+        logger = logging.getLogger("telepiplex.rpc.feature")
+        original_level = logger.level
+        logger.setLevel(logging.INFO)
+        capture = Capture()
+        logger.addHandler(capture)
+        self.addCleanup(logger.removeHandler, capture)
+        self.addCleanup(logger.setLevel, original_level)
+
+        with bind_diagnostic_context(trace_id="TRC-RPC-LOG", operation_id="operation-log"):
+            result = await RpcClient(self.socket_path, "secret-token").request(
+                "handshake",
+                {"message": "你好"},
+                deadline=1,
+            )
+
+        started = next(
+            record for record in records
+            if getattr(record, "event_name", "") == "rpc.feature.started"
+        )
+        completed = next(
+            record for record in records
+            if getattr(record, "event_name", "") == "rpc.feature.completed"
+        )
+        self.assertEqual(result["plugin_id"], "echo")
+        self.assertEqual(started.diagnostic_fields["transport"]["method"], "handshake")
+        self.assertEqual(
+            started.diagnostic_fields["transport"]["request_id"],
+            completed.diagnostic_fields["transport"]["request_id"],
+        )
+        self.assertEqual(completed.diagnostic_fields["status"], "completed")
+        self.assertGreaterEqual(completed.diagnostic_fields["duration_ms"], 0)
 
 
 if __name__ == "__main__":

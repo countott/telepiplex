@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -15,6 +16,15 @@ from app.runtime.plugin_rpc import RpcClient
 from app.runtime.plugin_store import ActiveRelease
 from app.utils.log_sanitizer import sanitize_log_text
 from app.utils.logger import configure_named_file_logger, feature_runtime_log_path
+from app.utils.logger import (
+    LogSession,
+    configure_feature_session_logger,
+    current_log_session,
+)
+from telepiplex_plugin_sdk.diagnostics import (
+    render_machine_event,
+    sanitize_diagnostic_value,
+)
 
 
 _FEATURE_LOG_LEVEL = re.compile(
@@ -65,6 +75,7 @@ class PluginProcess:
     monitor_task: asyncio.Task | None = None
     log_tasks: list[asyncio.Task] = field(default_factory=list)
     desired_stop: bool = False
+    last_diagnostic_sequence: int = 0
 
     @property
     def pid(self) -> int | None:
@@ -96,6 +107,7 @@ class PluginSupervisor:
         broker=None,
         log_level: str = "info",
         restart_listener=None,
+        log_session: LogSession | None = None,
     ):
         self.startup_timeout = float(startup_timeout)
         self.restart_limit = max(0, int(restart_limit))
@@ -106,6 +118,7 @@ class PluginSupervisor:
         self.broker = broker
         self.log_level = str(log_level or "info")
         self.restart_listener = restart_listener
+        self.log_session = log_session or current_log_session()
         self._active: dict[str, PluginProcess] = {}
         self._instances: dict[str, PluginProcess] = {}
 
@@ -179,6 +192,7 @@ class PluginSupervisor:
                 process.release.manifest,
             )
         process.state = "starting"
+        process.last_diagnostic_sequence = 0
         environment = {
             key: value
             for key, value in os.environ.items()
@@ -200,6 +214,10 @@ class PluginSupervisor:
             ),
             "TPX_LOG_LEVEL": self.log_level,
             "TPX_RUNTIME_LOG_PATH": str(self._runtime_log_path(process)),
+            "TPX_LOG_SESSION_ID": (
+                self.log_session.session_id if self.log_session is not None else ""
+            ),
+            "TPX_INSTANCE_ID": process.instance_id,
         })
         process.child = await asyncio.create_subprocess_exec(
             *process.argv,
@@ -249,21 +267,96 @@ class PluginSupervisor:
             line = await stream.readline()
             if not line:
                 return
-            text = sanitize_log_text(
-                line.decode("utf-8", errors="replace").rstrip().replace(
-                    process.startup_token,
-                    "***redacted***",
-                )
+            raw_text = line.decode("utf-8", errors="replace").rstrip().replace(
+                process.startup_token,
+                "***redacted***",
             )
+            feature_logger = self._feature_logger(process)
+            diagnostic_event = None
+            if raw_text.startswith("@tpx-event-v1 "):
+                try:
+                    candidate = json.loads(raw_text.removeprefix("@tpx-event-v1 "))
+                    if isinstance(candidate, dict) and candidate.get("schema_version") == "1.0":
+                        diagnostic_event = candidate
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    diagnostic_event = None
+            if diagnostic_event is not None:
+                existing_paths = list(
+                    (diagnostic_event.get("privacy") or {}).get("redacted_paths") or []
+                )
+                event_without_privacy = dict(diagnostic_event)
+                event_without_privacy.pop("privacy", None)
+                diagnostic_event, newly_redacted = sanitize_diagnostic_value(
+                    event_without_privacy
+                )
+                redacted_paths = sorted(set(existing_paths + newly_redacted))
+                diagnostic_event["privacy"] = {
+                    "redacted_paths": redacted_paths,
+                    "redaction_count": len(redacted_paths),
+                    "sanitized": True,
+                }
+                text = "@tpx-event-v1 " + render_machine_event(diagnostic_event)
+                process.logs.append(f"{label}: {text}")
+                if len(process.logs) > self.max_log_lines:
+                    del process.logs[:-self.max_log_lines]
+                producer_sequence = int(
+                    (diagnostic_event.get("sequence") or {}).get("producer") or 0
+                )
+                expected_sequence = process.last_diagnostic_sequence + 1
+                if producer_sequence > expected_sequence:
+                    feature_logger.warning(
+                        "Feature 诊断事件序号出现缺口",
+                        extra={
+                            "event_name": "diagnostics.event_gap",
+                            "diagnostic_component": process.plugin_id,
+                            "diagnostic_runtime": {
+                                "plugin_id": process.plugin_id,
+                                "plugin_version": process.release.version,
+                                "instance_id": process.instance_id,
+                                "pid": process.pid,
+                            },
+                            "diagnostic_fields": {
+                                "stage": "diagnostics_transport",
+                                "status": "gap_detected",
+                                "input": {
+                                    "expected_sequence": expected_sequence,
+                                    "received_sequence": producer_sequence,
+                                },
+                            },
+                        },
+                    )
+                process.last_diagnostic_sequence = max(
+                    process.last_diagnostic_sequence,
+                    producer_sequence,
+                )
+                feature_logger.log(
+                    logging.getLevelName(str(diagnostic_event.get("level") or "INFO")),
+                    str((diagnostic_event.get("event") or {}).get("message") or "Feature event"),
+                    extra={"diagnostic_event": diagnostic_event},
+                )
+                continue
+            text = sanitize_log_text(raw_text)
             process.logs.append(f"{label}: {text}")
             if len(process.logs) > self.max_log_lines:
                 del process.logs[:-self.max_log_lines]
-            feature_logger = self._feature_logger(process)
             feature_logger.log(
                 self._captured_log_level(text, label),
-                "[%s] %s",
-                label,
                 text,
+                extra={
+                    "event_name": "feature.process_output",
+                    "diagnostic_component": process.plugin_id,
+                    "diagnostic_runtime": {
+                        "plugin_id": process.plugin_id,
+                        "plugin_version": process.release.version,
+                        "instance_id": process.instance_id,
+                        "pid": process.pid,
+                    },
+                    "diagnostic_fields": {
+                        "stage": "process_output",
+                        "status": "observed",
+                        "output": {"stream": label},
+                    },
+                },
             )
 
     @staticmethod
@@ -479,9 +572,19 @@ class PluginSupervisor:
         return process.release.path.parent.parent
 
     def _runtime_log_path(self, process: PluginProcess) -> Path:
+        if self.log_session is not None:
+            return self.log_session.feature_paths(process.plugin_id)[0]
         return feature_runtime_log_path(self._plugin_root(process))
 
     def _feature_logger(self, process: PluginProcess) -> logging.Logger:
+        if self.log_session is not None:
+            return configure_feature_session_logger(
+                f"telepiplex.feature.{process.plugin_id}",
+                plugin_id=process.plugin_id,
+                session=self.log_session,
+                level=self.log_level,
+                propagate=True,
+            )
         return configure_named_file_logger(
             f"telepiplex.feature.{process.plugin_id}",
             log_path=self._runtime_log_path(process),

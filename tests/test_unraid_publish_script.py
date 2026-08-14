@@ -184,7 +184,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
                     "b refs/tags/search-v1.6.0",
                     "c refs/tags/rename-v1.0.5",
                     "d refs/tags/sync-v1.0.2",
-                    "e refs/tags/caption-v0.1.2",
+                    "e refs/tags/caption-v0.1.3",
                 )
             ),
         )
@@ -199,10 +199,10 @@ class UnraidPublishScriptTest(unittest.TestCase):
             tag_pushes,
             [
                 "push origin refs/tags/telepiplex-v3.4.11",
-                "push origin refs/tags/download-v1.0.10",
-                "push origin refs/tags/search-v1.9.5",
-                "push origin refs/tags/rename-v1.4.3",
-                "push origin refs/tags/sync-v1.1.0",
+                "push origin refs/tags/download-v1.0.12",
+                "push origin refs/tags/search-v1.9.7",
+                "push origin refs/tags/rename-v1.4.5",
+                "push origin refs/tags/sync-v1.1.1",
             ],
         )
         self.assertTrue(
@@ -222,19 +222,19 @@ class UnraidPublishScriptTest(unittest.TestCase):
             remote_tags="\n".join(
                 (
                     "host refs/tags/telepiplex-v3.4.11",
-                    "a refs/tags/download-v1.0.10",
-                    "b refs/tags/search-v1.9.5",
-                    "c refs/tags/rename-v1.4.3",
-                    "d refs/tags/sync-v1.1.0",
-                    "e refs/tags/caption-v0.1.2",
+                    "a refs/tags/download-v1.0.12",
+                    "b refs/tags/search-v1.9.7",
+                    "c refs/tags/rename-v1.4.5",
+                    "d refs/tags/sync-v1.1.1",
+                    "e refs/tags/caption-v0.1.3",
                 )
             ),
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("仅进入 main、不创建标签", result.stdout)
-        self.assertIn("download 1.0.10", result.stdout)
-        self.assertNotIn("refs/tags/download-v1.0.10", git_log.read_text())
+        self.assertIn("download 1.0.12", result.stdout)
+        self.assertNotIn("refs/tags/download-v1.0.12", git_log.read_text())
 
     def test_unpublished_feature_version_is_tagged(self):
         result, git_log = self._run_script(
@@ -242,19 +242,19 @@ class UnraidPublishScriptTest(unittest.TestCase):
             remote_tags="\n".join(
                 (
                     "host refs/tags/telepiplex-v3.4.11",
-                    "a refs/tags/download-v1.0.10",
+                    "a refs/tags/download-v1.0.12",
                     "b refs/tags/search-v1.9.2",
-                    "c refs/tags/rename-v1.4.3",
-                    "d refs/tags/sync-v1.1.0",
-                    "e refs/tags/caption-v0.1.2",
+                    "c refs/tags/rename-v1.4.5",
+                    "d refs/tags/sync-v1.1.1",
+                    "e refs/tags/caption-v0.1.3",
                 )
             ),
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("search-v1.9.5", result.stdout)
+        self.assertIn("search-v1.9.7", result.stdout)
         self.assertIn(
-            "push origin refs/tags/search-v1.9.5",
+            "push origin refs/tags/search-v1.9.7",
             git_log.read_text(encoding="utf-8"),
         )
 
@@ -268,11 +268,11 @@ class UnraidPublishScriptTest(unittest.TestCase):
             remote_tags="\n".join(
                 (
                     "host refs/tags/telepiplex-v3.4.11",
-                    "a refs/tags/download-v1.0.10",
-                    "b refs/tags/search-v1.9.5",
-                    "c refs/tags/rename-v1.4.3",
-                    "d refs/tags/sync-v1.1.0",
-                    "e refs/tags/caption-v0.1.2",
+                    "a refs/tags/download-v1.0.12",
+                    "b refs/tags/search-v1.9.7",
+                    "c refs/tags/rename-v1.4.5",
+                    "d refs/tags/sync-v1.1.1",
+                    "e refs/tags/caption-v0.1.3",
                 )
             ),
             script_args=("PUBLISH 3.4.9 release telepiplex 3.4.9",),

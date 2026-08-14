@@ -1,5 +1,7 @@
 import asyncio
 import importlib.util
+import json
+import logging
 import sys
 import tempfile
 import unittest
@@ -24,10 +26,58 @@ def load_bot_module():
 
 
 class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
-    async def test_core_runtime_version_is_v3_4_24_host(self):
+    async def test_core_runtime_version_is_v3_5_0_host(self):
         bot_module = await asyncio.to_thread(load_bot_module)
 
-        self.assertEqual(bot_module.get_version(), "v3.4.25-host")
+        self.assertEqual(bot_module.get_version(), "v3.5.0-host")
+
+    async def test_uncaught_telegram_error_uses_the_same_sanitized_incident_in_frontend_and_machine_log(self):
+        from app.utils.logger import Logger
+
+        bot_module = await asyncio.to_thread(load_bot_module)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wrapper = Logger(config_root=tmpdir, session_id="BOT-ERROR")
+            original_logger = bot_module.init.logger
+            bot_module.init.logger = wrapper
+            reply_text = AsyncMock()
+            update = SimpleNamespace(
+                update_id=991,
+                effective_chat=SimpleNamespace(id=1001),
+                effective_user=SimpleNamespace(id=2002),
+                effective_message=SimpleNamespace(message_id=3003, reply_text=reply_text),
+            )
+            try:
+                raise RuntimeError("api_key=secret-value")
+            except RuntimeError as exc:
+                context = SimpleNamespace(error=exc)
+                await bot_module.telepiplex_error_handler(update, context)
+            for handler in list(logging.getLogger().handlers):
+                if getattr(handler, "_telepiplex_handler_kind", ""):
+                    logging.getLogger().removeHandler(handler)
+                    handler.close()
+            bot_module.init.logger = original_logger
+
+            frontend = reply_text.await_args.kwargs["text"]
+            events = [
+                json.loads(line)
+                for line in wrapper.session.machine_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            event = next(
+                item for item in events
+                if item["event"]["name"] == "telegram.update.failed"
+            )
+            incident_id = event["identity"]["incident_id"]
+            self.assertTrue(incident_id.startswith("INC-"))
+            self.assertIn(incident_id, frontend)
+            self.assertEqual(event["facts"]["user_surface"]["text"], frontend)
+            self.assertEqual(event["identity"]["trace_id"], "TG-991")
+            self.assertIn("Traceback", event["error"]["stack"])
+            self.assertNotIn("secret-value", frontend)
+            self.assertNotIn(
+                "secret-value",
+                wrapper.session.machine_path.read_text(encoding="utf-8"),
+            )
 
     async def test_missing_legacy_catalog_uses_official_catalog_branch(self):
         bot_module = await asyncio.to_thread(load_bot_module)
@@ -458,10 +508,18 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_host_install_callback_is_reserved_before_feature_callbacks(self):
         bot_module = await asyncio.to_thread(load_bot_module)
-        application = SimpleNamespace(bot_data={}, add_handler=Mock())
+        application = SimpleNamespace(
+            bot_data={},
+            add_handler=Mock(),
+            add_error_handler=Mock(),
+        )
         manager = SimpleNamespace(router=Mock())
 
         bot_module.configure_application(application, manager)
+
+        application.add_error_handler.assert_called_once_with(
+            bot_module.telepiplex_error_handler
+        )
 
         callback_patterns = [
             handler.pattern.pattern if handler.pattern is not None else None

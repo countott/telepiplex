@@ -615,6 +615,8 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(release_calls, [])
 
     async def test_lost_identity_response_retries_same_milestone(self):
+        from telepiplex_plugin_sdk import FeatureError
+
         plan_id = await self._prepare_search()
         stored = self.feature.plans[plan_id]
         stored["selected_path"] = "/Movies"
@@ -640,7 +642,10 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 deadline=deadline,
             )
             if len(attempts) == 1:
-                raise RuntimeError("identity response lost")
+                raise FeatureError(
+                    "internal_error",
+                    "Host milestone bookkeeping was interrupted",
+                )
             return {**response, "accepted": False, "duplicate": True}
 
         self.host.publish_operation_milestone = accept_then_lose
@@ -653,6 +658,59 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             stored["identity_milestone_id"],
             attempts[0],
         )
+
+    async def test_rejected_identity_milestone_is_not_retried(self):
+        from telepiplex_plugin_sdk import FeatureError
+
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        stored["selected_path"] = "/Movies"
+        attempts = []
+
+        async def reject_owner(*_args, **_kwargs):
+            attempts.append("owner_mismatch")
+            raise FeatureError(
+                "owner_mismatch",
+                "operation belongs to another Feature",
+            )
+
+        self.host.publish_operation_milestone = reject_owner
+
+        with self.assertRaises(FeatureError) as raised:
+            await self.feature._confirm_and_search(plan_id, stored)
+
+        self.assertEqual(raised.exception.code, "identity_delivery_failed")
+        self.assertEqual(attempts, ["owner_mismatch"])
+
+    async def test_identity_milestone_failure_reports_contract_code_not_type(
+        self,
+    ):
+        from telepiplex_plugin_sdk import FeatureError
+
+        plan_id = await self._prepare_search()
+
+        async def fail_internal(*_args, **_kwargs):
+            raise FeatureError(
+                "internal_error",
+                "Host milestone bookkeeping was interrupted",
+            )
+
+        self.host.publish_operation_milestone = fail_internal
+        await self.feature.callback({
+            "namespace": "search",
+            "payload": f"confirm:{plan_id}",
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.runtime.run("search-releases-")
+
+        failed = self.host.reports[-1]
+        self.assertEqual(failed["state"], "failed")
+        self.assertEqual(
+            failed["status_text"],
+            "资源搜索失败：identity_delivery_failed",
+        )
+        self.assertNotIn("FeatureError", failed["status_text"])
 
     async def test_no_exact_scope_reports_counts_without_fallback_buttons(self):
         from telepiplex_search.series_scope import apply_series_scope
@@ -1744,6 +1802,8 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(seal_index, capability_index)
 
     async def test_lost_stage_seal_response_retries_same_milestone(self):
+        from telepiplex_plugin_sdk import FeatureError
+
         plan_id = await self._prepare_search()
         await self.feature.callback({
             "namespace": "search",
@@ -1772,7 +1832,10 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 deadline=deadline,
             )
             if len(attempts) == 1:
-                raise RuntimeError("stage seal response lost")
+                raise FeatureError(
+                    "internal_error",
+                    "Host milestone bookkeeping was interrupted",
+                )
             return {**response, "accepted": False, "duplicate": True}
 
         self.host.seal_operation_stage = accept_then_lose
@@ -3743,12 +3806,12 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "1.9.5")
+        self.assertEqual(manifest["version"], "1.9.7")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertEqual(project["project"]["version"], "1.9.5")
+        self.assertEqual(project["project"]["version"], "1.9.7")
         self.assertEqual(
             project["project"]["dependencies"][0],
-            "telepiplex-plugin-sdk==1.2.2",
+            "telepiplex-plugin-sdk==1.3.0",
         )
 
     def test_default_config_enables_free_and_configured_sources(self):
@@ -3779,14 +3842,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.9.5.tpx", source)
+        self.assertIn("/tmp/search-1.9.7.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-1.9.5.tpx", source)
+        self.assertNotIn("dist/search-1.9.7.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

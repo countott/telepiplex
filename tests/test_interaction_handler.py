@@ -701,6 +701,46 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         )
         context.application.bot.send_message.assert_not_awaited()
 
+    async def test_stage_delivery_logs_the_exact_frontend_text_and_operation_in_typed_events(self):
+        from app.handlers import interaction_handler
+        from app.handlers.interaction_handler import deliver_operation_milestone
+
+        record = self.coordinator.report("search", self.report())
+        context = self.context()
+        logger = Mock()
+
+        with patch.object(interaction_handler.init, "logger", logger):
+            result = await deliver_operation_milestone(
+                context.application,
+                record,
+                "stage",
+                "",
+                "✅ 搜索完成，共 38 条候选",
+            )
+
+        events = [
+            call.kwargs for call in logger.info.call_args_list
+            if call.kwargs.get("event_name")
+        ]
+        started = next(
+            item for item in events
+            if item["event_name"] == "telegram.milestone.delivery.started"
+        )
+        completed = next(
+            item for item in events
+            if item["event_name"] == "telegram.milestone.delivery.completed"
+        )
+        self.assertEqual(result["message_id"], 90)
+        self.assertEqual(
+            started["diagnostic_fields"]["user_surface"]["text"],
+            "✅ 搜索完成，共 38 条候选",
+        )
+        self.assertEqual(
+            started["diagnostic_fields"]["input"]["operation_id"],
+            record.operation_id,
+        )
+        self.assertEqual(completed["diagnostic_fields"]["output"]["message_id"], 90)
+
     @patch("app.handlers.interaction_handler.build_poster_grid")
     async def test_identity_delivery_reuses_title_placeholder_when_remote_fails(
         self,

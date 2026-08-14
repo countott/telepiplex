@@ -1339,6 +1339,37 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             "search:select:p1:0",
         )
 
+    async def test_rendered_feature_action_logs_the_exact_frontend_payload_and_message_id(self):
+        from app.handlers import plugin_handler
+        from app.handlers.plugin_handler import _render_actions
+
+        update, context, _manager = self._request([], user_id=1)
+        update.effective_message.reply_text.return_value = SimpleNamespace(
+            message_id=912
+        )
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        logger = Mock()
+
+        with patch.object(plugin_handler.init, "logger", logger):
+            rendered, message_id, message_kind = await _render_actions(
+                update,
+                context,
+                route,
+                {"actions": [{"kind": "send_message", "text": "前台完整文案"}]},
+            )
+
+        self.assertEqual((rendered, message_id, message_kind), (True, 912, "text"))
+        call = logger.info.call_args
+        self.assertEqual(call.kwargs["event_name"], "telegram.feature_action.delivered")
+        fields = call.kwargs["diagnostic_fields"]
+        self.assertEqual(fields["user_surface"]["text"], "前台完整文案")
+        self.assertEqual(fields["user_surface"]["action"], "send_message")
+        self.assertEqual(fields["output"]["message_id"], 912)
+        self.assertEqual(fields["input"]["plugin_id"], "search")
+
     @patch("app.handlers.plugin_handler.build_poster_grid")
     async def test_feature_send_photo_grid_action(self, build_grid):
         from io import BytesIO
@@ -1797,6 +1828,32 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "暂不更新",
             update.callback_query.edit_message_text.await_args.args[0],
+        )
+
+    async def test_expired_update_callback_answer_does_not_abort_update(self):
+        from telegram.error import BadRequest
+        from app.handlers.plugin_handler import plugin_update_callback
+
+        update, context, manager = self._request([], user_id=1)
+        update.callback_query = Mock()
+        update.callback_query.data = (
+            "host-plugin-update:confirm:echo@1.1.0"
+        )
+        update.callback_query.answer = AsyncMock(side_effect=BadRequest(
+            "Query is too old and response timeout expired or query id is invalid"
+        ))
+        update.callback_query.edit_message_text = AsyncMock()
+
+        with patch(
+            "app.handlers.plugin_handler.init.check_user",
+            return_value=True,
+        ):
+            await plugin_update_callback(update, context)
+
+        self.assertEqual(manager.calls, [("update", "echo@1.1.0")])
+        self.assertIn(
+            "1.0.0",
+            update.callback_query.edit_message_text.await_args_list[-1].args[0],
         )
 
     async def test_update_success_clears_stale_config_state_and_links_current_wizard(self):

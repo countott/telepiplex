@@ -788,6 +788,8 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_lost_download_stage_response_retries_same_milestone(self):
+        from telepiplex_plugin_sdk import FeatureError
+
         original_seal = self.host.seal_operation_stage
         attempts = []
 
@@ -806,7 +808,10 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
                 deadline=deadline,
             )
             if len(attempts) == 1:
-                raise RuntimeError("download stage response lost")
+                raise FeatureError(
+                    "internal_error",
+                    "Host milestone bookkeeping was interrupted",
+                )
             return {**response, "accepted": False, "duplicate": True}
 
         self.host.seal_operation_stage = accept_then_lose
@@ -818,6 +823,30 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(attempts, [attempts[0], attempts[0]])
+
+    async def test_rejected_download_stage_milestone_is_not_retried(self):
+        from telepiplex_plugin_sdk import FeatureError
+
+        attempts = []
+
+        async def reject_owner(*_args, **_kwargs):
+            attempts.append("owner_mismatch")
+            raise FeatureError(
+                "owner_mismatch",
+                "operation belongs to another Feature",
+            )
+
+        self.host.seal_operation_stage = reject_owner
+
+        with self.assertRaises(FeatureError) as raised:
+            await self.feature._seal_download_stage(
+                "op-download-rejected-stage",
+                "job-download-rejected-stage",
+                {"final_path": "/Downloads/Show.S01E01.mkv"},
+            )
+
+        self.assertEqual(raised.exception.code, "owner_mismatch")
+        self.assertEqual(attempts, ["owner_mismatch"])
 
     async def test_download_completes_and_skips_organization_when_rename_is_inactive(self):
         async def reject_missing_target(report, **_kwargs):
@@ -2282,17 +2311,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.0.10")
+        self.assertEqual(manifest["version"], "1.0.12")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.0.10")
+        self.assertEqual(project["project"]["version"], "1.0.12")
         self.assertEqual(
             project["project"]["dependencies"][0],
-            "telepiplex-plugin-sdk==1.2.2",
+            "telepiplex-plugin-sdk==1.3.0",
         )
-        self.assertIn("/tmp/download-1.0.10.tpx", readme)
-        self.assertNotIn("dist/download-1.0.10.tpx", readme)
+        self.assertIn("/tmp/download-1.0.12.tpx", readme)
+        self.assertNotIn("dist/download-1.0.12.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)

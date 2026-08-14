@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 import yaml
@@ -25,12 +26,24 @@ class PluginRuntimeEndToEndTest(unittest.IsolatedAsyncioTestCase):
         from app.runtime.plugin_manager import PluginManager
         from app.runtime.plugin_store import PluginStore
         from app.runtime.plugin_supervisor import PluginSupervisor
+        from app.utils.logger import configure_root_logger, create_log_session
 
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.wheels = self.root / "wheels"
         self.wheels.mkdir()
         self.sdk_wheel = await asyncio.to_thread(self._build_wheel, SDK_SOURCE, self.wheels / "sdk")
+        with zipfile.ZipFile(self.sdk_wheel) as archive:
+            self.assertIn(
+                "telepiplex_plugin_sdk/diagnostic-event-v1.schema.json",
+                archive.namelist(),
+            )
+        self.log_session = create_log_session(
+            self.root,
+            session_id="E2E-SESSION",
+            runtime={"host_version": "test-host"},
+        )
+        configure_root_logger(level="INFO", session=self.log_session)
         self.router = CapabilityRouter()
         self.journal = EventJournal(self.root / "host.db")
         self.dispatcher = EventDispatcher(self.router, self.journal, retry_interval=0.01)
@@ -46,6 +59,7 @@ class PluginRuntimeEndToEndTest(unittest.IsolatedAsyncioTestCase):
             restart_backoff=0.01,
             runtime_root=self.root / "runtime",
             broker=self.broker,
+            log_session=self.log_session,
         )
         self.manager = PluginManager(
             store=PluginStore(self.root / "plugins"),
@@ -62,6 +76,13 @@ class PluginRuntimeEndToEndTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         if hasattr(self, "manager"):
             await self.manager.close()
+        import logging
+
+        for logger in (logging.getLogger(), logging.getLogger("telepiplex.feature.echo")):
+            for handler in list(logger.handlers):
+                if getattr(handler, "_telepiplex_handler_kind", ""):
+                    logger.removeHandler(handler)
+                    handler.close()
         self.temp.cleanup()
 
     def _build_wheel(self, source: Path, output: Path) -> Path:
@@ -221,23 +242,101 @@ class PluginRuntimeEndToEndTest(unittest.IsolatedAsyncioTestCase):
             deadline=3,
         )
 
-        runtime_log = self.root / "plugins" / "echo" / "state" / "logs" / "runtime.log"
+        runtime_log = self.log_session.feature_paths("echo")[1]
         async with asyncio.timeout(5):
             while not runtime_log.exists():
                 await asyncio.sleep(0.02)
         async with asyncio.timeout(5):
             while True:
                 text = runtime_log.read_text(encoding="utf-8")
-                if "feature_dispatch_start" in text:
+                if "feature.dispatch.completed" in text:
                     break
                 await asyncio.sleep(0.02)
 
-        text = runtime_log.read_text(encoding="utf-8")
-        self.assertIn("feature_dispatch_start", text)
-        self.assertIn("feature_dispatch_finish", text)
-        self.assertIn("command.dispatch", text)
+        events = [json.loads(line) for line in text.splitlines() if line.strip()]
+        event_names = {event["event"]["name"] for event in events}
+        self.assertIn("feature.dispatch.started", event_names)
+        self.assertIn("feature.dispatch.completed", event_names)
+        self.assertTrue(
+            any(
+                ((event.get("facts") or {}).get("input") or {}).get("method")
+                == "command.dispatch"
+                for event in events
+            )
+        )
         self.assertIn("***redacted***", text)
         self.assertNotIn("secret-token-value", text)
+        self.assertTrue(
+            all(event["identity"]["session_id"] == "E2E-SESSION" for event in events)
+        )
+
+    async def test_concurrent_host_to_feature_calls_keep_complete_correlated_diagnostics(self):
+        artifact = await self._artifact("1.0.0", "d" * 40)
+        await self.manager.install(artifact)
+        route = self.router.command_route("echo")
+
+        async def request(index: int):
+            return await route.client.request(
+                "command.dispatch",
+                {"command": "echo", "args": [f"load-{index}"]},
+                deadline=5,
+            )
+
+        request_count = 100
+        results = await asyncio.gather(
+            *(request(index) for index in range(request_count))
+        )
+        self.assertEqual(len(results), request_count)
+        self.assertEqual(
+            {result["actions"][0]["text"] for result in results},
+            {f"1.0.0: load-{index}" for index in range(request_count)},
+        )
+
+        feature_machine = self.log_session.feature_paths("echo")[1]
+        async with asyncio.timeout(10):
+            while True:
+                events = [
+                    json.loads(line)
+                    for line in feature_machine.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                completed = [
+                    event for event in events
+                    if event["event"]["name"] == "feature.dispatch.completed"
+                    and ((event.get("facts") or {}).get("input") or {}).get("method")
+                    == "command.dispatch"
+                ]
+                if len(completed) >= request_count:
+                    break
+                await asyncio.sleep(0.02)
+
+        started = [
+            event for event in events
+            if event["event"]["name"] == "feature.dispatch.started"
+            and ((event.get("facts") or {}).get("input") or {}).get("method")
+            == "command.dispatch"
+        ]
+        self.assertEqual(len(started), request_count)
+        self.assertEqual(len(completed), request_count)
+        self.assertEqual(
+            len({event["event_id"] for event in started + completed}),
+            request_count * 2,
+        )
+        self.assertEqual(
+            len({event["identity"]["trace_id"] for event in completed}),
+            request_count,
+        )
+        self.assertTrue(
+            all(event["event"]["duration_ms"] is not None for event in completed)
+        )
+        global_ids = {
+            json.loads(line)["event_id"]
+            for line in self.log_session.machine_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        }
+        self.assertTrue(
+            {event["event_id"] for event in started + completed}.issubset(global_ids)
+        )
 
 
 if __name__ == "__main__":

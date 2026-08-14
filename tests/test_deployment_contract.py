@@ -121,12 +121,12 @@ class DeploymentContractTest(unittest.TestCase):
             self.assertIn("Host API 1.5", source)
             self.assertIn("Host API 1.6", source)
 
-    def test_plugin_sdk_release_identity_is_1_2_2(self):
+    def test_plugin_sdk_release_identity_is_1_3_0(self):
         project = tomllib.loads(
             (ROOT / "sdk" / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(project["project"]["version"], "1.2.2")
+        self.assertEqual(project["project"]["version"], "1.3.0")
 
     def test_build_script_only_references_existing_dockerfiles(self):
         source = (ROOT / "build.sh").read_text(encoding="utf-8")

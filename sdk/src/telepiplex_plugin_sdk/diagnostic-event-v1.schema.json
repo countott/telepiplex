@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://telepiplex.local/schemas/diagnostic-event-v1.schema.json",
+  "title": "telepiplex diagnostic event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "sequence",
+    "time",
+    "level",
+    "logger",
+    "component",
+    "identity",
+    "event",
+    "runtime",
+    "facts",
+    "error",
+    "privacy"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "event_id": {"type": "string", "minLength": 1},
+    "sequence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["producer", "ingest"],
+      "properties": {
+        "producer": {"type": "integer", "minimum": 0},
+        "ingest": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "time": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["utc", "local", "timezone", "unix_ns", "monotonic_ns"],
+      "properties": {
+        "utc": {"type": "string", "format": "date-time"},
+        "local": {"type": "string", "format": "date-time"},
+        "timezone": {"type": "string"},
+        "unix_ns": {"type": "integer", "minimum": 0},
+        "monotonic_ns": {"type": "integer", "minimum": 0}
+      }
+    },
+    "level": {"enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]},
+    "logger": {"type": "string"},
+    "component": {"type": "string"},
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "trace_id", "span_id", "parent_span_id", "operation_id", "request_id", "incident_id"],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "trace_id": {"type": ["string", "null"]},
+        "span_id": {"type": ["string", "null"]},
+        "parent_span_id": {"type": ["string", "null"]},
+        "operation_id": {"type": ["string", "null"]},
+        "request_id": {"type": ["string", "null"]},
+        "incident_id": {"type": ["string", "null"]}
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "message", "stage", "status", "duration_ms"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "message": {"type": "string"},
+        "stage": {"type": ["string", "null"]},
+        "status": {"type": ["string", "null"]},
+        "duration_ms": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "required": ["host_version", "plugin_id", "plugin_version", "instance_id", "pid", "thread_name", "thread_id", "async_task"],
+      "properties": {
+        "host_version": {"type": ["string", "null"]},
+        "plugin_id": {"type": ["string", "null"]},
+        "plugin_version": {"type": ["string", "null"]},
+        "instance_id": {"type": ["string", "null"]},
+        "pid": {"type": ["integer", "null"]},
+        "thread_name": {"type": ["string", "null"]},
+        "thread_id": {"type": ["integer", "null"]},
+        "async_task": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "facts": {"type": "object"},
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "type", "message", "retryable", "stack", "causes"],
+      "properties": {
+        "code": {"type": ["string", "null"]},
+        "type": {"type": ["string", "null"]},
+        "message": {"type": ["string", "null"]},
+        "retryable": {"type": ["boolean", "null"]},
+        "stack": {"type": ["string", "null"]},
+        "causes": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["redacted_paths", "redaction_count", "sanitized"],
+      "properties": {
+        "redacted_paths": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "redaction_count": {"type": "integer", "minimum": 0},
+        "sanitized": {"const": true}
+      }
+    }
+  }
+}

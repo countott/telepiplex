@@ -18,7 +18,7 @@ def _ensure_module_paths():
 
 _ensure_module_paths()
 
-from app.utils.logger import Logger, host_log_path
+from app.utils.logger import Logger
 
 
 debug_mode = False
@@ -60,9 +60,21 @@ def create_logger():
     logger = Logger(
         level=level_map.get(log_level, logging.INFO),
         debug_model=debug_mode,
-        log_path=host_log_path(CONFIG),
+        config_root=CONFIG,
     )
-    logger.info(f"Logger init success! host_log={host_log_path(CONFIG)}")
+    logger.info(
+        "日志系统启动完成",
+        event_name="diagnostics.session.started",
+        diagnostic_fields={
+            "status": "ready",
+            "output": {
+                "session_directory": str(logger.session.directory),
+                "human_log": str(logger.session.human_path),
+                "machine_log": str(logger.session.machine_path),
+            },
+            "retention": {"startups": 30, "days": 30},
+        },
+    )
 
 
 def load_yaml_config(*, raise_on_error=False):

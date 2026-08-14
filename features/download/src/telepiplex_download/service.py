@@ -67,6 +67,12 @@ def _ambiguous_host_report_error(exc: Exception) -> bool:
     }
 
 
+def _ambiguous_milestone_error(exc: Exception) -> bool:
+    return _ambiguous_host_report_error(exc) or (
+        isinstance(exc, FeatureError) and exc.code == "internal_error"
+    )
+
+
 def _offline_task_status(task: dict) -> tuple[int | str, str]:
     raw_status = task.get("status")
     try:
@@ -1814,7 +1820,7 @@ class DownloadFeature:
                 )
             except Exception as exc:
                 if (
-                    _ambiguous_host_report_error(exc)
+                    _ambiguous_milestone_error(exc)
                     and attempt < 2
                 ):
                     await asyncio.sleep(0.25 * (2 ** attempt))

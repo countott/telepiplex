@@ -1,7 +1,8 @@
 import tempfile
+import logging
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 
 class ProviderClient:
@@ -107,6 +108,124 @@ class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
                 "download.provider", "submit", {}, deadline=1
             )
         self.assertEqual(raised.exception.code, "capability_not_declared")
+
+    async def test_feature_to_host_rpc_binds_diagnostics_while_routing_provider(self):
+        from telepiplex_plugin_sdk import HostClient
+        from telepiplex_plugin_sdk.diagnostics import (
+            bind_diagnostic_context,
+            current_diagnostic_context,
+        )
+
+        class ContextProvider:
+            async def request(self, method, params, *, deadline, idempotency_key=""):
+                return {"context": current_diagnostic_context()}
+
+        self.router.activate(
+            "download",
+            manifest("download", provides=("download.provider",)),
+            ContextProvider(),
+        )
+        self.broker.register(
+            "search",
+            "search-token",
+            manifest("search", requires=("download.provider",)),
+        )
+        with bind_diagnostic_context(
+            trace_id="TRC-HOST-1",
+            span_id="SPN-FEATURE-PARENT",
+            operation_id="operation-host-1",
+        ):
+            result = await HostClient(
+                self.broker.socket_path,
+                "search-token",
+            ).call_capability(
+                "download.provider",
+                "submit",
+                {"value": 1},
+                deadline=1,
+            )
+
+        observed = result["context"]
+        self.assertEqual(observed["trace_id"], "TRC-HOST-1")
+        self.assertEqual(observed["parent_span_id"], "SPN-FEATURE-PARENT")
+        self.assertEqual(observed["operation_id"], "operation-host-1")
+        self.assertTrue(observed["span_id"].startswith("SPN-"))
+        self.assertTrue(observed["request_id"])
+
+    async def test_host_client_logs_typed_start_and_failure_with_stable_error_code(self):
+        from telepiplex_plugin_sdk import FeatureError, HostClient
+
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        self.broker.register("echo", "echo-token", manifest("echo"))
+        logger = logging.getLogger("telepiplex.rpc.host")
+        original_level = logger.level
+        logger.setLevel(logging.INFO)
+        capture = Capture()
+        logger.addHandler(capture)
+        self.addCleanup(logger.removeHandler, capture)
+        self.addCleanup(logger.setLevel, original_level)
+
+        with self.assertRaises(FeatureError) as raised:
+            await HostClient(self.broker.socket_path, "echo-token").call_capability(
+                "download.provider",
+                "submit",
+                {"value": 1},
+                deadline=1,
+            )
+
+        started = next(
+            record for record in records
+            if getattr(record, "event_name", "") == "rpc.host.started"
+        )
+        failed = next(
+            record for record in records
+            if getattr(record, "event_name", "") == "rpc.host.failed"
+        )
+        self.assertEqual(raised.exception.code, "capability_not_declared")
+        self.assertEqual(started.diagnostic_fields["transport"]["method"], "capability.call")
+        self.assertEqual(
+            failed.diagnostic_fields["output"]["error_code"],
+            "capability_not_declared",
+        )
+        self.assertGreaterEqual(failed.diagnostic_fields["duration_ms"], 0)
+
+    async def test_broker_logs_typed_receive_and_completion_with_plugin_method_and_duration(self):
+        from telepiplex_plugin_sdk import HostClient
+
+        logger = Mock()
+        self.broker.logger = logger
+        self.broker.register("notify", "notify-token", manifest("notify"))
+
+        result = await HostClient(
+            self.broker.socket_path,
+            "notify-token",
+        ).notify_user(123, "处理完成", deadline=1)
+
+        events = [
+            call.kwargs for call in logger.info.call_args_list
+            if call.kwargs.get("event_name")
+        ]
+        received = next(
+            item for item in events
+            if item["event_name"] == "rpc.host.received"
+        )
+        completed = next(
+            item for item in events
+            if item["event_name"] == "rpc.host.completed"
+        )
+        self.assertTrue(result["accepted"])
+        self.assertEqual(received["diagnostic_fields"]["transport"]["plugin_id"], "notify")
+        self.assertEqual(received["diagnostic_fields"]["transport"]["method"], "notification.send")
+        self.assertEqual(
+            received["diagnostic_fields"]["transport"]["request_id"],
+            completed["diagnostic_fields"]["transport"]["request_id"],
+        )
+        self.assertGreaterEqual(completed["diagnostic_fields"]["duration_ms"], 0)
 
     async def test_provider_error_code_survives_the_full_feature_to_feature_route(self):
         from telepiplex_plugin_sdk import HostClient, FeatureError
@@ -264,6 +383,57 @@ class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
             raised.exception.message,
             "operation belongs to another Feature",
         )
+
+    async def test_internal_rpc_error_logs_safe_correlation_without_payload(
+        self,
+    ):
+        from telepiplex_plugin_sdk import FeatureError, HostClient
+
+        logger = Mock()
+
+        async def fail_milestone(_plugin_id, _payload):
+            raise RuntimeError(
+                "access_token=must-not-leak https://secret.example/path"
+            )
+
+        self.broker.logger = logger
+        self.broker.milestone_sink = fail_milestone
+        self.broker.register(
+            "search",
+            "internal-error-token",
+            manifest("search"),
+        )
+
+        with self.assertRaises(FeatureError) as raised:
+            await HostClient(
+                self.broker.socket_path,
+                "internal-error-token",
+            ).publish_operation_milestone(
+                "op-internal-log",
+                "media-internal-log",
+                "sensitive title must-not-leak",
+                deadline=1,
+            )
+
+        self.assertEqual(raised.exception.code, "internal_error")
+        message = logger.error.call_args.args[0]
+        self.assertIn("event=runtime_broker.internal_error", message)
+        self.assertIn("plugin_id=search", message)
+        self.assertIn("method=operation.milestone", message)
+        self.assertIn("error_type=RuntimeError", message)
+        self.assertIn("request_id=", message)
+        self.assertNotIn("must-not-leak", message)
+        self.assertNotIn("secret.example", message)
+        self.assertEqual(
+            logger.error.call_args.kwargs["event_name"],
+            "runtime_broker.internal_error",
+        )
+        fields = logger.error.call_args.kwargs["diagnostic_fields"]
+        self.assertEqual(fields["status"], "failed")
+        self.assertEqual(fields["transport"]["plugin_id"], "search")
+        self.assertEqual(fields["transport"]["method"], "operation.milestone")
+        self.assertGreaterEqual(fields["duration_ms"], 0)
+        self.assertIsInstance(logger.error.call_args.kwargs["exc_info"][1], RuntimeError)
 
     async def test_operation_report_uses_authenticated_feature_identity(self):
         from telepiplex_plugin_sdk import HostClient

@@ -16,6 +16,7 @@ from .logging_utils import (
     log_dispatch_start,
 )
 from .types import FeatureError
+from .diagnostics import bind_diagnostic_context
 
 
 Handler = Callable[[dict], dict | Awaitable[dict]]
@@ -133,8 +134,18 @@ class FeatureRuntime:
             if not isinstance(params, dict):
                 raise FeatureError("invalid_request", "request params must be an object")
             try:
-                async with asyncio.timeout(remaining):
-                    result = await self._dispatch(str(request.get("method") or ""), params)
+                diagnostics = request.get("diagnostics")
+                if not isinstance(diagnostics, dict):
+                    diagnostics = {}
+                bound_diagnostics = dict(diagnostics)
+                bound_diagnostics["request_id"] = request_id
+                bound_diagnostics["operation_id"] = (
+                    params.get("operation_id")
+                    or diagnostics.get("operation_id")
+                )
+                with bind_diagnostic_context(**bound_diagnostics):
+                    async with asyncio.timeout(remaining):
+                        result = await self._dispatch(str(request.get("method") or ""), params)
             except TimeoutError:
                 raise FeatureError("deadline_exceeded", "request deadline exceeded") from None
             response = {"type": "response", "id": request_id, "ok": True, "result": result}
@@ -275,19 +286,37 @@ class FeatureRuntime:
         handler = handlers.get(key)
         if handler is None:
             raise FeatureError("not_found", f"handler is not registered: {key}")
+        started_ns = time.monotonic_ns()
         log_dispatch_start(method, key, params)
         self._active_requests += 1
         try:
             result = await self._invoke(handler, params)
         except FeatureError as exc:
-            log_dispatch_error(method, key, exc.code, exc.message)
+            log_dispatch_error(
+                method,
+                key,
+                exc.code,
+                exc,
+                duration_ms=(time.monotonic_ns() - started_ns) / 1_000_000,
+            )
             raise
         except Exception as exc:
-            log_dispatch_error(method, key, type(exc).__name__, exc)
+            log_dispatch_error(
+                method,
+                key,
+                type(exc).__name__,
+                exc,
+                duration_ms=(time.monotonic_ns() - started_ns) / 1_000_000,
+            )
             raise
         finally:
             self._active_requests -= 1
-        log_dispatch_finish(method, key, result)
+        log_dispatch_finish(
+            method,
+            key,
+            result,
+            duration_ms=(time.monotonic_ns() - started_ns) / 1_000_000,
+        )
         return result
 
     @staticmethod
