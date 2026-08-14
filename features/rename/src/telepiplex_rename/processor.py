@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+from telepiplex_plugin_sdk import FeatureError
 from .context import runtime_context
 from telepiplex_plugin_sdk.media_metadata import (
     MEDIA_METADATA_KEY,
@@ -33,6 +34,9 @@ from .subtitles import (
     build_movie_subtitle_plan,
     collect_subtitle_evidence,
 )
+from .file_executor import execute_file_resolutions
+from .file_facts import build_file_facts, parse_file_evidence
+from .file_plan import normalize_storage_path, plan_file_resolutions
 
 
 def _storage(event: DownloadCompletedEvent):
@@ -40,32 +44,6 @@ def _storage(event: DownloadCompletedEvent):
     if storage is None:
         raise RuntimeError("rename processor requires a storage provider")
     return storage
-
-
-def _cleanup_source_directory(storage, path):
-    try:
-        result = storage.delete_single_file(path)
-    except Exception as exc:
-        runtime_context.logger.warning(f"自动整理已完成，但源目录清理失败 path={path}: {exc}")
-        return False
-    if result is not True:
-        runtime_context.logger.warning(f"自动整理已完成，但源目录未能清理 path={path}")
-        return False
-    return True
-
-
-def _move_file_with_outcome(storage, source_path, target_dir):
-    detailed = getattr(storage, "move_file_detailed", None)
-    if callable(detailed):
-        result = detailed(source_path, target_dir)
-        if isinstance(result, dict) and "copied" in result:
-            return result
-    moved = storage.move_file(source_path, target_dir)
-    return {
-        "state": "moved" if moved is True else "move_failed",
-        "copied": moved is True,
-        "source_deleted": moved is True,
-    }
 
 
 def _list_response_items(response):
@@ -160,6 +138,186 @@ def _source_path(event: DownloadCompletedEvent, node: dict) -> str:
     return f"{str(event.final_path).rstrip('/')}/{relative}"
 
 
+def process_file_first_media(
+    event: DownloadCompletedEvent,
+    *,
+    operations: list[dict],
+    work_identity: dict,
+) -> dict:
+    """Plan and execute one independent resolution for every scanned file."""
+
+    if event.snapshot_complete is False:
+        raise FeatureError(
+            "inventory_tree_incomplete",
+            "file-first rename requires a complete tree snapshot",
+        )
+    storage = _storage(event)
+    file_tree = _event_file_tree(event)
+    root_path = event.download_root or event.final_path
+    enriched_tree = []
+    for node in file_tree:
+        enriched = dict(node)
+        if not enriched.get("is_dir") and not (
+            enriched.get("source_id")
+            or enriched.get("file_id")
+            or enriched.get("fid")
+        ):
+            absolute_path = str(enriched.get("path") or "").strip() or (
+                f"{str(root_path).rstrip('/')}/"
+                f"{str(enriched.get('relative_path') or enriched.get('name') or '').strip('/')}"
+            )
+            info = storage.get_file_info(absolute_path)
+            if isinstance(info, dict):
+                enriched["file_id"] = str(
+                    info.get("file_id") or info.get("fid") or ""
+                )
+                enriched["sha1"] = str(
+                    info.get("sha1") or info.get("sha") or ""
+                )
+        enriched_tree.append(enriched)
+    file_tree = enriched_tree
+    facts = build_file_facts(
+        file_tree,
+        root_path=root_path,
+        provider=event.provider,
+        snapshot_id=str(event.snapshot_id or "") or "completed-download",
+    )
+    evidence = {
+        fact.source_id: parse_file_evidence(fact)
+        for fact in facts
+    }
+    facts_by_path = {
+        normalize_storage_path(fact.absolute_path): fact
+        for fact in facts
+    }
+    targets = {}
+    identities = {}
+    operation_by_source = {}
+    existing_targets = {}
+    for operation in operations or []:
+        source_path = normalize_storage_path(operation.get("source_path"))
+        fact = facts_by_path.get(source_path)
+        if fact is None:
+            continue
+        target_path = normalize_storage_path(
+            operation.get("final_path")
+            or (
+                f"{str(operation.get('target_dir') or '').rstrip('/')}/"
+                f"{operation.get('rename_to') or ''}"
+            )
+        )
+        if not target_path:
+            continue
+        operation["source_id"] = fact.source_id
+        operation["final_path"] = target_path
+        targets[fact.source_id] = target_path
+        identities[fact.source_id] = dict(work_identity or {})
+        operation_by_source[fact.source_id] = operation
+        target_info = storage.get_file_info(target_path)
+        if isinstance(target_info, dict):
+            existing_targets[target_path] = target_info
+
+    resolutions = plan_file_resolutions(
+        facts,
+        evidence,
+        targets,
+        identities,
+        existing_targets=existing_targets,
+    )
+    execution = execute_file_resolutions(
+        storage,
+        resolutions,
+        selected_root=event.download_root or event.final_path,
+        journal=getattr(storage, "journal", None),
+    )
+    outcome_by_source = {
+        outcome.source_id: outcome
+        for outcome in execution.outcomes
+    }
+    successful_operations = [
+        operation
+        for source_id, operation in operation_by_source.items()
+        if outcome_by_source.get(source_id)
+        and outcome_by_source[source_id].state in {"organized", "no_op"}
+    ]
+    media_resolutions = [
+        resolution
+        for resolution in resolutions
+        if evidence[resolution.source_id].content_role != "unknown"
+        or resolution.source_id in operation_by_source
+    ]
+    return {
+        "pipeline_version": "file-first-v1",
+        "resolutions": resolutions,
+        "outcomes": list(execution.outcomes),
+        "successful_operations": successful_operations,
+        "media_files_total": len(media_resolutions),
+        "organized_files": execution.organized_files,
+        "canonical_no_ops": execution.canonical_no_ops,
+        "kept_unresolved": sum(
+            resolution.action == "keep_original"
+            for resolution in media_resolutions
+        ),
+        "target_conflicts": sum(
+            "target_conflict" in resolution.reason_codes
+            or "planned_target_collision" in resolution.reason_codes
+            for resolution in media_resolutions
+        ),
+        "failed_files": execution.failed_files,
+        "verified_work_groups": int(bool(
+            execution.organized_files or execution.canonical_no_ops
+        )),
+    }
+
+
+def _public_file_results(file_first: dict) -> dict:
+    successful_files = []
+    files = []
+    warnings = []
+    for outcome in file_first.get("outcomes") or []:
+        item = {
+            "source_id": outcome.source_id,
+            "state": outcome.state,
+            "source_path": outcome.source_path,
+            "target_path": outcome.target_path,
+            "observed_path": outcome.observed_path,
+            "reason_codes": list(outcome.reason_codes),
+        }
+        files.append(item)
+        if outcome.state not in {"organized", "no_op"}:
+            warnings.append({
+                "source_id": outcome.source_id,
+                "state": outcome.state,
+                "observed_path": outcome.observed_path,
+                "reason_codes": list(outcome.reason_codes),
+            })
+            continue
+        successful_files.append({
+            "source_id": outcome.source_id,
+            "state": outcome.state,
+            "final_path": outcome.observed_path,
+        })
+    return {
+        "pipeline_version": "file-first-v1",
+        "media_files_total": int(
+            file_first.get("media_files_total") or 0
+        ),
+        "organized_files": int(file_first.get("organized_files") or 0),
+        "canonical_no_ops": int(
+            file_first.get("canonical_no_ops") or 0
+        ),
+        "kept_unresolved": int(file_first.get("kept_unresolved") or 0),
+        "target_conflicts": int(file_first.get("target_conflicts") or 0),
+        "failed_files": int(file_first.get("failed_files") or 0),
+        "verified_work_groups": int(
+            file_first.get("verified_work_groups") or 0
+        ),
+        "successful_files": successful_files,
+        "files": files,
+        "warnings": warnings,
+    }
+
+
 def _selection_key(value):
     name = Path(str(value or "").replace("\\", "/")).name
     suffix = Path(name).suffix.lower()
@@ -222,21 +380,6 @@ def _lookup_ai_movie_selection(video_nodes, plan):
         if basename_counts.get(name) == 1:
             index[name] = node
     main = index.get(str(plan.get("main_video") or "").strip("/"))
-    if main is None:
-        return None
-    expected_discard = {
-        str(node.get("relative_path") or node.get("name") or "").strip("/")
-        for node in video_nodes if node is not main
-    }
-    actual_discard = set()
-    for value in plan.get("discard_files") or []:
-        node = index.get(str(value or "").strip("/"))
-        if node is not None and node is not main:
-            actual_discard.add(
-                str(node.get("relative_path") or node.get("name") or "").strip("/")
-            )
-    if actual_discard != expected_discard:
-        return None
     return main
 
 
@@ -347,65 +490,6 @@ def _confirmed_series_metadata(event: DownloadCompletedEvent):
     if not isinstance(placement, dict) or placement.get("library_type") != "series":
         return None
     return contract
-
-
-def _unorganized_root() -> str:
-    return str(
-        ((runtime_context.config or {}).get("media") or {}).get("unorganized_path") or ""
-    ).rstrip("/")
-
-
-def _move_unmatched_to_unorganized(event, unmatched_sources):
-    if not unmatched_sources:
-        return ""
-    storage = _storage(event)
-    for relative_path in unmatched_sources:
-        source_path = (
-            f"{str(event.final_path).rstrip('/')}/"
-            f"{str(relative_path).strip('/')}"
-        )
-        if storage.delete_single_file(source_path) is not True:
-            raise RuntimeError(f"无法删除未匹配视频 {source_path}")
-    return ""
-
-
-def _move_confirmed_failure_to_unorganized(event):
-    unorganized_root = _unorganized_root()
-    if not unorganized_root:
-        raise RuntimeError("确认方案映射失败，但 media.unorganized_path 未配置")
-    storage = _storage(event)
-    source_path = str(event.final_path or "").rstrip("/")
-    if source_path == unorganized_root or source_path.startswith(
-        f"{unorganized_root}/"
-    ):
-        return source_path
-    source_leaf = source_path.rsplit("/", 1)[-1]
-    if not storage.create_dir_recursive(unorganized_root):
-        raise RuntimeError(f"无法创建未整理目录 {unorganized_root}")
-    if storage.move_file(source_path, unorganized_root) is not True:
-        raise RuntimeError(f"无法移动确认方案失败目录 {source_path}")
-    return f"{unorganized_root}/{source_leaf}"
-
-
-class ConfirmedPlanConflict(RuntimeError):
-    pass
-
-
-class SubtitlePlanBlocked(RuntimeError):
-    pass
-
-
-class SubtitleTargetConflict(RuntimeError):
-    pass
-
-
-class BatchRenameInterrupted(RuntimeError):
-    def __init__(self, *, completed, total, target_root, failed_path, cause):
-        super().__init__(str(cause))
-        self.completed = int(completed)
-        self.total = int(total)
-        self.target_root = str(target_root)
-        self.failed_path = str(failed_path)
 
 
 def _deterministic_episode_plan(media_metadata: dict, file_tree: list[dict]):
@@ -564,41 +648,6 @@ def _locked_ai_context(media_metadata: dict) -> dict:
     }
 
 
-def _assert_no_target_conflicts(storage, rename_plan):
-    for operation in rename_plan.get("operations") or []:
-        target_path = (
-            f"{str(operation['target_dir']).rstrip('/')}/"
-            f"{operation['rename_to']}"
-        )
-        if str(operation.get("source_path") or "").rstrip("/") == (
-            target_path.rstrip("/")
-        ):
-            operation["skip_write"] = True
-            continue
-        target_info = storage.get_file_info(target_path)
-        if not target_info:
-            continue
-        if operation.get("media_kind") == "subtitle":
-            source_info = storage.get_file_info(operation["source_path"]) or {}
-            source_sha1 = str(
-                operation.get("source_sha1")
-                or source_info.get("sha1") or source_info.get("sha") or ""
-            ).strip().lower()
-            target_sha1 = str(
-                target_info.get("sha1") or target_info.get("sha") or ""
-            ).strip().lower()
-            if source_sha1 and source_sha1 == target_sha1:
-                operation["skip_write"] = True
-                continue
-            raise SubtitleTargetConflict(
-                f"字幕目标冲突：{operation['rename_to']}"
-            )
-        if target_info:
-            raise ConfirmedPlanConflict(
-                f"已确认目标编号发生冲突：{operation['rename_to']}"
-            )
-
-
 def _attempt_confirmed_series_rename(
     event: DownloadCompletedEvent,
     metadata: dict,
@@ -654,135 +703,29 @@ def _attempt_confirmed_series_rename(
         file_tree=file_tree,
     )
     if not rename_plan:
-        runtime_context.logger.warn(
+        runtime_context.logger.warning(
             f"确认方案整理跳过：AI文件映射未通过锁定校验 path={event.final_path}"
         )
         return None
-
-    unresolved_sources = rename_plan.get("unresolved_sources") or []
-    if unresolved_sources:
-        raise SubtitlePlanBlocked(
-            "字幕语言或归属无法确定：" + ", ".join(unresolved_sources[:3])
-        )
-
-    unmatched_sources = rename_plan.get("unmatched_sources") or []
-    if unmatched_sources:
-        nodes_by_path = {
-            str(node.get("relative_path") or node.get("name") or "").strip("/"): node
-            for node in file_tree if not node.get("is_dir")
-        }
-        mapped_sizes = [
-            int(nodes_by_path.get(operation["source_relative_path"], {}).get("size") or 0)
-            for operation in rename_plan.get("operations") or []
-        ]
-        largest_mapped = max(mapped_sizes or [0])
-        selection = (runtime_context.config or {}).get("selection") or {}
-        relative_threshold = largest_mapped * float(
-            selection.get("unmatched_large_ratio", 0.25)
-        )
-        absolute_threshold = int(
-            selection.get("unmatched_large_min_bytes", 314572800)
-        )
-        large_unmatched = {
-            path for path in unmatched_sources
-            if int(nodes_by_path.get(path, {}).get("size") or 0)
-            >= max(relative_threshold, absolute_threshold)
-        }
-        if large_unmatched and not ai_was_used:
-            context = {
-                "metadata": metadata,
-                "confirmed_media_metadata": media_metadata,
-                "release": event.release or {},
-                "release_title": metadata.get("release_title") or event.resource_name,
-                "resource_name": event.resource_name,
-                "download_path": event.final_path,
-                "file_tree": file_tree,
-                **_locked_ai_context(media_metadata),
-            }
-            ai_plan = infer_tvdb_episode_plan_with_ai(context)
-            ai_was_used = True
-            rename_plan = build_confirmed_rename_plan(
-                final_path=event.final_path,
-                selected_path=event.selected_path,
-                metadata=metadata,
-                media_metadata=media_metadata,
-                ai_plan=ai_plan or {},
-                file_tree=file_tree,
-            )
-            if not rename_plan:
-                return None
-            unmatched_sources = rename_plan.get("unmatched_sources") or []
-            large_unmatched = large_unmatched.intersection(unmatched_sources)
-        if large_unmatched:
-            discard = {
-                str(value or "").strip("/")
-                for value in (ai_plan or {}).get("discard_files") or []
-            }
-            if not large_unmatched.issubset(discard):
-                runtime_context.logger.warning(
-                    "确认方案存在未经 AI 明确处理的大视频，整批转入未整理"
-                )
-                return None
-
-    _assert_no_target_conflicts(storage, rename_plan)
-    operations = rename_plan["operations"]
-    completed = 0
-    root_source_deleted = None
-    for operation in operations:
-        if operation.get("skip_write"):
-            completed += 1
-            continue
-        current_source_path = operation["source_path"]
-        try:
-            if not storage.create_dir_recursive(operation["target_dir"]):
-                raise RuntimeError(f"无法创建 {operation['target_dir']}")
-            if Path(operation["source_path"]).name != operation["rename_to"]:
-                if storage.rename(operation["source_path"], operation["rename_to"]) is not True:
-                    raise RuntimeError(f"重命名失败 {operation['source_path']}")
-                current_source_path = operation["renamed_source_path"]
-            outcome = _move_file_with_outcome(
-                storage, current_source_path, operation["target_dir"]
-            )
-            if not outcome.get("copied"):
-                raise RuntimeError(f"移动失败 {current_source_path}")
-            if (
-                len(operations) == 1
-                and str(operation["source_path"]).rstrip("/")
-                == str(event.final_path).rstrip("/")
-            ):
-                root_source_deleted = bool(outcome.get("source_deleted"))
-        except Exception as exc:
-            raise BatchRenameInterrupted(
-                completed=completed,
-                total=len(operations),
-                target_root=rename_plan["target_root"],
-                failed_path=current_source_path,
-                cause=exc,
-            ) from exc
-        completed += 1
-
-    unmatched_sources = sorted(set(
-        (rename_plan.get("unmatched_sources") or [])
+    planned_operations = list(rename_plan.get("operations") or [])
+    file_first = process_file_first_media(
+        event,
+        operations=planned_operations,
+        work_identity={
+            "metadata_id": media_metadata.get("metadata_id") or "",
+            **dict(media_metadata.get("identity") or {}),
+        },
+    )
+    rename_plan["planned_operations"] = planned_operations
+    rename_plan["operations"] = file_first["successful_operations"]
+    rename_plan["file_first"] = file_first
+    rename_plan["kept_sources"] = sorted(set(
+        (rename_plan.get("kept_sources") or [])
+        + (rename_plan.get("unmatched_sources") or [])
         + (rename_plan.get("discard_sources") or [])
     ))
-    try:
-        unmatched_dir = _move_unmatched_to_unorganized(event, unmatched_sources)
-    except Exception as exc:
-        raise BatchRenameInterrupted(
-            completed=len(operations),
-            total=len(operations) + len(unmatched_sources),
-            target_root=rename_plan["target_root"],
-            failed_path=str(event.final_path),
-            cause=exc,
-        ) from exc
-    rename_plan["unmatched_target"] = unmatched_dir
-    rename_plan["cleanup_complete"] = True
-    if root_source_deleted is False:
-        rename_plan["cleanup_complete"] = False
-    elif root_source_deleted is None and event.final_path != rename_plan["target_root"]:
-        rename_plan["cleanup_complete"] = _cleanup_source_directory(
-            storage, event.final_path
-        )
+    rename_plan["discard_sources"] = []
+    rename_plan["cleanup_complete"] = file_first["failed_files"] == 0
     rename_plan["media_metadata"] = enrich_media_metadata_with_rename_plan(
         media_metadata,
         rename_plan,
@@ -819,68 +762,42 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
         filename_metadata=filename_metadata,
     )
     confirmed_series = _confirmed_series_metadata(event)
-    try:
-        rename_plan = _attempt_tvdb_ai_episode_rename(event, metadata)
-    except (SubtitlePlanBlocked, SubtitleTargetConflict) as exc:
-        return PostDownloadResult(
-            True,
-            final_path=event.final_path,
-            message=f"⚠️ {exc}\n文件保持原位，未执行任何写操作。",
-            should_stop=True,
-            metadata=event.metadata,
-        )
-    except ConfirmedPlanConflict as exc:
-        unorganized_target = _move_confirmed_failure_to_unorganized(event)
-        return PostDownloadResult(
-            True,
-            final_path=unorganized_target,
-            message=(
-                f"⚠️ {exc}\n映射规则存在冲突，整批已移入未整理。\n"
-                f"保存目录：`{unorganized_target}`"
-            ),
-            should_stop=True,
-        )
-    except BatchRenameInterrupted as exc:
-        return PostDownloadResult(
-            True,
-            final_path=exc.target_root,
-            message=(
-                f"⚠️ 批量整理部分完成（{exc.completed}/{exc.total}），"
-                "已停止自动重试，请人工检查。\n"
-                f"失败位置：`{exc.failed_path}`\n"
-                f"目标目录：`{exc.target_root}`"
-            ),
-            should_stop=True,
-            metadata=event.metadata,
-        )
+    rename_plan = _attempt_tvdb_ai_episode_rename(event, metadata)
     if not rename_plan:
         if confirmed_series:
-            unorganized_target = _move_confirmed_failure_to_unorganized(event)
             return PostDownloadResult(
                 True,
-                final_path=unorganized_target,
+                final_path=event.final_path,
                 message=(
-                    "⚠️ 下载后 AI 文件映射失败，已移入未整理目录。\n\n"
-                    f"保存目录：`{unorganized_target}`"
+                    "⚠️ 下载后文件映射未能确认；相关文件保持原位，"
+                    "未移动整个目录。"
                 ),
                 should_stop=True,
+                metadata=event.metadata,
             )
         return PostDownloadResult(False, final_path=event.final_path)
 
+    file_first = rename_plan.get("file_first") or {}
+    successful = int(file_first.get("organized_files") or 0) + int(
+        file_first.get("canonical_no_ops") or 0
+    )
+    conflicts = int(file_first.get("target_conflicts") or 0)
+    failed = int(file_first.get("failed_files") or 0)
+    kept = int(file_first.get("kept_unresolved") or 0)
+    final_path = rename_plan["target_root"] if successful else event.final_path
+    prefix = "✅" if not conflicts and not failed else "⚠️"
+    completion_label = "整理完成（文件级）" if prefix == "✅" else "文件级整理"
     message = (
-        f"✅ TVDB 自动整理完成：`{rename_plan['series_name'] or rename_plan['target_root'].split('/')[-1]}`\n"
-        f"文件数：{len(rename_plan['operations'])} 个文件\n\n"
-        f"保存目录：`{rename_plan['target_root']}`"
+        f"{prefix} TVDB {completion_label}：`{rename_plan['series_name'] or rename_plan['target_root'].split('/')[-1]}`\n"
+        f"已整理 {file_first.get('organized_files', 0)}，"
+        f"已规范 {file_first.get('canonical_no_ops', 0)}，"
+        f"保留 {kept}，目标冲突 {conflicts}，失败 {failed}\n\n"
+        f"保存目录：`{final_path}`"
     )
     if rename_plan.get("tvdb_series_id"):
         message += f"\nTVDB：`{rename_plan['tvdb_series_id']}`"
     if rename_plan.get("warnings"):
         message += f"\n提示：{'; '.join(rename_plan['warnings'][:2])}"
-    if not rename_plan.get("cleanup_complete", True):
-        message = (
-            "⚠️ 媒体已完成整理，但源目录清理未完成，请人工检查。\n\n"
-            f"保存目录：`{rename_plan['target_root']}`"
-        )
     result_metadata = event.metadata
     if rename_plan.get("media_metadata"):
         result_metadata = attach_media_metadata(
@@ -889,10 +806,11 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
         )
     return PostDownloadResult(
         True,
-        final_path=rename_plan["target_root"],
+        final_path=final_path,
         message=message,
         should_stop=True,
         metadata=result_metadata,
+        file_results=_public_file_results(file_first),
     )
 
 
@@ -939,47 +857,17 @@ def _attempt_media_auto_rename(event: DownloadCompletedEvent, naming_metadata):
         target_stem=Path(plan.file_name).stem,
         file_tree=file_tree,
     )
-    if subtitle_plan["unresolved_sources"]:
-        raise SubtitlePlanBlocked(
-            "字幕语言或归属无法确定："
-            + ", ".join(subtitle_plan["unresolved_sources"][:3])
-        )
     operations.extend(subtitle_plan["operations"])
-    shared_plan = {"operations": operations}
-    _assert_no_target_conflicts(storage, shared_plan)
-    if not storage.create_dir_recursive(target_path):
-        raise RuntimeError(f"自动整理失败：无法创建目标目录 {target_path}")
-
-    cleanup_complete = True
-    root_source_deleted = None
-    for operation in operations:
-        if operation.get("skip_write"):
-            continue
-        current_source_path = operation["source_path"]
-        if Path(current_source_path).name != operation["rename_to"]:
-            if storage.rename(current_source_path, operation["rename_to"]) is not True:
-                raise RuntimeError(f"自动整理失败：重命名失败 {current_source_path}")
-            current_source_path = operation["renamed_source_path"]
-        outcome = _move_file_with_outcome(
-            storage, current_source_path, operation["target_dir"]
-        )
-        if not outcome.get("copied"):
-            raise RuntimeError(f"自动整理失败：移动失败 {current_source_path}")
-        if str(event.final_path).rstrip("/") == str(operation["source_path"]).rstrip("/"):
-            root_source_deleted = bool(outcome.get("source_deleted"))
-    for relative_path in subtitle_plan["discard_sources"]:
-        source_path = f"{str(event.final_path).rstrip('/')}/{relative_path}"
-        if storage.delete_single_file(source_path) is not True:
-            raise RuntimeError(f"自动整理失败：无法删除排除字幕 {source_path}")
-    if root_source_deleted is False:
-        cleanup_complete = False
-    elif root_source_deleted is None and event.final_path != target_path:
-        cleanup_complete = _cleanup_source_directory(storage, event.final_path)
+    file_first = process_file_first_media(
+        event,
+        operations=operations,
+        work_identity=dict(naming_metadata or {}),
+    )
 
     return (
         target_path,
         plan,
-        cleanup_complete,
+        file_first,
         selection_reason or "subtitle_only",
     )
 
@@ -1006,44 +894,32 @@ def process_generic_media(event: DownloadCompletedEvent) -> PostDownloadResult:
         _standalone_contract_naming_metadata(event)
         or event.naming_metadata
     )
-    try:
-        result = _attempt_media_auto_rename(event, naming_auto_metadata)
-    except (SubtitlePlanBlocked, SubtitleTargetConflict) as exc:
-        return PostDownloadResult(
-            True,
-            final_path=event.final_path,
-            message=f"⚠️ {exc}\n文件保持原位，未执行任何写操作。",
-            should_stop=True,
-            metadata=event.metadata,
-        )
-    except ConfirmedPlanConflict as exc:
-        unorganized_target = _move_confirmed_failure_to_unorganized(event)
-        return PostDownloadResult(
-            True,
-            final_path=unorganized_target,
-            message=(
-                f"⚠️ {exc}\n映射规则存在冲突，整批已移入未整理。\n"
-                f"保存目录：`{unorganized_target}`"
-            ),
-            should_stop=True,
-            metadata=event.metadata,
-        )
+    result = _attempt_media_auto_rename(event, naming_auto_metadata)
     if not result:
         return PostDownloadResult(False, final_path=event.final_path)
-    target_path, plan, cleanup_complete, selection_reason = result
+    target_path, plan, file_first, selection_reason = result
+    successful = int(file_first.get("organized_files") or 0) + int(
+        file_first.get("canonical_no_ops") or 0
+    )
+    conflicts = int(file_first.get("target_conflicts") or 0)
+    failed = int(file_first.get("failed_files") or 0)
+    kept = int(file_first.get("kept_unresolved") or 0)
+    final_path = target_path if successful else event.final_path
+    prefix = "✅" if not conflicts and not failed else "⚠️"
+    completion_label = "整理完成（文件级）" if prefix == "✅" else "文件级整理"
     message = (
-        f"✅ 自动整理完成：`{plan.file_name}`\n"
-        f"主视频依据：{selection_reason}\n\n保存目录：`{target_path}`"
-        if cleanup_complete
-        else (
-            "⚠️ 媒体已完成整理，但源目录清理未完成，请人工检查。\n\n"
-            f"保存目录：`{target_path}`"
-        )
+        f"{prefix} 电影{completion_label}：`{plan.file_name}`\n"
+        f"主视频依据：{selection_reason}\n"
+        f"已整理 {file_first.get('organized_files', 0)}，"
+        f"已规范 {file_first.get('canonical_no_ops', 0)}，"
+        f"保留 {kept}，目标冲突 {conflicts}，失败 {failed}\n\n"
+        f"保存目录：`{final_path}`"
     )
     return PostDownloadResult(
         True,
-        final_path=target_path,
+        final_path=final_path,
         message=message,
         should_stop=True,
         metadata=event.metadata,
+        file_results=_public_file_results(file_first),
     )

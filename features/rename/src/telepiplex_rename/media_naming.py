@@ -118,6 +118,11 @@ def parse_episode_marker(release_title: str):
     patterns = [
         re.compile(r"(?i)\bS(?P<season>\d{1,2})E(?P<episode>\d{1,3})\b"),
         re.compile(r"(?i)\b(?P<season>\d{1,2})x(?P<episode>\d{1,3})\b"),
+        re.compile(
+            r"(?i)\b(?:S|Season[ ._-]*)"
+            r"(?P<season>\d{1,2})\s*[-–—_.]\s*"
+            r"(?P<episode>\d{1,3})\b"
+        ),
         re.compile(r"第\s*(?P<season>\d{1,2})\s*季\D{0,6}第\s*(?P<episode>\d{1,3})\s*[集话話]"),
     ]
     for pattern in patterns:

@@ -16,10 +16,8 @@ from telepiplex_plugin_sdk.media_metadata import (
 from .config_wizard import RenameConfigWizard
 from .content_probe import build_metadata_probe
 from .context import runtime_context
-from .inventory import (
-    inventory_job_id,
-    looks_organized_release,
-)
+from .file_facts import build_file_facts, parse_file_evidence
+from .file_groups import build_provisional_groups
 from .models import DownloadCompletedEvent, PostDownloadResult
 from .operations import OperationCancelled, RenameOperationJournal
 from .processor import process_generic_media, process_tvdb_episode
@@ -53,6 +51,131 @@ _STORAGE_STAGES = {
 _IRREVERSIBLE_METHODS = {
     "copy_file", "move_file", "move_file_detailed", "delete_single_file",
 }
+
+_FILE_RESULT_COUNTERS = (
+    "media_files_total",
+    "organized_files",
+    "canonical_no_ops",
+    "kept_unresolved",
+    "target_conflicts",
+    "failed_files",
+)
+
+
+def _verified_event_identity(payload: dict) -> str:
+    contract = payload.get("media_metadata")
+    if not isinstance(contract, dict):
+        contract = {}
+    metadata_id = str(contract.get("metadata_id") or "").strip()
+    if metadata_id:
+        return f"metadata:{metadata_id}"
+    identity = contract.get("identity")
+    if not isinstance(identity, dict):
+        identity = {}
+    external_ids = identity.get("external_ids")
+    if isinstance(external_ids, dict):
+        values = [
+            f"{key}:{str(value).strip()}"
+            for key, value in sorted(external_ids.items())
+            if str(value or "").strip()
+        ]
+        if values:
+            return "external:" + "|".join(values)
+    return f"job:{str(payload.get('job_id') or '').strip()}"
+
+
+def _merge_verified_inventory_events(
+    payloads: list[dict],
+) -> list[tuple[str, dict]]:
+    """Merge provisional aliases only after confirmed external identity."""
+
+    grouped = {}
+    for payload in payloads or []:
+        if not isinstance(payload, dict):
+            continue
+        identity_key = _verified_event_identity(payload)
+        grouped.setdefault(identity_key, []).append(payload)
+
+    merged = []
+    for identity_key in sorted(grouped):
+        members = grouped[identity_key]
+        job_ids = sorted({
+            str(item.get("job_id") or "").strip()
+            for item in members
+            if str(item.get("job_id") or "").strip()
+        })
+        source_paths = sorted({
+            str(item.get("source_path") or "").strip()
+            for item in members
+            if str(item.get("source_path") or "").strip()
+        })
+        final_paths = sorted({
+            str(item.get("final_path") or "").strip()
+            for item in members
+            if str(item.get("final_path") or "").strip()
+        })
+        counters = {key: 0 for key in _FILE_RESULT_COUNTERS}
+        successful_by_identity = {}
+        warnings = []
+        for item in members:
+            file_results = item.get("file_results")
+            if not isinstance(file_results, dict):
+                file_results = {}
+            for key in _FILE_RESULT_COUNTERS:
+                counters[key] += int(file_results.get(key) or 0)
+            for successful in file_results.get("successful_files") or []:
+                if not isinstance(successful, dict):
+                    continue
+                dedupe_key = (
+                    str(successful.get("source_id") or ""),
+                    str(successful.get("final_path") or ""),
+                )
+                successful_by_identity[dedupe_key] = dict(successful)
+            warnings.extend(
+                dict(warning)
+                for warning in item.get("file_warnings") or []
+                if isinstance(warning, dict)
+            )
+        base = dict(members[0])
+        base.update({
+            "job_id": job_ids[0] if job_ids else "",
+            "job_ids": job_ids,
+            "source_path": source_paths[0] if source_paths else "",
+            "source_paths": source_paths,
+            "final_path": final_paths[0] if final_paths else "",
+            "final_paths": final_paths,
+            "file_results": {
+                "pipeline_version": "file-first-v1",
+                **counters,
+                "verified_work_groups": 1,
+                "successful_files": [
+                    successful_by_identity[key]
+                    for key in sorted(successful_by_identity)
+                ],
+            },
+            "file_warnings": warnings,
+        })
+        merged.append((identity_key, base))
+    return merged
+
+
+def _storage_listing_incomplete(value) -> bool:
+    if not isinstance(value, dict):
+        return False
+    for container in (value, value.get("data")):
+        if not isinstance(container, dict):
+            continue
+        if container.get("incomplete") is True:
+            return True
+        for key in ("complete", "snapshot_complete"):
+            if key not in container:
+                continue
+            flag = container.get(key)
+            if flag is False or str(flag).strip().casefold() in {
+                "0", "false", "no"
+            }:
+                return True
+    return False
 
 
 def _ambiguous_host_report_error(exc: Exception) -> bool:
@@ -444,7 +567,7 @@ class RenameFeature:
                 operation_id,
                 state="running",
                 stage="inventory_scan",
-                status_text=f"正在扫描 {root['name']} 的直接子项。",
+                status_text=f"正在扫描 {root['name']} 的完整文件树。",
                 control="cancel",
             )
             task = self.runtime.spawn(
@@ -574,7 +697,7 @@ class RenameFeature:
         items = []
         seen_page_items = set()
         while True:
-            page = self._storage_items(await self._storage_value(
+            response = await self._storage_value(
                 "get_file_list",
                 {
                     "cid": str(parent_id),
@@ -582,7 +705,13 @@ class RenameFeature:
                     "limit": page_size,
                     "show_dir": 1,
                 },
-            ))
+            )
+            if _storage_listing_incomplete(response):
+                raise FeatureError(
+                    "inventory_tree_incomplete",
+                    "storage reported an incomplete inventory page",
+                )
+            page = self._storage_items(response)
             if not page:
                 return items
             new_items = []
@@ -676,51 +805,86 @@ class RenameFeature:
                 raise FeatureError(
                     "storage_unavailable", "inventory root has no file identity"
                 )
-            children = await self._inventory_directory_items(root_id)
-            for child in children:
+            root_path = str(root.get("path") or "").rstrip("/")
+            snapshot_id = f"inventory:{uuid.uuid4()}"
+            file_tree = await self._inventory_file_tree(
+                {"file_id": root_id},
+                root_path,
+            )
+            for node in file_tree:
+                node["snapshot_id"] = snapshot_id
+                node["snapshot_complete"] = True
+                node["provider"] = "inventory"
+            facts = build_file_facts(
+                file_tree,
+                root_path=root_path,
+                provider="inventory",
+                snapshot_id=snapshot_id,
+            )
+            media_facts = [
+                fact for fact in facts
+                if fact.media_kind in {"video", "subtitle"}
+            ]
+            evidence = [parse_file_evidence(fact) for fact in media_facts]
+            groups = build_provisional_groups(evidence)
+            node_by_file_id = {
+                self._inventory_item_id(node): node
+                for node in file_tree
+                if not node.get("is_dir") and self._inventory_item_id(node)
+            }
+            node_by_path = {
+                str(node.get("path") or ""): node
+                for node in file_tree
+                if not node.get("is_dir")
+            }
+            fact_by_source = {
+                fact.source_id: fact for fact in media_facts
+            }
+            unresolved_files = 0
+            for group in groups:
                 self._raise_if_cancelled(operation_id)
-                name = self._inventory_item_name(child)
-                if not name:
+                if group.status != "ready":
+                    unresolved_files += len(group.source_ids)
                     continue
-                source_path = (
-                    f"{str(root.get('path') or '').rstrip('/')}/{name}"
-                )
-                child_is_directory = self._inventory_item_is_dir(child)
-                if child_is_directory:
-                    file_tree = await self._inventory_file_tree(
-                        child,
-                        source_path,
+                group_tree = []
+                for source_id in group.source_ids:
+                    fact = fact_by_source[source_id]
+                    node = (
+                        node_by_file_id.get(source_id)
+                        or node_by_path.get(fact.absolute_path)
                     )
-                else:
-                    file_tree = [{
-                        **child,
-                        "name": name,
-                        "relative_path": name,
-                        "path": source_path,
-                        "is_dir": False,
-                    }]
-                job_id = inventory_job_id(child, source_path)
-                if (
-                    child_is_directory
-                    and looks_organized_release(name, file_tree)
-                ):
-                    counts["completed"] += 1
+                    if node is not None:
+                        group_tree.append(dict(node))
+                if not group_tree:
+                    unresolved_files += len(group.source_ids)
                     continue
+                resource_name = (
+                    group.query_candidates[0]
+                    if group.query_candidates else group.title_key
+                )
                 pending.append({
-                    "job_id": job_id,
-                    "source_path": source_path,
-                    "resource_name": name,
-                    "file_tree": file_tree,
-                    "source_file_id": str(
-                        child.get("file_id") or child.get("fid")
-                        or child.get("cid") or ""
+                    "job_id": (
+                        "inventory:file-first-v1:"
+                        f"{group.group_id.removeprefix('group:')}"
                     ),
+                    "source_path": root_path,
+                    "resource_name": resource_name,
+                    "file_tree": group_tree,
+                    "source_file_id": root_id,
+                    "snapshot_id": snapshot_id,
+                    "group_id": group.group_id,
+                    "source_ids": list(group.source_ids),
                 })
                 counts["pending"] += 1
             session.update({
                 "stage": "confirmation",
                 "pending": pending,
                 "counts": counts,
+                "snapshot_id": snapshot_id,
+                "snapshot_complete": True,
+                "snapshot_file_count": len(facts),
+                "media_files_total": len(media_facts),
+                "kept_unresolved": unresolved_files,
             })
             keyboard = []
             if pending:
@@ -734,8 +898,9 @@ class RenameFeature:
             }])
             text = (
                 f"{root.get('name') or '所选目录'}扫描完成：\n"
-                f"未完成：{counts['pending']}\n"
-                f"已完成：{counts['completed']}"
+                f"待解析作品组：{counts['pending']}\n"
+                f"媒体文件：{len(media_facts)}\n"
+                f"保留未解析：{unresolved_files}"
             )
             await self._report_if_active(
                 operation_id,
@@ -788,6 +953,10 @@ class RenameFeature:
             "final_path": str(item.get("source_path") or ""),
             "resource_name": str(item.get("resource_name") or ""),
             "file_tree": list(item.get("file_tree") or []),
+            "snapshot_id": str(item.get("snapshot_id") or ""),
+            "snapshot_complete": True,
+            "pipeline_version": "file-first-v1",
+            "source_ids": list(item.get("source_ids") or []),
             "operation_id": operation_id,
             "operation_revision": int(
                 (self.operations.get(operation_id) or {}).get("revision") or 0
@@ -851,22 +1020,82 @@ class RenameFeature:
                     session["stage"] = "awaiting_metadata"
                     return
                 result = (current or {}).get("result") or {}
+                file_results = (
+                    result.get("file_results")
+                    if isinstance(result.get("file_results"), dict)
+                    else {}
+                )
+                aggregate = session.setdefault("file_results", {})
+                for counter in (
+                    "media_files_total",
+                    "organized_files",
+                    "canonical_no_ops",
+                    "kept_unresolved",
+                    "target_conflicts",
+                    "failed_files",
+                    "verified_work_groups",
+                ):
+                    aggregate[counter] = int(aggregate.get(counter) or 0) + int(
+                        file_results.get(counter) or 0
+                    )
+                if not file_results:
+                    aggregate["kept_unresolved"] = int(
+                        aggregate.get("kept_unresolved") or 0
+                    ) + len(item.get("source_ids") or [])
                 if current and current.get("state") == "completed" and result.get(
                     "organized"
                 ):
+                    event_payload = result.get("event_payload")
+                    if isinstance(event_payload, dict):
+                        session.setdefault(
+                            "verified_event_payloads", []
+                        ).append(dict(event_payload))
                     session["success"] = int(session.get("success") or 0) + 1
                 else:
                     session["failed"] = int(session.get("failed") or 0) + 1
                 session["index"] = index + 1
             session["stage"] = "completed"
+            downstream_failures = await self._publish_inventory_verified_groups(
+                session,
+                operation_id,
+            )
             total = len(pending)
             success = int(session.get("success") or 0)
             failed = int(session.get("failed") or 0)
+            file_counts = {
+                key: int(
+                    (session.get("file_results") or {}).get(key) or 0
+                )
+                for key in (
+                    "media_files_total",
+                    "organized_files",
+                    "canonical_no_ops",
+                    "kept_unresolved",
+                    "target_conflicts",
+                    "failed_files",
+                    "verified_work_groups",
+                )
+            }
+            file_counts["verified_work_groups"] = int(
+                session.get("published_verified_work_groups") or 0
+            )
             text = (
                 "存量媒体补整理完成。\n"
                 f"成功：{success}\n失败：{failed}\n"
-                f"总计：{total}"
+                f"总计：{total}\n"
+                f"文件总数：{file_counts['media_files_total']}\n"
+                f"已整理：{file_counts['organized_files']}，"
+                f"已规范：{file_counts['canonical_no_ops']}，"
+                f"原位保留：{file_counts['kept_unresolved']}，"
+                f"目标冲突：{file_counts['target_conflicts']}，"
+                f"失败：{file_counts['failed_files']}，"
+                f"已验证作品组：{file_counts['verified_work_groups']}"
             )
+            if downstream_failures:
+                text += (
+                    f"\nPlex 事件发布失败：{downstream_failures}，"
+                    "文件结果已保留，请人工检查。"
+                )
             await self._report_if_active(
                 operation_id,
                 state="completed",
@@ -878,10 +1107,16 @@ class RenameFeature:
                     "completed": total,
                     "success": success,
                     "failed": failed,
+                    "file_results": file_counts,
+                    "downstream_failures": downstream_failures,
                 },
             )
             self.inventory_sessions.pop(owner, None)
         except (asyncio.CancelledError, OperationCancelled):
+            await self._publish_inventory_verified_groups(
+                session,
+                operation_id,
+            )
             self.inventory_sessions.pop(owner, None)
             await self._report_if_active(
                 operation_id,
@@ -1461,6 +1696,10 @@ class RenameFeature:
                 ),
                 download_root=str(payload.get("download_root") or ""),
                 provider=str(payload.get("provider") or "download"),
+                snapshot_id=str(payload.get("snapshot_id") or ""),
+                snapshot_complete=(
+                    payload.get("snapshot_complete") is not False
+                ),
                 storage=storage,
             )
             if operation_id:
@@ -1473,14 +1712,31 @@ class RenameFeature:
                 processor = self._fallback_unorganized
             result = await asyncio.to_thread(processor, event)
             self._raise_if_cancelled(operation_id)
+            file_results = (
+                dict(result.file_results)
+                if isinstance(result.file_results, dict)
+                else {}
+            )
+            verified_files = int(file_results.get("organized_files") or 0) + int(
+                file_results.get("canonical_no_ops") or 0
+            )
             organized = bool(
                 result.handled
                 and result.final_path
-                and str(result.message or "").startswith("✅")
+                and (
+                    verified_files > 0
+                    if file_results
+                    else str(result.message or "").startswith("✅")
+                )
             )
             contract = extract_confirmed_media_metadata(
                 result.metadata or event.metadata
             )
+            downstream_file_results = {
+                key: value
+                for key, value in file_results.items()
+                if key not in {"files", "warnings"}
+            }
             event_payload = {
                 "job_id": job_id,
                 "user_id": user_id,
@@ -1491,6 +1747,8 @@ class RenameFeature:
                 ),
                 "final_path": result.final_path,
                 "media_metadata": contract,
+                "file_results": downstream_file_results,
+                "file_warnings": list(file_results.get("warnings") or []),
             }
             if not is_inventory:
                 event_payload.update({
@@ -1506,6 +1764,7 @@ class RenameFeature:
                 "user_id": user_id,
                 "job_id": job_id,
                 "event_payload": event_payload,
+                "file_results": file_results,
             }
             if is_inventory:
                 outcome["inventory_batch_id"] = operation_id
@@ -1626,23 +1885,38 @@ class RenameFeature:
                 except Exception:
                     pass
 
-    async def _finish_inventory_item(self, job_id: str, outcome: dict) -> None:
-        if outcome.get("organized"):
+    async def _publish_inventory_verified_groups(
+        self,
+        session: dict,
+        operation_id: str,
+    ) -> int:
+        failures = 0
+        verified_groups = 0
+        payloads = list(session.get("verified_event_payloads") or [])
+        for identity_key, payload in _merge_verified_inventory_events(payloads):
+            if not (payload.get("file_results") or {}).get(
+                "successful_files"
+            ):
+                continue
+            verified_groups += 1
+            event_key = uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"telepiplex:file-first-v1:{identity_key}",
+            ).hex
             try:
                 await self.host.publish_event(
                     "media.organized",
-                    outcome["event_payload"],
+                    payload,
                     idempotency_key=(
-                        f"{job_id}:organized:"
-                        f"{outcome.get('inventory_batch_id') or 'inventory'}"
+                        f"inventory:{operation_id}:organized:{event_key}"
                     ),
                 )
-            except Exception as exc:
-                outcome["downstream_error"] = type(exc).__name__
-                outcome["message"] = (
-                    str(outcome.get("message") or "").rstrip()
-                    + "\nPlex 事件发布失败，请人工检查。"
-                ).lstrip()
+            except Exception:
+                failures += 1
+        session["published_verified_work_groups"] = verified_groups
+        return failures
+
+    async def _finish_inventory_item(self, job_id: str, outcome: dict) -> None:
         if self.jobs:
             self.jobs.update(
                 job_id,
@@ -2283,42 +2557,13 @@ class RenameFeature:
         )
 
     def _fallback_unorganized(self, event: DownloadCompletedEvent) -> PostDownloadResult:
-        root = str(self.config.get("unorganized_path") or "").rstrip("/")
-        if not root:
-            return PostDownloadResult(
-                True,
-                final_path=event.final_path,
-                message="⚠️ 无法确定整理规则，文件保持原位。",
-                should_stop=True,
-                metadata=event.metadata,
-            )
-        leaf = str(event.final_path).rstrip("/").rsplit("/", 1)[-1]
-        if not event.storage.create_dir_recursive(root):
-            raise RuntimeError(f"cannot create unorganized path: {root}")
-        move = event.storage.move_file_detailed(event.final_path, root)
-        state = str(
-            move.get("state") if isinstance(move, dict) else ""
-        )
-        if state not in {"moved", "copied_source_retained"}:
-            raise RuntimeError(
-                "cannot move release to unorganized path: "
-                f"{event.final_path} ({state or 'invalid_result'})"
-            )
-        target = str(
-            move.get("target_path") if isinstance(move, dict) else ""
-        ) or f"{root}/{leaf}"
-        if state == "copied_source_retained":
-            message = (
-                "⚠️ 无法确定整理规则，已复制到未整理；"
-                "源文件仍保留，请人工检查后清理。"
-                f"\n保存目录：{target}"
-            )
-        else:
-            message = f"⚠️ 无法确定整理规则，已移入未整理。\n保存目录：{target}"
         return PostDownloadResult(
             True,
-            final_path=target,
-            message=message,
+            final_path=event.final_path,
+            message=(
+                "⚠️ 无法确定文件级整理规则，文件保持原位；"
+                "未移动整个目录。"
+            ),
             should_stop=True,
             metadata=event.metadata,
         )

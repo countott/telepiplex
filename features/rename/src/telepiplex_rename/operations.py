@@ -18,7 +18,28 @@ class RenameInverse:
 class RenameOperationJournal:
     def __init__(self):
         self.inverses: list[RenameInverse] = []
+        self.file_transitions: list[dict] = []
         self.irreversible_reason = ""
+
+    def record_file_transition(
+        self,
+        *,
+        source_id: str,
+        target_path: str,
+        stage: str,
+        observed_path: str,
+        details: dict | None = None,
+    ) -> dict:
+        transition = {
+            "pipeline_version": "file-first-v1",
+            "source_id": str(source_id or ""),
+            "target_path": str(target_path or ""),
+            "stage": str(stage or ""),
+            "observed_path": str(observed_path or ""),
+            "details": dict(details or {}),
+        }
+        self.file_transitions.append(transition)
+        return transition
 
     @property
     def can_rollback(self) -> bool:

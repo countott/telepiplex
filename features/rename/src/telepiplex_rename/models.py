@@ -15,6 +15,8 @@ class DownloadCompletedEvent:
     release: dict | None = None
     download_root: str | None = None
     provider: str = "download"
+    snapshot_id: str = ""
+    snapshot_complete: bool = True
     storage: Any = None
 
 
@@ -25,3 +27,4 @@ class PostDownloadResult:
     message: str | None = None
     should_stop: bool = False
     metadata: dict | None = None
+    file_results: dict | None = None

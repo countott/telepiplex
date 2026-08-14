@@ -51,8 +51,10 @@ def _video_file_nodes(file_tree: list[dict]) -> list[dict]:
     for item in file_tree or []:
         if not isinstance(item, dict) or item.get("is_dir"):
             continue
-        name = str(item.get("name") or "").strip()
-        relative_path = _clean_path(item.get("relative_path") or name)
+        relative_path = _clean_path(
+            item.get("relative_path") or item.get("name") or ""
+        )
+        name = str(item.get("name") or PurePosixPath(relative_path).name).strip()
         if not name or not relative_path:
             continue
         suffix = PurePosixPath(relative_path).suffix.lower()
@@ -216,20 +218,14 @@ def build_tvdb_rename_plan(
             }
         )
 
-    discard_sources = {
-        _clean_path(value)
-        for value in ai_plan.get("discard_files") or []
-        if _clean_path(value) in source_video_paths
-    }
-    if seen_sources | discard_sources != source_video_paths:
-        return None
+    unmatched_sources = source_video_paths - seen_sources
 
     return {
         "target_root": target_root,
         "tvdb_series_id": tvdb_series_id,
         "series_name": sanitize_target_name(ai_plan.get("series_name") or ""),
         "operations": operations,
-        "unmatched_sources": sorted(discard_sources),
+        "unmatched_sources": sorted(unmatched_sources),
         "warnings": [str(item) for item in ai_plan.get("warnings") or [] if str(item).strip()],
     }
 def build_confirmed_rename_plan(
@@ -391,12 +387,22 @@ def build_confirmed_rename_plan(
             subtitle_plan = {
                 "operations": [],
                 "discard_sources": [],
+                "kept_sources": sorted(set(
+                    (subtitle_plan.get("kept_sources") or [])
+                    + invalid_bounded_sources
+                )),
                 "unresolved_sources": invalid_bounded_sources,
             }
     operations.extend(subtitle_plan["operations"])
     unmatched_video_sources = sorted(source_video_paths - seen_sources)
     discard_sources = sorted(set(subtitle_plan["discard_sources"]))
-    if not operations and not discard_sources and not subtitle_plan["unresolved_sources"]:
+    kept_sources = sorted(set(subtitle_plan.get("kept_sources") or []))
+    if (
+        not operations
+        and not discard_sources
+        and not kept_sources
+        and not subtitle_plan["unresolved_sources"]
+    ):
         return None
     return {
         "target_root": target_root,
@@ -404,6 +410,7 @@ def build_confirmed_rename_plan(
         "operations": operations,
         "unmatched_sources": unmatched_video_sources,
         "discard_sources": discard_sources,
+        "kept_sources": kept_sources,
         "unresolved_sources": subtitle_plan["unresolved_sources"],
         "warnings": [
             str(item)

@@ -181,6 +181,8 @@ class MediaAutoRenameTest(unittest.TestCase):
         self.assertEqual(parse_episode_marker("Show.S02E03.1080p"), (2, 3))
         self.assertEqual(parse_episode_marker("Show 2x04 WEB-DL"), (2, 4))
         self.assertEqual(parse_episode_marker("剧名 第3季 第5集"), (3, 5))
+        self.assertEqual(parse_episode_marker("Honey and Clover S1 - 01"), (1, 1))
+        self.assertEqual(parse_episode_marker("Honey Season 1 - 02"), (1, 2))
         self.assertIsNone(parse_episode_marker("Movie 2014 1080p"))
 
     def test_build_plan_returns_none_without_douban_titles(self):

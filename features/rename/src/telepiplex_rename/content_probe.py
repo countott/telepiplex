@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import asdict
 from pathlib import PurePosixPath
 import re
 import unicodedata
+
+from .file_facts import build_file_facts, parse_file_evidence
 
 
 _VIDEO = re.compile(
@@ -244,9 +247,14 @@ def _is_usable_identity(value: str, *, allow_numeric: bool = False) -> bool:
 
 
 def _identity_key(value: str) -> str:
+    value = re.sub(
+        r"[（(]\s*(?:19|20)\d{2}\s*[）)]",
+        " ",
+        _text(value),
+    )
     return "".join(
         character
-        for character in _text(value).casefold()
+        for character in value.casefold()
         if character.isalnum()
     )
 
@@ -626,7 +634,22 @@ def build_metadata_probe(payload: dict) -> dict:
             video_paths.append(path)
         elif _SUBTITLE.search(path):
             subtitle_paths.append(path)
-    identity_paths = video_paths or subtitle_paths
+    identity_paths = video_paths + subtitle_paths
+    facts = build_file_facts(
+        payload.get("file_tree") or [],
+        root_path=str(
+            payload.get("download_root")
+            or payload.get("final_path")
+            or "/"
+        ),
+        provider=str(payload.get("provider") or ""),
+        snapshot_id=str(payload.get("snapshot_id") or "legacy-probe"),
+    )
+    file_evidence = [
+        asdict(parse_file_evidence(fact))
+        for fact in facts
+        if fact.media_kind in {"video", "subtitle", "other_media"}
+    ]
     marker_values = identity_paths or paths or [
         _root_name(payload),
         str(
@@ -682,4 +705,5 @@ def build_metadata_probe(payload: dict) -> dict:
         } for episode in sorted(unscoped_episodes)],
         "video_count": len(video_paths),
         "subtitle_count": len(subtitle_paths),
+        "file_evidence": file_evidence,
     }

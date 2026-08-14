@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from dataclasses import dataclass
 import requests
 import json
 from .context import runtime_context
@@ -6,6 +7,15 @@ from .log_sanitizer import sanitize_log_value
 
 
 DEFAULT_AI_REQUEST_TIMEOUT_SECONDS = 60
+MAX_DEEPSEEK_OUTPUT_TOKENS = 32768
+
+
+@dataclass(frozen=True)
+class AIJSONResult:
+    status: str
+    value: dict | None
+    attempts: int
+    finish_reason: str
 
 
 TVDB_EPISODE_PLAN_PROMPT = """你是媒体库剧集整理助手。根据输入的多源事实，推断 TVDB 剧集和文件重命名映射。
@@ -21,7 +31,7 @@ TVDB_EPISODE_PLAN_PROMPT = """你是媒体库剧集整理助手。根据输入�
 8. 如果输入包含 confirmed_media_metadata，target_series、library_type、category_kind、season_number 和 episode_number 都是已确认锁，禁止改写。
 9. temporary_related_special 可以没有 TVDB episode ID，但必须复用输入中的可定位 source_entry。
 10. 只映射能够从 file_tree 精确定位的文件；无法可靠映射的文件不要写入 episode_map。
-11. 对确认不是目标正片的额外视频，在 discard_files 中列出其精确相对路径；不确定的文件禁止丢弃。
+11. 额外、无法确认或不属于目标作品的文件不要映射；禁止决定删除、丢弃或移动这些文件。
 12. 外挂字幕只允许写入 subtitle_map，且只补 season_number 和 episode_number；禁止判断字幕语言、禁止决定保留或丢弃字幕。
 13. subtitle_map 的 source_file 必须精确等于 file_tree 中的 .srt、.ass、.sup 或 .vtt 相对路径；无法可靠归属时不要映射。
 
@@ -53,26 +63,24 @@ JSON结构：
       "episode_number": 1
     }
   ],
-  "discard_files": ["relative/path/to/discard.mkv"],
   "warnings": ["string"]
 }
 
 输入事实如下：
 """
 
-MOVIE_CLEANUP_PLAN_PROMPT = """你是媒体库电影文件清理助手。根据已确认条目、多源证据、Prowlarr片源标题和完整文件树，选择唯一主视频。
+MOVIE_CLEANUP_PLAN_PROMPT = """你是媒体库电影文件映射助手。根据已确认条目、多源证据、Prowlarr片源标题和完整文件树，选择唯一主视频。
 
 硬性规则：
 1. 只返回JSON，不要返回Markdown或解释。
 2. main_video 必须精确等于 file_tree 中一个视频的 relative_path；不能编造文件名。
 3. 结合片源标题、分辨率、版本、语言、时长/大小线索判断；大小不能单独作为结论。
-4. 其余已确认不是主视频的视频必须逐一列入 discard_files；不确定时 main_video 为空。
+4. 其余视频保持未映射；禁止决定删除、丢弃或移动它们。不确定时 main_video 为空。
 5. evidence 只能引用输入事实，不输出虚构ID或自评置信分。
 
 JSON结构：
 {
   "main_video": "relative/path/movie.mkv",
-  "discard_files": ["relative/path/other.mkv"],
   "reason": "string",
   "evidence": ["string"]
 }
@@ -247,6 +255,17 @@ def _ai_request_timeout():
     return max(timeout, 1)
 
 
+def _is_deepseek() -> bool:
+    ai_config = (runtime_context.config or {}).get("ai") or {}
+    provider = str(ai_config.get("provider") or "").strip().casefold()
+    model = str(ai_config.get("model") or "").strip().casefold()
+    return provider == "deepseek" or model.startswith("deepseek-")
+
+
+def _is_messages_endpoint(url: str) -> bool:
+    return "messages" in str(url or "").casefold()
+
+
 def chat_completion(tip_words, max_tokens=8192):
     url = runtime_context.config.get("ai").get("api_url")
     # 智能判断是否需要拼接 /chat/completions
@@ -262,6 +281,10 @@ def chat_completion(tip_words, max_tokens=8192):
         "messages": [{"role": "user", "content": tip_words}],
         "max_tokens": max_tokens
     }
+    if not _is_messages_endpoint(url):
+        payload["response_format"] = {"type": "json_object"}
+        if _is_deepseek():
+            payload["thinking"] = {"type": "enabled"}
     headers = {
         "Authorization": f"Bearer {runtime_context.config.get('ai').get('api_key')}",
         "Content-Type": "application/json"
@@ -270,7 +293,9 @@ def chat_completion(tip_words, max_tokens=8192):
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=_ai_request_timeout())
         if response.status_code != 200:
-            runtime_context.logger.warn(f"AI API请求失败: {sanitize_log_value(response.text)}")
+            runtime_context.logger.warn(
+                f"AI API请求失败: status_code={response.status_code}"
+            )
             return None
             
         result = response.json()
@@ -288,28 +313,122 @@ def _strip_json_markdown(text: str) -> str:
     return text
 
 
+def _completion_info(result) -> dict:
+    content = ""
+    finish_reason = ""
+    usage = {}
+    if isinstance(result, dict):
+        if isinstance(result.get("content"), list) and result["content"]:
+            block = result["content"][0]
+            if isinstance(block, dict):
+                content = str(block.get("text") or "")
+            finish_reason = str(result.get("stop_reason") or "")
+        elif isinstance(result.get("choices"), list) and result["choices"]:
+            choice = result["choices"][0]
+            if isinstance(choice, dict):
+                message = choice.get("message") or {}
+                if isinstance(message, dict):
+                    content = str(message.get("content") or "")
+                finish_reason = str(choice.get("finish_reason") or "")
+        if isinstance(result.get("usage"), dict):
+            usage = result["usage"]
+    details = usage.get("completion_tokens_details")
+    if not isinstance(details, dict):
+        details = {}
+    reasoning_tokens = details.get("reasoning_tokens")
+    if reasoning_tokens is None:
+        reasoning_tokens = usage.get("reasoning_tokens")
+    try:
+        reasoning_tokens = int(reasoning_tokens or 0)
+    except (TypeError, ValueError):
+        reasoning_tokens = 0
+    return {
+        "content": content,
+        "content_length": len(content),
+        "finish_reason": finish_reason,
+        "completion_tokens": usage.get("completion_tokens") or 0,
+        "reasoning_tokens": reasoning_tokens,
+    }
+
+
 def parse_ai_json_response(result):
     if not isinstance(result, dict):
         return None
 
-    text_content = ""
-    if isinstance(result.get("content"), list) and result["content"]:
-        text_content = result["content"][0].get("text", "")
-    elif isinstance(result.get("choices"), list) and result["choices"]:
-        message = result["choices"][0].get("message") or {}
-        text_content = message.get("content", "")
-
-    text_content = _strip_json_markdown(text_content)
+    text_content = _strip_json_markdown(_completion_info(result)["content"])
     if not text_content:
         return None
-
     try:
         return json.loads(text_content)
     except json.JSONDecodeError:
         logger = runtime_context.logger
         if logger:
-            logger.warn(f"AI返回的不是有效的JSON格式: {text_content}")
+            logger.warning(f"AI返回的不是有效的JSON格式: {text_content}")
         return None
+
+
+def _compact_repair_prompt(prompt: str) -> str:
+    compact = " ".join(str(prompt or "").split())
+    return (
+        "上一次最终 content 为空、被截断或不是有效 JSON。"
+        "只返回符合原结构的完整 JSON 对象，不要解释。\n" + compact
+    )
+
+
+def request_structured_json(
+    prompt: str,
+    *,
+    max_tokens: int,
+    task: str,
+) -> AIJSONResult:
+    """Request final JSON content once, with one bounded repair retry."""
+
+    budget = max(1, min(int(max_tokens), MAX_DEEPSEEK_OUTPUT_TOKENS))
+    current_prompt = str(prompt or "")
+    last_finish_reason = ""
+    for attempt in (1, 2):
+        result = chat_completion(current_prompt, max_tokens=budget)
+        info = _completion_info(result)
+        last_finish_reason = info["finish_reason"]
+        value = parse_ai_json_response(result)
+        accepted = (
+            isinstance(value, dict)
+            and info["finish_reason"].casefold() != "length"
+        )
+        _log_ai_info(
+            f"AI结构化输出 task={task} attempt={attempt} "
+            f"finish_reason={info['finish_reason'] or 'unknown'} "
+            f"completion_tokens={info['completion_tokens']} "
+            f"reasoning_tokens={info['reasoning_tokens']} "
+            f"content_length={info['content_length']} "
+            f"parse_status={'ok' if accepted else 'invalid'}"
+        )
+        if accepted:
+            return AIJSONResult(
+                status="ok",
+                value=value,
+                attempts=attempt,
+                finish_reason=info["finish_reason"],
+            )
+        if attempt == 1:
+            if info["finish_reason"].casefold() == "length":
+                budget = min(budget * 2, MAX_DEEPSEEK_OUTPUT_TOKENS)
+            current_prompt = _compact_repair_prompt(prompt)
+    return AIJSONResult(
+        status="ai_output_unavailable",
+        value=None,
+        attempts=2,
+        finish_reason=last_finish_reason,
+    )
+
+
+def _episode_mapping_budget(unresolved_file_count: int) -> int:
+    if not _is_deepseek():
+        return 4096
+    return min(
+        MAX_DEEPSEEK_OUTPUT_TOKENS,
+        max(16384, 4096 + 256 * max(0, int(unresolved_file_count))),
+    )
 
 
 def infer_tvdb_episode_plan_with_ai(context: dict):
@@ -318,10 +437,17 @@ def infer_tvdb_episode_plan_with_ai(context: dict):
 
     prompt = TVDB_EPISODE_PLAN_PROMPT + json.dumps(context or {}, ensure_ascii=False, indent=2)
     _log_ai_info(f"AI TVDB映射输入 context={_compact_json_for_log(context)}")
-    result = chat_completion(prompt, max_tokens=4096)
-    if runtime_context.logger:
-        runtime_context.logger.info(f"AI TVDB映射原始响应: {sanitize_log_value(result)}")
-    plan = parse_ai_json_response(result)
+    unresolved_file_count = sum(
+        1
+        for item in (context or {}).get("file_tree") or []
+        if isinstance(item, dict) and not item.get("is_dir")
+    )
+    response = request_structured_json(
+        prompt,
+        max_tokens=_episode_mapping_budget(unresolved_file_count),
+        task="tvdb_episode_mapping",
+    )
+    plan = response.value
     if not isinstance(plan, dict):
         return None
 
@@ -334,9 +460,6 @@ def infer_tvdb_episode_plan_with_ai(context: dict):
     warnings = plan.get("warnings")
     if not isinstance(warnings, list):
         plan["warnings"] = []
-    discard_files = plan.get("discard_files")
-    if not isinstance(discard_files, list):
-        plan["discard_files"] = []
     evidence = plan.get("evidence")
     if not isinstance(evidence, dict):
         plan["evidence"] = {}
@@ -350,12 +473,13 @@ def infer_movie_cleanup_plan_with_ai(context: dict):
         context or {}, ensure_ascii=False, indent=2
     )
     _log_ai_info(f"AI电影清理输入 context={_compact_json_for_log(context)}")
-    result = chat_completion(prompt, max_tokens=2048)
-    plan = parse_ai_json_response(result)
+    plan = request_structured_json(
+        prompt,
+        max_tokens=2048,
+        task="movie_selection",
+    ).value
     if not isinstance(plan, dict):
         return None
-    if not isinstance(plan.get("discard_files"), list):
-        plan["discard_files"] = []
     return plan
 
 
@@ -375,9 +499,11 @@ def normalize_search_query_with_ai(raw_query: str):
         return None
 
     _log_ai_info(f"AI搜索清洗输入 raw={raw_query}")
-    result = chat_completion(SEARCH_QUERY_NORMALIZATION_PROMPT + str(raw_query or ""), max_tokens=2048)
-    _log_ai_info(f"AI搜索清洗原始响应 raw={raw_query} response={_compact_json_for_log(result)}")
-    plan = parse_ai_json_response(result)
+    plan = request_structured_json(
+        SEARCH_QUERY_NORMALIZATION_PROMPT + str(raw_query or ""),
+        max_tokens=2048,
+        task="search_query_normalization",
+    ).value
     if not isinstance(plan, dict):
         return None
 
@@ -400,9 +526,11 @@ def infer_verified_search_match_with_ai(raw_query: str):
         return None
 
     _log_ai_info(f"AI验证兜底输入 raw={raw_query}")
-    result = chat_completion(SEARCH_VERIFIED_MATCH_PROMPT + str(raw_query or ""), max_tokens=2048)
-    _log_ai_info(f"AI验证兜底原始响应 raw={raw_query} response={_compact_json_for_log(result)}")
-    plan = parse_ai_json_response(result)
+    plan = request_structured_json(
+        SEARCH_VERIFIED_MATCH_PROMPT + str(raw_query or ""),
+        max_tokens=2048,
+        task="verified_search_match",
+    ).value
     if not isinstance(plan, dict):
         return None
 
@@ -434,9 +562,11 @@ def infer_metadata_backfill_with_ai(context: dict):
 
     prompt = METADATA_BACKFILL_PROMPT + json.dumps(context or {}, ensure_ascii=False, indent=2)
     _log_ai_info(f"AI元数据补全输入 context={_compact_json_for_log(context)}")
-    result = chat_completion(prompt, max_tokens=2048)
-    _log_ai_info(f"AI元数据补全原始响应 response={_compact_json_for_log(result)}")
-    plan = parse_ai_json_response(result)
+    plan = request_structured_json(
+        prompt,
+        max_tokens=2048,
+        task="metadata_backfill",
+    ).value
     if not isinstance(plan, dict) or plan.get("status") != "ok":
         return None
 
@@ -469,8 +599,11 @@ def recover_query_with_ai(context: dict):
     _log_ai_info(
         f"AI文件树查询恢复输入 context={_compact_json_for_log(context)}"
     )
-    result = chat_completion(prompt, max_tokens=1024)
-    plan = parse_ai_json_response(result)
+    plan = request_structured_json(
+        prompt,
+        max_tokens=1024,
+        task="query_recovery",
+    ).value
     if not isinstance(plan, dict):
         return None
     status = str(plan.get("status") or "blocked").strip().casefold()
@@ -494,38 +627,11 @@ def get_movie_tmdb_name_with_ai(movie_desc):
         return None
     
     tip_words = f"'{movie_desc}' 请根据这个字符串，推断出可能的电影名称，然后根据电影名称，去TMDB网站(https://www.themoviedb.org)找到电影的TMDB ID，最后根据TMDB ID找到其对应的完整中文名称。注意：1. 优先匹配年份和英文原名。2. 如果有多个中文译名，请优先选择TMDB上的官方中文译名或最通用的译名。3. 有些系列电影可能会包含序号，比如：“侏罗纪公园2” 对应完整的中文名称应该是“侏罗纪公园2：失落的世界”。请返回json格式{{\"name\": \"完整的中文电影名称\"}} 。不要包含任何多余文字，如果找不到对应的中文名称请返回 {{\"name\": \"\"}}"
-    try:
-        result = chat_completion(tip_words)
-        runtime_context.logger.info(f"AI原始响应: {sanitize_log_value(result)}")
-        
-        # 解析返回结果
-        # 针对Anthropic/SiliconFlow messages接口: {'content': [{'text': '{"name": "..."}'...} ...}
-        if isinstance(result, dict) and 'content' in result and isinstance(result['content'], list) and len(result['content']) > 0:
-            text_content = result['content'][0].get('text', '')
-            # 清理可能存在的markdown标记
-            if "```" in text_content:
-                text_content = text_content.replace("```json", "").replace("```", "").strip()
-            
-            try:
-                json_data = json.loads(text_content)
-                return json_data.get('name')
-            except json.JSONDecodeError:
-                runtime_context.logger.warn(f"AI返回的不是有效的JSON格式: {text_content}")
-                return None
-
-        # 兼容OpenAI格式: choices[0].message.content
-        if isinstance(result, dict) and 'choices' in result and len(result['choices']) > 0:
-            content = result['choices'][0]['message']['content']
-            if "```" in content:
-                content = content.replace("```json", "").replace("```", "").strip()
-            try:
-                json_data = json.loads(content)
-                return json_data.get('name')
-            except json.JSONDecodeError:
-                return None
-                
+    result = request_structured_json(
+        tip_words,
+        max_tokens=8192,
+        task="movie_tmdb_name",
+    )
+    if not isinstance(result.value, dict):
         return None
-        
-    except Exception as e:
-        runtime_context.logger.error(f"调用AI接口出错: {e}")
-        return None
+    return result.value.get("name")

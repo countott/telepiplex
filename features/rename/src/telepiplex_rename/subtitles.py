@@ -39,6 +39,18 @@ _OTHER_LANGUAGE = re.compile(
     r"THA|TH|VIE|VI)(?:$|[ ._\-\[\]()&+])|日文|日语|日語|韩文|"
     r"韩语|韓文|韓語|法文|德文|西班牙文|俄文"
 )
+_KNOWN_LANGUAGE_CODES = (
+    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:JPN|JA|JAPANESE)(?:$|[ ._\-\[\]()&+])|日文|日语|日語"), "jpn"),
+    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:KOR|KO|KOREAN)(?:$|[ ._\-\[\]()&+])|韩文|韩语|韓文|韓語"), "kor"),
+    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:FRE|FRA|FR)(?:$|[ ._\-\[\]()&+])|法文"), "fre"),
+    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:GER|DEU|DE)(?:$|[ ._\-\[\]()&+])|德文"), "ger"),
+    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:SPA|ESP|ES)(?:$|[ ._\-\[\]()&+])|西班牙文"), "spa"),
+    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:ITA|IT)(?:$|[ ._\-\[\]()&+])|意大利文"), "ita"),
+    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:RUS|RU)(?:$|[ ._\-\[\]()&+])|俄文"), "rus"),
+    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:ARA|AR)(?:$|[ ._\-\[\]()&+])|阿拉伯文"), "ara"),
+    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:THA|TH)(?:$|[ ._\-\[\]()&+])|泰文|泰语|泰語"), "tha"),
+    (re.compile(r"(?i)(?:^|[ ._\-\[\]()&+])(?:VIE|VI)(?:$|[ ._\-\[\]()&+])|越南文|越南语|越南語"), "vie"),
+)
 
 
 def _text(value: str) -> str:
@@ -59,6 +71,13 @@ def _subtitle_nodes(file_tree: list[dict]) -> list[dict]:
             node["relative_path"] = relative
             node["name"] = str(item.get("name") or PurePosixPath(relative).name)
             node["extension"] = extension
+            node["source_id"] = str(
+                item.get("source_id")
+                or item.get("file_id")
+                or item.get("fid")
+                or item.get("id")
+                or f"path:{relative}"
+            )
             result.append(node)
     return result
 
@@ -83,7 +102,7 @@ def _episode_key(relative_path: str) -> tuple[int, int] | None:
     return (next(iter(seasons)), episode) if episode > 0 else None
 
 
-def _language_profile(relative_path: str) -> str:
+def _language_details(relative_path: str) -> tuple[str, str, str]:
     value = _text(relative_path)
     simplified = bool(_SIMPLIFIED.search(value))
     traditional = bool(_TRADITIONAL.search(value))
@@ -92,21 +111,32 @@ def _language_profile(relative_path: str) -> str:
     ))
     other = bool(_OTHER_LANGUAGE.search(value))
     if simplified and not traditional:
-        return "simplified_bilingual" if english else "simplified"
+        if english:
+            return "chi", "simplified_bilingual", "bilingual"
+        return "chi", "simplified", "simplified"
     if traditional:
-        return "traditional"
-    if english or other:
-        return "other"
-    return "unknown"
+        return "chi", "traditional", "traditional"
+    if english:
+        return "eng", "english", "general"
+    if other:
+        for pattern, code in _KNOWN_LANGUAGE_CODES:
+            if pattern.search(value):
+                return code, "other", "general"
+    return "unknown", "unknown", "unknown"
 
 
 def collect_subtitle_evidence(file_tree: list[dict]) -> list[dict]:
     evidence = []
     for node in _subtitle_nodes(file_tree):
+        language_code, language_profile, subtitle_variant = (
+            _language_details(node["relative_path"])
+        )
         evidence.append({
             **node,
             "episode_key": _episode_key(node["relative_path"]),
-            "language_profile": _language_profile(node["relative_path"]),
+            "language_code": language_code,
+            "language_profile": language_profile,
+            "subtitle_variant": subtitle_variant,
         })
     return evidence
 
@@ -118,9 +148,14 @@ def _operation(
     target_dir: str,
     target_stem: str,
     episode_key: tuple[int, int] | None = None,
+    variant_index: int = 1,
 ) -> dict:
     target_stem = sanitize_target_name(target_stem)
-    rename_to = f"{target_stem}.chi{node['extension']}"
+    variant = f".variant-{variant_index:02d}" if variant_index > 1 else ""
+    rename_to = (
+        f"{target_stem}{variant}.{node['language_code']}"
+        f"{node['extension']}"
+    )
     source_path = str(node.get("path") or "") or (
         f"{str(final_path).rstrip('/')}/{node['relative_path']}"
     )
@@ -129,6 +164,7 @@ def _operation(
         "media_kind": "subtitle",
         "content_role": "external_subtitle",
         "source_relative_path": node["relative_path"],
+        "source_id": node["source_id"],
         "source_path": source_path,
         "rename_to": rename_to,
         "renamed_source_path": f"{source_parent}/{rename_to}",
@@ -136,6 +172,8 @@ def _operation(
         "target_relative_path": rename_to,
         "final_path": f"{str(target_dir).rstrip('/')}/{rename_to}",
         "language_profile": node["language_profile"],
+        "language_code": node["language_code"],
+        "subtitle_variant": node["subtitle_variant"],
         "extension": node["extension"],
         "source_sha1": str(
             node.get("sha1") or node.get("sha") or ""
@@ -150,59 +188,33 @@ def _operation(
     return operation
 
 
-def _select_subtitles(
+def _plan_subtitles(
     evidence: list[dict],
     *,
     grouping_key,
-) -> tuple[list[dict], list[str], list[str]]:
-    unresolved = [
-        item["relative_path"] for item in evidence
-        if item["language_profile"] == "unknown"
-        or (
-            item["language_profile"] in {
-                "simplified_bilingual", "simplified",
-            }
-            and grouping_key(item) is None
-        )
-    ]
-    if unresolved:
-        return [], [], unresolved
-
-    discard = [
-        item["relative_path"] for item in evidence
-        if item["language_profile"] in {"traditional", "other"}
+) -> tuple[list[tuple[dict, int]], list[str]]:
+    kept = [
+        item["relative_path"]
+        for item in evidence
+        if item["language_code"] == "unknown" or grouping_key(item) is None
     ]
     eligible = [
         item for item in evidence
-        if item["language_profile"] in {
-            "simplified_bilingual", "simplified",
-        }
+        if item["language_code"] != "unknown" and grouping_key(item) is not None
     ]
     grouped = defaultdict(list)
     for item in eligible:
-        grouped[(grouping_key(item), item["extension"])].append(item)
+        grouped[(
+            grouping_key(item),
+            item["language_code"],
+            item["extension"],
+        )].append(item)
 
-    selected = []
-    for items in grouped.values():
-        best_rank = max(
-            2 if item["language_profile"] == "simplified_bilingual" else 1
-            for item in items
-        )
-        best = [
-            item for item in items
-            if (2 if item["language_profile"] == "simplified_bilingual" else 1)
-            == best_rank
-        ]
-        if len(best) != 1:
-            unresolved.extend(item["relative_path"] for item in best)
-            continue
-        selected.append(best[0])
-        discard.extend(
-            item["relative_path"] for item in items if item is not best[0]
-        )
-    if unresolved:
-        return [], [], sorted(set(unresolved))
-    return selected, sorted(set(discard)), []
+    planned = []
+    for key in sorted(grouped, key=lambda value: str(value)):
+        items = sorted(grouped[key], key=lambda item: item["source_id"])
+        planned.extend((item, index) for index, item in enumerate(items, 1))
+    return planned, sorted(set(kept))
 
 
 def build_series_subtitle_plan(
@@ -227,13 +239,13 @@ def build_series_subtitle_plan(
         ):
             item["episode_key"] = None
 
-    selected, discard, unresolved = _select_subtitles(
+    selected, kept = _plan_subtitles(
         evidence,
         grouping_key=lambda item: item["episode_key"],
     )
     operations = []
     safe_series_name = sanitize_target_name(series_name)
-    for item in selected:
+    for item, variant_index in selected:
         season, episode = item["episode_key"]
         marker = f"S{season:02d}E{episode:0{3 if episode >= 100 else 2}d}"
         target_dir = (
@@ -246,6 +258,7 @@ def build_series_subtitle_plan(
             target_dir=target_dir,
             target_stem=f"{safe_series_name} {marker}",
             episode_key=(season, episode),
+            variant_index=variant_index,
         )
         operation["target_relative_path"] = (
             f"{safe_series_name} Season {season:02d}/"
@@ -253,12 +266,14 @@ def build_series_subtitle_plan(
         )
         operations.append(operation)
     operations.sort(key=lambda item: (
-        item["season_number"], item["episode_number"], item["extension"],
+        item["season_number"], item["episode_number"],
+        item["language_code"], item["extension"], item["source_id"],
     ))
     return {
-        "operations": operations if not unresolved else [],
-        "discard_sources": discard if not unresolved else [],
-        "unresolved_sources": unresolved,
+        "operations": operations,
+        "discard_sources": [],
+        "kept_sources": kept,
+        "unresolved_sources": [],
     }
 
 
@@ -270,7 +285,7 @@ def build_movie_subtitle_plan(
     file_tree: list[dict],
 ) -> dict:
     evidence = collect_subtitle_evidence(file_tree)
-    selected, discard, unresolved = _select_subtitles(
+    selected, kept = _plan_subtitles(
         evidence,
         grouping_key=lambda _item: "movie",
     )
@@ -280,12 +295,16 @@ def build_movie_subtitle_plan(
             final_path=final_path,
             target_dir=target_dir,
             target_stem=target_stem,
+            variant_index=variant_index,
         )
-        for item in selected
+        for item, variant_index in selected
     ]
-    operations.sort(key=lambda item: item["extension"])
+    operations.sort(key=lambda item: (
+        item["language_code"], item["extension"], item["source_id"],
+    ))
     return {
-        "operations": operations if not unresolved else [],
-        "discard_sources": discard if not unresolved else [],
-        "unresolved_sources": unresolved,
+        "operations": operations,
+        "discard_sources": [],
+        "kept_sources": kept,
+        "unresolved_sources": [],
     }
