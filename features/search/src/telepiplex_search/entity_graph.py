@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Mapping
 
@@ -129,6 +129,11 @@ class EvidenceFact:
     backdrop_urls: tuple[str, ...] = ()
     season_count: int | None = None
     episode_count: int | None = None
+    episode_inventory: Mapping[str, object] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    douban_title_raw: str = ""
+    source_season_number: int | None = None
     complex_signals: tuple[str, ...] = ()
     stable_fact_id: str = ""
 
@@ -430,6 +435,13 @@ def _fact(
         backdrop_urls=_unique_text(raw.get("backdrop_urls") or []),
         season_count=_optional_integer(raw.get("season_count")),
         episode_count=_optional_integer(raw.get("episode_count")),
+        episode_inventory=MappingProxyType(dict(
+            raw.get("wikipedia_episode_inventory")
+            or raw.get("episode_inventory")
+            or {}
+        )),
+        douban_title_raw=_text(raw.get("douban_title_raw")),
+        source_season_number=_optional_integer(raw.get("season_number")),
         complex_signals=_unique_text(signals),
         stable_fact_id=fact_id,
     )
@@ -774,6 +786,9 @@ def _merge_fact_group(facts: list[EvidenceFact]) -> EvidenceFact:
                 "backdrop_urls": fact.backdrop_urls,
                 "season_count": fact.season_count,
                 "episode_count": fact.episode_count,
+                "episode_inventory": dict(fact.episode_inventory),
+                "douban_title_raw": fact.douban_title_raw,
+                "source_season_number": fact.source_season_number,
                 "complex_signals": fact.complex_signals,
             },
             ensure_ascii=False,
@@ -881,6 +896,32 @@ def _merge_fact_group(facts: list[EvidenceFact]) -> EvidenceFact:
         ),
         episode_count=_preferred_integer(
             fact.episode_count for fact in facts
+        ),
+        episode_inventory=MappingProxyType(dict(max(
+            (fact.episode_inventory for fact in facts),
+            key=lambda value: (
+                {
+                    "complete": 6,
+                    "partial": 5,
+                    "parse_error": 4,
+                    "conflict": 3,
+                    "absent": 2,
+                    "unavailable": 1,
+                }.get(_text(value.get("status")), 0),
+                len(json.dumps(
+                    dict(value),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                )),
+            ),
+            default={},
+        ))),
+        douban_title_raw=_preferred_text(
+            fact.douban_title_raw for fact in facts
+        ),
+        source_season_number=_preferred_integer(
+            fact.source_season_number for fact in facts
         ),
         complex_signals=_sorted_unique_text(
             signal for fact in facts for signal in fact.complex_signals

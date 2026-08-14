@@ -39,8 +39,84 @@ def lookup_wikipedia_episode_page(
     *,
     timeout: float = 10,
 ) -> dict:
-    del language, title, timeout
-    return {}
+    language = re.sub(r"[^a-z0-9-]", "", str(language or "").casefold())
+    title = " ".join(str(title or "").replace("_", " ").split())
+    if not language or not title:
+        return {
+            "status": "unavailable",
+            "items": [],
+            "season_totals": {},
+            "source_url": "",
+            "source_language": language,
+            "revision_id": 0,
+            "error": "source_page_empty",
+        }
+    endpoint = f"https://{language}.wikipedia.org/w/api.php"
+    try:
+        response = _get(
+            endpoint,
+            params={
+                "action": "parse",
+                "page": title,
+                "prop": "text|revid|displaytitle",
+                "format": "json",
+                "formatversion": 2,
+                **_variant_params(language),
+            },
+            headers={"User-Agent": USER_AGENT},
+            timeout=timeout,
+            min_interval=0,
+            rate_limit_cooldown=30,
+        )
+        response.raise_for_status()
+        payload = response.json() or {}
+    except Exception as exc:
+        status = _exception_status(exc)
+        return {
+            "status": status,
+            "items": [],
+            "season_totals": {},
+            "source_url": (
+                f"https://{language}.wikipedia.org/wiki/"
+                f"{quote(title.replace(' ', '_'))}"
+            ),
+            "source_language": language,
+            "revision_id": 0,
+            "error": f"wikipedia_{status}",
+        }
+    parsed = payload.get("parse") if isinstance(payload, dict) else None
+    if not isinstance(parsed, dict):
+        error_code = str((payload.get("error") or {}).get("code") or "")
+        status = "not_found" if error_code in {"missingtitle", "invalidtitle"} else "server_down"
+        return {
+            "status": status,
+            "items": [],
+            "season_totals": {},
+            "source_url": (
+                f"https://{language}.wikipedia.org/wiki/"
+                f"{quote(title.replace(' ', '_'))}"
+            ),
+            "source_language": language,
+            "revision_id": 0,
+            "error": f"wikipedia_{status}",
+        }
+    resolved_title = " ".join(str(parsed.get("title") or title).split())
+    source_url = (
+        f"https://{language}.wikipedia.org/wiki/"
+        f"{quote(resolved_title.replace(' ', '_'))}"
+    )
+    result = parse_wikipedia_episode_html(
+        str(parsed.get("text") or ""),
+        language=language,
+        source_url=source_url,
+        revision_id=int(parsed.get("revid") or 0),
+    )
+    result.update({
+        "page_id": int(parsed.get("pageid") or 0),
+        "page_title": resolved_title,
+        "display_title": str(parsed.get("displaytitle") or ""),
+    })
+    return result
 
 
 def _retry_after_seconds(response, fallback: float) -> float:
@@ -191,7 +267,7 @@ _ENGLISH_MEDIA_DISAMBIGUATION = re.compile(
 )
 
 
-def _english_work_title(page: dict, language: str) -> str:
+def _english_page_title(page: dict, language: str) -> str:
     if language.startswith("en"):
         title = str(page.get("title") or "")
     else:
@@ -207,8 +283,14 @@ def _english_work_title(page: dict, language: str) -> str:
             title = str(item.get("title") or item.get("*") or "")
             if title:
                 break
-    title = " ".join(title.split())
-    return _ENGLISH_MEDIA_DISAMBIGUATION.sub("", title).strip()
+    return " ".join(title.split())
+
+
+def _english_work_title(page: dict, language: str) -> str:
+    return _ENGLISH_MEDIA_DISAMBIGUATION.sub(
+        "",
+        _english_page_title(page, language),
+    ).strip()
 
 
 def _variant_params(language: str) -> dict:
@@ -305,6 +387,7 @@ def lookup_wikipedia_evidence(
                     page,
                     language,
                 )
+                english_page_title = _english_page_title(page, language)
                 pageprops = page.get("pageprops") or {}
                 facts.append(
                     {
@@ -329,6 +412,7 @@ def lookup_wikipedia_evidence(
                         "chinese_title": title if language.startswith("zh") else "",
                         "english_title": title if language.startswith("en") else "",
                         "official_english_title": official_english_title,
+                        "english_page_title": english_page_title,
                     }
                 )
                 if page_url not in urls:
@@ -424,6 +508,7 @@ def lookup_wikipedia_page(
         else ""
     )
     official_english_title = _english_work_title(page, language)
+    english_page_title = _english_page_title(page, language)
     pageprops = page.get("pageprops") or {}
     return {
         "language": language,
@@ -445,5 +530,6 @@ def lookup_wikipedia_page(
             else official_english_title
         ),
         "official_english_title": official_english_title,
+        "english_page_title": english_page_title,
         "cover_url": poster_url,
     }

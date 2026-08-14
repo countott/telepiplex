@@ -15,6 +15,109 @@ from telepiplex_search.input_contract import MetadataLink, ParsedInput
 
 
 class DirectLinkTest(unittest.TestCase):
+    @patch("telepiplex_search.direct_link.lookup_wikipedia_episode_page")
+    @patch("telepiplex_search.direct_link.enrich_wikidata_entities")
+    @patch("telepiplex_search.direct_link.lookup_wikipedia_page")
+    def test_wikipedia_series_uses_same_qid_english_episode_table(
+        self,
+        lookup_page,
+        enrich,
+        lookup_episodes,
+    ):
+        lookup_page.side_effect = [
+            {
+                "wikibase_item": "Q124175370",
+                "title": "百年孤独 (电视剧)",
+                "canonical_title": "百年孤独 (电视剧)",
+                "official_english_title": "One Hundred Years of Solitude",
+                "english_page_title": "One Hundred Years of Solitude (TV series)",
+                "year": "2024",
+                "media_type": "series",
+                "url": "https://zh.wikipedia.org/wiki/百年孤独_(电视剧)",
+            },
+            {
+                "wikibase_item": "Q124175370",
+                "title": "One Hundred Years of Solitude (TV series)",
+                "canonical_title": "One Hundred Years of Solitude (TV series)",
+                "official_english_title": "One Hundred Years of Solitude",
+                "year": "2024",
+                "media_type": "series",
+                "url": "https://en.wikipedia.org/wiki/One_Hundred_Years_of_Solitude_(TV_series)",
+            },
+        ]
+        enrich.return_value = {"Q124175370": {
+            "wikibase_item": "Q124175370",
+            "external_ids": {"wikidata": "Q124175370"},
+            "english_title": "One Hundred Years of Solitude",
+            "year": "2024",
+            "media_type": "series",
+            "season_count": 2,
+            "episode_count": 16,
+        }}
+        lookup_episodes.side_effect = [
+            {
+                "status": "partial",
+                "items": [{
+                    "season_number": None,
+                    "episode_number": None,
+                    "overall_number": 1,
+                    "air_date": "2024-12-11",
+                }],
+                "season_totals": {},
+                "source_url": "https://zh.wikipedia.org/wiki/百年孤独_(电视剧)",
+                "source_language": "zh",
+                "revision_id": 100,
+                "error": "",
+            },
+            {
+                "status": "complete",
+                "items": [
+                    {
+                        "season_number": season,
+                        "episode_number": episode,
+                        "overall_number": (season - 1) * 8 + episode,
+                        "air_date": (
+                            "2024-12-11"
+                            if season == 1
+                            else "2026-08-05"
+                            if episode < 8
+                            else "2026-08-26"
+                        ),
+                    }
+                    for season in (1, 2)
+                    for episode in range(1, 9)
+                ],
+                "season_totals": {1: 8, 2: 8},
+                "source_url": "https://en.wikipedia.org/wiki/One_Hundred_Years_of_Solitude_(TV_series)",
+                "source_language": "en",
+                "revision_id": 200,
+                "error": "",
+            },
+        ]
+
+        direct = resolve_direct_link(MetadataLink(
+            provider="wikipedia",
+            media_type="",
+            entity_id="zh:百年孤独 (电视剧)",
+            scope="work",
+            url="https://zh.wikipedia.org/wiki/百年孤独_(电视剧)",
+        ))
+
+        fact = direct.evidence["facts"][0]
+        self.assertEqual(len(fact["episodes"]), 16)
+        self.assertEqual(fact["wikipedia_episode_inventory"]["status"], "complete")
+        self.assertEqual(
+            fact["wikipedia_episode_inventory"]["season_totals"],
+            {1: 8, 2: 8},
+        )
+        self.assertEqual(
+            [call.args[:2] for call in lookup_episodes.call_args_list],
+            [
+                ("zh", "百年孤独 (电视剧)"),
+                ("en", "One Hundred Years of Solitude (TV series)"),
+            ],
+        )
+
     @patch("telepiplex_search.direct_link.requests.get")
     def test_short_wikipedia_link_resolves_to_stable_article(self, get):
         get.side_effect = [
@@ -174,12 +277,14 @@ class DirectLinkTest(unittest.TestCase):
         self.assertEqual(direct.media_type, "movie")
         self.assertEqual(direct.query, "The Grand Budapest Hotel")
 
+    @patch("telepiplex_search.direct_link.lookup_wikipedia_episode_page")
     @patch("telepiplex_search.direct_link.enrich_wikidata_entities")
     @patch("telepiplex_search.direct_link.lookup_wikipedia_page")
     def test_wikipedia_exact_read_restores_structural_wikidata_fields(
         self,
         lookup,
         enrich,
+        lookup_episodes,
     ):
         lookup.return_value = {
             "wikibase_item": "Q74801",
@@ -200,6 +305,15 @@ class DirectLinkTest(unittest.TestCase):
             "season_count": 7,
             "episode_count": 65,
         }}
+        lookup_episodes.return_value = {
+            "status": "absent",
+            "items": [],
+            "season_totals": {},
+            "source_url": "https://en.wikipedia.org/wiki/Veep",
+            "source_language": "en",
+            "revision_id": 1,
+            "error": "wikipedia_table_absent",
+        }
 
         direct = resolve_direct_link(MetadataLink(
             provider="wikipedia",

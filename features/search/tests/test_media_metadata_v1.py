@@ -43,6 +43,7 @@ def _fact(
     backdrops=(),
     season_count=None,
     episode_count=None,
+    episode_inventory=None,
 ):
     return EvidenceFact(
         fact_id=fact_id,
@@ -73,6 +74,7 @@ def _fact(
         backdrop_urls=tuple(backdrops),
         season_count=season_count,
         episode_count=episode_count,
+        episode_inventory=episode_inventory or {},
     )
 
 
@@ -148,6 +150,250 @@ def _candidate(*, intended_scope="movie", facts=None, unresolved=()):
 
 
 class MediaMetadataV1Test(unittest.TestCase):
+    def test_wikipedia_inventory_precedes_conflicting_tvdb_default_order(self):
+        wikipedia_episodes = tuple(
+            {
+                "season_number": season,
+                "episode_number": episode,
+                "overall_number": (season - 1) * 8 + episode,
+                "aired": "2024-12-11" if season == 1 else "2026-08-05",
+            }
+            for season in (1, 2)
+            for episode in range(1, 9)
+        )
+        tvdb_episodes = tuple(
+            {
+                "tvdb_episode_id": f"tvdb-{episode}",
+                "season_number": 1,
+                "episode_number": episode,
+                "aired": "2024-12-11" if episode < 9 else "2026-08-05",
+            }
+            for episode in range(1, 17)
+        )
+        wikipedia = _fact(
+            "wikipedia:Q124175370",
+            "wikipedia",
+            titles=("百年孤寂", "One Hundred Years of Solitude"),
+            year="2024",
+            media_type="series",
+            url="https://en.wikipedia.org/wiki/One_Hundred_Years_of_Solitude_(TV_series)",
+            external_ids={"wikidata": "Q124175370"},
+            english="One Hundred Years of Solitude",
+            original="Cien años de soledad",
+            language="es",
+            episodes=wikipedia_episodes,
+        )
+        tvdb = _fact(
+            "tvdb:426288",
+            "tvdb",
+            titles=("One Hundred Years of Solitude",),
+            year="2024",
+            media_type="series",
+            url="https://thetvdb.com/series/426288",
+            external_ids={"tvdb": "426288"},
+            english="One Hundred Years of Solitude",
+            original="Cien años de soledad",
+            language="es",
+            episodes=tvdb_episodes,
+        )
+        candidate = AnchoredCandidate(
+            candidate_id="wikipedia:Q124175370",
+            anchor_fact_id=wikipedia.fact_id,
+            identity_role="series_root",
+            intended_scope="whole_series",
+            source_links=(
+                SourceLink(
+                    provider="wikipedia", fact_id=wikipedia.fact_id,
+                    url=wikipedia.source_url, external_ids=wikipedia.external_ids,
+                    role="series_root", season_number=None, episode_number=None,
+                    verification="fact_verified",
+                ),
+                SourceLink(
+                    provider="tvdb", fact_id=tvdb.fact_id,
+                    url=tvdb.source_url, external_ids=tvdb.external_ids,
+                    role="series_root", season_number=None, episode_number=None,
+                    verification="fact_verified",
+                ),
+            ),
+            poster_assets=(),
+            unresolved_sources=(),
+            ai_confidence=1,
+            ai_reason="Wikipedia identity with downstream TVDB metadata.",
+            facts=(wikipedia, tvdb),
+        )
+
+        contract = build_media_metadata_v1(
+            candidate,
+            metadata_id="one-hundred-years",
+            raw_query="百年孤独",
+        )
+
+        self.assertEqual(
+            sorted({item["season_number"] for item in contract["items"]}),
+            [1, 2],
+        )
+        self.assertTrue(all(
+            item["inventory_source"] == "wikipedia"
+            for item in contract["items"]
+        ))
+        self.assertEqual(
+            contract["evidence"]["series_inventory"]["source"],
+            "wikipedia",
+        )
+        self.assertEqual(
+            contract["evidence"]["series_inventory"]["season_totals"],
+            {1: 8, 2: 8},
+        )
+
+    def test_wikipedia_parse_error_remains_visible_after_tvdb_fallback(self):
+        wikipedia = _fact(
+            "wikipedia:Q1",
+            "wikipedia",
+            titles=("Example",),
+            year="2024",
+            media_type="series",
+            url="https://en.wikipedia.org/wiki/Example",
+            external_ids={"wikidata": "Q1"},
+            english="Example",
+            episode_inventory={
+                "status": "parse_error",
+                "season_totals": {},
+                "source_revisions": {"en": 123},
+                "error": "wikipedia_parse_error",
+            },
+        )
+        tvdb = _fact(
+            "tvdb:1",
+            "tvdb",
+            titles=("Example",),
+            year="2024",
+            media_type="series",
+            url="https://thetvdb.com/series/1",
+            external_ids={"tvdb": "1"},
+            english="Example",
+            episodes=({
+                "tvdb_episode_id": "1-1",
+                "season_number": 1,
+                "episode_number": 1,
+                "aired": "2024-01-01",
+            },),
+        )
+        candidate = _candidate(
+            intended_scope="whole_series",
+            facts=(wikipedia, tvdb),
+        )
+
+        contract = build_media_metadata_v1(
+            candidate,
+            metadata_id="example",
+            raw_query="Example",
+        )
+
+        inventory = contract["evidence"]["series_inventory"]
+        self.assertEqual(inventory["source"], "tvdb")
+        self.assertEqual(inventory["wikipedia_status"], "parse_error")
+        self.assertEqual(inventory["fallback_reason"], "wikipedia_parse_error")
+        self.assertIn(
+            "warning:wikipedia_episode_parse_error",
+            contract["warnings"],
+        )
+
+    def test_tvdb_tmdb_fallback_merges_only_consistent_coordinates(self):
+        wikipedia = _fact(
+            "wikipedia:Q2",
+            "wikipedia",
+            titles=("Fallback",),
+            year="2024",
+            media_type="series",
+            url="https://en.wikipedia.org/wiki/Fallback",
+            external_ids={"wikidata": "Q2"},
+            english="Fallback",
+            episode_inventory={
+                "status": "absent",
+                "error": "wikipedia_table_absent",
+            },
+        )
+        tvdb = _fact(
+            "tvdb:2",
+            "tvdb",
+            titles=("Fallback",),
+            year="2024",
+            media_type="series",
+            url="https://thetvdb.com/series/2",
+            external_ids={"tvdb": "2"},
+            english="Fallback",
+            episodes=({
+                "tvdb_episode_id": "tvdb-1",
+                "season_number": 1,
+                "episode_number": 1,
+                "aired": "2024-01-01",
+            },),
+        )
+        tmdb = _fact(
+            "tmdb:2",
+            "tmdb",
+            titles=("Fallback",),
+            year="2024",
+            media_type="series",
+            url="https://www.themoviedb.org/tv/2",
+            external_ids={"tmdb": "2"},
+            english="Fallback",
+            episodes=({
+                "tmdb_episode_id": "tmdb-1",
+                "season_number": 1,
+                "episode_number": 1,
+                "air_date": "2024-01-01",
+            },),
+        )
+
+        contract = build_media_metadata_v1(
+            _candidate(
+                intended_scope="whole_series",
+                facts=(wikipedia, tvdb, tmdb),
+            ),
+            metadata_id="fallback",
+            raw_query="Fallback",
+        )
+
+        self.assertEqual(len(contract["items"]), 1)
+        item = contract["items"][0]
+        self.assertEqual(item["inventory_source"], "tvdb_tmdb")
+        self.assertEqual(item["tvdb_episode_id"], "tvdb-1")
+        self.assertEqual(item["tmdb_episode_id"], "tmdb-1")
+
+    def test_tvdb_tmdb_fallback_date_conflict_becomes_unknown(self):
+        facts = []
+        for provider, aired in (("tvdb", "2024-01-01"), ("tmdb", "2024-01-02")):
+            facts.append(_fact(
+                f"{provider}:3",
+                provider,
+                titles=("Conflict",),
+                year="2024",
+                media_type="series",
+                url=f"https://example.com/{provider}/3",
+                external_ids={provider: "3"},
+                english="Conflict",
+                episodes=({
+                    f"{provider}_episode_id": f"{provider}-1",
+                    "season_number": 1,
+                    "episode_number": 1,
+                    "aired": aired,
+                },),
+            ))
+
+        contract = build_media_metadata_v1(
+            _candidate(intended_scope="whole_series", facts=tuple(facts)),
+            metadata_id="conflict",
+            raw_query="Conflict",
+        )
+
+        self.assertEqual(contract["items"][0]["aired"], "")
+        self.assertTrue(contract["items"][0]["air_date_conflict"])
+        self.assertEqual(
+            contract["evidence"]["series_inventory"]["status"],
+            "conflict",
+        )
+
     def test_contract_preserves_anchor_country_for_candidate_presentation(self):
         fact = _fact(
             "douban:35981510",

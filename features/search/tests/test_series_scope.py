@@ -5,12 +5,20 @@ from datetime import date
 from telepiplex_search.series_scope import (
     SeriesScopeError,
     apply_series_scope,
+    series_inventory,
     series_seasons,
     series_scope_options,
 )
 
 
-def contract(*, seasons=(1,), scope="movie_or_series", season_number=None, episode_number=None):
+def contract(
+    *,
+    seasons=(1,),
+    scope="movie_or_series",
+    season_number=None,
+    episode_number=None,
+    ongoing=False,
+):
     items = []
     for season in seasons:
         for episode in range(1, 4):
@@ -19,7 +27,11 @@ def contract(*, seasons=(1,), scope="movie_or_series", season_number=None, episo
                 "content_role": "main_episode",
                 "season_number": season,
                 "episode_number": episode,
-                "aired": "2026-01-01" if episode < 3 else "2027-01-01",
+                "aired": (
+                    "2027-01-01"
+                    if ongoing and episode == 3
+                    else "2026-01-01"
+                ),
             })
     return {
         "identity": {"english_title": "The Glory", "year": "2022"},
@@ -32,11 +44,16 @@ def contract(*, seasons=(1,), scope="movie_or_series", season_number=None, episo
             "episode_number": None,
         },
         "items": items,
-        "evidence": {"decision": {
-            "scope": scope,
-            "season_number": season_number,
-            "episode_number": episode_number,
-        }},
+        "evidence": {
+            "decision": {
+                "scope": scope,
+                "season_number": season_number,
+                "episode_number": episode_number,
+            },
+            "series_inventory": {
+                "season_totals": {season: 3 for season in seasons},
+            },
+        },
     }
 
 
@@ -51,22 +68,21 @@ class SeriesScopeTest(unittest.TestCase):
             ("whole_series", "season", "episode"),
         )
 
-    def test_season_count_only_allows_season_search_but_not_episode_search(self):
+    def test_season_count_only_does_not_claim_a_verified_whole_season(self):
         value = contract(seasons=())
         value["identity"]["season_count"] = 3
 
         self.assertEqual(series_seasons(value), (1, 2, 3))
         self.assertEqual(
             series_scope_options(value),
-            ("whole_series", "season"),
+            ("season",),
         )
-        scoped = apply_series_scope(
-            value,
-            "season",
-            season_number=2,
-        )
-        self.assertEqual(scoped["retrieval"]["query"], "The Glory S02")
-        self.assertEqual(scoped["items"], [])
+        with self.assertRaisesRegex(SeriesScopeError, "season_incomplete"):
+            apply_series_scope(
+                value,
+                "season",
+                season_number=2,
+            )
 
     def test_explicit_season_requires_all_or_single_episode_choice(self):
         self.assertEqual(
@@ -106,11 +122,77 @@ class SeriesScopeTest(unittest.TestCase):
     def test_unreleased_episode_is_rejected(self):
         with self.assertRaisesRegex(SeriesScopeError, "episode_not_aired"):
             apply_series_scope(
-                contract(seasons=(1,)),
+                contract(seasons=(1,), ongoing=True),
                 "episode",
                 season_number=1,
                 episode_number=3,
                 today=date(2026, 7, 16),
+            )
+
+    def test_missing_date_is_unknown_not_aired(self):
+        value = contract(seasons=())
+        value["items"] = [{
+            "item_id": "s1e1",
+            "content_role": "main_episode",
+            "season_number": 1,
+            "episode_number": 1,
+            "aired": "",
+        }]
+        value["evidence"]["series_inventory"] = {
+            "season_totals": {1: 1},
+        }
+
+        inventory = series_inventory(value, today=date(2026, 8, 14))
+
+        self.assertEqual(inventory.aired_by_season, {})
+        self.assertEqual(inventory.state_by_season, {1: "unknown"})
+
+    def test_one_hundred_years_is_completed_then_incomplete(self):
+        value = contract(seasons=())
+        value["items"] = [
+            *({
+                "item_id": f"s1e{number}",
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": number,
+                "aired": "2024-12-11",
+            } for number in range(1, 9)),
+            *({
+                "item_id": f"s2e{number}",
+                "content_role": "main_episode",
+                "season_number": 2,
+                "episode_number": number,
+                "aired": "2026-08-05" if number < 8 else "2026-08-26",
+            } for number in range(1, 9)),
+        ]
+        value["evidence"]["series_inventory"] = {
+            "season_totals": {1: 8, 2: 8},
+        }
+
+        inventory = series_inventory(value, today=date(2026, 8, 14))
+
+        self.assertEqual(
+            inventory.state_by_season,
+            {1: "completed", 2: "incomplete"},
+        )
+        self.assertEqual(inventory.aired_by_season[2], tuple(range(1, 8)))
+
+    def test_incomplete_inventory_hides_unsafe_aggregate_scopes(self):
+        value = contract(seasons=(1,), ongoing=True)
+
+        self.assertEqual(series_scope_options(value), ("episode",))
+        with self.assertRaisesRegex(SeriesScopeError, "series_incomplete"):
+            apply_series_scope(
+                value,
+                "whole_series",
+                today=date(2026, 8, 14),
+            )
+        with self.assertRaisesRegex(SeriesScopeError, "season_incomplete"):
+            apply_series_scope(
+                value,
+                "season",
+                season_number=1,
+                today=date(2026, 8, 14),
             )
 
     def test_scope_application_does_not_mutate_original(self):

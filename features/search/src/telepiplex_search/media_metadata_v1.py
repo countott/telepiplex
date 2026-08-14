@@ -183,7 +183,7 @@ def _field_resolutions(
 
 
 def _inventory(facts: tuple[EvidenceFact, ...]) -> list[dict]:
-    for provider in ("tvdb", "tmdb"):
+    def collect(provider: str) -> list[dict]:
         items = []
         seen = set()
         for fact in facts:
@@ -202,7 +202,9 @@ def _inventory(facts: tuple[EvidenceFact, ...]) -> list[dict]:
                 seen.add((season, episode))
                 items.append({
                     "item_id": _text(
-                        raw.get("tvdb_episode_id")
+                        raw.get("wikipedia_episode_id")
+                        or raw.get("item_id")
+                        or raw.get("tvdb_episode_id")
                         or raw.get("tmdb_episode_id")
                         or raw.get("id")
                     ) or f"S{season:02d}E{episode:03d}",
@@ -215,16 +217,166 @@ def _inventory(facts: tuple[EvidenceFact, ...]) -> list[dict]:
                         or raw.get("air_date")
                     ),
                     "inventory_source": provider,
+                    **{
+                        key: raw[key]
+                        for key in (
+                            "overall_number",
+                            "season_total",
+                            "inventory_status",
+                            "source_url",
+                            "source_language",
+                            "revision_id",
+                            "tvdb_episode_id",
+                            "tmdb_episode_id",
+                        )
+                        if raw.get(key) not in (None, "")
+                    },
                 })
-        if items:
-            return sorted(
-                items,
-                key=lambda item: (
-                    item["season_number"],
-                    item["episode_number"],
-                ),
+        return sorted(
+            items,
+            key=lambda item: (
+                item["season_number"],
+                item["episode_number"],
+            ),
+        )
+
+    wikipedia_items = collect("wikipedia")
+    if wikipedia_items:
+        downstream_by_coordinate = {}
+        for provider in ("tvdb", "tmdb"):
+            for item in collect(provider):
+                key = (item["season_number"], item["episode_number"])
+                downstream_by_coordinate.setdefault(key, {}).update({
+                    field: item[field]
+                    for field in ("tvdb_episode_id", "tmdb_episode_id")
+                    if item.get(field)
+                })
+        for item in wikipedia_items:
+            item.update(downstream_by_coordinate.get((
+                item["season_number"],
+                item["episode_number"],
+            ), {}))
+        return wikipedia_items
+    tvdb_items = collect("tvdb")
+    tmdb_items = collect("tmdb")
+    if tvdb_items and tmdb_items:
+        tvdb_by_coordinate = {
+            (item["season_number"], item["episode_number"]): item
+            for item in tvdb_items
+        }
+        tmdb_by_coordinate = {
+            (item["season_number"], item["episode_number"]): item
+            for item in tmdb_items
+        }
+        coordinate_conflict = (
+            set(tvdb_by_coordinate) != set(tmdb_by_coordinate)
+        )
+        reconciled = []
+        for key in sorted(
+            set(tvdb_by_coordinate).intersection(tmdb_by_coordinate)
+        ):
+            tvdb_item = tvdb_by_coordinate[key]
+            tmdb_item = tmdb_by_coordinate[key]
+            tvdb_date = _text(tvdb_item.get("aired"))
+            tmdb_date = _text(tmdb_item.get("aired"))
+            date_conflict = bool(
+                tvdb_date and tmdb_date and tvdb_date != tmdb_date
             )
+            conflict = coordinate_conflict or date_conflict
+            reconciled.append({
+                **tvdb_item,
+                **{
+                    field: tmdb_item[field]
+                    for field in ("tmdb_episode_id",)
+                    if tmdb_item.get(field)
+                },
+                "aired": "" if conflict else tvdb_date or tmdb_date,
+                "inventory_source": "tvdb_tmdb",
+                **({
+                    "air_date_conflict": True,
+                    "inventory_conflict": (
+                        "coordinate_conflict"
+                        if coordinate_conflict
+                        else "air_date_conflict"
+                    ),
+                } if conflict else {}),
+            })
+        return reconciled
+    if tvdb_items:
+        return tvdb_items
+    if tmdb_items:
+        return tmdb_items
     return []
+
+
+def _series_inventory_evidence(
+    facts: tuple[EvidenceFact, ...],
+    items: list[dict],
+) -> dict:
+    source = _text(items[0].get("inventory_source")) if items else ""
+    wikipedia_fact = next(
+        (fact for fact in facts if fact.provider == "wikipedia"),
+        None,
+    )
+    wikipedia_inventory = dict(
+        wikipedia_fact.episode_inventory
+        if wikipedia_fact is not None
+        else {}
+    )
+    totals = {}
+    if source == "wikipedia":
+        raw_totals = wikipedia_inventory.get("season_totals") or {}
+        for season, total in raw_totals.items():
+            try:
+                totals[int(season)] = int(total)
+            except (TypeError, ValueError):
+                continue
+    if not totals:
+        coordinates = {}
+        for item in items:
+            try:
+                season = int(item.get("season_number"))
+                episode = int(item.get("episode_number"))
+            except (TypeError, ValueError):
+                continue
+            if season > 0 and episode > 0:
+                coordinates.setdefault(season, set()).add(episode)
+            try:
+                explicit_total = int(item.get("season_total"))
+            except (TypeError, ValueError):
+                explicit_total = 0
+            if season > 0 and explicit_total > 0:
+                totals[season] = explicit_total
+        for season, episodes in coordinates.items():
+            totals.setdefault(season, len(episodes))
+    wikipedia_status = _text(wikipedia_inventory.get("status"))
+    wikipedia_error = _text(wikipedia_inventory.get("error"))
+    fallback_reason = ""
+    if source and source != "wikipedia" and wikipedia_status:
+        fallback_reason = wikipedia_error or f"wikipedia_{wikipedia_status}"
+    fallback_conflict = any(
+        item.get("inventory_conflict") for item in items
+    )
+    return {
+        "source": source,
+        "status": (
+            wikipedia_status
+            if source == "wikipedia"
+            else "conflict"
+            if fallback_conflict
+            else "fallback"
+            if source
+            else wikipedia_status or "unavailable"
+        ),
+        "season_totals": dict(sorted(totals.items())),
+        "source_urls": list(wikipedia_inventory.get("source_urls") or ()),
+        "source_revisions": dict(
+            wikipedia_inventory.get("source_revisions") or {}
+        ),
+        "wikipedia_status": wikipedia_status,
+        "wikipedia_error": wikipedia_error,
+        "fallback_reason": fallback_reason,
+    }
 
 
 def _scope(candidate: AnchoredCandidate, media_type: str) -> tuple[
@@ -417,6 +569,10 @@ def build_media_metadata_v1(
         media_type,
     )
     inventory = _inventory(primary_facts)
+    series_inventory_evidence = _series_inventory_evidence(
+        primary_facts,
+        inventory,
+    ) if media_type == "series" else {}
     degraded_tvdb_inventory = bool(
         media_type == "series"
         and scope == "whole_series"
@@ -587,6 +743,13 @@ def build_media_metadata_v1(
         warnings.append("warning:tvdb_inventory_unavailable")
     if degraded_episode_inventory:
         warnings.append("warning:episode_inventory_unavailable")
+    if (
+        series_inventory_evidence.get("wikipedia_status")
+        == "parse_error"
+    ):
+        warnings.append("warning:wikipedia_episode_parse_error")
+    if series_inventory_evidence.get("status") == "conflict":
+        warnings.append("warning:episode_inventory_conflict")
     anchor_link = next(
         (
             link for link in candidate.source_links
@@ -658,6 +821,9 @@ def build_media_metadata_v1(
                 "backdrop_urls": list(fact.backdrop_urls),
                 "season_count": fact.season_count,
                 "episode_count": fact.episode_count,
+                "episode_inventory": dict(fact.episode_inventory),
+                "douban_title_raw": fact.douban_title_raw,
+                "season_number": fact.source_season_number,
                 "external_ids": dict(fact.external_ids),
             } for fact in primary_facts],
             "provider_statuses": _provider_statuses(candidate),
@@ -682,6 +848,7 @@ def build_media_metadata_v1(
                 },
             ),
             "tvdb_inventory": list(inventory),
+            "series_inventory": series_inventory_evidence,
             "unresolved": list(candidate.unresolved_sources),
             "decision": {
                 "mode": "deterministic_fact_binding",

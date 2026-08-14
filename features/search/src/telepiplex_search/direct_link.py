@@ -23,8 +23,10 @@ from .adapters.tvdb import (
 )
 from .adapters.wikipedia import (
     WikipediaPageLookupError,
+    lookup_wikipedia_episode_page,
     lookup_wikipedia_page,
 )
+from .wikipedia_episode_inventory import merge_wikipedia_episode_results
 from .adapters.wikidata import enrich_wikidata_entities
 from .adapters.tmdb import (
     TmdbAuthenticationError,
@@ -303,6 +305,78 @@ def resolve_direct_link(link: MetadataLink) -> DirectEntity:
             or media_type not in {"movie", "series"}
         ):
             raise DirectLinkError("direct_link_invalid")
+        if media_type == "series":
+            primary_title = _text(
+                fact.get("canonical_title") or title_hint
+            )
+            primary_inventory = lookup_wikipedia_episode_page(
+                language,
+                primary_title,
+            )
+            primary_inventory["wikibase_item"] = stable_id
+            secondary_inventory = None
+            english_page_title = _text(fact.get("english_page_title"))
+            if (
+                _text(primary_inventory.get("status")) != "complete"
+                and not language.casefold().startswith("en")
+                and english_page_title
+            ):
+                try:
+                    english_fact = lookup_wikipedia_page(
+                        "en",
+                        english_page_title,
+                    )
+                except WikipediaPageLookupError as exc:
+                    secondary_inventory = {
+                        "status": exc.code,
+                        "items": [],
+                        "season_totals": {},
+                        "source_language": "en",
+                        "revision_id": 0,
+                        "error": f"wikipedia_{exc.code}",
+                        "wikibase_item": stable_id,
+                    }
+                else:
+                    english_qid = _text(
+                        (english_fact or {}).get("wikibase_item")
+                    )
+                    if english_qid != stable_id:
+                        secondary_inventory = {
+                            "status": "conflict",
+                            "items": [],
+                            "season_totals": {},
+                            "source_language": "en",
+                            "revision_id": 0,
+                            "error": "wikipedia_fact_conflict",
+                            "wikibase_item": english_qid,
+                        }
+                    else:
+                        secondary_inventory = lookup_wikipedia_episode_page(
+                            "en",
+                            _text(
+                                english_fact.get("canonical_title")
+                                or english_page_title
+                            ),
+                        )
+                        secondary_inventory["wikibase_item"] = english_qid
+            episode_inventory = merge_wikipedia_episode_results(
+                primary_inventory,
+                secondary_inventory,
+                expected_qid=stable_id,
+            )
+            season_totals = episode_inventory.get("season_totals") or {}
+            inventory_status = _text(episode_inventory.get("status"))
+            fact["episodes"] = [
+                {
+                    **item,
+                    "season_total": season_totals.get(
+                        item.get("season_number")
+                    ),
+                    "inventory_status": inventory_status,
+                }
+                for item in episode_inventory.get("items") or ()
+            ]
+            fact["wikipedia_episode_inventory"] = episode_inventory
         return DirectEntity(
             provider="wikipedia",
             evidence={

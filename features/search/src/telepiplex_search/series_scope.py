@@ -18,6 +18,10 @@ class SeriesInventory:
     seasons: tuple[int, ...]
     aired_by_season: dict[int, tuple[int, ...]]
     all_by_season: dict[int, tuple[int, ...]]
+    scheduled_by_season: dict[int, tuple[int, ...]]
+    unknown_by_season: dict[int, tuple[int, ...]]
+    season_totals: dict[int, int]
+    state_by_season: dict[int, str]
 
 
 def _integer(value):
@@ -27,20 +31,47 @@ def _integer(value):
         return None
 
 
-def _aired(value, today: date) -> bool:
+def _airing_state(value, today: date) -> str:
     raw = str(value or "").strip()
     if not raw:
-        return True
+        return "unknown"
     try:
-        return date.fromisoformat(raw[:10]) <= today
+        parsed = date.fromisoformat(raw[:10])
     except ValueError:
-        return False
+        return "unknown"
+    return "aired" if parsed <= today else "scheduled"
+
+
+def _aired(value, today: date) -> bool:
+    return _airing_state(value, today) == "aired"
+
+
+def _season_totals(contract: dict) -> dict[int, int]:
+    totals = {}
+    evidence = contract.get("evidence") or {}
+    inventory = evidence.get("series_inventory") or {}
+    for season, total in (inventory.get("season_totals") or {}).items():
+        season_number = _integer(season)
+        episode_total = _integer(total)
+        if season_number and episode_total and episode_total > 0:
+            totals[season_number] = episode_total
+    for item in contract.get("items") or ():
+        if not isinstance(item, dict):
+            continue
+        season_number = _integer(item.get("season_number"))
+        episode_total = _integer(item.get("season_total"))
+        if season_number and episode_total and episode_total > 0:
+            totals.setdefault(season_number, episode_total)
+    return totals
 
 
 def series_inventory(contract: dict, *, today: date | None = None) -> SeriesInventory:
     today = today or date.today()
     all_by_season: dict[int, set[int]] = {}
     aired_by_season: dict[int, set[int]] = {}
+    scheduled_by_season: dict[int, set[int]] = {}
+    unknown_by_season: dict[int, set[int]] = {}
+    season_totals = _season_totals(contract)
     for item in contract.get("items") or []:
         if not isinstance(item, dict):
             continue
@@ -49,9 +80,41 @@ def series_inventory(contract: dict, *, today: date | None = None) -> SeriesInve
         if season is None or season < 1 or episode is None or episode < 1:
             continue
         all_by_season.setdefault(season, set()).add(episode)
-        if _aired(item.get("aired"), today):
+        airing_state = (
+            "unknown"
+            if item.get("air_date_conflict") is True
+            else _airing_state(
+                item.get("aired") or item.get("air_date"),
+                today,
+            )
+        )
+        if airing_state == "aired":
             aired_by_season.setdefault(season, set()).add(episode)
-    seasons = tuple(sorted(all_by_season))
+        elif airing_state == "scheduled":
+            scheduled_by_season.setdefault(season, set()).add(episode)
+        else:
+            unknown_by_season.setdefault(season, set()).add(episode)
+    seasons = tuple(sorted(set(all_by_season) | set(season_totals)))
+    state_by_season = {}
+    for season in seasons:
+        all_episodes = all_by_season.get(season, set())
+        aired_episodes = aired_by_season.get(season, set())
+        scheduled_episodes = scheduled_by_season.get(season, set())
+        unknown_episodes = unknown_by_season.get(season, set())
+        total = season_totals.get(season)
+        if unknown_episodes:
+            state = "unknown"
+        elif total is None:
+            state = "unknown"
+        elif (
+            scheduled_episodes
+            or len(aired_episodes) < total
+            or all_episodes != set(range(1, total + 1))
+        ):
+            state = "incomplete"
+        else:
+            state = "completed"
+        state_by_season[season] = state
     return SeriesInventory(
         seasons=seasons,
         aired_by_season={
@@ -60,6 +123,16 @@ def series_inventory(contract: dict, *, today: date | None = None) -> SeriesInve
         all_by_season={
             key: tuple(sorted(values)) for key, values in all_by_season.items()
         },
+        scheduled_by_season={
+            key: tuple(sorted(values))
+            for key, values in scheduled_by_season.items()
+        },
+        unknown_by_season={
+            key: tuple(sorted(values))
+            for key, values in unknown_by_season.items()
+        },
+        season_totals=dict(sorted(season_totals.items())),
+        state_by_season=state_by_season,
     )
 
 
@@ -80,16 +153,28 @@ def series_scope_options(contract: dict) -> tuple[str, ...]:
     if scope == "episode":
         return ()
     if scope == "season":
-        return ("season_all", "season_episode")
+        season = _integer(decision.get("season_number"))
+        inventory = series_inventory(contract)
+        if inventory.state_by_season.get(season) == "completed":
+            return ("season_all", "season_episode")
+        return ("season_episode",)
     if scope == "whole_series":
         return ()
     inventory = series_inventory(contract)
     seasons = series_seasons(contract)
-    if len(seasons) <= 1:
-        return ("whole_series",)
     if not inventory.seasons:
-        return ("whole_series", "season")
-    return ("whole_series", "season", "episode")
+        return ("season",) if seasons else ()
+    all_completed = bool(seasons) and all(
+        inventory.state_by_season.get(season) == "completed"
+        for season in seasons
+    )
+    if all_completed:
+        if len(seasons) <= 1:
+            return ("whole_series",)
+        return ("whole_series", "season", "episode")
+    if len(seasons) <= 1:
+        return ("episode",) if seasons else ()
+    return ("season", "episode")
 
 
 def apply_series_scope(
@@ -99,6 +184,7 @@ def apply_series_scope(
     season_number: int | None = None,
     episode_number: int | None = None,
     today: date | None = None,
+    allow_incomplete_aggregate: bool = False,
 ) -> dict:
     today = today or date.today()
     result = deepcopy(contract)
@@ -113,6 +199,11 @@ def apply_series_scope(
         raise SeriesScopeError("search_title_missing")
     choice = str(choice or "")
     if choice == "whole_series":
+        if not allow_incomplete_aggregate and inventory.seasons and any(
+            inventory.state_by_season.get(season) != "completed"
+            for season in inventory.seasons
+        ):
+            raise SeriesScopeError("series_incomplete")
         query = build_prowlarr_query(search_title, "whole_series")
         selected = [
             item
@@ -128,6 +219,11 @@ def apply_series_scope(
         if season_number not in known_seasons:
             raise SeriesScopeError("season_not_found")
         if choice == "season":
+            if (
+                not allow_incomplete_aggregate
+                and inventory.state_by_season.get(season_number) != "completed"
+            ):
+                raise SeriesScopeError("season_incomplete")
             aired = inventory.aired_by_season.get(season_number, ())
             if inventory.seasons and not aired:
                 raise SeriesScopeError("season_not_aired")

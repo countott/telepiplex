@@ -267,7 +267,54 @@ def select_unique_douban_fact(
         )
         for fact in matches
     }
-    return dict(matches[0]) if len(stable_ids - {""}) == 1 else None
+    stable_ids.discard("")
+    if len(stable_ids) == 1:
+        return dict(matches[0])
+    if matches and all(
+        fact.get("douban_match_mode") == "imdb_exact"
+        for fact in matches
+    ):
+        root_titles = {
+            normalize_title(fact.get("chinese_title"))
+            for fact in matches
+            if normalize_title(fact.get("chinese_title"))
+        }
+        imdb_ids = {
+            _external_id(fact, "imdb") for fact in matches
+            if _external_id(fact, "imdb")
+        }
+        season_numbers = []
+        for fact in matches:
+            try:
+                season = int(fact.get("season_number"))
+            except (TypeError, ValueError):
+                season = 0
+            if season > 0:
+                season_numbers.append(season)
+        split_seasons_are_unique = bool(
+            len(season_numbers) == len(matches)
+            and len(set(season_numbers)) == len(season_numbers)
+        )
+        if (
+            len(root_titles) == 1
+            and len(imdb_ids) == 1
+            and split_seasons_are_unique
+        ):
+            def season_key(fact):
+                try:
+                    season = int(fact.get("season_number"))
+                except (TypeError, ValueError):
+                    season = 0
+                return (
+                    season,
+                    _text(fact.get("year"))[:4],
+                    _text(fact.get("subject_id")),
+                )
+
+            selected = dict(min(matches, key=season_key))
+            selected["douban_subject_ids"] = sorted(stable_ids)
+            return selected
+    return None
 
 
 def _external_id(value: dict, key: str) -> str:

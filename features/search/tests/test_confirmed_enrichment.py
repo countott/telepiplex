@@ -150,6 +150,42 @@ class ConfirmedEnrichmentTest(unittest.TestCase):
         })
         self.assertIsNone(select_unique_douban_fact(result, english_only))
 
+    def test_douban_same_imdb_season_entries_collapse_to_one_root_title(self):
+        confirmed = identity(
+            provider="wikipedia",
+            stable_id="Q74801",
+            chinese_title="副人之仁",
+            english_title="Veep",
+            year="2012",
+            external_ids={"wikidata": "Q74801", "imdb": "tt1759761"},
+        )
+        result = {
+            "source": "douban",
+            "status": "ok",
+            "facts": [{
+                "subject_id": str(subject_id),
+                "douban_title_raw": f"副总统 第{season}季",
+                "chinese_title": "副总统",
+                "english_title": "Veep",
+                "year": str(year),
+                "media_type": "series",
+                "season_number": season,
+                "external_ids": {
+                    "douban_subject": str(subject_id),
+                    "imdb": "tt1759761",
+                },
+            } for subject_id, season, year in (
+                (1, 1, 2012),
+                (2, 2, 2013),
+            )],
+        }
+
+        selected = select_unique_douban_fact(result, confirmed)
+
+        self.assertEqual(selected["subject_id"], "1")
+        self.assertEqual(selected["chinese_title"], "副总统")
+        self.assertEqual(selected["douban_match_mode"], "imdb_exact")
+
     def test_douban_title_and_year_without_second_strong_field_is_rejected(self):
         english_only = identity(
             provider="wikipedia",
@@ -173,6 +209,35 @@ class ConfirmedEnrichmentTest(unittest.TestCase):
         }
 
         self.assertIsNone(select_unique_douban_fact(result, english_only))
+
+    def test_douban_uses_strong_fields_when_imdb_is_unavailable(self):
+        confirmed = identity(
+            provider="wikipedia",
+            stable_id="Q74801",
+            chinese_title="副人之仁",
+            english_title="Veep",
+            year="2012",
+            original_language="en",
+            external_ids={"wikidata": "Q74801"},
+        )
+        result = {
+            "source": "douban",
+            "status": "ok",
+            "facts": [{
+                "subject_id": "5379824",
+                "chinese_title": "副总统",
+                "english_title": "Veep",
+                "year": "2012",
+                "media_type": "series",
+                "original_language": "en",
+                "external_ids": {"douban_subject": "5379824"},
+            }],
+        }
+
+        selected = select_unique_douban_fact(result, confirmed)
+
+        self.assertEqual(selected["subject_id"], "5379824")
+        self.assertEqual(selected["douban_match_mode"], "strong_fields")
 
     def test_wikipedia_queries_use_only_confirmed_identity(self):
         queries = build_wikipedia_queries(identity())

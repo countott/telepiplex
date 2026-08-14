@@ -58,7 +58,9 @@ def _resolver(calls, *, fail=()):
             fact = {
                 "subject_id": "11",
                 "title": "布达佩斯大饭店",
+                "douban_title_raw": "布达佩斯大饭店 第一季",
                 "chinese_title": "布达佩斯大饭店",
+                "season_number": 1,
                 "official_english_title": "The Grand Budapest Hotel",
                 "original_title": "The Grand Budapest Hotel",
                 "original_language": "en",
@@ -131,9 +133,11 @@ def _resolver(calls, *, fail=()):
 class CandidateHydrationTest(unittest.TestCase):
     def test_exact_reads_only_saved_urls_and_rebuilds_v1(self):
         calls = []
+        candidate = _candidate()
+        candidate["douban_match_mode"] = "imdb_exact"
 
         hydrated = hydrate_frozen_candidate(
-            _candidate(),
+            candidate,
             metadata_id="m1",
             raw_query="布达佩斯大饭店",
             resolver=_resolver(calls),
@@ -149,6 +153,19 @@ class CandidateHydrationTest(unittest.TestCase):
             hydrated["media_metadata"]["identity"]["english_title"],
             "The Grand Budapest Hotel",
         )
+        chinese_sources = hydrated["media_metadata"]["evidence"][
+            "field_sources"
+        ]["chinese_title"]
+        douban_source = next(
+            item for item in chinese_sources
+            if item["provider"] == "douban"
+        )
+        self.assertEqual(douban_source["match_mode"], "imdb_exact")
+        self.assertEqual(
+            douban_source["douban_title_raw"],
+            "布达佩斯大饭店 第一季",
+        )
+        self.assertEqual(douban_source["season_number"], 1)
 
     def test_partial_exact_read_failure_continues_when_v1_is_complete(self):
         calls = []

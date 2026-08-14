@@ -357,6 +357,27 @@ def hydrate_frozen_candidate(
             exc.missing_fields,
         ) from exc
 
+    douban_match_mode = _text(candidate.get("douban_match_mode"))
+    if douban_match_mode:
+        facts_by_id = {fact.fact_id: fact for fact in anchored.facts}
+        field_sources = (
+            (contract.get("evidence") or {}).get("field_sources") or {}
+        )
+        for record in field_sources.get("chinese_title") or ():
+            if record.get("provider") != "douban":
+                continue
+            fact = facts_by_id.get(_text(record.get("fact_id")))
+            if fact is None:
+                continue
+            record.update({
+                "match_mode": douban_match_mode,
+                "douban_title_raw": fact.douban_title_raw,
+                "season_number": fact.source_season_number,
+                "subject_id": _text(
+                    fact.external_ids.get("douban_subject")
+                ),
+            })
+
     result = dict(candidate)
     result.update({
         "anchor_fact_id": anchored.anchor_fact_id,

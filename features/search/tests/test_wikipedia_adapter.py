@@ -239,6 +239,7 @@ class WikipediaAdapterTest(unittest.TestCase):
 
         self.assertEqual(fact["official_english_title"], "Backrooms")
         self.assertEqual(fact["english_title"], "Backrooms")
+        self.assertEqual(fact["english_page_title"], "Backrooms (2026 film)")
 
     @patch("telepiplex_search.adapters.wikipedia.requests.get", side_effect=OSError("dns failed"))
     def test_server_failure_is_soft_evidence(self, _get_mock):

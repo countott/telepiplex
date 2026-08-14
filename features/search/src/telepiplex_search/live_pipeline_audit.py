@@ -321,6 +321,10 @@ def _apply_requested_scope(case: dict, contract: dict) -> dict:
         scope,
         season_number=case.get("season_number"),
         episode_number=case.get("episode_number"),
+        # This deterministic audit validates contract/query round-tripping
+        # before the live exact-read stage supplies episode inventory. Runtime
+        # resource search keeps the conservative aggregate gate enabled.
+        allow_incomplete_aggregate=True,
     )
 
 

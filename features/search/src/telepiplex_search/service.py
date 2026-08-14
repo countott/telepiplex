@@ -717,10 +717,12 @@ class SearchFeature:
             scope = str(decision.get("scope") or "movie_or_series")
             season_number = decision.get("season_number")
             episode_number = decision.get("episode_number")
+            scope_derived_from_probe = False
             if scope not in {"whole_series", "season", "episode"}:
                 derived_scope = _probe_scope(contract, probe)
                 if derived_scope[0]:
                     scope, season_number, episode_number = derived_scope
+                    scope_derived_from_probe = True
             if scope == "episode":
                 contract = apply_series_scope(
                     contract,
@@ -733,9 +735,14 @@ class SearchFeature:
                     contract,
                     "season",
                     season_number=season_number,
+                    allow_incomplete_aggregate=scope_derived_from_probe,
                 )
             elif scope == "whole_series":
-                contract = apply_series_scope(contract, "whole_series")
+                contract = apply_series_scope(
+                    contract,
+                    "whole_series",
+                    allow_incomplete_aggregate=scope_derived_from_probe,
+                )
             else:
                 return {
                     "status": "unresolved",
@@ -2288,26 +2295,25 @@ class SearchFeature:
                 return f"第{text}{unit}"
             return f"第 {number} {unit}"
 
-        keyboard = []
         if scope == "season":
             season = int(decision.get("season_number") or 0)
-            keyboard.append([{
-                "text": f"{ordinal(season, '季')} 全季",
-                "callback_data": f"search:scope:{plan_id}:season:{season}",
-            }])
-            for episode in inventory.all_by_season.get(season, ()):
-                keyboard.append([{
-                    "text": ordinal(episode, "集"),
-                    "callback_data": (
-                        f"search:scope:{plan_id}:episode:{season}:{episode}"
-                    ),
-                }])
-        elif len(seasons) == 1:
+            return self._series_episode_scope_action(
+                plan_id,
+                stored,
+                season,
+            )
+
+        keyboard = []
+        all_completed = bool(seasons) and all(
+            inventory.state_by_season.get(season) == "completed"
+            for season in seasons
+        )
+        if all_completed and len(seasons) == 1:
             keyboard.append([{
                 "text": "全剧（共 1 季）",
                 "callback_data": f"search:scope:{plan_id}:whole_series",
             }])
-        else:
+        elif all_completed:
             keyboard.append([{
                 "text": "全剧",
                 "callback_data": f"search:scope:{plan_id}:whole_series",
@@ -2317,29 +2323,165 @@ class SearchFeature:
                     "text": ordinal(season, "季"),
                     "callback_data": f"search:scope:{plan_id}:season:{season}",
                 }])
+        else:
+            for season in seasons:
+                state = inventory.state_by_season.get(season, "unknown")
+                aired_count = len(
+                    inventory.aired_by_season.get(season, ())
+                )
+                total = inventory.season_totals.get(season)
+                if state == "completed":
+                    label = f"{ordinal(season, '季')}（全季）"
+                elif total:
+                    label = (
+                        f"{ordinal(season, '季')}"
+                        f"（已播 {aired_count}/{total}）"
+                    )
+                else:
+                    label = (
+                        f"{ordinal(season, '季')}"
+                        f"（已播 {aired_count} 集）"
+                    )
+                keyboard.append([{
+                    "text": label,
+                    "callback_data": f"search:scope:{plan_id}:season:{season}",
+                }])
         keyboard.append([{
             "text": "返回",
             "callback_data": f"search:cancel:{plan_id}",
         }])
-        if scope == "season":
-            season = decision.get("season_number")
-            aired = inventory.aired_by_season.get(int(season or 0), ())
-            total = inventory.all_by_season.get(int(season or 0), ())
-            if total:
-                text = (
-                    f"已确认第 {season} 季：共 {len(total)} 集，"
-                    f"当前已播 {len(aired)} 集。请选择下载范围。"
-                )
-            else:
-                text = (
-                    f"已确认第 {season} 季；未获取集数明细，"
-                    "仅可搜索全季。"
-                )
-        else:
+        if all_completed:
             text = (
                 f"已确认剧集，共 {len(seasons)} 季。"
                 "请选择本次下载范围。"
             )
+        else:
+            text = (
+                f"已确认剧集，共 {len(seasons)} 季；"
+                "存在尚未播完或日期未确认的季度，已隐藏全剧搜索。"
+            )
+        inventory_evidence = (
+            (contract.get("evidence") or {}).get("series_inventory") or {}
+        )
+        log_search_event(
+            runtime_context.logger,
+            "search.series_scope_inventory",
+            search_session_id=plan_id,
+            inventory_source=inventory_evidence.get("source"),
+            wikipedia_status=inventory_evidence.get("status"),
+            source_revisions=inventory_evidence.get("source_revisions"),
+            season_states=inventory.state_by_season,
+            aired_counts={
+                season: len(inventory.aired_by_season.get(season, ()))
+                for season in seasons
+            },
+            season_totals=inventory.season_totals,
+            fallback_reason=inventory_evidence.get("fallback_reason"),
+            hidden_whole_series_reason=(
+                "incomplete_or_unknown_season"
+                if seasons and not all_completed
+                else ""
+            ),
+            hidden_scheduled_counts={
+                season: len(inventory.scheduled_by_season.get(season, ()))
+                for season in seasons
+            },
+            hidden_unknown_counts={
+                season: len(inventory.unknown_by_season.get(season, ()))
+                for season in seasons
+            },
+        )
+        action = {
+            "kind": "edit_message",
+            "text": text,
+            "data": {"keyboard": keyboard},
+        }
+        operation = self._advance_operation(
+            stored["operation_id"],
+            state="awaiting_input",
+            stage="series_scope",
+            status_text=text,
+            control="exit",
+            details=deepcopy(action["data"]),
+        )
+        return {"actions": [action], "operation": operation}
+
+    def _series_episode_scope_action(
+        self,
+        plan_id: str,
+        stored: dict,
+        season: int,
+    ) -> dict:
+        contract = stored["plan"]["media_metadata"]
+        inventory = series_inventory(contract)
+        state = inventory.state_by_season.get(season, "unknown")
+        digits = ("零", "一", "二", "三", "四", "五", "六", "七", "八", "九")
+
+        def ordinal(number: int, unit: str) -> str:
+            if 0 < number <= 20:
+                if number < 10:
+                    text = digits[number]
+                elif number == 10:
+                    text = "十"
+                elif number < 20:
+                    text = "十" + digits[number - 10]
+                else:
+                    text = "二十"
+                return f"第{text}{unit}"
+            return f"第 {number} {unit}"
+
+        keyboard = []
+        if state == "completed":
+            keyboard.append([{
+                "text": f"{ordinal(season, '季')} 全季",
+                "callback_data": f"search:scope:{plan_id}:season:{season}",
+            }])
+            episodes = inventory.all_by_season.get(season, ())
+        else:
+            episodes = inventory.aired_by_season.get(season, ())
+        for episode in episodes:
+            keyboard.append([{
+                "text": ordinal(episode, "集"),
+                "callback_data": (
+                    f"search:scope:{plan_id}:episode:{season}:{episode}"
+                ),
+            }])
+        keyboard.append([{
+            "text": "返回",
+            "callback_data": f"search:cancel:{plan_id}",
+        }])
+        aired_count = len(inventory.aired_by_season.get(season, ()))
+        total = inventory.season_totals.get(season)
+        if state == "completed":
+            text = (
+                f"已确认第 {season} 季：共 {total or len(episodes)} 集，"
+                "请选择下载范围。"
+            )
+        elif total:
+            text = (
+                f"第 {season} 季尚未播完：已播 {aired_count}/{total}。"
+                "请选择已播单集。"
+            )
+        else:
+            text = (
+                f"第 {season} 季尚未确认完整集数：已播 {aired_count} 集。"
+                "请选择已播单集。"
+            )
+        log_search_event(
+            runtime_context.logger,
+            "search.series_episode_menu",
+            search_session_id=plan_id,
+            season_number=season,
+            season_state=state,
+            aired_count=aired_count,
+            season_total=total,
+            hidden_scheduled_count=len(
+                inventory.scheduled_by_season.get(season, ())
+            ),
+            hidden_unknown_count=len(
+                inventory.unknown_by_season.get(season, ())
+            ),
+        )
         action = {
             "kind": "edit_message",
             "text": text,
@@ -2478,12 +2620,20 @@ class SearchFeature:
             )
             return self._start_selected_release(plan_id, stored)
         if choice == "season" and len(coordinates) == 1:
-            stored["plan"]["media_metadata"] = apply_series_scope(
-                contract,
-                "season",
-                season_number=int(coordinates[0]),
+            season = int(coordinates[0])
+            inventory = series_inventory(contract)
+            if inventory.state_by_season.get(season) == "completed":
+                stored["plan"]["media_metadata"] = apply_series_scope(
+                    contract,
+                    "season",
+                    season_number=season,
+                )
+                return self._start_selected_release(plan_id, stored)
+            return self._series_episode_scope_action(
+                plan_id,
+                stored,
+                season,
             )
-            return self._start_selected_release(plan_id, stored)
         if choice == "episode" and len(coordinates) == 2:
             stored["plan"]["media_metadata"] = apply_series_scope(
                 contract,
@@ -2598,6 +2748,13 @@ class SearchFeature:
                     request,
                     phase="episode",
                     season_number=number,
+                )
+            if inventory.state_by_season.get(number) != "completed":
+                self.awaiting_scope_inputs.pop(owner, None)
+                return self._series_episode_scope_action(
+                    plan_id,
+                    stored,
+                    number,
                 )
             self.awaiting_scope_inputs.pop(owner, None)
             stored["plan"]["media_metadata"] = apply_series_scope(
@@ -3721,6 +3878,7 @@ class SearchFeature:
                     external_ids.setdefault(_text(key), _text(value))
         anchor = source_links[0] if source_links else {}
         anchor_ids = anchor.get("external_ids") or {}
+        decision = ((contract.get("evidence") or {}).get("decision") or {})
         return ConfirmedIdentity(
             provider=_text(anchor.get("provider")).casefold(),
             stable_id=_text(next(iter(anchor_ids.values()), "")),
@@ -3742,7 +3900,88 @@ class SearchFeature:
                 if _text(item)
             ),
             external_ids=external_ids,
+            countries=tuple(
+                _text(item)
+                for item in identity.get("countries") or ()
+                if _text(item)
+            ),
+            cast_names=tuple(
+                _text(
+                    item.get("name") if isinstance(item, dict) else item
+                )
+                for item in (
+                    list(identity.get("cast") or ())
+                    + list(identity.get("crew") or ())
+                )
+                if _text(
+                    item.get("name") if isinstance(item, dict) else item
+                )
+            ),
+            season_number=(
+                int(decision.get("season_number"))
+                if str(decision.get("season_number") or "").isdigit()
+                else None
+            ),
         )
+
+    @staticmethod
+    def _select_unique_douban_poster_fact(
+        facts: list[dict],
+        identity: ConfirmedIdentity,
+    ) -> dict | None:
+        subject_id = _text(identity.external_ids.get("douban_subject"))
+        if subject_id:
+            exact = [
+                item for item in facts
+                if _text(
+                    item.get("subject_id")
+                    or (item.get("external_ids") or {}).get(
+                        "douban_subject"
+                    )
+                ) == subject_id
+            ]
+            if len(exact) == 1:
+                return exact[0]
+        expected_titles = {
+            value for value in (
+                _normalized_title(identity.chinese_title),
+                _normalized_title(identity.english_title),
+                _normalized_title(identity.original_title),
+            )
+            if value
+        }
+        matches = []
+        for item in facts:
+            titles = {
+                value for value in (
+                    _normalized_title(item.get("title")),
+                    _normalized_title(item.get("chinese_title")),
+                    _normalized_title(item.get("english_title")),
+                    _normalized_title(item.get("original_title")),
+                )
+                if value
+            }
+            item_year = _text(item.get("year"))[:4]
+            item_type = _text(item.get("media_type")).casefold()
+            if not expected_titles.intersection(titles):
+                continue
+            if identity.year and item_year and identity.year != item_year:
+                continue
+            if (
+                identity.media_type
+                and item_type
+                and identity.media_type != item_type
+            ):
+                continue
+            matches.append(item)
+        ids = {
+            _text(
+                item.get("subject_id")
+                or (item.get("external_ids") or {}).get("douban_subject")
+            )
+            for item in matches
+        }
+        return matches[0] if len(ids - {""}) == 1 else None
 
     @staticmethod
     def _select_unique_tvdb_poster_fact(
@@ -3827,7 +4066,10 @@ class SearchFeature:
                 self._douban_provider,
                 {"source_queries": {"douban": [query]}},
             )
-            fact = select_unique_douban_fact(result, identity)
+            fact = self._select_unique_douban_poster_fact(
+                list((result or {}).get("facts") or ()),
+                identity,
+            )
         elif provider == "tvdb":
             query = (
                 identity.english_title
@@ -3990,6 +4232,41 @@ class SearchFeature:
                 ).items()
                 if _text(key) and _text(value)
             },
+            countries=tuple(
+                _text(item)
+                for item in identity_value.get("countries") or ()
+                if _text(item)
+            ),
+            cast_names=tuple(
+                _text(
+                    item.get("name") if isinstance(item, dict) else item
+                )
+                for item in (
+                    list(identity_value.get("cast") or ())
+                    + list(identity_value.get("crew") or ())
+                )
+                if _text(
+                    item.get("name") if isinstance(item, dict) else item
+                )
+            ),
+            season_number=(
+                int(
+                    result.get("requested_season_number")
+                    or (
+                        (contract.get("evidence") or {}).get("decision")
+                        or {}
+                    ).get("season_number")
+                )
+                if str(
+                    result.get("requested_season_number")
+                    or (
+                        (contract.get("evidence") or {}).get("decision")
+                        or {}
+                    ).get("season_number")
+                    or ""
+                ).isdigit()
+                else None
+            ),
         )
         unresolved = [
             _text(item)
@@ -4300,6 +4577,52 @@ class SearchFeature:
             )
 
         if "douban" not in providers:
+            douban_identity_ids = dict(confirmed.external_ids)
+            if isinstance(tmdb_fact, dict):
+                douban_identity_ids.update({
+                    _text(key): _text(value)
+                    for key, value in (
+                        tmdb_fact.get("external_ids") or {}
+                    ).items()
+                    if _text(key) and _text(value)
+                })
+            douban_identity = replace(
+                confirmed,
+                external_ids=douban_identity_ids,
+                original_language=(
+                    confirmed.original_language
+                    or _text(
+                        (tmdb_fact or {}).get("original_language")
+                    ).casefold()
+                ),
+                countries=(
+                    confirmed.countries
+                    or tuple(
+                        _text(item)
+                        for item in (tmdb_fact or {}).get("countries") or ()
+                        if _text(item)
+                    )
+                ),
+                cast_names=(
+                    confirmed.cast_names
+                    or tuple(
+                        _text(
+                            item.get("name")
+                            if isinstance(item, dict)
+                            else item
+                        )
+                        for item in (
+                            list((tmdb_fact or {}).get("cast") or ())
+                            + list((tmdb_fact or {}).get("crew") or ())
+                        )
+                        if _text(
+                            item.get("name")
+                            if isinstance(item, dict)
+                            else item
+                        )
+                    )
+                ),
+            )
             douban_query = _text(" ".join(filter(None, (
                 confirmed.english_title or confirmed.original_title,
                 confirmed.year,
@@ -4319,7 +4642,7 @@ class SearchFeature:
                     ).casefold() or "not_found"
                     douban_fact = select_unique_douban_fact(
                         douban_result,
-                        confirmed,
+                        douban_identity,
                     )
                 except Exception:
                     douban_status = "unavailable"
@@ -4357,6 +4680,15 @@ class SearchFeature:
                 })
                 result["douban_match_mode"] = _text(
                     douban_fact.get("douban_match_mode")
+                )
+                log_search_event(
+                    runtime_context.logger,
+                    "search.douban_title_verified",
+                    search_session_id=search_session_id,
+                    match_mode=result["douban_match_mode"],
+                    douban_title_raw=douban_fact.get("douban_title_raw"),
+                    selected_chinese_title=douban_fact.get("chinese_title"),
+                    subject_id=subject_id,
                 )
                 providers.add("douban")
             if "douban" not in providers:

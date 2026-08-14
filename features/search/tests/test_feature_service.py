@@ -208,6 +208,9 @@ def series_ranked_search_plan():
         "aired": "2022-12-30",
     } for number in range(1, 9)]
     contract["evidence"] = {
+        "series_inventory": {
+            "season_totals": {1: 8},
+        },
         "decision": {
             "mode": "deterministic_bounded",
             "scope": "movie_or_series",
@@ -2492,7 +2495,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
 
     @patch("telepiplex_search.service.hydrate_frozen_candidate")
-    async def test_tvdb_unavailable_series_continues_as_whole_series(
+    async def test_unverified_series_does_not_continue_as_whole_series(
         self,
         hydrate,
     ):
@@ -2538,10 +2541,10 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "0",
         )
 
-        self.assertEqual(result.get("actions"), [])
-        self.assertNotEqual(
-            result["operation"]["stage"],
-            "prowlarr_search",
+        self.assertTrue(result.get("actions"))
+        self.assertIn(
+            "无法验证该剧集的季集范围",
+            result["actions"][0]["text"],
         )
         self.assertEqual(
             stored["plan"]["media_metadata"]["retrieval"]["scope"],
@@ -2637,7 +2640,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("operation", result)
 
     @patch("telepiplex_search.service.hydrate_frozen_candidate")
-    async def test_wikipedia_bounded_season_offers_whole_season_without_fake_episode_count(
+    async def test_wikipedia_bounded_season_without_inventory_offers_no_aggregate(
         self,
         hydrate,
     ):
@@ -2665,6 +2668,9 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "season_number": 1,
             "episode_number": None,
         })
+        contract["evidence"]["series_inventory"] = {
+            "season_totals": {},
+        }
         contract["warnings"] = ["warning:episode_inventory_unavailable"]
         hydrate.return_value = deepcopy(candidate)
         operation = self.feature._new_operation(
@@ -2685,13 +2691,13 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         result = await self.feature._select_candidate(plan_id, stored, "0")
 
         self.assertEqual(result["operation"]["stage"], "series_scope")
-        self.assertIn("未获取集数明细", result["actions"][0]["text"])
+        self.assertIn("尚未确认完整集数", result["actions"][0]["text"])
         labels = [
             button["text"]
             for row in result["actions"][0]["data"]["keyboard"]
             for button in row
         ]
-        self.assertEqual(labels, ["第一季 全季", "返回"])
+        self.assertEqual(labels, ["返回"])
 
     async def test_unique_hard_match_announces_identity_before_auto_confirmation(self):
         async def planner(_raw_query, plan_id):
@@ -3325,6 +3331,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "episode_number": number,
             "aired": "2023-01-01",
         } for number in range(1, 4))
+        contract["evidence"]["series_inventory"]["season_totals"][2] = 3
         operation = self.feature._new_operation(
             {"chat_id": 10, "user_id": 1},
             state="awaiting_input",
@@ -3351,6 +3358,9 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         contract = plan["media_metadata"]
         contract["identity"]["season_count"] = 11
         contract["items"] = []
+        contract["evidence"]["series_inventory"] = {
+            "season_totals": {},
+        }
         operation = self.feature._new_operation(
             {"chat_id": 10, "user_id": 1},
             state="awaiting_input",
@@ -3366,7 +3376,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         })["actions"][0]
         labels = [row[0]["text"] for row in action["data"]["keyboard"]]
 
-        self.assertIn("第十一季", labels)
+        self.assertIn("第十一季（已播 0 集）", labels)
 
     def test_explicit_season_menu_lists_each_regular_episode(self):
         plan = series_ranked_search_plan()
@@ -3396,6 +3406,100 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             action["data"]["keyboard"][1][0]["callback_data"],
             "search:scope:episodes:episode:1:1",
         )
+
+    def test_ongoing_series_uses_third_level_aired_episode_menu(self):
+        plan = series_ranked_search_plan()
+        contract = plan["media_metadata"]
+        contract["items"] = [
+            *({
+                "item_id": f"s1e{number}",
+                "content_role": "main_episode",
+                "season_number": 1,
+                "episode_number": number,
+                "aired": "2024-12-11",
+            } for number in range(1, 9)),
+            *({
+                "item_id": f"s2e{number}",
+                "content_role": "main_episode",
+                "season_number": 2,
+                "episode_number": number,
+                "aired": "2026-08-05" if number < 8 else "2026-08-26",
+            } for number in range(1, 9)),
+        ]
+        contract["evidence"]["series_inventory"] = {
+            "source": "wikipedia",
+            "status": "complete",
+            "season_totals": {1: 8, 2: 8},
+            "source_revisions": {"en": 1367933110},
+        }
+        operation = self.feature._new_operation(
+            {"chat_id": 10, "user_id": 1},
+            state="awaiting_input",
+            stage="series_scope",
+            status_text="等待选择。",
+            control="exit",
+            kind="search",
+        )
+        stored = {
+            "plan": {"plan_id": "ongoing", "media_metadata": contract},
+            "operation_id": operation["operation_id"],
+        }
+
+        action = self.feature._series_scope_action(
+            "ongoing",
+            stored,
+        )["actions"][0]
+        labels = [row[0]["text"] for row in action["data"]["keyboard"]]
+
+        self.assertEqual(
+            labels[:2],
+            ["第一季（全季）", "第二季（已播 7/8）"],
+        )
+        self.assertNotIn("全剧", labels)
+
+        submenu = self.feature._scope_callback(
+            "ongoing",
+            stored,
+            "season",
+            {"user_id": 1, "chat_id": 10},
+            "2",
+        )["actions"][0]
+        episode_labels = [
+            row[0]["text"] for row in submenu["data"]["keyboard"]
+        ]
+        self.assertEqual(
+            episode_labels[:7],
+            [f"第{number}集" for number in "一二三四五六七"],
+        )
+        self.assertNotIn("第八集", episode_labels)
+
+    def test_one_season_ongoing_series_does_not_offer_whole_series(self):
+        plan = series_ranked_search_plan()
+        contract = plan["media_metadata"]
+        contract["items"][-1]["aired"] = "2099-01-01"
+        contract["evidence"]["series_inventory"] = {
+            "season_totals": {1: 8},
+        }
+        operation = self.feature._new_operation(
+            {"chat_id": 10, "user_id": 1},
+            state="awaiting_input",
+            stage="series_scope",
+            status_text="等待选择。",
+            control="exit",
+            kind="search",
+        )
+
+        action = self.feature._series_scope_action("single-ongoing", {
+            "plan": {
+                "plan_id": "single-ongoing",
+                "media_metadata": contract,
+            },
+            "operation_id": operation["operation_id"],
+        })["actions"][0]
+        labels = [row[0]["text"] for row in action["data"]["keyboard"]]
+
+        self.assertNotIn("全剧（共 1 季）", labels)
+        self.assertEqual(labels[0], "第一季（已播 7/8）")
 
     async def test_metadata_capability_resolves_once_without_registry(self):
         planner_queries = []

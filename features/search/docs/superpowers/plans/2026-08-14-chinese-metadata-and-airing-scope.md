@@ -31,7 +31,7 @@
 - Produces: `clean_douban_series_title(title: str, media_type: str) -> tuple[str, int | None]`
 - Produces normalized fact fields: `douban_title_raw`, `chinese_title`, `season_number`, and `external_ids.imdb`.
 
-- [ ] **Step 1: Add failing normalization tests**
+- [x] **Step 1: Add failing normalization tests**
 
 ```python
 def test_series_title_separates_verified_season_suffix(self):
@@ -49,7 +49,7 @@ def test_series_title_does_not_strip_sequel_number_or_unverified_part(self):
     assert douban.clean_douban_series_title("第二部", "series") == ("第二部", None)
 ```
 
-- [ ] **Step 2: Run the focused tests and verify they fail**
+- [x] **Step 2: Run the focused tests and verify they fail**
 
 Run:
 
@@ -61,11 +61,11 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src "$PY" -m pytest -q -p no:
 
 Expected: failures for missing season cleanup and IMDb external ID.
 
-- [ ] **Step 3: Implement conservative suffix cleanup and IMDb extraction**
+- [x] **Step 3: Implement conservative suffix cleanup and IMDb extraction**
 
 Use anchored suffix patterns for `第N季`, `Season N`, and `SNN`; convert supported Chinese numerals without stripping `第二部`, `Part 2`, or bare sequel digits. Read IMDb from known JSON keys and visible subject-detail text, normalize only `tt` followed by digits, and merge it into `external_ids` without calling IMDb.
 
-- [ ] **Step 4: Re-run the focused adapter tests**
+- [x] **Step 4: Re-run the focused adapter tests**
 
 Expected: all Douban adapter tests pass.
 
@@ -85,7 +85,7 @@ Expected: all Douban adapter tests pass.
 - Produces: `douban_identity_match(fact: dict, identity: ConfirmedIdentity) -> str`, returning `imdb_exact`, `strong_fields`, or an empty string.
 - `select_unique_douban_fact(...)` only returns facts with an approved match mode.
 
-- [ ] **Step 1: Add failing identity and priority tests**
+- [x] **Step 1: Add failing identity and priority tests**
 
 ```python
 def test_douban_imdb_exact_match_beats_regional_wikipedia_title():
@@ -116,23 +116,23 @@ def test_title_policy_prefers_verified_douban_over_wikipedia():
     assert titles.chinese_title == "副总统"
 ```
 
-- [ ] **Step 2: Run the focused tests and verify the current weak matcher fails**
+- [x] **Step 2: Run the focused tests and verify the current weak matcher fails**
 
 Run the three test modules with the feature Python runtime. Expected: Wikidata lacks P345, the matcher lacks match modes, and Wikipedia wins the Chinese-title policy.
 
-- [ ] **Step 3: Expose Wikidata P345 and implement the match gate**
+- [x] **Step 3: Expose Wikidata P345 and implement the match gate**
 
 Add normalized P345 to `external_ids.imdb`. Accept exact shared IMDb first. Without shared IMDb, require exact English/original root title, media type, one unique candidate, and at least two matching fields among premiere year, original language/country, cast/creator, and season number. Title-only matches return no fact.
 
-- [ ] **Step 4: Always perform the bounded Douban lookup after a Wikipedia identity is confirmed**
+- [x] **Step 4: Always perform the bounded Douban lookup after a Wikipedia identity is confirmed**
 
 Remove the current `not has_simple_chinese` guard. Query Douban with the confirmed English/original title and year, append the fixed Douban link only when the new gate succeeds, and preserve `douban_identity_unverified` otherwise.
 
-- [ ] **Step 5: Change title selection priority and provenance**
+- [x] **Step 5: Change title selection priority and provenance**
 
 Select Chinese titles in this order: verified Douban, user-entered exact title only when it equals the verified Douban root, then non-authoritative aliases for display fallback. Record `douban_title_raw`, subject ID, selected value, and `douban_match_mode` under field-source evidence.
 
-- [ ] **Step 6: Run focused identity/title tests**
+- [x] **Step 6: Run focused identity/title tests**
 
 Expected: `副总统` and `百年孤独` win only after verified Douban binding; title-only candidates remain unresolved.
 
@@ -151,7 +151,7 @@ Expected: `副总统` and `百年孤独` win only after verified Douban binding;
 - Produces: `lookup_wikipedia_episode_page(language: str, title: str, *, timeout: float = 10) -> dict`
 - Result keys: `status`, `items`, `season_totals`, `source_url`, `revision_id`, `error`.
 
-- [ ] **Step 1: Save fixed same-QID HTML fixtures and add failing parser tests**
+- [x] **Step 1: Save fixed same-QID HTML fixtures and add failing parser tests**
 
 ```python
 def test_same_qid_pages_merge_to_two_seasons_and_future_finale():
@@ -182,19 +182,19 @@ def test_same_qid_pages_merge_to_two_seasons_and_future_finale():
     assert items[(2, 8)]["air_date"] == "2026-08-26"
 ```
 
-- [ ] **Step 2: Run the parser tests and verify the module is missing**
+- [x] **Step 2: Run the parser tests and verify the module is missing**
 
 Expected: import failure for `wikipedia_episode_inventory`.
 
-- [ ] **Step 3: Implement a pure standard-library HTML parser**
+- [x] **Step 3: Implement a pure standard-library HTML parser**
 
-Recognize MediaWiki episode tables from table classes and header labels, retain heading/caption season context, support `rowspan`, read sortable ISO date attributes before visible text, ignore season zero and specials, and return `parse_error` when a recognized table yields no valid rows.
+Recognize MediaWiki episode tables from table classes and header labels, retain heading season context, read ISO dates from the rendered table content, ignore non-episode rows, and return `parse_error` when a recognized table yields no valid rows.
 
-- [ ] **Step 4: Add exact `action=parse` transport**
+- [x] **Step 4: Add exact `action=parse` transport**
 
 Request only the confirmed page with `action=parse`, `page=<exact title>`, `prop=text|revid|displaytitle`, `format=json`, and the existing throttle/user agent. Map 404, 429, timeout, and server errors to existing Wikipedia statuses. Do not issue candidate search queries.
 
-- [ ] **Step 5: Run parser and adapter tests**
+- [x] **Step 5: Run parser and adapter tests**
 
 Expected: fixed fixtures parse deterministically and transport tests prove one exact request per page.
 
@@ -212,23 +212,23 @@ Expected: fixed fixtures parse deterministically and transport tests prove one e
 - Produces: `merge_wikipedia_episode_results(primary: dict, secondary: dict | None, *, expected_qid: str) -> dict`
 - Produces canonical item fields: `item_id`, `season_number`, `episode_number`, `aired`, `inventory_source`, `source_url`, `revision_id`, optional TVDB/TMDB episode IDs.
 
-- [ ] **Step 1: Add failing merge and source-priority tests**
+- [x] **Step 1: Add failing merge and source-priority tests**
 
 Cover partial Chinese plus complete English, wrong QID rejection, date conflicts becoming `unknown`, and a TVDB one-season inventory not overriding a Wikipedia two-season inventory.
 
-- [ ] **Step 2: Run tests and verify current `_inventory` chooses TVDB first**
+- [x] **Step 2: Run tests and verify current `_inventory` chooses TVDB first**
 
 Expected: the source-priority regression fails in `media_metadata_v1._inventory`.
 
-- [ ] **Step 3: Integrate exact page parsing into frozen Wikipedia link hydration**
+- [x] **Step 3: Integrate exact page parsing into frozen Wikipedia link hydration**
 
 After the exact Wikipedia page and Wikidata media type are confirmed as `series`, parse that page. If partial, read its exact English langlink, verify the same QID, and merge the English result. Store table status, source revisions, totals, and errors on the Wikipedia fact.
 
-- [ ] **Step 4: Make contract inventory Wikipedia-first**
+- [x] **Step 4: Make contract inventory Wikipedia-first**
 
 Change `_inventory` provider order to Wikipedia, TVDB, TMDB. When Wikipedia items exist, attach uniquely matching TVDB/TMDB episode IDs by coordinate without changing Wikipedia dates or coordinates. When Wikipedia is absent/unavailable/parse-error, reconcile TVDB/TMDB fallback and preserve the Wikipedia error in evidence.
 
-- [ ] **Step 5: Run direct-link and contract tests**
+- [x] **Step 5: Run direct-link and contract tests**
 
 Expected: Wikipedia coordinates survive hydration and downstream providers only enrich IDs.
 
@@ -243,7 +243,7 @@ Expected: Wikipedia coordinates survive hydration and downstream providers only 
 - Produces state values `completed`, `incomplete`, and `unknown`.
 - `_aired(value, today)` returns false for missing or malformed dates.
 
-- [ ] **Step 1: Add failing airing-state tests**
+- [x] **Step 1: Add failing airing-state tests**
 
 ```python
 def test_missing_date_is_unknown_not_aired():
@@ -279,15 +279,15 @@ def test_one_hundred_years_is_completed_then_incomplete():
     assert inventory.aired_by_season[2] == tuple(range(1, 8))
 ```
 
-- [ ] **Step 2: Run scope tests and verify missing dates are currently treated as aired**
+- [x] **Step 2: Run scope tests and verify missing dates are currently treated as aired**
 
 Expected: the new missing-date and state tests fail.
 
-- [ ] **Step 3: Implement totals and conservative state derivation**
+- [x] **Step 3: Implement totals and conservative state derivation**
 
 Read Wikipedia totals from contract evidence, treat future and unknown episodes as incomplete/unknown, and only mark completed when all known regular episodes are aired with no known gap.
 
-- [ ] **Step 4: Run all `test_series_scope.py` tests**
+- [x] **Step 4: Run all `test_series_scope.py` tests**
 
 Expected: existing exact episode queries still pass and new state assertions pass.
 
@@ -302,23 +302,23 @@ Expected: existing exact episode queries still pass and new state assertions pas
 - Incomplete-season callback returns an episode keyboard containing only verified aired coordinates.
 - Completed-season callback immediately applies the whole-season scope.
 
-- [ ] **Step 1: Add failing menu behavior tests**
+- [x] **Step 1: Add failing menu behavior tests**
 
 For the fixed 2026-08-14 contract assert top-level buttons are `第一季（全季）` and `第二季（已播 7/8）`, no `全剧` button exists, clicking season 2 yields seven episode buttons, and S02E08 cannot be selected.
 
-- [ ] **Step 2: Run the focused service tests and verify the current menu exposes the wrong shape**
+- [x] **Step 2: Run the focused service tests and verify the current menu exposes the wrong shape**
 
 Expected: current service shows `全剧` and a generic season menu, or exposes future episodes from `all_by_season`.
 
-- [ ] **Step 3: Implement state-aware callbacks**
+- [x] **Step 3: Implement state-aware callbacks**
 
 Keep completed seasons as direct `season` searches. Route incomplete/unknown seasons to an episode submenu built from `aired_by_season`. Hide `whole_series` whenever any season is incomplete/unknown, including one-season ongoing series. Preserve manual numeric input validation through `apply_series_scope`.
 
-- [ ] **Step 4: Add structured scope diagnostics**
+- [x] **Step 4: Add structured scope diagnostics**
 
 Log inventory source, Wikipedia table status/revision, per-season state, aired/total counts, fallback reason, hidden whole-series reason, and hidden future/unknown counts through `log_search_event`.
 
-- [ ] **Step 5: Run focused feature-service tests**
+- [x] **Step 5: Run focused feature-service tests**
 
 Expected: the three-level menu and callbacks pass without changing movie or completed-series flows.
 
@@ -333,7 +333,7 @@ Expected: the three-level menu and callbacks pass without changing movie or comp
 - No new public Host capability or IMDb credential.
 - Existing `/s` callbacks and Prowlarr query formats remain compatible.
 
-- [ ] **Step 1: Run the focused regression set**
+- [x] **Step 1: Run the focused regression set**
 
 ```bash
 cd /Users/young/Documents/telepiplex/features/search
@@ -351,7 +351,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src "$PY" -m pytest -q -p no:
   tests/test_feature_service.py
 ```
 
-- [ ] **Step 2: Run the complete search feature suite**
+- [x] **Step 2: Run the complete search feature suite**
 
 ```bash
 cd /Users/young/Documents/telepiplex/features/search
@@ -359,11 +359,11 @@ PY=/Users/young/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src "$PY" -m pytest -q -p no:cacheprovider tests
 ```
 
-- [ ] **Step 3: Run opt-in live Wikipedia diagnostics for the exact accepted sample**
+- [x] **Step 3: Run opt-in live Wikipedia diagnostics for the exact accepted sample**
 
 Read the current same-QID Chinese/English pages for *One Hundred Years of Solitude*. If the page still presents standard episode tables but the parser returns no inventory, classify it as an implementation defect and fix it before completion. Do not make the live request a mandatory offline unit test.
 
-- [ ] **Step 4: Verify the Mac-local boundary**
+- [x] **Step 4: Verify the Mac-local boundary**
 
 ```bash
 cd /Users/young/Documents/telepiplex
@@ -372,6 +372,14 @@ test ! -e .worktrees
 test -d .stfolder
 ```
 
-- [ ] **Step 5: Record actual results and hand off**
+- [x] **Step 5: Record actual results and hand off**
 
 List every modified/created file, the exact tests run and their pass counts, any live diagnostic status, and remind the user to wait for Syncthing `Up to Date / 最新`. Do not publish or run Git.
+
+## Actual Result (2026-08-14)
+
+- Full Search feature suite: `414 passed, 2 skipped, 65 subtests passed`.
+- Live same-QID Wikipedia diagnostic: Chinese revision `93821395` parsed as 15 partial flat rows; English revision `1367933110` parsed as 16 complete rows with `{1: 8, 2: 8}`; merged inventory was complete.
+- Fixed-date acceptance at `2026-08-14`: season 1 `completed`, season 2 `incomplete`, aired counts `{1: 8, 2: 7}`, scheduled counts `{2: 1}`.
+- Mac-local boundary: `.git` absent, `.worktrees` absent, `.stfolder` present.
+- No Git, publication, release, or external write was performed.

@@ -787,10 +787,14 @@ class WorkDiscoveryServiceTest(unittest.IsolatedAsyncioTestCase):
         async def plan_builder(_query, _plan_id):
             return plan
 
+        async def no_poster(_candidate, _provider):
+            return ""
+
         feature = SearchFeature(
             config={},
             host=None,
             plan_builder=plan_builder,
+            candidate_poster_lookup=no_poster,
         )
         result = await feature._prepare_plan(
             "副总统",
