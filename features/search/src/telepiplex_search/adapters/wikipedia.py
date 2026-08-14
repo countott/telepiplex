@@ -9,6 +9,8 @@ from urllib.parse import quote
 
 import requests
 
+from ..wikipedia_episode_inventory import parse_wikipedia_episode_html
+
 
 USER_AGENT = (
     "telepiplex/1.9 (media metadata lookup; "
@@ -29,6 +31,16 @@ class WikipediaPageLookupError(RuntimeError):
     def __init__(self, code: str):
         self.code = str(code or "server_down")
         super().__init__(self.code)
+
+
+def lookup_wikipedia_episode_page(
+    language: str,
+    title: str,
+    *,
+    timeout: float = 10,
+) -> dict:
+    del language, title, timeout
+    return {}
 
 
 def _retry_after_seconds(response, fallback: float) -> float:

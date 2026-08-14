@@ -2311,17 +2311,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.0.13")
+        self.assertEqual(manifest["version"], "1.0.14")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.0.13")
+        self.assertEqual(project["project"]["version"], "1.0.14")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.3.1",
         )
-        self.assertIn("/tmp/download-1.0.13.tpx", readme)
-        self.assertNotIn("dist/download-1.0.13.tpx", readme)
+        self.assertIn("/tmp/download-1.0.14.tpx", readme)
+        self.assertNotIn("dist/download-1.0.14.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)

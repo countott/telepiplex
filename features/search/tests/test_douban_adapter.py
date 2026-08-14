@@ -211,6 +211,50 @@ class DoubanAdapterTest(unittest.TestCase):
             all("\u200e" not in value and "(2012)" not in value for value in fact["aliases"])
         )
 
+    def test_series_title_separates_explicit_season_suffix_and_imdb_id(self):
+        fact = douban._normalize_payload(
+            {
+                "id": "5379824",
+                "title": "副总统 第一季",
+                "original_title": "Veep",
+                "year": "2012",
+                "type": "tv",
+                "info": "IMDb: tt1759761",
+            },
+            "https://movie.douban.com/subject/5379824/",
+        )
+
+        self.assertEqual(fact["douban_title_raw"], "副总统 第一季")
+        self.assertEqual(fact["chinese_title"], "副总统")
+        self.assertEqual(fact["season_number"], 1)
+        self.assertEqual(fact["external_ids"]["imdb"], "tt1759761")
+
+    def test_series_title_cleanup_is_conservative_for_parts_and_sequels(self):
+        self.assertEqual(
+            douban.clean_douban_series_title("黑暗荣耀 第 2 季", "series"),
+            ("黑暗荣耀", 2),
+        )
+        self.assertEqual(
+            douban.clean_douban_series_title("副总统 Season 03", "series"),
+            ("副总统", 3),
+        )
+        self.assertEqual(
+            douban.clean_douban_series_title("副总统 S04", "series"),
+            ("副总统", 4),
+        )
+        self.assertEqual(
+            douban.clean_douban_series_title("庆余年2", "series"),
+            ("庆余年2", None),
+        )
+        self.assertEqual(
+            douban.clean_douban_series_title("百年孤独 第二部", "series"),
+            ("百年孤独 第二部", None),
+        )
+        self.assertEqual(
+            douban.clean_douban_series_title("百年孤独 Part 2", "series"),
+            ("百年孤独 Part 2", None),
+        )
+
     def test_mixed_chinese_and_english_title_does_not_pollute_chinese_title(self):
         fact = douban._normalize_payload(
             {

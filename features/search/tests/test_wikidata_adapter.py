@@ -55,6 +55,7 @@ class WikidataAdapterTest(unittest.TestCase):
                         "P527": [{"mainsnak": {"datavalue": {"value": {"id": "Q1339165"}}}}],
                         "P2437": [{"mainsnak": {"datavalue": {"value": {"amount": "+7"}}}}],
                         "P1113": [{"mainsnak": {"datavalue": {"value": {"amount": "+65"}}}}],
+                        "P345": [{"mainsnak": {"datavalue": {"value": "tt1759761"}}}],
                     },
                 }
             }
@@ -71,6 +72,10 @@ class WikidataAdapterTest(unittest.TestCase):
         self.assertEqual(entities["Q74801"]["countries"], ["Q30"])
         self.assertEqual(entities["Q74801"]["season_count"], 7)
         self.assertEqual(entities["Q74801"]["episode_count"], 65)
+        self.assertEqual(
+            entities["Q74801"]["external_ids"]["imdb"],
+            "tt1759761",
+        )
         self.assertEqual(entities["Q74801"]["original_language"], "ja")
         self.assertIn("anime", entities["Q74801"]["genres"])
         self.assertEqual(

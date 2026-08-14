@@ -252,6 +252,34 @@ class TitlePolicyTest(unittest.TestCase):
 
         self.assertEqual(titles.chinese_title, "康斯坦丁")
 
+    def test_douban_chinese_title_beats_explicit_wikipedia_regional_title(self):
+        candidate = CandidateEntity("wikipedia:Q74801", (
+            fact(
+                fact_id="wikipedia:Q74801",
+                provider="wikipedia",
+                titles=("副人之仁", "Veep"),
+                chinese_title="副人之仁",
+                official_english_title="Veep",
+                original_title="Veep",
+                original_language="en",
+                media_type="series",
+            ),
+            fact(
+                fact_id="douban:5379824",
+                provider="douban",
+                titles=("副总统", "Veep"),
+                chinese_title="副总统",
+                official_english_title="Veep",
+                original_title="Veep",
+                original_language="en",
+                media_type="series",
+            ),
+        ))
+
+        titles = resolve_title_policy(candidate)
+
+        self.assertEqual(titles.chinese_title, "副总统")
+
     def test_verified_simple_chinese_wikipedia_title_is_accepted(self):
         candidate = CandidateEntity("wikipedia:Q74801", (fact(
             fact_id="wikipedia:Q74801",

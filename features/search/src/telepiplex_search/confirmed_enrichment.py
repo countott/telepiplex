@@ -21,6 +21,9 @@ class ConfirmedIdentity:
     original_language: str
     genres: tuple[str, ...]
     external_ids: dict[str, str]
+    countries: tuple[str, ...] = ()
+    cast_names: tuple[str, ...] = ()
+    season_number: int | None = None
 
 
 def _text(value) -> str:
@@ -245,12 +248,140 @@ def select_unique_douban_fact(
     result: dict,
     identity: ConfirmedIdentity,
 ) -> dict | None:
-    return _select_unique_flat_fact(
-        result,
-        identity,
-        provider="douban_subject",
-        id_key="subject_id",
+    if not isinstance(result, dict) or result.get("status") != "ok":
+        return None
+    matches = []
+    for fact in result.get("facts") or ():
+        if not isinstance(fact, dict):
+            continue
+        match_mode = douban_identity_match(fact, identity)
+        if not match_mode:
+            continue
+        selected = dict(fact)
+        selected["douban_match_mode"] = match_mode
+        matches.append(selected)
+    stable_ids = {
+        _text(
+            fact.get("subject_id")
+            or (fact.get("external_ids") or {}).get("douban_subject")
+        )
+        for fact in matches
+    }
+    return dict(matches[0]) if len(stable_ids - {""}) == 1 else None
+
+
+def _external_id(value: dict, key: str) -> str:
+    external_ids = (
+        value.get("external_ids")
+        if isinstance(value.get("external_ids"), dict)
+        else {}
     )
+    return _text(external_ids.get(key)).casefold()
+
+
+def _latin_identity_titles(value: dict) -> set[str]:
+    return {
+        normalized
+        for title in (
+            value.get("english_title"),
+            value.get("official_english_title"),
+            value.get("original_title"),
+            *(value.get("aliases") or ()),
+        )
+        if re.search(r"[A-Za-z]", _text(title))
+        and (normalized := normalize_title(title))
+    }
+
+
+def _identity_latin_titles(identity: ConfirmedIdentity) -> set[str]:
+    return {
+        normalized
+        for title in (identity.english_title, identity.original_title)
+        if re.search(r"[A-Za-z]", _text(title))
+        and (normalized := normalize_title(title))
+    }
+
+
+def _person_names(value) -> set[str]:
+    items = value if isinstance(value, (list, tuple)) else ()
+    result = set()
+    for item in items:
+        raw = (
+            item.get("name") or item.get("title")
+            if isinstance(item, dict)
+            else item
+        )
+        if normalized := normalize_title(raw):
+            result.add(normalized)
+    return result
+
+
+def douban_identity_match(
+    fact: dict,
+    identity: ConfirmedIdentity,
+) -> str:
+    raw_type = _text(fact.get("media_type")).casefold()
+    if not raw_type or raw_type != identity.media_type:
+        return ""
+
+    expected_imdb = _text(identity.external_ids.get("imdb")).casefold()
+    fact_imdb = _external_id(fact, "imdb")
+    if expected_imdb and fact_imdb:
+        return "imdb_exact" if expected_imdb == fact_imdb else ""
+
+    fact_year = _text(fact.get("year"))[:4]
+    if identity.year and fact_year and identity.year != fact_year:
+        return ""
+    if not _latin_identity_titles(fact).intersection(
+        _identity_latin_titles(identity)
+    ):
+        return ""
+
+    strong_fields = 0
+    if identity.year and fact_year and identity.year == fact_year:
+        strong_fields += 1
+    fact_language = _text(fact.get("original_language")).casefold()
+    if (
+        identity.original_language
+        and fact_language
+        and identity.original_language == fact_language
+    ):
+        strong_fields += 1
+    fact_countries = {
+        normalize_title(value) or _text(value).casefold()
+        for value in fact.get("countries") or ()
+        if _text(value)
+    }
+    identity_countries = {
+        normalize_title(value) or _text(value).casefold()
+        for value in identity.countries
+        if _text(value)
+    }
+    if fact_countries.intersection(identity_countries):
+        strong_fields += 1
+    fact_people = _person_names(
+        list(fact.get("cast") or ())
+        + list(fact.get("crew") or ())
+        + list(fact.get("directors") or ())
+        + list(fact.get("actors") or ())
+    )
+    identity_people = {
+        normalized
+        for value in identity.cast_names
+        if (normalized := normalize_title(value))
+    }
+    if fact_people.intersection(identity_people):
+        strong_fields += 1
+    try:
+        fact_season = int(fact.get("season_number"))
+    except (TypeError, ValueError):
+        fact_season = None
+    if (
+        identity.season_number is not None
+        and fact_season == identity.season_number
+    ):
+        strong_fields += 1
+    return "strong_fields" if strong_fields >= 2 else ""
 
 
 def build_tvdb_query(

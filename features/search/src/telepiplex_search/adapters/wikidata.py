@@ -138,9 +138,21 @@ def _normalize(entity: dict) -> dict:
     qid = _text(entity.get("id"))
     labels = entity.get("labels") or {}
     instance_of = _entity_ids(entity, "P31")
+    imdb_id = next(
+        (
+            value.casefold()
+            for raw in _claim_values(entity, "P345")
+            if (value := _text(raw)).casefold().startswith("tt")
+            and value[2:].isdigit()
+        ),
+        "",
+    )
+    external_ids = {"wikidata": qid} if qid else {}
+    if imdb_id:
+        external_ids["imdb"] = imdb_id
     result = {
         "wikibase_item": qid,
-        "external_ids": {"wikidata": qid} if qid else {},
+        "external_ids": external_ids,
         "chinese_title": _localized_value(
             labels, ("zh-hans", "zh-cn", "zh")
         ),

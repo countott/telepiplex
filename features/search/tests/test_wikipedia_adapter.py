@@ -6,11 +6,55 @@ import requests
 from telepiplex_search.adapters.wikipedia import (
     _classification,
     lookup_wikipedia_evidence,
+    lookup_wikipedia_episode_page,
     lookup_wikipedia_page,
 )
 
 
 class WikipediaAdapterTest(unittest.TestCase):
+    @patch("telepiplex_search.adapters.wikipedia.requests.get")
+    def test_episode_inventory_uses_one_exact_action_parse_request(self, get_mock):
+        response = Mock()
+        response.status_code = 200
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "parse": {
+                "title": "One Hundred Years of Solitude (TV series)",
+                "pageid": 123,
+                "revid": 1367933110,
+                "displaytitle": "One Hundred Years of Solitude",
+                "text": (
+                    '<h3>Season 2 (2026)</h3>'
+                    '<table class="wikiepisodetable">'
+                    '<tr><th>No. overall</th><th>No. in season</th>'
+                    '<th>Original release date</th></tr>'
+                    '<tr class="module-episode-list-row">'
+                    '<th id="ep9">9</th><td>1</td>'
+                    '<td><span class="bday">2026-08-05</span></td>'
+                    '</tr></table>'
+                ),
+            }
+        }
+        get_mock.return_value = response
+
+        result = lookup_wikipedia_episode_page(
+            "en",
+            "One Hundred Years of Solitude (TV series)",
+        )
+
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["revision_id"], 1367933110)
+        self.assertEqual(result["items"][0]["season_number"], 2)
+        params = get_mock.call_args.kwargs["params"]
+        self.assertEqual(params["action"], "parse")
+        self.assertEqual(
+            params["page"],
+            "One Hundred Years of Solitude (TV series)",
+        )
+        self.assertEqual(params["prop"], "text|revid|displaytitle")
+        self.assertNotIn("generator", params)
+        self.assertEqual(get_mock.call_count, 1)
+
     @patch("telepiplex_search.adapters.wikipedia.requests.get")
     def test_preserves_mediawiki_rank_and_marks_disambiguation(self, get_mock):
         response = Mock()

@@ -120,7 +120,7 @@ class ConfirmedEnrichmentTest(unittest.TestCase):
             chinese_title="Veep",
             english_title="Veep",
             year="2012",
-            external_ids={"wikidata": "Q74801"},
+            external_ids={"wikidata": "Q74801", "imdb": "tt1759761"},
         )
         result = {
             "source": "douban",
@@ -133,18 +133,45 @@ class ConfirmedEnrichmentTest(unittest.TestCase):
                 "year": "2012",
                 "media_type": "series",
                 "url": "https://movie.douban.com/subject/1/",
+                "external_ids": {
+                    "douban_subject": "1",
+                    "imdb": "tt1759761",
+                },
             }],
         }
 
-        self.assertEqual(
-            select_unique_douban_fact(result, english_only)["subject_id"],
-            "1",
-        )
+        selected = select_unique_douban_fact(result, english_only)
+        self.assertEqual(selected["subject_id"], "1")
+        self.assertEqual(selected["douban_match_mode"], "imdb_exact")
         result["facts"].append({
             **result["facts"][0],
             "subject_id": "2",
             "url": "https://movie.douban.com/subject/2/",
         })
+        self.assertIsNone(select_unique_douban_fact(result, english_only))
+
+    def test_douban_title_and_year_without_second_strong_field_is_rejected(self):
+        english_only = identity(
+            provider="wikipedia",
+            stable_id="Q74801",
+            chinese_title="副人之仁",
+            english_title="Veep",
+            year="2012",
+            external_ids={"wikidata": "Q74801"},
+        )
+        result = {
+            "source": "douban",
+            "status": "ok",
+            "facts": [{
+                "subject_id": "1",
+                "chinese_title": "副总统",
+                "english_title": "Veep",
+                "year": "2012",
+                "media_type": "series",
+                "external_ids": {"douban_subject": "1"},
+            }],
+        }
+
         self.assertIsNone(select_unique_douban_fact(result, english_only))
 
     def test_wikipedia_queries_use_only_confirmed_identity(self):
@@ -555,13 +582,13 @@ class ConfirmedEnrichmentIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
     @patch("telepiplex_search.service.search_tvdb_series", return_value=[])
     @patch("telepiplex_search.service.search_tmdb", return_value=[])
-    async def test_english_wikipedia_identity_uses_unique_douban_chinese_fallback(
+    async def test_wikipedia_regional_chinese_still_uses_verified_douban_title(
         self,
         _tmdb,
         _tvdb,
     ):
         plan = build_root_work_search_plan(
-            "Veep",
+            "副人之仁",
             "english-wiki",
             lambda _payload: {
                 "source": "wikipedia",
@@ -571,7 +598,8 @@ class ConfirmedEnrichmentIntegrationTest(unittest.IsolatedAsyncioTestCase):
                     "search_rank": 1,
                     "page_id": 1,
                     "is_disambiguation": False,
-                    "title": "Veep",
+                    "title": "副人之仁",
+                    "chinese_title": "副人之仁",
                     "english_title": "Veep",
                     "official_english_title": "Veep",
                     "extract": "American television series",
@@ -582,7 +610,11 @@ class ConfirmedEnrichmentIntegrationTest(unittest.IsolatedAsyncioTestCase):
             lambda _qids: {
                 "Q74801": {
                     "wikibase_item": "Q74801",
-                    "chinese_title": "",
+                    "external_ids": {
+                        "wikidata": "Q74801",
+                        "imdb": "tt1759761",
+                    },
+                    "chinese_title": "副人之仁",
                     "english_title": "Veep",
                     "aliases": [],
                     "media_type": "series",
@@ -606,12 +638,16 @@ class ConfirmedEnrichmentIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 "media_type": "series",
                 "url": "https://movie.douban.com/subject/5379824/",
                 "cover_url": "https://img.example/veep.jpg",
+                "external_ids": {
+                    "douban_subject": "5379824",
+                    "imdb": "tt1759761",
+                },
             }],
         }
 
         enriched = await feature._supplement_selected_candidate(
             plan["candidates"][0],
-            "Veep",
+            "副人之仁",
         )
 
         douban_link = next(
@@ -622,6 +658,7 @@ class ConfirmedEnrichmentIntegrationTest(unittest.IsolatedAsyncioTestCase):
             douban_link["external_ids"]["douban_subject"],
             "5379824",
         )
+        self.assertEqual(enriched["douban_match_mode"], "imdb_exact")
 
 
 if __name__ == "__main__":

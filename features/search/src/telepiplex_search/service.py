@@ -4299,11 +4299,7 @@ class SearchFeature:
                 ),
             )
 
-        has_simple_chinese = bool(re.search(
-            r"[\u3400-\u9fff]",
-            _text(confirmed.chinese_title),
-        ))
-        if not has_simple_chinese and "douban" not in providers:
+        if "douban" not in providers:
             douban_query = _text(" ".join(filter(None, (
                 confirmed.english_title or confirmed.original_title,
                 confirmed.year,
@@ -4334,12 +4330,20 @@ class SearchFeature:
                         "douban_subject"
                     )
                 )
+                douban_external_ids = {
+                    _text(key): _text(value)
+                    for key, value in (
+                        douban_fact.get("external_ids") or {}
+                    ).items()
+                    if _text(key) and _text(value)
+                }
+                douban_external_ids["douban_subject"] = subject_id
                 source_links.append({
                     "provider": "douban",
                     "fact_id": f"douban:{subject_id}",
                     "url": _text(douban_fact.get("url"))
                     or f"https://movie.douban.com/subject/{subject_id}/",
-                    "external_ids": {"douban_subject": subject_id},
+                    "external_ids": douban_external_ids,
                     "role": (
                         "movie"
                         if confirmed.media_type == "movie"
@@ -4351,6 +4355,9 @@ class SearchFeature:
                     "proposed_season_number": None,
                     "proposed_episode_number": None,
                 })
+                result["douban_match_mode"] = _text(
+                    douban_fact.get("douban_match_mode")
+                )
                 providers.add("douban")
             if "douban" not in providers:
                 unresolved.append(f"douban:{douban_status}")

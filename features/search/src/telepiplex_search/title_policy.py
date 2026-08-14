@@ -85,6 +85,12 @@ def _chinese_title(
     original_titles = {
         _text(fact.original_title) for fact in candidate.facts if fact.original_title
     }
+    douban_titles = _chinese_values(candidate, "douban")
+    for title in douban_titles:
+        if title not in original_titles:
+            return title
+    for title in douban_titles:
+        return title
     preferred = _text(preferred_chinese_title)
     if (
         preferred
@@ -103,11 +109,6 @@ def _chinese_title(
                 and title not in original_titles
             ):
                 return title
-    for title in _chinese_values(candidate, "douban"):
-        if title not in original_titles:
-            return title
-    for title in _chinese_values(candidate, "douban"):
-        return title
     for fact in candidate.facts:
         title = _text(fact.chinese_title)
         if (

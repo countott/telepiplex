@@ -17,6 +17,20 @@ USER_AGENT = "telepiplex/1.0 (media metadata lookup)"
 _SUBJECT_PATTERN = re.compile(
     r"(?:https?:)?//movie\.douban\.com/subject/(\d+)/?|(?<![\w/])/subject/(\d+)/?"
 )
+_IMDB_PATTERN = re.compile(r"\btt\d{5,12}\b", re.IGNORECASE)
+_CHINESE_NUMBER_VALUES = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
 _QUERY_CACHE: dict[tuple[str, ...], tuple[float, dict]] = {}
 _SUBJECT_CACHE: dict[str, tuple[float, dict]] = {}
 _CIRCUIT_STATE = {"failures": 0, "open_until": 0.0}
@@ -42,6 +56,73 @@ def _clean_title_text(value) -> str:
         if unicodedata.category(character) != "Cf"
     )
     return _text(visible)
+
+
+def _positive_number(value: str) -> int | None:
+    value = _text(value)
+    if value.isdigit():
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    if value == "十":
+        return 10
+    if "十" in value and value.count("十") == 1:
+        left, right = value.split("十")
+        tens = 1 if not left else _CHINESE_NUMBER_VALUES.get(left)
+        ones = 0 if not right else _CHINESE_NUMBER_VALUES.get(right)
+        if tens is not None and ones is not None:
+            parsed = tens * 10 + ones
+            return parsed if parsed > 0 else None
+    if len(value) == 1:
+        parsed = _CHINESE_NUMBER_VALUES.get(value)
+        return parsed if parsed and parsed > 0 else None
+    return None
+
+
+def clean_douban_series_title(
+    title: str,
+    media_type: str,
+) -> tuple[str, int | None]:
+    value = _clean_title_text(title)
+    if _text(media_type).casefold() != "series" or not value:
+        return value, None
+    patterns = (
+        re.compile(r"\s*第\s*([0-9零〇一二三四五六七八九十]+)\s*季\s*$"),
+        re.compile(r"(?:\s+|[-:：])Season\s*0*(\d+)\s*$", re.IGNORECASE),
+        re.compile(r"(?:\s+|[-:：])S0*(\d+)\s*$", re.IGNORECASE),
+    )
+    for pattern in patterns:
+        match = pattern.search(value)
+        if match is None:
+            continue
+        season_number = _positive_number(match.group(1))
+        root = value[:match.start()].rstrip(" \t/／|｜·・-–—:：")
+        if root and season_number is not None:
+            return root, season_number
+    return value, None
+
+
+def _imdb_id(value) -> str:
+    if isinstance(value, dict):
+        preferred = (
+            "imdb",
+            "imdb_id",
+            "imdbId",
+            "imdbID",
+        )
+        for key in preferred:
+            if key in value and (result := _imdb_id(value.get(key))):
+                return result
+        for nested in value.values():
+            if result := _imdb_id(nested):
+                return result
+        return ""
+    if isinstance(value, (list, tuple)):
+        for nested in value:
+            if result := _imdb_id(nested):
+                return result
+        return ""
+    match = _IMDB_PATTERN.search(str(value or ""))
+    return match.group(0).casefold() if match else ""
 
 
 def _normalize_title_and_year(
@@ -299,7 +380,11 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
         or data.get("originalName"),
         "",
     )
-    chinese_title = _chinese_title_part(title, original_title)
+    douban_title_raw = _chinese_title_part(title, original_title)
+    chinese_title, season_number = clean_douban_series_title(
+        douban_title_raw,
+        _media_type(data),
+    )
     candidates = [
         original_title,
         data.get("originalTitle"),
@@ -341,12 +426,18 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
         or data.get("romajiTitle"),
         "",
     )
+    external_ids = {"douban_subject": subject_id}
+    imdb_id = _imdb_id(data)
+    if imdb_id:
+        external_ids["imdb"] = imdb_id
     return {
         "subject_id": subject_id,
-        "external_ids": {"douban_subject": subject_id},
+        "external_ids": external_ids,
         "url": f"https://movie.douban.com/subject/{subject_id}/",
         "title": english_title or chinese_title or title,
+        "douban_title_raw": douban_title_raw,
         "chinese_title": chinese_title,
+        "season_number": season_number,
         "english_title": english_title,
         "original_title": original_title,
         "original_language": _language(data, original_title),
@@ -378,6 +469,7 @@ def _merge_subject_facts(facts: list[dict]) -> dict | None:
     conflicts = []
     scalar_fields = (
         "title",
+        "douban_title_raw",
         "chinese_title",
         "english_title",
         "original_title",
@@ -399,7 +491,7 @@ def _merge_subject_facts(facts: list[dict]) -> dict | None:
                 if value and value not in values:
                     values.append(value)
             merged[field] = values
-        for field in ("year", "media_type"):
+        for field in ("year", "media_type", "season_number"):
             current = _text(merged.get(field))
             incoming = _text(fact.get(field))
             if current and incoming and current != incoming:

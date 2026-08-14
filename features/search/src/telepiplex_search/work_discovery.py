@@ -359,6 +359,7 @@ def discover_root_works(
             "url": source_url,
             "wikibase_item": qid,
             "external_ids": {
+                **dict(entity.get("external_ids") or {}),
                 "wikidata": qid,
                 **(
                     {"wikipedia": qid}
@@ -373,6 +374,7 @@ def discover_root_works(
             "original_language": _text(entity.get("original_language")),
             "season_count": entity.get("season_count"),
             "episode_count": entity.get("episode_count"),
+            "external_ids": dict(entity.get("external_ids") or {}),
             "cover_url": _text(page.get("cover_url")),
         }
         candidates.append({
@@ -553,7 +555,10 @@ def discover_root_works(
                 "aliases": fact_aliases,
                 "url": f"https://www.wikidata.org/wiki/{qid}",
                 "wikibase_item": qid,
-                "external_ids": {"wikidata": qid},
+                "external_ids": {
+                    **dict(entity.get("external_ids") or {}),
+                    "wikidata": qid,
+                },
                 "year": year,
                 "media_type": media_type,
                 "countries": list(entity.get("countries") or ()),
@@ -669,6 +674,7 @@ def _plan_candidate(
         "poster_url": root["poster_url"],
         "external_ids": {
             **dict(identity.get("external_ids") or {}),
+            **dict(root.get("external_ids") or {}),
             "wikidata": root["qid"],
             **(
                 {"wikipedia": root["qid"]}
