@@ -235,8 +235,8 @@ def _scope(candidate: AnchoredCandidate, media_type: str) -> tuple[
     if media_type == "movie":
         return "movie", None, None
     scope = candidate.intended_scope
-    if scope in {"movie", "work"}:
-        scope = "whole_series"
+    if scope == "movie":
+        scope = "work"
     season = episode = None
     if scope in {"season", "episode"}:
         verified_inventory = {

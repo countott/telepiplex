@@ -212,6 +212,55 @@ class MediaMetadataV1Test(unittest.TestCase):
             "A young filmmaker encounters the unsettling Backrooms.",
         )
 
+    def test_bare_series_keeps_work_scope_until_user_selects_download_range(self):
+        fact = _fact(
+            "tvdb:79044",
+            "tvdb",
+            titles=("蜂蜜与四叶草", "Honey and Clover"),
+            year="2005",
+            media_type="series",
+            url="https://thetvdb.com/series/79044",
+            external_ids={"tvdb": "79044"},
+            chinese="蜂蜜与四叶草",
+            english="Honey and Clover",
+            episodes=({
+                "tvdb_episode_id": "79044-s1e1",
+                "season_number": 1,
+                "episode_number": 1,
+                "aired": "2005-04-15",
+            },),
+        )
+        candidate = AnchoredCandidate(
+            candidate_id="tvdb:79044",
+            anchor_fact_id=fact.fact_id,
+            identity_role="series_root",
+            intended_scope="work",
+            source_links=(SourceLink(
+                provider="tvdb",
+                fact_id=fact.fact_id,
+                url=fact.source_url,
+                external_ids=fact.external_ids,
+                role="series_root",
+                season_number=None,
+                episode_number=None,
+                verification="fact_verified",
+            ),),
+            poster_assets=(),
+            unresolved_sources=(),
+            ai_confidence=0,
+            ai_reason="deterministic_tvdb_root",
+            facts=(fact,),
+        )
+
+        contract = build_media_metadata_v1(
+            candidate,
+            metadata_id="bare-series",
+            raw_query="蜂蜜与四叶草",
+        )
+
+        self.assertEqual(contract["retrieval"]["scope"], "work")
+        self.assertEqual(contract["evidence"]["decision"]["scope"], "work")
+
     def test_contract_converges_peer_descriptive_metadata_with_field_evidence(self):
         douban = _fact(
             "douban:1295644",
