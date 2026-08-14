@@ -2289,7 +2289,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("(", button)
         self.assertTrue(button.endswith(" 2026"))
 
-    def test_candidate_grid_is_bounded_to_five_and_hides_internal_fields(self):
+    def test_candidate_grid_paginates_all_candidates_and_hides_internal_fields(self):
         candidates = []
         for index in range(6):
             contract = deepcopy(search_plan()["media_metadata"])
@@ -2338,8 +2338,27 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("wikipedia:server_down", action["text"])
         self.assertNotIn("匹配参考", action["text"])
         self.assertEqual(
+            action["data"]["keyboard"][-2][0]["text"],
+            "下一页",
+        )
+        self.assertEqual(
+            action["data"]["keyboard"][-2][0]["callback_data"],
+            "search:candidate_page:caption-limit:1",
+        )
+        self.assertEqual(
             action["data"]["keyboard"][-1][0]["text"],
             "都不是",
+        )
+
+        second_page = self.feature._candidate_grid_action({
+            "candidates": candidates,
+            "plan": {"plan_id": "caption-limit"},
+        }, page=1)
+        self.assertEqual(len(second_page["data"]["poster_items"]), 1)
+        self.assertIn("6. <b>候选标题 6", second_page["text"])
+        self.assertEqual(
+            second_page["data"]["keyboard"][-2][0]["text"],
+            "上一页",
         )
 
     def test_single_candidate_grid_returns_poster_and_source_overview(self):
@@ -3910,9 +3929,9 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "1.10.0")
+        self.assertEqual(manifest["version"], "1.11.0")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertEqual(project["project"]["version"], "1.10.0")
+        self.assertEqual(project["project"]["version"], "1.11.0")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.3.1",
@@ -3946,14 +3965,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.10.0.tpx", source)
+        self.assertIn("/tmp/search-1.11.0.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-1.10.0.tpx", source)
+        self.assertNotIn("dist/search-1.11.0.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

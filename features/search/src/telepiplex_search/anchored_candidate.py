@@ -217,9 +217,22 @@ def _wikipedia_season_counts(
         try:
             count = int(fact.season_count)
         except (TypeError, ValueError):
-            continue
+            count = 0
         if count > 0:
             counts.add(count)
+        episode_seasons = set()
+        for raw in fact.episodes:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                season = int(raw.get("season_number"))
+                episode = int(raw.get("episode_number"))
+            except (TypeError, ValueError):
+                continue
+            if season > 0 and episode > 0:
+                episode_seasons.add(season)
+        if episode_seasons:
+            counts.add(max(episode_seasons))
     return tuple(sorted(counts))
 
 

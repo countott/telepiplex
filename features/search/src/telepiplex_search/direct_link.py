@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from html.parser import HTMLParser
+import re
 from urllib.parse import urljoin, urlparse
 
 import requests
 
 from .adapters.douban import (
     DoubanSubjectLookupError,
+    clean_douban_series_title,
     lookup_douban_subject,
 )
 from .adapters.tvdb import (
@@ -66,11 +68,12 @@ class DirectEntity:
     scope: str
     season_number: int | None = None
     episode_number: int | None = None
+    search_title: str = ""
 
     @property
     def query(self) -> str:
         return build_prowlarr_query(
-            self.title,
+            self.search_title or self.title,
             self.scope,
             self.season_number,
             self.episode_number,
@@ -233,6 +236,33 @@ def _integer(value):
         return None
 
 
+def _canonical_episode_list_link(values) -> dict | None:
+    links = []
+    seen = set()
+    for raw in values or ():
+        if not isinstance(raw, dict):
+            continue
+        title = _text(raw.get("title"))
+        href = _text(raw.get("href"))
+        if not title or not href or (title, href) in seen:
+            continue
+        seen.add((title, href))
+        links.append({"title": title, "href": href})
+    if not links:
+        return None
+    overview_links = [
+        link for link in links
+        if not re.search(
+            r"(?:\(|_)\s*(?:season|series)[ _-]*\d+",
+            f"{link['title']} {link['href']}",
+            re.IGNORECASE,
+        )
+    ]
+    if len(overview_links) == 1:
+        return overview_links[0]
+    return links[0] if len(links) == 1 else None
+
+
 def _tvdb_series_entity(link: MetadataLink):
     if link.scope == "work":
         return get_tvdb_series(link.entity_id), None, None
@@ -314,6 +344,39 @@ def resolve_direct_link(link: MetadataLink) -> DirectEntity:
                 primary_title,
             )
             primary_inventory["wikibase_item"] = stable_id
+            episode_list_relationship = None
+            primary_inventory_merged = False
+            episode_list_links = [
+                value
+                for value in primary_inventory.get("episode_list_links") or ()
+                if isinstance(value, dict) and _text(value.get("title"))
+            ]
+            episode_list_link = _canonical_episode_list_link(
+                episode_list_links
+            )
+            if (
+                _text(primary_inventory.get("status")) != "complete"
+                and episode_list_link is not None
+            ):
+                linked_title = _text(episode_list_link["title"])
+                linked_inventory = lookup_wikipedia_episode_page(
+                    language,
+                    linked_title,
+                )
+                linked_inventory["wikibase_item"] = stable_id
+                if linked_inventory.get("items"):
+                    primary_inventory = merge_wikipedia_episode_results(
+                        primary_inventory,
+                        linked_inventory,
+                        expected_qid=stable_id,
+                    )
+                    primary_inventory_merged = True
+                    episode_list_relationship = {
+                        "from_title": primary_title,
+                        "to_title": linked_title,
+                        "href": _text(episode_list_link.get("href")),
+                        "verification": "wikipedia_explicit_link",
+                    }
             secondary_inventory = None
             english_page_title = _text(fact.get("english_page_title"))
             if (
@@ -359,11 +422,19 @@ def resolve_direct_link(link: MetadataLink) -> DirectEntity:
                             ),
                         )
                         secondary_inventory["wikibase_item"] = english_qid
-            episode_inventory = merge_wikipedia_episode_results(
-                primary_inventory,
-                secondary_inventory,
-                expected_qid=stable_id,
+            episode_inventory = (
+                primary_inventory
+                if primary_inventory_merged and secondary_inventory is None
+                else merge_wikipedia_episode_results(
+                    primary_inventory,
+                    secondary_inventory,
+                    expected_qid=stable_id,
+                )
             )
+            if episode_list_relationship is not None:
+                episode_inventory["episode_list_relationship"] = (
+                    episode_list_relationship
+                )
             season_totals = episode_inventory.get("season_totals") or {}
             inventory_status = _text(episode_inventory.get("status"))
             fact["episodes"] = [
@@ -442,30 +513,59 @@ def resolve_direct_link(link: MetadataLink) -> DirectEntity:
             ) from exc
         if not isinstance(fact, dict):
             raise DirectLinkError("direct_link_not_found")
-        title = _text(
-            fact.get("english_title")
-            or fact.get("title")
-            or fact.get("chinese_title")
-        )
-        if not title:
-            raise DirectLinkError("direct_link_invalid")
         media_type = _text(fact.get("media_type"))
         if media_type not in {"movie", "series"}:
             raise DirectLinkError("direct_link_invalid")
+        try:
+            season_number = int(fact.get("season_number") or 0)
+        except (TypeError, ValueError):
+            season_number = 0
+        if season_number <= 0:
+            season_number = 0
+        chinese_title, chinese_season = clean_douban_series_title(
+            fact.get("chinese_title")
+            or fact.get("title")
+            or fact.get("douban_title_raw"),
+            media_type,
+        )
+        english_title, english_season = clean_douban_series_title(
+            fact.get("english_title") or fact.get("original_title"),
+            media_type,
+        )
+        season_number = season_number or chinese_season or english_season or 0
+        display_title = chinese_title or english_title
+        search_title = english_title or display_title
+        if not display_title:
+            raise DirectLinkError("direct_link_invalid")
+        normalized_fact = dict(fact)
+        normalized_fact["chinese_title"] = chinese_title
+        normalized_fact["title"] = display_title
+        if english_title:
+            normalized_fact["english_title"] = english_title
+            normalized_fact["official_english_title"] = english_title
+        if season_number:
+            normalized_fact["season_number"] = season_number
+        root_lookup_year = "" if season_number else _text(fact.get("year"))
+        if season_number:
+            normalized_fact["season_entity_year"] = _text(fact.get("year"))
+            normalized_fact["year"] = ""
         return DirectEntity(
             provider="douban",
             evidence={
                 "source": "douban",
                 "status": "ok",
-                "facts": [fact],
+                "facts": [normalized_fact],
                 "source_urls": [fact.get("url") or link.url],
                 "error": "",
+                "root_lookup_year": root_lookup_year,
             },
             stable_identity=("douban_subject", link.entity_id),
-            title=title,
-            year=_text(fact.get("year")),
+            title=display_title,
+            year=root_lookup_year,
             media_type=media_type,
-            scope="work",
+            scope="season" if season_number else "work",
+            season_number=season_number or None,
+            search_title=search_title,
         )
     if link.provider == "tmdb":
         try:

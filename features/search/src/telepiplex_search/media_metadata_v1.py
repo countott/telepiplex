@@ -5,6 +5,10 @@ from __future__ import annotations
 from .anchored_candidate import AnchoredCandidate
 from .entity_graph import CandidateEntity, EvidenceFact, normalize_title
 from .prowlarr_query import build_prowlarr_query_chain
+from .series_topology import (
+    ProviderOrderConflict,
+    select_series_topology,
+)
 from .title_policy import (
     CanonicalTitles,
     TitlePolicyError,
@@ -182,7 +186,13 @@ def _field_resolutions(
     return result
 
 
-def _inventory(facts: tuple[EvidenceFact, ...]) -> list[dict]:
+def _inventory(
+    facts: tuple[EvidenceFact, ...],
+    *,
+    trusted_episode_count: int | None = None,
+    trusted_season_count: int | None = None,
+    requested_season_number: int | None = None,
+) -> tuple[list[dict], dict]:
     def collect(provider: str) -> list[dict]:
         items = []
         seen = set()
@@ -256,62 +266,53 @@ def _inventory(facts: tuple[EvidenceFact, ...]) -> list[dict]:
                 item["season_number"],
                 item["episode_number"],
             ), {}))
-        return wikipedia_items
+        return wikipedia_items, {
+            "status": "wikipedia_authoritative",
+            "selected_provider": "wikipedia",
+            "profile_counts": {"wikipedia": len(wikipedia_items)},
+        }
     tvdb_items = collect("tvdb")
     tmdb_items = collect("tmdb")
     if tvdb_items and tmdb_items:
-        tvdb_by_coordinate = {
-            (item["season_number"], item["episode_number"]): item
-            for item in tvdb_items
-        }
-        tmdb_by_coordinate = {
-            (item["season_number"], item["episode_number"]): item
-            for item in tmdb_items
-        }
-        coordinate_conflict = (
-            set(tvdb_by_coordinate) != set(tmdb_by_coordinate)
-        )
-        reconciled = []
-        for key in sorted(
-            set(tvdb_by_coordinate).intersection(tmdb_by_coordinate)
-        ):
-            tvdb_item = tvdb_by_coordinate[key]
-            tmdb_item = tmdb_by_coordinate[key]
-            tvdb_date = _text(tvdb_item.get("aired"))
-            tmdb_date = _text(tmdb_item.get("aired"))
-            date_conflict = bool(
-                tvdb_date and tmdb_date and tvdb_date != tmdb_date
+        try:
+            selected = select_series_topology(
+                {"tvdb": tvdb_items, "tmdb": tmdb_items},
+                trusted_episode_count=trusted_episode_count,
+                trusted_season_count=trusted_season_count,
+                requested_season_number=requested_season_number,
             )
-            conflict = coordinate_conflict or date_conflict
-            reconciled.append({
-                **tvdb_item,
-                **{
-                    field: tmdb_item[field]
-                    for field in ("tmdb_episode_id",)
-                    if tmdb_item.get(field)
-                },
-                "aired": "" if conflict else tvdb_date or tmdb_date,
-                "inventory_source": "tvdb_tmdb",
-                **({
-                    "air_date_conflict": True,
-                    "inventory_conflict": (
-                        "coordinate_conflict"
-                        if coordinate_conflict
-                        else "air_date_conflict"
-                    ),
-                } if conflict else {}),
-            })
-        return reconciled
+        except ProviderOrderConflict as exc:
+            raise MetadataV1Error(
+                "provider_order_conflict",
+                (exc.reason,),
+            ) from exc
+        items = []
+        for raw in selected.items:
+            item = dict(raw)
+            item["inventory_source"] = selected.provider
+            if item.get("air_date_conflict"):
+                item["inventory_conflict"] = "air_date_conflict"
+            items.append(item)
+        return items, dict(selected.diagnostics)
     if tvdb_items:
-        return tvdb_items
+        return tvdb_items, {
+            "status": "single_profile",
+            "selected_provider": "tvdb",
+            "profile_counts": {"tvdb": len(tvdb_items)},
+        }
     if tmdb_items:
-        return tmdb_items
-    return []
+        return tmdb_items, {
+            "status": "single_profile",
+            "selected_provider": "tmdb",
+            "profile_counts": {"tmdb": len(tmdb_items)},
+        }
+    return [], {"status": "unavailable", "selected_provider": ""}
 
 
 def _series_inventory_evidence(
     facts: tuple[EvidenceFact, ...],
     items: list[dict],
+    topology: dict | None = None,
 ) -> dict:
     source = _text(items[0].get("inventory_source")) if items else ""
     wikipedia_fact = next(
@@ -376,6 +377,7 @@ def _series_inventory_evidence(
         "wikipedia_status": wikipedia_status,
         "wikipedia_error": wikipedia_error,
         "fallback_reason": fallback_reason,
+        "topology": dict(topology or {}),
     }
 
 
@@ -568,10 +570,26 @@ def build_media_metadata_v1(
         candidate,
         media_type,
     )
-    inventory = _inventory(primary_facts)
+    trusted_season_count = _first_integer(
+        root,
+        primary_facts,
+        "season_count",
+    )
+    trusted_episode_count = _first_integer(
+        root,
+        primary_facts,
+        "episode_count",
+    )
+    inventory, topology_evidence = _inventory(
+        primary_facts,
+        trusted_episode_count=trusted_episode_count,
+        trusted_season_count=trusted_season_count,
+        requested_season_number=season_number,
+    )
     series_inventory_evidence = _series_inventory_evidence(
         primary_facts,
         inventory,
+        topology_evidence,
     ) if media_type == "series" else {}
     degraded_tvdb_inventory = bool(
         media_type == "series"
@@ -674,16 +692,8 @@ def build_media_metadata_v1(
         "runtime_minutes",
     )
     status = _first_text(root, primary_facts, "status")
-    season_count = _first_integer(
-        root,
-        primary_facts,
-        "season_count",
-    )
-    episode_count = _first_integer(
-        root,
-        primary_facts,
-        "episode_count",
-    )
+    season_count = trusted_season_count
+    episode_count = trusted_episode_count
     query_titles = _unique((
         titles.canonical_search_title,
         titles.canonical_latin_title,

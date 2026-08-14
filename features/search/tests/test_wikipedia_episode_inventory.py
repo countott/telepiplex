@@ -92,6 +92,28 @@ class WikipediaEpisodeInventoryTest(unittest.TestCase):
         self.assertEqual(result["status"], "parse_error")
         self.assertEqual(result["error"], "wikipedia_parse_error")
 
+    def test_root_page_exposes_only_explicit_episode_list_links(self):
+        result = parse_wikipedia_episode_html(
+            """
+            <table class="infobox">
+              <tr><th>Episode list</th><td>
+                <a href="/wiki/List_of_Bleach_episodes"
+                   title="List of Bleach episodes">List of episodes</a>
+              </td></tr>
+            </table>
+            <a href="/wiki/Bleach_(manga)" title="Bleach manga">Manga</a>
+            """,
+            language="en",
+            source_url="https://en.wikipedia.org/wiki/Bleach_(TV_series)",
+            revision_id=10,
+        )
+
+        self.assertEqual(result["status"], "absent")
+        self.assertEqual(result["episode_list_links"], [{
+            "title": "List of Bleach episodes",
+            "href": "/wiki/List_of_Bleach_episodes",
+        }])
+
     def test_qid_mismatch_is_a_fact_conflict(self):
         zh = parsed(
             "one_hundred_years_zh.html",
@@ -114,6 +136,51 @@ class WikipediaEpisodeInventoryTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "conflict")
         self.assertEqual(result["error"], "wikipedia_fact_conflict")
+
+    def test_explicit_continuation_parts_form_release_seasons(self):
+        source = {
+            "status": "partial",
+            "items": [{
+                "season_number": season,
+                "episode_number": episode,
+                "overall_number": overall,
+                "source_section": f"Season {season}",
+                "air_date": "2004-01-01",
+            } for season, episode, overall in (
+                (1, 1, 1), (1, 2, 2), (2, 1, 3),
+            )] + [{
+                "season_number": None,
+                "episode_number": None,
+                "overall_number": overall,
+                "source_section": section,
+                "air_date": "2024-01-01",
+            } for overall, section in (
+                (4, "Part 1: The Beginning"),
+                (5, "Part 1: The Beginning"),
+                (6, "Part 2: The Return"),
+            )],
+            "season_totals": {1: 2, 2: 1},
+            "source_language": "en",
+            "source_url": "https://en.wikipedia.org/wiki/List_of_Example_episodes",
+            "revision_id": 1,
+            "wikibase_item": "Q1",
+            "error": "",
+        }
+
+        result = merge_wikipedia_episode_results(
+            source,
+            expected_qid="Q1",
+        )
+
+        self.assertEqual(result["topology_kind"], "continuation_parts")
+        self.assertEqual(result["season_totals"], {1: 3, 2: 2, 3: 1})
+        self.assertEqual(
+            [
+                (item["season_number"], item["episode_number"])
+                for item in result["items"]
+            ],
+            [(1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (3, 1)],
+        )
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ from ..wikipedia_episode_inventory import parse_wikipedia_episode_html
 
 
 USER_AGENT = (
-    "telepiplex/1.10.0 (media metadata lookup; "
+    "telepiplex/1.11.0 (media metadata lookup; "
     "https://github.com/openai/codex)"
 )
 _RATE_LIMIT_LOCK = threading.Lock()

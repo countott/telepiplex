@@ -13,9 +13,9 @@ from telepiplex_plugin_sdk import FeatureRuntime
 
 ROOT = Path(__file__).resolve().parents[1]
 FEATURES = {
-    "search": ("telepiplex_search", "1.9.8"),
+    "search": ("telepiplex_search", "1.11.0"),
     "download": ("telepiplex_download", "1.0.14"),
-    "rename": ("telepiplex_rename", "1.5.0"),
+    "rename": ("telepiplex_rename", "1.5.1"),
     "sync": ("telepiplex_sync", "1.1.2"),
     "caption": ("telepiplex_caption", "0.1.4"),
 }

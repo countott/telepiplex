@@ -371,6 +371,20 @@ def douban_identity_match(
     if not raw_type or raw_type != identity.media_type:
         return ""
 
+    expected_subject = _text(
+        identity.external_ids.get("douban_subject")
+    )
+    fact_subject = _text(
+        fact.get("subject_id")
+        or (fact.get("external_ids") or {}).get("douban_subject")
+    )
+    if expected_subject:
+        return (
+            "wikidata_exact"
+            if fact_subject == expected_subject
+            else ""
+        )
+
     expected_imdb = _text(identity.external_ids.get("imdb")).casefold()
     fact_imdb = _external_id(fact, "imdb")
     if expected_imdb and fact_imdb:

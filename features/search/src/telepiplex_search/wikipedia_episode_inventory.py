@@ -5,6 +5,7 @@ from __future__ import annotations
 import html as html_module
 import re
 from html.parser import HTMLParser
+from urllib.parse import unquote
 
 
 def _text(value) -> str:
@@ -32,10 +33,14 @@ class _EpisodeTableParser(HTMLParser):
         self._row: dict | None = None
         self._cell: dict | None = None
         self.tables: list[dict] = []
+        self._link: dict | None = None
+        self.episode_list_links: list[dict] = []
 
     def handle_starttag(self, tag, attrs):
         tag = tag.casefold()
         attributes = _attrs(attrs)
+        if tag == "a" and self._link is None:
+            self._link = {"attrs": attributes, "parts": []}
         if tag in {"h2", "h3", "h4"} and self._table_depth == 0:
             self._heading_tag = tag
             self._heading_parts = []
@@ -66,6 +71,29 @@ class _EpisodeTableParser(HTMLParser):
 
     def handle_endtag(self, tag):
         tag = tag.casefold()
+        if tag == "a" and self._link is not None:
+            attributes = self._link["attrs"]
+            href = _text(attributes.get("href"))
+            title = _text(attributes.get("title"))
+            visible = _text("".join(self._link["parts"]))
+            signal = f"{title} {visible}".casefold()
+            is_episode_list = bool(
+                re.search(r"\blist of (?:.+ )?episodes\b", signal)
+                or "episode list" in signal
+                or "list of episodes" in signal
+                or any(value in signal for value in (
+                    "集数列表", "集數列表", "剧集列表", "劇集列表",
+                ))
+            )
+            if is_episode_list and href.startswith("/wiki/"):
+                resolved_title = title or unquote(
+                    href.split("/wiki/", 1)[1]
+                ).replace("_", " ")
+                value = {"title": resolved_title, "href": href}
+                if resolved_title and value not in self.episode_list_links:
+                    self.episode_list_links.append(value)
+            self._link = None
+            return
         if tag == self._heading_tag:
             self.current_heading = _text("".join(self._heading_parts))
             self._heading_tag = ""
@@ -93,6 +121,8 @@ class _EpisodeTableParser(HTMLParser):
             self._heading_parts.append(data)
         if self._cell is not None:
             self._cell["parts"].append(data)
+        if self._link is not None:
+            self._link["parts"].append(data)
 
 
 def _integer(value) -> int | None:
@@ -117,6 +147,18 @@ def _season_from_heading(value) -> int | None:
     ):
         if match := re.search(pattern, text, re.IGNORECASE):
             return int(match.group(1))
+    return None
+
+
+def _part_from_heading(value) -> int | None:
+    text = _text(value)
+    for pattern in (
+        r"\bPart\s+(\d+)\b",
+        r"第\s*(\d+)\s*(?:部|部分|篇)",
+    ):
+        if match := re.search(pattern, text, re.IGNORECASE):
+            parsed = int(match.group(1))
+            return parsed if parsed > 0 else None
     return None
 
 
@@ -224,6 +266,7 @@ def _episode_items(
             "episode_number": episode,
             "overall_number": overall,
             "title": title,
+            "source_section": _text(table.get("heading")),
             "air_date": air_date,
             "source_language": _text(language).casefold(),
             "source_url": _text(source_url),
@@ -251,6 +294,7 @@ def parse_wikipedia_episode_html(
             "source_url": _text(source_url),
             "source_language": _text(language).casefold(),
             "revision_id": int(revision_id or 0),
+            "episode_list_links": list(parser.episode_list_links),
             "error": f"wikipedia_parse_error:{type(exc).__name__}",
         }
     episode_tables = [
@@ -303,6 +347,7 @@ def parse_wikipedia_episode_html(
         "source_url": _text(source_url),
         "source_language": _text(language).casefold(),
         "revision_id": int(revision_id or 0),
+        "episode_list_links": list(parser.episode_list_links),
         "error": error,
     }
 
@@ -325,6 +370,7 @@ def _conflict_result(primary: dict, secondary: dict | None) -> dict:
             for item in sources
             if (language := _text(item.get("source_language")))
         },
+        "topology_kind": "",
         "error": "wikipedia_fact_conflict",
     }
 
@@ -401,6 +447,72 @@ def merge_wikipedia_episode_results(
                     languages.append(value)
             current["source_languages"] = languages
 
+    topology_kind = ""
+    idless_with_overall = [
+        raw for raw in idless
+        if str(raw.get("overall_number") or "").isdigit()
+    ]
+    continuation_rows = [
+        (_part_from_heading(raw.get("source_section")), raw)
+        for raw in idless_with_overall
+    ]
+    part_numbers = sorted({
+        part for part, _raw in continuation_rows if part is not None
+    })
+    base_rows = sorted(
+        by_coordinate.values(),
+        key=lambda raw: int(raw.get("overall_number") or 0),
+    )
+    base_overalls = [
+        int(raw.get("overall_number") or 0) for raw in base_rows
+    ]
+    if (
+        base_rows
+        and all(base_overalls)
+        and idless_with_overall
+        and all(part is not None for part, _raw in continuation_rows)
+        and part_numbers == list(range(1, max(part_numbers) + 1))
+        and min(
+            int(raw.get("overall_number") or 0)
+            for _part, raw in continuation_rows
+        ) > max(base_overalls)
+    ):
+        release_coordinates = {}
+        for episode, raw in enumerate(base_rows, 1):
+            value = dict(raw)
+            value["source_season_number"] = value.get("season_number")
+            value["source_episode_number"] = value.get("episode_number")
+            value["season_number"] = 1
+            value["episode_number"] = episode
+            release_coordinates[(1, episode)] = value
+        for part in part_numbers:
+            rows = sorted(
+                (
+                    raw for row_part, raw in continuation_rows
+                    if row_part == part
+                ),
+                key=lambda raw: int(raw.get("overall_number") or 0),
+            )
+            season = part + 1
+            for episode, raw in enumerate(rows, 1):
+                value = dict(raw)
+                value["season_number"] = season
+                value["episode_number"] = episode
+                release_coordinates[(season, episode)] = value
+        by_coordinate = release_coordinates
+        season_totals = {
+            1: len(base_rows),
+            **{
+                part + 1: sum(
+                    1 for row_part, _raw in continuation_rows
+                    if row_part == part
+                )
+                for part in part_numbers
+            },
+        }
+        idless = []
+        topology_kind = "continuation_parts"
+
     by_overall = {
         int(item["overall_number"]): item
         for item in by_coordinate.values()
@@ -474,6 +586,7 @@ def merge_wikipedia_episode_results(
         "source_revisions": source_revisions,
         "wikibase_item": expected_qid or next(iter(qids), ""),
         "fact_conflicts": sorted(set(fact_conflicts)),
+        "topology_kind": topology_kind,
         "error": (
             "wikipedia_fact_conflict"
             if fact_conflicts

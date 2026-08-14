@@ -56,6 +56,7 @@ class WikidataAdapterTest(unittest.TestCase):
                         "P2437": [{"mainsnak": {"datavalue": {"value": {"amount": "+7"}}}}],
                         "P1113": [{"mainsnak": {"datavalue": {"value": {"amount": "+65"}}}}],
                         "P345": [{"mainsnak": {"datavalue": {"value": "tt1759761"}}}],
+                        "P4529": [{"mainsnak": {"datavalue": {"value": "5379824"}}}],
                     },
                 }
             }
@@ -75,6 +76,10 @@ class WikidataAdapterTest(unittest.TestCase):
         self.assertEqual(
             entities["Q74801"]["external_ids"]["imdb"],
             "tt1759761",
+        )
+        self.assertEqual(
+            entities["Q74801"]["external_ids"]["douban_subject"],
+            "5379824",
         )
         self.assertEqual(entities["Q74801"]["original_language"], "ja")
         self.assertIn("anime", entities["Q74801"]["genres"])

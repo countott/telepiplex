@@ -109,6 +109,23 @@ def build_prowlarr_query_chain(
         identity.get("official_english_title"),
         identity.get("english_title"),
     ]
+    original_language = str(
+        identity.get("original_language") or ""
+    ).strip().casefold()
+    foreign_work = bool(
+        original_language
+        and original_language not in {
+            "zh", "zh-cn", "zh-hans", "cmn", "yue",
+        }
+    )
+    if foreign_work:
+        latin_titles = [
+            title for title in titles
+            if re.search(r"[A-Za-z]", str(title or ""))
+        ]
+        if not latin_titles:
+            raise ValueError("foreign_search_title_missing")
+        titles = latin_titles
     if not any(str(title or "").strip() for title in titles):
         raise ValueError("query_chain_empty")
     year = str(identity.get("year") or "")[:4]

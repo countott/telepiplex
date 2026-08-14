@@ -239,6 +239,37 @@ class ConfirmedEnrichmentTest(unittest.TestCase):
         self.assertEqual(selected["subject_id"], "5379824")
         self.assertEqual(selected["douban_match_mode"], "strong_fields")
 
+    def test_wikidata_exact_douban_subject_needs_no_imdb_api(self):
+        confirmed = identity(
+            provider="wikipedia",
+            stable_id="Q124175370",
+            chinese_title="百年孤寂",
+            english_title="One Hundred Years of Solitude",
+            year="2024",
+            original_language="es",
+            external_ids={
+                "wikidata": "Q124175370",
+                "douban_subject": "30482958",
+            },
+        )
+        result = {
+            "source": "douban",
+            "status": "ok",
+            "facts": [{
+                "subject_id": "30482958",
+                "chinese_title": "百年孤独",
+                "english_title": "One Hundred Years of Solitude",
+                "year": "2024",
+                "media_type": "series",
+                "external_ids": {"douban_subject": "30482958"},
+            }],
+        }
+
+        selected = select_unique_douban_fact(result, confirmed)
+
+        self.assertEqual(selected["subject_id"], "30482958")
+        self.assertEqual(selected["douban_match_mode"], "wikidata_exact")
+
     def test_wikipedia_queries_use_only_confirmed_identity(self):
         queries = build_wikipedia_queries(identity())
 

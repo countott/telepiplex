@@ -463,6 +463,108 @@ class CandidateHydrationTest(unittest.TestCase):
             hydrated["unresolved_sources"],
         )
 
+    def test_douban_foreign_season_hydrates_to_english_prowlarr_query(self):
+        candidate = {
+            "candidate_key": "douban_subject:36666949",
+            "candidate_id": "douban_subject:36666949",
+            "anchor_fact_id": "douban:36666949",
+            "identity_role": "season",
+            "intended_scope": "season",
+            "links_frozen": True,
+            "ai_confidence": 0,
+            "ai_reason": "Deterministic direct season link.",
+            "unresolved_sources": [
+                "douban:36666949:unresolved_scope_link",
+            ],
+            "source_links": [{
+                "provider": "douban",
+                "fact_id": "douban:36666949",
+                "url": "https://movie.douban.com/subject/36666949/",
+                "external_ids": {"douban_subject": "36666949"},
+                "role": "season",
+                "season_number": None,
+                "episode_number": None,
+                "verification": "unresolved_scope_link",
+                "proposed_season_number": 3,
+                "proposed_episode_number": None,
+            }, {
+                "provider": "tmdb",
+                "fact_id": "tmdb:94997",
+                "url": "https://www.themoviedb.org/tv/94997",
+                "external_ids": {"tmdb": "94997"},
+                "role": "series_root",
+                "season_number": None,
+                "episode_number": None,
+                "verification": "fact_verified",
+                "proposed_season_number": None,
+                "proposed_episode_number": None,
+            }],
+        }
+
+        def resolver(link):
+            if link.provider == "douban":
+                fact = {
+                    "subject_id": "36666949",
+                    "title": "龙之家族",
+                    "chinese_title": "龙之家族",
+                    "douban_title_raw": "龙之家族 第三季",
+                    "official_english_title": "House of the Dragon",
+                    "original_title": "House of the Dragon",
+                    "original_language": "en",
+                    "year": "",
+                    "media_type": "series",
+                    "url": link.url,
+                }
+                stable = ("douban_subject", "36666949")
+            else:
+                fact = {
+                    "tmdb_id": "94997",
+                    "title": "House of the Dragon",
+                    "official_english_title": "House of the Dragon",
+                    "original_title": "House of the Dragon",
+                    "original_language": "en",
+                    "year": "2022",
+                    "media_type": "series",
+                    "url": link.url,
+                    "episodes": [{
+                        "tmdb_episode_id": "s3e1",
+                        "season_number": 3,
+                        "episode_number": 1,
+                    }],
+                }
+                stable = ("tmdb", "94997")
+            return DirectEntity(
+                provider=link.provider,
+                evidence={
+                    "source": link.provider,
+                    "status": "ok",
+                    "facts": [fact],
+                    "source_urls": [link.url],
+                },
+                stable_identity=stable,
+                title="House of the Dragon",
+                year="2022",
+                media_type="series",
+                scope="work",
+            )
+
+        hydrated = hydrate_frozen_candidate(
+            candidate,
+            metadata_id="house-of-the-dragon-s3",
+            raw_query="https://movie.douban.com/subject/36666949/",
+            require_anchor=True,
+            resolver=resolver,
+        )
+
+        self.assertEqual(
+            hydrated["media_metadata"]["retrieval"]["queries"][0],
+            "House of the Dragon S03",
+        )
+        self.assertEqual(
+            hydrated["media_metadata"]["evidence"]["decision"]["season_number"],
+            3,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

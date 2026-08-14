@@ -394,6 +394,82 @@ class MediaMetadataV1Test(unittest.TestCase):
             "conflict",
         )
 
+    def test_divergent_provider_orders_select_a_complete_profile_not_intersection(self):
+        wikipedia = _fact(
+            "wikipedia:Q5362638",
+            "wikipedia",
+            titles=("死神", "Bleach"),
+            year="2004",
+            media_type="series",
+            url="https://en.wikipedia.org/wiki/Bleach_(TV_series)",
+            external_ids={"wikidata": "Q5362638"},
+            english="Bleach",
+            episode_count=406,
+            episode_inventory={
+                "status": "absent",
+                "error": "wikipedia_table_absent",
+            },
+        )
+        tvdb = _fact(
+            "tvdb:74796",
+            "tvdb",
+            titles=("Bleach",),
+            year="2004",
+            media_type="series",
+            url="https://thetvdb.com/series/74796",
+            external_ids={"tvdb": "74796"},
+            english="Bleach",
+            episodes=tuple(
+                {
+                    "season_number": season,
+                    "episode_number": episode,
+                    "aired": "2004-10-05",
+                    "tvdb_episode_id": f"tvdb-{season}-{episode}",
+                }
+                for season, total in ((1, 20), (2, 21), (3, 22))
+                for episode in range(1, total + 1)
+            ),
+        )
+        tmdb = _fact(
+            "tmdb:30984",
+            "tmdb",
+            titles=("Bleach",),
+            year="2004",
+            media_type="series",
+            url="https://www.themoviedb.org/tv/30984",
+            external_ids={"tmdb": "30984"},
+            english="Bleach",
+            episodes=tuple(
+                {
+                    "season_number": season,
+                    "episode_number": episode,
+                    "air_date": "2004-10-05",
+                    "tmdb_episode_id": f"tmdb-{season}-{episode}",
+                }
+                for season, total in ((1, 366), (2, 40))
+                for episode in range(1, total + 1)
+            ),
+        )
+
+        contract = build_media_metadata_v1(
+            _candidate(
+                intended_scope="whole_series",
+                facts=(wikipedia, tvdb, tmdb),
+            ),
+            metadata_id="bleach",
+            raw_query="死神",
+        )
+
+        self.assertEqual(len(contract["items"]), 406)
+        self.assertEqual(
+            contract["evidence"]["series_inventory"]["source"],
+            "tmdb",
+        )
+        self.assertEqual(
+            contract["evidence"]["series_inventory"]["season_totals"],
+            {1: 366, 2: 40},
+        )
+
     def test_contract_preserves_anchor_country_for_candidate_presentation(self):
         fact = _fact(
             "douban:35981510",
@@ -584,6 +660,7 @@ class MediaMetadataV1Test(unittest.TestCase):
             external_ids={"douban_subject": "20"},
             chinese="繁花",
             english="",
+            language="zh",
         )
         candidate = AnchoredCandidate(
             candidate_id="douban:20",
@@ -949,6 +1026,27 @@ class MediaMetadataV1Test(unittest.TestCase):
                 "Le Voyage de Chihiro 2001",
             ],
         )
+
+    def test_foreign_work_without_latin_title_never_queries_chinese_only(self):
+        contract = {
+            "identity": {
+                "canonical_search_title": "龙之家族",
+                "official_english_title": "",
+                "english_title": "",
+                "query_titles": ["龙之家族"],
+                "original_language": "en",
+                "year": "2022",
+            },
+            "retrieval": {"scope": "season", "media_type": "series"},
+            "evidence": {"decision": {
+                "scope": "season",
+                "season_number": 3,
+                "episode_number": None,
+            }},
+        }
+
+        with self.assertRaisesRegex(ValueError, "foreign_search_title_missing"):
+            build_prowlarr_query_chain(contract, "龙之家族 第三季")
 
     def test_media_type_conflict_and_incomplete_scope_fail_explicitly(self):
         movie = _candidate().facts[0]

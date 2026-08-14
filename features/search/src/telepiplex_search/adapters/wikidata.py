@@ -10,7 +10,7 @@ import requests
 
 WIKIDATA_ENDPOINT = "https://www.wikidata.org/w/api.php"
 USER_AGENT = (
-    "telepiplex/1.10.0 (media metadata lookup; "
+    "telepiplex/1.11.0 (media metadata lookup; "
     "https://github.com/openai/codex)"
 )
 
@@ -150,6 +150,13 @@ def _normalize(entity: dict) -> dict:
     external_ids = {"wikidata": qid} if qid else {}
     if imdb_id:
         external_ids["imdb"] = imdb_id
+    douban_subject = next((
+        value
+        for raw in _claim_values(entity, "P4529")
+        if (value := _text(raw)).isdigit()
+    ), "")
+    if douban_subject:
+        external_ids["douban_subject"] = douban_subject
     result = {
         "wikibase_item": qid,
         "external_ids": external_ids,

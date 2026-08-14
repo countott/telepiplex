@@ -18,6 +18,83 @@ class DirectLinkTest(unittest.TestCase):
     @patch("telepiplex_search.direct_link.lookup_wikipedia_episode_page")
     @patch("telepiplex_search.direct_link.enrich_wikidata_entities")
     @patch("telepiplex_search.direct_link.lookup_wikipedia_page")
+    def test_wikipedia_root_follows_its_exact_episode_list_link(
+        self,
+        page,
+        enrich,
+        episodes,
+    ):
+        page.return_value = {
+            "title": "Bleach (TV series)",
+            "canonical_title": "Bleach (TV series)",
+            "official_english_title": "Bleach",
+            "url": "https://en.wikipedia.org/wiki/Bleach_(TV_series)",
+            "wikibase_item": "Q5362638",
+            "is_disambiguation": False,
+        }
+        enrich.return_value = {"Q5362638": {
+            "wikibase_item": "Q5362638",
+            "media_type": "series",
+            "year": "2004",
+            "episode_count": 366,
+        }}
+        episodes.side_effect = [{
+            "status": "absent",
+            "items": [],
+            "season_totals": {},
+            "source_language": "en",
+            "source_url": "https://en.wikipedia.org/wiki/Bleach_(TV_series)",
+            "revision_id": 1,
+            "episode_list_links": [{
+                "title": "List of Bleach episodes",
+                "href": "/wiki/List_of_Bleach_episodes",
+            }, {
+                "title": "List of Bleach episodes (season 1)",
+                "href": "/wiki/List_of_Bleach_episodes_(season_1)",
+            }, {
+                "title": "List of Bleach episodes (season 2)",
+                "href": "/wiki/List_of_Bleach_episodes_(season_2)",
+            }],
+            "error": "wikipedia_table_absent",
+        }, {
+            "status": "complete",
+            "items": [{
+                "season_number": 1,
+                "episode_number": 1,
+                "air_date": "2004-10-05",
+            }],
+            "season_totals": {1: 1},
+            "source_language": "en",
+            "source_url": "https://en.wikipedia.org/wiki/List_of_Bleach_episodes",
+            "revision_id": 2,
+            "episode_list_links": [],
+            "error": "",
+        }]
+
+        direct = resolve_direct_link(MetadataLink(
+            provider="wikipedia",
+            media_type="",
+            entity_id="en:Bleach_(TV_series)",
+            scope="work",
+            url="https://en.wikipedia.org/wiki/Bleach_(TV_series)",
+        ))
+
+        self.assertEqual(
+            [call.args[1] for call in episodes.call_args_list],
+            ["Bleach (TV series)", "List of Bleach episodes"],
+        )
+        inventory = direct.evidence["facts"][0][
+            "wikipedia_episode_inventory"
+        ]
+        self.assertEqual(inventory["status"], "complete")
+        self.assertEqual(
+            inventory["episode_list_relationship"]["from_title"],
+            "Bleach (TV series)",
+        )
+
+    @patch("telepiplex_search.direct_link.lookup_wikipedia_episode_page")
+    @patch("telepiplex_search.direct_link.enrich_wikidata_entities")
+    @patch("telepiplex_search.direct_link.lookup_wikipedia_page")
     def test_wikipedia_series_uses_same_qid_english_episode_table(
         self,
         lookup_page,
@@ -372,6 +449,35 @@ class DirectLinkTest(unittest.TestCase):
         self.assertEqual(direct.scope, "work")
         self.assertEqual(direct.media_type, "series")
         self.assertEqual(direct.query, "The Glory")
+
+    @patch("telepiplex_search.direct_link.lookup_douban_subject")
+    def test_douban_season_link_preserves_scope_and_normalizes_root(self, lookup):
+        lookup.return_value = {
+            "subject_id": "36666949",
+            "title": "龙之家族",
+            "chinese_title": "龙之家族",
+            "douban_title_raw": "龙之家族 第三季",
+            "english_title": "House of the Dragon Season 3",
+            "original_title": "House of the Dragon Season 3",
+            "year": "2026",
+            "media_type": "series",
+            "season_number": 3,
+            "external_ids": {"douban_subject": "36666949"},
+        }
+
+        direct = resolve_direct_link(MetadataLink(
+            provider="douban",
+            media_type="",
+            entity_id="36666949",
+            scope="work",
+            url="https://movie.douban.com/subject/36666949/",
+        ))
+
+        self.assertEqual(direct.scope, "season")
+        self.assertEqual(direct.season_number, 3)
+        self.assertEqual(direct.title, "龙之家族")
+        self.assertEqual(direct.query, "House of the Dragon S03")
+        self.assertEqual(direct.evidence["root_lookup_year"], "")
 
     @patch("telepiplex_search.direct_link.get_tvdb_episode")
     @patch("telepiplex_search.direct_link.get_tvdb_series")

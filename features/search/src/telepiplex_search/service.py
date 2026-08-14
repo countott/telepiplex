@@ -16,6 +16,7 @@ from telepiplex_plugin_sdk.media_metadata import resolve_category_route
 
 from .adapters.douban import (
     lookup_douban_evidence,
+    lookup_douban_subject,
 )
 from .adapters.anilist import (
     AniListConfigError,
@@ -69,6 +70,9 @@ from .context import runtime_context
 from .candidate_hydration import (
     CandidateHydrationError,
     hydrate_frozen_candidate,
+)
+from .candidate_locale import (
+    localize_candidate_from_exact_douban,
 )
 from .direct_link import (
     DirectLinkError,
@@ -973,6 +977,8 @@ class SearchFeature:
             return result
         if action == "browse" and len(parts) == 3:
             return self._browse_candidate(plan_id, stored, parts[2])
+        if action == "candidate_page" and len(parts) == 3:
+            return self._candidate_page(plan_id, stored, parts[2])
         if action == "select" and len(parts) == 3:
             return await self._select_candidate(plan_id, stored, parts[2])
         if action == "scope" and len(parts) >= 3:
@@ -1699,7 +1705,7 @@ class SearchFeature:
             return selected_result
         action = (
             self._candidate_grid_action(self.plans[plan_id])
-            if plan.get("links_frozen") and 1 <= len(selectable) <= 5
+            if plan.get("links_frozen") and selectable
             else self._candidate_action(
                 self.plans[plan_id],
                 0,
@@ -1894,14 +1900,24 @@ class SearchFeature:
             kind = "edit_message" if edit else "send_message"
         return {"kind": kind, "text": text, "data": data}
 
-    def _candidate_grid_action(self, stored: dict) -> dict:
-        candidates = list(stored.get("candidates") or ())[:5]
-        lines = ["请选择作品候选："]
+    def _candidate_grid_action(self, stored: dict, *, page: int = 0) -> dict:
+        all_candidates = list(stored.get("candidates") or ())
+        page_size = 5
+        page_count = max(1, (len(all_candidates) + page_size - 1) // page_size)
+        page = max(0, min(int(page), page_count - 1))
+        start = page * page_size
+        candidates = all_candidates[start:start + page_size]
+        lines = [
+            "请选择作品候选："
+            if page_count == 1
+            else f"请选择作品候选（第 {page + 1}/{page_count} 页）："
+        ]
         poster_items = []
         keyboard = []
         has_poster = False
         plan_id = str((stored.get("plan") or {}).get("plan_id") or "")
-        for index, candidate in enumerate(candidates, 1):
+        for local_index, candidate in enumerate(candidates, 1):
+            index = start + local_index
             contract = candidate.get("media_metadata") or {}
             identity = contract.get("identity") or {}
             placement = contract.get("placement") or {}
@@ -1944,7 +1960,7 @@ class SearchFeature:
                     or "已验证元数据"
                 ),
             ])
-            if len(candidates) == 1 and (
+            if len(all_candidates) == 1 and (
                 summary := _compact_summary(identity.get("summary"))
             ):
                 lines.append(f"总览：{html.escape(summary)}")
@@ -1969,6 +1985,23 @@ class SearchFeature:
                 ),
                 "callback_data": f"search:select:{plan_id}:{index - 1}",
             }])
+        navigation = []
+        if page > 0:
+            navigation.append({
+                "text": "上一页",
+                "callback_data": (
+                    f"search:candidate_page:{plan_id}:{page - 1}"
+                ),
+            })
+        if page + 1 < page_count:
+            navigation.append({
+                "text": "下一页",
+                "callback_data": (
+                    f"search:candidate_page:{plan_id}:{page + 1}"
+                ),
+            })
+        if navigation:
+            keyboard.append(navigation)
         keyboard.append([{
             "text": "都不是",
             "callback_data": f"search:reject:{plan_id}",
@@ -1991,6 +2024,36 @@ class SearchFeature:
             "parse_mode": "HTML",
             "data": data,
         }
+
+    def _candidate_page(
+        self,
+        plan_id: str,
+        stored: dict,
+        raw_page: str,
+    ) -> dict:
+        try:
+            page = int(raw_page)
+        except ValueError:
+            raise FeatureError(
+                "invalid_candidate",
+                "candidate page is invalid",
+            ) from None
+        total = len(stored.get("candidates") or ())
+        if page < 0 or page * 5 >= total:
+            raise FeatureError(
+                "invalid_candidate",
+                "candidate page is invalid",
+            )
+        action = self._candidate_grid_action(stored, page=page)
+        operation = self._advance_operation(
+            stored["operation_id"],
+            state="awaiting_input",
+            stage="candidate_selection",
+            status_text=f"候选第 {page + 1} 页",
+            control="exit",
+            details=deepcopy(action["data"]),
+        )
+        return {"actions": [action], "operation": operation}
 
     def _browse_candidate(self, plan_id: str, stored: dict, raw_index: str) -> dict:
         try:
@@ -3638,6 +3701,82 @@ class SearchFeature:
                 "Host did not seal the completed search stage",
             )
 
+    async def _localize_exact_douban_candidates(
+        self,
+        plan: dict,
+        *,
+        plan_id: str,
+    ) -> dict:
+        if not isinstance(plan, dict):
+            return plan
+        candidates = [
+            deepcopy(value) for value in plan.get("candidates") or ()
+            if isinstance(value, dict)
+        ]
+        if not candidates:
+            return plan
+        semaphore = asyncio.Semaphore(4)
+
+        async def localize(index: int, candidate: dict):
+            identity = (
+                (candidate.get("media_metadata") or {}).get("identity") or {}
+            )
+            subject_id = _text(
+                (identity.get("external_ids") or {}).get("douban_subject")
+            )
+            if not subject_id:
+                return index, candidate, "not_bound"
+            try:
+                async with semaphore:
+                    fact = await asyncio.to_thread(
+                        lookup_douban_subject,
+                        subject_id,
+                    )
+                localized = localize_candidate_from_exact_douban(
+                    candidate,
+                    fact,
+                )
+                return index, localized, "wikidata_exact"
+            except Exception:
+                return index, candidate, "douban_exact_binding_failed"
+
+        localized = await asyncio.gather(*(
+            localize(index, candidate)
+            for index, candidate in enumerate(candidates)
+        ))
+        for index, candidate, match_mode in localized:
+            candidates[index] = candidate
+            if match_mode != "not_bound":
+                log_search_event(
+                    runtime_context.logger,
+                    "search.candidate_localized",
+                    search_session_id=plan_id,
+                    candidate_id=(
+                        candidate.get("candidate_id")
+                        or candidate.get("candidate_key")
+                    ),
+                    provider="douban",
+                    match_mode=match_mode,
+                )
+        result = deepcopy(plan)
+        result["candidates"] = candidates
+        if candidates:
+            result["media_metadata"] = deepcopy(
+                candidates[0].get("media_metadata") or {}
+            )
+            result["prowlarr_queries"] = list(
+                candidates[0].get("prowlarr_queries") or ()
+            )
+        summary = result.get("discovery_summary") or {}
+        if summary:
+            log_search_event(
+                runtime_context.logger,
+                "search.discovery_graph_completed",
+                search_session_id=plan_id,
+                **summary,
+            )
+        return result
+
     async def _build_plan(
         self,
         raw_query: str,
@@ -3664,13 +3803,17 @@ class SearchFeature:
                         search_session_id=plan_id,
                         fallback_title=fallback_title,
                     )
-                    return await asyncio.to_thread(
+                    plan = await asyncio.to_thread(
                         build_root_work_search_plan,
                         fallback_title,
                         plan_id,
                         self._wikipedia_provider,
                         enrich_wikidata_entities,
                         search_wikidata_entities,
+                    )
+                    return await self._localize_exact_douban_candidates(
+                        plan,
+                        plan_id=plan_id,
                     )
                 direct = await asyncio.to_thread(
                     resolve_direct_link,
@@ -3692,13 +3835,17 @@ class SearchFeature:
                     and getattr(exc, "details", ())
                     and _text(exc.details[0])
                 ):
-                    return await asyncio.to_thread(
+                    plan = await asyncio.to_thread(
                         build_root_work_search_plan,
                         _text(exc.details[0]),
                         plan_id,
                         self._wikipedia_provider,
                         enrich_wikidata_entities,
                         search_wikidata_entities,
+                    )
+                    return await self._localize_exact_douban_candidates(
+                        plan,
+                        plan_id=plan_id,
                     )
                 raise SearchPlanningError(
                     getattr(exc, "code", str(exc)),
@@ -3709,13 +3856,17 @@ class SearchFeature:
                 raw_query=raw_query,
                 plan_id=plan_id,
             )
-        return await asyncio.to_thread(
+        plan = await asyncio.to_thread(
             build_root_work_search_plan,
             raw_query,
             plan_id,
             self._wikipedia_provider,
             enrich_wikidata_entities,
             search_wikidata_entities,
+        )
+        return await self._localize_exact_douban_candidates(
+            plan,
+            plan_id=plan_id,
         )
 
     @staticmethod
@@ -4268,6 +4419,67 @@ class SearchFeature:
                 else None
             ),
         )
+
+        def scoped_source_binding(provider: str, fact: dict) -> dict:
+            if (
+                confirmed.media_type != "series"
+                or requested_scope not in {"season", "episode"}
+                or confirmed.season_number is None
+            ):
+                return {
+                    "role": (
+                        "movie"
+                        if confirmed.media_type == "movie"
+                        else "series_root"
+                    ),
+                    "season_number": None,
+                    "episode_number": None,
+                    "verification": "fact_verified",
+                }
+            requested_season = confirmed.season_number
+            coordinates = set()
+            for item in fact.get("episodes") or ():
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    season = int(item.get("season_number"))
+                    episode = int(item.get("episode_number"))
+                except (TypeError, ValueError):
+                    continue
+                if season > 0 and episode > 0:
+                    coordinates.add((season, episode))
+            try:
+                season_count = int(fact.get("season_count") or 0)
+            except (TypeError, ValueError):
+                season_count = 0
+            season_verified = (
+                any(season == requested_season for season, _ in coordinates)
+                or (provider == "wikipedia" and season_count >= requested_season)
+            )
+            if not season_verified:
+                return {
+                    "role": "series_root",
+                    "season_number": None,
+                    "episode_number": None,
+                    "verification": "fact_verified",
+                }
+            verification = {
+                "wikipedia": "wikipedia_season_count_verified",
+                "tvdb": "tvdb_inventory_verified",
+                "tmdb": "tmdb_inventory_verified",
+            }.get(provider, "fact_verified")
+            return {
+                "role": (
+                    "episode" if requested_scope == "episode" else "season"
+                ),
+                "season_number": requested_season,
+                "episode_number": (
+                    result.get("requested_episode_number")
+                    if requested_scope == "episode"
+                    else None
+                ),
+                "verification": verification,
+            }
         unresolved = [
             _text(item)
             for item in result.get("unresolved_sources") or ()
@@ -4315,19 +4527,16 @@ class SearchFeature:
                 )
                 wikipedia_url = _text(wikipedia_fact.get("url"))
                 if wikipedia_id and wikipedia_url:
+                    binding = scoped_source_binding(
+                        "wikipedia",
+                        wikipedia_fact,
+                    )
                     source_links.append({
                         "provider": "wikipedia",
                         "fact_id": f"wikipedia:{wikipedia_id}",
                         "url": wikipedia_url,
                         "external_ids": {"wikipedia": wikipedia_id},
-                        "role": (
-                            "movie"
-                            if confirmed.media_type == "movie"
-                            else "series_root"
-                        ),
-                        "season_number": None,
-                        "episode_number": None,
-                        "verification": "fact_verified",
+                        **binding,
                         "proposed_season_number": None,
                         "proposed_episode_number": None,
                     })
@@ -4403,6 +4612,7 @@ class SearchFeature:
                     if _text(key) and _text(value)
                 }
                 external_ids["tmdb"] = tmdb_id
+                binding = scoped_source_binding("tmdb", tmdb_fact)
                 source_links.append({
                     "provider": "tmdb",
                     "fact_id": f"tmdb:{tmdb_id}",
@@ -4412,14 +4622,7 @@ class SearchFeature:
                         f"{tmdb_id}"
                     ),
                     "external_ids": external_ids,
-                    "role": (
-                        "movie"
-                        if confirmed.media_type == "movie"
-                        else "series_root"
-                    ),
-                    "season_number": None,
-                    "episode_number": None,
-                    "verification": "fact_verified",
+                    **binding,
                     "proposed_season_number": None,
                     "proposed_episode_number": None,
                 })
@@ -4519,16 +4722,14 @@ class SearchFeature:
                     or tvdb_series.get("tvdb_id")
                     or tvdb_series.get("id")
                 )
+                binding = scoped_source_binding("tvdb", tvdb_series)
                 source_links.append({
                     "provider": "tvdb",
                     "fact_id": f"tvdb:series:{tvdb_id}",
                     "url": _text(tvdb_series.get("url"))
                     or f"https://thetvdb.com/series/{tvdb_id}",
                     "external_ids": {"tvdb": tvdb_id},
-                    "role": "series_root",
-                    "season_number": None,
-                    "episode_number": None,
-                    "verification": "fact_verified",
+                    **binding,
                     "proposed_season_number": None,
                     "proposed_episode_number": None,
                 })

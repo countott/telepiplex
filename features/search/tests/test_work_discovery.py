@@ -471,7 +471,7 @@ class WorkDiscoveryTest(unittest.TestCase):
                 "wikipedia_en": ["The Office TV series", "The Office"],
             },
         )
-    def test_filters_by_structural_type_deduplicates_qid_and_keeps_rank(self):
+    def test_filters_by_exact_identity_deduplicates_qid_and_keeps_rank(self):
         calls = []
 
         def wikidata_lookup(qids):
@@ -522,7 +522,7 @@ class WorkDiscoveryTest(unittest.TestCase):
 
         self.assertEqual(
             [item["qid"] for item in candidates],
-            ["Q74801", "Q200"],
+            ["Q74801"],
         )
         self.assertEqual(candidates[0]["display_title"], "副总统")
         self.assertEqual(candidates[0]["english_title"], "Veep")
@@ -710,6 +710,210 @@ class WorkDiscoveryServiceTest(unittest.IsolatedAsyncioTestCase):
             ["wikipedia:Q74801"],
         )
         wikipedia.assert_called_once()
+
+    async def test_exact_douban_binding_localizes_candidate_before_display(self):
+        feature = SearchFeature(config={}, host=None)
+        entity = {
+            "wikibase_item": "Q124175370",
+            "chinese_title": "百年孤寂",
+            "english_title": "One Hundred Years of Solitude",
+            "aliases": [],
+            "media_type": "series",
+            "year": "2024",
+            "countries": [],
+            "season_count": 2,
+            "episode_count": 16,
+            "external_ids": {
+                "wikidata": "Q124175370",
+                "douban_subject": "30482958",
+            },
+        }
+        wikipedia = {
+            "source": "wikipedia",
+            "status": "ok",
+            "facts": [{
+                "language": "zh",
+                "search_rank": 1,
+                "page_id": 1,
+                "is_disambiguation": False,
+                "title": "百年孤寂",
+                "extract": "《百年孤独》电视剧",
+                "url": "https://zh.wikipedia.org/wiki/百年孤寂",
+                "wikibase_item": "Q124175370",
+            }],
+        }
+        with (
+            patch.object(feature, "_wikipedia_provider", return_value=wikipedia),
+            patch(
+                "telepiplex_search.service.search_wikidata_entities",
+                return_value=["Q124175370"],
+            ),
+            patch(
+                "telepiplex_search.service.enrich_wikidata_entities",
+                side_effect=lambda qids: {
+                    qid: entity for qid in qids if qid == "Q124175370"
+                },
+            ),
+            patch(
+                "telepiplex_search.service.lookup_douban_subject",
+                return_value={
+                    "subject_id": "30482958",
+                    "url": "https://movie.douban.com/subject/30482958/",
+                    "douban_title_raw": "百年孤独 第一季",
+                    "chinese_title": "百年孤独",
+                    "english_title": "One Hundred Years of Solitude",
+                    "media_type": "series",
+                    "season_number": 1,
+                    "external_ids": {"douban_subject": "30482958"},
+                },
+            ),
+        ):
+            plan = await feature._build_plan("百年孤独", "localized-candidate")
+
+        candidate = plan["candidates"][0]
+        self.assertEqual(
+            candidate["media_metadata"]["identity"]["chinese_title"],
+            "百年孤独",
+        )
+        self.assertEqual(
+            [link["provider"] for link in candidate["source_links"]],
+            ["wikipedia", "douban"],
+        )
+
+    @staticmethod
+    def _lookup(entities):
+        return lambda qids: {
+            qid: entities[qid] for qid in qids if qid in entities
+        }
+
+    def test_weak_partial_hit_cannot_suppress_verified_one_piece_graph(self):
+        entities = {
+            "Q85884426": {
+                "wikibase_item": "Q85884426",
+                "chinese_title": "贼王",
+                "english_title": "King of Thieves",
+                "aliases": [],
+                "media_type": "movie",
+                "year": "1998",
+                "countries": [],
+            },
+            "Q28667972": {
+                "wikibase_item": "Q28667972",
+                "chinese_title": "海贼王",
+                "english_title": "One Piece",
+                "aliases": ["航海王"],
+                "media_type": "",
+                "year": "",
+                "adaptation_ids": ["Q710324"],
+                "part_ids": ["Q4431905"],
+            },
+            "Q710324": {
+                "wikibase_item": "Q710324",
+                "chinese_title": "海贼王",
+                "english_title": "One Piece",
+                "aliases": ["ONE PIECE"],
+                "media_type": "series",
+                "year": "1999",
+                "countries": ["Q17"],
+                "genres": ["anime"],
+            },
+            "Q4431905": {
+                "wikibase_item": "Q4431905",
+                "chinese_title": "海贼王剧场版",
+                "english_title": "One Piece films",
+                "aliases": [],
+                "media_type": "",
+                "year": "",
+                "part_ids": ["Q1209459", "Q56313751"],
+            },
+            "Q1209459": {
+                "wikibase_item": "Q1209459",
+                "chinese_title": "海贼王 黄金岛冒险",
+                "english_title": "One Piece: The Movie",
+                "aliases": [],
+                "media_type": "movie",
+                "year": "2000",
+                "countries": ["Q17"],
+            },
+            "Q56313751": {
+                "wikibase_item": "Q56313751",
+                "chinese_title": "航海王：夺宝争霸战",
+                "english_title": "One Piece: Stampede",
+                "aliases": [],
+                "media_type": "movie",
+                "year": "2019",
+                "countries": ["Q17"],
+            },
+            "Q17": {"chinese_title": "日本", "english_title": "Japan"},
+        }
+        roots = discover_root_works(
+            classify_search_input("海贼王"),
+            lambda _payload: {
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [{
+                    "language": "zh",
+                    "search_rank": 1,
+                    "page_id": 1,
+                    "is_disambiguation": False,
+                    "title": "贼王",
+                    "url": "https://zh.wikipedia.org/wiki/贼王",
+                    "wikibase_item": "Q85884426",
+                }],
+            },
+            self._lookup(entities),
+            wikidata_search=lambda _title: ["Q28667972", "Q85884426"],
+        )
+
+        self.assertEqual(
+            [item["qid"] for item in roots],
+            ["Q710324", "Q1209459", "Q56313751"],
+        )
+        self.assertNotIn("Q85884426", {item["qid"] for item in roots})
+        self.assertTrue(all(item["relation_path"] for item in roots))
+
+    def test_wikipedia_and_wikidata_exact_roots_are_always_unioned(self):
+        qids = ["Q1987", "Q2009", "Q2007", "Q1950"]
+        entities = {
+            qid: {
+                "wikibase_item": qid,
+                "chinese_title": "男儿本色",
+                "english_title": f"True Colours {year}",
+                "aliases": [],
+                "media_type": media_type,
+                "year": year,
+                "countries": [],
+            }
+            for qid, year, media_type in (
+                ("Q1987", "1987", "series"),
+                ("Q2009", "2009", "series"),
+                ("Q2007", "2007", "movie"),
+                ("Q1950", "1950", "movie"),
+            )
+        }
+        roots = discover_root_works(
+            classify_search_input("男儿本色"),
+            lambda _payload: {
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [
+                    {
+                        "language": "zh",
+                        "search_rank": rank,
+                        "page_id": rank,
+                        "is_disambiguation": False,
+                        "title": "男儿本色",
+                        "url": f"https://zh.wikipedia.org/wiki/{qid}",
+                        "wikibase_item": qid,
+                    }
+                    for rank, qid in enumerate(qids[:3], 1)
+                ],
+            },
+            self._lookup(entities),
+            wikidata_search=lambda _title: ["Q1950", "Q2007"],
+        )
+
+        self.assertEqual({item["qid"] for item in roots}, set(qids))
 
     async def test_wikipedia_disambiguation_link_routes_to_root_candidates(self):
         feature = SearchFeature(config={}, host=None)
