@@ -2,6 +2,7 @@ from pathlib import PurePosixPath
 
 from telepiplex_rename.file_executor import (
     cleanup_empty_source_directories,
+    cleanup_source_directories,
     execute_file_resolutions,
 )
 from telepiplex_rename.file_plan import FileResolution
@@ -270,3 +271,101 @@ def test_cleanup_deletes_only_freshly_verified_empty_directories_bottom_up():
     ]
     assert "/Downloads" not in storage.deleted
     assert "/Downloads/Keep" not in storage.deleted
+
+
+def test_automatic_cleanup_deletes_empty_release_root_but_protects_category():
+    storage = StatefulStorage(
+        directories=[
+            "/Downloads/House.Release",
+            "/Series",
+        ],
+    )
+    moved = _resolution(
+        "episode",
+        "/Downloads/House.Release/episode.mkv",
+        "/Series/House/episode.mkv",
+        "move_only",
+    )
+
+    summary = cleanup_source_directories(
+        storage,
+        [moved],
+        selected_root="/Downloads/House.Release",
+        include_selected_root=True,
+        protected_roots=("/Series",),
+    )
+
+    assert summary.deleted_directories == 1
+    assert summary.failed_directories == 0
+    assert summary.complete is True
+    assert storage.deleted == ["/Downloads/House.Release"]
+    assert "/Series" in storage.directories
+
+
+def test_manual_cleanup_preserves_user_scan_root():
+    storage = StatefulStorage(directories=["/Series/UserSelected"])
+    moved = _resolution(
+        "episode",
+        "/Series/UserSelected/episode.mkv",
+        "/Series/Show/episode.mkv",
+        "move_only",
+    )
+
+    summary = cleanup_source_directories(
+        storage,
+        [moved],
+        selected_root="/Series/UserSelected",
+        include_selected_root=False,
+        protected_roots=("/Series/UserSelected",),
+    )
+
+    assert summary.deleted_directories == 0
+    assert summary.failed_directories == 0
+    assert storage.deleted == []
+
+
+def test_cleanup_delete_failure_is_reported_not_hidden():
+    class DeleteFailureStorage(StatefulStorage):
+        def delete_single_file(self, path):
+            self.deleted.append(path)
+            return False
+
+    storage = DeleteFailureStorage(directories=["/Downloads/Release"])
+    moved = _resolution(
+        "episode",
+        "/Downloads/Release/episode.mkv",
+        "/Series/Show/episode.mkv",
+        "move_only",
+    )
+
+    summary = cleanup_source_directories(
+        storage,
+        [moved],
+        selected_root="/Downloads/Release",
+        include_selected_root=True,
+    )
+
+    assert summary.complete is False
+    assert summary.failed_directories == 1
+    assert summary.outcomes[0].state == "delete_failed"
+
+
+def test_cleanup_replay_treats_already_absent_source_as_complete():
+    storage = StatefulStorage()
+    moved = _resolution(
+        "episode",
+        "/Downloads/AlreadyGone/episode.mkv",
+        "/Series/Show/episode.mkv",
+        "move_only",
+    )
+
+    summary = cleanup_source_directories(
+        storage,
+        [moved],
+        selected_root="/Downloads/AlreadyGone",
+        include_selected_root=True,
+    )
+
+    assert summary.complete is True
+    assert summary.failed_directories == 0
+    assert summary.outcomes[0].state == "already_absent"

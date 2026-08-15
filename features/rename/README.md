@@ -1,6 +1,6 @@
 # rename Feature
 
-`features/rename` 是 telepiplex 的独立媒体整理 Feature。rename 1.5.1 消费 durable `download.completed`，也支持 Telegram `/rename` 扫描 115 存量目录；它通过 `storage.provider` 执行文件级变更，并只在验证整理结果后发布 `media.organized`。媒体候选按钮使用短持久令牌，满足 Telegram callback 的 64-byte 限制，同时支持直接回复候选编号。
+`features/rename` 是 telepiplex 的独立媒体整理 Feature。rename 1.5.2 消费 durable `download.completed`，也支持 Telegram `/rename` 扫描 115 存量目录；它通过 `storage.provider` 执行文件级变更，并只在验证整理结果后发布 `media.organized`。媒体候选按钮使用短持久令牌，满足 Telegram callback 的 64-byte 限制，同时支持直接回复候选编号。
 
 ## file-first 整理链路
 
@@ -10,7 +10,7 @@ rename 会对下载根或用户选择的扫描根建立一次完整、递归、�
 
 临时作品组仍必须交给 `media.search.resolve_metadata` 形成已确认的 `media_metadata v1`。AI 只处理确定性规则无法覆盖的长尾文件映射，不能确认媒体身份、覆盖外部元数据或授权删除。DeepSeek 请求保留 thinking，并要求 JSON 最终输出；rename 只解析最终 `content`，不解析、不保存也不记录 `reasoning_content`。最终内容为空、无效或因长度截断时只重试一次，仍失败则把受影响文件保留原位。
 
-每个文件是身份、规划、执行、重试与结果的最小单位。无法识别、目标冲突、AI 失败或 provider 失败只影响对应文件，不会把整个目录移到 `/未整理`，也不会自动删除未匹配视频、样片、花絮、字幕或未知文件。源路径与最终目标相同是成功 `no_op`；同目录只改文件名时只调用 rename，不再追加复制后删除式移动。源目录仅在重新读取后确认完全为空时才可清理，扫描根永不删除。
+每个文件是身份、规划、执行、重试与结果的最小单位。无法识别、目标冲突、AI 失败或 provider 失败只影响对应文件，不会把整个目录移到 `/未整理`，也不会自动删除未匹配视频、样片、花絮、字幕或未知文件。源路径与最终目标相同是 `no_op`；同目录只改文件名时只调用 rename，不再追加复制后删除式移动。文件目标验证完成后才进入独立清理阶段：自动下载的空 release 根目录会在重新读取确认完全为空后删除，`/rename` 存量扫描由用户选择的扫描根始终保护，分类根也永不删除。终态使用中性的“整理结果”，并分别报告源目录删除、保留和清理失败数量。
 
 ## rename 终态规则
 
@@ -35,7 +35,7 @@ rename 会在写操作前按文件预检目标冲突。已有目标与相同 pro
 如果 Host 在交接前确认 sync/Plex 管理未安装或未启用，rename 会保留已经完成的整理结果并收敛为成功终态，明确通知“已跳过后续处理”，且不会发布无人消费的 `media.organized`。用户通知使用纯文本，文件名和路径不会依赖 Telegram Markdown 转义。
 
 ```bash
-python tools/build_feature.py features/rename /tmp/rename-1.5.1.tpx \
+python tools/build_feature.py features/rename /tmp/rename-1.5.2.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

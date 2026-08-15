@@ -570,6 +570,17 @@ def build_media_metadata_v1(
         candidate,
         media_type,
     )
+    facts_by_id = {fact.fact_id: fact for fact in primary_facts}
+    scope_year = next(
+        (
+            facts_by_id[link.fact_id].year
+            for link in candidate.source_links
+            if link.role in {"season", "episode"}
+            and link.fact_id in facts_by_id
+            and facts_by_id[link.fact_id].year
+        ),
+        "",
+    ) if scope in {"season", "episode"} else ""
     trusted_season_count = _first_integer(
         root,
         primary_facts,
@@ -676,11 +687,7 @@ def build_media_metadata_v1(
         for signal in ("animation", "animated", "anime", "动画", "動畫")
     )
     category = f"{'animated' if animation else 'live_action'}_{media_type}"
-    chinese_title = (
-        titles.chinese_title
-        or titles.original_title
-        or titles.canonical_latin_title
-    )
+    chinese_title = titles.chinese_title
     original_release_date = _first_text(
         root,
         primary_facts,
@@ -715,6 +722,8 @@ def build_media_metadata_v1(
         "countries": countries,
         "genres": genres,
         "year": year,
+        "root_year": year,
+        "scope_year": scope_year,
         "content_kind": media_type,
         "summary": candidate.primary_summary,
         "original_release_date": original_release_date,

@@ -4,7 +4,11 @@ from copy import deepcopy
 from threading import Lock
 from urllib.parse import urlsplit, urlunsplit
 
-from telepiplex_plugin_sdk.media_metadata import series_scope_key, validate_media_metadata
+from telepiplex_plugin_sdk.media_metadata import (
+    series_scope_key,
+    validate_media_metadata,
+    validate_media_metadata_detailed,
+)
 
 
 TEMPORARY_MAPPING_KIND = "temporary_related_special"
@@ -61,7 +65,10 @@ def validate_draft_search_plan(value: object):
         return None
     # Canonical naming identity is finalized before Prowlarr; release search never
     # performs title backfill and therefore cannot leave the contract stale.
-    if not _text(identity.get("chinese_title")) or not _text(identity.get("english_title")):
+    if not (
+        _text(identity.get("chinese_title"))
+        or _text(identity.get("english_title"))
+    ):
         return None
     if placement.get("mapping_kind") == TEMPORARY_MAPPING_KIND:
         source_entry = contract.get("source_entry")
@@ -235,8 +242,18 @@ def finalize_search_plan(
             series_scope_key(plan["media_metadata"]),
             occupied,
         )
-    if validate_media_metadata(plan["media_metadata"], require_confirmed=False) is None:
-        raise ValueError("invalid finalized media_metadata")
+    validated, issue = validate_media_metadata_detailed(
+        plan["media_metadata"],
+        require_confirmed=False,
+    )
+    if validated is None:
+        issue = issue or {}
+        raise ValueError(
+            "invalid finalized media_metadata "
+            f"path={issue.get('path') or '$'} "
+            f"reason={issue.get('reason_code') or 'unknown'} "
+            f"detail={issue.get('detail') or 'validation failed'}"
+        )
     return plan
 
 

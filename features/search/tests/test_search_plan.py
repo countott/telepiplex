@@ -94,6 +94,23 @@ class SearchPlanTest(unittest.TestCase):
         self.assertNotIn("prowlarr_queries", contract)
         self.assertNotIn("plan_id", contract)
 
+    def test_finalize_surfaces_contract_path_and_reason(self):
+        draft = self._draft()
+        draft["media_metadata"]["placement"]["category_kind"] = (
+            "animated_movie"
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"path=\$\.placement\.category_kind "
+            r"reason=category_library_mismatch",
+        ):
+            finalize_search_plan(
+                draft,
+                TemporarySpecialAllocator(),
+                set(),
+            )
+
     def test_allocator_starts_at_100_and_skips_occupied_and_reserved_values(self):
         allocator = TemporarySpecialAllocator()
         self.assertEqual(allocator.reserve("plan-a", "show-a", set()), 100)

@@ -115,6 +115,11 @@ def build_identity_presentation(contract: dict) -> dict:
         photo_url = ""
     return {
         "title": title,
+        "title_status": (
+            "verified_chinese"
+            if _text(identity.get("chinese_title"))
+            else "latin_fallback"
+        ),
         "text": text,
         "photo_url": photo_url,
         "milestone_id": f"media-{digest}",

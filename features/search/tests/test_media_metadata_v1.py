@@ -150,6 +150,54 @@ def _candidate(*, intended_scope="movie", facts=None, unresolved=()):
 
 
 class MediaMetadataV1Test(unittest.TestCase):
+    def test_latin_fallback_never_populates_semantic_chinese_title(self):
+        fact = _fact(
+            "wikipedia:Q3786532",
+            "wikipedia",
+            titles=("Honey and Clover", "ハチミツとクローバー"),
+            year="2005",
+            media_type="series",
+            url="https://en.wikipedia.org/wiki/Honey_and_Clover",
+            external_ids={"wikidata": "Q3786532"},
+            original="ハチミツとクローバー",
+            language="ja",
+            english="Honey and Clover",
+        )
+        candidate = AnchoredCandidate(
+            candidate_id="wikipedia:Q3786532",
+            anchor_fact_id=fact.fact_id,
+            identity_role="series_root",
+            intended_scope="whole_series",
+            source_links=(SourceLink(
+                provider=fact.provider,
+                fact_id=fact.fact_id,
+                url=fact.source_url,
+                external_ids=fact.external_ids,
+                role="series_root",
+                season_number=None,
+                episode_number=None,
+                verification="fact_verified",
+            ),),
+            poster_assets=(),
+            unresolved_sources=("tvdb:unavailable",),
+            ai_confidence=1,
+            ai_reason="Exact Wikidata identity.",
+            facts=(fact,),
+        )
+
+        contract = build_media_metadata_v1(
+            candidate,
+            metadata_id="honey-latin-only",
+            raw_query="Honey and Clover",
+        )
+
+        self.assertEqual(contract["identity"]["chinese_title"], "")
+        self.assertEqual(contract["identity"]["root_year"], "2005")
+        self.assertEqual(contract["identity"]["scope_year"], "")
+        self.assertEqual(
+            contract["identity"]["english_title"],
+            "Honey and Clover",
+        )
     def test_wikipedia_inventory_precedes_conflicting_tvdb_default_order(self):
         wikipedia_episodes = tuple(
             {

@@ -24,6 +24,8 @@ class ConfirmedIdentity:
     countries: tuple[str, ...] = ()
     cast_names: tuple[str, ...] = ()
     season_number: int | None = None
+    root_year: str = ""
+    scope_year: str = ""
 
 
 def _text(value) -> str:
@@ -462,11 +464,15 @@ def build_tvdb_query(
     )
     if not title or not re.search(r"[A-Za-z]", title):
         return None
-    return {
+    result = {
         "title": title,
-        "year": _text(wikipedia_fact.get("year") or identity.year)[:4],
+        "year": _text(identity.root_year or identity.year)[:4],
         "media_type": "series",
     }
+    tvdb_id = _text(identity.external_ids.get("tvdb"))
+    if tvdb_id:
+        result["tvdb_id"] = tvdb_id
+    return result
 
 
 def select_unique_tvdb_series(

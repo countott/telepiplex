@@ -73,6 +73,7 @@ from .candidate_hydration import (
 )
 from .candidate_locale import (
     localize_candidate_from_exact_douban,
+    localize_candidate_from_verified_douban,
 )
 from .direct_link import (
     DirectLinkError,
@@ -3724,21 +3725,105 @@ class SearchFeature:
             subject_id = _text(
                 (identity.get("external_ids") or {}).get("douban_subject")
             )
-            if not subject_id:
+            if subject_id:
+                try:
+                    async with semaphore:
+                        fact = await asyncio.to_thread(
+                            lookup_douban_subject,
+                            subject_id,
+                        )
+                    localized = localize_candidate_from_exact_douban(
+                        candidate,
+                        fact,
+                    )
+                    return index, localized, "wikidata_exact"
+                except Exception:
+                    return index, candidate, "douban_exact_binding_failed"
+            if index >= 5:
                 return index, candidate, "not_bound"
+
+            english_title = _text(
+                identity.get("official_english_title")
+                or identity.get("english_title")
+                or identity.get("original_title")
+            )
+            year = _text(identity.get("year"))[:4]
+            query = _text(" ".join(filter(None, (english_title, year))))
+            media_type = _text(identity.get("content_kind")).casefold()
+            if not query or media_type not in {"movie", "series"}:
+                return index, candidate, "not_bound"
+            confirmed = ConfirmedIdentity(
+                provider="candidate_preview",
+                stable_id=_text(
+                    candidate.get("candidate_id")
+                    or candidate.get("candidate_key")
+                ),
+                chinese_title=_text(identity.get("chinese_title")),
+                english_title=english_title,
+                original_title=_text(identity.get("original_title")),
+                year=year,
+                media_type=media_type,
+                requested_scope=_text(
+                    candidate.get("intended_scope")
+                    or (candidate.get("media_metadata") or {})
+                    .get("retrieval", {}).get("scope")
+                ).casefold(),
+                original_language=_text(
+                    identity.get("original_language")
+                ).casefold(),
+                genres=tuple(
+                    _text(item)
+                    for item in identity.get("genres") or ()
+                    if _text(item)
+                ),
+                external_ids={
+                    _text(key): _text(value)
+                    for key, value in (
+                        identity.get("external_ids") or {}
+                    ).items()
+                    if _text(key) and _text(value)
+                },
+                countries=tuple(
+                    _text(item)
+                    for item in identity.get("countries") or ()
+                    if _text(item)
+                ),
+                cast_names=tuple(
+                    _text(
+                        item.get("name")
+                        if isinstance(item, dict)
+                        else item
+                    )
+                    for item in (
+                        list(identity.get("cast") or ())
+                        + list(identity.get("crew") or ())
+                    )
+                    if _text(
+                        item.get("name")
+                        if isinstance(item, dict)
+                        else item
+                    )
+                ),
+            )
             try:
                 async with semaphore:
-                    fact = await asyncio.to_thread(
-                        lookup_douban_subject,
-                        subject_id,
+                    result = await asyncio.to_thread(
+                        self._douban_provider,
+                        {"source_queries": {"douban": [query]}},
                     )
-                localized = localize_candidate_from_exact_douban(
+                fact = select_unique_douban_fact(result, confirmed)
+                if not isinstance(fact, dict) or _text(
+                    fact.get("douban_match_mode")
+                ) != "strong_fields":
+                    return index, candidate, "not_bound"
+                localized = localize_candidate_from_verified_douban(
                     candidate,
                     fact,
+                    match_mode="strong_fields",
                 )
-                return index, localized, "wikidata_exact"
+                return index, localized, "strong_fields"
             except Exception:
-                return index, candidate, "douban_exact_binding_failed"
+                return index, candidate, "douban_strong_fields_failed"
 
         localized = await asyncio.gather(*(
             localize(index, candidate)
@@ -4073,6 +4158,11 @@ class SearchFeature:
                 if str(decision.get("season_number") or "").isdigit()
                 else None
             ),
+            root_year=_text(
+                identity.get("root_year")
+                or identity.get("year")
+            )[:4],
+            scope_year=_text(identity.get("scope_year"))[:4],
         )
 
     @staticmethod
@@ -4418,6 +4508,11 @@ class SearchFeature:
                 ).isdigit()
                 else None
             ),
+            root_year=_text(
+                identity_value.get("root_year")
+                or identity_value.get("year")
+            )[:4],
+            scope_year=_text(identity_value.get("scope_year"))[:4],
         )
 
         def scoped_source_binding(provider: str, fact: dict) -> dict:
@@ -4660,52 +4755,62 @@ class SearchFeature:
             tvdb_series = None
             if tvdb_query is not None:
                 try:
-                    tvdb_candidates = await asyncio.to_thread(
-                        search_tvdb_series,
-                        tvdb_query["title"],
-                        tvdb_query["year"],
-                    )
-                    tvdb_result = {
-                        "source": "tvdb",
-                        "status": "ok" if tvdb_candidates else "not_found",
-                        "facts": [{
-                            "movies": [],
-                            "series": tvdb_candidates[:5],
-                            "episodes_by_series": {},
-                        }],
-                    }
-                    tvdb_identity = replace(
-                        confirmed,
-                        english_title=tvdb_query["title"],
-                    )
-                    selected = select_unique_tvdb_series(
-                        tvdb_result,
-                        tvdb_identity,
-                    )
-                    if selected is not None:
-                        tvdb_id = _text(
-                            selected.get("tvdb_series_id")
-                            or selected.get("tvdb_id")
-                            or selected.get("id")
-                        )
+                    stable_tvdb_id = _text(tvdb_query.get("tvdb_id"))
+                    if stable_tvdb_id:
                         tvdb_series = await asyncio.to_thread(
                             get_tvdb_series,
-                            tvdb_id,
+                            stable_tvdb_id,
                         )
-                        if not (
-                            isinstance(tvdb_series, dict)
-                            and tvdb_series.get("episodes")
-                        ):
-                            tvdb_series = None
-                            tvdb_status = "unavailable"
-                        else:
-                            tvdb_status = "ok"
                     else:
-                        tvdb_status = _text(
-                            tvdb_result.get("status")
-                        ).casefold() or "not_found"
-                        if tvdb_status == "ok":
-                            tvdb_status = "not_unique"
+                        tvdb_candidates = await asyncio.to_thread(
+                            search_tvdb_series,
+                            tvdb_query["title"],
+                            tvdb_query["year"],
+                        )
+                        tvdb_result = {
+                            "source": "tvdb",
+                            "status": (
+                                "ok" if tvdb_candidates else "not_found"
+                            ),
+                            "facts": [{
+                                "movies": [],
+                                "series": tvdb_candidates[:5],
+                                "episodes_by_series": {},
+                            }],
+                        }
+                        tvdb_identity = replace(
+                            confirmed,
+                            english_title=tvdb_query["title"],
+                        )
+                        selected = select_unique_tvdb_series(
+                            tvdb_result,
+                            tvdb_identity,
+                        )
+                        if selected is not None:
+                            tvdb_id = _text(
+                                selected.get("tvdb_series_id")
+                                or selected.get("tvdb_id")
+                                or selected.get("id")
+                            )
+                            tvdb_series = await asyncio.to_thread(
+                                get_tvdb_series,
+                                tvdb_id,
+                            )
+                        else:
+                            tvdb_status = _text(
+                                tvdb_result.get("status")
+                            ).casefold() or "not_found"
+                            if tvdb_status == "ok":
+                                tvdb_status = "not_unique"
+                    if not (
+                        isinstance(tvdb_series, dict)
+                        and tvdb_series.get("episodes")
+                    ):
+                        tvdb_series = None
+                        if tvdb_status not in {"not_found", "not_unique"}:
+                            tvdb_status = "unavailable"
+                    else:
+                        tvdb_status = "ok"
                 except TvdbConfigError as exc:
                     tvdb_status = exc.code
                 except TvdbAuthenticationError:
@@ -4891,6 +4996,17 @@ class SearchFeature:
                     selected_chinese_title=douban_fact.get("chinese_title"),
                     subject_id=subject_id,
                 )
+                result["source_links"] = source_links
+                result = localize_candidate_from_verified_douban(
+                    result,
+                    douban_fact,
+                    match_mode=result["douban_match_mode"],
+                )
+                source_links = [
+                    dict(item)
+                    for item in result.get("source_links") or ()
+                    if isinstance(item, dict)
+                ]
                 providers.add("douban")
             if "douban" not in providers:
                 unresolved.append(f"douban:{douban_status}")

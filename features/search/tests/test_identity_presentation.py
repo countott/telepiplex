@@ -66,8 +66,28 @@ class IdentityPresentationTest(unittest.TestCase):
         })
 
         self.assertEqual(result["title"], "Dune")
+        self.assertEqual(result["title_status"], "latin_fallback")
         self.assertIn("2021｜地区未知｜电影｜电影", result["text"])
         self.assertIn("来源：豆瓣", result["text"])
+
+    def test_verified_chinese_title_is_marked_separately_from_display_fallback(self):
+        from telepiplex_search.identity_presentation import (
+            build_identity_presentation,
+        )
+
+        result = build_identity_presentation({
+            "identity": {
+                "chinese_title": "蜂蜜与四叶草",
+                "english_title": "Honey and Clover",
+                "year": "2005",
+                "content_kind": "series",
+            },
+            "retrieval": {"media_type": "series", "scope": "whole_series"},
+            "placement": {"library_type": "series"},
+        })
+
+        self.assertEqual(result["title"], "蜂蜜与四叶草 (Honey and Clover)")
+        self.assertEqual(result["title_status"], "verified_chinese")
 
 
 if __name__ == "__main__":

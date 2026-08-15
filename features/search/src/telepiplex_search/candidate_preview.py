@@ -97,7 +97,7 @@ def candidate_preview_metadata(
         "metadata_id": _text(metadata_id),
         "confirmed": False,
         "identity": {
-            "chinese_title": chinese_title or display_title,
+            "chinese_title": chinese_title,
             "english_title": english_title or romanized or original_title,
             "official_english_title": english_title,
             "romanized_original_title": romanized,

@@ -13,10 +13,57 @@ from app.runtime.media_metadata import (
     series_scope_key,
     series_season_directory_name,
     validate_media_metadata,
+    validate_media_metadata_detailed,
 )
 
 
 class HostMediaMetadataTest(unittest.TestCase):
+    def test_detailed_validation_reports_exact_path_reason_and_detail(self):
+        cases = (
+            (
+                lambda value: value.update({"schema_version": 2}),
+                "$.schema_version",
+                "schema_version_unsupported",
+            ),
+            (
+                lambda value: value.update({"metadata_id": ""}),
+                "$.metadata_id",
+                "required_value_missing",
+            ),
+            (
+                lambda value: value["placement"].update({
+                    "category_kind": "animated_movie",
+                }),
+                "$.placement.category_kind",
+                "category_library_mismatch",
+            ),
+            (
+                lambda value: value.update({"items": [
+                    {"season_number": 0, "episode_number": 100},
+                    {"season_number": 0, "episode_number": 100},
+                ]}),
+                "$.items",
+                "items_invalid",
+            ),
+        )
+        for mutate, expected_path, expected_reason in cases:
+            with self.subTest(reason=expected_reason):
+                value = self._value()
+                mutate(value)
+
+                validated, issue = validate_media_metadata_detailed(
+                    value,
+                    require_confirmed=True,
+                )
+
+                self.assertIsNone(validated)
+                self.assertEqual(issue["path"], expected_path)
+                self.assertEqual(issue["reason_code"], expected_reason)
+                self.assertTrue(issue["detail"])
+                self.assertIsNone(
+                    validate_media_metadata(value, require_confirmed=True)
+                )
+
     def test_category_route_uses_kind_not_display_name(self):
         route = resolve_category_route({
             "category_folder": [{

@@ -7,6 +7,7 @@ from .media_metadata import (
     extract_confirmed_media_metadata,
     merge_resolved_items,
     validate_media_metadata,
+    validate_media_metadata_detailed,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "extract_confirmed_media_metadata",
     "merge_resolved_items",
     "validate_media_metadata",
+    "validate_media_metadata_detailed",
 ]

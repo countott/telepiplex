@@ -86,6 +86,62 @@ def test_restored_series_in_canonical_directory_is_rename_only():
     assert target in storage.files
 
 
+def test_automatic_download_deletes_verified_empty_release_root():
+    root = "/Downloads/House.Release"
+    source = f"{root}/English.Series.S01E01.mkv"
+    storage = StatefulStorage(
+        files=[(source, "episode-1")],
+        directories=[root, "/Series"],
+    )
+    event = _event(root, [{
+        "file_id": "episode-1",
+        "path": source,
+        "relative_path": "English.Series.S01E01.mkv",
+        "is_dir": False,
+    }], (1, 1))
+    event.storage = storage
+
+    result = process_tvdb_episode(event)
+
+    assert root not in storage.directories
+    assert root in storage.deleted
+    assert result.file_results["cleanup"] == {
+        "candidate_directories": 1,
+        "deleted_directories": 1,
+        "retained_directories": 0,
+        "failed_directories": 0,
+        "complete": True,
+        "deleted_paths": [root],
+        "failures": [],
+    }
+    assert "媒体整理结果" in result.message
+    assert "TVDB 整理完成" not in result.message
+
+
+def test_inventory_run_preserves_user_selected_scan_root():
+    root = "/Series/UserSelected"
+    source = f"{root}/English.Series.S01E01.mkv"
+    storage = StatefulStorage(
+        files=[(source, "episode-1")],
+        directories=[root, "/Series"],
+    )
+    event = _event(root, [{
+        "file_id": "episode-1",
+        "path": source,
+        "relative_path": "English.Series.S01E01.mkv",
+        "is_dir": False,
+    }], (1, 1))
+    event.provider = "inventory"
+    event.storage = storage
+
+    result = process_tvdb_episode(event)
+
+    assert root in storage.directories
+    assert root not in storage.deleted
+    assert result.file_results["cleanup"]["deleted_directories"] == 0
+    assert result.file_results["cleanup"]["complete"] is True
+
+
 def test_mixed_unrelated_video_stays_while_matching_work_organizes():
     root = "/Downloads/Mixed"
     english = f"{root}/English.Series.S01E01.mkv"
@@ -216,6 +272,15 @@ def test_one_failed_episode_does_not_stop_the_next_episode():
             "observed_path": renamed_first,
             "reason_codes": ["move_failed"],
         }],
+        "cleanup": {
+            "candidate_directories": 1,
+            "deleted_directories": 0,
+            "retained_directories": 1,
+            "failed_directories": 0,
+            "complete": True,
+            "deleted_paths": [],
+            "failures": [],
+        },
     }
 
 

@@ -1,5 +1,7 @@
 import unittest
 
+import telepiplex_search.candidate_locale as candidate_locale
+
 from telepiplex_search.candidate_locale import (
     CandidateLocaleError,
     localize_candidate_from_exact_douban,
@@ -7,6 +9,41 @@ from telepiplex_search.candidate_locale import (
 
 
 class CandidateLocaleTest(unittest.TestCase):
+    def test_unique_strong_field_fact_localizes_candidate_before_selection(self):
+        candidate = {
+            "candidate_id": "wikipedia:Q3786532",
+            "media_metadata": {"identity": {
+                "chinese_title": "",
+                "english_title": "Honey and Clover",
+                "content_kind": "series",
+                "aliases": ["ハチミツとクローバー"],
+                "external_ids": {"wikidata": "Q3786532"},
+            }},
+            "source_links": [],
+        }
+        fact = {
+            "subject_id": "1770547",
+            "url": "https://movie.douban.com/subject/1770547/",
+            "douban_title_raw": "蜂蜜与四叶草",
+            "chinese_title": "蜂蜜与四叶草",
+            "english_title": "Honey and Clover",
+            "media_type": "series",
+            "external_ids": {"douban_subject": "1770547"},
+            "douban_match_mode": "strong_fields",
+        }
+
+        localized = candidate_locale.localize_candidate_from_verified_douban(
+            candidate,
+            fact,
+            match_mode="strong_fields",
+        )
+
+        self.assertEqual(
+            localized["media_metadata"]["identity"]["chinese_title"],
+            "蜂蜜与四叶草",
+        )
+        self.assertEqual(localized["douban_match_mode"], "strong_fields")
+        self.assertEqual(localized["source_links"][-1]["provider"], "douban")
     def test_exact_wikidata_binding_replaces_preview_title_before_selection(self):
         candidate = {
             "candidate_id": "wikipedia:Q124175370",

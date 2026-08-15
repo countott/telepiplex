@@ -1220,7 +1220,7 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertEqual(storage.deleted, [])
         self.assertIn("目标冲突 1", result.message)
 
-    def test_selected_download_root_is_not_deleted_after_movie_organization(self):
+    def test_nonempty_download_root_is_reported_retained_after_movie_organization(self):
         storage = CleanupFailureStorage([
             {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1_000_000},
         ])
@@ -1233,7 +1233,8 @@ class RenamingProcessorTest(unittest.TestCase):
         result = process_generic_media(event)
 
         self.assertTrue(result.handled)
-        self.assertTrue(result.message.startswith("✅"))
+        self.assertTrue(result.message.startswith("📂"))
+        self.assertIn("源目录删除 0，保留 1", result.message)
         self.assertNotIn("/Downloads/Release", storage.deleted)
 
     @patch(
@@ -1661,7 +1662,7 @@ class RenamingProcessorTest(unittest.TestCase):
 
         result = process_tvdb_episode(event)
 
-        self.assertTrue(result.message.startswith("✅"))
+        self.assertTrue(result.message.startswith("📂"))
         self.assertIn("保留 1", result.message)
         self.assertNotIn("sample.mp4", storage.deleted)
 
@@ -1701,7 +1702,7 @@ class RenamingProcessorTest(unittest.TestCase):
 
         result = process_tvdb_episode(event)
 
-        self.assertTrue(result.message.startswith("✅"))
+        self.assertTrue(result.message.startswith("📂"))
         ai_mock.assert_not_called()
         self.assertIn("保留 1", result.message)
         self.assertNotIn(
@@ -1755,7 +1756,7 @@ class RenamingProcessorTest(unittest.TestCase):
 
         result = process_tvdb_episode(event)
 
-        self.assertTrue(result.message.startswith("✅"))
+        self.assertTrue(result.message.startswith("📂"))
         self.assertNotIn(
             "/Downloads/English.Series.S01E01.mkv",
             storage.deleted,
@@ -3694,7 +3695,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             host.events[0][1]["media_metadata"]["identity"]["english_title"],
             "English Movie",
         )
-        self.assertIn("整理完成", host.notifications[0][1])
+        self.assertIn("整理结果", host.notifications[0][1])
         self.assertNotIn("`", host.notifications[0][1])
 
     async def test_selected_root_cleanup_failure_does_not_block_organized_event(self):
@@ -3720,7 +3721,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(host.events), 1)
         self.assertEqual(host.events[0][0], "media.organized")
-        self.assertIn("整理完成", host.notifications[0][1])
+        self.assertIn("整理结果", host.notifications[0][1])
 
     async def test_delivery_replay_does_not_repeat_destructive_storage_operations(self):
         from telepiplex_rename.jobs import RenameJobStore
@@ -4056,9 +4057,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.5.1")
+        self.assertEqual(manifest["version"], "1.5.2")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertIn('version = "1.5.1"', project)
+        self.assertIn('version = "1.5.2"', project)
         self.assertIn('telepiplex-plugin-sdk==1.3.1', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
@@ -4074,8 +4075,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.5.1.tpx", source)
-        self.assertNotIn("dist/rename-1.5.1.tpx", source)
+        self.assertIn("/tmp/rename-1.5.2.tpx", source)
+        self.assertNotIn("dist/rename-1.5.2.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

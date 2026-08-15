@@ -341,6 +341,40 @@ class ConfirmedEnrichmentTest(unittest.TestCase):
             "media_type": "series",
         })
 
+    def test_tvdb_query_uses_series_root_year_not_supplement_scope_year(self):
+        query = build_tvdb_query(
+            identity(
+                english_title="House of the Dragon",
+                year="2024",
+                root_year="2022",
+                scope_year="2024",
+            ),
+            {
+                "official_english_title": "House of the Dragon",
+                "year": "2011",
+            },
+        )
+
+        self.assertEqual(query, {
+            "title": "House of the Dragon",
+            "year": "2022",
+            "media_type": "series",
+        })
+
+    def test_tvdb_query_carries_stable_series_id(self):
+        query = build_tvdb_query(
+            identity(
+                english_title="House of the Dragon",
+                year="2022",
+                root_year="2022",
+                external_ids={"tvdb": "371572"},
+            ),
+            None,
+        )
+
+        self.assertEqual(query["tvdb_id"], "371572")
+        self.assertEqual(query["year"], "2022")
+
     def test_tvdb_is_skipped_without_reliable_latin_identity(self):
         self.assertIsNone(build_tvdb_query(
             identity(english_title="", original_title="繁花"),

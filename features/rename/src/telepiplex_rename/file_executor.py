@@ -27,6 +27,45 @@ class FileExecutionSummary:
     failed_files: int
 
 
+@dataclass(frozen=True)
+class DirectoryCleanupOutcome:
+    path: str
+    state: str
+    reason_code: str
+
+
+@dataclass(frozen=True)
+class DirectoryCleanupSummary:
+    outcomes: tuple[DirectoryCleanupOutcome, ...]
+    candidate_directories: int
+    deleted_directories: int
+    retained_directories: int
+    failed_directories: int
+    complete: bool
+
+    def to_dict(self) -> dict:
+        return {
+            "candidate_directories": self.candidate_directories,
+            "deleted_directories": self.deleted_directories,
+            "retained_directories": self.retained_directories,
+            "failed_directories": self.failed_directories,
+            "complete": self.complete,
+            "deleted_paths": [
+                item.path
+                for item in self.outcomes
+                if item.state == "deleted"
+            ],
+            "failures": [{
+                "path": item.path,
+                "state": item.state,
+                "reason_code": item.reason_code,
+            } for item in self.outcomes if item.state in {
+                "lookup_failed",
+                "delete_failed",
+            }],
+        }
+
+
 def _provider_id(value) -> str:
     if not isinstance(value, dict):
         return ""
@@ -277,29 +316,133 @@ def _list_items(value):
     return None
 
 
-def _fresh_directory_is_empty(storage, path: str) -> bool:
+def _fresh_directory_state(storage, path: str) -> str:
     try:
         info = storage.get_file_info(path)
+        if info is None:
+            return "absent"
         directory_id = _provider_id(info)
         if not info or not directory_id:
-            return False
+            return "lookup_failed"
         response = storage.get_file_list({
             "cid": directory_id,
             "limit": 1,
             "show_dir": 1,
         })
     except Exception:
-        return False
+        return "lookup_failed"
     items = _list_items(response)
-    if items is None or items:
-        return False
+    if items is None:
+        return "lookup_failed"
+    if items:
+        return "nonempty"
     if isinstance(response, dict):
         if response.get("has_more") is True:
-            return False
+            return "nonempty"
         data = response.get("data")
         if isinstance(data, dict) and data.get("has_more") is True:
-            return False
-    return True
+            return "nonempty"
+    return "empty"
+
+
+def _fresh_directory_is_empty(storage, path: str) -> bool:
+    return _fresh_directory_state(storage, path) == "empty"
+
+
+def cleanup_source_directories(
+    storage,
+    resolutions: list[FileResolution],
+    *,
+    selected_root: str,
+    include_selected_root: bool,
+    protected_roots: tuple[str, ...] = (),
+) -> DirectoryCleanupSummary:
+    """Freshly verify and clean source ancestors after file verification."""
+
+    root_value = normalize_storage_path(selected_root)
+    root = PurePosixPath(root_value)
+    protected = {
+        normalize_storage_path(path)
+        for path in protected_roots
+        if normalize_storage_path(path)
+    }
+    candidates = set()
+    for resolution in resolutions or []:
+        path = PurePosixPath(
+            normalize_storage_path(resolution.source_path)
+        ).parent
+        while path != root and root in path.parents:
+            candidates.add(str(path))
+            path = path.parent
+        if include_selected_root and path == root and root_value not in {"", "/"}:
+            candidates.add(root_value)
+
+    outcomes = []
+    for path in sorted(
+        candidates,
+        key=lambda value: (-len(PurePosixPath(value).parts), value),
+    ):
+        if path in protected:
+            outcomes.append(DirectoryCleanupOutcome(
+                path=path,
+                state="protected",
+                reason_code="protected_root",
+            ))
+            continue
+        state = _fresh_directory_state(storage, path)
+        if state == "nonempty":
+            outcomes.append(DirectoryCleanupOutcome(
+                path=path,
+                state="retained_nonempty",
+                reason_code="directory_not_empty",
+            ))
+            continue
+        if state == "absent":
+            outcomes.append(DirectoryCleanupOutcome(
+                path=path,
+                state="already_absent",
+                reason_code="source_directory_already_absent",
+            ))
+            continue
+        if state != "empty":
+            outcomes.append(DirectoryCleanupOutcome(
+                path=path,
+                state="lookup_failed",
+                reason_code="fresh_listing_failed",
+            ))
+            continue
+        try:
+            deleted = storage.delete_single_file(path) is True
+        except Exception:
+            deleted = False
+        outcomes.append(DirectoryCleanupOutcome(
+            path=path,
+            state="deleted" if deleted else "delete_failed",
+            reason_code=(
+                "empty_directory_deleted"
+                if deleted
+                else "provider_delete_failed"
+            ),
+        ))
+
+    frozen = tuple(outcomes)
+    failed = sum(
+        item.state in {"lookup_failed", "delete_failed"}
+        for item in frozen
+    )
+    return DirectoryCleanupSummary(
+        outcomes=frozen,
+        candidate_directories=len(frozen),
+        deleted_directories=sum(
+            item.state == "deleted" for item in frozen
+        ),
+        retained_directories=sum(
+            item.state in {"retained_nonempty", "protected"}
+            for item in frozen
+        ),
+        failed_directories=failed,
+        complete=failed == 0,
+    )
 
 
 def cleanup_empty_source_directories(
@@ -310,23 +453,14 @@ def cleanup_empty_source_directories(
 ) -> list[str]:
     """Delete only source ancestors proven empty by a fresh provider listing."""
 
-    root = PurePosixPath(normalize_storage_path(selected_root))
-    candidates = set()
-    for resolution in resolutions or []:
-        path = PurePosixPath(normalize_storage_path(resolution.source_path)).parent
-        while path != root and root in path.parents:
-            candidates.add(str(path))
-            path = path.parent
-    deleted = []
-    for path in sorted(
-        candidates,
-        key=lambda value: (-len(PurePosixPath(value).parts), value),
-    ):
-        if not _fresh_directory_is_empty(storage, path):
-            continue
-        try:
-            if storage.delete_single_file(path) is True:
-                deleted.append(path)
-        except Exception:
-            continue
-    return deleted
+    summary = cleanup_source_directories(
+        storage,
+        resolutions,
+        selected_root=selected_root,
+        include_selected_root=False,
+    )
+    return [
+        item.path
+        for item in summary.outcomes
+        if item.state == "deleted"
+    ]

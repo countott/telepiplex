@@ -34,7 +34,10 @@ from .subtitles import (
     build_movie_subtitle_plan,
     collect_subtitle_evidence,
 )
-from .file_executor import execute_file_resolutions
+from .file_executor import (
+    cleanup_source_directories,
+    execute_file_resolutions,
+)
 from .file_facts import build_file_facts, parse_file_evidence
 from .file_plan import normalize_storage_path, plan_file_resolutions
 
@@ -230,6 +233,21 @@ def process_file_first_media(
         selected_root=event.download_root or event.final_path,
         journal=getattr(storage, "journal", None),
     )
+    source_root = event.download_root or event.final_path
+    manual_inventory = str(event.provider or "").strip().casefold() in {
+        "inventory",
+        "manual",
+    }
+    cleanup = cleanup_source_directories(
+        storage,
+        resolutions,
+        selected_root=source_root,
+        include_selected_root=not manual_inventory,
+        protected_roots=tuple(filter(None, (
+            event.selected_path,
+            source_root if manual_inventory else "",
+        ))),
+    )
     outcome_by_source = {
         outcome.source_id: outcome
         for outcome in execution.outcomes
@@ -264,6 +282,7 @@ def process_file_first_media(
             for resolution in media_resolutions
         ),
         "failed_files": execution.failed_files,
+        "cleanup": cleanup.to_dict(),
         "verified_work_groups": int(bool(
             execution.organized_files or execution.canonical_no_ops
         )),
@@ -315,6 +334,15 @@ def _public_file_results(file_first: dict) -> dict:
         "successful_files": successful_files,
         "files": files,
         "warnings": warnings,
+        "cleanup": dict(file_first.get("cleanup") or {
+            "candidate_directories": 0,
+            "deleted_directories": 0,
+            "retained_directories": 0,
+            "failed_directories": 0,
+            "complete": True,
+            "deleted_paths": [],
+            "failures": [],
+        }),
     }
 
 
@@ -721,7 +749,10 @@ def _attempt_confirmed_series_rename(
         + (rename_plan.get("discard_sources") or [])
     ))
     rename_plan["discard_sources"] = []
-    rename_plan["cleanup_complete"] = file_first["failed_files"] == 0
+    rename_plan["cleanup_complete"] = bool(
+        file_first["failed_files"] == 0
+        and (file_first.get("cleanup") or {}).get("complete") is True
+    )
     rename_plan["media_metadata"] = enrich_media_metadata_with_rename_plan(
         media_metadata,
         rename_plan,
@@ -780,14 +811,18 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
     conflicts = int(file_first.get("target_conflicts") or 0)
     failed = int(file_first.get("failed_files") or 0)
     kept = int(file_first.get("kept_unresolved") or 0)
+    cleanup = file_first.get("cleanup") or {}
+    cleanup_failed = int(cleanup.get("failed_directories") or 0)
     final_path = rename_plan["target_root"] if successful else event.final_path
-    prefix = "✅" if not conflicts and not failed else "⚠️"
-    completion_label = "整理完成（文件级）" if prefix == "✅" else "文件级整理"
+    prefix = "📂" if not conflicts and not failed and not cleanup_failed else "⚠️"
     message = (
-        f"{prefix} TVDB {completion_label}：`{rename_plan['series_name'] or rename_plan['target_root'].split('/')[-1]}`\n"
+        f"{prefix} 媒体整理结果：`{rename_plan['series_name'] or rename_plan['target_root'].split('/')[-1]}`\n"
         f"已整理 {file_first.get('organized_files', 0)}，"
         f"已规范 {file_first.get('canonical_no_ops', 0)}，"
-        f"保留 {kept}，目标冲突 {conflicts}，失败 {failed}\n\n"
+        f"保留 {kept}，目标冲突 {conflicts}，失败 {failed}\n"
+        f"源目录删除 {cleanup.get('deleted_directories', 0)}，"
+        f"保留 {cleanup.get('retained_directories', 0)}，"
+        f"清理失败 {cleanup_failed}\n\n"
         f"保存目录：`{final_path}`"
     )
     if rename_plan.get("tvdb_series_id"):
@@ -900,15 +935,19 @@ def process_generic_media(event: DownloadCompletedEvent) -> PostDownloadResult:
     conflicts = int(file_first.get("target_conflicts") or 0)
     failed = int(file_first.get("failed_files") or 0)
     kept = int(file_first.get("kept_unresolved") or 0)
+    cleanup = file_first.get("cleanup") or {}
+    cleanup_failed = int(cleanup.get("failed_directories") or 0)
     final_path = target_path if successful else event.final_path
-    prefix = "✅" if not conflicts and not failed else "⚠️"
-    completion_label = "整理完成（文件级）" if prefix == "✅" else "文件级整理"
+    prefix = "📂" if not conflicts and not failed and not cleanup_failed else "⚠️"
     message = (
-        f"{prefix} 电影{completion_label}：`{plan.file_name}`\n"
+        f"{prefix} 电影整理结果：`{plan.file_name}`\n"
         f"主视频依据：{selection_reason}\n"
         f"已整理 {file_first.get('organized_files', 0)}，"
         f"已规范 {file_first.get('canonical_no_ops', 0)}，"
-        f"保留 {kept}，目标冲突 {conflicts}，失败 {failed}\n\n"
+        f"保留 {kept}，目标冲突 {conflicts}，失败 {failed}\n"
+        f"源目录删除 {cleanup.get('deleted_directories', 0)}，"
+        f"保留 {cleanup.get('retained_directories', 0)}，"
+        f"清理失败 {cleanup_failed}\n\n"
         f"保存目录：`{final_path}`"
     )
     return PostDownloadResult(

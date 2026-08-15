@@ -28,12 +28,16 @@ _EP_ABSOLUTE = re.compile(
     r"(?i)(?<![A-Z0-9])EP(?:ISODE)?[ ._-]*(\d{1,4})(?![\dP])"
 )
 _DASH_EPISODE = re.compile(
-    r"(?<!\S)-\s*(\d{1,4})(?=\s*(?:-|\(|\[|$))"
+    r"(?<!\S)-\s*(\d{1,4})(?=\s*(?:-|\(|\[|\.[A-Za-z0-9]{2,5}$|$))"
 )
 _BRACKET_EPISODE = re.compile(r"[\[【]\s*(\d{1,4})\s*[\]】]")
 _BARE_EPISODE_STEM = re.compile(r"^(\d{1,3})$")
 _SEASON_RANGE = re.compile(
-    r"(?i)\bS(\d{1,2})\s*(?:-|~|TO)\s*S?(\d{1,2})\b"
+    r"(?ix)(?:"
+    r"\bS(\d{1,2})\s*(?:-|~|TO)\s*S(\d{1,2})\b|"
+    r"\bSeason[ ._-]+(\d{1,2})\s*(?:-|~|TO)\s*"
+    r"Season[ ._-]+(\d{1,2})\b"
+    r")"
 )
 _SEASON = re.compile(r"(?i)\bS(\d{1,2})\b|\bSeason[ ._-]+(\d{1,2})\b")
 _CHINESE_NUMBER = r"[0-9零〇一二三四五六七八九十百两]+"
@@ -470,7 +474,8 @@ def _observed_markers(
                 local_seasons.add(season)
                 episodes.add((season, episode))
         for match in _SEASON_RANGE.finditer(value):
-            start, end = int(match.group(1)), int(match.group(2))
+            start = int(match.group(1) or match.group(3))
+            end = int(match.group(2) or match.group(4))
             if 0 <= start <= end and end - start <= 100:
                 local_seasons.update(range(start, end + 1))
         for match in _SEASON.finditer(value):

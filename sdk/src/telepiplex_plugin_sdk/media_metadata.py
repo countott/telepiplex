@@ -324,6 +324,297 @@ def validate_media_metadata(value: object, require_confirmed: bool = False):
     return deepcopy(value)
 
 
+def _validation_issue(path: str, reason_code: str, detail: str) -> dict:
+    return {
+        "path": path,
+        "reason_code": reason_code,
+        "detail": detail,
+    }
+
+
+def _diagnose_media_metadata(
+    value: object,
+    *,
+    require_confirmed: bool,
+) -> dict:
+    if not isinstance(value, dict):
+        return _validation_issue(
+            "$",
+            "object_required",
+            "media_metadata must be an object",
+        )
+    if value.get("schema_version") != SCHEMA_VERSION:
+        return _validation_issue(
+            "$.schema_version",
+            "schema_version_unsupported",
+            f"expected schema_version {SCHEMA_VERSION}",
+        )
+    try:
+        json.dumps(value, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        return _validation_issue(
+            "$",
+            "json_serialization_failed",
+            f"contract is not strict JSON: {type(exc).__name__}",
+        )
+    if not _text(value.get("metadata_id")):
+        return _validation_issue(
+            "$.metadata_id",
+            "required_value_missing",
+            "metadata_id must be a non-empty string",
+        )
+    if require_confirmed and value.get("confirmed") is not True:
+        return _validation_issue(
+            "$.confirmed",
+            "confirmation_required",
+            "confirmed must be true at this boundary",
+        )
+
+    identity = value.get("identity")
+    relation = value.get("relation")
+    placement = value.get("placement")
+    for path, field_value in (
+        ("$.identity", identity),
+        ("$.relation", relation),
+        ("$.placement", placement),
+    ):
+        if not isinstance(field_value, dict):
+            return _validation_issue(
+                path,
+                "object_required",
+                f"{path.rsplit('.', 1)[-1]} must be an object",
+            )
+    if not (
+        _text(identity.get("chinese_title"))
+        or _text(identity.get("english_title"))
+    ):
+        return _validation_issue(
+            "$.identity",
+            "identity_title_missing",
+            "identity needs a Chinese or English title",
+        )
+    if _text(identity.get("content_kind")) not in CONTENT_KINDS:
+        return _validation_issue(
+            "$.identity.content_kind",
+            "content_kind_invalid",
+            "content_kind is not a supported value",
+        )
+    if (
+        "external_ids" in identity
+        and not isinstance(identity.get("external_ids"), dict)
+    ):
+        return _validation_issue(
+            "$.identity.external_ids",
+            "object_required",
+            "external_ids must be an object",
+        )
+    if not _valid_title_policy(identity):
+        return _validation_issue(
+            "$.identity.search_title_policy",
+            "title_policy_invalid",
+            "canonical and compatibility title fields violate the policy",
+        )
+
+    target = relation.get("target_series")
+    if isinstance(target, dict) and (
+        "external_ids" in target
+        and not isinstance(target.get("external_ids"), dict)
+    ):
+        return _validation_issue(
+            "$.relation.target_series.external_ids",
+            "object_required",
+            "target series external_ids must be an object",
+        )
+    if isinstance(target, dict) and not _valid_title_policy(target):
+        return _validation_issue(
+            "$.relation.target_series.search_title_policy",
+            "title_policy_invalid",
+            "target series title fields violate the policy",
+        )
+
+    category_kind = placement.get("category_kind")
+    library_type = placement.get("library_type")
+    if (
+        category_kind not in CATEGORY_LIBRARY_TYPES
+        or CATEGORY_LIBRARY_TYPES[category_kind] != library_type
+    ):
+        return _validation_issue(
+            "$.placement.category_kind",
+            "category_library_mismatch",
+            "category_kind does not map to placement.library_type",
+        )
+    mapping_kind = placement.get("mapping_kind")
+    if mapping_kind not in MAPPING_KINDS:
+        return _validation_issue(
+            "$.placement.mapping_kind",
+            "mapping_kind_invalid",
+            "mapping_kind is not supported",
+        )
+    evidence = value.get("evidence")
+    warnings = value.get("warnings")
+    items = value.get("items")
+    if not isinstance(evidence, dict):
+        return _validation_issue(
+            "$.evidence",
+            "object_required",
+            "evidence must be an object",
+        )
+    if not isinstance(warnings, list):
+        return _validation_issue(
+            "$.warnings",
+            "array_required",
+            "warnings must be an array",
+        )
+    if not isinstance(items, list) or not _valid_items(items):
+        return _validation_issue(
+            "$.items",
+            "items_invalid",
+            "items must contain unique valid logical episode coordinates",
+        )
+
+    if mapping_kind in SERIES_EPISODE_MAPPINGS:
+        season = _integer(placement.get("season_number"))
+        episode = _integer(placement.get("episode_number"))
+        if (
+            library_type != "series"
+            or season != 0
+            or episode is None
+            or episode < 1
+        ):
+            return _validation_issue(
+                "$.placement.season_number",
+                "episode_lock_invalid",
+                "series episode mappings require season 0 and a positive episode",
+            )
+        if not isinstance(target, dict) or not (
+            _text(target.get("chinese_title"))
+            or _text(target.get("english_title"))
+        ):
+            return _validation_issue(
+                "$.relation.target_series",
+                "target_series_missing",
+                "series episode mappings require a titled target series",
+            )
+        if any(
+            (
+                _integer(item.get("season_number")),
+                _integer(item.get("episode_number")),
+            ) != (season, episode)
+            for item in items
+        ):
+            return _validation_issue(
+                "$.items",
+                "episode_lock_mismatch",
+                "every item must match the locked placement coordinate",
+            )
+
+    if mapping_kind == "tvdb_official":
+        target_ids = target.get("external_ids") or {}
+        if not _text(target_ids.get("tvdb")):
+            return _validation_issue(
+                "$.relation.target_series.external_ids.tvdb",
+                "required_value_missing",
+                "TVDB-official mapping requires a target TVDB series ID",
+            )
+        if not _text(placement.get("tvdb_episode_id")):
+            return _validation_issue(
+                "$.placement.tvdb_episode_id",
+                "required_value_missing",
+                "TVDB-official mapping requires a TVDB episode ID",
+            )
+
+    if mapping_kind == "ai_inferred_tvdb" and not any(
+        isinstance(warning, str) and warning.strip()
+        for warning in warnings
+    ):
+        return _validation_issue(
+            "$.warnings",
+            "ai_warning_required",
+            "AI-inferred TVDB mapping requires a non-empty warning",
+        )
+
+    if mapping_kind == "temporary_related_special":
+        source_entry = value.get("source_entry")
+        episode = _integer(placement.get("episode_number"))
+        if (
+            placement.get("season_number") != 0
+            or episode is None
+            or episode < 100
+        ):
+            return _validation_issue(
+                "$.placement.episode_number",
+                "temporary_episode_invalid",
+                "temporary related specials require season 0 episode 100 or higher",
+            )
+        if not isinstance(source_entry, dict) or not _text(
+            source_entry.get("title")
+        ):
+            return _validation_issue(
+                "$.source_entry.title",
+                "required_value_missing",
+                "temporary related special needs a titled source entry",
+            )
+        if not (
+            _text(source_entry.get("url"))
+            or _text(source_entry.get("external_id"))
+        ):
+            return _validation_issue(
+                "$.source_entry",
+                "source_locator_missing",
+                "source entry needs a URL or external ID",
+            )
+
+    if mapping_kind == "standalone":
+        if (
+            placement.get("season_number") is not None
+            or placement.get("episode_number") is not None
+        ):
+            return _validation_issue(
+                "$.placement.season_number",
+                "standalone_scope_invalid",
+                "standalone mappings cannot lock a season or episode",
+            )
+        if isinstance(target, dict) and (
+            _text(target.get("chinese_title"))
+            or _text(target.get("english_title"))
+        ):
+            return _validation_issue(
+                "$.relation.target_series",
+                "standalone_target_invalid",
+                "standalone mappings cannot target another series",
+            )
+        if library_type == "series":
+            return _validation_issue(
+                "$.items",
+                "series_inventory_invalid",
+                "series standalone mapping needs valid items or an explicit degraded inventory state",
+            )
+
+    return _validation_issue(
+        "$",
+        "contract_invariant_failed",
+        "contract failed an unclassified media_metadata invariant",
+    )
+
+
+def validate_media_metadata_detailed(
+    value: object,
+    require_confirmed: bool = False,
+) -> tuple[dict | None, dict | None]:
+    """Return legacy validation output plus one actionable failure issue."""
+
+    validated = validate_media_metadata(
+        value,
+        require_confirmed=require_confirmed,
+    )
+    if validated is not None:
+        return validated, None
+    return None, _diagnose_media_metadata(
+        value,
+        require_confirmed=require_confirmed,
+    )
+
+
 def attach_media_metadata(metadata: dict | None, value: dict) -> dict:
     validated = validate_media_metadata(value, require_confirmed=True)
     if validated is None:
