@@ -118,7 +118,7 @@ def test_automatic_download_deletes_verified_empty_release_root():
     assert "TVDB 整理完成" not in result.message
 
 
-def test_inventory_run_preserves_user_selected_scan_root():
+def test_inventory_run_deletes_work_group_but_preserves_category_root():
     root = "/Series/UserSelected"
     source = f"{root}/English.Series.S01E01.mkv"
     storage = StatefulStorage(
@@ -136,9 +136,11 @@ def test_inventory_run_preserves_user_selected_scan_root():
 
     result = process_tvdb_episode(event)
 
-    assert root in storage.directories
-    assert root not in storage.deleted
-    assert result.file_results["cleanup"]["deleted_directories"] == 0
+    assert root not in storage.directories
+    assert root in storage.deleted
+    assert "/Series" in storage.directories
+    assert "/Series" not in storage.deleted
+    assert result.file_results["cleanup"]["deleted_directories"] == 1
     assert result.file_results["cleanup"]["complete"] is True
 
 
