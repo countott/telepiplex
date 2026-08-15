@@ -85,6 +85,30 @@ def _get_info(storage, path: str):
     return method(path)
 
 
+def prefetch_file_info(storage, paths) -> dict[str, object]:
+    normalized = []
+    seen = set()
+    for path in paths or ():
+        value = normalize_storage_path(path)
+        if value and value not in seen:
+            seen.add(value)
+            normalized.append(value)
+    if not normalized:
+        return {}
+    method = getattr(storage, "get_file_info_batch", None)
+    if callable(method):
+        values = method(normalized)
+        if isinstance(values, dict):
+            return {
+                path: values.get(path)
+                for path in normalized
+            }
+    return {
+        path: _get_info(storage, path)
+        for path in normalized
+    }
+
+
 def _transition(
     journal,
     resolution: FileResolution,
@@ -119,20 +143,32 @@ def _outcome(
     )
 
 
-def _execute_one(storage, resolution: FileResolution, journal=None):
+def _execute_one(
+    storage,
+    resolution: FileResolution,
+    journal=None,
+    initial_info=None,
+):
     source = normalize_storage_path(resolution.source_path)
     target = normalize_storage_path(resolution.target_path)
     if resolution.action == "keep_original" or resolution.status != "resolved":
         _transition(journal, resolution, "kept", source)
         return _outcome(resolution, "kept", source)
 
-    target_info = _get_info(storage, target)
+    initial_info = initial_info or {}
+
+    def initial(path):
+        if path in initial_info:
+            return initial_info[path]
+        return _get_info(storage, path)
+
+    target_info = initial(target)
     if target and _provider_id(target_info) == resolution.source_id:
         _transition(journal, resolution, "verified", target, replay=True)
         return _outcome(resolution, "no_op", target, "target_identity_verified")
 
     if resolution.action == "no_op" or source == target:
-        source_info = _get_info(storage, source)
+        source_info = initial(source)
         if source_info is not None and (
             not _provider_id(source_info)
             or _provider_id(source_info) == resolution.source_id
@@ -144,7 +180,7 @@ def _execute_one(storage, resolution: FileResolution, journal=None):
 
     current = source
     try:
-        source_info = _get_info(storage, current)
+        source_info = initial(current)
         if source_info is None:
             _transition(
                 journal, resolution, "failed", current, reason="source_missing"
@@ -288,9 +324,26 @@ def execute_file_resolutions(
     journal=None,
 ) -> FileExecutionSummary:
     del selected_root  # Cleanup is an explicit, separately verified phase.
+    resolutions = list(resolutions or [])
+    initial_info = prefetch_file_info(
+        storage,
+        [
+            path
+            for resolution in resolutions
+            if resolution.action != "keep_original"
+            and resolution.status == "resolved"
+            for path in (resolution.source_path, resolution.target_path)
+            if path
+        ],
+    )
     outcomes = tuple(
-        _execute_one(storage, resolution, journal)
-        for resolution in resolutions or []
+        _execute_one(
+            storage,
+            resolution,
+            journal,
+            initial_info=initial_info,
+        )
+        for resolution in resolutions
     )
     return FileExecutionSummary(
         outcomes=outcomes,
@@ -430,6 +483,10 @@ def cleanup_source_directories(
         item.state in {"lookup_failed", "delete_failed"}
         for item in frozen
     )
+    retained_nonempty = sum(
+        item.state == "retained_nonempty"
+        for item in frozen
+    )
     return DirectoryCleanupSummary(
         outcomes=frozen,
         candidate_directories=len(frozen),
@@ -441,7 +498,7 @@ def cleanup_source_directories(
             for item in frozen
         ),
         failed_directories=failed,
-        complete=failed == 0,
+        complete=failed == 0 and retained_nonempty == 0,
     )
 
 

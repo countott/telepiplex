@@ -13,11 +13,11 @@ from telepiplex_plugin_sdk import FeatureRuntime
 
 ROOT = Path(__file__).resolve().parents[1]
 FEATURES = {
-    "search": ("telepiplex_search", "1.11.1"),
-    "download": ("telepiplex_download", "1.0.14"),
-    "rename": ("telepiplex_rename", "1.5.2"),
-    "sync": ("telepiplex_sync", "1.1.2"),
-    "caption": ("telepiplex_caption", "0.1.4"),
+    "search": ("telepiplex_search", "1.11.2", "1.3.2"),
+    "download": ("telepiplex_download", "1.0.15", "1.3.2"),
+    "rename": ("telepiplex_rename", "1.5.3", "1.3.2"),
+    "sync": ("telepiplex_sync", "1.1.2", "1.3.1"),
+    "caption": ("telepiplex_caption", "0.1.4", "1.3.1"),
 }
 LEGACY_FEATURE_DIRS = (
     "media-search",
@@ -35,7 +35,7 @@ def test_features_use_only_the_new_technical_identities():
     for legacy in LEGACY_FEATURE_DIRS:
         assert not (ROOT / "features" / legacy).exists()
 
-    for plugin_id, (package, version) in FEATURES.items():
+    for plugin_id, (package, version, sdk_version) in FEATURES.items():
         feature_dir = ROOT / "features" / plugin_id
         assert feature_dir.is_dir()
 
@@ -53,7 +53,10 @@ def test_features_use_only_the_new_technical_identities():
         )
         assert project["project"]["name"] == f"telepiplex-{plugin_id}"
         assert project["project"]["version"] == version
-        assert "telepiplex-plugin-sdk==1.3.1" in project["project"]["dependencies"]
+        assert (
+            f"telepiplex-plugin-sdk=={sdk_version}"
+            in project["project"]["dependencies"]
+        )
         assert (feature_dir / "src" / package).is_dir()
 
 
@@ -127,7 +130,7 @@ def test_feature_release_catalog_accepts_only_new_ids():
         plugin_id: f"features/{plugin_id}"
         for plugin_id in FEATURES
     }
-    for plugin_id, (_, version) in FEATURES.items():
+    for plugin_id, (_, version, _sdk_version) in FEATURES.items():
         assert parse_feature_tag(f"{plugin_id}-v{version}") == (plugin_id, version)
 
 

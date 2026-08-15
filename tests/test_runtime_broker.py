@@ -174,7 +174,7 @@ class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
             await HostClient(self.broker.socket_path, "echo-token").call_capability(
                 "download.provider",
                 "submit",
-                {"value": 1},
+                {"value": "x" * 100_000},
                 deadline=1,
             )
 
@@ -188,6 +188,12 @@ class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(raised.exception.code, "capability_not_declared")
         self.assertEqual(started.diagnostic_fields["transport"]["method"], "capability.call")
+        self.assertGreater(
+            started.diagnostic_fields["input"]["params"][
+                "_diagnostic_summary"
+            ]["bytes"],
+            100_000,
+        )
         self.assertEqual(
             failed.diagnostic_fields["output"]["error_code"],
             "capability_not_declared",

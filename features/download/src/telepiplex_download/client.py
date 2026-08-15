@@ -259,6 +259,21 @@ class Open115Client:
         self._file_cache[path] = result["data"]
         return result["data"]
 
+    def get_file_info_batch(self, paths: list[str]):
+        if not isinstance(paths, list) or len(paths) > 128:
+            raise ValueError("file info batch exceeds 128 paths")
+        normalized = []
+        seen = set()
+        for path in paths:
+            value = self._normalize(path)
+            if value and value not in seen:
+                seen.add(value)
+                normalized.append(value)
+        return {
+            path: self.get_file_info(path)
+            for path in normalized
+        }
+
     def get_file_info_by_id(self, file_id: str):
         result = self._request("GET", "/open/folder/get_info", params={"file_id": file_id})
         return result.get("data") if self._successful(result) else None
@@ -504,7 +519,10 @@ class Open115Client:
                 "nodupli": 1,
             },
         )
-        return self._successful(result)
+        if self._successful(result):
+            self._file_cache.clear()
+            return True
+        return False
 
     def delete_single_file(self, path: str):
         info = self.get_file_info(path)

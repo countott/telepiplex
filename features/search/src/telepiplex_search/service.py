@@ -86,6 +86,7 @@ from .direct_plan import (
 from .input_contract import classify_search_input, contains_url
 from .identity_presentation import build_identity_presentation
 from .log_sanitizer import sanitize_log_value
+from .metadata_resolutions import MetadataResolutionStore
 from .errors import SearchPlanningError
 from .prowlarr_query import (
     build_prowlarr_query,
@@ -515,6 +516,7 @@ class SearchFeature:
         exact_link_resolver=None,
         selected_candidate_supplementer=None,
         candidate_poster_lookup=None,
+        metadata_resolution_store=None,
     ):
         self.config = config
         self.host = host
@@ -537,6 +539,9 @@ class SearchFeature:
             candidate_poster_lookup or self._lookup_candidate_poster
         )
         self.candidate_poster_timeout = 12.0
+        self.metadata_resolution_store = (
+            metadata_resolution_store or MetadataResolutionStore()
+        )
         self.plans = {}
         self.awaiting_queries = set()
         self.awaiting_scope_inputs = {}
@@ -578,14 +583,51 @@ class SearchFeature:
                 "media.search method is not allowed",
             )
         payload = request.get("payload") or {}
-        raw_query = " ".join(str(payload.get("query") or "").split())
-        if not raw_query:
-            raise FeatureError("invalid_query", "metadata query is required")
-        probe = (
-            payload.get("probe")
-            if isinstance(payload.get("probe"), dict)
-            else {}
-        )
+        resolution_id = ""
+        candidate_ref = ""
+        if method == "confirm_metadata":
+            resolution_id = _text(payload.get("resolution_id"))
+            candidate_ref = _text(payload.get("candidate_ref"))
+            if not resolution_id:
+                return {
+                    "status": "unresolved",
+                    "reason_code": "resolution_id_required",
+                }
+            resolution_state, frozen = self.metadata_resolution_store.load(
+                resolution_id
+            )
+            if resolution_state != "found" or frozen is None:
+                return {
+                    "status": "unresolved",
+                    "reason_code": (
+                        "resolution_expired"
+                        if resolution_state == "expired"
+                        else "resolution_not_found"
+                    ),
+                }
+            selected_ref = _text(frozen.get("selected_candidate_ref"))
+            cached_result = frozen.get("result")
+            if isinstance(cached_result, dict):
+                if selected_ref != candidate_ref:
+                    return {
+                        "status": "unresolved",
+                        "reason_code": "resolution_already_confirmed",
+                    }
+                return deepcopy(cached_result)
+            raw_query = _text(frozen.get("query"))
+            probe = deepcopy(frozen.get("probe") or {})
+            plan = deepcopy(frozen.get("plan") or {})
+            plan_id = resolution_id
+        else:
+            raw_query = " ".join(str(payload.get("query") or "").split())
+            if not raw_query:
+                raise FeatureError("invalid_query", "metadata query is required")
+            probe = (
+                payload.get("probe")
+                if isinstance(payload.get("probe"), dict)
+                else {}
+            )
+            plan_id = f"cap-{uuid.uuid4().hex[:10]}"
         if probe and runtime_context.logger:
             runtime_context.logger.info(
                 "metadata_probe "
@@ -594,14 +636,14 @@ class SearchFeature:
                 f"episodes={len(probe.get('observed_episodes') or [])} "
                 f"videos={str(probe.get('video_count') or 0)}"
             )
-        plan_id = f"cap-{uuid.uuid4().hex[:10]}"
-        try:
-            plan = await self.plan_builder(raw_query, plan_id)
-        except SearchPlanningError as exc:
-            raise FeatureError(
-                "metadata_unresolved",
-                f"metadata resolution failed: {exc.code}",
-            ) from exc
+        if method == "resolve_metadata":
+            try:
+                plan = await self.plan_builder(raw_query, plan_id)
+            except SearchPlanningError as exc:
+                raise FeatureError(
+                    "metadata_unresolved",
+                    f"metadata resolution failed: {exc.code}",
+                ) from exc
         all_candidates = [
             item
             for item in plan.get("candidates") or []
@@ -633,7 +675,6 @@ class SearchFeature:
                 ),
             }
         if method == "confirm_metadata":
-            candidate_ref = _text(payload.get("candidate_ref"))
             candidates = [
                 item
                 for item in candidates
@@ -658,8 +699,16 @@ class SearchFeature:
                     "status": "unresolved",
                     "reason_code": "candidate_ref_missing",
                 }
+            frozen_plan = deepcopy(plan)
+            frozen_plan["candidates"] = deepcopy(candidates[:5])
+            self.metadata_resolution_store.save(plan_id, {
+                "query": raw_query,
+                "probe": deepcopy(probe),
+                "plan": frozen_plan,
+            })
             return {
                 "status": "confirmation_required",
+                "resolution_id": plan_id,
                 "query": raw_query,
                 "probe": deepcopy(probe),
                 "candidates": previews,
@@ -762,7 +811,7 @@ class SearchFeature:
                 "resolved metadata did not pass the canonical contract",
             ) from exc
         identity = contract["identity"]
-        return {
+        result = {
             "status": "resolved",
             "media_metadata": contract,
             "naming_metadata": {
@@ -775,10 +824,15 @@ class SearchFeature:
                 "english_title": identity.get("english_title") or "",
                 "year": identity.get("year") or "",
             },
-            "source_queries": deepcopy(plan.get("source_queries") or {}),
-            "evidence": deepcopy(contract.get("evidence") or {}),
             "presentation": build_identity_presentation(contract),
         }
+        if method == "confirm_metadata":
+            self.metadata_resolution_store.cache_result(
+                resolution_id,
+                candidate_ref,
+                result,
+            )
+        return result
 
     async def command(self, request: dict) -> dict:
         command = str(request.get("command") or "")

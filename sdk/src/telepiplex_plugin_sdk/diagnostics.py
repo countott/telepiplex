@@ -204,6 +204,94 @@ def sanitize_diagnostic_value(value: Any) -> tuple[Any, list[str]]:
     return visit(value, "", 0), sorted(set(redacted_paths))
 
 
+def bounded_diagnostic_value(
+    value: Any,
+    *,
+    max_bytes: int = 8 * 1024,
+) -> Any:
+    """Keep small diagnostic values intact and summarize large payloads."""
+
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        encoded = repr(type(value).__name__).encode("utf-8")
+    if len(encoded) <= max(256, int(max_bytes)):
+        return value
+    summary: dict[str, Any] = {
+        "type": type(value).__name__,
+        "bytes": len(encoded),
+    }
+    if isinstance(value, Mapping):
+        summary["keys"] = len(value)
+        summary["key_sample"] = [str(key)[:80] for key in list(value)[:20]]
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        summary["items"] = len(value)
+    elif isinstance(value, str):
+        summary["characters"] = len(value)
+    return {"_diagnostic_summary": summary}
+
+
+def bounded_diagnostic_event(
+    event: Mapping[str, object],
+    *,
+    max_line_bytes: int,
+    prefix: str = "",
+) -> dict[str, Any]:
+    """Return a transport-safe event without losing correlation fields."""
+
+    candidate = dict(event)
+    rendered = prefix + render_machine_event(candidate) + "\n"
+    if len(rendered.encode("utf-8")) <= int(max_line_bytes):
+        return candidate
+    original_bytes = len(rendered.encode("utf-8"))
+    event_data = dict(candidate.get("event") or {})
+    event_data["message"] = str(event_data.get("message") or "")[:512]
+    error = dict(candidate.get("error") or {})
+    error["message"] = str(error.get("message") or "")[:512]
+    error["stack"] = None
+    error["causes"] = bounded_diagnostic_value(
+        error.get("causes") or [],
+        max_bytes=1024,
+    )
+    candidate.update({
+        "event": event_data,
+        "facts": {
+            "diagnostics_transport": {
+                "truncated": True,
+                "original_bytes": original_bytes,
+            },
+            "payload": bounded_diagnostic_value(
+                candidate.get("facts") or {},
+                max_bytes=4 * 1024,
+            ),
+        },
+        "error": error,
+    })
+    rendered = prefix + render_machine_event(candidate) + "\n"
+    if len(rendered.encode("utf-8")) <= int(max_line_bytes):
+        return candidate
+    candidate["facts"] = {
+        "diagnostics_transport": {
+            "truncated": True,
+            "original_bytes": original_bytes,
+        },
+    }
+    candidate["error"] = {
+        "code": error.get("code"),
+        "type": error.get("type"),
+        "message": str(error.get("message") or "")[:256],
+        "retryable": error.get("retryable"),
+        "stack": None,
+        "causes": [],
+    }
+    return candidate
+
+
 def current_diagnostic_context() -> dict[str, str | None]:
     current = dict(_CONTEXT.get())
     return {field: current.get(field) for field in DIAGNOSTIC_CONTEXT_FIELDS}

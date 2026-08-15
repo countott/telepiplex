@@ -1,6 +1,9 @@
+from copy import deepcopy
+import json
 import unittest
 from unittest.mock import patch
 
+from telepiplex_plugin_sdk.diagnostics import bounded_diagnostic_value
 from telepiplex_search.candidate_locale import (
     CandidateLocaleError,
     localize_candidate_from_verified_douban,
@@ -10,6 +13,7 @@ from telepiplex_search.confirmed_enrichment import (
     build_tvdb_query,
 )
 from telepiplex_search.service import SearchFeature
+from tests.test_feature_service import series_ranked_search_plan
 
 
 def _latin_candidate(index: int) -> dict:
@@ -32,6 +36,67 @@ def _latin_candidate(index: int) -> dict:
 
 
 class CandidateLocalizationPressureTest(unittest.IsolatedAsyncioTestCase):
+    async def test_veep_sixty_five_episode_result_is_compact_and_diagnostic_safe(self):
+        async def planner(_raw_query, plan_id):
+            plan = deepcopy(series_ranked_search_plan())
+            plan["plan_id"] = plan_id
+            plan["candidates"] = plan["candidates"][:1]
+            contract = plan["candidates"][0]["media_metadata"]
+            contract["metadata_id"] = plan_id
+            contract["identity"].update({
+                "chinese_title": "副总统",
+                "english_title": "Veep",
+                "year": "2012",
+            })
+            contract["items"] = [{
+                "item_id": f"veep-s07e{episode:02d}",
+                "content_role": "main_episode",
+                "season_number": 7,
+                "episode_number": episode,
+                "aired": "2019-05-12",
+            } for episode in range(1, 66)]
+            contract["evidence"]["series_inventory"] = {
+                "season_totals": {7: 65},
+            }
+            return plan
+
+        feature = SearchFeature(
+            config={},
+            host=None,
+            plan_builder=planner,
+        )
+        result = await feature.metadata_capability({
+            "method": "resolve_metadata",
+            "payload": {
+                "query": "Veep S07",
+                "probe": {
+                    "content_shape": "season_pack",
+                    "observed_seasons": [7],
+                    "observed_episodes": [],
+                    "video_count": 65,
+                },
+            },
+        })
+
+        encoded = json.dumps(
+            result,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertEqual(
+            result["media_metadata"]["identity"]["chinese_title"],
+            "副总统",
+        )
+        self.assertEqual(len(result["media_metadata"]["items"]), 65)
+        self.assertNotIn("source_queries", result)
+        self.assertNotIn("evidence", result)
+        self.assertLess(len(encoded), 32 * 1024)
+        if len(encoded) > 8 * 1024:
+            self.assertIn(
+                "_diagnostic_summary",
+                bounded_diagnostic_value(result),
+            )
+
     def test_tvdb_root_year_pressure_1_000_scope_mismatches(self):
         for index in range(1_000):
             root_year = str(1980 + index % 40)

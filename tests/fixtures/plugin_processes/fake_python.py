@@ -86,6 +86,11 @@ async def main():
             },
         }
         print("@tpx-event-v1 " + json.dumps(event, ensure_ascii=False), flush=True)
+    if PLUGIN_ID == "oversizeflood":
+        print("multi-megabyte:" + ("y" * 2_000_000), flush=True)
+        for index in range(16):
+            print(f"oversize-{index}:" + ("x" * 70_000), flush=True)
+        print("oversize flood complete", flush=True)
 
     stop = asyncio.Event()
     state = {"value": "healthy", "drain_started": 0.0}

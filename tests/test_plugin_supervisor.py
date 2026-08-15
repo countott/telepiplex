@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import logging
@@ -200,6 +201,24 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(gap["facts"]["input"]["expected_sequence"], 1)
         self.assertEqual(gap["facts"]["input"]["received_sequence"], 9)
+
+    async def test_oversized_legacy_stdout_lines_do_not_abandon_capture_or_block_health(self):
+        supervisor = self._supervisor(startup_timeout=2)
+        process = await supervisor.start(self._release("oversizeflood"))
+
+        await self._wait_for(
+            lambda: any("oversize flood complete" in line for line in process.logs),
+            timeout=2,
+        )
+        health = await asyncio.wait_for(supervisor.health("oversizeflood"), timeout=1)
+
+        self.assertEqual(process.state, "healthy")
+        self.assertEqual(health.state, "healthy")
+        self.assertTrue(all(not task.done() for task in process.log_tasks))
+        self.assertTrue(any(
+            "Feature output line omitted bytes=" in line
+            for line in process.logs
+        ))
 
     async def test_startup_timeout_terminates_child_and_leaves_no_registration(self):
         from app.runtime.plugin_supervisor import SupervisorError

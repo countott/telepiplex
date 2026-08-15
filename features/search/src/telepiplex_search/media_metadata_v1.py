@@ -834,13 +834,15 @@ def build_media_metadata_v1(
                 "status": fact.status,
                 "studios": list(fact.studios),
                 "networks": list(fact.networks),
-                "cast": [dict(item) for item in fact.cast],
-                "crew": [dict(item) for item in fact.crew],
                 "certifications": list(fact.certifications),
-                "backdrop_urls": list(fact.backdrop_urls),
+                "cast_count": len(fact.cast),
+                "crew_count": len(fact.crew),
+                "backdrop_count": len(fact.backdrop_urls),
                 "season_count": fact.season_count,
                 "episode_count": fact.episode_count,
-                "episode_inventory": dict(fact.episode_inventory),
+                "episode_inventory_field_count": len(
+                    fact.episode_inventory
+                ),
                 "douban_title_raw": fact.douban_title_raw,
                 "season_number": fact.source_season_number,
                 "external_ids": dict(fact.external_ids),
@@ -866,7 +868,6 @@ def build_media_metadata_v1(
                     "episode_count": episode_count,
                 },
             ),
-            "tvdb_inventory": list(inventory),
             "series_inventory": series_inventory_evidence,
             "unresolved": list(candidate.unresolved_sources),
             "decision": {

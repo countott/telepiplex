@@ -1,6 +1,6 @@
 # rename Feature
 
-`features/rename` 是 telepiplex 的独立媒体整理 Feature。rename 1.5.2 消费 durable `download.completed`，也支持 Telegram `/rename` 扫描 115 存量目录；它通过 `storage.provider` 执行文件级变更，并只在验证整理结果后发布 `media.organized`。媒体候选按钮使用短持久令牌，满足 Telegram callback 的 64-byte 限制，同时支持直接回复候选编号。
+`features/rename` 是 telepiplex 的独立媒体整理 Feature。rename 1.5.3 消费 durable `download.completed`，也支持 Telegram `/rename` 扫描 115 存量目录；媒体候选确认会先持久化状态，再转入后台调用 search，因此 Telegram callback 不再等待长链路，取消操作也能及时生效。文件规划优先使用 download 1.0.15 的批量身份读取，并在每次写操作后重新验证目标，避免缓存掩盖移动结果。它只在验证整理结果后发布 `media.organized`。媒体候选按钮使用短持久令牌，满足 Telegram callback 的 64-byte 限制，同时支持直接回复候选编号。
 
 ## file-first 整理链路
 
@@ -35,7 +35,7 @@ rename 会在写操作前按文件预检目标冲突。已有目标与相同 pro
 如果 Host 在交接前确认 sync/Plex 管理未安装或未启用，rename 会保留已经完成的整理结果并收敛为成功终态，明确通知“已跳过后续处理”，且不会发布无人消费的 `media.organized`。用户通知使用纯文本，文件名和路径不会依赖 Telegram Markdown 转义。
 
 ```bash
-python tools/build_feature.py features/rename /tmp/rename-1.5.2.tpx \
+python tools/build_feature.py features/rename /tmp/rename-1.5.3.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

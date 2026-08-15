@@ -5,13 +5,20 @@ import yaml
 from telepiplex_plugin_sdk import FeatureRuntime, RuntimeContext
 
 from .context import runtime_context
+from .metadata_resolutions import MetadataResolutionStore
 from .service import SearchFeature
 
 
 def main(context: RuntimeContext) -> FeatureRuntime:
     config = yaml.safe_load(context.config_path.read_text(encoding="utf-8")) or {}
     runtime_context.configure(config)
-    feature = SearchFeature(config=config, host=context.host)
+    feature = SearchFeature(
+        config=config,
+        host=context.host,
+        metadata_resolution_store=MetadataResolutionStore(
+            context.state_path / "metadata_resolutions.db"
+        ),
+    )
     runtime = FeatureRuntime(
         manifest=context.manifest,
         token=context.token,

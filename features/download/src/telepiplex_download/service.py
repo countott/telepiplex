@@ -27,6 +27,7 @@ OPERATION_TERMINAL_STATES = {
 }
 _STORAGE_METHODS = {
     "get_file_info",
+    "get_file_info_batch",
     "get_file_info_by_id",
     "get_file_list",
     "create_directory",
@@ -137,6 +138,21 @@ class DownloadFeature:
         kwargs = payload.get("kwargs") or {}
         if not isinstance(args, list) or not isinstance(kwargs, dict):
             raise FeatureError("invalid_request", "storage args/kwargs are invalid")
+        if method == "get_file_info_batch":
+            paths = args[0] if len(args) == 1 else None
+            if not isinstance(paths, list) or not all(
+                isinstance(path, str) and path.strip()
+                for path in paths
+            ):
+                raise FeatureError(
+                    "invalid_request",
+                    "storage file info batch paths are invalid",
+                )
+            if len(paths) > 128:
+                raise FeatureError(
+                    "invalid_request",
+                    "storage file info batch exceeds 128 paths",
+                )
         value = await asyncio.to_thread(getattr(self.client, method), *args, **kwargs)
         return {"value": value}
 

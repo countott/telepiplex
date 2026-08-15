@@ -31,6 +31,8 @@ _FEATURE_LOG_LEVEL = re.compile(
     r"^\[[^\]\r\n]+\]\s+\[(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)\]\s+"
     r"\[[^\]\r\n]+\](?:\s|$)"
 )
+_FEATURE_LOG_READ_CHUNK_BYTES = 64 * 1024
+_FEATURE_LOG_MAX_PARSED_LINE_BYTES = 1024 * 1024
 
 
 class SupervisorError(RuntimeError):
@@ -226,10 +228,26 @@ class PluginSupervisor:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        process.log_tasks = [
-            asyncio.create_task(self._capture_logs(process, process.child.stdout, "stdout")),
-            asyncio.create_task(self._capture_logs(process, process.child.stderr, "stderr")),
-        ]
+        child = process.child
+        process.log_tasks = []
+        for stream, label in (
+            (child.stdout, "stdout"),
+            (child.stderr, "stderr"),
+        ):
+            task = asyncio.create_task(
+                self._capture_logs(process, stream, label),
+                name=f"feature-log:{process.instance_id}:{label}",
+            )
+            task.add_done_callback(
+                lambda completed, captured_child=child, captured_label=label:
+                self._log_capture_finished(
+                    process,
+                    captured_child,
+                    captured_label,
+                    completed,
+                )
+            )
+            process.log_tasks.append(task)
         process.client = RpcClient(process.socket_path, process.startup_token)
 
         loop = asyncio.get_running_loop()
@@ -263,10 +281,7 @@ class PluginSupervisor:
         raise SupervisorError("startup_timeout", last_error)
 
     async def _capture_logs(self, process: PluginProcess, stream, label: str):
-        while True:
-            line = await stream.readline()
-            if not line:
-                return
+        async for line in self._iter_stream_lines(stream):
             raw_text = line.decode("utf-8", errors="replace").rstrip().replace(
                 process.startup_token,
                 "***redacted***",
@@ -358,6 +373,90 @@ class PluginSupervisor:
                     },
                 },
             )
+
+    async def _iter_stream_lines(self, stream):
+        buffer = bytearray()
+        oversize_hash = None
+        oversize_bytes = 0
+        while True:
+            chunk = await stream.read(_FEATURE_LOG_READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            pending = chunk
+            while pending:
+                newline = pending.find(b"\n")
+                if oversize_hash is not None:
+                    if newline < 0:
+                        oversize_hash.update(pending)
+                        oversize_bytes += len(pending)
+                        pending = b""
+                        continue
+                    oversize_hash.update(pending[:newline])
+                    oversize_bytes += newline
+                    yield self._oversize_line(oversize_bytes, oversize_hash)
+                    oversize_hash = None
+                    oversize_bytes = 0
+                    pending = pending[newline + 1:]
+                    continue
+                if newline < 0:
+                    buffer.extend(pending)
+                    pending = b""
+                    if len(buffer) > _FEATURE_LOG_MAX_PARSED_LINE_BYTES:
+                        oversize_hash = hashlib.sha256()
+                        oversize_hash.update(buffer)
+                        oversize_bytes = len(buffer)
+                        buffer.clear()
+                    continue
+                buffer.extend(pending[:newline])
+                if len(buffer) > _FEATURE_LOG_MAX_PARSED_LINE_BYTES:
+                    digest = hashlib.sha256(buffer)
+                    yield self._oversize_line(len(buffer), digest)
+                else:
+                    yield bytes(buffer)
+                buffer.clear()
+                pending = pending[newline + 1:]
+        if oversize_hash is not None:
+            yield self._oversize_line(oversize_bytes, oversize_hash)
+        elif buffer:
+            yield bytes(buffer)
+
+    @staticmethod
+    def _oversize_line(byte_count: int, digest) -> bytes:
+        return (
+            "Feature output line omitted "
+            f"bytes={int(byte_count)} sha256={digest.hexdigest()}"
+        ).encode("utf-8")
+
+    def _log_capture_finished(
+        self,
+        process: PluginProcess,
+        child,
+        label: str,
+        task: asyncio.Task,
+    ) -> None:
+        if task.cancelled() or process.desired_stop or process.child is not child:
+            return
+        if child.returncode is not None:
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        process.last_error = (
+            f"Feature {label} capture stopped"
+            + (f": {type(error).__name__}" if error is not None else "")
+        )
+        self._log_feature_event(
+            process,
+            "feature_log_capture_stopped",
+            level=logging.ERROR,
+            stream=label,
+            error=process.last_error,
+        )
+        try:
+            child.terminate()
+        except ProcessLookupError:
+            pass
 
     @staticmethod
     def _captured_log_level(text: str, label: str) -> int:

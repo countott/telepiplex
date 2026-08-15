@@ -15,6 +15,27 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class Open115ClientCacheTest(unittest.TestCase):
+    def test_successful_copy_invalidates_file_info_cache(self):
+        from telepiplex_download.client import Open115Client
+
+        client = Open115Client({"access_token": "test"})
+        client._file_cache = {
+            "/source.mkv": {"file_id": "source"},
+            "/target": {"file_id": "target"},
+            "/target/source.mkv": None,
+        }
+        client._request = lambda *_args, **_kwargs: {
+            "state": True,
+            "code": 0,
+        }
+
+        copied = client.copy_file("/source.mkv", "/target")
+
+        self.assertTrue(copied)
+        self.assertEqual(client._file_cache, {})
+
+
 class FakeHost:
     def __init__(self):
         self.events = []
@@ -1164,6 +1185,33 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
             await self.feature.storage_capability({
                 "method": "__getattribute__",
                 "payload": {"args": ["access_token"]},
+            })
+
+    async def test_storage_capability_batches_bounded_file_info_paths(self):
+        calls = []
+
+        def get_file_info_batch(paths):
+            calls.append(list(paths))
+            return {
+                path: {"file_id": f"file-{index}", "file_category": "1"}
+                for index, path in enumerate(paths)
+            }
+
+        self.client.get_file_info_batch = get_file_info_batch
+        paths = [f"/Downloads/Show/episode-{index:03d}.mkv" for index in range(128)]
+
+        result = await self.feature.storage_capability({
+            "method": "get_file_info_batch",
+            "payload": {"args": [paths]},
+        })
+
+        self.assertEqual(calls, [paths])
+        self.assertEqual(len(result["value"]), 128)
+
+        with self.assertRaisesRegex(Exception, "batch exceeds"):
+            await self.feature.storage_capability({
+                "method": "get_file_info_batch",
+                "payload": {"args": [paths + ["/Downloads/overflow.mkv"]]},
             })
 
     async def test_completed_job_is_persistently_idempotent(self):
@@ -2363,17 +2411,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.0.14")
+        self.assertEqual(manifest["version"], "1.0.15")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.0.14")
+        self.assertEqual(project["project"]["version"], "1.0.15")
         self.assertEqual(
             project["project"]["dependencies"][0],
-            "telepiplex-plugin-sdk==1.3.1",
+            "telepiplex-plugin-sdk==1.3.2",
         )
-        self.assertIn("/tmp/download-1.0.14.tpx", readme)
-        self.assertNotIn("dist/download-1.0.14.tpx", readme)
+        self.assertIn("/tmp/download-1.0.15.tpx", readme)
+        self.assertNotIn("dist/download-1.0.15.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)

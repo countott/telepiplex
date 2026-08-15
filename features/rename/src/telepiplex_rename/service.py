@@ -25,7 +25,7 @@ from .query_recovery import recover_metadata_probe
 
 
 _STORAGE_METHODS = {
-    "get_file_info", "get_file_info_by_id", "get_file_list",
+    "get_file_info", "get_file_info_batch", "get_file_info_by_id", "get_file_list",
     "get_file_tree",
     "create_directory", "create_dir_recursive", "rename", "copy_file",
     "delete_single_file", "move_file", "is_directory", "get_files_from_dir",
@@ -35,6 +35,7 @@ _STORAGE_METHODS = {
 
 _STORAGE_STAGES = {
     "get_file_info": ("conflict_validation", "正在验证目标文件冲突。"),
+    "get_file_info_batch": ("conflict_validation", "正在批量验证文件身份与目标冲突。"),
     "get_file_info_by_id": ("planning", "正在读取文件身份。"),
     "get_file_list": ("planning", "正在构建整理计划。"),
     "get_file_tree": ("planning", "正在读取媒体文件树。"),
@@ -262,6 +263,67 @@ class StorageProxy:
         self.cancel_event = cancel_event
         self.on_stage = on_stage
         self.journal = journal
+        self._file_info_cache = {}
+
+    def get_file_info(self, path):
+        normalized = str(PurePosixPath(str(path)))
+        if normalized in self._file_info_cache:
+            return self._file_info_cache[normalized]
+        self._raise_if_cancelled()
+        self._report_stage("get_file_info", "cancel")
+        value = self._storage_call("get_file_info", [normalized], {})
+        self._file_info_cache[normalized] = value
+        self._raise_if_cancelled()
+        return value
+
+    def get_file_info_batch(self, paths):
+        normalized = []
+        seen = set()
+        for path in paths or []:
+            value = str(PurePosixPath(str(path)))
+            if value and value not in seen:
+                seen.add(value)
+                normalized.append(value)
+        missing = [
+            path for path in normalized
+            if path not in self._file_info_cache
+        ]
+        if missing:
+            self._raise_if_cancelled()
+            self._report_stage("get_file_info_batch", "cancel")
+            try:
+                for offset in range(0, len(missing), 128):
+                    chunk = missing[offset:offset + 128]
+                    values = self._storage_call(
+                        "get_file_info_batch",
+                        [chunk],
+                        {},
+                    )
+                    if not isinstance(values, dict):
+                        raise FeatureError(
+                            "invalid_response",
+                            "storage file info batch must return an object",
+                        )
+                    for path in chunk:
+                        self._file_info_cache[path] = values.get(path)
+            except (FeatureError, AttributeError, NotImplementedError) as exc:
+                if isinstance(exc, FeatureError) and exc.code not in {
+                    "method_not_allowed",
+                    "not_found",
+                    "unimplemented",
+                }:
+                    raise
+                for path in missing:
+                    self._file_info_cache[path] = self._storage_call(
+                        "get_file_info",
+                        [path],
+                        {},
+                    )
+            self._raise_if_cancelled()
+        return {
+            path: self._file_info_cache.get(path)
+            for path in normalized
+        }
 
     def __getattr__(self, method):
         if method not in _STORAGE_METHODS:
@@ -278,6 +340,7 @@ class StorageProxy:
             if method in {"create_directory", "create_dir_recursive"}:
                 existing = self._storage_call("get_file_info", [args[0]], {})
                 value = self._storage_call(method, list(args), kwargs)
+                self._file_info_cache.clear()
                 if not existing and value and self.journal is not None:
                     self.journal.mark_irreversible("directory_created")
                 self._raise_if_cancelled()
@@ -289,6 +352,7 @@ class StorageProxy:
                     "get_file_info", [source_path], {}
                 )
                 value = self._storage_call(method, list(args), kwargs)
+                self._file_info_cache.clear()
                 if value is True and self.journal is not None:
                     target_path = (
                         str(PurePosixPath(source_path).parent)
@@ -310,6 +374,11 @@ class StorageProxy:
                 return value
 
             value = self._storage_call(method, list(args), kwargs)
+            if method in {
+                "copy_file", "move_file", "move_file_detailed",
+                "delete_single_file",
+            }:
+                self._file_info_cache.clear()
             self._raise_if_cancelled()
             return value
 
@@ -389,6 +458,22 @@ class RenameFeature:
                 await self._restore_metadata_confirmation(
                     job["job_id"],
                     outcome,
+                )
+                return
+            if job.get("state") == "resolving_metadata":
+                payload = dict(outcome.get("event_payload") or {})
+                operation_id = str(payload.get("operation_id") or "")
+                if operation_id not in self.operations:
+                    await self._accept_event_operation(payload, job["job_id"])
+                owner = (
+                    int(payload.get("chat_id") or payload.get("user_id") or 0),
+                    int(payload.get("user_id") or 0),
+                )
+                self._spawn_metadata_confirmation(
+                    job["job_id"],
+                    outcome,
+                    owner,
+                    operation_id,
                 )
                 return
             if job.get("state") == "ready_metadata":
@@ -1223,67 +1308,212 @@ class RenameFeature:
                 raise FeatureError(
                     "invalid_state", "rename inventory batch is no longer active"
                 )
-        resolved = await self.host.call_capability(
-            "media.search",
-            "confirm_metadata",
-            {
-                "query": outcome.get("query") or "",
-                "probe": outcome.get("probe") or {},
-                "candidate_ref": candidate.get("ref") or "",
-            },
-            deadline=float(self.config.get("metadata_timeout") or 120),
-            idempotency_key=f"{job_id}:metadata:{candidate.get('ref') or index}",
-        )
-        if (
-            not isinstance(resolved, dict)
-            or resolved.get("status") not in {None, "resolved"}
-            or not isinstance(resolved.get("media_metadata"), dict)
-        ):
-            raise FeatureError(
-                "metadata_unresolved",
-                "confirmed metadata candidate could not be resolved",
-            )
-        event_payload["media_metadata"] = resolved["media_metadata"]
-        if isinstance(resolved.get("naming_metadata"), dict):
-            event_payload["naming_metadata"] = resolved["naming_metadata"]
-        if isinstance(resolved.get("presentation"), dict):
-            event_payload["_metadata_presentation"] = resolved[
-                "presentation"
-            ]
-        await self._publish_metadata_identity(event_payload, operation_id)
-        ready = {
+        resolving = {
             **outcome,
-            "event_payload": event_payload,
             "selected_candidate_ref": candidate.get("ref") or "",
+            "selected_candidate_index": index,
         }
         if self.jobs:
-            self.jobs.update(job_id, "ready_metadata", ready)
+            self.jobs.update(job_id, "resolving_metadata", resolving)
         running = await self._report_if_active(
             operation_id,
             state="running",
-            stage="inventory_batch" if is_inventory else "organizing",
-            status_text=(
-                "正在恢复存量媒体整理任务。"
-                if is_inventory
-                else "正在规划媒体目录。"
-            ),
+            stage="metadata_resolution",
+            status_text="已确认候选，正在读取精确媒体元数据。",
             control="cancel",
             details={},
         )
-        if is_inventory:
-            session["stage"] = "batch"
-            task = self.runtime.spawn(
-                self._run_inventory_batch(owner, operation_id),
-                task_id=f"rename-inventory-batch-{operation_id}",
-            )
-            self.operations[operation_id]["task"] = task
-        else:
-            self._spawn_organization(job_id, event_payload, operation_id)
+        self._spawn_metadata_confirmation(
+            job_id,
+            resolving,
+            owner,
+            operation_id,
+        )
         return {
             "actions": [],
             "session": {"state": "close"},
             "operation": running,
         }
+
+    def _spawn_metadata_confirmation(
+        self,
+        job_id: str,
+        outcome: dict,
+        owner: tuple[int, int],
+        operation_id: str,
+    ):
+        task_id = f"rename-metadata-{job_id}"
+        task = self.runtime.spawn(
+            self._complete_metadata_confirmation(
+                job_id,
+                dict(outcome),
+                owner,
+                operation_id,
+            ),
+            task_id=task_id,
+        )
+        if operation_id in self.operations:
+            self.operations[operation_id].update({
+                "task": task,
+                "task_id": task_id,
+                "job_id": job_id,
+            })
+        return task
+
+    async def _complete_metadata_confirmation(
+        self,
+        job_id: str,
+        outcome: dict,
+        owner: tuple[int, int],
+        operation_id: str,
+    ) -> None:
+        event_payload = dict(outcome.get("event_payload") or {})
+        selected_ref = str(outcome.get("selected_candidate_ref") or "")
+        selected_index = int(outcome.get("selected_candidate_index") or 0)
+        is_inventory = bool(
+            event_payload.get("_inventory_batch_id") == operation_id
+        )
+        try:
+            self._raise_if_cancelled(operation_id)
+            resolved = await self.host.call_capability(
+                "media.search",
+                "confirm_metadata",
+                {
+                    "resolution_id": outcome.get("resolution_id") or "",
+                    "query": outcome.get("query") or "",
+                    "probe": outcome.get("probe") or {},
+                    "candidate_ref": selected_ref,
+                },
+                deadline=float(self.config.get("metadata_timeout") or 120),
+                idempotency_key=f"{job_id}:metadata:{selected_ref or selected_index}",
+            )
+            self._raise_if_cancelled(operation_id)
+            if (
+                not isinstance(resolved, dict)
+                or resolved.get("status") not in {None, "resolved"}
+                or not isinstance(resolved.get("media_metadata"), dict)
+            ):
+                reason_code = str(
+                    (resolved or {}).get("reason_code")
+                    if isinstance(resolved, dict)
+                    else ""
+                ) or "metadata_unresolved"
+                raise FeatureError(
+                    reason_code,
+                    "confirmed metadata candidate could not be resolved",
+                )
+            event_payload["media_metadata"] = resolved["media_metadata"]
+            if isinstance(resolved.get("naming_metadata"), dict):
+                event_payload["naming_metadata"] = resolved[
+                    "naming_metadata"
+                ]
+            if isinstance(resolved.get("presentation"), dict):
+                event_payload["_metadata_presentation"] = resolved[
+                    "presentation"
+                ]
+            await self._publish_metadata_identity(event_payload, operation_id)
+            self._raise_if_cancelled(operation_id)
+            ready = {
+                **outcome,
+                "event_payload": event_payload,
+                "selected_candidate_ref": selected_ref,
+            }
+            if self.jobs:
+                self.jobs.update(job_id, "ready_metadata", ready)
+            await self._report_if_active(
+                operation_id,
+                state="running",
+                stage="inventory_batch" if is_inventory else "organizing",
+                status_text=(
+                    "正在恢复存量媒体整理任务。"
+                    if is_inventory
+                    else "正在规划媒体目录。"
+                ),
+                control="cancel",
+                details={},
+            )
+            if is_inventory:
+                session = self.inventory_sessions.get(owner)
+                if (
+                    not session
+                    or session.get("operation_id") != operation_id
+                    or session.get("current_job_id") != job_id
+                ):
+                    raise FeatureError(
+                        "invalid_state",
+                        "rename inventory batch is no longer active",
+                    )
+                session["stage"] = "batch"
+                task = self.runtime.spawn(
+                    self._run_inventory_batch(owner, operation_id),
+                    task_id=f"rename-inventory-batch-{operation_id}",
+                )
+                self.operations[operation_id]["task"] = task
+            else:
+                self._spawn_organization(job_id, event_payload, operation_id)
+        except (asyncio.CancelledError, OperationCancelled):
+            cancelled = {
+                **outcome,
+                "message": "用户已取消媒体候选确认。",
+            }
+            if self.jobs:
+                self.jobs.update(job_id, "cancelled", cancelled)
+            await self._report_if_active(
+                operation_id,
+                state="cancelled",
+                stage="metadata_resolution",
+                status_text="已取消媒体候选确认，未开始文件变更。",
+                control="",
+                details={},
+            )
+        except Exception as exc:
+            code = str(getattr(exc, "code", type(exc).__name__))
+            if _retryable_error(code):
+                retry = dict(outcome)
+                retry.pop("selected_candidate_ref", None)
+                retry.pop("selected_candidate_index", None)
+                if self.jobs:
+                    self.jobs.update(job_id, "awaiting_metadata", retry)
+                text, details = self._metadata_confirmation_view(
+                    job_id,
+                    retry,
+                )
+                await self._report_if_active(
+                    operation_id,
+                    state="awaiting_input",
+                    stage="metadata_confirmation",
+                    status_text=(
+                        "媒体来源暂时不可用，可重新选择候选重试。\n"
+                        + text
+                    ),
+                    control="exit",
+                    details=details,
+                )
+                return
+            failed = {
+                **outcome,
+                "error_code": code,
+                "message": _safe_error_detail(exc),
+            }
+            if self.jobs:
+                self.jobs.update(job_id, "failed", failed)
+            expired = code in {
+                "resolution_expired",
+                "resolution_not_found",
+                "resolution_id_required",
+            }
+            await self._report_if_active(
+                operation_id,
+                state="failed",
+                stage="metadata_resolution",
+                status_text=(
+                    "媒体候选确认已过期，请重新执行 rename 扫描。"
+                    if expired
+                    else f"媒体候选确认失败：{code}。"
+                ),
+                control="",
+                details={"error_code": code},
+            )
 
     @staticmethod
     def _metadata_confirmation_view(job_id: str, outcome: dict) -> tuple[str, dict]:
@@ -1394,6 +1624,7 @@ class RenameFeature:
     ) -> None:
         outcome = {
             "event_payload": dict(payload),
+            "resolution_id": str(resolved.get("resolution_id") or ""),
             "query": str(resolved.get("query") or ""),
             "probe": dict(resolved.get("probe") or {}),
             "candidates": list(resolved.get("candidates") or [])[:5],
@@ -1821,6 +2052,11 @@ class RenameFeature:
                 for key, value in file_results.items()
                 if key not in {"files", "warnings"}
             }
+            cleanup = file_results.get("cleanup")
+            cleanup_complete = not (
+                isinstance(cleanup, dict)
+                and cleanup.get("complete") is False
+            )
             event_payload = {
                 "job_id": job_id,
                 "user_id": user_id,
@@ -1849,6 +2085,7 @@ class RenameFeature:
                 "job_id": job_id,
                 "event_payload": event_payload,
                 "file_results": file_results,
+                "cleanup_complete": cleanup_complete,
             }
             if is_inventory:
                 outcome["inventory_batch_id"] = operation_id
@@ -2004,13 +2241,19 @@ class RenameFeature:
         if self.jobs:
             self.jobs.update(
                 job_id,
-                "completed" if outcome.get("organized") else "failed",
+                (
+                    "completed"
+                    if outcome.get("organized")
+                    and outcome.get("cleanup_complete", True)
+                    else "failed"
+                ),
                 outcome,
             )
 
     async def _finish_operation(self, job_id, outcome, operation_id):
         if outcome.get("organized"):
             event_payload = outcome["event_payload"]
+            cleanup_complete = outcome.get("cleanup_complete", True)
             if operation_id:
                 handoff = outcome.get("handoff_operation")
                 if not isinstance(handoff, dict):
@@ -2018,7 +2261,14 @@ class RenameFeature:
                         operation_id,
                         state="handed_off",
                         stage="handoff_plex",
-                        status_text="媒体整理完成，已交给 Plex 管理任务。",
+                        status_text=(
+                            "媒体整理完成，已交给 Plex 管理任务。"
+                            if cleanup_complete
+                            else (
+                                "媒体文件已移动，但源目录清理未完成；"
+                                "已交给 Plex，仍需检查源目录。"
+                            )
+                        ),
                         control="cancel",
                         next_plugin_id="sync",
                     )
@@ -2047,14 +2297,30 @@ class RenameFeature:
                             ).lstrip()
                             await self._report_operation(
                                 operation_id,
-                                state="completed",
-                                stage="completed",
+                                state=(
+                                    "completed"
+                                    if cleanup_complete
+                                    else "failed"
+                                ),
+                                stage=(
+                                    "completed"
+                                    if cleanup_complete
+                                    else "cleanup"
+                                ),
                                 status_text=(
                                     "媒体整理完成；Plex 管理未安装，"
                                     "已跳过后续处理。"
+                                    if cleanup_complete
+                                    else (
+                                        "媒体文件已移动，但源目录清理未完成；"
+                                        "Plex 管理未安装，仍需人工检查。"
+                                    )
                                 ),
                                 control="",
-                                details={"downstream_skipped": "sync"},
+                                details={
+                                    "downstream_skipped": "sync",
+                                    "cleanup_complete": cleanup_complete,
+                                },
                             )
                             if self.jobs:
                                 self.jobs.update(
@@ -2075,6 +2341,11 @@ class RenameFeature:
                             (
                                 "✅ 媒体整理已完成。\n"
                                 f"目标目录：{outcome.get('final_path') or ''}"
+                                if cleanup_complete
+                                else (
+                                    "⚠️ 媒体文件已移动，但源目录清理未完成。\n"
+                                    f"目标目录：{outcome.get('final_path') or ''}"
+                                )
                             ),
                             deadline=45,
                         )
@@ -2140,11 +2411,20 @@ class RenameFeature:
                 idempotency_key=f"{job_id}:rename-notice",
             )
         if self.jobs:
-            self.jobs.update(job_id, "completed", outcome)
+            self.jobs.update(
+                job_id,
+                (
+                    "completed"
+                    if outcome.get("cleanup_complete", True)
+                    else "failed"
+                ),
+                outcome,
+            )
         return {
             "accepted": True,
             "duplicate": True,
             "organized": bool(outcome.get("organized")),
+            "complete": bool(outcome.get("cleanup_complete", True)),
             "final_path": outcome.get("final_path"),
             "replayed": True,
         }

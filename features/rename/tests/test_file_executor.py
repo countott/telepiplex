@@ -235,6 +235,76 @@ def test_replay_accepts_verified_target_identity_without_mutation():
     assert journal.file_transitions[-1]["stage"] == "verified"
 
 
+def test_sixty_five_no_op_files_use_one_initial_batch_lookup():
+    class BatchStorage(StatefulStorage):
+        def __init__(self, files):
+            super().__init__(files=files)
+            self.batch_calls = []
+            self.individual_calls = []
+
+        def get_file_info_batch(self, paths):
+            self.batch_calls.append(tuple(paths))
+            return {
+                path: dict(self.files[path]) if path in self.files else None
+                for path in paths
+            }
+
+        def get_file_info(self, path):
+            self.individual_calls.append(path)
+            return super().get_file_info(path)
+
+    paths = [f"/TV/Veep/Veep S07E{index:02d}.mkv" for index in range(1, 66)]
+    storage = BatchStorage([(path, f"veep-{index}") for index, path in enumerate(paths)])
+    resolutions = [
+        _resolution(f"veep-{index}", path, path, "no_op")
+        for index, path in enumerate(paths)
+    ]
+
+    summary = execute_file_resolutions(
+        storage,
+        resolutions,
+        selected_root="/TV/Veep",
+    )
+
+    assert summary.canonical_no_ops == 65
+    assert len(storage.batch_calls) == 1
+    assert set(storage.batch_calls[0]) == set(paths)
+    assert storage.individual_calls == []
+
+
+def test_batch_snapshot_is_never_used_for_post_move_target_verification():
+    class BatchStorage(StatefulStorage):
+        def __init__(self, files):
+            super().__init__(files=files)
+            self.batch_calls = 0
+            self.individual_calls = []
+
+        def get_file_info_batch(self, paths):
+            self.batch_calls += 1
+            return {
+                path: dict(self.files[path]) if path in self.files else None
+                for path in paths
+            }
+
+        def get_file_info(self, path):
+            self.individual_calls.append(path)
+            return super().get_file_info(path)
+
+    source = "/Downloads/Veep.S07E01.mkv"
+    target = "/TV/Veep/Veep S07E01.mkv"
+    storage = BatchStorage([(source, "veep-1")])
+
+    summary = execute_file_resolutions(
+        storage,
+        [_resolution("veep-1", source, target, "rename_and_move")],
+        selected_root="/Downloads",
+    )
+
+    assert summary.organized_files == 1
+    assert storage.batch_calls == 1
+    assert storage.individual_calls[-1] == target
+
+
 def test_cleanup_deletes_only_freshly_verified_empty_directories_bottom_up():
     storage = StatefulStorage(
         files=[("/Downloads/Keep/unresolved.srt", "kept")],

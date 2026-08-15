@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import queue
 import sys
 import threading
 import time
 
 from .diagnostics import (
+    bounded_diagnostic_event,
+    bounded_diagnostic_value,
     build_diagnostic_event,
     infer_legacy_diagnostics,
     render_machine_event,
@@ -16,6 +19,8 @@ from .log_sanitizer import sanitize_log_text, sanitize_log_value
 
 
 FEATURE_DIAGNOSTIC_TRANSPORT_PREFIX = "@tpx-event-v1 "
+FEATURE_DIAGNOSTIC_MAX_LINE_BYTES = 32 * 1024
+FEATURE_DIAGNOSTIC_QUEUE_SIZE = 512
 _HANDLER_MARKER = "_telepiplex_sdk_handler"
 
 
@@ -34,7 +39,48 @@ class _FeatureDiagnosticTransportHandler(logging.Handler):
         self.stream = stream or sys.stdout
         self._sequence = 0
         self._lock = threading.Lock()
+        self._queue = queue.Queue(maxsize=FEATURE_DIAGNOSTIC_QUEUE_SIZE)
+        self._drained = threading.Event()
+        self._drained.set()
+        self._closed = False
+        self._writer = threading.Thread(
+            target=self._write_loop,
+            name="telepiplex-diagnostics-stdout",
+            daemon=True,
+        )
+        self._writer.start()
         setattr(self, _HANDLER_MARKER, True)
+
+    def _write_loop(self):
+        while True:
+            try:
+                line = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                if self._closed:
+                    return
+                continue
+            try:
+                if line is None:
+                    return
+                self.stream.write(line)
+                self.stream.flush()
+            except Exception as exc:
+                self._transport_failure(exc)
+            finally:
+                self._queue.task_done()
+                if self._queue.empty():
+                    self._drained.set()
+
+    @staticmethod
+    def _transport_failure(exc):
+        try:
+            sys.__stderr__.write(
+                "telepiplex Feature diagnostics transport failed: "
+                f"{type(exc).__name__}\n"
+            )
+            sys.__stderr__.flush()
+        except Exception:
+            pass
 
     def emit(self, record: logging.LogRecord):
         try:
@@ -75,20 +121,36 @@ class _FeatureDiagnosticTransportHandler(logging.Handler):
                 ),
                 sequence=sequence,
             )
-            self.stream.write(
+            event = bounded_diagnostic_event(
+                event,
+                max_line_bytes=FEATURE_DIAGNOSTIC_MAX_LINE_BYTES,
+                prefix=FEATURE_DIAGNOSTIC_TRANSPORT_PREFIX,
+            )
+            line = (
                 FEATURE_DIAGNOSTIC_TRANSPORT_PREFIX
                 + render_machine_event(event)
                 + "\n"
             )
-            self.stream.flush()
-        except Exception as exc:
+            self._drained.clear()
             try:
-                sys.__stderr__.write(
-                    f"telepiplex Feature diagnostics transport failed: {type(exc).__name__}\n"
-                )
-                sys.__stderr__.flush()
-            except Exception:
+                self._queue.put_nowait(line)
+            except queue.Full:
+                if self._queue.empty():
+                    self._drained.set()
+        except Exception as exc:
+            self._transport_failure(exc)
+
+    def flush(self):
+        self._drained.wait(timeout=1)
+
+    def close(self):
+        if not self._closed:
+            self._closed = True
+            try:
+                self._queue.put_nowait(None)
+            except queue.Full:
                 pass
+        super().close()
 
 
 def configure_feature_logging(context) -> logging.Logger:
@@ -139,7 +201,7 @@ def log_dispatch_start(method: str, key: str, params: dict):
                 "input": {
                     "method": str(method),
                     "handler": str(key),
-                    "params": params,
+                    "params": bounded_diagnostic_value(params),
                 },
             },
         },
@@ -156,7 +218,7 @@ def log_dispatch_finish(method: str, key: str, result: dict, *, duration_ms=None
                 "status": "completed",
                 "duration_ms": duration_ms,
                 "input": {"method": str(method), "handler": str(key)},
-                "output": {"result": result},
+                "output": {"result": bounded_diagnostic_value(result)},
             },
         },
     )

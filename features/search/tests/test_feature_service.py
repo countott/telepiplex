@@ -3561,6 +3561,8 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "English Title",
         )
         self.assertEqual(resolved["naming_metadata"]["source"], "search-live")
+        self.assertNotIn("source_queries", resolved)
+        self.assertNotIn("evidence", resolved)
         self.assertEqual(self.host.calls, [])
 
         async def ambiguous_planner(_raw_query, plan_id):
@@ -3621,7 +3623,10 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_metadata_probe_does_not_choose_between_same_type_works(self):
+        planner_calls = []
+
         async def series_planner(_raw_query, plan_id):
+            planner_calls.append(plan_id)
             first = deepcopy(series_ranked_search_plan()["candidates"][0])
             second = deepcopy(first)
             first["candidate_key"] = "douban:series:1"
@@ -3652,6 +3657,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         })
 
         self.assertEqual(ambiguous["status"], "confirmation_required")
+        self.assertTrue(ambiguous["resolution_id"])
         self.assertEqual(
             [item["title"] for item in ambiguous["candidates"]],
             ["剧集甲", "剧集乙"],
@@ -3661,14 +3667,26 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "payload": {
                 "query": "同名剧集",
                 "probe": ambiguous["probe"],
+                "resolution_id": ambiguous["resolution_id"],
                 "candidate_ref": ambiguous["candidates"][1]["ref"],
             },
         })
         self.assertEqual(confirmed["status"], "resolved")
+        self.assertEqual(len(planner_calls), 1)
         self.assertEqual(
             confirmed["media_metadata"]["identity"]["chinese_title"],
             "剧集乙",
         )
+        for _index in range(100):
+            replay = await self.feature.metadata_capability({
+                "method": "confirm_metadata",
+                "payload": {
+                    "resolution_id": ambiguous["resolution_id"],
+                    "candidate_ref": ambiguous["candidates"][1]["ref"],
+                },
+            })
+            self.assertEqual(replay, confirmed)
+        self.assertEqual(len(planner_calls), 1)
 
     async def test_metadata_probe_conflict_fails_without_rewriting_identity(self):
         async def movie_planner(_raw_query, plan_id):
@@ -3929,12 +3947,12 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "1.11.1")
+        self.assertEqual(manifest["version"], "1.11.2")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertEqual(project["project"]["version"], "1.11.1")
+        self.assertEqual(project["project"]["version"], "1.11.2")
         self.assertEqual(
             project["project"]["dependencies"][0],
-            "telepiplex-plugin-sdk==1.3.1",
+            "telepiplex-plugin-sdk==1.3.2",
         )
 
     def test_default_config_enables_free_and_configured_sources(self):
@@ -3965,14 +3983,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.11.1.tpx", source)
+        self.assertIn("/tmp/search-1.11.2.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-1.11.1.tpx", source)
+        self.assertNotIn("dist/search-1.11.2.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

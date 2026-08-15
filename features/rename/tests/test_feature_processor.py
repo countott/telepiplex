@@ -118,6 +118,13 @@ class CleanupFailureStorage(FakeStorage):
         return path != "/Downloads/Release"
 
 
+class EmptyAfterMoveStorage(FakeStorage):
+    def get_file_list(self, params):
+        if self.moved and params.get("cid") == "root":
+            return []
+        return super().get_file_list(params)
+
+
 class SecondMoveFailureStorage(FakeStorage):
     def move_file(self, source, target):
         if len(self.moved) >= 1:
@@ -1220,7 +1227,7 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertEqual(storage.deleted, [])
         self.assertIn("目标冲突 1", result.message)
 
-    def test_nonempty_download_root_is_reported_retained_after_movie_organization(self):
+    def test_nonempty_download_root_is_retained_but_not_reported_success(self):
         storage = CleanupFailureStorage([
             {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1_000_000},
         ])
@@ -1233,8 +1240,9 @@ class RenamingProcessorTest(unittest.TestCase):
         result = process_generic_media(event)
 
         self.assertTrue(result.handled)
-        self.assertTrue(result.message.startswith("📂"))
+        self.assertTrue(result.message.startswith("⚠️"))
         self.assertIn("源目录删除 0，保留 1", result.message)
+        self.assertFalse(result.file_results["cleanup"]["complete"])
         self.assertNotIn("/Downloads/Release", storage.deleted)
 
     @patch(
@@ -1662,7 +1670,7 @@ class RenamingProcessorTest(unittest.TestCase):
 
         result = process_tvdb_episode(event)
 
-        self.assertTrue(result.message.startswith("📂"))
+        self.assertTrue(result.message.startswith("⚠️"))
         self.assertIn("保留 1", result.message)
         self.assertNotIn("sample.mp4", storage.deleted)
 
@@ -1702,7 +1710,7 @@ class RenamingProcessorTest(unittest.TestCase):
 
         result = process_tvdb_episode(event)
 
-        self.assertTrue(result.message.startswith("📂"))
+        self.assertTrue(result.message.startswith("⚠️"))
         ai_mock.assert_not_called()
         self.assertIn("保留 1", result.message)
         self.assertNotIn(
@@ -1866,9 +1874,9 @@ class FakeRuntime:
         return task
 
     async def wait(self):
-        tasks = list(self.tasks.values())
-        self.tasks.clear()
-        if tasks:
+        while self.tasks:
+            tasks = list(self.tasks.values())
+            self.tasks.clear()
             await asyncio.gather(*tasks)
 
 
@@ -2162,6 +2170,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     if self.resolve_calls == 1:
                         return {
                             "status": "confirmation_required",
+                            "resolution_id": "resolution-inventory-1",
                             "query": payload["query"],
                             "probe": payload["probe"],
                             "candidates": [{
@@ -2567,6 +2576,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 if capability == "media.search" and method == "resolve_metadata":
                     return {
                         "status": "confirmation_required",
+                        "resolution_id": "resolution-ambiguous-1",
                         "query": payload["query"],
                         "probe": payload["probe"],
                         "candidates": [{
@@ -2688,6 +2698,10 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             await restored_runtime.wait()
 
             self.assertEqual(host.confirm_payload["candidate_ref"], "douban:2")
+            self.assertEqual(
+                host.confirm_payload["resolution_id"],
+                "resolution-ambiguous-1",
+            )
             identity_milestones = [
                 item
                 for item in host.milestones
@@ -2701,6 +2715,201 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 restored.jobs.get("telegram:219358366")["state"],
                 "completed",
+            )
+
+    async def test_metadata_candidate_callback_returns_before_blocked_search_and_cancel_stays_responsive(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        class BlockingConfirmHost(FakeHost):
+            def __init__(self):
+                super().__init__()
+                self.confirm_started = asyncio.Event()
+
+            async def call_capability(
+                self, capability, method, payload, **kwargs
+            ):
+                if capability == "media.search" and method == "resolve_metadata":
+                    return {
+                        "status": "confirmation_required",
+                        "resolution_id": "resolution-blocked",
+                        "query": payload["query"],
+                        "probe": payload["probe"],
+                        "candidates": [{
+                            "ref": "douban:block",
+                            "title": "阻塞候选",
+                            "original_title": "Blocked Candidate",
+                            "year": "2024",
+                            "countries": ["美国"],
+                            "media_type": "movie",
+                        }],
+                    }
+                if capability == "media.search" and method == "confirm_metadata":
+                    self.confirm_started.set()
+                    await asyncio.Event().wait()
+                return await super().call_capability(
+                    capability, method, payload, **kwargs
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = BlockingConfirmHost()
+            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
+            feature = RenameFeature(
+                config={
+                    "unorganized_path": "/Unorganized",
+                    "storage_timeout": 3,
+                    "metadata_timeout": 120,
+                },
+                host=host,
+                jobs=jobs,
+            )
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+            accepted = await feature.download_completed({
+                "event_id": "event-blocked-confirm",
+                "payload": {
+                    "job_id": "job-blocked-confirm",
+                    "selected_path": "/Movies",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "download_root": "/Downloads/Blocked.2024.mkv",
+                    "final_path": "/Downloads/Blocked.2024.mkv",
+                    "resource_name": "Blocked.2024.mkv",
+                    "operation_id": "op-blocked-confirm",
+                    "operation_revision": 2,
+                    "file_tree": [{
+                        "name": "Blocked.2024.mkv",
+                        "relative_path": "Blocked.2024.mkv",
+                        "path": "/Downloads/Blocked.2024.mkv",
+                        "is_dir": False,
+                        "size": 1000,
+                    }],
+                },
+            })
+            await runtime.wait()
+            callback_data = host.reports[-1]["details"]["keyboard"][0][0][
+                "callback_data"
+            ]
+
+            callback_result = await asyncio.wait_for(
+                feature.callback({
+                    "chat_id": 10,
+                    "user_id": 123,
+                    "payload": callback_data.removeprefix("rename:"),
+                }),
+                timeout=1,
+            )
+            await asyncio.wait_for(host.confirm_started.wait(), timeout=1)
+
+            self.assertEqual(callback_result["operation"]["state"], "running")
+            self.assertEqual(
+                callback_result["operation"]["stage"],
+                "metadata_resolution",
+            )
+            self.assertEqual(
+                jobs.get("job-blocked-confirm")["state"],
+                "resolving_metadata",
+            )
+            cancelled = await asyncio.wait_for(
+                feature.operation_control({
+                    "operation_id": "op-blocked-confirm",
+                    "action": "cancel",
+                    "revision": callback_result["operation"]["revision"],
+                }),
+                timeout=1,
+            )
+            await runtime.wait()
+
+            self.assertEqual(cancelled["operation"]["state"], "cancelling")
+            self.assertEqual(host.reports[-1]["state"], "cancelled")
+            self.assertEqual(jobs.get("job-blocked-confirm")["state"], "cancelled")
+            self.assertEqual(host.storage.renamed, [])
+            self.assertEqual(host.storage.moved, [])
+
+    async def test_resolving_metadata_job_resumes_after_feature_restart(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        class RestartHost(FakeHost):
+            async def call_capability(
+                self, capability, method, payload, **kwargs
+            ):
+                if capability == "media.search" and method == "confirm_metadata":
+                    self.confirm_payload = payload
+                    return {
+                        "status": "resolved",
+                        "media_metadata": movie_contract(),
+                        "naming_metadata": {
+                            "source": "search",
+                            "media_type": "movie",
+                            "chinese_title": "中文电影",
+                            "english_title": "English Movie",
+                            "year": "2024",
+                        },
+                    }
+                return await super().call_capability(
+                    capability, method, payload, **kwargs
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
+            self.assertTrue(jobs.claim("job-restart-resolution"))
+            jobs.update("job-restart-resolution", "resolving_metadata", {
+                "resolution_id": "resolution-after-restart",
+                "query": "English Movie 2024",
+                "probe": {"content_shape": "movie", "video_count": 1},
+                "candidates": [{
+                    "ref": "douban:restart",
+                    "title": "中文电影",
+                    "original_title": "English Movie",
+                    "year": "2024",
+                    "media_type": "movie",
+                }],
+                "selected_candidate_ref": "douban:restart",
+                "selected_candidate_index": 0,
+                "event_payload": {
+                    "job_id": "job-restart-resolution",
+                    "selected_path": "/Movies",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "download_root": "/Downloads/Movie.2024.mkv",
+                    "final_path": "/Downloads/Movie.2024.mkv",
+                    "resource_name": "Movie.2024.mkv",
+                    "operation_id": "op-restart-resolution",
+                    "operation_revision": 2,
+                    "file_tree": [{
+                        "name": "Movie.2024.mkv",
+                        "relative_path": "Movie.2024.mkv",
+                        "path": "/Downloads/Movie.2024.mkv",
+                        "is_dir": False,
+                        "file_id": "1",
+                        "size": 1000,
+                    }],
+                },
+            })
+            host = RestartHost()
+            restored = RenameFeature(
+                config={
+                    "unorganized_path": "/Unorganized",
+                    "storage_timeout": 3,
+                },
+                host=host,
+                jobs=RenameJobStore(Path(tmpdir) / "jobs.db"),
+            )
+            runtime = FakeRuntime()
+
+            restored.bind_runtime(runtime)
+            await runtime.wait()
+
+            self.assertEqual(
+                host.confirm_payload["resolution_id"],
+                "resolution-after-restart",
+            )
+            self.assertEqual(
+                restored.jobs.get("job-restart-resolution")["state"],
+                "completed",
+            )
+            self.assertEqual(
+                host.storage.renamed[0][0],
+                "/Downloads/Movie.2024.mkv",
             )
 
     async def test_resume_durable_job_defers_transient_failure(self):
@@ -3352,7 +3561,9 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_completed_rename_skips_plex_when_sync_is_inactive(self):
-        host = FakeHost()
+        host = FakeHost(EmptyAfterMoveStorage([
+            {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
+        ]))
 
         async def reject_missing_target(operation):
             host.reports.append(operation)
@@ -3698,30 +3909,56 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("整理结果", host.notifications[0][1])
         self.assertNotIn("`", host.notifications[0][1])
 
-    async def test_selected_root_cleanup_failure_does_not_block_organized_event(self):
-        host = FakeHost(CleanupFailureStorage([
-            {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
-        ]))
-        feature = RenameFeature(
-            config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
-            host=host,
-        )
-        runtime = FakeRuntime()
-        feature.bind_runtime(runtime)
+    async def test_cleanup_failure_publishes_verified_target_but_is_not_success(self):
+        from telepiplex_rename.jobs import RenameJobStore
 
-        await feature.download_completed({
-            "event_id": "event-cleanup-failed",
-            "payload": {
-                "job_id": "job-cleanup-failed", "selected_path": "/Movies",
-                "user_id": 123, "final_path": "/Downloads/Release",
-                "resource_name": "Movie.2024", "media_metadata": movie_contract(),
-            },
-        })
-        await runtime.wait()
+        class EmptyDeleteFailureStorage(CleanupFailureStorage):
+            def get_file_list(self, params):
+                if self.moved and params.get("cid") == "root":
+                    return []
+                return super().get_file_list(params)
 
-        self.assertEqual(len(host.events), 1)
-        self.assertEqual(host.events[0][0], "media.organized")
-        self.assertIn("整理结果", host.notifications[0][1])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = FakeHost(EmptyDeleteFailureStorage([
+                {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
+            ]))
+            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
+            feature = RenameFeature(
+                config={
+                    "unorganized_path": "/Unorganized",
+                    "storage_timeout": 3,
+                },
+                host=host,
+                jobs=jobs,
+            )
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+
+            await feature.download_completed({
+                "event_id": "event-cleanup-failed",
+                "payload": {
+                    "job_id": "job-cleanup-failed",
+                    "selected_path": "/Movies",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "operation_id": "op-cleanup-failed",
+                    "operation_revision": 2,
+                    "final_path": "/Downloads/Release",
+                    "resource_name": "Movie.2024",
+                    "media_metadata": movie_contract(),
+                },
+            })
+            await runtime.wait()
+
+            self.assertEqual(len(host.events), 1)
+            self.assertEqual(host.events[0][0], "media.organized")
+            self.assertTrue(host.notifications[0][1].startswith("⚠️"))
+            self.assertEqual(jobs.get("job-cleanup-failed")["state"], "failed")
+            stage_milestone = next(
+                item for item in host.milestones
+                if item["mode"] == "stage"
+            )
+            self.assertTrue(stage_milestone["text"].startswith("⚠️"))
 
     async def test_delivery_replay_does_not_repeat_destructive_storage_operations(self):
         from telepiplex_rename.jobs import RenameJobStore
@@ -3756,7 +3993,14 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         class LostAcceptAckHost(FakeHost):
             def __init__(self):
-                super().__init__()
+                super().__init__(EmptyAfterMoveStorage([
+                    {
+                        "fn": "Movie.2024.mkv",
+                        "fid": "1",
+                        "fc": "1",
+                        "fs": 1000,
+                    },
+                ]))
                 self.report_attempts = 0
 
             async def report_operation(self, operation):
@@ -4057,10 +4301,10 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.5.2")
+        self.assertEqual(manifest["version"], "1.5.3")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertIn('version = "1.5.2"', project)
-        self.assertIn('telepiplex-plugin-sdk==1.3.1', project)
+        self.assertIn('version = "1.5.3"', project)
+        self.assertIn('telepiplex-plugin-sdk==1.3.2', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
         manifest = yaml.safe_load(
@@ -4075,8 +4319,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.5.2.tpx", source)
-        self.assertNotIn("dist/rename-1.5.2.tpx", source)
+        self.assertIn("/tmp/rename-1.5.3.tpx", source)
+        self.assertNotIn("dist/rename-1.5.3.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

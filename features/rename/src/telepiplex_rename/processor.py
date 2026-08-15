@@ -37,6 +37,7 @@ from .subtitles import (
 from .file_executor import (
     cleanup_source_directories,
     execute_file_resolutions,
+    prefetch_file_info,
 )
 from .file_facts import build_file_facts, parse_file_evidence
 from .file_plan import normalize_storage_path, plan_file_resolutions
@@ -157,6 +158,18 @@ def process_file_first_media(
     storage = _storage(event)
     file_tree = _event_file_tree(event)
     root_path = event.download_root or event.final_path
+    missing_paths = []
+    for node in file_tree:
+        if not node.get("is_dir") and not (
+            node.get("source_id") or node.get("file_id") or node.get("fid")
+        ):
+            missing_paths.append(
+                str(node.get("path") or "").strip() or (
+                    f"{str(root_path).rstrip('/')}/"
+                    f"{str(node.get('relative_path') or node.get('name') or '').strip('/')}"
+                )
+            )
+    missing_info = prefetch_file_info(storage, missing_paths)
     enriched_tree = []
     for node in file_tree:
         enriched = dict(node)
@@ -169,7 +182,7 @@ def process_file_first_media(
                 f"{str(root_path).rstrip('/')}/"
                 f"{str(enriched.get('relative_path') or enriched.get('name') or '').strip('/')}"
             )
-            info = storage.get_file_info(absolute_path)
+            info = missing_info.get(normalize_storage_path(absolute_path))
             if isinstance(info, dict):
                 enriched["file_id"] = str(
                     info.get("file_id") or info.get("fid") or ""
@@ -197,6 +210,7 @@ def process_file_first_media(
     identities = {}
     operation_by_source = {}
     existing_targets = {}
+    prepared_operations = []
     for operation in operations or []:
         source_path = normalize_storage_path(operation.get("source_path"))
         fact = facts_by_path.get(source_path)
@@ -216,7 +230,13 @@ def process_file_first_media(
         targets[fact.source_id] = target_path
         identities[fact.source_id] = dict(work_identity or {})
         operation_by_source[fact.source_id] = operation
-        target_info = storage.get_file_info(target_path)
+        prepared_operations.append((target_path, operation))
+    target_info_by_path = prefetch_file_info(
+        storage,
+        [target_path for target_path, _operation in prepared_operations],
+    )
+    for target_path, _operation in prepared_operations:
+        target_info = target_info_by_path.get(target_path)
         if isinstance(target_info, dict):
             existing_targets[target_path] = target_info
 
@@ -813,8 +833,13 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
     kept = int(file_first.get("kept_unresolved") or 0)
     cleanup = file_first.get("cleanup") or {}
     cleanup_failed = int(cleanup.get("failed_directories") or 0)
+    cleanup_incomplete = cleanup.get("complete") is False
     final_path = rename_plan["target_root"] if successful else event.final_path
-    prefix = "📂" if not conflicts and not failed and not cleanup_failed else "⚠️"
+    prefix = (
+        "📂"
+        if not conflicts and not failed and not cleanup_incomplete
+        else "⚠️"
+    )
     message = (
         f"{prefix} 媒体整理结果：`{rename_plan['series_name'] or rename_plan['target_root'].split('/')[-1]}`\n"
         f"已整理 {file_first.get('organized_files', 0)}，"
@@ -937,8 +962,13 @@ def process_generic_media(event: DownloadCompletedEvent) -> PostDownloadResult:
     kept = int(file_first.get("kept_unresolved") or 0)
     cleanup = file_first.get("cleanup") or {}
     cleanup_failed = int(cleanup.get("failed_directories") or 0)
+    cleanup_incomplete = cleanup.get("complete") is False
     final_path = target_path if successful else event.final_path
-    prefix = "📂" if not conflicts and not failed and not cleanup_failed else "⚠️"
+    prefix = (
+        "📂"
+        if not conflicts and not failed and not cleanup_incomplete
+        else "⚠️"
+    )
     message = (
         f"{prefix} 电影整理结果：`{plan.file_name}`\n"
         f"主视频依据：{selection_reason}\n"

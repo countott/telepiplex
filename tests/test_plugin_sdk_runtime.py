@@ -6,6 +6,8 @@ import logging
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -178,6 +180,205 @@ class FeatureSdkRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["facts"]["output"]["count"], 38)
         self.assertIn("***redacted***", event["event"]["message"])
         self.assertNotIn("secret-value", output.getvalue())
+
+    def test_feature_logging_bounds_large_dispatch_results_before_stdout(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from telepiplex_plugin_sdk.logging_utils import (
+            configure_feature_logging,
+            log_dispatch_finish,
+        )
+
+        output = io.StringIO()
+        context = SimpleNamespace(
+            manifest={"plugin_id": "search", "version": "1.11.2"},
+            config_path=Path("/config/plugins/search/config.yaml"),
+            state_path=Path("/config/plugins/search/state"),
+        )
+        environment = {
+            "TPX_LOG_LEVEL": "info",
+            "TPX_LOG_SESSION_ID": "HOST-LARGE-RESULT",
+            "TPX_INSTANCE_ID": "search@1.11.2-large",
+        }
+        with patch.dict(os.environ, environment, clear=False), contextlib.redirect_stdout(output):
+            configure_feature_logging(context)
+            log_dispatch_finish(
+                "capability.call",
+                "media.search:resolve_metadata",
+                {"payload": "x" * 100_000, "items": list(range(500))},
+                duration_ms=12.5,
+            )
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+
+        transport_lines = [
+            line for line in output.getvalue().splitlines()
+            if line.startswith("@tpx-event-v1 ")
+        ]
+        self.assertTrue(transport_lines)
+        self.assertLessEqual(
+            max(len((line + "\n").encode("utf-8")) for line in transport_lines),
+            32 * 1024,
+        )
+        completed = next(
+            json.loads(line.removeprefix("@tpx-event-v1 "))
+            for line in transport_lines
+            if json.loads(line.removeprefix("@tpx-event-v1 "))["event"]["name"]
+            == "feature.dispatch.completed"
+        )
+        summary = completed["facts"]["output"]["result"]
+        self.assertEqual(summary["_diagnostic_summary"]["type"], "dict")
+        self.assertGreater(summary["_diagnostic_summary"]["bytes"], 100_000)
+
+    def test_feature_diagnostic_emit_never_waits_for_a_blocked_stdout_pipe(self):
+        from types import SimpleNamespace
+
+        from telepiplex_plugin_sdk.logging_utils import (
+            _FeatureDiagnosticTransportHandler,
+        )
+
+        release = threading.Event()
+
+        class BlockingStream:
+            def write(self, _value):
+                release.wait(timeout=1)
+
+            def flush(self):
+                return None
+
+        context = SimpleNamespace(
+            manifest={"plugin_id": "rename", "version": "1.5.3"},
+        )
+        handler = _FeatureDiagnosticTransportHandler(
+            context,
+            stream=BlockingStream(),
+        )
+        record = logging.LogRecord(
+            "telepiplex.rename",
+            logging.INFO,
+            __file__,
+            1,
+            "pipe backpressure test",
+            (),
+            None,
+        )
+
+        started = time.monotonic()
+        handler.emit(record)
+        elapsed = time.monotonic() - started
+        release.set()
+        handler.flush()
+        handler.close()
+
+        self.assertLess(elapsed, 0.1)
+
+    def test_two_thousand_large_diagnostics_cannot_apply_pipe_backpressure(self):
+        from types import SimpleNamespace
+
+        from telepiplex_plugin_sdk.logging_utils import (
+            FEATURE_DIAGNOSTIC_QUEUE_SIZE,
+            _FeatureDiagnosticTransportHandler,
+        )
+
+        release = threading.Event()
+        writes = []
+
+        class BlockingStream:
+            def write(self, value):
+                release.wait(timeout=5)
+                writes.append(value)
+
+            def flush(self):
+                return None
+
+        handler = _FeatureDiagnosticTransportHandler(
+            SimpleNamespace(
+                manifest={"plugin_id": "search", "version": "1.11.2"},
+            ),
+            stream=BlockingStream(),
+        )
+        record = logging.LogRecord(
+            "telepiplex.search",
+            logging.INFO,
+            __file__,
+            1,
+            "large dispatch result summarized before transport",
+            (),
+            None,
+        )
+        record.event_name = "feature.dispatch.completed"
+        record.diagnostic_fields = {
+            "stage": "dispatch",
+            "status": "completed",
+            "output": {
+                "result": {
+                    "_diagnostic_summary": {
+                        "type": "dict",
+                        "bytes": 100_000,
+                        "keys": 25,
+                    },
+                },
+            },
+        }
+
+        started = time.monotonic()
+        try:
+            for _index in range(2_000):
+                handler.emit(record)
+            elapsed = time.monotonic() - started
+
+            self.assertLess(elapsed, 5.0)
+            self.assertLessEqual(
+                handler._queue.qsize(),
+                FEATURE_DIAGNOSTIC_QUEUE_SIZE,
+            )
+        finally:
+            release.set()
+            handler.flush()
+            handler.close()
+        self.assertTrue(writes)
+
+    def test_diagnostic_writer_exits_after_close_even_when_queue_was_full(self):
+        from types import SimpleNamespace
+
+        from telepiplex_plugin_sdk.logging_utils import (
+            FEATURE_DIAGNOSTIC_QUEUE_SIZE,
+            _FeatureDiagnosticTransportHandler,
+        )
+
+        release = threading.Event()
+
+        class BlockingStream:
+            def write(self, _value):
+                release.wait(timeout=5)
+
+            def flush(self):
+                return None
+
+        handler = _FeatureDiagnosticTransportHandler(
+            SimpleNamespace(
+                manifest={"plugin_id": "search", "version": "1.11.2"},
+            ),
+            stream=BlockingStream(),
+        )
+        record = logging.LogRecord(
+            "telepiplex.search",
+            logging.INFO,
+            __file__,
+            1,
+            "diagnostic queue close",
+            (),
+            None,
+        )
+        for _index in range(FEATURE_DIAGNOSTIC_QUEUE_SIZE + 100):
+            handler.emit(record)
+
+        handler.close()
+        release.set()
+        handler._writer.join(timeout=2)
+
+        self.assertFalse(handler._writer.is_alive())
 
     async def test_message_dispatch_uses_session_handler(self):
         from app.runtime.plugin_rpc import RpcClient

@@ -81,7 +81,7 @@ class RenameJobStore:
             rows = db.execute(
                 "SELECT job_id FROM rename_jobs "
                 "WHERE state IN ("
-                "'awaiting_metadata', 'ready_metadata', "
+                "'awaiting_metadata', 'resolving_metadata', 'ready_metadata', "
                 "'processed', 'published'"
                 ") "
                 "ORDER BY updated_at"

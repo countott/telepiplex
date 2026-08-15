@@ -11,7 +11,10 @@ from app.runtime.capability_router import CapabilityRouter, RoutingError
 from app.runtime.event_journal import EventJournal
 from app.runtime.interaction_coordinator import InteractionError
 from app.runtime.plugin_manifest import PluginManifest
-from telepiplex_plugin_sdk.diagnostics import bind_diagnostic_context
+from telepiplex_plugin_sdk.diagnostics import (
+    bind_diagnostic_context,
+    bounded_diagnostic_value,
+)
 
 
 class BrokerError(RuntimeError):
@@ -129,7 +132,9 @@ class RuntimeBroker:
                 diagnostic_fields={
                     "stage": "rpc",
                     "status": "received",
-                    "input": {"params": params},
+                    "input": {
+                        "params": bounded_diagnostic_value(params),
+                    },
                     "transport": transport,
                 },
             )
@@ -154,7 +159,9 @@ class RuntimeBroker:
                     "status": "completed",
                     "duration_ms": (time.monotonic_ns() - started_ns) / 1_000_000,
                     "transport": transport,
-                    "output": {"result": result},
+                    "output": {
+                        "result": bounded_diagnostic_value(result),
+                    },
                 },
             )
             response = {"type": "response", "id": request_id, "ok": True, "result": result}

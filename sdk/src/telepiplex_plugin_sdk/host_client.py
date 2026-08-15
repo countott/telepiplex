@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 
 from .types import FeatureError
-from .diagnostics import outbound_diagnostic_context
+from .diagnostics import bounded_diagnostic_value, outbound_diagnostic_context
 
 
 class HostClient:
@@ -163,7 +163,9 @@ class HostClient:
                 "diagnostic_fields": {
                     "stage": "rpc",
                     "status": "started",
-                    "input": {"params": params},
+                    "input": {
+                        "params": bounded_diagnostic_value(params),
+                    },
                     "transport": transport,
                 },
             },
@@ -249,7 +251,9 @@ class HostClient:
                         "status": "completed",
                         "duration_ms": (time.monotonic_ns() - started_ns) / 1_000_000,
                         "transport": transport,
-                        "output": {"result": result},
+                        "output": {
+                            "result": bounded_diagnostic_value(result),
+                        },
                     },
                 },
             )

@@ -277,7 +277,7 @@ def test_one_failed_episode_does_not_stop_the_next_episode():
             "deleted_directories": 0,
             "retained_directories": 1,
             "failed_directories": 0,
-            "complete": True,
+            "complete": False,
             "deleted_paths": [],
             "failures": [],
         },
