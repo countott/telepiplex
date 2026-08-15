@@ -18,7 +18,7 @@ def main(context: RuntimeContext) -> FeatureRuntime:
         manifest=context.manifest,
         token=context.token,
         capabilities={"library.sync": feature.management_capability},
-        events={"media.organized": feature.media_organized},
+        events={},
         commands={
             "sync": feature.command,
             "scan": feature.command,

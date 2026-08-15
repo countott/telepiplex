@@ -12,7 +12,7 @@ from telepiplex_plugin_sdk.media_metadata import attach_media_metadata
 
 from telepiplex_rename.content_probe import build_metadata_probe
 from telepiplex_rename.ai import recover_query_with_ai
-from telepiplex_rename.models import DownloadCompletedEvent
+from telepiplex_rename.models import DownloadCompletedEvent, PostDownloadResult
 from telepiplex_rename.query_recovery import recover_metadata_probe
 from telepiplex_rename.processor import (
     _deterministic_episode_plan,
@@ -21,6 +21,7 @@ from telepiplex_rename.processor import (
 )
 from telepiplex_rename.service import (
     RenameFeature,
+    StorageProxy,
     _inventory_completion_text,
 )
 
@@ -50,6 +51,26 @@ class InventoryCompletionCopyTest(unittest.TestCase):
         self.assertNotIn("成功重命名", text)
 
 
+class StorageProxyBatchTest(unittest.TestCase):
+    def test_file_info_batches_are_split_before_provider_rpc_deadline(self):
+        class RecordingProxy(StorageProxy):
+            def __init__(self):
+                super().__init__(None, None, timeout=120)
+                self.calls = []
+
+            def _storage_call(self, method, args, kwargs):
+                self.calls.append((method, list(args[0]), dict(kwargs)))
+                return {path: {"file_id": path} for path in args[0]}
+
+        proxy = RecordingProxy()
+        paths = [f"/TV/Veep/episode-{index:03d}.mkv" for index in range(65)]
+
+        result = proxy.get_file_info_batch(paths)
+
+        self.assertEqual(len(result), 65)
+        self.assertEqual([len(call[1]) for call in proxy.calls], [32, 32, 1])
+
+
 class FakeStorage:
     def __init__(self, items):
         self.items = items
@@ -58,8 +79,11 @@ class FakeStorage:
         self.deleted = []
         self.created = []
         self.renamed_info = {}
+        self.missing_paths = set()
 
     def get_file_info(self, path):
+        if path in self.missing_paths:
+            return None
         if path in {"/Downloads/Release", "/Downloads/Series.Release"}:
             return {"file_id": "root", "file_category": "0"}
         if path in self.renamed_info:
@@ -88,6 +112,7 @@ class FakeStorage:
         if info:
             parent = path.rsplit("/", 1)[0]
             self.renamed_info[f"{parent}/{name}"] = info
+            self.missing_paths.add(path)
         return True
 
     def move_file(self, source, target):
@@ -97,6 +122,7 @@ class FakeStorage:
             self.renamed_info[
                 f"{str(target).rstrip('/')}/{str(source).rsplit('/', 1)[-1]}"
             ] = info
+            self.missing_paths.add(source)
         return True
 
     def move_file_detailed(self, source, target):
@@ -109,6 +135,7 @@ class FakeStorage:
 
     def delete_single_file(self, path):
         self.deleted.append(path)
+        self.missing_paths.add(path)
         return True
 
 
@@ -1905,6 +1932,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 return []
 
             def get_file_info(self, path):
+                if path in self.missing_paths:
+                    return None
                 if path == "/未整理":
                     return {"file_id": "root-unorganized", "file_category": "0"}
                 if path == "/未整理/Movie.2024.1080p/Movie.2024.mkv":
@@ -1972,26 +2001,12 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 host.storage.created[-1],
                 "/真人电影/中文电影 (English Movie)",
             )
-            self.assertEqual(len(host.events), 1)
+            self.assertEqual(host.events, [])
             self.assertEqual(
-                host.events[0][2]["idempotency_key"].split(":organized:")[0],
-                f"inventory:{started['operation']['operation_id']}",
+                host.reports[-1]["state"],
+                "completed",
+                jobs.get(inventory_job_id),
             )
-            self.assertEqual(
-                host.events[0][1]["final_path"],
-                "/真人电影/中文电影 (English Movie)",
-            )
-            self.assertEqual(
-                host.events[0][1]["file_results"]["organized_files"],
-                1,
-            )
-            self.assertEqual(
-                host.events[0][1]["file_results"]["successful_files"][0][
-                    "source_id"
-                ],
-                "movie-video-1",
-            )
-            self.assertEqual(host.reports[-1]["state"], "completed")
             self.assertIn("作品组完成：1", host.reports[-1]["status_text"])
             self.assertIn("文件总数：1", host.reports[-1]["status_text"])
             self.assertIn("实际改动：1", host.reports[-1]["status_text"])
@@ -2007,6 +2022,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 super().__init__([])
 
             def get_file_info(self, path):
+                if path in self.missing_paths:
+                    return None
                 if path == "/真人电影":
                     return {"file_id": "root-movies", "file_category": "0"}
                 if path == "/真人电影/Loose:<Movie>?.mkv":
@@ -2101,14 +2118,14 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 storage.moved,
                 [("/真人电影/CON_.mkv", target_dir)],
             )
-            self.assertEqual(host.events[0][1]["final_path"], target_dir)
-            self.assertEqual(host.reports[-1]["state"], "completed")
+            self.assertEqual(host.events, [])
+            self.assertEqual(
+                host.reports[-1]["state"],
+                "completed",
+                jobs.get(inventory_job_id),
+            )
             self.assertTrue(
                 jobs.get(inventory_job_id)["result"]["organized"]
-            )
-            self.assertEqual(
-                host.events[0][2]["idempotency_key"].split(":organized:")[0],
-                f"inventory:{started['operation']['operation_id']}",
             )
 
     async def test_inventory_batch_pauses_for_metadata_and_resumes_serially(self):
@@ -2119,6 +2136,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 super().__init__([])
 
             def get_file_info(self, path):
+                if path in self.missing_paths:
+                    return None
                 if path == "/真人电影":
                     return {"file_id": "root-movies", "file_category": "0"}
                 for name in ("Ambiguous.2024", "Resolved.2024"):
@@ -2259,16 +2278,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             await runtime.wait()
 
             self.assertEqual(host.resolve_calls, 2)
-            self.assertEqual(len(host.events), 1)
-            self.assertEqual(
-                host.events[0][1]["file_results"]["verified_work_groups"],
-                1,
-            )
-            self.assertEqual(
-                len(host.events[0][1]["file_results"]["successful_files"]),
-                1,
-            )
-            self.assertEqual(host.reports[-1]["state"], "completed")
+            self.assertEqual(host.events, [])
+            self.assertEqual(host.reports[-1]["state"], "failed")
             self.assertIn("作品组完成：1", host.reports[-1]["status_text"])
             self.assertIn("作品组失败：1", host.reports[-1]["status_text"])
             self.assertEqual(
@@ -3246,8 +3257,10 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         forward_release.set()
         await forward_task
 
-    async def test_download_event_accepts_handoff_and_runs_in_background(self):
-        host = FakeHost()
+    async def test_download_event_runs_in_background_and_completes_in_rename(self):
+        host = FakeHost(EmptyAfterMoveStorage([
+            {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
+        ]))
         runtime = FakeRuntime()
         feature = RenameFeature(
             config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
@@ -3281,25 +3294,15 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             "organizing", "conflict_validation", "directory_preparation",
             "rename", "moving",
         }.issubset(stages))
-        self.assertNotIn("cleanup", stages)
-        self.assertEqual(host.reports[-1]["state"], "handed_off")
-        self.assertEqual(host.reports[-1]["next_plugin_id"], "sync")
-        self.assertEqual(host.events[0][1]["operation_id"], "op-chain")
-        self.assertEqual(
-            host.events[0][1]["operation_revision"],
-            host.reports[-1]["revision"],
-        )
-
-        cancelled = await feature.operation_control({
-            "operation_id": "op-chain",
-            "action": "cancel",
-            "revision": host.reports[-1]["revision"],
-        })
-        self.assertEqual(cancelled["operation"]["state"], "cancelled")
-        self.assertIn("后续 Plex", cancelled["operation"]["status_text"])
+        self.assertEqual(host.reports[-1]["state"], "completed")
+        self.assertEqual(host.reports[-1]["stage"], "completed")
+        self.assertNotIn("next_plugin_id", host.reports[-1])
+        self.assertEqual(host.events, [])
 
     async def test_upstream_identity_starts_new_rename_message_without_repeat(self):
-        host = FakeHost()
+        host = FakeHost(EmptyAfterMoveStorage([
+            {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
+        ]))
         runtime = FakeRuntime()
         feature = RenameFeature(
             config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
@@ -3466,8 +3469,10 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.code, "owner_mismatch")
         self.assertEqual(attempts, ["owner_mismatch"])
 
-    async def test_rename_stage_seals_before_plex_event_is_published(self):
-        host = FakeHost()
+    async def test_rename_completes_without_sync_handoff_or_organized_event(self):
+        host = FakeHost(EmptyAfterMoveStorage([
+            {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
+        ]))
         runtime = FakeRuntime()
         feature = RenameFeature(
             config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
@@ -3491,21 +3496,21 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         })
         await runtime.wait()
 
-        handoff_index = host.timeline.index(
-            ("report", "handed_off", "handoff_plex")
+        self.assertEqual(host.events, [])
+        self.assertNotIn(
+            ("report", "handed_off", "handoff_plex"),
+            host.timeline,
         )
-        seal_index = next(
-            index for index, item in enumerate(host.timeline)
-            if item[:2] == ("milestone", "stage")
-        )
-        event_index = host.timeline.index(("event", "media.organized"))
-        self.assertLess(handoff_index, seal_index)
-        self.assertLess(seal_index, event_index)
+        self.assertEqual(host.reports[-1]["state"], "completed")
+        self.assertEqual(host.reports[-1]["stage"], "completed")
+        self.assertNotIn("next_plugin_id", host.reports[-1])
 
     async def test_lost_rename_stage_response_retries_same_milestone(self):
         from telepiplex_plugin_sdk import FeatureError
 
-        host = FakeHost()
+        host = FakeHost(EmptyAfterMoveStorage([
+            {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
+        ]))
         runtime = FakeRuntime()
         feature = RenameFeature(
             config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
@@ -3555,12 +3560,10 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         await runtime.wait()
 
         self.assertEqual(attempts, [attempts[0], attempts[0]])
-        self.assertEqual(
-            [item[0] for item in host.events],
-            ["media.organized"],
-        )
+        self.assertEqual(host.events, [])
+        self.assertEqual(host.reports[-1]["state"], "completed")
 
-    async def test_completed_rename_skips_plex_when_sync_is_inactive(self):
+    async def test_completed_rename_never_consults_sync_availability(self):
         host = FakeHost(EmptyAfterMoveStorage([
             {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
         ]))
@@ -3604,7 +3607,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         await runtime.wait()
 
         self.assertEqual(host.events, [])
-        self.assertIn("Plex 管理未安装", host.notifications[-1][1])
+        self.assertNotIn("Plex", host.notifications[-1][1])
         self.assertEqual(host.reports[-1]["state"], "completed")
         self.assertNotIn("next_plugin_id", host.reports[-1])
 
@@ -3874,8 +3877,10 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             "metadata_query_unresolved",
         )
 
-    async def test_download_event_calls_storage_rpc_and_publishes_media_organized(self):
-        host = FakeHost()
+    async def test_download_event_calls_storage_rpc_without_downstream_event(self):
+        host = FakeHost(EmptyAfterMoveStorage([
+            {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
+        ]))
         feature = RenameFeature(
             config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
             host=host,
@@ -3898,18 +3903,11 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         await runtime.wait()
 
         self.assertEqual(host.assert_capability, "storage.provider")
-        self.assertEqual(host.events[0][0], "media.organized")
-        self.assertEqual(host.events[0][1]["job_id"], "job-1")
-        self.assertEqual(host.events[0][1]["final_path"], "/Movies/中文电影 (English Movie)")
-        self.assertTrue(host.events[0][1]["media_metadata"]["confirmed"])
-        self.assertEqual(
-            host.events[0][1]["media_metadata"]["identity"]["english_title"],
-            "English Movie",
-        )
+        self.assertEqual(host.events, [])
         self.assertIn("整理结果", host.notifications[0][1])
         self.assertNotIn("`", host.notifications[0][1])
 
-    async def test_cleanup_failure_publishes_verified_target_but_is_not_success(self):
+    async def test_cleanup_failure_publishes_nothing_and_is_not_success(self):
         from telepiplex_rename.jobs import RenameJobStore
 
         class EmptyDeleteFailureStorage(CleanupFailureStorage):
@@ -3950,8 +3948,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             })
             await runtime.wait()
 
-            self.assertEqual(len(host.events), 1)
-            self.assertEqual(host.events[0][0], "media.organized")
+            self.assertEqual(host.events, [])
             self.assertTrue(host.notifications[0][1].startswith("⚠️"))
             self.assertEqual(jobs.get("job-cleanup-failed")["state"], "failed")
             stage_milestone = next(
@@ -3960,14 +3957,78 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(stage_milestone["text"].startswith("⚠️"))
 
-    async def test_delivery_replay_does_not_repeat_destructive_storage_operations(self):
+    async def test_partial_file_accounting_cannot_complete_rename_operation(self):
         from telepiplex_rename.jobs import RenameJobStore
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
             host = FakeHost()
             feature = RenameFeature(
                 config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
-                host=host, jobs=RenameJobStore(Path(tmpdir) / "jobs.db"),
+                host=host,
+                jobs=jobs,
+            )
+            feature._process = lambda _event: PostDownloadResult(
+                handled=True,
+                final_path="/Series/中文剧集 (English Series)",
+                message="⚠️ 已整理 1，原位保留 1。",
+                metadata=attach_media_metadata({}, series_contract()),
+                file_results={
+                    "media_files_total": 2,
+                    "organized_files": 1,
+                    "canonical_no_ops": 0,
+                    "kept_unresolved": 1,
+                    "target_conflicts": 0,
+                    "failed_files": 0,
+                    "cleanup": {"complete": True},
+                },
+            )
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+
+            await feature.download_completed({
+                "event_id": "event-partial-accounting",
+                "payload": {
+                    "job_id": "job-partial-accounting",
+                    "selected_path": "/Series",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "final_path": "/Downloads/Series.Release",
+                    "resource_name": "English.Series.S01",
+                    "media_metadata": series_contract(),
+                    "operation_id": "op-partial-accounting",
+                    "operation_revision": 2,
+                },
+            })
+            await runtime.wait()
+
+            stored = jobs.get("job-partial-accounting")
+            self.assertEqual(host.reports[-1]["state"], "failed")
+            self.assertEqual(stored["state"], "failed")
+            self.assertIn("file_results", stored["result"], stored)
+            self.assertFalse(stored["result"]["organized"])
+            self.assertEqual(
+                stored["result"]["file_results"]["kept_unresolved"],
+                1,
+            )
+            self.assertNotIn("error", stored["result"])
+            self.assertEqual(host.events, [])
+
+    async def test_notification_failure_does_not_change_completed_job_or_replay_storage(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = FakeHost(EmptyAfterMoveStorage([{
+                "fn": "Movie.2024.mkv",
+                "fid": "1",
+                "fc": "1",
+                "fs": 1000,
+            }]))
+            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
+            feature = RenameFeature(
+                config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+                host=host,
+                jobs=jobs,
             )
             runtime = FakeRuntime()
             feature.bind_runtime(runtime)
@@ -3977,9 +4038,10 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "media_metadata": movie_contract(),
             }}
             host.fail_notification = True
-            with self.assertRaises(RuntimeError):
-                await feature.download_completed(request)
-                await runtime.wait()
+            await feature.download_completed(request)
+            await runtime.wait()
+
+            self.assertEqual(jobs.get("job-replay")["state"], "completed")
             moved_count = len(host.storage.moved)
             host.fail_notification = False
 
@@ -4085,7 +4147,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(host.storage.moved, [])
             self.assertEqual(jobs.get("job-rejected-claim")["state"], "cancelled")
 
-    async def test_processed_replay_restores_operation_before_plex_publish(self):
+    async def test_processed_replay_restores_operation_and_completes_locally(self):
         from telepiplex_rename.jobs import RenameJobStore
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4128,15 +4190,9 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             })
 
             self.assertTrue(replay["organized"])
-            self.assertEqual(host.reports[-1]["state"], "handed_off")
-            self.assertEqual(
-                host.events[-1][1]["operation_id"],
-                "op-processed-replay",
-            )
-            self.assertEqual(
-                host.events[-1][1]["operation_revision"],
-                host.reports[-1]["revision"],
-            )
+            self.assertEqual(host.reports[-1]["state"], "completed")
+            self.assertEqual(host.events, [])
+            self.assertEqual(jobs.get("job-processed-replay")["state"], "completed")
 
     async def test_processed_replay_without_durable_identity_stops_downstream(self):
         from telepiplex_rename.jobs import RenameJobStore
@@ -4226,74 +4282,6 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(host.events, [])
             self.assertEqual(host.notifications, [])
 
-    async def test_lost_handoff_ack_replays_same_durable_revision(self):
-        from telepiplex_rename.jobs import RenameJobStore
-
-        class LostAckHost(FakeHost):
-            async def report_operation(self, operation):
-                self.reports.append(dict(operation))
-                if operation["state"] == "handed_off":
-                    raise RuntimeError("handoff response lost")
-                return {"accepted": True, "revision": operation["revision"]}
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
-            outcome = {
-                "organized": True,
-                "final_path": "/Movies/Movie",
-                "message": "✅ 整理完成",
-                "user_id": 123,
-                "job_id": "job-lost-handoff-ack",
-                "event_payload": {
-                    "job_id": "job-lost-handoff-ack",
-                    "user_id": 123,
-                    "chat_id": 10,
-                    "final_path": "/Movies/Movie",
-                    "operation_id": "op-lost-handoff-ack",
-                    "operation_revision": 9,
-                },
-            }
-            jobs.claim("job-lost-handoff-ack")
-            jobs.update("job-lost-handoff-ack", "processed", outcome)
-            first_host = LostAckHost()
-            first = RenameFeature(
-                config={"unorganized_path": "/Unorganized"},
-                host=first_host,
-                jobs=jobs,
-            )
-            first.bind_runtime(FakeRuntime())
-            request = {"event_id": "lost-handoff-source", "payload": {
-                "job_id": "job-lost-handoff-ack",
-                "user_id": 123,
-                "chat_id": 10,
-                "operation_id": "op-lost-handoff-ack",
-                "operation_revision": 9,
-            }}
-
-            with self.assertRaises(RuntimeError):
-                await first.download_completed(request)
-            durable = jobs.get("job-lost-handoff-ack")["result"]
-            proposed = durable["handoff_operation"]["revision"]
-            self.assertFalse(durable.get("handoff_reported", False))
-
-            replay_host = FakeHost()
-            replayed = RenameFeature(
-                config={"unorganized_path": "/Unorganized"},
-                host=replay_host,
-                jobs=jobs,
-            )
-            replay_runtime = FakeRuntime()
-            replayed.bind_runtime(replay_runtime)
-            await replay_runtime.wait()
-
-            self.assertEqual(
-                [report["state"] for report in replay_host.reports],
-                ["handed_off"],
-            )
-            self.assertEqual(replay_host.reports[0]["revision"], proposed)
-            self.assertEqual(len(replay_host.events), 1)
-
-
 class FeatureSourceContractTest(unittest.TestCase):
     def test_release_identity_uses_new_confirmed_identity_version(self):
         manifest = yaml.safe_load(
@@ -4301,9 +4289,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.5.3")
+        self.assertEqual(manifest["version"], "1.5.4")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertIn('version = "1.5.3"', project)
+        self.assertIn('version = "1.5.4"', project)
         self.assertIn('telepiplex-plugin-sdk==1.3.2', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
@@ -4319,8 +4307,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.5.3.tpx", source)
-        self.assertNotIn("dist/rename-1.5.3.tpx", source)
+        self.assertIn("/tmp/rename-1.5.4.tpx", source)
+        self.assertNotIn("dist/rename-1.5.4.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

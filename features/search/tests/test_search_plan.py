@@ -111,6 +111,20 @@ class SearchPlanTest(unittest.TestCase):
                 set(),
             )
 
+    def test_confirm_surfaces_contract_path_and_reason(self):
+        draft = self._draft()
+        draft["media_metadata"]["metadata_id"] = "plan-a"
+        draft["media_metadata"]["placement"]["category_kind"] = (
+            "animated_movie"
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"path=\$\.placement\.category_kind "
+            r"reason=category_library_mismatch",
+        ):
+            confirm_media_metadata(draft)
+
     def test_allocator_starts_at_100_and_skips_occupied_and_reserved_values(self):
         allocator = TemporarySpecialAllocator()
         self.assertEqual(allocator.reserve("plan-a", "show-a", set()), 100)

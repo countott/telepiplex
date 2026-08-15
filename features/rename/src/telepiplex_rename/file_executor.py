@@ -78,6 +78,39 @@ def _provider_id(value) -> str:
     ).strip()
 
 
+def _sha1(value) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return str(
+        value.get("sha1") or value.get("sha") or value.get("file_sha1") or ""
+    ).strip().lower()
+
+
+def _size(value) -> int:
+    if not isinstance(value, dict):
+        return 0
+    try:
+        return int(
+            value.get("size") or value.get("fs") or value.get("size_byte") or 0
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
+def _matches_fingerprint(expected, observed, *, source_id="") -> bool:
+    if not isinstance(observed, dict):
+        return False
+    if source_id and _provider_id(observed) == str(source_id):
+        return True
+    expected_sha1 = _sha1(expected)
+    observed_sha1 = _sha1(observed)
+    if expected_sha1 and observed_sha1:
+        return expected_sha1 == observed_sha1
+    expected_size = _size(expected)
+    observed_size = _size(observed)
+    return bool(expected_size and observed_size and expected_size == observed_size)
+
+
 def _get_info(storage, path: str):
     method = getattr(storage, "get_file_info", None)
     if not callable(method) or not path:
@@ -167,6 +200,96 @@ def _execute_one(
         _transition(journal, resolution, "verified", target, replay=True)
         return _outcome(resolution, "no_op", target, "target_identity_verified")
 
+    if resolution.action == "recover_duplicate_copy":
+        expected = dict(resolution.source_fingerprint or {})
+        if not _matches_fingerprint(expected, target_info):
+            _transition(
+                journal,
+                resolution,
+                "failed",
+                target,
+                reason="target_identity_unverifiable",
+            )
+            return _outcome(
+                resolution,
+                "failed",
+                target,
+                "target_identity_unverifiable",
+            )
+        source_info = initial(source)
+        if source_info is None:
+            _transition(journal, resolution, "verified", target, replay=True)
+            return _outcome(
+                resolution,
+                "no_op",
+                target,
+                "recovered_source_already_absent",
+            )
+        if not _matches_fingerprint(
+            expected,
+            source_info,
+            source_id=resolution.source_id,
+        ):
+            _transition(
+                journal,
+                resolution,
+                "failed",
+                source,
+                reason="source_identity_changed",
+            )
+            return _outcome(
+                resolution,
+                "failed",
+                source,
+                "source_identity_changed",
+            )
+        try:
+            deleted = storage.delete_single_file(source) is True
+        except Exception:
+            deleted = False
+        if not deleted or _get_info(storage, source) is not None:
+            _transition(
+                journal,
+                resolution,
+                "failed",
+                source,
+                reason="copied_source_retained",
+            )
+            return _outcome(
+                resolution,
+                "failed",
+                source,
+                "copied_source_retained",
+            )
+        verified_target = _get_info(storage, target)
+        if not _matches_fingerprint(expected, verified_target):
+            _transition(
+                journal,
+                resolution,
+                "failed",
+                target,
+                reason="target_identity_changed",
+            )
+            return _outcome(
+                resolution,
+                "failed",
+                target,
+                "target_identity_changed",
+            )
+        _transition(
+            journal,
+            resolution,
+            "verified",
+            target,
+            recovered_copy=True,
+        )
+        return _outcome(
+            resolution,
+            "organized",
+            target,
+            "recovered_interrupted_copy",
+        )
+
     if resolution.action == "no_op" or source == target:
         source_info = initial(source)
         if source_info is not None and (
@@ -198,6 +321,15 @@ def _execute_one(
             return _outcome(
                 resolution, "failed", current, "source_identity_changed"
             )
+        if target_info is not None:
+            _transition(
+                journal,
+                resolution,
+                "failed",
+                target,
+                reason="target_conflict",
+            )
+            return _outcome(resolution, "failed", target, "target_conflict")
 
         target_path = PurePosixPath(target)
         current_path = PurePosixPath(current)
@@ -302,6 +434,38 @@ def _execute_one(
             )
             return _outcome(
                 resolution, "failed", target, "target_missing_after_move"
+            )
+        if not _matches_fingerprint(
+            source_info,
+            verified,
+            source_id=resolution.source_id,
+        ):
+            _transition(
+                journal,
+                resolution,
+                "failed",
+                target,
+                reason="target_identity_unverifiable",
+            )
+            return _outcome(
+                resolution,
+                "failed",
+                target,
+                "target_identity_unverifiable",
+            )
+        if _get_info(storage, current) is not None:
+            _transition(
+                journal,
+                resolution,
+                "failed",
+                current,
+                reason="source_still_present_after_move",
+            )
+            return _outcome(
+                resolution,
+                "failed",
+                current,
+                "source_still_present_after_move",
             )
         _transition(journal, resolution, "verified", target)
         return _outcome(resolution, "organized", target)
@@ -468,13 +632,25 @@ def cleanup_source_directories(
             deleted = storage.delete_single_file(path) is True
         except Exception:
             deleted = False
+        post_delete_state = (
+            _fresh_directory_state(storage, path)
+            if deleted
+            else "delete_failed"
+        )
+        verified_deleted = deleted and post_delete_state == "absent"
         outcomes.append(DirectoryCleanupOutcome(
             path=path,
-            state="deleted" if deleted else "delete_failed",
+            state="deleted" if verified_deleted else "delete_failed",
             reason_code=(
                 "empty_directory_deleted"
-                if deleted
-                else "provider_delete_failed"
+                if verified_deleted
+                else (
+                    "post_delete_lookup_failed"
+                    if post_delete_state == "lookup_failed"
+                    else "directory_still_present"
+                    if deleted
+                    else "provider_delete_failed"
+                )
             ),
         ))
 

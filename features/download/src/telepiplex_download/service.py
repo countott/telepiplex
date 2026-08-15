@@ -148,10 +148,10 @@ class DownloadFeature:
                     "invalid_request",
                     "storage file info batch paths are invalid",
                 )
-            if len(paths) > 128:
+            if len(paths) > 32:
                 raise FeatureError(
                     "invalid_request",
-                    "storage file info batch exceeds 128 paths",
+                    "storage file info batch exceeds 32 paths",
                 )
         value = await asyncio.to_thread(getattr(self.client, method), *args, **kwargs)
         return {"value": value}

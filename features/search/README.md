@@ -1,6 +1,6 @@
 # search Feature
 
-search 1.11.2 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，并把需要人工确认的候选计划冻结到持久状态；确认时只读取原计划，不再重新规划或因来源顺序变化选中另一作品，重复确认会返回同一结果。对 rename 的能力响应移除了重复的大体积证据和节目清单，同时使用 SDK 1.3.2 的有界非阻塞诊断传输。简中候选优先使用 Wikidata P4529 精确读取豆瓣条目；没有 P4529 时，仅对前五个候选执行唯一强字段豆瓣定位。语义 `chinese_title` 不再写入英文、罗马字或日文兜底，展示层在没有可靠简中标题时单独回退英文。剧集范围由完整的 Wikipedia/TVDB/TMDB order profile 裁决，不再对冲突坐标求交集。裸剧名在身份确认后会先进入季/集范围菜单，只有用户明确选择全剧、季度或单集后才开始资源搜索。Host 已接受 milestone、但落账或回执中断时，Feature 会复用同一个 milestone ID 恢复，不会把暂态 `internal_error` 误判为资源搜索失败。search 不调用 AI，也不支持自然语言描述搜索；用户需要提供明确片名，或直接发送受支持的稳定作品链接。作品身份消息先完整保留，后续资源搜索进度不会覆盖它。
+search 1.11.3 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，并把需要人工确认的候选计划冻结到持久状态；确认时只读取原计划，不再重新规划或因来源顺序变化选中另一作品，重复确认会返回同一结果。对 rename 的能力响应移除了重复的大体积证据和节目清单，同时使用 SDK 1.3.2 的有界非阻塞诊断传输。简中候选优先使用 Wikidata P4529 精确读取豆瓣条目；没有 P4529 时，仅对前五个候选执行唯一强字段豆瓣定位。语义 `chinese_title` 不再写入英文、罗马字或日文兜底，展示层在没有可靠简中标题时单独回退英文。剧集范围由完整的 Wikipedia/TVDB/TMDB order profile 裁决，不再对冲突坐标求交集；rename 提交存量文件 probe 时，则以实际观测到的季集坐标限定合同，不再因缺少首播日期把 Honey and Clover 一类完整文件集过滤为空，也不会丢失已确认的中文标题。裸剧名在身份确认后会先进入季/集范围菜单，只有用户明确选择全剧、季度或单集后才开始资源搜索。Host 已接受 milestone、但落账或回执中断时，Feature 会复用同一个 milestone ID 恢复，不会把暂态 `internal_error` 误判为资源搜索失败。search 不调用 AI，也不支持自然语言描述搜索；用户需要提供明确片名，或直接发送受支持的稳定作品链接。作品身份消息先完整保留，后续资源搜索进度不会覆盖它。
 
 ## 发起搜索
 
@@ -36,7 +36,7 @@ search 1.11.2 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，
 4. 精确 P4529 豆瓣条目在候选展示前写入权威简中根标题；没有精确绑定时，只对前五个候选使用标题之外至少两个强字段形成唯一匹配，歧义结果不写入中文标题；豆瓣不提供整剧季集结构；
 5. 仅当作品已确认是日本动画电影或剧集时，AniList 补充官方罗马字标题和 AniList ID，不提供海报或季集结构。
 
-字段以来源事实逐项收敛，不使用后返回覆盖，也不记录 Search AI 决策。海报优先级为 TMDB、豆瓣、Wikipedia、占位图、纯文本。最终形成严格 `media_metadata v1`；相同合同会随选中片源进入 Download，由 Rename 使用确认身份、目录类型和季集项目完成整理，再经 `media.organized` 交给 Sync/Plex。
+字段以来源事实逐项收敛，不使用后返回覆盖，也不记录 Search AI 决策。海报优先级为 TMDB、豆瓣、Wikipedia、占位图、纯文本。最终形成严格 `media_metadata v1`；相同合同会随选中片源进入 Download，由 Rename 使用确认身份、目录类型和季集项目完成整理。Rename 完成即为本链路终态，不再自动触发 Plex 扫描。
 
 ## 剧集范围菜单
 
@@ -58,11 +58,11 @@ search 1.11.2 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，
 
 Prowlarr 仍按 Indexer 和 query 有界并发搜索，执行身份与范围硬门禁、去重和质量排序，最多展示 12 个结果。电影片源标题必须包含匹配年份；剧集资源按已确认范围验证。特殊内容在进入资源搜索前即被排除。
 
-search 提供 `media.search.resolve_metadata` 与持久冻结的 `media.search.confirm_metadata` capability。Rename 的结构化 probe 只用于补全已存在文件的确定身份；Rename 自身约束式文件映射能力不属于 search 1.11.2 的 AI 移除范围。剧集身份同时保存根作品年份与范围年份；TVDB 补全优先使用稳定 Series ID，否则只使用根作品年份，不使用季条目或补充来源的年份。最终契约失败会记录精确字段路径、原因码和说明。
+search 提供 `media.search.resolve_metadata` 与持久冻结的 `media.search.confirm_metadata` capability。Rename 的结构化 probe 只用于补全已存在文件的确定身份；Rename 自身约束式文件映射能力不属于 search 1.11.3 的 AI 移除范围。剧集身份同时保存根作品年份与范围年份；TVDB 补全优先使用稳定 Series ID，否则只使用根作品年份，不使用季条目或补充来源的年份。最终契约失败会记录精确字段路径、原因码和说明。
 
 ## 配置与日志
 
-运行配置位于 `/config/plugins/search/config.yaml`。Wikipedia、Wikidata、豆瓣和 AniList 无需 API Key；P4529 与 IMDb ID 都直接来自 Wikidata/来源事实，不接入 IMDb API。TMDB 使用 API Read Access Token，TVDB 使用自身凭据，均可通过 `/search_config` 配置。search 不再包含 AI 配置项。1.11.2 沿用配置 schema v2，并继续通过包内声明安全删除 1.8.0 遗留的顶层 `ai` 配置段，其余用户配置保持不变；回滚时 Host 会恢复升级前的完整配置。
+运行配置位于 `/config/plugins/search/config.yaml`。Wikipedia、Wikidata、豆瓣和 AniList 无需 API Key；P4529 与 IMDb ID 都直接来自 Wikidata/来源事实，不接入 IMDb API。TMDB 使用 API Read Access Token，TVDB 使用自身凭据，均可通过 `/search_config` 配置。search 不再包含 AI 配置项。1.11.3 沿用配置 schema v2，并继续通过包内声明安全删除 1.8.0 遗留的顶层 `ai` 配置段，其余用户配置保持不变；回滚时 Host 会恢复升级前的完整配置。
 
 每个搜索会话使用稳定的 `search_session_id`。日志记录输入分类、直链解析、候选确认、元数据来源状态、最终 query 变体、片源门禁结果和唯一终态；不记录 API Key、Token、Cookie、Authorization、magnet 或完整来源 payload。
 
@@ -88,7 +88,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
 构建示例：
 
 ```bash
-python tools/build_feature.py features/search /tmp/search-1.11.2.tpx \
+python tools/build_feature.py features/search /tmp/search-1.11.3.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

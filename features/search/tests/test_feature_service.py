@@ -3851,6 +3851,59 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                     expected,
                 )
 
+    async def test_metadata_capability_keeps_honey_inventory_and_chinese_title(self):
+        async def live_planner(_raw_query, plan_id):
+            result = series_ranked_search_plan()
+            result["plan_id"] = plan_id
+            candidate = result["candidates"][0]
+            contract = candidate["media_metadata"]
+            contract["metadata_id"] = plan_id
+            contract["identity"]["chinese_title"] = "蜂蜜与四叶草"
+            contract["identity"]["english_title"] = "Honey and Clover"
+            contract["items"] = [
+                {
+                    "item_id": f"s{season}e{episode}",
+                    "content_role": "main_episode",
+                    "season_number": season,
+                    "episode_number": episode,
+                    "aired": "",
+                }
+                for season, total in ((1, 26), (2, 12))
+                for episode in range(1, total + 1)
+            ]
+            contract["evidence"]["series_inventory"] = {
+                "source": "tvdb",
+                "season_totals": {1: 26, 2: 12},
+            }
+            result["candidates"] = [candidate]
+            return result
+
+        self.feature.plan_builder = live_planner
+        probe = {
+            "content_shape": "multi_season_episode_pack",
+            "observed_seasons": [1, 2],
+            "observed_episodes": [
+                {"season_number": season, "episode_number": episode}
+                for season, total in ((1, 26), (2, 12))
+                for episode in range(1, total + 1)
+            ],
+            "video_count": 38,
+        }
+
+        resolved = await self.feature.metadata_capability({
+            "method": "resolve_metadata",
+            "payload": {"query": "蜂蜜与四叶草", "probe": probe},
+        })
+
+        contract = resolved["media_metadata"]
+        self.assertEqual(resolved["status"], "resolved")
+        self.assertEqual(len(contract["items"]), 38)
+        self.assertEqual(contract["identity"]["chinese_title"], "蜂蜜与四叶草")
+        self.assertEqual(
+            contract["evidence"]["decision"]["scope_source"],
+            "file_probe",
+        )
+
     async def test_metadata_capability_maps_unscoped_episode_probe_only_with_unique_inventory(self):
         async def live_planner(_raw_query, plan_id):
             result = series_ranked_search_plan()
@@ -3947,9 +4000,9 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "1.11.2")
+        self.assertEqual(manifest["version"], "1.11.3")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertEqual(project["project"]["version"], "1.11.2")
+        self.assertEqual(project["project"]["version"], "1.11.3")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.3.2",
@@ -3983,14 +4036,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.11.2.tpx", source)
+        self.assertIn("/tmp/search-1.11.3.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-1.11.2.tpx", source)
+        self.assertNotIn("dist/search-1.11.3.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

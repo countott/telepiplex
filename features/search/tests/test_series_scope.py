@@ -4,6 +4,7 @@ from datetime import date
 
 from telepiplex_search.series_scope import (
     SeriesScopeError,
+    apply_inventory_probe_scope,
     apply_series_scope,
     series_inventory,
     series_seasons,
@@ -58,6 +59,66 @@ def contract(
 
 
 class SeriesScopeTest(unittest.TestCase):
+    def test_inventory_probe_keeps_honey_and_clover_38_files_without_air_dates(self):
+        value = contract(seasons=())
+        value["identity"].update({
+            "chinese_title": "蜂蜜与四叶草",
+            "english_title": "Honey and Clover",
+        })
+        value["items"] = [
+            {
+                "item_id": f"s{season}e{episode}",
+                "content_role": "main_episode",
+                "season_number": season,
+                "episode_number": episode,
+                "aired": "",
+            }
+            for season, total in ((1, 26), (2, 12))
+            for episode in range(1, total + 1)
+        ]
+        probe = {
+            "content_shape": "multi_season_episode_pack",
+            "observed_seasons": [1, 2],
+            "observed_episodes": [
+                {"season_number": season, "episode_number": episode}
+                for season, total in ((1, 26), (2, 12))
+                for episode in range(1, total + 1)
+            ],
+            "video_count": 38,
+        }
+
+        scoped = apply_inventory_probe_scope(value, probe)
+
+        self.assertEqual(len(scoped["items"]), 38)
+        self.assertEqual(
+            {item["season_number"] for item in scoped["items"]},
+            {1, 2},
+        )
+        self.assertEqual(
+            scoped["identity"]["chinese_title"],
+            "蜂蜜与四叶草",
+        )
+        self.assertEqual(
+            scoped["evidence"]["decision"]["scope_source"],
+            "file_probe",
+        )
+
+    def test_inventory_probe_reports_exact_missing_coordinate(self):
+        value = contract(seasons=(1,))
+        probe = {
+            "content_shape": "single_episode",
+            "observed_episodes": [{
+                "season_number": 1,
+                "episode_number": 9,
+            }],
+        }
+
+        with self.assertRaisesRegex(
+            SeriesScopeError,
+            r"probe_inventory_mismatch missing=S01E09",
+        ):
+            apply_inventory_probe_scope(value, probe)
+
     def test_one_and_multiple_season_options(self):
         self.assertEqual(
             series_scope_options(contract(seasons=(1,))),

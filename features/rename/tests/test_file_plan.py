@@ -92,7 +92,7 @@ def test_existing_different_identity_conflicts_only_that_file():
     assert resolutions[0].reason_codes == ("target_conflict",)
 
 
-def test_same_hash_with_distinct_identity_never_authorizes_source_deletion():
+def test_same_hash_with_distinct_identity_recovers_interrupted_copy_delete():
     facts, evidence = _inputs({
         "file_id": "source",
         "path": "/Downloads/old.mkv",
@@ -110,11 +110,15 @@ def test_same_hash_with_distinct_identity_never_authorizes_source_deletion():
         },
     )[0]
 
-    assert resolution.action == "keep_original"
+    assert resolution.status == "resolved"
+    assert resolution.action == "recover_duplicate_copy"
     assert resolution.reason_codes == (
-        "target_conflict",
         "duplicate_hash_distinct_identity",
     )
+    assert resolution.source_fingerprint == {
+        "sha1": "same-hash",
+        "size": 0,
+    }
 
 
 def test_two_sources_claiming_same_target_are_both_preserved():

@@ -9,7 +9,15 @@ from telepiplex_rename.file_plan import FileResolution
 from telepiplex_rename.operations import RenameOperationJournal
 
 
-def _resolution(source_id, source, target, action, *, status="resolved"):
+def _resolution(
+    source_id,
+    source,
+    target,
+    action,
+    *,
+    status="resolved",
+    source_fingerprint=None,
+):
     return FileResolution(
         source_id=source_id,
         source_path=source,
@@ -19,6 +27,7 @@ def _resolution(source_id, source, target, action, *, status="resolved"):
         target_path=target,
         action=action,
         reason_codes=(),
+        source_fingerprint=dict(source_fingerprint or {}),
     )
 
 
@@ -189,6 +198,82 @@ def test_provider_move_success_without_readable_target_is_not_verified():
     )
 
 
+def test_move_claiming_source_deleted_fails_when_source_is_still_present():
+    class RetainedSourceStorage(StatefulStorage):
+        def move_file_detailed(self, source, target_dir):
+            self.moves.append((source, target_dir))
+            target = str(PurePosixPath(target_dir) / PurePosixPath(source).name)
+            self.directories.add(target_dir)
+            self.files[target] = dict(self.files[source])
+            return {
+                "state": "moved",
+                "copied": True,
+                "source_deleted": True,
+                "source_path": source,
+                "target_path": target,
+            }
+
+    source = "/Downloads/episode.mkv"
+    target = "/TV/Show/episode.mkv"
+    storage = RetainedSourceStorage(files=[(source, "episode")])
+
+    summary = execute_file_resolutions(
+        storage,
+        [_resolution("episode", source, target, "move_only")],
+        selected_root="/Downloads",
+    )
+
+    assert summary.failed_files == 1
+    assert summary.outcomes[0].reason_codes == (
+        "source_still_present_after_move",
+    )
+
+
+def test_same_hash_target_recovers_interrupted_copy_by_deleting_source():
+    class RecoverableStorage(StatefulStorage):
+        def __init__(self):
+            super().__init__()
+            self.files = {
+                "/Downloads/episode.mkv": {
+                    "file_id": "source",
+                    "file_category": "1",
+                    "sha1": "same-hash",
+                    "size": 4096,
+                },
+                "/TV/Show/episode.mkv": {
+                    "file_id": "copied-target",
+                    "file_category": "1",
+                    "sha1": "same-hash",
+                    "size": 4096,
+                },
+            }
+
+        def delete_single_file(self, path):
+            self.deleted.append(path)
+            return self.files.pop(path, None) is not None
+
+    storage = RecoverableStorage()
+    resolution = _resolution(
+        "source",
+        "/Downloads/episode.mkv",
+        "/TV/Show/episode.mkv",
+        "recover_duplicate_copy",
+        source_fingerprint={"sha1": "same-hash", "size": 4096},
+    )
+
+    summary = execute_file_resolutions(
+        storage,
+        [resolution],
+        selected_root="/Downloads",
+    )
+
+    assert summary.organized_files == 1
+    assert summary.failed_files == 0
+    assert storage.deleted == ["/Downloads/episode.mkv"]
+    assert "/Downloads/episode.mkv" not in storage.files
+    assert "/TV/Show/episode.mkv" in storage.files
+
+
 def test_keep_and_no_op_resolutions_invoke_no_mutation():
     source = "/Downloads/unknown.srt"
     storage = StatefulStorage(files=[(source, "subtitle")])
@@ -302,7 +387,8 @@ def test_batch_snapshot_is_never_used_for_post_move_target_verification():
 
     assert summary.organized_files == 1
     assert storage.batch_calls == 1
-    assert storage.individual_calls[-1] == target
+    assert target in storage.individual_calls
+    assert storage.individual_calls[-1] == "/Downloads/Veep S07E01.mkv"
 
 
 def test_cleanup_deletes_only_freshly_verified_empty_directories_bottom_up():
@@ -372,7 +458,7 @@ def test_automatic_cleanup_deletes_empty_release_root_but_protects_category():
     assert "/Series" in storage.directories
 
 
-def test_manual_cleanup_preserves_user_scan_root():
+def test_manual_cleanup_deletes_empty_selected_work_group_root():
     storage = StatefulStorage(directories=["/Series/UserSelected"])
     moved = _resolution(
         "episode",
@@ -385,13 +471,14 @@ def test_manual_cleanup_preserves_user_scan_root():
         storage,
         [moved],
         selected_root="/Series/UserSelected",
-        include_selected_root=False,
-        protected_roots=("/Series/UserSelected",),
+        include_selected_root=True,
+        protected_roots=("/Series",),
     )
 
-    assert summary.deleted_directories == 0
+    assert summary.deleted_directories == 1
     assert summary.failed_directories == 0
-    assert storage.deleted == []
+    assert summary.complete is True
+    assert storage.deleted == ["/Series/UserSelected"]
 
 
 def test_cleanup_delete_failure_is_reported_not_hidden():
@@ -418,6 +505,33 @@ def test_cleanup_delete_failure_is_reported_not_hidden():
     assert summary.complete is False
     assert summary.failed_directories == 1
     assert summary.outcomes[0].state == "delete_failed"
+
+
+def test_cleanup_requires_directory_absence_after_provider_delete_success():
+    class StickyDirectoryStorage(StatefulStorage):
+        def delete_single_file(self, path):
+            self.deleted.append(path)
+            return True
+
+    storage = StickyDirectoryStorage(directories=["/Downloads/Release"])
+    moved = _resolution(
+        "episode",
+        "/Downloads/Release/episode.mkv",
+        "/Series/Show/episode.mkv",
+        "move_only",
+    )
+
+    summary = cleanup_source_directories(
+        storage,
+        [moved],
+        selected_root="/Downloads/Release",
+        include_selected_root=True,
+    )
+
+    assert summary.complete is False
+    assert summary.failed_directories == 1
+    assert summary.outcomes[0].state == "delete_failed"
+    assert summary.outcomes[0].reason_code == "directory_still_present"
 
 
 def test_cleanup_replay_treats_already_absent_source_as_complete():

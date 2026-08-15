@@ -1,6 +1,6 @@
 # rename Feature
 
-`features/rename` 是 telepiplex 的独立媒体整理 Feature。rename 1.5.3 消费 durable `download.completed`，也支持 Telegram `/rename` 扫描 115 存量目录；媒体候选确认会先持久化状态，再转入后台调用 search，因此 Telegram callback 不再等待长链路，取消操作也能及时生效。文件规划优先使用 download 1.0.15 的批量身份读取，并在每次写操作后重新验证目标，避免缓存掩盖移动结果。它只在验证整理结果后发布 `media.organized`。媒体候选按钮使用短持久令牌，满足 Telegram callback 的 64-byte 限制，同时支持直接回复候选编号。
+`features/rename` 是 telepiplex 的独立媒体整理 Feature。rename 1.5.4 消费 durable `download.completed`，也支持 Telegram `/rename` 扫描 115 存量目录；媒体候选确认会先持久化状态，再转入后台调用 search，因此 Telegram callback 不再等待长链路，取消操作也能及时生效。文件规划使用 download 1.0.16 的 32 路径分批身份读取，并在每次写操作后重新验证目标与源路径，避免缓存或 provider 的“已复制”回执掩盖源文件仍残留。rename 的成功终态只表示本地媒体整理完整收敛，不发布下游整理事件，也不自动交接 sync/Plex。媒体候选按钮使用短持久令牌，满足 Telegram callback 的 64-byte 限制，同时支持直接回复候选编号。
 
 ## file-first 整理链路
 
@@ -10,7 +10,7 @@ rename 会对下载根或用户选择的扫描根建立一次完整、递归、�
 
 临时作品组仍必须交给 `media.search.resolve_metadata` 形成已确认的 `media_metadata v1`。AI 只处理确定性规则无法覆盖的长尾文件映射，不能确认媒体身份、覆盖外部元数据或授权删除。DeepSeek 请求保留 thinking，并要求 JSON 最终输出；rename 只解析最终 `content`，不解析、不保存也不记录 `reasoning_content`。最终内容为空、无效或因长度截断时只重试一次，仍失败则把受影响文件保留原位。
 
-每个文件是身份、规划、执行、重试与结果的最小单位。无法识别、目标冲突、AI 失败或 provider 失败只影响对应文件，不会把整个目录移到 `/未整理`，也不会自动删除未匹配视频、样片、花絮、字幕或未知文件。源路径与最终目标相同是 `no_op`；同目录只改文件名时只调用 rename，不再追加复制后删除式移动。文件目标验证完成后才进入独立清理阶段：自动下载的空 release 根目录会在重新读取确认完全为空后删除，`/rename` 存量扫描由用户选择的扫描根始终保护，分类根也永不删除。终态使用中性的“整理结果”，并分别报告源目录删除、保留和清理失败数量。
+每个文件是身份、规划、执行、重试与结果的最小单位。无法识别、目标冲突、AI 失败或 provider 失败只影响对应文件，不会把整个目录移到 `/未整理`，也不会自动删除未匹配视频、样片、花絮、字幕或未知文件。源路径与最终目标相同是 `no_op`；同目录只改文件名时只调用 rename，不再追加复制后删除式移动。文件目标验证完成后才进入独立清理阶段：自动下载的空 release 根目录会在重新读取确认完全为空后删除；`/rename` 按每个作品组文件的共同父目录确定源作品边界，删除已经搬空的作品目录，同时始终保护用户选择的分类根。终态使用中性的“整理结果”，并分别报告源目录删除、保留和清理失败数量。
 
 ## rename 终态规则
 
@@ -30,12 +30,12 @@ rename 会对下载根或用户选择的扫描根建立一次完整、递归、�
 
 rename 不识别也不筛选字幕语言。只要字幕已经映射到确认的电影或剧集集号，目标名就固定增加 `.chi`，并保留源文件真实扩展名；`forced`、`sdh`、`cc` 和原语言标记都不进入目标名。`.chi` 只是交给 caption 继续处理前的统一文件名标记，不代表 rename 检测到了中文。无法安全确认媒体身份或集号的字幕保持原名原位，不阻塞其他文件。多个同集、同扩展名字幕若会生成相同目标名，按稳定 `source_id` 分配规范名与 `.variant-NN.chi` 防重名，绝不静默丢弃。
 
-rename 会在写操作前按文件预检目标冲突。已有目标与相同 provider 身份对应时作为幂等 `no_op`；同路径不同身份只阻断当前文件且不覆盖。执行中途失败会记录当前可观测路径，其他无关文件继续按自己的计划处理。
+rename 会在写操作前按文件预检目标冲突。已有目标与相同 provider 身份对应时作为幂等 `no_op`；目标与源文件 SHA1 相同但 provider 身份不同，视为上次复制后删源中断，仅在重新验证两端指纹后删除残留源文件；其他同路径不同身份只阻断当前文件且不覆盖。普通移动也必须重新读取并确认目标身份成立、源路径消失。执行中途失败会记录当前可观测路径，其他无关文件继续按自己的计划处理。
 
-如果 Host 在交接前确认 sync/Plex 管理未安装或未启用，rename 会保留已经完成的整理结果并收敛为成功终态，明确通知“已跳过后续处理”，且不会发布无人消费的 `media.organized`。用户通知使用纯文本，文件名和路径不会依赖 Telegram Markdown 转义。
+rename 只有在媒体文件全部被核验为已整理或规范 `no_op`、不存在原位保留/目标冲突/文件失败，并且源作品目录清理完成时才写入成功终态。Telegram 通知是尽力投递的旁路；通知失败不会把已经核验完成的 Job 改成失败，也不会触发重复文件操作。用户通知使用纯文本，文件名和路径不会依赖 Telegram Markdown 转义。
 
 ```bash
-python tools/build_feature.py features/rename /tmp/rename-1.5.3.tpx \
+python tools/build_feature.py features/rename /tmp/rename-1.5.4.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

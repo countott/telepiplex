@@ -260,8 +260,8 @@ class Open115Client:
         return result["data"]
 
     def get_file_info_batch(self, paths: list[str]):
-        if not isinstance(paths, list) or len(paths) > 128:
-            raise ValueError("file info batch exceeds 128 paths")
+        if not isinstance(paths, list) or len(paths) > 32:
+            raise ValueError("file info batch exceeds 32 paths")
         normalized = []
         seen = set()
         for path in paths:
@@ -621,6 +621,12 @@ class Open115Client:
             return str(item.get("fc")) != "1"
         return False
 
+    @staticmethod
+    def _item_sha1(item):
+        return str(
+            item.get("sha1") or item.get("sha") or item.get("file_sha1") or ""
+        ).strip()
+
     def get_file_tree(self, root_path: str, *, max_depth=8, limit=1000):
         root_path = self._normalize(root_path)
         root = self.get_file_info(root_path)
@@ -635,6 +641,7 @@ class Open115Client:
                 "is_dir": False,
                 "file_id": self._item_id(root),
                 "size": root.get("fs") or root.get("size") or root.get("size_byte") or 0,
+                "sha1": self._item_sha1(root),
             }]
 
         root_id = self._item_id(root)
@@ -665,6 +672,7 @@ class Open115Client:
                     "is_dir": is_dir,
                     "file_id": self._item_id(item),
                     "size": item.get("fs") or item.get("size") or item.get("size_byte") or 0,
+                    "sha1": self._item_sha1(item),
                 }
                 tree.append(node)
                 if is_dir and node["file_id"]:

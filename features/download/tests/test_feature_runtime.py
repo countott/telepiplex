@@ -1198,7 +1198,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
             }
 
         self.client.get_file_info_batch = get_file_info_batch
-        paths = [f"/Downloads/Show/episode-{index:03d}.mkv" for index in range(128)]
+        paths = [f"/Downloads/Show/episode-{index:03d}.mkv" for index in range(32)]
 
         result = await self.feature.storage_capability({
             "method": "get_file_info_batch",
@@ -1206,7 +1206,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         })
 
         self.assertEqual(calls, [paths])
-        self.assertEqual(len(result["value"]), 128)
+        self.assertEqual(len(result["value"]), 32)
 
         with self.assertRaisesRegex(Exception, "batch exceeds"):
             await self.feature.storage_capability({
@@ -2411,17 +2411,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.0.15")
+        self.assertEqual(manifest["version"], "1.0.16")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.0.15")
+        self.assertEqual(project["project"]["version"], "1.0.16")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.3.2",
         )
-        self.assertIn("/tmp/download-1.0.15.tpx", readme)
-        self.assertNotIn("dist/download-1.0.15.tpx", readme)
+        self.assertIn("/tmp/download-1.0.16.tpx", readme)
+        self.assertNotIn("dist/download-1.0.16.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)

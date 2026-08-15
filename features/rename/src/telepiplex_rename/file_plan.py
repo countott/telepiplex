@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
 from .file_facts import FileFact, ParsedFileEvidence
@@ -19,6 +19,7 @@ class FileResolution:
     target_path: str
     action: str
     reason_codes: tuple[str, ...]
+    source_fingerprint: dict = field(default_factory=dict)
 
     @property
     def target_dir(self) -> str:
@@ -168,17 +169,35 @@ def plan_file_resolutions(
                 target_info.get("sha1") or target_info.get("sha") or ""
             ).strip().lower()
             if fact.sha1 and target_sha1 and fact.sha1 == target_sha1:
-                reasons.append("duplicate_hash_distinct_identity")
-            resolutions.append(FileResolution(
-                source_id=fact.source_id,
-                source_path=normalize_storage_path(fact.absolute_path),
-                status="ambiguous",
-                work_identity=dict(work_identity),
-                item_identity=_item_identity(evidence),
-                target_path=target_path,
-                action="keep_original",
-                reason_codes=tuple(reasons),
-            ))
+                resolutions.append(FileResolution(
+                    source_id=fact.source_id,
+                    source_path=normalize_storage_path(fact.absolute_path),
+                    status="resolved",
+                    work_identity=dict(work_identity),
+                    item_identity=_item_identity(evidence),
+                    target_path=target_path,
+                    action="recover_duplicate_copy",
+                    reason_codes=("duplicate_hash_distinct_identity",),
+                    source_fingerprint={
+                        "sha1": fact.sha1,
+                        "size": fact.size,
+                    },
+                ))
+            else:
+                resolutions.append(FileResolution(
+                    source_id=fact.source_id,
+                    source_path=normalize_storage_path(fact.absolute_path),
+                    status="ambiguous",
+                    work_identity=dict(work_identity),
+                    item_identity=_item_identity(evidence),
+                    target_path=target_path,
+                    action="keep_original",
+                    reason_codes=tuple(reasons),
+                    source_fingerprint={
+                        "sha1": fact.sha1,
+                        "size": fact.size,
+                    },
+                ))
             continue
 
         action = _resolved_action(fact.absolute_path, target_path)
@@ -192,5 +211,6 @@ def plan_file_resolutions(
             target_path=target_path,
             action=action,
             reason_codes=reasons,
+            source_fingerprint={"sha1": fact.sha1, "size": fact.size},
         ))
     return resolutions

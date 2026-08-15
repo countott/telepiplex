@@ -6,7 +6,6 @@ from urllib.parse import urlsplit, urlunsplit
 
 from telepiplex_plugin_sdk.media_metadata import (
     series_scope_key,
-    validate_media_metadata,
     validate_media_metadata_detailed,
 )
 
@@ -262,7 +261,16 @@ def confirm_media_metadata(plan: dict) -> dict:
     if not isinstance(contract, dict):
         raise ValueError("search plan has no media_metadata")
     contract["confirmed"] = True
-    validated = validate_media_metadata(contract, require_confirmed=True)
+    validated, issue = validate_media_metadata_detailed(
+        contract,
+        require_confirmed=True,
+    )
     if validated is None:
-        raise ValueError("invalid confirmed media_metadata")
+        issue = issue or {}
+        raise ValueError(
+            "invalid confirmed media_metadata "
+            f"path={issue.get('path') or '$'} "
+            f"reason={issue.get('reason_code') or 'unknown'} "
+            f"detail={issue.get('detail') or 'validation failed'}"
+        )
     return validated

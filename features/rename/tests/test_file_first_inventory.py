@@ -4,7 +4,6 @@ from telepiplex_plugin_sdk import FeatureError
 
 from telepiplex_rename.service import (
     RenameFeature,
-    _merge_verified_inventory_events,
 )
 
 from tests.test_feature_processor import FakeHost, FakeRuntime, FakeStorage
@@ -90,80 +89,11 @@ class FileFirstInventoryTest(unittest.IsolatedAsyncioTestCase):
         }, {"honey-video"})
         self.assertEqual({
             item["source_path"] for item in session["pending"]
-        }, {"/Library"})
+        }, {"/Library", "/Library/Mixed"})
         self.assertTrue(all(
             item["job_id"].startswith("inventory:file-first-v1:")
             for item in session["pending"]
         ))
-
-
-def test_verified_alias_groups_merge_into_one_downstream_event():
-    contract = {
-        "metadata_id": "series-veep",
-        "confirmed": True,
-        "identity": {
-            "english_title": "Veep",
-            "external_ids": {"tvdb": "75682"},
-        },
-    }
-    payloads = [{
-        "job_id": "english-title-group",
-        "source_path": "/Library",
-        "final_path": "/TV/副总统 (Veep)",
-        "media_metadata": contract,
-        "file_results": {
-            "pipeline_version": "file-first-v1",
-            "media_files_total": 1,
-            "organized_files": 1,
-            "canonical_no_ops": 0,
-            "kept_unresolved": 0,
-            "target_conflicts": 0,
-            "failed_files": 0,
-            "verified_work_groups": 1,
-            "successful_files": [{
-                "source_id": "video",
-                "state": "organized",
-                "final_path": "/TV/副总统 (Veep)/Veep S07E01.mkv",
-            }],
-        },
-        "file_warnings": [],
-    }, {
-        "job_id": "chinese-title-group",
-        "source_path": "/Library",
-        "final_path": "/TV/副总统 (Veep)",
-        "media_metadata": contract,
-        "file_results": {
-            "pipeline_version": "file-first-v1",
-            "media_files_total": 1,
-            "organized_files": 1,
-            "canonical_no_ops": 0,
-            "kept_unresolved": 0,
-            "target_conflicts": 0,
-            "failed_files": 0,
-            "verified_work_groups": 1,
-            "successful_files": [{
-                "source_id": "subtitle",
-                "state": "organized",
-                "final_path": "/TV/副总统 (Veep)/Veep S07E01.chi.srt",
-            }],
-        },
-        "file_warnings": [],
-    }]
-
-    merged = _merge_verified_inventory_events(payloads)
-
-    assert len(merged) == 1
-    identity_key, event = merged[0]
-    assert identity_key == "metadata:series-veep"
-    assert event["job_ids"] == [
-        "chinese-title-group",
-        "english-title-group",
-    ]
-    assert event["file_results"]["verified_work_groups"] == 1
-    assert {
-        item["source_id"]
-        for item in event["file_results"]["successful_files"]
-    } == {"video", "subtitle"}
 
 
 class IncompleteSnapshotTest(unittest.IsolatedAsyncioTestCase):

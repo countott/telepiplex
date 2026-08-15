@@ -254,19 +254,13 @@ def process_file_first_media(
         journal=getattr(storage, "journal", None),
     )
     source_root = event.download_root or event.final_path
-    manual_inventory = str(event.provider or "").strip().casefold() in {
-        "inventory",
-        "manual",
-    }
+    protected_category_root = normalize_storage_path(event.selected_path)
     cleanup = cleanup_source_directories(
         storage,
         resolutions,
         selected_root=source_root,
-        include_selected_root=not manual_inventory,
-        protected_roots=tuple(filter(None, (
-            event.selected_path,
-            source_root if manual_inventory else "",
-        ))),
+        include_selected_root=True,
+        protected_roots=tuple(filter(None, (protected_category_root,))),
     )
     outcome_by_source = {
         outcome.source_id: outcome

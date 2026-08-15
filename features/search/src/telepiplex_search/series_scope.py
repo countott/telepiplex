@@ -177,6 +177,152 @@ def series_scope_options(contract: dict) -> tuple[str, ...]:
     return ("season", "episode")
 
 
+def apply_inventory_probe_scope(contract: dict, probe: dict) -> dict:
+    """Select files already observed by rename without air-date filtering."""
+
+    result = deepcopy(contract)
+    items = [
+        item
+        for item in result.get("items") or []
+        if isinstance(item, dict)
+    ]
+    by_coordinate: dict[tuple[int, int], list[dict]] = {}
+    for item in items:
+        season = _integer(item.get("season_number"))
+        episode = _integer(item.get("episode_number"))
+        if season and season > 0 and episode and episode > 0:
+            by_coordinate.setdefault((season, episode), []).append(item)
+
+    observed_coordinates = set()
+    unscoped_episodes = set()
+    for item in (probe or {}).get("observed_episodes") or []:
+        if not isinstance(item, dict):
+            continue
+        season = _integer(item.get("season_number"))
+        episode = _integer(item.get("episode_number"))
+        if not episode or episode < 1:
+            continue
+        if season and season > 0:
+            observed_coordinates.add((season, episode))
+        else:
+            unscoped_episodes.add(episode)
+
+    observed_seasons = set()
+    for value in (probe or {}).get("observed_seasons") or []:
+        season = _integer(
+            value.get("season_number") if isinstance(value, dict) else value
+        )
+        if season and season > 0:
+            observed_seasons.add(season)
+    observed_seasons.update(season for season, _episode in observed_coordinates)
+
+    if unscoped_episodes:
+        matching_seasons = [
+            season
+            for season, episodes in series_inventory(result).all_by_season.items()
+            if unscoped_episodes.issubset(set(episodes))
+        ]
+        if len(matching_seasons) != 1:
+            raise SeriesScopeError("scope_unresolved")
+        observed_coordinates.update(
+            (matching_seasons[0], episode)
+            for episode in unscoped_episodes
+        )
+        observed_seasons.add(matching_seasons[0])
+
+    if observed_coordinates:
+        missing = sorted(
+            coordinate
+            for coordinate in observed_coordinates
+            if len(by_coordinate.get(coordinate, ())) != 1
+        )
+        if missing:
+            formatted = ",".join(
+                f"S{season:02d}E{episode:02d}"
+                for season, episode in missing
+            )
+            raise SeriesScopeError(
+                f"probe_inventory_mismatch missing={formatted}"
+            )
+        selected = [
+            by_coordinate[coordinate][0]
+            for coordinate in sorted(observed_coordinates)
+        ]
+    elif observed_seasons:
+        known_seasons = {
+            season
+            for season, _episode in by_coordinate
+        }
+        missing_seasons = sorted(observed_seasons - known_seasons)
+        if missing_seasons:
+            formatted = ",".join(f"S{season:02d}" for season in missing_seasons)
+            raise SeriesScopeError(
+                f"probe_inventory_mismatch missing={formatted}"
+            )
+        selected = [
+            item
+            for item in items
+            if _integer(item.get("season_number")) in observed_seasons
+        ]
+    else:
+        raise SeriesScopeError("scope_unresolved")
+
+    if not selected:
+        raise SeriesScopeError("probe_inventory_mismatch missing=all")
+
+    selected_seasons = sorted({
+        _integer(item.get("season_number"))
+        for item in selected
+        if _integer(item.get("season_number")) is not None
+    })
+    shape = str((probe or {}).get("content_shape") or "").casefold()
+    if len(selected) == 1 and shape in {
+        "single_episode",
+        "single_episode_unscoped",
+    }:
+        scope = "episode"
+        season_number = _integer(selected[0].get("season_number"))
+        episode_number = _integer(selected[0].get("episode_number"))
+    elif len(selected_seasons) == 1:
+        scope = "season"
+        season_number = selected_seasons[0]
+        episode_number = None
+    else:
+        scope = "whole_series"
+        season_number = None
+        episode_number = None
+
+    identity = result.get("identity") or {}
+    search_title = " ".join(
+        str(
+            identity.get("english_title")
+            or identity.get("chinese_title")
+            or ""
+        ).split()
+    )
+    if not search_title:
+        raise SeriesScopeError("search_title_missing")
+    result["items"] = selected
+    result["retrieval"] = {
+        "media_type": "series",
+        "scope": scope,
+        "query": build_prowlarr_query(
+            search_title,
+            scope,
+            season_number=season_number,
+            episode_number=episode_number,
+        ),
+    }
+    decision = result.setdefault("evidence", {}).setdefault("decision", {})
+    decision.update({
+        "scope": scope,
+        "season_number": season_number,
+        "episode_number": episode_number,
+        "scope_source": "file_probe",
+    })
+    return result
+
+
 def apply_series_scope(
     contract: dict,
     choice: str,

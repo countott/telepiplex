@@ -45,3 +45,30 @@ def test_move_file_reports_same_path_no_op_as_success():
 
     assert moved is True
     assert client.mutations == []
+
+
+def test_file_tree_preserves_provider_sha1_for_identity_recovery():
+    client = Open115Client({"access_token": "test", "request_interval": 0})
+    client.get_file_info = lambda _path: {
+        "file_id": "root",
+        "file_category": "0",
+    }
+    client.get_file_list = lambda _params: {"list": [{
+        "fn": "Veep.S07E01.mkv",
+        "fid": "episode-1",
+        "fc": "1",
+        "fs": 4096,
+        "sha1": "ABCDEF0123456789",
+    }]}
+
+    tree = client.get_file_tree("/Downloads/Veep")
+
+    assert tree == [{
+        "name": "Veep.S07E01.mkv",
+        "relative_path": "Veep.S07E01.mkv",
+        "path": "/Downloads/Veep/Veep.S07E01.mkv",
+        "is_dir": False,
+        "file_id": "episode-1",
+        "size": 4096,
+        "sha1": "ABCDEF0123456789",
+    }]

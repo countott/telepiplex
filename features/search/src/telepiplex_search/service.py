@@ -105,6 +105,7 @@ from .search_resolution import parse_search_intent
 from .search_logging import bind_search_log_context, log_search_event
 from .series_scope import (
     SeriesScopeError,
+    apply_inventory_probe_scope,
     apply_series_scope,
     series_inventory,
     series_seasons,
@@ -767,48 +768,57 @@ class SearchFeature:
             })
             contract["items"] = []
         elif placement.get("library_type") == "series":
-            decision = ((contract.get("evidence") or {}).get("decision") or {})
-            scope = str(decision.get("scope") or "movie_or_series")
-            season_number = decision.get("season_number")
-            episode_number = decision.get("episode_number")
-            scope_derived_from_probe = False
-            if scope not in {"whole_series", "season", "episode"}:
-                derived_scope = _probe_scope(contract, probe)
-                if derived_scope[0]:
-                    scope, season_number, episode_number = derived_scope
-                    scope_derived_from_probe = True
-            if scope == "episode":
-                contract = apply_series_scope(
-                    contract,
-                    "episode",
-                    season_number=season_number,
-                    episode_number=episode_number,
-                )
-            elif scope == "season":
-                contract = apply_series_scope(
-                    contract,
-                    "season",
-                    season_number=season_number,
-                    allow_incomplete_aggregate=scope_derived_from_probe,
-                )
-            elif scope == "whole_series":
-                contract = apply_series_scope(
-                    contract,
-                    "whole_series",
-                    allow_incomplete_aggregate=scope_derived_from_probe,
-                )
+            has_inventory_probe = bool(
+                (probe or {}).get("observed_episodes")
+                or (probe or {}).get("observed_seasons")
+            )
+            if has_inventory_probe:
+                try:
+                    contract = apply_inventory_probe_scope(contract, probe)
+                except SeriesScopeError as exc:
+                    reason = str(exc).split(None, 1)[0]
+                    return {
+                        "status": "unresolved",
+                        "reason_code": reason,
+                        "detail": str(exc),
+                    }
+                selected_plan["media_metadata"] = contract
             else:
-                return {
-                    "status": "unresolved",
-                    "reason_code": "scope_unresolved",
-                }
-            selected_plan["media_metadata"] = contract
+                decision = ((contract.get("evidence") or {}).get("decision") or {})
+                scope = str(decision.get("scope") or "movie_or_series")
+                season_number = decision.get("season_number")
+                episode_number = decision.get("episode_number")
+                if scope == "episode":
+                    contract = apply_series_scope(
+                        contract,
+                        "episode",
+                        season_number=season_number,
+                        episode_number=episode_number,
+                    )
+                elif scope == "season":
+                    contract = apply_series_scope(
+                        contract,
+                        "season",
+                        season_number=season_number,
+                    )
+                elif scope == "whole_series":
+                    contract = apply_series_scope(
+                        contract,
+                        "whole_series",
+                    )
+                else:
+                    return {
+                        "status": "unresolved",
+                        "reason_code": "scope_unresolved",
+                    }
+                selected_plan["media_metadata"] = contract
         try:
             contract = confirm_media_metadata(selected_plan)
         except ValueError as exc:
             raise FeatureError(
                 "metadata_unresolved",
-                "resolved metadata did not pass the canonical contract",
+                "resolved metadata did not pass the canonical contract: "
+                f"{exc}",
             ) from exc
         identity = contract["identity"]
         result = {

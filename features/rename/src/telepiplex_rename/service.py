@@ -53,16 +53,6 @@ _IRREVERSIBLE_METHODS = {
     "copy_file", "move_file", "move_file_detailed", "delete_single_file",
 }
 
-_FILE_RESULT_COUNTERS = (
-    "media_files_total",
-    "organized_files",
-    "canonical_no_ops",
-    "kept_unresolved",
-    "target_conflicts",
-    "failed_files",
-)
-
-
 def _metadata_callback_token(job_id: str) -> str:
     return uuid.uuid5(
         uuid.NAMESPACE_URL,
@@ -89,103 +79,6 @@ def _inventory_completion_text(
         f"失败：{file_counts['failed_files']}，"
         f"已验证作品组：{file_counts['verified_work_groups']}"
     )
-
-
-def _verified_event_identity(payload: dict) -> str:
-    contract = payload.get("media_metadata")
-    if not isinstance(contract, dict):
-        contract = {}
-    metadata_id = str(contract.get("metadata_id") or "").strip()
-    if metadata_id:
-        return f"metadata:{metadata_id}"
-    identity = contract.get("identity")
-    if not isinstance(identity, dict):
-        identity = {}
-    external_ids = identity.get("external_ids")
-    if isinstance(external_ids, dict):
-        values = [
-            f"{key}:{str(value).strip()}"
-            for key, value in sorted(external_ids.items())
-            if str(value or "").strip()
-        ]
-        if values:
-            return "external:" + "|".join(values)
-    return f"job:{str(payload.get('job_id') or '').strip()}"
-
-
-def _merge_verified_inventory_events(
-    payloads: list[dict],
-) -> list[tuple[str, dict]]:
-    """Merge provisional aliases only after confirmed external identity."""
-
-    grouped = {}
-    for payload in payloads or []:
-        if not isinstance(payload, dict):
-            continue
-        identity_key = _verified_event_identity(payload)
-        grouped.setdefault(identity_key, []).append(payload)
-
-    merged = []
-    for identity_key in sorted(grouped):
-        members = grouped[identity_key]
-        job_ids = sorted({
-            str(item.get("job_id") or "").strip()
-            for item in members
-            if str(item.get("job_id") or "").strip()
-        })
-        source_paths = sorted({
-            str(item.get("source_path") or "").strip()
-            for item in members
-            if str(item.get("source_path") or "").strip()
-        })
-        final_paths = sorted({
-            str(item.get("final_path") or "").strip()
-            for item in members
-            if str(item.get("final_path") or "").strip()
-        })
-        counters = {key: 0 for key in _FILE_RESULT_COUNTERS}
-        successful_by_identity = {}
-        warnings = []
-        for item in members:
-            file_results = item.get("file_results")
-            if not isinstance(file_results, dict):
-                file_results = {}
-            for key in _FILE_RESULT_COUNTERS:
-                counters[key] += int(file_results.get(key) or 0)
-            for successful in file_results.get("successful_files") or []:
-                if not isinstance(successful, dict):
-                    continue
-                dedupe_key = (
-                    str(successful.get("source_id") or ""),
-                    str(successful.get("final_path") or ""),
-                )
-                successful_by_identity[dedupe_key] = dict(successful)
-            warnings.extend(
-                dict(warning)
-                for warning in item.get("file_warnings") or []
-                if isinstance(warning, dict)
-            )
-        base = dict(members[0])
-        base.update({
-            "job_id": job_ids[0] if job_ids else "",
-            "job_ids": job_ids,
-            "source_path": source_paths[0] if source_paths else "",
-            "source_paths": source_paths,
-            "final_path": final_paths[0] if final_paths else "",
-            "final_paths": final_paths,
-            "file_results": {
-                "pipeline_version": "file-first-v1",
-                **counters,
-                "verified_work_groups": 1,
-                "successful_files": [
-                    successful_by_identity[key]
-                    for key in sorted(successful_by_identity)
-                ],
-            },
-            "file_warnings": warnings,
-        })
-        merged.append((identity_key, base))
-    return merged
 
 
 def _storage_listing_incomplete(value) -> bool:
@@ -292,8 +185,8 @@ class StorageProxy:
             self._raise_if_cancelled()
             self._report_stage("get_file_info_batch", "cancel")
             try:
-                for offset in range(0, len(missing), 128):
-                    chunk = missing[offset:offset + 128]
+                for offset in range(0, len(missing), 32):
+                    chunk = missing[offset:offset + 32]
                     values = self._storage_call(
                         "get_file_info_batch",
                         [chunk],
@@ -804,6 +697,32 @@ class RenameFeature:
             or item.get("size_byte") or 0
         )
 
+    @staticmethod
+    def _inventory_group_source_path(root_path: str, group_tree: list[dict]) -> str:
+        parents = [
+            PurePosixPath(str(node.get("path") or "")).parent
+            for node in group_tree
+            if str(node.get("path") or "").strip()
+        ]
+        if not parents:
+            return root_path
+        common_parts = list(parents[0].parts)
+        for parent in parents[1:]:
+            matching_parts = []
+            for left, right in zip(common_parts, parent.parts):
+                if left != right:
+                    break
+                matching_parts.append(left)
+            common_parts = matching_parts
+            if not common_parts:
+                return root_path
+        common = str(PurePosixPath(*common_parts))
+        root = PurePosixPath(root_path)
+        candidate = PurePosixPath(common)
+        if candidate != root and root not in candidate.parents:
+            return root_path
+        return common
+
     async def _inventory_directory_items(self, parent_id: str) -> list[dict]:
         page_size = 1000
         offset = 0
@@ -975,12 +894,16 @@ class RenameFeature:
                     group.query_candidates[0]
                     if group.query_candidates else group.title_key
                 )
+                group_source_path = self._inventory_group_source_path(
+                    root_path,
+                    group_tree,
+                )
                 pending.append({
                     "job_id": (
                         "inventory:file-first-v1:"
                         f"{group.group_id.removeprefix('group:')}"
                     ),
-                    "source_path": root_path,
+                    "source_path": group_source_path,
                     "resource_name": resource_name,
                     "file_tree": group_tree,
                     "source_file_id": root_id,
@@ -1158,20 +1081,11 @@ class RenameFeature:
                 if current and current.get("state") == "completed" and result.get(
                     "organized"
                 ):
-                    event_payload = result.get("event_payload")
-                    if isinstance(event_payload, dict):
-                        session.setdefault(
-                            "verified_event_payloads", []
-                        ).append(dict(event_payload))
                     session["success"] = int(session.get("success") or 0) + 1
                 else:
                     session["failed"] = int(session.get("failed") or 0) + 1
                 session["index"] = index + 1
             session["stage"] = "completed"
-            downstream_failures = await self._publish_inventory_verified_groups(
-                session,
-                operation_id,
-            )
             total = len(pending)
             success = int(session.get("success") or 0)
             failed = int(session.get("failed") or 0)
@@ -1189,24 +1103,24 @@ class RenameFeature:
                     "verified_work_groups",
                 )
             }
-            file_counts["verified_work_groups"] = int(
-                session.get("published_verified_work_groups") or 0
-            )
+            file_counts["verified_work_groups"] = success
             text = _inventory_completion_text(
                 total=total,
                 success=success,
                 failed=failed,
                 file_counts=file_counts,
             )
-            if downstream_failures:
-                text += (
-                    f"\nPlex 事件发布失败：{downstream_failures}，"
-                    "文件结果已保留，请人工检查。"
-                )
+            complete = bool(
+                success == total
+                and failed == 0
+                and file_counts["kept_unresolved"] == 0
+                and file_counts["target_conflicts"] == 0
+                and file_counts["failed_files"] == 0
+            )
             await self._report_if_active(
                 operation_id,
-                state="completed",
-                stage="completed",
+                state="completed" if complete else "failed",
+                stage="completed" if complete else "inventory_batch",
                 status_text=text,
                 control="",
                 details={
@@ -1215,15 +1129,10 @@ class RenameFeature:
                     "success": success,
                     "failed": failed,
                     "file_results": file_counts,
-                    "downstream_failures": downstream_failures,
                 },
             )
             self.inventory_sessions.pop(owner, None)
         except (asyncio.CancelledError, OperationCancelled):
-            await self._publish_inventory_verified_groups(
-                session,
-                operation_id,
-            )
             self.inventory_sessions.pop(owner, None)
             await self._report_if_active(
                 operation_id,
@@ -1740,7 +1649,7 @@ class RenameFeature:
                             stage="replay_identity_check",
                             status_text=(
                                 "持久化结果缺少匹配的协调任务身份；"
-                                "已停止自动发布后续 Plex 任务。"
+                                "已停止自动重放 rename。"
                             ),
                             control="",
                             details={"manual_check_required": True},
@@ -1751,7 +1660,7 @@ class RenameFeature:
                         "state": "interrupted",
                         "message": (
                             "协调任务身份未在处理结果中完整持久化；"
-                            "已停止自动发布后续 Plex 任务。"
+                            "已停止自动重放 rename。"
                         ),
                     }
                 outcome = existing.get("result") or {}
@@ -2035,9 +1944,22 @@ class RenameFeature:
             verified_files = int(file_results.get("organized_files") or 0) + int(
                 file_results.get("canonical_no_ops") or 0
             )
+            file_accounting_complete = True
+            if file_results:
+                media_files_total = int(
+                    file_results.get("media_files_total") or 0
+                )
+                file_accounting_complete = bool(
+                    media_files_total > 0
+                    and verified_files == media_files_total
+                    and int(file_results.get("kept_unresolved") or 0) == 0
+                    and int(file_results.get("target_conflicts") or 0) == 0
+                    and int(file_results.get("failed_files") or 0) == 0
+                )
             organized = bool(
                 result.handled
                 and result.final_path
+                and file_accounting_complete
                 and (
                     verified_files > 0
                     if file_results
@@ -2206,37 +2128,6 @@ class RenameFeature:
                 except Exception:
                     pass
 
-    async def _publish_inventory_verified_groups(
-        self,
-        session: dict,
-        operation_id: str,
-    ) -> int:
-        failures = 0
-        verified_groups = 0
-        payloads = list(session.get("verified_event_payloads") or [])
-        for identity_key, payload in _merge_verified_inventory_events(payloads):
-            if not (payload.get("file_results") or {}).get(
-                "successful_files"
-            ):
-                continue
-            verified_groups += 1
-            event_key = uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"telepiplex:file-first-v1:{identity_key}",
-            ).hex
-            try:
-                await self.host.publish_event(
-                    "media.organized",
-                    payload,
-                    idempotency_key=(
-                        f"inventory:{operation_id}:organized:{event_key}"
-                    ),
-                )
-            except Exception:
-                failures += 1
-        session["published_verified_work_groups"] = verified_groups
-        return failures
-
     async def _finish_inventory_item(self, job_id: str, outcome: dict) -> None:
         if self.jobs:
             self.jobs.update(
@@ -2251,88 +2142,11 @@ class RenameFeature:
             )
 
     async def _finish_operation(self, job_id, outcome, operation_id):
-        if outcome.get("organized"):
-            event_payload = outcome["event_payload"]
-            cleanup_complete = outcome.get("cleanup_complete", True)
-            if operation_id:
-                handoff = outcome.get("handoff_operation")
-                if not isinstance(handoff, dict):
-                    handoff = self._advance_operation(
-                        operation_id,
-                        state="handed_off",
-                        stage="handoff_plex",
-                        status_text=(
-                            "媒体整理完成，已交给 Plex 管理任务。"
-                            if cleanup_complete
-                            else (
-                                "媒体文件已移动，但源目录清理未完成；"
-                                "已交给 Plex，仍需检查源目录。"
-                            )
-                        ),
-                        control="cancel",
-                        next_plugin_id="sync",
-                    )
-                    event_payload["operation_id"] = operation_id
-                    event_payload["operation_revision"] = handoff["revision"]
-                    outcome["handoff_operation"] = dict(handoff)
-                    if self.jobs:
-                        self.jobs.update(job_id, "processed", outcome)
-                if not outcome.get("handoff_reported"):
-                    response = await self.host.report_operation(handoff)
-                    if (
-                        not isinstance(response, dict)
-                        or response.get("accepted") is not True
-                    ):
-                        if (
-                            isinstance(response, dict)
-                            and response.get("error_code")
-                            == "handoff_target_unavailable"
-                            and response.get("target_plugin_id") == "sync"
-                        ):
-                            outcome.pop("handoff_operation", None)
-                            outcome["downstream_skipped"] = "sync"
-                            outcome["message"] = (
-                                str(outcome.get("message") or "").rstrip()
-                                + "\nPlex 管理未安装，已跳过后续处理。"
-                            ).lstrip()
-                            await self._report_operation(
-                                operation_id,
-                                state=(
-                                    "completed"
-                                    if cleanup_complete
-                                    else "failed"
-                                ),
-                                stage=(
-                                    "completed"
-                                    if cleanup_complete
-                                    else "cleanup"
-                                ),
-                                status_text=(
-                                    "媒体整理完成；Plex 管理未安装，"
-                                    "已跳过后续处理。"
-                                    if cleanup_complete
-                                    else (
-                                        "媒体文件已移动，但源目录清理未完成；"
-                                        "Plex 管理未安装，仍需人工检查。"
-                                    )
-                                ),
-                                control="",
-                                details={
-                                    "downstream_skipped": "sync",
-                                    "cleanup_complete": cleanup_complete,
-                                },
-                            )
-                            if self.jobs:
-                                self.jobs.update(
-                                    job_id, "published", outcome
-                                )
-                            return await self._complete_published_job(
-                                job_id, outcome
-                            )
-                        raise FeatureError(
-                            "operation_rejected",
-                            "Host rejected rename handoff ownership",
-                        )
+        cleanup_complete = bool(outcome.get("cleanup_complete", True))
+        organized = bool(outcome.get("organized"))
+        complete = organized and cleanup_complete
+        if operation_id:
+            if organized:
                 for attempt in range(3):
                     try:
                         seal_response = await self.host.seal_operation_stage(
@@ -2366,56 +2180,57 @@ class RenameFeature:
                         "stage_seal_failed",
                         "Host did not seal the completed rename stage",
                     )
-                outcome["handoff_reported"] = True
-                if self.jobs:
-                    self.jobs.update(job_id, "processed", outcome)
-            try:
-                await self.host.publish_event(
-                    "media.organized",
-                    event_payload,
-                    idempotency_key=f"{job_id}:organized",
-                )
-            except Exception as exc:
-                await self._report_if_active(
-                    operation_id,
-                    state="failed",
-                    stage="event_publication",
-                    status_text=(
-                        "媒体已整理，但 Plex 事件发布失败："
-                        f"{type(exc).__name__}。"
-                    ),
-                    control="",
-                    details={"manual_check_required": True},
-                )
-                raise
-        else:
             await self._report_if_active(
                 operation_id,
-                state="completed",
-                stage="completed",
+                state="completed" if complete else "failed",
+                stage=(
+                    "completed"
+                    if complete
+                    else "cleanup" if organized else "organizing"
+                ),
                 status_text=(
-                    outcome.get("message")
-                    or "媒体整理任务已完成，未发布 Plex 任务。"
+                    "媒体整理完成。"
+                    if complete
+                    else outcome.get("message")
+                    or "媒体整理未满足完整成功条件。"
                 ),
                 control="",
+                details={
+                    "organized": organized,
+                    "cleanup_complete": cleanup_complete,
+                    "final_path": outcome.get("final_path"),
+                },
             )
         if self.jobs:
-            self.jobs.update(job_id, "published", outcome)
+            self.jobs.update(
+                job_id,
+                "completed" if complete else "failed",
+                outcome,
+            )
         return await self._complete_published_job(job_id, outcome)
 
     async def _complete_published_job(self, job_id, outcome):
         if outcome.get("user_id") and outcome.get("message"):
-            await self.host.notify_user(
-                int(outcome["user_id"]),
-                _plain_notification(outcome["message"]),
-                idempotency_key=f"{job_id}:rename-notice",
-            )
+            try:
+                await self.host.notify_user(
+                    int(outcome["user_id"]),
+                    _plain_notification(outcome["message"]),
+                    idempotency_key=f"{job_id}:rename-notice",
+                )
+            except Exception as exc:
+                runtime_context.logger.warning(
+                    "rename completion notification failed without changing "
+                    "the verified job state: job_id=%s error=%s",
+                    job_id,
+                    type(exc).__name__,
+                )
         if self.jobs:
             self.jobs.update(
                 job_id,
                 (
                     "completed"
-                    if outcome.get("cleanup_complete", True)
+                    if outcome.get("organized")
+                    and outcome.get("cleanup_complete", True)
                     else "failed"
                 ),
                 outcome,
@@ -2424,7 +2239,10 @@ class RenameFeature:
             "accepted": True,
             "duplicate": True,
             "organized": bool(outcome.get("organized")),
-            "complete": bool(outcome.get("cleanup_complete", True)),
+            "complete": bool(
+                outcome.get("organized")
+                and outcome.get("cleanup_complete", True)
+            ),
             "final_path": outcome.get("final_path"),
             "replayed": True,
         }
@@ -2615,22 +2433,6 @@ class RenameFeature:
         cancel_event = operation.get("cancel_event")
         if cancel_event is not None:
             cancel_event.set()
-        if operation.get("state") == "handed_off":
-            terminal = self._advance_operation(
-                operation_id,
-                state="cancelled",
-                stage=operation.get("stage") or "handoff_plex",
-                status_text=(
-                    "已取消尚未被下游接受的后续 Plex 任务；"
-                    "已完成的媒体文件变更保持不变。"
-                ),
-                control="",
-                details={
-                    "stopped_at": operation.get("stage") or "handoff_plex",
-                    "completed_media_changes": "preserved",
-                },
-            )
-            return {"actions": [], "operation": terminal}
         if action == "rollback":
             journal = operation.get("journal")
             if journal is None or not journal.can_rollback:
