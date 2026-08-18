@@ -16,6 +16,9 @@ def main(context: RuntimeContext) -> FeatureRuntime:
         "metadata": config.get("metadata") or {},
         "media": {"unorganized_path": config.get("unorganized_path") or ""},
         "selection": config.get("selection") or {},
+        "storage_move_batch_size": int(
+            config.get("storage_move_batch_size") or 32
+        ),
     })
     feature = RenameFeature(
         config=config, host=context.host,

@@ -1214,6 +1214,30 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "payload": {"args": [paths + ["/Downloads/overflow.mkv"]]},
             })
 
+    async def test_storage_capability_exposes_bounded_native_move(self):
+        calls = []
+
+        def move_files_by_id(file_ids, target_dir_id):
+            calls.append((list(file_ids), target_dir_id))
+            return {"state": "submitted", "submitted": True}
+
+        self.client.move_files_by_id = move_files_by_id
+        ids = [f"episode-{index}" for index in range(100)]
+
+        result = await self.feature.storage_capability({
+            "method": "move_files_by_id",
+            "payload": {"args": [ids, "season-1"]},
+        })
+
+        self.assertTrue(result["value"]["submitted"])
+        self.assertEqual(calls, [(ids, "season-1")])
+
+        with self.assertRaisesRegex(Exception, "batch exceeds"):
+            await self.feature.storage_capability({
+                "method": "move_files_by_id",
+                "payload": {"args": [ids + ["overflow"], "season-1"]},
+            })
+
     async def test_completed_job_is_persistently_idempotent(self):
         from telepiplex_download.jobs import DownloadJobStore
         from telepiplex_download.service import DownloadFeature
@@ -2411,17 +2435,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.0.16")
+        self.assertEqual(manifest["version"], "1.0.17")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.0.16")
+        self.assertEqual(project["project"]["version"], "1.0.17")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.3.2",
         )
-        self.assertIn("/tmp/download-1.0.16.tpx", readme)
-        self.assertNotIn("dist/download-1.0.16.tpx", readme)
+        self.assertIn("/tmp/download-1.0.17.tpx", readme)
+        self.assertNotIn("dist/download-1.0.17.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)

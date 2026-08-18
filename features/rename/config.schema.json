@@ -20,6 +20,7 @@
     },
     "unorganized_path": {"type": "string", "pattern": "^/"},
     "storage_timeout": {"type": "number", "minimum": 1, "maximum": 600},
+    "storage_move_batch_size": {"type": "integer", "minimum": 1, "maximum": 100},
     "metadata_timeout": {"type": "number", "minimum": 1, "maximum": 600},
     "selection": {
       "type": "object",
@@ -63,6 +64,6 @@
       "additionalProperties": true
     }
   },
-  "required": ["category_folder", "unorganized_path", "storage_timeout", "metadata_timeout", "selection", "metadata", "ai"],
+  "required": ["category_folder", "unorganized_path", "storage_timeout", "storage_move_batch_size", "metadata_timeout", "selection", "metadata", "ai"],
   "additionalProperties": false
 }

@@ -1,6 +1,7 @@
 import json
 from unittest.mock import patch
 
+from telepiplex_rename import ai as ai_module
 from telepiplex_rename.ai import (
     chat_completion,
     get_movie_tmdb_name_with_ai,
@@ -198,3 +199,44 @@ def test_reasoning_text_is_never_written_to_logs(chat):
 
     assert name == "Movie"
     assert "SECRET_REASONING_SENTINEL" not in "\n".join(logger.messages)
+
+
+@patch("telepiplex_rename.ai.chat_completion")
+def test_ambiguity_explanation_accepts_advice_but_discards_mapping_fields(chat):
+    explanation_fn = getattr(
+        ai_module,
+        "explain_unresolved_episode_files_with_ai",
+        None,
+    )
+    assert callable(explanation_fn)
+
+    _configure()
+    chat.return_value = _openai_result(json.dumps({
+        "summary": "文件编号可能采用不同分集顺序。",
+        "possible_causes": ["DVD 顺序", "自定义打包顺序"],
+        "user_checks": ["核对发行说明", "核对 TVDB alternate order"],
+        "episode_map": [{
+            "source_file": "Honey.S01E25.mkv",
+            "season_number": 0,
+            "episode_number": 1,
+        }],
+        "target_path": "/Series/Unsafe.mkv",
+    }))
+
+    explanation = explanation_fn({
+        "confirmed_work": {"english_title": "Honey and Clover"},
+        "unresolved_files": [{
+            "source_name": "Honey.S01E25.mkv",
+            "reason_codes": ["target_unresolved"],
+        }],
+    })
+
+    assert explanation == {
+        "source": "ai",
+        "summary": "文件编号可能采用不同分集顺序。",
+        "possible_causes": ["DVD 顺序", "自定义打包顺序"],
+        "user_checks": ["核对发行说明", "核对 TVDB alternate order"],
+    }
+    assert "episode_map" not in explanation
+    assert "target_path" not in explanation
+    assert chat.call_count == 1

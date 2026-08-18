@@ -231,22 +231,30 @@ def apply_inventory_probe_scope(contract: dict, probe: dict) -> dict:
         observed_seasons.add(matching_seasons[0])
 
     if observed_coordinates:
-        missing = sorted(
+        matched_coordinates = sorted(
             coordinate
             for coordinate in observed_coordinates
-            if len(by_coordinate.get(coordinate, ())) != 1
+            if len(by_coordinate.get(coordinate, ())) == 1
         )
-        if missing:
-            formatted = ",".join(
-                f"S{season:02d}E{episode:02d}"
-                for season, episode in missing
-            )
-            raise SeriesScopeError(
-                f"probe_inventory_mismatch missing={formatted}"
-            )
+        unresolved = []
+        for season, episode in sorted(observed_coordinates):
+            candidates = by_coordinate.get((season, episode), ())
+            if len(candidates) == 1:
+                continue
+            unresolved.append({
+                "season_number": season,
+                "episode_number": episode,
+                "reason_code": (
+                    "canonical_coordinate_unavailable"
+                    if not candidates
+                    else "canonical_coordinate_non_unique"
+                ),
+            })
+        if not matched_coordinates:
+            raise SeriesScopeError("probe_inventory_mismatch missing=all")
         selected = [
             by_coordinate[coordinate][0]
-            for coordinate in sorted(observed_coordinates)
+            for coordinate in matched_coordinates
         ]
     elif observed_seasons:
         known_seasons = {
@@ -320,6 +328,20 @@ def apply_inventory_probe_scope(contract: dict, probe: dict) -> dict:
         "episode_number": episode_number,
         "scope_source": "file_probe",
     })
+    if observed_coordinates:
+        reconciliation = {
+            "status": "partial" if unresolved else "complete",
+            "observed_count": len(observed_coordinates),
+            "matched_count": len(selected),
+            "unresolved_count": len(unresolved),
+            "unresolved": unresolved,
+        }
+        result["evidence"]["inventory_reconciliation"] = reconciliation
+        if unresolved:
+            warnings = result.setdefault("warnings", [])
+            warning = "warning:inventory_partial_match"
+            if warning not in warnings:
+                warnings.append(warning)
     return result
 
 

@@ -17,6 +17,7 @@ category_folder:
     plex_library_id: ""
 unorganized_path: /未整理
 storage_timeout: 120
+storage_move_batch_size: 32
 metadata_timeout: 120
 selection:
   movie_size_fallback_ratio: 1.5

@@ -357,6 +357,136 @@ def test_sixty_five_no_op_files_use_one_initial_batch_lookup():
     assert storage.individual_calls == []
 
 
+def test_sixty_five_moves_use_three_native_batches_and_no_legacy_moves():
+    class NativeBatchStorage(StatefulStorage):
+        def __init__(self, files):
+            super().__init__(files=files, directories=["/Downloads", "/TV"])
+            self.native_calls = []
+
+        def create_dir_recursive(self, path):
+            self.directories.add(path)
+            return {"file_id": f"dir:{path}", "file_category": "0"}
+
+        def move_files_by_id(self, file_ids, target_dir_id):
+            self.native_calls.append((tuple(file_ids), target_dir_id))
+            target_dir = str(target_dir_id)[4:]
+            for file_id in file_ids:
+                source = next(
+                    path for path, info in self.files.items()
+                    if info["file_id"] == file_id
+                )
+                target = str(PurePosixPath(target_dir) / PurePosixPath(source).name)
+                self.files[target] = self.files.pop(source)
+            return {"state": "submitted", "submitted": True}
+
+    sources = [
+        f"/Downloads/episode-{index:03d}.mkv"
+        for index in range(65)
+    ]
+    storage = NativeBatchStorage([
+        (source, f"episode-{index}")
+        for index, source in enumerate(sources)
+    ])
+    resolutions = [
+        _resolution(
+            f"episode-{index}",
+            source,
+            f"/TV/Show/{PurePosixPath(source).name}",
+            "move_only",
+        )
+        for index, source in enumerate(sources)
+    ]
+
+    summary = execute_file_resolutions(
+        storage,
+        resolutions,
+        selected_root="/Downloads",
+        move_batch_size=32,
+    )
+
+    assert summary.organized_files == 65
+    assert summary.failed_files == 0
+    assert [len(call[0]) for call in storage.native_calls] == [32, 32, 1]
+    assert {call[1] for call in storage.native_calls} == {"dir:/TV/Show"}
+    assert storage.moves == []
+
+
+def test_native_move_reconciles_observed_state_instead_of_response_boolean():
+    class ReconciledStorage(StatefulStorage):
+        def __init__(self, *, apply_move):
+            super().__init__(
+                files=[("/Downloads/episode.mkv", "episode")],
+                directories=["/Downloads", "/TV"],
+            )
+            self.apply_move = apply_move
+
+        def create_dir_recursive(self, path):
+            self.directories.add(path)
+            return {"file_id": f"dir:{path}", "file_category": "0"}
+
+        def move_files_by_id(self, file_ids, target_dir_id):
+            if self.apply_move:
+                self.files["/TV/Show/episode.mkv"] = self.files.pop(
+                    "/Downloads/episode.mkv"
+                )
+            return {"state": "provider_rejected", "submitted": False}
+
+    resolution = _resolution(
+        "episode",
+        "/Downloads/episode.mkv",
+        "/TV/Show/episode.mkv",
+        "move_only",
+    )
+
+    applied = execute_file_resolutions(
+        ReconciledStorage(apply_move=True),
+        [resolution],
+        selected_root="/Downloads",
+    )
+    not_applied = execute_file_resolutions(
+        ReconciledStorage(apply_move=False),
+        [resolution],
+        selected_root="/Downloads",
+    )
+
+    assert applied.outcomes[0].state == "organized"
+    assert not_applied.outcomes[0].state == "failed"
+    assert not_applied.outcomes[0].reason_codes == (
+        "target_missing_after_move",
+    )
+
+
+def test_incompatible_native_provider_falls_back_to_legacy_move():
+    class LegacyFallbackStorage(StatefulStorage):
+        def __init__(self):
+            super().__init__(
+                files=[("/Downloads/episode.mkv", "episode")],
+                directories=["/Downloads", "/TV"],
+            )
+
+        def create_dir_recursive(self, path):
+            self.directories.add(path)
+            return {"file_id": f"dir:{path}", "file_category": "0"}
+
+        def move_files_by_id(self, _file_ids, _target_dir_id):
+            raise AttributeError("native move unavailable")
+
+    storage = LegacyFallbackStorage()
+    summary = execute_file_resolutions(
+        storage,
+        [_resolution(
+            "episode",
+            "/Downloads/episode.mkv",
+            "/TV/Show/episode.mkv",
+            "move_only",
+        )],
+        selected_root="/Downloads",
+    )
+
+    assert summary.outcomes[0].state == "organized"
+    assert storage.moves == [("/Downloads/episode.mkv", "/TV/Show")]
+
+
 def test_batch_snapshot_is_never_used_for_post_move_target_verification():
     class BatchStorage(StatefulStorage):
         def __init__(self, files):
@@ -427,6 +557,34 @@ def test_cleanup_deletes_only_freshly_verified_empty_directories_bottom_up():
     ]
     assert "/Downloads" not in storage.deleted
     assert "/Downloads/Keep" not in storage.deleted
+
+
+def test_cleanup_treats_directory_retained_for_unresolved_file_as_complete():
+    root = "/Downloads/Honey"
+    unresolved = f"{root}/Honey.S01E25.mkv"
+    storage = StatefulStorage(
+        files=[(unresolved, "episode-25")],
+        directories=[root],
+    )
+    kept = _resolution(
+        "episode-25",
+        unresolved,
+        "",
+        "keep_original",
+        status="ambiguous",
+    )
+
+    summary = cleanup_source_directories(
+        storage,
+        [kept],
+        selected_root=root,
+        include_selected_root=True,
+    )
+
+    assert summary.complete is True
+    assert summary.retained_directories == 1
+    assert summary.outcomes[0].state == "retained_unresolved"
+    assert storage.deleted == []
 
 
 def test_automatic_cleanup_deletes_empty_release_root_but_protects_category():

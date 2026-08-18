@@ -212,6 +212,25 @@ JSON结构：
 输入事实如下：
 """
 
+UNRESOLVED_EPISODE_EXPLANATION_PROMPT = """你是媒体库分集歧义解释助手。根据已确认作品、官方分集范围和未能唯一匹配的文件，为用户解释可能原因和核对方法。
+
+硬性规则：
+1. 只返回JSON，不要返回Markdown或额外文字。
+2. 你只能解释，不得决定、建议或输出任何文件重命名、移动、删除或集数映射。
+3. 不得输出 target_path、target_name、episode_map、season_number、episode_number 或特殊篇映射。
+4. 不要断言某一种分集顺序就是正确答案；把 DVD、absolute、alternate、平台自定义打包顺序等写成待核对的可能性。
+5. 建议必须是用户可执行的核对动作，最多四项。
+
+JSON结构：
+{
+  "summary": "string",
+  "possible_causes": ["string"],
+  "user_checks": ["string"]
+}
+
+输入事实如下：
+"""
+
 def check_ai_api_available():
     ai_config = runtime_context.config.get("ai", {})
     if ai_config.get("enable") is False:
@@ -464,6 +483,48 @@ def infer_tvdb_episode_plan_with_ai(context: dict):
     if not isinstance(evidence, dict):
         plan["evidence"] = {}
     return plan
+
+
+def _bounded_text_list(value, *, limit=4, max_chars=200) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items = []
+    for item in value:
+        text = " ".join(str(item or "").split())[:max_chars].strip()
+        if text and text not in items:
+            items.append(text)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def explain_unresolved_episode_files_with_ai(context: dict):
+    """Return explanation-only advice; mapping-shaped AI fields are discarded."""
+
+    if not check_ai_api_available():
+        return None
+    prompt = UNRESOLVED_EPISODE_EXPLANATION_PROMPT + json.dumps(
+        context or {}, ensure_ascii=False, indent=2
+    )
+    _log_ai_info(
+        f"AI分集歧义解释输入 context={_compact_json_for_log(context)}"
+    )
+    plan = request_structured_json(
+        prompt,
+        max_tokens=1024,
+        task="unresolved_episode_explanation",
+    ).value
+    if not isinstance(plan, dict):
+        return None
+    summary = " ".join(str(plan.get("summary") or "").split())[:400].strip()
+    if not summary:
+        return None
+    return {
+        "source": "ai",
+        "summary": summary,
+        "possible_causes": _bounded_text_list(plan.get("possible_causes")),
+        "user_checks": _bounded_text_list(plan.get("user_checks")),
+    }
 
 
 def infer_movie_cleanup_plan_with_ai(context: dict):

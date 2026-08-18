@@ -16,6 +16,7 @@ from telepiplex_plugin_sdk.media_metadata import (
 )
 from .models import DownloadCompletedEvent, PostDownloadResult
 from .ai import (
+    explain_unresolved_episode_files_with_ai,
     infer_movie_cleanup_plan_with_ai,
     infer_tvdb_episode_plan_with_ai,
 )
@@ -252,6 +253,9 @@ def process_file_first_media(
         resolutions,
         selected_root=event.download_root or event.final_path,
         journal=getattr(storage, "journal", None),
+        move_batch_size=int(
+            (runtime_context.config or {}).get("storage_move_batch_size") or 32
+        ),
     )
     source_root = event.download_root or event.final_path
     protected_category_root = normalize_storage_path(event.selected_path)
@@ -278,7 +282,7 @@ def process_file_first_media(
         if evidence[resolution.source_id].content_role != "unknown"
         or resolution.source_id in operation_by_source
     ]
-    return {
+    result = {
         "pipeline_version": "file-first-v1",
         "resolutions": resolutions,
         "outcomes": list(execution.outcomes),
@@ -301,6 +305,65 @@ def process_file_first_media(
             execution.organized_files or execution.canonical_no_ops
         )),
     }
+    verified_files = result["organized_files"] + result["canonical_no_ops"]
+    if (
+        verified_files > 0
+        and result["kept_unresolved"] > 0
+        and result["target_conflicts"] == 0
+        and result["failed_files"] == 0
+    ):
+        result["completion_kind"] = "partial_completed"
+    return result
+
+
+def _partial_completion_explanation(
+    file_first: dict,
+    media_metadata: dict,
+) -> dict | None:
+    if file_first.get("completion_kind") != "partial_completed":
+        return None
+    unresolved_files = []
+    for resolution in file_first.get("resolutions") or []:
+        if resolution.action != "keep_original":
+            continue
+        unresolved_files.append({
+            "source_id": resolution.source_id,
+            "source_path": resolution.source_path,
+            "source_name": Path(resolution.source_path).name,
+            "reason_codes": list(resolution.reason_codes),
+        })
+    file_first["unresolved_files"] = unresolved_files
+    context = {
+        "confirmed_work": dict(media_metadata.get("identity") or {}),
+        "placement": dict(media_metadata.get("placement") or {}),
+        "inventory_reconciliation": dict(
+            ((media_metadata.get("evidence") or {}).get(
+                "inventory_reconciliation"
+            ) or {})
+        ),
+        "unresolved_files": unresolved_files,
+    }
+    explanation = None
+    if unresolved_files and _has_ai_episode_inference_config():
+        try:
+            explanation = explain_unresolved_episode_files_with_ai(context)
+        except Exception as exc:
+            runtime_context.logger.warning(
+                f"AI分集歧义解释失败 error={type(exc).__name__}"
+            )
+    if not isinstance(explanation, dict):
+        explanation = {
+            "source": "rules",
+            "summary": "这些文件坐标无法与已确认的官方分集唯一对应，已保持原位。",
+            "possible_causes": [
+                "资源可能采用 DVD、absolute、alternate 或平台自定义分集顺序。",
+            ],
+            "user_checks": [
+                "核对资源发行说明和元数据平台的可选分集顺序后再手动处理。",
+            ],
+        }
+    file_first["ambiguity_explanation"] = explanation
+    return explanation
 
 
 def _public_file_results(file_first: dict) -> dict:
@@ -330,7 +393,7 @@ def _public_file_results(file_first: dict) -> dict:
             "state": outcome.state,
             "final_path": outcome.observed_path,
         })
-    return {
+    result = {
         "pipeline_version": "file-first-v1",
         "media_files_total": int(
             file_first.get("media_files_total") or 0
@@ -358,6 +421,15 @@ def _public_file_results(file_first: dict) -> dict:
             "failures": [],
         }),
     }
+    if file_first.get("completion_kind"):
+        result["completion_kind"] = file_first["completion_kind"]
+        result["unresolved_files"] = list(
+            file_first.get("unresolved_files") or []
+        )
+        result["ambiguity_explanation"] = dict(
+            file_first.get("ambiguity_explanation") or {}
+        )
+    return result
 
 
 def _selection_key(value):
@@ -757,6 +829,7 @@ def _attempt_confirmed_series_rename(
     rename_plan["planned_operations"] = planned_operations
     rename_plan["operations"] = file_first["successful_operations"]
     rename_plan["file_first"] = file_first
+    _partial_completion_explanation(file_first, media_metadata)
     rename_plan["kept_sources"] = sorted(set(
         (rename_plan.get("kept_sources") or [])
         + (rename_plan.get("unmatched_sources") or [])
@@ -831,7 +904,7 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
     final_path = rename_plan["target_root"] if successful else event.final_path
     prefix = (
         "📂"
-        if not conflicts and not failed and not cleanup_incomplete
+        if not kept and not conflicts and not failed and not cleanup_incomplete
         else "⚠️"
     )
     message = (
@@ -848,6 +921,19 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
         message += f"\nTVDB：`{rename_plan['tvdb_series_id']}`"
     if rename_plan.get("warnings"):
         message += f"\n提示：{'; '.join(rename_plan['warnings'][:2])}"
+    if file_first.get("completion_kind") == "partial_completed":
+        unresolved_names = [
+            item.get("source_name")
+            for item in file_first.get("unresolved_files") or []
+            if item.get("source_name")
+        ]
+        if unresolved_names:
+            message += "\n待确认（保持原位）：" + "、".join(unresolved_names[:8])
+            if len(unresolved_names) > 8:
+                message += f" 等 {len(unresolved_names)} 个文件"
+        explanation = file_first.get("ambiguity_explanation") or {}
+        if explanation.get("summary"):
+            message += f"\n歧义说明：{explanation['summary']}"
     result_metadata = event.metadata
     if rename_plan.get("media_metadata"):
         result_metadata = attach_media_metadata(
@@ -960,7 +1046,7 @@ def process_generic_media(event: DownloadCompletedEvent) -> PostDownloadResult:
     final_path = target_path if successful else event.final_path
     prefix = (
         "📂"
-        if not conflicts and not failed and not cleanup_incomplete
+        if not kept and not conflicts and not failed and not cleanup_incomplete
         else "⚠️"
     )
     message = (

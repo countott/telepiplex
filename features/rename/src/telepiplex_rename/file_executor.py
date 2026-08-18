@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from collections import defaultdict
 from pathlib import PurePosixPath
 
 from .file_plan import FileResolution, normalize_storage_path
@@ -486,6 +487,7 @@ def execute_file_resolutions(
     *,
     selected_root: str,
     journal=None,
+    move_batch_size: int = 32,
 ) -> FileExecutionSummary:
     del selected_root  # Cleanup is an explicit, separately verified phase.
     resolutions = list(resolutions or [])
@@ -500,15 +502,25 @@ def execute_file_resolutions(
             if path
         ],
     )
-    outcomes = tuple(
-        _execute_one(
+    native_move = getattr(storage, "move_files_by_id", None)
+    if callable(native_move):
+        outcomes = _execute_with_native_batches(
             storage,
-            resolution,
-            journal,
+            resolutions,
             initial_info=initial_info,
+            journal=journal,
+            move_batch_size=move_batch_size,
         )
-        for resolution in resolutions
-    )
+    else:
+        outcomes = tuple(
+            _execute_one(
+                storage,
+                resolution,
+                journal,
+                initial_info=initial_info,
+            )
+            for resolution in resolutions
+        )
     return FileExecutionSummary(
         outcomes=outcomes,
         organized_files=sum(item.state == "organized" for item in outcomes),
@@ -516,6 +528,313 @@ def execute_file_resolutions(
         kept_files=sum(item.state == "kept" for item in outcomes),
         failed_files=sum(item.state == "failed" for item in outcomes),
     )
+
+
+def _directory_id(value) -> str:
+    return _provider_id(value)
+
+
+def _item_name(value) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return str(
+        value.get("fn")
+        or value.get("n")
+        or value.get("file_name")
+        or value.get("name")
+        or ""
+    ).strip()
+
+
+def _fresh_directory_items(storage, directory_id: str):
+    if not directory_id:
+        return None
+    collected = []
+    offset = 0
+    limit = 1000
+    for _page in range(100):
+        try:
+            response = storage.get_file_list({
+                "cid": directory_id,
+                "offset": offset,
+                "limit": limit,
+                "show_dir": 1,
+            })
+        except Exception:
+            return None
+        items = _list_items(response)
+        if items is None:
+            return None
+        collected.extend(item for item in items if isinstance(item, dict))
+        has_more = False
+        if isinstance(response, dict):
+            has_more = response.get("has_more") is True
+            data = response.get("data")
+            if isinstance(data, dict):
+                has_more = has_more or data.get("has_more") is True
+        if not has_more and len(items) < limit:
+            return collected
+        if not items:
+            return collected
+        offset += len(items)
+    return None
+
+
+def _legacy_move_prepared(storage, prepared: dict, journal=None):
+    resolution = prepared["resolution"]
+    current = prepared["current_path"]
+    replacement = replace(
+        resolution,
+        source_path=current,
+        action="move_only",
+    )
+    legacy = _execute_one(storage, replacement, journal, initial_info={})
+    return FileExecutionOutcome(
+        source_id=resolution.source_id,
+        state=legacy.state,
+        source_path=resolution.source_path,
+        target_path=resolution.target_path,
+        observed_path=legacy.observed_path,
+        reason_codes=legacy.reason_codes,
+    )
+
+
+def _prepare_native_move(
+    storage,
+    resolution: FileResolution,
+    *,
+    initial_info: dict,
+    directory_info: dict,
+    journal=None,
+):
+    source = normalize_storage_path(resolution.source_path)
+    target = normalize_storage_path(resolution.target_path)
+    target_info = initial_info.get(target)
+    if target and _provider_id(target_info) == resolution.source_id:
+        _transition(journal, resolution, "verified", target, replay=True)
+        return _outcome(
+            resolution, "no_op", target, "target_identity_verified"
+        )
+    source_info = initial_info.get(source)
+    if source_info is None:
+        return _outcome(resolution, "failed", source, "source_missing")
+    source_id = _provider_id(source_info)
+    if source_id and source_id != resolution.source_id:
+        return _outcome(
+            resolution, "failed", source, "source_identity_changed"
+        )
+    if target_info is not None:
+        return _outcome(resolution, "failed", target, "target_conflict")
+
+    current = source
+    target_path = PurePosixPath(target)
+    current_path = PurePosixPath(current)
+    if current_path.name != target_path.name:
+        _transition(journal, resolution, "before_rename", current)
+        try:
+            renamed = storage.rename(current, target_path.name)
+        except Exception:
+            renamed = False
+        if renamed is not True:
+            return _outcome(resolution, "failed", current, "rename_failed")
+        current = str(current_path.parent / target_path.name)
+        _transition(journal, resolution, "after_rename", current)
+
+    if normalize_storage_path(current) == target:
+        verified = _get_info(storage, target)
+        if _provider_id(verified) not in {"", resolution.source_id}:
+            return _outcome(
+                resolution, "failed", current, "target_identity_changed"
+            )
+        if verified is None:
+            return _outcome(
+                resolution, "failed", current, "target_missing_after_rename"
+            )
+        _transition(journal, resolution, "verified", target)
+        return _outcome(resolution, "organized", target)
+
+    target_dir = str(target_path.parent)
+    target_dir_info = directory_info.get(target_dir)
+    if target_dir_info is None:
+        create_directory = getattr(storage, "create_dir_recursive", None)
+        try:
+            target_dir_info = (
+                create_directory(target_dir)
+                if callable(create_directory)
+                else _get_info(storage, target_dir)
+            )
+        except Exception:
+            target_dir_info = None
+        if not isinstance(target_dir_info, dict):
+            target_dir_info = _get_info(storage, target_dir)
+        directory_info[target_dir] = target_dir_info
+    target_dir_id = _directory_id(target_dir_info)
+    source_parent = str(PurePosixPath(current).parent)
+    source_parent_info = _get_info(storage, source_parent)
+    source_parent_id = _directory_id(source_parent_info)
+    if not target_dir_id:
+        return _outcome(
+            resolution, "failed", current, "target_directory_failed"
+        )
+    if not source_parent_id:
+        return _outcome(
+            resolution, "failed", current, "source_directory_unverifiable"
+        )
+    return {
+        "resolution": resolution,
+        "current_path": current,
+        "target_path": target,
+        "target_dir": target_dir,
+        "target_dir_id": target_dir_id,
+        "source_parent_id": source_parent_id,
+    }
+
+
+def _reconcile_native_chunk(storage, chunk: list[dict], journal=None):
+    listings = {}
+    directory_ids = {
+        item["target_dir_id"] for item in chunk
+    } | {
+        item["source_parent_id"] for item in chunk
+    }
+    for directory_id in directory_ids:
+        listings[directory_id] = _fresh_directory_items(
+            storage, directory_id
+        )
+    outcomes = []
+    for item in chunk:
+        resolution = item["resolution"]
+        target_items = listings.get(item["target_dir_id"])
+        source_items = listings.get(item["source_parent_id"])
+        if target_items is None or source_items is None:
+            outcomes.append(_outcome(
+                resolution,
+                "failed",
+                item["current_path"],
+                "fresh_listing_failed",
+            ))
+            continue
+        target_identity_items = [
+            value for value in target_items
+            if _provider_id(value) == resolution.source_id
+        ]
+        target_ok = any(
+            _item_name(value) == PurePosixPath(item["target_path"]).name
+            for value in target_identity_items
+        )
+        source_present = any(
+            _provider_id(value) == resolution.source_id
+            for value in source_items
+        )
+        if target_ok and not source_present:
+            _transition(journal, resolution, "verified", item["target_path"])
+            outcomes.append(_outcome(
+                resolution, "organized", item["target_path"]
+            ))
+            continue
+        if target_identity_items and not target_ok:
+            reason = "target_name_mismatch_after_move"
+        elif not target_identity_items:
+            reason = "target_missing_after_move"
+        else:
+            reason = "source_still_present_after_move"
+        outcomes.append(_outcome(
+            resolution, "failed", item["current_path"], reason
+        ))
+    return outcomes
+
+
+def _execute_with_native_batches(
+    storage,
+    resolutions: list[FileResolution],
+    *,
+    initial_info: dict,
+    journal=None,
+    move_batch_size: int,
+) -> tuple[FileExecutionOutcome, ...]:
+    try:
+        batch_size = max(1, min(int(move_batch_size), 100))
+    except (TypeError, ValueError):
+        batch_size = 32
+    indexed_outcomes = {}
+    prepared_by_target = defaultdict(list)
+    directory_info = {}
+    for index, resolution in enumerate(resolutions):
+        if (
+            resolution.action not in {"move_only", "rename_and_move"}
+            or resolution.status != "resolved"
+        ):
+            indexed_outcomes[index] = _execute_one(
+                storage,
+                resolution,
+                journal,
+                initial_info=initial_info,
+            )
+            continue
+        source_parent_id = _directory_id(_get_info(
+            storage,
+            str(PurePosixPath(resolution.source_path).parent),
+        ))
+        if not source_parent_id:
+            indexed_outcomes[index] = _execute_one(
+                storage,
+                resolution,
+                journal,
+                initial_info=initial_info,
+            )
+            continue
+        prepared = _prepare_native_move(
+            storage,
+            resolution,
+            initial_info=initial_info,
+            directory_info=directory_info,
+            journal=journal,
+        )
+        if isinstance(prepared, FileExecutionOutcome):
+            indexed_outcomes[index] = prepared
+            continue
+        prepared["index"] = index
+        prepared_by_target[prepared["target_dir"]].append(prepared)
+
+    native_unavailable = False
+    for target_dir in sorted(prepared_by_target):
+        group = prepared_by_target[target_dir]
+        for offset in range(0, len(group), batch_size):
+            chunk = group[offset:offset + batch_size]
+            if native_unavailable:
+                for item in chunk:
+                    indexed_outcomes[item["index"]] = _legacy_move_prepared(
+                        storage, item, journal
+                    )
+                continue
+            for item in chunk:
+                _transition(
+                    journal,
+                    item["resolution"],
+                    "before_move",
+                    item["current_path"],
+                    native_batch=True,
+                )
+            try:
+                storage.move_files_by_id(
+                    [item["resolution"].source_id for item in chunk],
+                    chunk[0]["target_dir_id"],
+                )
+            except Exception as exc:
+                code = str(getattr(exc, "code", "") or "")
+                if isinstance(exc, (AttributeError, NotImplementedError)) or code in {
+                    "method_not_allowed", "not_found", "unimplemented",
+                }:
+                    native_unavailable = True
+                    for item in chunk:
+                        indexed_outcomes[item["index"]] = _legacy_move_prepared(
+                            storage, item, journal
+                        )
+                    continue
+            reconciled = _reconcile_native_chunk(storage, chunk, journal)
+            for item, outcome in zip(chunk, reconciled):
+                indexed_outcomes[item["index"]] = outcome
+    return tuple(indexed_outcomes[index] for index in range(len(resolutions)))
 
 
 def _list_items(value):
@@ -584,15 +903,20 @@ def cleanup_source_directories(
         if normalize_storage_path(path)
     }
     candidates = set()
+    expected_retained = set()
     for resolution in resolutions or []:
         path = PurePosixPath(
             normalize_storage_path(resolution.source_path)
         ).parent
         while path != root and root in path.parents:
             candidates.add(str(path))
+            if resolution.action == "keep_original":
+                expected_retained.add(str(path))
             path = path.parent
         if include_selected_root and path == root and root_value not in {"", "/"}:
             candidates.add(root_value)
+            if resolution.action == "keep_original":
+                expected_retained.add(root_value)
 
     outcomes = []
     for path in sorted(
@@ -610,8 +934,16 @@ def cleanup_source_directories(
         if state == "nonempty":
             outcomes.append(DirectoryCleanupOutcome(
                 path=path,
-                state="retained_nonempty",
-                reason_code="directory_not_empty",
+                state=(
+                    "retained_unresolved"
+                    if path in expected_retained
+                    else "retained_nonempty"
+                ),
+                reason_code=(
+                    "unresolved_files_retained"
+                    if path in expected_retained
+                    else "directory_not_empty"
+                ),
             ))
             continue
         if state == "absent":
@@ -670,7 +1002,11 @@ def cleanup_source_directories(
             item.state == "deleted" for item in frozen
         ),
         retained_directories=sum(
-            item.state in {"retained_nonempty", "protected"}
+            item.state in {
+                "retained_nonempty",
+                "retained_unresolved",
+                "protected",
+            }
             for item in frozen
         ),
         failed_directories=failed,

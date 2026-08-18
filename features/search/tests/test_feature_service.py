@@ -3851,7 +3851,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                     expected,
                 )
 
-    async def test_metadata_capability_keeps_honey_inventory_and_chinese_title(self):
+    async def test_metadata_capability_returns_honey_canonical_subset_and_unresolved_evidence(self):
         async def live_planner(_raw_query, plan_id):
             result = series_ranked_search_plan()
             result["plan_id"] = plan_id
@@ -3868,12 +3868,12 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "episode_number": episode,
                     "aired": "",
                 }
-                for season, total in ((1, 26), (2, 12))
+                for season, total in ((1, 24), (2, 12))
                 for episode in range(1, total + 1)
             ]
             contract["evidence"]["series_inventory"] = {
                 "source": "tvdb",
-                "season_totals": {1: 26, 2: 12},
+                "season_totals": {1: 24, 2: 12},
             }
             result["candidates"] = [candidate]
             return result
@@ -3897,11 +3897,23 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         contract = resolved["media_metadata"]
         self.assertEqual(resolved["status"], "resolved")
-        self.assertEqual(len(contract["items"]), 38)
+        self.assertEqual(len(contract["items"]), 36)
         self.assertEqual(contract["identity"]["chinese_title"], "蜂蜜与四叶草")
         self.assertEqual(
             contract["evidence"]["decision"]["scope_source"],
             "file_probe",
+        )
+        self.assertEqual(
+            contract["evidence"]["inventory_reconciliation"]["unresolved"],
+            [{
+                "season_number": 1,
+                "episode_number": 25,
+                "reason_code": "canonical_coordinate_unavailable",
+            }, {
+                "season_number": 1,
+                "episode_number": 26,
+                "reason_code": "canonical_coordinate_unavailable",
+            }],
         )
 
     async def test_metadata_capability_maps_unscoped_episode_probe_only_with_unique_inventory(self):
@@ -4000,9 +4012,9 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "1.11.3")
+        self.assertEqual(manifest["version"], "1.11.4")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertEqual(project["project"]["version"], "1.11.3")
+        self.assertEqual(project["project"]["version"], "1.11.4")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.3.2",
@@ -4036,14 +4048,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.11.3.tpx", source)
+        self.assertIn("/tmp/search-1.11.4.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-1.11.3.tpx", source)
+        self.assertNotIn("dist/search-1.11.4.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

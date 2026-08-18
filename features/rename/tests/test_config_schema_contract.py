@@ -55,6 +55,10 @@ class ConfigSchemaContractTest(unittest.TestCase):
 
         Draft202012Validator.check_schema(schema)
         Draft202012Validator(schema).validate(default)
+        self.assertEqual(default["storage_move_batch_size"], 32)
+        batch = schema["properties"]["storage_move_batch_size"]
+        self.assertEqual(batch["minimum"], 1)
+        self.assertEqual(batch["maximum"], 100)
 
 
 if __name__ == "__main__":

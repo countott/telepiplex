@@ -59,7 +59,7 @@ def contract(
 
 
 class SeriesScopeTest(unittest.TestCase):
-    def test_inventory_probe_keeps_honey_and_clover_38_files_without_air_dates(self):
+    def test_inventory_probe_keeps_canonical_honey_subset_and_reports_two_unresolved(self):
         value = contract(seasons=())
         value["identity"].update({
             "chinese_title": "蜂蜜与四叶草",
@@ -73,7 +73,7 @@ class SeriesScopeTest(unittest.TestCase):
                 "episode_number": episode,
                 "aired": "",
             }
-            for season, total in ((1, 26), (2, 12))
+            for season, total in ((1, 24), (2, 12))
             for episode in range(1, total + 1)
         ]
         probe = {
@@ -89,7 +89,7 @@ class SeriesScopeTest(unittest.TestCase):
 
         scoped = apply_inventory_probe_scope(value, probe)
 
-        self.assertEqual(len(scoped["items"]), 38)
+        self.assertEqual(len(scoped["items"]), 36)
         self.assertEqual(
             {item["season_number"] for item in scoped["items"]},
             {1, 2},
@@ -102,8 +102,30 @@ class SeriesScopeTest(unittest.TestCase):
             scoped["evidence"]["decision"]["scope_source"],
             "file_probe",
         )
+        self.assertEqual(
+            scoped["evidence"]["inventory_reconciliation"],
+            {
+                "status": "partial",
+                "observed_count": 38,
+                "matched_count": 36,
+                "unresolved_count": 2,
+                "unresolved": [{
+                    "season_number": 1,
+                    "episode_number": 25,
+                    "reason_code": "canonical_coordinate_unavailable",
+                }, {
+                    "season_number": 1,
+                    "episode_number": 26,
+                    "reason_code": "canonical_coordinate_unavailable",
+                }],
+            },
+        )
+        self.assertIn(
+            "warning:inventory_partial_match",
+            scoped["warnings"],
+        )
 
-    def test_inventory_probe_reports_exact_missing_coordinate(self):
+    def test_inventory_probe_with_zero_matching_coordinates_still_fails_closed(self):
         value = contract(seasons=(1,))
         probe = {
             "content_shape": "single_episode",
@@ -115,7 +137,7 @@ class SeriesScopeTest(unittest.TestCase):
 
         with self.assertRaisesRegex(
             SeriesScopeError,
-            r"probe_inventory_mismatch missing=S01E09",
+            r"probe_inventory_mismatch missing=all",
         ):
             apply_inventory_probe_scope(value, probe)
 

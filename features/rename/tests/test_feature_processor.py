@@ -3957,7 +3957,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(stage_milestone["text"].startswith("⚠️"))
 
-    async def test_partial_file_accounting_cannot_complete_rename_operation(self):
+    async def test_safe_partial_file_accounting_completes_with_partial_state(self):
         from telepiplex_rename.jobs import RenameJobStore
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3986,7 +3986,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             runtime = FakeRuntime()
             feature.bind_runtime(runtime)
 
-            await feature.download_completed({
+            request = {
                 "event_id": "event-partial-accounting",
                 "payload": {
                     "job_id": "job-partial-accounting",
@@ -3999,20 +3999,99 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "operation_id": "op-partial-accounting",
                     "operation_revision": 2,
                 },
-            })
+            }
+            await feature.download_completed(request)
             await runtime.wait()
 
             stored = jobs.get("job-partial-accounting")
-            self.assertEqual(host.reports[-1]["state"], "failed")
-            self.assertEqual(stored["state"], "failed")
+            self.assertEqual(host.reports[-1]["state"], "completed")
+            self.assertEqual(host.reports[-1]["stage"], "partial_completed")
+            self.assertEqual(
+                host.reports[-1]["details"]["completion_kind"],
+                "partial_completed",
+            )
+            self.assertEqual(stored["state"], "partial_completed")
             self.assertIn("file_results", stored["result"], stored)
-            self.assertFalse(stored["result"]["organized"])
+            self.assertTrue(stored["result"]["organized"])
+            self.assertTrue(stored["result"]["partial_completed"])
             self.assertEqual(
                 stored["result"]["file_results"]["kept_unresolved"],
                 1,
             )
             self.assertNotIn("error", stored["result"])
             self.assertEqual(host.events, [])
+
+            replay = await feature.download_completed(request)
+
+            self.assertEqual(replay["state"], "partial_completed")
+            self.assertTrue(replay["organized"])
+
+    async def test_inventory_batch_reports_partial_groups_as_safe_terminal(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
+            host = FakeHost()
+            feature = RenameFeature(
+                config={"unorganized_path": "/Unorganized"},
+                host=host,
+                jobs=jobs,
+            )
+            owner = (10, 123)
+            operation = feature._new_operation(
+                {"chat_id": owner[0], "user_id": owner[1]},
+                state="running",
+                stage="inventory_batch",
+                status_text="正在补整理。",
+                control="cancel",
+                kind="inventory",
+            )
+            operation_id = operation["operation_id"]
+            feature.inventory_sessions[owner] = {
+                "operation_id": operation_id,
+                "stage": "batch",
+                "root": {"source_kind": "category", "path": "/Series"},
+                "pending": [{
+                    "job_id": "inventory-partial",
+                    "source_path": "/Series/Honey",
+                    "resource_name": "Honey",
+                    "source_ids": ["matched", "unresolved"],
+                    "file_tree": [],
+                }],
+                "index": 0,
+                "success": 0,
+                "partial": 0,
+                "failed": 0,
+            }
+
+            async def finish_partial(job_id, _payload, _operation_id):
+                jobs.update(job_id, "partial_completed", {
+                    "organized": True,
+                    "partial_completed": True,
+                    "file_results": {
+                        "media_files_total": 2,
+                        "organized_files": 1,
+                        "canonical_no_ops": 0,
+                        "kept_unresolved": 1,
+                        "target_conflicts": 0,
+                        "failed_files": 0,
+                        "verified_work_groups": 1,
+                    },
+                })
+
+            feature._run_organization = finish_partial
+
+            await feature._run_inventory_batch(owner, operation_id)
+
+            self.assertEqual(host.reports[-1]["state"], "completed")
+            self.assertEqual(
+                host.reports[-1]["stage"], "partial_completed"
+            )
+            self.assertEqual(host.reports[-1]["details"]["partial"], 1)
+            self.assertIn(
+                "作品组部分完成：1",
+                host.reports[-1]["status_text"],
+            )
 
     async def test_notification_failure_does_not_change_completed_job_or_replay_storage(self):
         from telepiplex_rename.jobs import RenameJobStore
@@ -4289,9 +4368,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.5.5")
+        self.assertEqual(manifest["version"], "1.5.6")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertIn('version = "1.5.5"', project)
+        self.assertIn('version = "1.5.6"', project)
         self.assertIn('telepiplex-plugin-sdk==1.3.2', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
@@ -4307,8 +4386,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.5.5.tpx", source)
-        self.assertNotIn("dist/rename-1.5.5.tpx", source)
+        self.assertIn("/tmp/rename-1.5.6.tpx", source)
+        self.assertNotIn("dist/rename-1.5.6.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

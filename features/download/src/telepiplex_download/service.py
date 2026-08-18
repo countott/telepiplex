@@ -37,6 +37,7 @@ _STORAGE_METHODS = {
     "delete_single_file",
     "move_file",
     "move_file_detailed",
+    "move_files_by_id",
     "is_directory",
     "get_files_from_dir",
     "get_file_tree",
@@ -152,6 +153,25 @@ class DownloadFeature:
                 raise FeatureError(
                     "invalid_request",
                     "storage file info batch exceeds 32 paths",
+                )
+        if method == "move_files_by_id":
+            file_ids = args[0] if len(args) == 2 else None
+            target_dir_id = args[1] if len(args) == 2 else None
+            if not isinstance(file_ids, list) or not all(
+                isinstance(file_id, str) and file_id.strip()
+                for file_id in file_ids
+            ) or not isinstance(target_dir_id, str) or not target_dir_id.strip():
+                raise FeatureError(
+                    "invalid_request",
+                    "storage native move arguments are invalid",
+                )
+            unique_ids = {
+                file_id.strip() for file_id in file_ids if file_id.strip()
+            }
+            if not 1 <= len(unique_ids) <= 100:
+                raise FeatureError(
+                    "invalid_request",
+                    "storage native move batch exceeds 100 unique file IDs",
                 )
         value = await asyncio.to_thread(getattr(self.client, method), *args, **kwargs)
         return {"value": value}

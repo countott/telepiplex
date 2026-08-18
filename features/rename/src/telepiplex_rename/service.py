@@ -30,6 +30,7 @@ _STORAGE_METHODS = {
     "create_directory", "create_dir_recursive", "rename", "copy_file",
     "delete_single_file", "move_file", "is_directory", "get_files_from_dir",
     "move_file_detailed",
+    "move_files_by_id",
 }
 
 
@@ -47,10 +48,12 @@ _STORAGE_STAGES = {
     "copy_file": ("moving", "正在复制媒体文件。"),
     "move_file": ("moving", "正在移动媒体文件。"),
     "move_file_detailed": ("moving", "正在移动媒体文件。"),
+    "move_files_by_id": ("moving", "正在批量移动媒体文件。"),
     "delete_single_file": ("cleanup", "正在清理已处理的源文件。"),
 }
 _IRREVERSIBLE_METHODS = {
-    "copy_file", "move_file", "move_file_detailed", "delete_single_file",
+    "copy_file", "move_file", "move_file_detailed", "move_files_by_id",
+    "delete_single_file",
 }
 
 def _metadata_callback_token(job_id: str) -> str:
@@ -66,10 +69,12 @@ def _inventory_completion_text(
     success: int,
     failed: int,
     file_counts: dict,
+    partial: int = 0,
 ) -> str:
     return (
         "存量媒体补整理完成。\n"
-        f"作品组完成：{success}\n作品组失败：{failed}\n"
+        f"作品组完成：{success}\n"
+        f"作品组部分完成：{partial}\n作品组失败：{failed}\n"
         f"作品组总计：{total}\n"
         f"文件总数：{file_counts['media_files_total']}\n"
         f"实际改动：{file_counts['organized_files']}，"
@@ -269,7 +274,7 @@ class StorageProxy:
             value = self._storage_call(method, list(args), kwargs)
             if method in {
                 "copy_file", "move_file", "move_file_detailed",
-                "delete_single_file",
+                "move_files_by_id", "delete_single_file",
             }:
                 self._file_info_cache.clear()
             self._raise_if_cancelled()
@@ -603,6 +608,7 @@ class RenameFeature:
                 "stage": "batch",
                 "index": 0,
                 "success": 0,
+                "partial": 0,
                 "failed": 0,
             })
             view = self._advance_operation(
@@ -615,6 +621,7 @@ class RenameFeature:
                     "total": len(pending),
                     "completed": 0,
                     "success": 0,
+                    "partial": 0,
                     "failed": 0,
                 },
             )
@@ -1047,6 +1054,7 @@ class RenameFeature:
                         "total": len(pending),
                         "completed": index,
                         "success": int(session.get("success") or 0),
+                        "partial": int(session.get("partial") or 0),
                         "failed": int(session.get("failed") or 0),
                     },
                 )
@@ -1078,7 +1086,13 @@ class RenameFeature:
                     aggregate["kept_unresolved"] = int(
                         aggregate.get("kept_unresolved") or 0
                     ) + len(item.get("source_ids") or [])
-                if current and current.get("state") == "completed" and result.get(
+                if (
+                    current
+                    and current.get("state") == "partial_completed"
+                    and result.get("organized")
+                ):
+                    session["partial"] = int(session.get("partial") or 0) + 1
+                elif current and current.get("state") == "completed" and result.get(
                     "organized"
                 ):
                     session["success"] = int(session.get("success") or 0) + 1
@@ -1088,6 +1102,7 @@ class RenameFeature:
             session["stage"] = "completed"
             total = len(pending)
             success = int(session.get("success") or 0)
+            partial = int(session.get("partial") or 0)
             failed = int(session.get("failed") or 0)
             file_counts = {
                 key: int(
@@ -1103,31 +1118,42 @@ class RenameFeature:
                     "verified_work_groups",
                 )
             }
-            file_counts["verified_work_groups"] = success
+            file_counts["verified_work_groups"] = success + partial
             text = _inventory_completion_text(
                 total=total,
                 success=success,
                 failed=failed,
                 file_counts=file_counts,
+                partial=partial,
             )
             complete = bool(
-                success == total
+                success + partial == total
                 and failed == 0
-                and file_counts["kept_unresolved"] == 0
                 and file_counts["target_conflicts"] == 0
                 and file_counts["failed_files"] == 0
             )
+            partial_completed = bool(complete and partial > 0)
             await self._report_if_active(
                 operation_id,
                 state="completed" if complete else "failed",
-                stage="completed" if complete else "inventory_batch",
+                stage=(
+                    "partial_completed"
+                    if partial_completed
+                    else "completed" if complete else "inventory_batch"
+                ),
                 status_text=text,
                 control="",
                 details={
                     "total": total,
                     "completed": total,
                     "success": success,
+                    "partial": partial,
                     "failed": failed,
+                    "completion_kind": (
+                        "partial_completed"
+                        if partial_completed
+                        else "completed" if complete else "failed"
+                    ),
                     "file_results": file_counts,
                 },
             )
@@ -1626,7 +1652,8 @@ class RenameFeature:
         if self.jobs:
             existing = self.jobs.get(job_id)
             if existing and existing["state"] in {
-                "processed", "published", "completed", "failed", "cancelled"
+                "processed", "published", "completed", "partial_completed",
+                "failed", "cancelled"
             }:
                 stored_payload = (
                     (existing.get("result") or {}).get("event_payload") or {}
@@ -1664,7 +1691,9 @@ class RenameFeature:
                         ),
                     }
                 outcome = existing.get("result") or {}
-                if existing["state"] in {"completed", "failed", "cancelled"}:
+                if existing["state"] in {
+                    "completed", "partial_completed", "failed", "cancelled"
+                }:
                     return {
                         "accepted": True,
                         "duplicate": True,
@@ -1944,17 +1973,28 @@ class RenameFeature:
             verified_files = int(file_results.get("organized_files") or 0) + int(
                 file_results.get("canonical_no_ops") or 0
             )
+            partial_completed = False
             file_accounting_complete = True
             if file_results:
                 media_files_total = int(
                     file_results.get("media_files_total") or 0
                 )
+                kept_unresolved = int(
+                    file_results.get("kept_unresolved") or 0
+                )
+                safe_file_outcome = bool(
+                    int(file_results.get("target_conflicts") or 0) == 0
+                    and int(file_results.get("failed_files") or 0) == 0
+                )
                 file_accounting_complete = bool(
                     media_files_total > 0
-                    and verified_files == media_files_total
-                    and int(file_results.get("kept_unresolved") or 0) == 0
-                    and int(file_results.get("target_conflicts") or 0) == 0
-                    and int(file_results.get("failed_files") or 0) == 0
+                    and verified_files + kept_unresolved == media_files_total
+                    and safe_file_outcome
+                )
+                partial_completed = bool(
+                    file_accounting_complete
+                    and verified_files > 0
+                    and kept_unresolved > 0
                 )
             organized = bool(
                 result.handled
@@ -2008,6 +2048,10 @@ class RenameFeature:
                 "event_payload": event_payload,
                 "file_results": file_results,
                 "cleanup_complete": cleanup_complete,
+                "partial_completed": partial_completed,
+                "completion_kind": (
+                    "partial_completed" if partial_completed else "completed"
+                ) if organized else "failed",
             }
             if is_inventory:
                 outcome["inventory_batch_id"] = operation_id
@@ -2130,12 +2174,17 @@ class RenameFeature:
 
     async def _finish_inventory_item(self, job_id: str, outcome: dict) -> None:
         if self.jobs:
+            successful = bool(
+                outcome.get("organized")
+                and outcome.get("cleanup_complete", True)
+            )
             self.jobs.update(
                 job_id,
                 (
-                    "completed"
-                    if outcome.get("organized")
-                    and outcome.get("cleanup_complete", True)
+                    "partial_completed"
+                    if successful and outcome.get("partial_completed")
+                    else "completed"
+                    if successful
                     else "failed"
                 ),
                 outcome,
@@ -2145,22 +2194,34 @@ class RenameFeature:
         cleanup_complete = bool(outcome.get("cleanup_complete", True))
         organized = bool(outcome.get("organized"))
         complete = organized and cleanup_complete
+        partial_completed = bool(
+            complete and outcome.get("partial_completed")
+        )
+        terminal_job_state = (
+            "partial_completed"
+            if partial_completed
+            else "completed" if complete else "failed"
+        )
         if operation_id:
             if organized:
+                if cleanup_complete:
+                    stage_text = (
+                        "✅ 已整理全部明确匹配文件；"
+                        "歧义文件已保持原位。\n"
+                        if partial_completed
+                        else "✅ 媒体整理已完成。\n"
+                    ) + f"目标目录：{outcome.get('final_path') or ''}"
+                else:
+                    stage_text = (
+                        "⚠️ 媒体文件已移动，但源目录清理未完成。\n"
+                        f"目标目录：{outcome.get('final_path') or ''}"
+                    )
                 for attempt in range(3):
                     try:
                         seal_response = await self.host.seal_operation_stage(
                             operation_id,
                             f"rename-stage-complete:{job_id}",
-                            (
-                                "✅ 媒体整理已完成。\n"
-                                f"目标目录：{outcome.get('final_path') or ''}"
-                                if cleanup_complete
-                                else (
-                                    "⚠️ 媒体文件已移动，但源目录清理未完成。\n"
-                                    f"目标目录：{outcome.get('final_path') or ''}"
-                                )
-                            ),
+                            stage_text,
                             deadline=45,
                         )
                     except Exception as exc:
@@ -2184,12 +2245,16 @@ class RenameFeature:
                 operation_id,
                 state="completed" if complete else "failed",
                 stage=(
-                    "completed"
+                    "partial_completed"
+                    if partial_completed
+                    else "completed"
                     if complete
                     else "cleanup" if organized else "organizing"
                 ),
                 status_text=(
-                    "媒体整理完成。"
+                    "明确匹配文件已整理，歧义文件保持原位并等待确认。"
+                    if partial_completed
+                    else "媒体整理完成。"
                     if complete
                     else outcome.get("message")
                     or "媒体整理未满足完整成功条件。"
@@ -2198,13 +2263,17 @@ class RenameFeature:
                 details={
                     "organized": organized,
                     "cleanup_complete": cleanup_complete,
+                    "partial_completed": partial_completed,
+                    "completion_kind": (
+                        "partial_completed" if partial_completed else "completed"
+                    ) if complete else "failed",
                     "final_path": outcome.get("final_path"),
                 },
             )
         if self.jobs:
             self.jobs.update(
                 job_id,
-                "completed" if complete else "failed",
+                terminal_job_state,
                 outcome,
             )
         return await self._complete_published_job(job_id, outcome)
@@ -2225,12 +2294,17 @@ class RenameFeature:
                     type(exc).__name__,
                 )
         if self.jobs:
+            complete = bool(
+                outcome.get("organized")
+                and outcome.get("cleanup_complete", True)
+            )
             self.jobs.update(
                 job_id,
                 (
-                    "completed"
-                    if outcome.get("organized")
-                    and outcome.get("cleanup_complete", True)
+                    "partial_completed"
+                    if complete and outcome.get("partial_completed")
+                    else "completed"
+                    if complete
                     else "failed"
                 ),
                 outcome,
@@ -2238,10 +2312,19 @@ class RenameFeature:
         return {
             "accepted": True,
             "duplicate": True,
+            "state": (
+                "partial_completed"
+                if outcome.get("partial_completed")
+                else "completed"
+                if outcome.get("organized")
+                and outcome.get("cleanup_complete", True)
+                else "failed"
+            ),
             "organized": bool(outcome.get("organized")),
             "complete": bool(
                 outcome.get("organized")
                 and outcome.get("cleanup_complete", True)
+                and not outcome.get("partial_completed")
             ),
             "final_path": outcome.get("final_path"),
             "replayed": True,

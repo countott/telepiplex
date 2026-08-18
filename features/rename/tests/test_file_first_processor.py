@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from telepiplex_plugin_sdk.media_metadata import attach_media_metadata
 from telepiplex_plugin_sdk import FeatureError
 
@@ -171,6 +173,102 @@ def test_mixed_unrelated_video_stays_while_matching_work_organizes():
     assert honey in storage.files
     assert all("Honey" not in source for source, _target in storage.moves)
     assert storage.deleted == []
+
+
+@patch("telepiplex_rename.processor.explain_unresolved_episode_files_with_ai")
+def test_honey_partial_inventory_organizes_36_keeps_two_and_explains_once(
+    explain,
+):
+    explain.return_value = {
+        "source": "ai",
+        "summary": "可能存在不同分集顺序。",
+        "possible_causes": ["DVD 或自定义顺序"],
+        "user_checks": ["核对 Chapter.L 与 Chapter.F"],
+    }
+    runtime_context.config["ai"] = {
+        "enable": True,
+        "api_url": "https://ai.example",
+        "api_key": "secret",
+        "model": "test",
+    }
+    root = "/Downloads/Honey.and.Clover"
+    local_coordinates = [
+        *((1, episode) for episode in range(1, 27)),
+        *((2, episode) for episode in range(1, 13)),
+    ]
+    canonical_coordinates = [
+        *((1, episode) for episode in range(1, 25)),
+        *((2, episode) for episode in range(1, 13)),
+    ]
+    files = []
+    tree = []
+    for season, episode in local_coordinates:
+        suffix = (
+            " [Chapter.L]" if (season, episode) == (1, 25)
+            else " [Chapter.F]" if (season, episode) == (1, 26)
+            else ""
+        )
+        name = f"Honey.and.Clover.S{season:02d}E{episode:02d}{suffix}.mkv"
+        source_id = f"s{season}e{episode}"
+        path = f"{root}/{name}"
+        files.append((path, source_id))
+        tree.append({
+            "file_id": source_id,
+            "path": path,
+            "relative_path": name,
+            "is_dir": False,
+        })
+    contract = _series_contract(*canonical_coordinates)
+    contract["identity"].update({
+        "chinese_title": "蜂蜜与四叶草",
+        "english_title": "Honey and Clover",
+    })
+    contract["evidence"]["inventory_reconciliation"] = {
+        "status": "partial",
+        "observed_count": 38,
+        "matched_count": 36,
+        "unresolved_count": 2,
+        "unresolved": [{
+            "season_number": 1,
+            "episode_number": 25,
+            "reason_code": "canonical_coordinate_unavailable",
+        }, {
+            "season_number": 1,
+            "episode_number": 26,
+            "reason_code": "canonical_coordinate_unavailable",
+        }],
+    }
+    storage = StatefulStorage(files=files, directories=[root, "/Series"])
+    event = DownloadCompletedEvent(
+        link="magnet:?x",
+        selected_path="/Series",
+        user_id=1,
+        final_path=root,
+        resource_name="Honey.and.Clover.S01-S02",
+        naming_metadata={"english_title": "Honey and Clover"},
+        metadata=attach_media_metadata({}, contract),
+        file_tree=tree,
+        storage=storage,
+    )
+
+    result = process_tvdb_episode(event)
+
+    unresolved_paths = {
+        f"{root}/Honey.and.Clover.S01E25 [Chapter.L].mkv",
+        f"{root}/Honey.and.Clover.S01E26 [Chapter.F].mkv",
+    }
+    assert result.handled is True
+    assert result.file_results["organized_files"] == 36
+    assert result.file_results["kept_unresolved"] == 2
+    assert result.file_results["completion_kind"] == "partial_completed"
+    assert result.file_results["cleanup"]["complete"] is True
+    assert unresolved_paths.issubset(storage.files)
+    assert root in storage.directories
+    assert root not in storage.deleted
+    assert "S01E25 [Chapter.L]" in result.message
+    assert "S01E26 [Chapter.F]" in result.message
+    assert "可能存在不同分集顺序" in result.message
+    explain.assert_called_once()
 
 
 def test_target_conflict_is_local_and_source_is_not_moved_to_unorganized():

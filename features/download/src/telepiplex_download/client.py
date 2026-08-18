@@ -63,7 +63,16 @@ class Open115Client:
             "User-Agent": "telepiplex-Feature/1.0",
         }
 
-    def _request(self, method: str, path: str, *, params=None, data=None, retry=True):
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params=None,
+        data=None,
+        files=None,
+        retry=True,
+    ):
         with self._lock:
             remaining = self.request_interval - (time.monotonic() - self._last_request)
             if remaining > 0:
@@ -76,6 +85,7 @@ class Open115Client:
                 headers=self._headers(),
                 params=params,
                 data=data,
+                files=files,
                 timeout=self.timeout,
             )
             response.raise_for_status()
@@ -93,7 +103,14 @@ class Open115Client:
             )
         if retry and result.get("code") in self.TOKEN_EXPIRED_CODES:
             self.refresh_access_token()
-            return self._request(method, path, params=params, data=data, retry=False)
+            return self._request(
+                method,
+                path,
+                params=params,
+                data=data,
+                files=files,
+                retry=False,
+            )
         return result
 
     def refresh_access_token(self):
@@ -540,6 +557,40 @@ class Open115Client:
         return self.move_file_detailed(source_path, target_path)["state"] in {
             "moved",
             "no_op",
+        }
+
+    def move_files_by_id(self, file_ids: list[str], target_dir_id: str):
+        unique_ids = []
+        seen = set()
+        for file_id in file_ids if isinstance(file_ids, list) else ():
+            value = str(file_id or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                unique_ids.append(value)
+        if not 1 <= len(unique_ids) <= 100:
+            raise ValueError("native move requires 1 through 100 unique file IDs")
+        target_dir_id = str(target_dir_id or "").strip()
+        if not target_dir_id:
+            raise ValueError("native move target directory ID is required")
+        result = self._request(
+            "POST",
+            "/open/ufile/move",
+            files={
+                "file_ids": (None, ",".join(unique_ids)),
+                "to_cid": (None, target_dir_id),
+            },
+        )
+        submitted = self._successful(result)
+        if submitted:
+            self._file_cache.clear()
+        return {
+            "state": "submitted" if submitted else "provider_rejected",
+            "submitted": submitted,
+            "file_ids": unique_ids,
+            "target_dir_id": target_dir_id,
+            "provider_code": str(
+                result.get("code") if result.get("code") is not None else ""
+            ),
         }
 
     def move_file_detailed(self, source_path: str, target_path: str):

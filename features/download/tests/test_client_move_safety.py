@@ -1,4 +1,5 @@
 from telepiplex_download.client import Open115Client
+import pytest
 
 
 class RecordingOpen115Client(Open115Client):
@@ -45,6 +46,54 @@ def test_move_file_reports_same_path_no_op_as_success():
 
     assert moved is True
     assert client.mutations == []
+
+
+def test_native_batch_move_uses_official_endpoint_without_copy_delete():
+    class NativeMoveClient(RecordingOpen115Client):
+        def _request(
+            self, method, path, *, params=None, data=None, files=None, retry=True
+        ):
+            self.mutations.append(("request", method, path, data, files))
+            return {"state": True, "code": 0, "data": {}}
+
+    client = NativeMoveClient()
+
+    result = client.move_files_by_id(
+        ["episode-1", "episode-2", "episode-1"],
+        "season-1",
+    )
+
+    assert result == {
+        "state": "submitted",
+        "submitted": True,
+        "file_ids": ["episode-1", "episode-2"],
+        "target_dir_id": "season-1",
+        "provider_code": "0",
+    }
+    assert client.mutations == [(
+        "request",
+        "POST",
+        "/open/ufile/move",
+        None,
+        {
+            "file_ids": (None, "episode-1,episode-2"),
+            "to_cid": (None, "season-1"),
+        },
+    )]
+
+
+def test_native_batch_move_rejects_empty_or_oversized_ids():
+    client = RecordingOpen115Client()
+
+    with pytest.raises(ValueError, match="1 through 100"):
+        client.move_files_by_id([], "season-1")
+    with pytest.raises(ValueError, match="1 through 100"):
+        client.move_files_by_id(
+            [f"episode-{index}" for index in range(101)],
+            "season-1",
+        )
+    with pytest.raises(ValueError, match="target directory"):
+        client.move_files_by_id(["episode-1"], "")
 
 
 def test_file_tree_preserves_provider_sha1_for_identity_recovery():

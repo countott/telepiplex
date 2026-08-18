@@ -41,7 +41,7 @@ class RenameJobStore:
                 return True
             retryable_states = ["failed", "cancelled"]
             if reopen_completed:
-                retryable_states.append("completed")
+                retryable_states.extend(["completed", "partial_completed"])
             placeholders = ",".join("?" for _ in retryable_states)
             cursor = db.execute(
                 "UPDATE rename_jobs SET state='processing', result_json='{}', "
