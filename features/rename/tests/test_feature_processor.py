@@ -687,6 +687,37 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertEqual(probe["content_shape"], "movie")
         self.assertEqual(probe["video_count"], 1)
 
+    def test_probe_excludes_anime_opening_and_ending_from_episode_shape(self):
+        probe = build_metadata_probe({
+            "resource_name": "[Kirion] Honey and Clover S2",
+            "file_tree": [{
+                "relative_path": (
+                    "[Kirion] Honey and Clover S2 - 01 "
+                    "(BD 1280x720 x264 QAAC).mp4"
+                ),
+                "is_dir": False,
+            }, {
+                "relative_path": (
+                    "[Kirion] Honey and Clover S2 - NCOP - 01 "
+                    "(BD 1280x720 x264 QAAC).mp4"
+                ),
+                "is_dir": False,
+            }, {
+                "relative_path": (
+                    "[Kirion] Honey and Clover S2 - NCED - 01 "
+                    "(BD 1280x720 x264 QAAC).mp4"
+                ),
+                "is_dir": False,
+            }],
+        })
+
+        self.assertEqual(probe["video_count"], 1)
+        self.assertEqual(probe["content_shape"], "single_episode")
+        self.assertEqual(probe["observed_episodes"], [{
+            "season_number": 2,
+            "episode_number": 1,
+        }])
+
     def test_probe_exposes_bounded_high_confidence_identity_evidence(self):
         probe = build_metadata_probe({
             "resource_name": "The.Residence.S01.1080p.WEB-DL",
@@ -4368,9 +4399,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.5.6")
+        self.assertEqual(manifest["version"], "1.5.7")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertIn('version = "1.5.6"', project)
+        self.assertIn('version = "1.5.7"', project)
         self.assertIn('telepiplex-plugin-sdk==1.3.2', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
@@ -4386,8 +4417,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.5.6.tpx", source)
-        self.assertNotIn("dist/rename-1.5.6.tpx", source)
+        self.assertIn("/tmp/rename-1.5.7.tpx", source)
+        self.assertNotIn("dist/rename-1.5.7.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

@@ -8,7 +8,11 @@ from pathlib import PurePosixPath
 import re
 import unicodedata
 
-from .file_facts import build_file_facts, parse_file_evidence
+from .file_facts import (
+    build_file_facts,
+    parse_auxiliary_video_marker,
+    parse_file_evidence,
+)
 
 
 _VIDEO = re.compile(
@@ -269,6 +273,8 @@ def _identity_tokens(value: str) -> tuple[str, ...]:
 
 def _is_primary_video(path: str) -> bool:
     relative = PurePosixPath(path)
+    if parse_auxiliary_video_marker(str(relative)) is not None:
+        return False
     if any(
         _NON_PRIMARY_VIDEO_PART.fullmatch(part.rsplit(".", 1)[0])
         for part in relative.parts

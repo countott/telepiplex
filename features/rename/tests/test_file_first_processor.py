@@ -176,7 +176,7 @@ def test_mixed_unrelated_video_stays_while_matching_work_organizes():
 
 
 @patch("telepiplex_rename.processor.explain_unresolved_episode_files_with_ai")
-def test_honey_partial_inventory_organizes_36_keeps_two_and_explains_once(
+def test_honey_partial_inventory_keeps_auxiliary_and_explains_chapters_once(
     explain,
 ):
     explain.return_value = {
@@ -218,6 +218,23 @@ def test_honey_partial_inventory_organizes_36_keeps_two_and_explains_once(
             "relative_path": name,
             "is_dir": False,
         })
+    auxiliary_paths = set()
+    for role in ("NCED", "NCOP"):
+        for variant in range(1, 4):
+            name = (
+                f"Honey.and.Clover.S2 - {role} - {variant:02d} "
+                "(BD 1280x720 x264 QAAC).mp4"
+            )
+            source_id = f"{role.casefold()}-{variant}"
+            path = f"{root}/{name}"
+            auxiliary_paths.add(path)
+            files.append((path, source_id))
+            tree.append({
+                "file_id": source_id,
+                "path": path,
+                "relative_path": name,
+                "is_dir": False,
+            })
     contract = _series_contract(*canonical_coordinates)
     contract["identity"].update({
         "chinese_title": "蜂蜜与四叶草",
@@ -259,16 +276,26 @@ def test_honey_partial_inventory_organizes_36_keeps_two_and_explains_once(
     }
     assert result.handled is True
     assert result.file_results["organized_files"] == 36
-    assert result.file_results["kept_unresolved"] == 2
+    assert result.file_results["kept_unresolved"] == 8
     assert result.file_results["completion_kind"] == "partial_completed"
     assert result.file_results["cleanup"]["complete"] is True
     assert unresolved_paths.issubset(storage.files)
+    assert auxiliary_paths.issubset(storage.files)
     assert root in storage.directories
     assert root not in storage.deleted
     assert "S01E25 [Chapter.L]" in result.message
     assert "S01E26 [Chapter.F]" in result.message
+    assert "NCED" not in result.message
+    assert "NCOP" not in result.message
     assert "可能存在不同分集顺序" in result.message
     explain.assert_called_once()
+    assert {
+        item["source_name"]
+        for item in explain.call_args.args[0]["unresolved_files"]
+    } == {
+        "Honey.and.Clover.S01E25 [Chapter.L].mkv",
+        "Honey.and.Clover.S01E26 [Chapter.F].mkv",
+    }
 
 
 def test_target_conflict_is_local_and_source_is_not_moved_to_unorganized():

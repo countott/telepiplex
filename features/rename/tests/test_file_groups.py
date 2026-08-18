@@ -91,6 +91,20 @@ def test_subtitle_only_evidence_can_form_group_and_missing_title_is_local():
     ]
 
 
+def test_auxiliary_only_evidence_never_becomes_independent_work_group():
+    opening = replace(
+        _evidence("opening", "Honey and Clover", "honeyandclover"),
+        episode_number=None,
+        content_role="opening",
+    )
+
+    groups = build_provisional_groups([opening])
+
+    assert len(groups) == 1
+    assert groups[0].status == "unresolved_auxiliary"
+    assert groups[0].source_ids == ("opening",)
+
+
 def test_group_order_and_ids_are_independent_of_input_order():
     evidence = [
         _evidence("b", "Veep", "veep", 2012),

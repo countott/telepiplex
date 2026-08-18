@@ -73,6 +73,12 @@ def _make_group(
     )
 
 
+def _work_group_status(items: list[ParsedFileEvidence]) -> str:
+    if any(item.content_role in {"main", "subtitle"} for item in items):
+        return "ready"
+    return "unresolved_auxiliary"
+
+
 def build_provisional_groups(
     evidence: list[ParsedFileEvidence],
 ) -> list[ProvisionalWorkGroup]:
@@ -96,12 +102,20 @@ def build_provisional_groups(
             item.year_hint for item in items if item.year_hint is not None
         })
         if len(explicit_years) <= 1:
-            groups.append(_make_group(title_key, items, status="ready"))
+            groups.append(_make_group(
+                title_key,
+                items,
+                status=_work_group_status(items),
+            ))
             continue
 
         for year in explicit_years:
             year_items = [item for item in items if item.year_hint == year]
-            groups.append(_make_group(title_key, year_items, status="ready"))
+            groups.append(_make_group(
+                title_key,
+                year_items,
+                status=_work_group_status(year_items),
+            ))
         for item in sorted(
             (item for item in items if item.year_hint is None),
             key=lambda value: value.source_id,

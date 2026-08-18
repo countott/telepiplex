@@ -26,6 +26,20 @@ _EPISODE_START = re.compile(
     r"\b(?:S|Season[ ._-]*)\d{1,2}\s*[-–—_.]\s*\d{1,4}\b|"
     r"第\s*\d{1,2}\s*季\D{0,6}第\s*\d{1,4}\s*[集话話])"
 )
+_AUXILIARY_VIDEO_MARKER = re.compile(
+    r"(?ix)(?:"
+    r"\b(?:S|Season[ ._-]*)(?P<season>\d{1,2})"
+    r"\s*[-–—_.]\s*"
+    r")?"
+    r"(?P<role>NCOP|NCED)\b"
+    r"(?:\s*[-–—_.]\s*(?P<variant>\d{1,3})\b)?"
+    r"|(?:"
+    r"\b(?:S|Season[ ._-]*)(?P<short_season>\d{1,2})"
+    r"\s*[-–—_.]\s*"
+    r")?"
+    r"(?P<short_role>OP|ED)\s*[-–—_.]\s*"
+    r"(?P<short_variant>\d{1,3})\b"
+)
 _QUALITY_START = re.compile(
     r"(?i)\b(?:2160p|1080p|720p|576p|480p|4k|8k|web[ ._-]?(?:dl|rip)|"
     r"bluray|bdrip|remux|hdtv|x26[45]|h[ ._-]*26[45]|hevc|avc|"
@@ -166,6 +180,26 @@ def normalize_title_key(value: str) -> str:
     return "".join(character for character in value if character.isalnum())
 
 
+def parse_auxiliary_video_marker(
+    value: str,
+) -> tuple[str, int | None, int | None] | None:
+    """Return role, optional season, and variant for anime OP/ED files."""
+
+    match = _AUXILIARY_VIDEO_MARKER.search(
+        unicodedata.normalize("NFKC", str(value or ""))
+    )
+    if match is None:
+        return None
+    token = str(match.group("role") or match.group("short_role")).casefold()
+    season_text = match.group("season") or match.group("short_season")
+    variant_text = match.group("variant") or match.group("short_variant")
+    return (
+        "opening" if token.endswith("op") else "ending",
+        int(season_text) if season_text else None,
+        int(variant_text) if variant_text else None,
+    )
+
+
 def _filename_title(fact: FileFact) -> tuple[str, int | None]:
     value = unicodedata.normalize("NFKC", PurePosixPath(fact.basename).stem)
     year_match = _YEAR.search(value)
@@ -176,6 +210,7 @@ def _filename_title(fact: FileFact) -> tuple[str, int | None]:
         for match in (
             _YEAR.search(value),
             _EPISODE_START.search(value),
+            _AUXILIARY_VIDEO_MARKER.search(value),
             _QUALITY_START.search(value),
             _SUBTITLE_SUFFIX_NOISE.search(value),
         )
@@ -189,6 +224,11 @@ def _filename_title(fact: FileFact) -> tuple[str, int | None]:
 
 
 def _content_role(fact: FileFact) -> str:
+    auxiliary = parse_auxiliary_video_marker(
+        "/".join((*fact.parent_parts, PurePosixPath(fact.basename).stem))
+    )
+    if auxiliary is not None:
+        return auxiliary[0]
     tokens = re.split(
         r"[ ._-]+",
         unicodedata.normalize("NFKC", "/".join(
@@ -231,7 +271,9 @@ def parse_file_evidence(fact: FileFact) -> ParsedFileEvidence:
         )
 
     title, year = _filename_title(fact)
-    marker = parse_episode_marker(PurePosixPath(fact.basename).stem)
+    basename_stem = PurePosixPath(fact.basename).stem
+    auxiliary = parse_auxiliary_video_marker(basename_stem)
+    marker = None if auxiliary else parse_episode_marker(basename_stem)
     language, variant = "unknown", "unknown"
     evidence = []
     if title:
@@ -240,7 +282,9 @@ def parse_file_evidence(fact: FileFact) -> ParsedFileEvidence:
         evidence.append("filename:year")
     if marker is not None:
         evidence.append("filename:episode")
-    confidence = "high" if title and marker is not None else (
+    if auxiliary is not None:
+        evidence.append("filename:auxiliary")
+    confidence = "high" if title and (marker is not None or auxiliary) else (
         "medium" if title else "low"
     )
     return ParsedFileEvidence(
@@ -248,7 +292,9 @@ def parse_file_evidence(fact: FileFact) -> ParsedFileEvidence:
         title_candidates=(title,) if title else (),
         title_key=normalize_title_key(title),
         year_hint=year,
-        season_number=marker[0] if marker else None,
+        season_number=(
+            marker[0] if marker else auxiliary[1] if auxiliary else None
+        ),
         episode_number=marker[1] if marker else None,
         absolute_episode=None,
         content_role=_content_role(fact),

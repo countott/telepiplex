@@ -54,6 +54,45 @@ class MixedRootStorage(FakeStorage):
         }.get(params.get("cid"), [])
 
 
+class HoneyAuxiliaryStorage(FakeStorage):
+    def __init__(self):
+        super().__init__([])
+
+    def get_file_info(self, path):
+        if path == "/Library":
+            return {"file_id": "root", "file_category": "0"}
+        return super().get_file_info(path)
+
+    def get_file_list(self, params):
+        auxiliary_names = [
+            f"[Kirion] Honey and Clover S2 - {role} - {variant:02d} "
+            "(BD 1280x720 x264 QAAC).mp4"
+            for role in ("NCED", "NCOP")
+            for variant in range(1, 4)
+        ]
+        return {
+            "root": [{
+                "file_id": "honey",
+                "name": "Honey Release",
+                "is_dir": True,
+            }],
+            "honey": [{
+                "file_id": "episode",
+                "name": (
+                    "[Kirion] Honey and Clover S2 - 01 "
+                    "(BD 1280x720 x264 QAAC).mp4"
+                ),
+                "is_dir": False,
+                "size": 1000,
+            }, *[{
+                "file_id": f"auxiliary-{index}",
+                "name": name,
+                "is_dir": False,
+                "size": 100,
+            } for index, name in enumerate(auxiliary_names, start=1)]],
+        }.get(params.get("cid"), [])
+
+
 class FileFirstInventoryTest(unittest.IsolatedAsyncioTestCase):
     async def test_inventory_scans_selected_root_once_and_groups_by_file_identity(self):
         feature = RenameFeature(
@@ -94,6 +133,35 @@ class FileFirstInventoryTest(unittest.IsolatedAsyncioTestCase):
             item["job_id"].startswith("inventory:file-first-v1:")
             for item in session["pending"]
         ))
+
+    async def test_anime_auxiliary_files_attach_to_one_search_work_group(self):
+        feature = RenameFeature(
+            config={
+                "category_folder": [{
+                    "kind": "animated_series",
+                    "name": "Library",
+                    "path": "/Library",
+                }],
+                "storage_timeout": 3,
+            },
+            host=FakeHost(HoneyAuxiliaryStorage()),
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+        owner = {"chat_id": 10, "user_id": 20}
+
+        await feature.command({**owner, "command": "rename", "args": []})
+        await feature.callback({**owner, "payload": "inventory:root:0"})
+        await runtime.wait()
+
+        session = feature.inventory_sessions[(10, 20)]
+        self.assertEqual(session["counts"], {"pending": 1, "completed": 0})
+        self.assertEqual(session["kept_unresolved"], 0)
+        self.assertEqual(len(session["pending"]), 1)
+        self.assertEqual(
+            {node["file_id"] for node in session["pending"][0]["file_tree"]},
+            {"episode", *(f"auxiliary-{index}" for index in range(1, 7))},
+        )
 
 
 class IncompleteSnapshotTest(unittest.IsolatedAsyncioTestCase):

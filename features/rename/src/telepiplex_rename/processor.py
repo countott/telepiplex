@@ -326,6 +326,11 @@ def _partial_completion_explanation(
     for resolution in file_first.get("resolutions") or []:
         if resolution.action != "keep_original":
             continue
+        if resolution.item_identity.get("content_role") not in {
+            "main",
+            "subtitle",
+        }:
+            continue
         unresolved_files.append({
             "source_id": resolution.source_id,
             "source_path": resolution.source_path,
@@ -333,6 +338,9 @@ def _partial_completion_explanation(
             "reason_codes": list(resolution.reason_codes),
         })
     file_first["unresolved_files"] = unresolved_files
+    if not unresolved_files:
+        file_first["ambiguity_explanation"] = {}
+        return None
     context = {
         "confirmed_work": dict(media_metadata.get("identity") or {}),
         "placement": dict(media_metadata.get("placement") or {}),

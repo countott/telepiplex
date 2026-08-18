@@ -93,6 +93,84 @@ def test_honey_and_clover_dash_episode_is_file_level_episode_evidence():
     assert evidence.confidence == "high"
 
 
+def test_anime_auxiliary_markers_keep_work_identity_without_episode_identity():
+    main, opening, ending = _facts(
+        {
+            "file_id": "main",
+            "relative_path": (
+                "混乱/[Kirion] Honey and Clover S2 - 01 "
+                "(BD 1280x720 x264 QAAC).mp4"
+            ),
+            "is_dir": False,
+        },
+        {
+            "file_id": "opening",
+            "relative_path": (
+                "混乱/[Kirion] Honey and Clover S2 - NCOP - 01 "
+                "(BD 1280x720 x264 QAAC).mp4"
+            ),
+            "is_dir": False,
+        },
+        {
+            "file_id": "ending",
+            "relative_path": (
+                "混乱/[Kirion] Honey and Clover S2 - NCED - 03 [ S2 ] "
+                "(BD 1280x720 x264 QAAC).mp4"
+            ),
+            "is_dir": False,
+        },
+    )
+
+    main_evidence = parse_file_evidence(main)
+    opening_evidence = parse_file_evidence(opening)
+    ending_evidence = parse_file_evidence(ending)
+
+    assert opening_evidence.title_key == main_evidence.title_key
+    assert ending_evidence.title_key == main_evidence.title_key
+    assert opening_evidence.content_role == "opening"
+    assert ending_evidence.content_role == "ending"
+    assert opening_evidence.season_number == 2
+    assert ending_evidence.season_number == 2
+    assert opening_evidence.episode_number is None
+    assert ending_evidence.episode_number is None
+    assert opening_evidence.confidence == "high"
+    assert ending_evidence.confidence == "high"
+
+
+def test_contextual_op_ed_markers_do_not_capture_ordinary_title_tokens():
+    opening, ending, ordinary = _facts(
+        {
+            "file_id": "opening",
+            "relative_path": "Honey and Clover S2 - OP - 02.mp4",
+            "is_dir": False,
+        },
+        {
+            "file_id": "ending",
+            "relative_path": "Honey and Clover S2 - ED - 03.mp4",
+            "is_dir": False,
+        },
+        {
+            "file_id": "ordinary",
+            "relative_path": "Ed.S01E01.mkv",
+            "is_dir": False,
+        },
+    )
+
+    opening_evidence = parse_file_evidence(opening)
+    ending_evidence = parse_file_evidence(ending)
+    ordinary_evidence = parse_file_evidence(ordinary)
+
+    assert opening_evidence.title_candidates == ("Honey and Clover",)
+    assert ending_evidence.title_candidates == ("Honey and Clover",)
+    assert opening_evidence.content_role == "opening"
+    assert ending_evidence.content_role == "ending"
+    assert opening_evidence.season_number == 2
+    assert ending_evidence.season_number == 2
+    assert ordinary_evidence.title_candidates == ("Ed",)
+    assert ordinary_evidence.content_role == "main"
+    assert ordinary_evidence.episode_number == 1
+
+
 def test_source_id_prefers_provider_id_and_fallback_is_stable():
     facts = _facts(
         {
