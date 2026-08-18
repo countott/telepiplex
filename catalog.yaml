@@ -437,6 +437,17 @@ plugins:
           branch: main
           commit: 03f77376348eb8d1cb86db586a39bb6a820a7b4b
         url: https://github.com/countott/telepiplex/releases/download/rename-v1.5.6/rename-1.5.6.tpx
+      1.5.7:
+        host_api: '>=1.6,<2.0'
+        provides: []
+        requires:
+        - media.search
+        - storage.provider
+        sha256: ecfc6d3502c7977786442933c55d19e6a31203354c7fa65048ebcf78fd18b36c
+        source:
+          branch: main
+          commit: 45929153c42abd6c70339f4feb2fc1688ce72c12
+        url: https://github.com/countott/telepiplex/releases/download/rename-v1.5.7/rename-1.5.7.tpx
   search:
     versions:
       1.0.0:
@@ -863,5 +874,5 @@ plugins:
           branch: main
           commit: fea015e9e852793cb03239e7c4095f53167eead4
         url: https://github.com/countott/telepiplex/releases/download/sync-v1.1.4/sync-1.1.4.tpx
-release: search-v1.11.4
+release: rename-v1.5.7
 schema_version: 1
