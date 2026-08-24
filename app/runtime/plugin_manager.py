@@ -681,6 +681,15 @@ class PluginManager:
         await self.supervisor.close_all()
         if self.broker is not None:
             await self.broker.close()
+            drains = []
+            for sink in (
+                getattr(self.broker, "operation_sink", None),
+                getattr(self.broker, "milestone_sink", None),
+            ):
+                if hasattr(sink, "drain"):
+                    drains.append(sink.drain(timeout=self.drain_timeout))
+            if drains:
+                await asyncio.gather(*drains, return_exceptions=True)
         self.journal.close()
         if self.interaction_coordinator is not None:
             self.interaction_coordinator.close()

@@ -441,3 +441,40 @@ def test_incomplete_snapshot_is_rejected_before_storage_mutation():
     assert storage.renames == []
     assert storage.moves == []
     assert storage.deleted == []
+
+
+def test_missing_source_id_is_enriched_in_the_shared_bounded_preflight():
+    class BatchStorage(StatefulStorage):
+        def __init__(self, files, directories):
+            super().__init__(files=files, directories=directories)
+            self.batch_calls = []
+
+        def get_file_info_batch(self, paths):
+            self.batch_calls.append(tuple(paths))
+            return {path: self.get_file_info(path) for path in paths}
+
+    root = "/Downloads/Release"
+    source = f"{root}/English.Series.S01E01.mkv"
+    target = "/Series/Show/English Series S01E01.mkv"
+    storage = BatchStorage(
+        files=[(source, "episode-1")],
+        directories=[root, "/Series"],
+    )
+    event = _event(root, [{
+        "path": source,
+        "relative_path": "English.Series.S01E01.mkv",
+        "is_dir": False,
+    }], (1, 1))
+    event.storage = storage
+
+    result = process_file_first_media(
+        event,
+        operations=[{"source_path": source, "final_path": target}],
+        work_identity={"metadata_id": "series-1"},
+    )
+
+    assert result["organized_files"] == 1
+    assert len(storage.batch_calls) == 1
+    assert set(storage.batch_calls[0]) == {source, target, root}
+    assert "preflight" not in result
+    assert all("provider_id" not in vars(outcome) for outcome in result["outcomes"])

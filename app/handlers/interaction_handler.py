@@ -5,8 +5,10 @@ import inspect
 import re
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram.error import BadRequest
 from telegram.ext import ApplicationHandlerStop
 from telepiplex_plugin_sdk.diagnostics import new_trace_id, set_diagnostic_context
 
@@ -143,117 +145,231 @@ class OperationMilestoneSink:
         self.coordinator = coordinator
         self.delivery = delivery
         self.lock_factory = lock_factory
-        self._milestone_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._workers: dict[tuple[str, str], asyncio.Task] = {}
+        self._tasks: set[asyncio.Task] = set()
+        self._started = False
 
     def attach(self, delivery, lock_factory=None):
         self.delivery = delivery
         self.lock_factory = lock_factory
 
+    async def start(self):
+        if self._started:
+            return
+        recoverable = self.coordinator.recover_milestones()
+        self._started = True
+        for intent in recoverable:
+            self._schedule(intent)
+
     async def __call__(self, plugin_id: str, payload: dict) -> dict:
-        operation_id = str(payload.get("operation_id") or "")
-        milestone_id = str(payload.get("milestone_id") or "")
-        key = (operation_id, milestone_id)
-        milestone_lock = self._milestone_locks.setdefault(key, asyncio.Lock())
-        async with milestone_lock:
-            operation_lock = (
-                self.lock_factory(operation_id)
-                if self.lock_factory is not None
+        intent, duplicate = self.coordinator.enqueue_milestone(
+            plugin_id, payload
+        )
+        if (
+            self._started
+            and intent.delivery_state in {"pending", "failed"}
+            and intent.attempt_count < 3
+        ):
+            self._schedule(intent)
+        return {
+            "accepted": True,
+            "queued": True,
+            "duplicate": duplicate,
+        }
+
+    def _schedule(self, intent):
+        key = (intent.operation_id, intent.milestone_id)
+        current = self._workers.get(key)
+        if current is not None and not current.done():
+            return current
+        task = asyncio.create_task(
+            self._deliver(key),
+            name=f"telepiplex-milestone-{intent.operation_id}-{intent.milestone_id}",
+        )
+        self._workers[key] = task
+        self._tasks.add(task)
+        task.add_done_callback(
+            lambda completed, owned_key=key: self._worker_done(
+                owned_key, completed
+            )
+        )
+        return task
+
+    def _worker_done(self, key, task):
+        if self._workers.get(key) is task:
+            self._workers.pop(key, None)
+        self._tasks.discard(task)
+        try:
+            task.exception()
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def _deliver(self, key: tuple[str, str]):
+        operation_id, milestone_id = key
+        while True:
+            intent = self.coordinator.claim_milestone_delivery(
+                operation_id, milestone_id
+            )
+            if intent is None:
+                return
+            try:
+                record = self.coordinator.milestone_delivery_record(intent)
+                operation_lock = (
+                    self.lock_factory(operation_id)
+                    if self.lock_factory is not None
+                    else None
+                )
+                if operation_lock is None:
+                    result = await self._invoke_delivery(record, intent)
+                else:
+                    async with operation_lock:
+                        result = await self._invoke_delivery(record, intent)
+            except asyncio.CancelledError:
+                self._mark_unknown(intent, "cancelled")
+                raise
+            except Exception as exc:
+                self._mark_unknown(intent, type(exc).__name__)
+                _log(
+                    "error",
+                    "Telegram 里程碑投影结果不确定："
+                    f"operation_id={operation_id}, "
+                    f"milestone_id={milestone_id}, "
+                    f"error={type(exc).__name__}",
+                )
+                return
+            if _milestone_delivery_failed(result):
+                rejected = self.coordinator.reject_milestone_delivery(
+                    intent.plugin_id,
+                    operation_id,
+                    milestone_id,
+                    "telegram_rejected",
+                )
+                if rejected.attempt_count < 3:
+                    continue
+                return
+            if not _milestone_delivery_succeeded(result):
+                self._mark_unknown(intent, "invalid_delivery_result")
+                return
+            try:
+                target = _milestone_delivery_target(result, record)
+            except (TypeError, ValueError, OverflowError):
+                self._mark_unknown(intent, "invalid_delivery_target")
+                return
+            if target is not None:
+                try:
+                    self.coordinator.record_milestone_delivery_target(
+                        intent.plugin_id,
+                        operation_id,
+                        milestone_id,
+                        target[0],
+                        target[1],
+                    )
+                except Exception as exc:
+                    durable = self.coordinator.get_milestone(
+                        operation_id, milestone_id
+                    )
+                    if (
+                        durable is None
+                        or durable.delivered_message_id is None
+                    ):
+                        self._mark_unknown(intent, type(exc).__name__)
+                        return
+            try:
+                self.coordinator.complete_milestone_delivery(
+                    intent.plugin_id,
+                    operation_id,
+                    milestone_id,
+                )
+            except Exception as exc:
+                durable = self.coordinator.get_milestone(
+                    operation_id, milestone_id
+                )
+                if durable is not None and durable.delivery_state == "delivered":
+                    return
+                if durable is not None and durable.delivered_message_id is not None:
+                    try:
+                        self.coordinator.complete_milestone_delivery(
+                            intent.plugin_id,
+                            operation_id,
+                            milestone_id,
+                        )
+                    except Exception:
+                        _log(
+                            "error",
+                            "Telegram 里程碑目标已记录但封口待恢复："
+                            f"operation_id={operation_id}, "
+                            f"milestone_id={milestone_id}",
+                        )
+                    return
+                self._mark_unknown(intent, type(exc).__name__)
+            return
+
+    async def _invoke_delivery(self, record, intent):
+        result = self.delivery(
+            record,
+            intent.mode,
+            intent.photo_url or None,
+            intent.text,
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    def _mark_unknown(self, intent, error_code):
+        current = self.coordinator.get_milestone(
+            intent.operation_id, intent.milestone_id
+        )
+        if current is None or current.delivery_state != "delivering":
+            return
+        try:
+            self.coordinator.mark_milestone_delivery_unknown(
+                intent.plugin_id,
+                intent.operation_id,
+                intent.milestone_id,
+                error_code,
+            )
+        except Exception:
+            pass
+
+    async def drain(self, timeout: float | None = None) -> bool:
+        deadline = (
+            asyncio.get_running_loop().time() + max(0, float(timeout))
+            if timeout is not None
+            else None
+        )
+        while self._tasks:
+            tasks = tuple(self._tasks)
+            remaining = (
+                max(0, deadline - asyncio.get_running_loop().time())
+                if deadline is not None
                 else None
             )
-            if operation_lock is None:
-                return await self._deliver(plugin_id, payload)
-            async with operation_lock:
-                return await self._deliver(plugin_id, payload)
-
-    async def _deliver(self, plugin_id: str, payload: dict) -> dict:
-        operation_id = str(payload.get("operation_id") or "")
-        milestone_id = str(payload.get("milestone_id") or "")
-        record = self.coordinator.claim_milestone(
-            plugin_id,
-            operation_id,
-            milestone_id,
-        )
-        if record is None:
-            return {"accepted": True, "duplicate": True}
-        delivered_target = self.coordinator.milestone_delivery_target(
-            plugin_id,
-            operation_id,
-            milestone_id,
-        )
-        if delivered_target is not None:
-            self.coordinator.complete_milestone(
-                plugin_id,
-                operation_id,
-                milestone_id,
-            )
-            return {"accepted": True, "duplicate": False, "recovered": True}
-        if self.coordinator.milestone_delivery_started(
-            plugin_id,
-            operation_id,
-            milestone_id,
-        ):
-            self.coordinator.complete_milestone(
-                plugin_id,
-                operation_id,
-                milestone_id,
-            )
-            return {
-                "accepted": True,
-                "duplicate": False,
-                "recovered": True,
-                "delivery_uncertain": True,
-            }
-        mode = str(payload.get("mode") or "identity").strip().casefold()
-        text = str(payload.get("text") or "")
-        photo_url = str(payload.get("photo_url") or "") or None
-        self.coordinator.begin_milestone_delivery(
-            plugin_id,
-            operation_id,
-            milestone_id,
-        )
-        try:
-            accepted = self.delivery(record, mode, photo_url, text)
-            if inspect.isawaitable(accepted):
-                accepted = await accepted
-            if _milestone_delivery_failed(accepted) and photo_url and mode == "identity":
-                accepted = self.delivery(record, mode, None, text)
-                if inspect.isawaitable(accepted):
-                    accepted = await accepted
-        except BaseException:
-            self.coordinator.release_milestone(
-                plugin_id,
-                operation_id,
-                milestone_id,
-            )
-            raise
-        if _milestone_delivery_failed(accepted):
-            self.coordinator.release_milestone(
-                plugin_id,
-                operation_id,
-                milestone_id,
-            )
-            return {"accepted": False, "duplicate": False}
-        target = _milestone_delivery_target(accepted, record)
-        if target is not None:
-            self.coordinator.record_milestone_delivery(
-                plugin_id,
-                operation_id,
-                milestone_id,
-                target[0],
-                target[1],
-            )
-        self.coordinator.complete_milestone(
-            plugin_id,
-            operation_id,
-            milestone_id,
-        )
-        return {"accepted": True, "duplicate": False}
+            done, pending = await asyncio.wait(tasks, timeout=remaining)
+            for task in done:
+                try:
+                    task.result()
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if pending and deadline is not None:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                await asyncio.sleep(0)
+                return False
+            await asyncio.sleep(0)
+        return True
 
 
 def _milestone_delivery_failed(result) -> bool:
     if isinstance(result, Mapping):
-        return result.get("accepted") is not True
+        return result.get("accepted") is False
     return result is False
+
+
+def _milestone_delivery_succeeded(result) -> bool:
+    if isinstance(result, Mapping):
+        return result.get("accepted") is True
+    return result is True
 
 
 def _milestone_delivery_target(
@@ -261,23 +377,45 @@ def _milestone_delivery_target(
     record: OperationRecord,
 ) -> tuple[int, str] | None:
     del record
-    if isinstance(result, Mapping):
-        message_id = result.get("message_id")
-        message_kind = str(result.get("message_kind") or "").casefold()
-        if message_id is not None and message_kind in {"text", "photo"}:
-            return int(message_id), message_kind
-    return None
+    if not isinstance(result, Mapping):
+        return None
+    raw_message_id = result.get("message_id")
+    raw_message_kind = result.get("message_kind")
+    message_id_empty = raw_message_id is None or (
+        isinstance(raw_message_id, str) and not raw_message_id.strip()
+    )
+    message_kind = str(raw_message_kind or "").strip().casefold()
+    message_kind_empty = not message_kind
+    if message_id_empty and message_kind_empty:
+        return None
+    if message_id_empty or message_kind_empty:
+        raise ValueError("milestone delivery target is incomplete")
+    if isinstance(raw_message_id, bool):
+        raise ValueError("milestone delivery message ID is invalid")
+    if isinstance(raw_message_id, int):
+        message_id = raw_message_id
+    elif isinstance(raw_message_id, str) and re.fullmatch(
+        r"[1-9][0-9]*", raw_message_id.strip()
+    ):
+        message_id = int(raw_message_id.strip())
+    else:
+        raise ValueError("milestone delivery message ID is invalid")
+    if message_id <= 0 or message_kind not in {"text", "photo"}:
+        raise ValueError("milestone delivery target is invalid")
+    return message_id, message_kind
 
 
 def _milestone_delivery_result(
     message_id: int | None,
     message_kind: str,
 ) -> dict:
-    return {
-        "accepted": True,
-        "message_id": int(message_id) if message_id is not None else None,
-        "message_kind": str(message_kind),
-    }
+    result = {"accepted": True}
+    if message_id is not None:
+        result.update({
+            "message_id": int(message_id),
+            "message_kind": str(message_kind),
+        })
+    return result
 
 
 def _milestone_title(text: str) -> str:
@@ -393,7 +531,7 @@ async def deliver_operation_milestone(
                     record.message_kind or "text",
                     "edit_message",
                 )
-            except Exception as exc:
+            except BadRequest as exc:
                 if _message_not_modified(exc):
                     return complete_delivery(
                         record.message_id,
@@ -418,7 +556,7 @@ async def deliver_operation_milestone(
                 "text",
                 "send_message",
             )
-        except Exception as exc:
+        except BadRequest as exc:
             _log(
                 "error",
                 "任务阶段封口消息发送失败："
@@ -431,13 +569,17 @@ async def deliver_operation_milestone(
                 result=False,
                 error=exc,
             )
-            return False
+            return {
+                "accepted": False,
+                "error_code": "telegram_bad_request",
+            }
 
     poster_items = [{
         "number": 1,
         "title": _milestone_title(rendered_text),
         "poster_url": str(photo_url or ""),
     }]
+    photo = None
     try:
         try:
             photo = await asyncio.to_thread(
@@ -453,14 +595,31 @@ async def deliver_operation_milestone(
                 )
             else:
                 raise
-        caption, _parse_mode = bounded_photo_caption(rendered_text, None)
+    except Exception as exc:
+        _log(
+            "warn",
+            "任务身份海报本地构建失败，降级为文本："
+            f"chat_id={chat_id}, error={_render_error(exc)}",
+        )
+    if photo is not None:
+        try:
+            caption, _parse_mode = bounded_photo_caption(rendered_text, None)
+            media = InputMediaPhoto(media=photo, caption=caption)
+        except Exception as exc:
+            _log(
+                "warn",
+                "任务身份海报本地组装失败，降级为文本："
+                f"chat_id={chat_id}, error={_render_error(exc)}",
+            )
+            photo = None
+    if photo is not None:
         if record is not None and record.message_id is not None:
             if record.message_kind == "photo":
                 try:
                     await application.bot.edit_message_media(
                         chat_id=chat_id,
                         message_id=record.message_id,
-                        media=InputMediaPhoto(media=photo, caption=caption),
+                        media=media,
                         reply_markup=None,
                     )
                     return complete_delivery(
@@ -468,7 +627,7 @@ async def deliver_operation_milestone(
                         "photo",
                         "edit_photo",
                     )
-                except Exception as exc:
+                except BadRequest as exc:
                     if _message_not_modified(exc):
                         return complete_delivery(
                             record.message_id,
@@ -483,28 +642,30 @@ async def deliver_operation_milestone(
                         f"error={_render_error(exc)}",
                     )
             await _clear_message_keyboard(application, record)
-        sent = await application.bot.send_photo(
-            chat_id=chat_id,
-            photo=photo,
-            caption=caption,
-        )
-        return complete_delivery(
-            getattr(sent, "message_id", None),
-            "photo",
-            "send_photo",
-        )
-    except Exception as exc:
-        _log(
-            "warn",
-            "任务身份海报发送失败，降级为文本："
-            f"chat_id={chat_id}, error={_render_error(exc)}",
-        )
+        try:
+            sent = await application.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=caption,
+            )
+        except BadRequest as exc:
+            _log(
+                "warn",
+                "任务身份海报被 Telegram 拒绝，降级为文本："
+                f"chat_id={chat_id}, error={_render_error(exc)}",
+            )
+        else:
+            return complete_delivery(
+                getattr(sent, "message_id", None),
+                "photo",
+                "send_photo",
+            )
     try:
         sent = await application.bot.send_message(
             chat_id=chat_id,
             text=rendered_text,
         )
-    except Exception as exc:
+    except BadRequest as exc:
         _log(
             "error",
             "任务身份消息发送失败："
@@ -517,7 +678,10 @@ async def deliver_operation_milestone(
             result=False,
             error=exc,
         )
-        return False
+        return {
+            "accepted": False,
+            "error_code": "telegram_bad_request",
+        }
     return complete_delivery(
         getattr(sent, "message_id", None),
         "text",
@@ -530,8 +694,9 @@ class OperationReportSink:
         self.coordinator = coordinator
         self.router = router
         self._listener = None
+        self._pending: dict[str, OperationRecord] = {}
+        self._workers: dict[str, asyncio.Task] = {}
         self._tasks: set[asyncio.Task] = set()
-        self._locks: dict[str, asyncio.Lock] = {}
 
     def attach(self, listener):
         self._listener = listener
@@ -541,13 +706,6 @@ class OperationReportSink:
         if unavailable is not None:
             return unavailable
         record = self.coordinator.report(plugin_id, report)
-        if self._listener is not None:
-            if record.state == "handed_off":
-                await self._notify(record)
-            else:
-                task = asyncio.create_task(self._notify(record))
-                self._tasks.add(task)
-                task.add_done_callback(self._tasks.discard)
         try:
             submitted_revision = int(report.get("revision"))
         except (TypeError, ValueError):
@@ -563,6 +721,11 @@ class OperationReportSink:
             and str(report.get("next_plugin_id") or "")
             == record.next_plugin_id
         )
+        if accepted and self._listener is not None:
+            pending = self._pending.get(record.operation_id)
+            if pending is None or record.revision >= pending.revision:
+                self._pending[record.operation_id] = record
+            self._ensure_worker(record.operation_id)
         return {
             "accepted": accepted,
             "operation_id": record.operation_id,
@@ -596,19 +759,86 @@ class OperationReportSink:
             "target_plugin_id": target,
         }
 
-    async def _notify(self, record: OperationRecord):
-        try:
-            lock = self._locks.setdefault(record.operation_id, asyncio.Lock())
-            async with lock:
+    def _ensure_worker(self, operation_id: str):
+        current = self._workers.get(operation_id)
+        if current is not None and not current.done():
+            return current
+        task = asyncio.create_task(
+            self._render_pending(operation_id),
+            name=f"telepiplex-operation-render-{operation_id}",
+        )
+        self._workers[operation_id] = task
+        self._tasks.add(task)
+        task.add_done_callback(
+            lambda completed, key=operation_id: self._worker_done(
+                key, completed
+            )
+        )
+        return task
+
+    async def _render_pending(self, operation_id: str):
+        while True:
+            record = self._pending.pop(operation_id, None)
+            if record is None:
+                return
+            try:
                 result = self._listener(record)
                 if inspect.isawaitable(result):
                     await result
-        except Exception as exc:
-            _log(
-                "error",
-                "Feature 任务状态渲染失败："
-                f"operation_id={record.operation_id}, error={type(exc).__name__}",
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log(
+                    "error",
+                    "Feature 任务状态渲染失败："
+                    f"operation_id={record.operation_id}, "
+                    f"error={type(exc).__name__}",
+                )
+
+    def _worker_done(self, operation_id: str, task: asyncio.Task):
+        if self._workers.get(operation_id) is task:
+            self._workers.pop(operation_id, None)
+        self._tasks.discard(task)
+        try:
+            task.exception()
+        except (asyncio.CancelledError, Exception):
+            pass
+        if operation_id in self._pending and self._listener is not None:
+            self._ensure_worker(operation_id)
+
+    async def drain(self, timeout: float | None = None) -> bool:
+        deadline = (
+            asyncio.get_running_loop().time() + max(0, float(timeout))
+            if timeout is not None
+            else None
+        )
+        while self._tasks or self._pending:
+            for operation_id in tuple(self._pending):
+                self._ensure_worker(operation_id)
+            tasks = tuple(self._tasks)
+            if not tasks:
+                await asyncio.sleep(0)
+                continue
+            remaining = (
+                max(0, deadline - asyncio.get_running_loop().time())
+                if deadline is not None
+                else None
             )
+            done, pending = await asyncio.wait(tasks, timeout=remaining)
+            for task in done:
+                try:
+                    task.result()
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if pending and deadline is not None:
+                self._pending.clear()
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                await asyncio.sleep(0)
+                return False
+            await asyncio.sleep(0)
+        return True
 
 
 async def operation_gate(update, context):
@@ -966,10 +1196,26 @@ async def _render_operation_locked(application, _router, record: OperationRecord
     coordinator = application.bot_data.get(COORDINATOR_KEY)
     if coordinator is None:
         return None
-    latest = coordinator.get(record.operation_id)
-    if latest is None:
+    current = coordinator.get(record.operation_id)
+    if current is None:
         return None
-    record = latest
+    # The report fields remain the supplied immutable snapshot.  A cursor
+    # created by another renderer under the same owner/revision is presentation
+    # state, so it may be overlaid without collapsing to a newer business
+    # revision.  The post-send write below still uses owner+revision CAS.
+    if (
+        current.plugin_id == record.plugin_id
+        and current.revision == record.revision
+        and (
+            current.message_id != record.message_id
+            or current.message_kind != record.message_kind
+        )
+    ):
+        record = replace(
+            record,
+            message_id=current.message_id,
+            message_kind=current.message_kind,
+        )
     text = record.status_text or (
         f"任务状态：{record.state}\n阶段：{record.stage or '-'}"
     )
@@ -1047,8 +1293,12 @@ async def _render_operation_locked(application, _router, record: OperationRecord
         else:
             message_id = getattr(message, "message_id", None)
             if isinstance(message_id, int) and message_id > 0:
-                coordinator.set_message_id(
-                    record.operation_id, message_id, "photo"
+                coordinator.set_message_id_if_current(
+                    record.operation_id,
+                    record.plugin_id,
+                    record.revision,
+                    message_id,
+                    "photo",
                 )
                 return message_id
     if record.message_id is not None:
@@ -1093,7 +1343,13 @@ async def _render_operation_locked(application, _router, record: OperationRecord
         return None
     message_id = getattr(message, "message_id", None)
     if isinstance(message_id, int) and message_id > 0:
-        coordinator.set_message_id(record.operation_id, message_id, "text")
+        coordinator.set_message_id_if_current(
+            record.operation_id,
+            record.plugin_id,
+            record.revision,
+            message_id,
+            "text",
+        )
         return message_id
     return None
 

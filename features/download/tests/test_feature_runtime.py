@@ -1,8 +1,10 @@
 import asyncio
 import ast
+import copy
 import re
 import tempfile
 import threading
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -10,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import yaml
+from jsonschema import Draft202012Validator
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,21 +22,250 @@ class Open115ClientCacheTest(unittest.TestCase):
     def test_successful_copy_invalidates_file_info_cache(self):
         from telepiplex_download.client import Open115Client
 
-        client = Open115Client({"access_token": "test"})
+        class SuccessResponse:
+            status_code = 200
+            headers = {}
+
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return {"state": True, "code": 0}
+
+        class SuccessSession:
+            def __init__(self):
+                self.requests = []
+
+            def request(self, method, url, **kwargs):
+                self.requests.append((method, url, kwargs.get("data")))
+                return SuccessResponse()
+
+        session = SuccessSession()
+        client = Open115Client({"access_token": "test"}, session=session)
         client._file_cache = {
             "/source.mkv": {"file_id": "source"},
             "/target": {"file_id": "target"},
             "/target/source.mkv": None,
-        }
-        client._request = lambda *_args, **_kwargs: {
-            "state": True,
-            "code": 0,
         }
 
         copied = client.copy_file("/source.mkv", "/target")
 
         self.assertTrue(copied)
         self.assertEqual(client._file_cache, {})
+        self.assertEqual(len(session.requests), 1)
+        self.assertTrue(session.requests[0][1].endswith("/open/ufile/copy"))
+
+
+class _PollingClock:
+    def __init__(self):
+        self.value = 0.0
+        self.delays = []
+
+    def monotonic(self):
+        return self.value
+
+
+class _AdvancingCancelEvent:
+    def __init__(self, clock):
+        self.clock = clock
+
+    def is_set(self):
+        return False
+
+    def wait(self, delay):
+        delay = float(delay)
+        self.clock.delays.append(delay)
+        self.clock.value += delay
+        return False
+
+
+class Open115AdaptivePollingTest(unittest.TestCase):
+    @staticmethod
+    def _task(*, info_hash="a" * 40, name="Show", status=1, progress=10, **extra):
+        return {
+            "url": "magnet:?xt=urn:btih:" + "a" * 40,
+            "info_hash": info_hash,
+            "name": name,
+            "status": status,
+            "percentDone": progress,
+            **extra,
+        }
+
+    def test_unchanged_business_tuple_backs_off_and_ignores_volatile_fields(self):
+        from telepiplex_download.client import Open115Client
+
+        client = Open115Client({})
+        snapshots = iter([
+            [self._task(provider_timestamp=index, unrelated={"revision": index})]
+            for index in range(4)
+        ] + [[self._task(status=2, progress=100, provider_timestamp=5)]])
+        client.get_offline_tasks = lambda: next(snapshots)
+        clock = _PollingClock()
+        cancel_event = _AdvancingCancelEvent(clock)
+
+        with patch(
+            "telepiplex_download.client.time.monotonic",
+            side_effect=clock.monotonic,
+        ):
+            completed = client.wait_for_download(
+                "magnet:?xt=urn:btih:" + "a" * 40,
+                timeout=100,
+                poll_initial_interval=2,
+                poll_max_interval=30,
+                poll_backoff_factor=1.7,
+                cancel_event=cancel_event,
+            )
+
+        self.assertEqual(completed["resource_name"], "Show")
+        self.assertEqual(len(clock.delays), 4)
+        for actual, expected in zip(clock.delays, [2.0, 3.4, 5.78, 9.826]):
+            self.assertAlmostEqual(actual, expected)
+
+    def test_only_hash_name_status_progress_and_presence_reset_backoff(self):
+        from telepiplex_download.client import Open115Client
+
+        client = Open115Client({})
+        same = self._task()
+        changed_hash = self._task(info_hash="b" * 40)
+        changed_name = self._task(info_hash="b" * 40, name="Show Renamed")
+        changed_status = self._task(
+            info_hash="b" * 40,
+            name="Show Renamed",
+            status=0,
+        )
+        changed_progress = self._task(
+            info_hash="b" * 40,
+            name="Show Renamed",
+            status=0,
+            progress=20,
+        )
+        snapshots = iter([
+            [],
+            [],
+            [same],
+            [same],
+            [changed_hash],
+            [changed_hash],
+            [changed_name],
+            [changed_name],
+            [changed_status],
+            [changed_status],
+            [changed_progress],
+            [],
+            [],
+            [self._task(status=2, progress=100)],
+        ])
+        client.get_offline_tasks = lambda: next(snapshots)
+        clock = _PollingClock()
+        cancel_event = _AdvancingCancelEvent(clock)
+
+        with patch(
+            "telepiplex_download.client.time.monotonic",
+            side_effect=clock.monotonic,
+        ):
+            client.wait_for_download(
+                "magnet:?xt=urn:btih:" + "a" * 40,
+                timeout=200,
+                poll_initial_interval=2,
+                poll_max_interval=30,
+                poll_backoff_factor=1.7,
+                cancel_event=cancel_event,
+            )
+
+        self.assertEqual(clock.delays, [
+            2.0,
+            3.4,
+            2.0,
+            3.4,
+            2.0,
+            3.4,
+            2.0,
+            3.4,
+            2.0,
+            3.4,
+            2.0,
+            2.0,
+            3.4,
+        ])
+
+    def test_completion_on_current_poll_has_no_trailing_wait(self):
+        from telepiplex_download.client import Open115Client
+
+        client = Open115Client({})
+        client.get_offline_tasks = lambda: [self._task(status=2, progress=100)]
+        clock = _PollingClock()
+        cancel_event = _AdvancingCancelEvent(clock)
+
+        completed = client.wait_for_download(
+            "magnet:?xt=urn:btih:" + "a" * 40,
+            timeout=100,
+            poll_initial_interval=2,
+            poll_max_interval=30,
+            poll_backoff_factor=1.7,
+            cancel_event=cancel_event,
+        )
+
+        self.assertEqual(completed["progress"], 100)
+        self.assertEqual(clock.delays, [])
+
+    def test_unchanged_30_minute_task_uses_exactly_64_list_calls(self):
+        from telepiplex_download.client import Open115Client, Open115Error
+
+        client = Open115Client({})
+        calls = 0
+
+        def tasks():
+            nonlocal calls
+            calls += 1
+            return [self._task()]
+
+        client.get_offline_tasks = tasks
+        clock = _PollingClock()
+        cancel_event = _AdvancingCancelEvent(clock)
+
+        with patch(
+            "telepiplex_download.client.time.monotonic",
+            side_effect=clock.monotonic,
+        ), self.assertRaisesRegex(Open115Error, "timed out"):
+            client.wait_for_download(
+                "magnet:?xt=urn:btih:" + "a" * 40,
+                timeout=1800,
+                poll_initial_interval=2,
+                poll_max_interval=30,
+                poll_backoff_factor=1.7,
+                cancel_event=cancel_event,
+            )
+
+        self.assertEqual(calls, 64)
+        self.assertLess(calls, 90)
+        self.assertEqual(clock.value, 1800)
+        self.assertLessEqual(max(clock.delays), 30)
+
+    def test_real_cancel_event_interrupts_a_thirty_second_wait(self):
+        from telepiplex_download.client import Open115Client, Open115Error
+
+        client = Open115Client({})
+        client.get_offline_tasks = lambda: [self._task()]
+        cancel_event = threading.Event()
+        setter = threading.Timer(0.03, cancel_event.set)
+        setter.start()
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(Open115Error, "cancelled"):
+                client.wait_for_download(
+                    "magnet:?xt=urn:btih:" + "a" * 40,
+                    timeout=120,
+                    poll_initial_interval=30,
+                    poll_max_interval=30,
+                    poll_backoff_factor=1,
+                    cancel_event=cancel_event,
+                )
+        finally:
+            setter.cancel()
+
+        self.assertLess(time.monotonic() - started, 0.5)
 
 
 class FakeHost:
@@ -100,12 +332,14 @@ class FakeClient:
         self.deleted_files = []
         self.added = []
         self.tokens = ("", "")
+        self.wait_kwargs = None
 
     def add_offline_task(self, link, selected_path):
         self.added.append((link, selected_path))
         return True
 
     def wait_for_download(self, link, **kwargs):
+        self.wait_kwargs = dict(kwargs)
         progress_callback = kwargs.get("progress_callback")
         if progress_callback:
             progress_callback({
@@ -276,6 +510,59 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.renamed, [])
         self.assertEqual(self.client.moved, [])
         self.assertEqual(self.client.deleted_tasks, [("hash-1", 0)])
+
+    async def test_service_wires_new_adaptive_polling_config(self):
+        self.feature.config.update({
+            "poll_initial_interval": 1.25,
+            "poll_max_interval": 22,
+            "poll_backoff_factor": 1.4,
+            "poll_interval": 99,
+        })
+
+        await self.feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "d" * 40,
+                "selected_path": "/Downloads",
+                "user_id": 123,
+            },
+            "context": {"idempotency_key": "adaptive-config"},
+        })
+        await self.runtime.tasks.pop("adaptive-config")
+
+        self.assertEqual(
+            {
+                key: self.client.wait_kwargs[key]
+                for key in (
+                    "poll_initial_interval",
+                    "poll_max_interval",
+                    "poll_backoff_factor",
+                )
+            },
+            {
+                "poll_initial_interval": 1.25,
+                "poll_max_interval": 22,
+                "poll_backoff_factor": 1.4,
+            },
+        )
+        self.assertNotIn("poll_interval", self.client.wait_kwargs)
+
+    async def test_service_uses_legacy_poll_interval_only_as_initial_fallback(self):
+        await self.feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "e" * 40,
+                "selected_path": "/Downloads",
+                "user_id": 123,
+            },
+            "context": {"idempotency_key": "legacy-poll-config"},
+        })
+        await self.runtime.tasks.pop("legacy-poll-config")
+
+        self.assertEqual(self.client.wait_kwargs["poll_initial_interval"], 0.01)
+        self.assertEqual(self.client.wait_kwargs["poll_max_interval"], 30)
+        self.assertEqual(self.client.wait_kwargs["poll_backoff_factor"], 1.7)
+        self.assertNotIn("poll_interval", self.client.wait_kwargs)
 
     async def test_completion_event_preserves_subtitles_in_full_file_tree(self):
         def file_tree(path):
@@ -806,6 +1093,20 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         })
 
         self.assertEqual(result["operation_id"], "op-download-1")
+        preparing = next(
+            report for report in self.host.reports
+            if report["stage"] == "preparing_submission"
+        )
+        self.assertEqual(preparing["details"], {
+            "effect_receipt": {
+                "effect_key": "download.submit:download-operation-1",
+                "state": "completed",
+                "receipt": {
+                    "job_id": "download-operation-1",
+                    "selected_path": "/Downloads",
+                },
+            },
+        })
         await self.runtime.tasks.pop("download-operation-1")
 
         stages = [report["stage"] for report in self.host.reports]
@@ -828,6 +1129,17 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host.notifications, [])
 
     async def test_download_stage_seals_before_rename_event_is_published(self):
+        original_seal = self.host.seal_operation_stage
+
+        async def queue_before_later_delivery_failure(*args, **kwargs):
+            response = await original_seal(*args, **kwargs)
+            return {
+                **response,
+                "queued": True,
+                "delivery_state": "failed",
+            }
+
+        self.host.seal_operation_stage = queue_before_later_delivery_failure
         await self.feature.download_capability({
             "method": "submit",
             "payload": {
@@ -858,6 +1170,10 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "保存目录：/Downloads/Show.S01E01.mkv",
             self.host.milestones[0]["text"],
+        )
+        self.assertEqual(
+            [event[0] for event in self.host.events],
+            ["download.completed"],
         )
 
     async def test_lost_download_stage_response_retries_same_milestone(self):
@@ -1356,9 +1672,21 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(accepted["accepted"])
         self.assertTrue(accepted["report_pending"])
         self.assertTrue(duplicate["duplicate"])
+        expected_effect = {
+            "effect_receipt": {
+                "effect_key": "download.submit:lost-running-response",
+                "state": "completed",
+                "receipt": {
+                    "job_id": "lost-running-response",
+                    "selected_path": "/Downloads",
+                },
+            },
+        }
+        self.assertEqual(accepted["operation"]["details"], expected_effect)
         self.assertEqual(list(runtime.tasks), ["lost-running-response"])
         self.assertEqual(jobs.get("lost-running-response")["state"], "running")
         await runtime.tasks.pop("lost-running-response")
+        self.assertEqual(self.host.reports[0]["details"], expected_effect)
         self.assertEqual(len(self.client.added), 1)
         self.assertEqual(jobs.get("lost-running-response")["state"], "completed")
 
@@ -1477,6 +1805,11 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(downloaded["state"], "downloaded")
         self.assertEqual(downloaded["result"]["operation_id"], "op-outbox")
         self.assertEqual(
+            downloaded["result"]["completion_event_idempotency_key"],
+            "outbox-1:completed",
+        )
+        self.assertNotIn("completion_event_id", downloaded["result"])
+        self.assertEqual(
             downloaded["result"]["operation_revision"],
             feature.operations["op-outbox"]["revision"],
         )
@@ -1501,7 +1834,255 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         await restored_runtime.tasks.pop("outbox-1")
         self.assertEqual(jobs.get("outbox-1")["state"], "completed")
+        self.assertEqual(
+            jobs.get("outbox-1")["result"]["completion_event_id"],
+            "event-1",
+        )
         self.assertEqual(self.host.events[-1][1]["operation_id"], "op-outbox")
+
+    async def test_restore_downloaded_operation_uses_exact_persisted_handoff_report(self):
+        from telepiplex_download.service import DownloadFeature
+
+        report = {
+            "operation_id": "op-exact-restored-handoff",
+            "chat_id": 10,
+            "user_id": 1,
+            "state": "handed_off",
+            "stage": "handoff_rename",
+            "status_text": "exact persisted status",
+            "control": "cancel",
+            "revision": 9,
+            "details": {"progress": 87.5, "proof": "persisted"},
+            "next_plugin_id": "rename",
+        }
+        feature = DownloadFeature(
+            config={"download_timeout": 30, "poll_interval": 0.01},
+            host=self.host,
+            client=self.client,
+        )
+
+        feature._restore_downloaded_operation({
+            "job_id": "exact-restored-handoff",
+            "state": "downloaded",
+            "result": {
+                "operation_id": report["operation_id"],
+                "operation_revision": report["revision"],
+                "chat_id": report["chat_id"],
+                "user_id": report["user_id"],
+                "download_handoff_report": report,
+                "download_handoff_accepted": False,
+            },
+        })
+
+        self.assertEqual(
+            feature._operation_view(feature.operations[report["operation_id"]]),
+            report,
+        )
+
+    async def test_legacy_downloaded_positive_revision_migrates_as_accepted_handoff(self):
+        from telepiplex_download.jobs import DownloadJobStore
+        from telepiplex_download.service import DownloadFeature
+
+        path = Path(self._testMethodName + ".db")
+        self.addCleanup(path.unlink, missing_ok=True)
+        jobs = DownloadJobStore(path)
+        jobs.create_or_get("legacy-accepted-handoff", {
+            "operation_id": "op-legacy-accepted-handoff",
+        })
+        jobs.update("legacy-accepted-handoff", "downloaded", result={
+            "job_id": "legacy-accepted-handoff",
+            "operation_id": "op-legacy-accepted-handoff",
+            "operation_revision": 7,
+            "chat_id": 10,
+            "user_id": 1,
+            "final_path": "/Downloads/Legacy.Movie.mkv",
+        })
+        feature = DownloadFeature(
+            config={"download_timeout": 30, "poll_interval": 0.01},
+            host=self.host,
+            client=self.client,
+            jobs=jobs,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+
+        migrated = jobs.get("legacy-accepted-handoff")["result"]
+        self.assertTrue(migrated["download_handoff_accepted"])
+        self.assertEqual(migrated["download_handoff_report"], {
+            "operation_id": "op-legacy-accepted-handoff",
+            "chat_id": 10,
+            "user_id": 1,
+            "state": "handed_off",
+            "stage": "handoff_rename",
+            "status_text": (
+                "✅ 115 下载完成\n"
+                "保存目录：/Downloads/Legacy.Movie.mkv"
+            ),
+            "control": "cancel",
+            "revision": 7,
+            "details": {"downloaded_content": "preserved"},
+            "next_plugin_id": "rename",
+        })
+
+        await runtime.tasks.pop("legacy-accepted-handoff")
+
+        self.assertEqual(self.host.reports, [])
+        self.assertEqual(jobs.get("legacy-accepted-handoff")["state"], "completed")
+        event_payload = self.host.events[-1][1]
+        self.assertNotIn("download_handoff_report", event_payload)
+        self.assertNotIn("download_handoff_accepted", event_payload)
+
+    async def test_legacy_downloaded_without_revision_fails_closed_without_rev1(self):
+        from telepiplex_download.jobs import DownloadJobStore
+        from telepiplex_download.service import DownloadFeature
+        from telepiplex_plugin_sdk import FeatureError
+
+        path = Path(self._testMethodName + ".db")
+        self.addCleanup(path.unlink, missing_ok=True)
+        jobs = DownloadJobStore(path)
+        jobs.create_or_get("legacy-unproven-handoff", {
+            "operation_id": "op-legacy-unproven-handoff",
+        })
+        jobs.update("legacy-unproven-handoff", "downloaded", result={
+            "job_id": "legacy-unproven-handoff",
+            "operation_id": "op-legacy-unproven-handoff",
+            "chat_id": 10,
+            "user_id": 1,
+            "final_path": "/Downloads/Unproven.Movie.mkv",
+        })
+        feature = DownloadFeature(
+            config={"download_timeout": 30, "poll_interval": 0.01},
+            host=self.host,
+            client=self.client,
+            jobs=jobs,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+
+        self.assertNotIn("op-legacy-unproven-handoff", feature.operations)
+        with self.assertRaises(FeatureError) as raised:
+            await runtime.tasks.pop("legacy-unproven-handoff")
+
+        self.assertEqual(raised.exception.code, "handoff_recovery_required")
+        self.assertEqual(jobs.get("legacy-unproven-handoff")["state"], "downloaded")
+        self.assertEqual(self.host.reports, [])
+        self.assertEqual(self.host.events, [])
+
+    async def test_committed_completion_response_loss_replays_stable_event_identity(self):
+        from telepiplex_download.jobs import DownloadJobStore
+        from telepiplex_download.service import DownloadFeature
+
+        class CommitThenLoseHost(FakeHost):
+            def __init__(self):
+                super().__init__()
+                self.logical_events = {}
+                self.publish_attempts = []
+
+            async def publish_event(self, event_type, payload, **kwargs):
+                key = kwargs["idempotency_key"]
+                self.publish_attempts.append(key)
+                event_id = self.logical_events.setdefault(key, "stable-event-1")
+                if len(self.publish_attempts) == 1:
+                    raise RuntimeError("Host committed event before response loss")
+                return {"event_id": event_id}
+
+        path = Path(self._testMethodName + ".db")
+        self.addCleanup(path.unlink, missing_ok=True)
+        jobs = DownloadJobStore(path)
+        host = CommitThenLoseHost()
+        feature = DownloadFeature(
+            config={"download_timeout": 30, "poll_interval": 0.01},
+            host=host,
+            client=self.client,
+            jobs=jobs,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+        await feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "e" * 40,
+                "selected_path": "/Downloads",
+                "operation_id": "op-committed-response-loss",
+                "operation_revision": 4,
+                "chat_id": 10,
+                "user_id": 1,
+            },
+            "context": {"idempotency_key": "committed-response-loss"},
+        })
+        await runtime.tasks.pop("committed-response-loss")
+
+        durable = jobs.get("committed-response-loss")
+        self.assertEqual(durable["state"], "downloaded")
+        self.assertEqual(
+            durable["result"]["completion_event_idempotency_key"],
+            "committed-response-loss:completed",
+        )
+
+        restored = DownloadFeature(
+            config={"download_timeout": 30, "poll_interval": 0.01},
+            host=host,
+            client=self.client,
+            jobs=jobs,
+        )
+        restored_runtime = FakeRuntime()
+        restored.bind_runtime(restored_runtime)
+        await restored_runtime.tasks.pop("committed-response-loss")
+
+        completed = jobs.get("committed-response-loss")
+        self.assertEqual(completed["state"], "completed")
+        self.assertEqual(
+            completed["result"]["completion_event_id"],
+            "stable-event-1",
+        )
+        self.assertEqual(host.publish_attempts, [
+            "committed-response-loss:completed",
+            "committed-response-loss:completed",
+        ])
+        self.assertEqual(host.logical_events, {
+            "committed-response-loss:completed": "stable-event-1",
+        })
+
+    async def test_completion_event_identity_mismatch_fails_closed(self):
+        from telepiplex_download.jobs import DownloadJobStore
+        from telepiplex_download.service import DownloadFeature
+
+        path = Path(self._testMethodName + ".db")
+        self.addCleanup(path.unlink, missing_ok=True)
+        jobs = DownloadJobStore(path)
+        jobs.create_or_get("event-id-mismatch", {
+            "operation_id": "op-event-id-mismatch",
+        })
+        jobs.update("event-id-mismatch", "downloaded", result={
+            "job_id": "event-id-mismatch",
+            "operation_id": "op-event-id-mismatch",
+            "chat_id": 10,
+            "user_id": 1,
+            "operation_revision": 5,
+            "completion_event_idempotency_key": "event-id-mismatch:completed",
+            "completion_event_id": "original-event-id",
+        })
+
+        async def mismatched_publish(*_args, **_kwargs):
+            return {"event_id": "different-event-id"}
+
+        self.host.publish_event = mismatched_publish
+        feature = DownloadFeature(
+            config={"download_timeout": 30, "poll_interval": 0.01},
+            host=self.host,
+            client=self.client,
+            jobs=jobs,
+        )
+        runtime = FakeRuntime()
+        feature.bind_runtime(runtime)
+
+        with self.assertRaises(Exception):
+            await runtime.tasks.pop("event-id-mismatch")
+        self.assertEqual(jobs.get("event-id-mismatch")["state"], "downloaded")
+        self.assertEqual(
+            jobs.get("event-id-mismatch")["result"]["completion_event_id"],
+            "original-event-id",
+        )
 
     async def test_interrupted_external_transfer_requires_manual_retry(self):
         from telepiplex_download.jobs import DownloadJobStore
@@ -2418,6 +2999,57 @@ class RuntimeStartupTest(unittest.TestCase):
 
 
 class FeatureSourceContractTest(unittest.TestCase):
+    def test_adaptive_pacing_default_and_schema_contract(self):
+        defaults = yaml.safe_load(
+            (ROOT / "config.default.yaml").read_text(encoding="utf-8")
+        )
+        schema = yaml.safe_load(
+            (ROOT / "config.schema.json").read_text(encoding="utf-8")
+        )
+        validator = Draft202012Validator(schema)
+
+        validator.validate(defaults)
+        self.assertEqual(defaults["poll_initial_interval"], 2)
+        self.assertEqual(defaults["poll_max_interval"], 30)
+        self.assertEqual(defaults["poll_backoff_factor"], 1.7)
+        self.assertEqual(defaults["storage_read_workers"], 4)
+        self.assertEqual(defaults["endpoint_intervals"], {
+            "offline_poll": 1.0,
+            "offline_mutation": 1.0,
+            "storage_read": 0.25,
+            "storage_mutation": 1.0,
+            "token_refresh": 1.0,
+        })
+        self.assertNotIn("poll_interval", defaults)
+        self.assertNotIn("request_interval", defaults)
+        self.assertIn("poll_interval", schema["properties"])
+        self.assertIn("request_interval", schema["properties"])
+        self.assertNotIn("poll_interval", schema["required"])
+        self.assertNotIn("request_interval", schema["required"])
+
+        with_legacy = copy.deepcopy(defaults)
+        with_legacy.update({"poll_interval": 10, "request_interval": 1})
+        validator.validate(with_legacy)
+
+        invalid_configs = []
+        for workers in (0, 5, 1.5):
+            invalid = copy.deepcopy(defaults)
+            invalid["storage_read_workers"] = workers
+            invalid_configs.append(invalid)
+        missing_nested = copy.deepcopy(defaults)
+        del missing_nested["endpoint_intervals"]["storage_read"]
+        invalid_configs.append(missing_nested)
+        extra_nested = copy.deepcopy(defaults)
+        extra_nested["endpoint_intervals"]["future"] = 1
+        invalid_configs.append(extra_nested)
+        negative_interval = copy.deepcopy(defaults)
+        negative_interval["endpoint_intervals"]["storage_read"] = -0.1
+        invalid_configs.append(negative_interval)
+
+        for invalid in invalid_configs:
+            with self.subTest(invalid=invalid):
+                self.assertTrue(list(validator.iter_errors(invalid)))
+
     def test_schema_declares_custom_config_command_registered_by_manifest(self):
         schema = yaml.safe_load((ROOT / "config.schema.json").read_text(encoding="utf-8"))
         manifest = yaml.safe_load((ROOT / "manifest.yaml").read_text(encoding="utf-8"))
@@ -2435,17 +3067,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.0.17")
+        self.assertEqual(manifest["version"], "1.0.18")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.0.17")
+        self.assertEqual(project["project"]["version"], "1.0.18")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.3.2",
         )
-        self.assertIn("/tmp/download-1.0.17.tpx", readme)
-        self.assertNotIn("dist/download-1.0.17.tpx", readme)
+        self.assertIn("/tmp/download-1.0.18.tpx", readme)
+        self.assertNotIn("dist/download-1.0.18.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)

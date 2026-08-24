@@ -7,6 +7,10 @@ from telepiplex_rename.file_executor import (
     execute_file_resolutions,
 )
 from telepiplex_rename.file_plan import FileResolution
+from telepiplex_rename.models import DownloadCompletedEvent
+from telepiplex_rename.operations import RenameOperationJournal
+from telepiplex_rename.processor import process_file_first_media
+from telepiplex_rename.service import StorageProxy
 
 
 def _probe(*paths: str, resource_name: str = "Honey and Clover") -> dict:
@@ -206,3 +210,195 @@ def test_file_execution_and_cleanup_pressure_10_000_files_500_directories():
     assert replay.canonical_no_ops == 10_000
     assert replay.failed_files == 0
     assert storage.moves == moves_before_replay
+
+
+class _LogicalStorageProxy(StorageProxy):
+    """Journal-enabled outer capability recorder for the attachment flow."""
+
+    def __init__(self, files, directories):
+        journal = RenameOperationJournal()
+        super().__init__(None, None, journal=journal)
+        self.files = {
+            path: {
+                "file_id": source_id,
+                "file_category": "1",
+                "sha1": f"sha1-{source_id}",
+                "size": 4096,
+            }
+            for path, source_id in files
+        }
+        self.directories = set(directories)
+        self.calls = []
+        self.phase = "pre_move"
+
+    def _info(self, path):
+        if path in self.files:
+            return dict(self.files[path])
+        if path in self.directories:
+            return {"file_id": f"dir:{path}", "file_category": "0"}
+        return None
+
+    def _storage_call(self, method, args, kwargs):
+        self.calls.append((self.phase, method, args, kwargs))
+        if method == "get_file_info_batch":
+            return {path: self._info(path) for path in args[0]}
+        if method == "get_file_info":
+            return self._info(args[0])
+        if method == "rename":
+            source, new_name = args
+            target = str(PurePosixPath(source).parent / new_name)
+            if source not in self.files or target in self.files:
+                return False
+            self.files[target] = self.files.pop(source)
+            return True
+        if method == "create_dir_recursive":
+            path = args[0]
+            self.directories.add(path)
+            return {"file_id": f"dir:{path}", "file_category": "0"}
+        if method == "move_files_by_id":
+            file_ids, target_dir_id = args
+            self.phase = "post_move"
+            target_dir = str(target_dir_id)[4:]
+            for source_id in file_ids:
+                source = next(
+                    path for path, info in self.files.items()
+                    if info["file_id"] == source_id
+                )
+                target = str(
+                    PurePosixPath(target_dir) / PurePosixPath(source).name
+                )
+                if target not in self.files:
+                    self.files[target] = self.files.pop(source)
+            return {"state": "submitted", "submitted": True}
+        if method == "get_file_list":
+            params = args[0]
+            directory = str(params["cid"])[4:]
+            items = [
+                {"fn": PurePosixPath(path).name, **info}
+                for path, info in self.files.items()
+                if str(PurePosixPath(path).parent) == directory
+            ]
+            items.extend({
+                "fn": PurePosixPath(path).name,
+                "file_id": f"dir:{path}",
+                "file_category": "0",
+            } for path in self.directories if (
+                path != directory
+                and str(PurePosixPath(path).parent) == directory
+            ))
+            return items
+        if method == "delete_single_file":
+            path = args[0]
+            if any(
+                str(PurePosixPath(value).parent) == path
+                for value in (*self.files, *self.directories)
+                if value != path
+            ):
+                return False
+            self.directories.discard(path)
+            return True
+        raise AssertionError(f"unexpected storage method: {method}")
+
+
+def _logical_file_first_fixture(parent_paths):
+    files = []
+    tree = []
+    operations = []
+    for index, parent in enumerate(parent_paths, 1):
+        source_id = f"episode-{index:02d}"
+        source_name = f"Release.S01E{index:02d}.mkv"
+        target_name = f"Show S01E{index:02d}.mkv"
+        source = f"{parent}/{source_name}"
+        target = f"/Series/Show/{target_name}"
+        files.append((source, source_id))
+        tree.append({
+            "file_id": source_id,
+            "path": source,
+            "relative_path": source.removeprefix("/Downloads/Release/")
+            if source.startswith("/Downloads/Release/") else source_name,
+            "name": source_name,
+            "is_dir": False,
+            "size": 4096,
+            "sha1": f"sha1-{source_id}",
+        })
+        operations.append({"source_path": source, "final_path": target})
+    directories = {"/Downloads/Release", "/Series"} | set(parent_paths)
+    storage = _LogicalStorageProxy(files, directories)
+    event = DownloadCompletedEvent(
+        link="magnet:?fixture",
+        selected_path="/Series",
+        user_id=1,
+        final_path="/Downloads/Release",
+        download_root="/Downloads/Release",
+        resource_name="Release",
+        file_tree=tree,
+        storage=storage,
+    )
+    result = process_file_first_media(
+        event,
+        operations=operations,
+        work_identity={"external_id": "series-1"},
+    )
+    return storage, result
+
+
+def test_attachment_equivalent_transaction_uses_59_logical_calls():
+    storage, result = _logical_file_first_fixture(
+        ["/Downloads/Release"] * 16
+    )
+    counts = Counter(method for _phase, method, _args, _kwargs in storage.calls)
+
+    assert result["organized_files"] == 16
+    assert result["cleanup"]["complete"] is True
+    assert counts == {
+        "get_file_info_batch": 2,
+        "get_file_info": 35,
+        "rename": 16,
+        "create_dir_recursive": 1,
+        "move_files_by_id": 1,
+        "get_file_list": 3,
+        "delete_single_file": 1,
+    }
+    assert len(storage.calls) == 59
+    snapshot_paths = [
+        path
+        for _phase, method, args, _kwargs in storage.calls
+        if method == "get_file_info_batch"
+        for path in args[0]
+    ]
+    assert snapshot_paths.count("/Downloads/Release") == 1
+    assert all(
+        phase == "post_move"
+        for phase, method, _args, _kwargs in storage.calls
+        if method in {"get_file_list", "delete_single_file"}
+    )
+
+
+def test_two_interleaved_source_parents_are_order_independent_at_68_calls():
+    parents = [
+        f"/Downloads/Release/Part-{index % 2 + 1}"
+        for index in range(16)
+    ]
+    storage, result = _logical_file_first_fixture(parents)
+    counts = Counter(method for _phase, method, _args, _kwargs in storage.calls)
+
+    assert result["organized_files"] == 16
+    assert result["cleanup"]["complete"] is True
+    assert counts == {
+        "get_file_info_batch": 2,
+        "get_file_info": 39,
+        "rename": 16,
+        "create_dir_recursive": 1,
+        "move_files_by_id": 1,
+        "get_file_list": 6,
+        "delete_single_file": 3,
+    }
+    assert len(storage.calls) == 68
+    snapshot_paths = [
+        path
+        for _phase, method, args, _kwargs in storage.calls
+        if method == "get_file_info_batch"
+        for path in args[0]
+    ]
+    assert snapshot_paths.count("/Downloads/Release/Part-1") == 1
+    assert snapshot_paths.count("/Downloads/Release/Part-2") == 1

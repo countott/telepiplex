@@ -13,6 +13,22 @@
     "auth_poll_interval": {"type": "number", "minimum": 0.5, "maximum": 30},
     "timeout": {"type": "number", "minimum": 1, "maximum": 300},
     "download_timeout": {"type": "number", "minimum": 10, "maximum": 86400},
+    "poll_initial_interval": {"type": "number", "exclusiveMinimum": 0, "maximum": 300},
+    "poll_max_interval": {"type": "number", "exclusiveMinimum": 0, "maximum": 300},
+    "poll_backoff_factor": {"type": "number", "minimum": 1, "maximum": 10},
+    "endpoint_intervals": {
+      "type": "object",
+      "properties": {
+        "offline_poll": {"type": "number", "minimum": 0, "maximum": 300},
+        "offline_mutation": {"type": "number", "minimum": 0, "maximum": 300},
+        "storage_read": {"type": "number", "minimum": 0, "maximum": 300},
+        "storage_mutation": {"type": "number", "minimum": 0, "maximum": 300},
+        "token_refresh": {"type": "number", "minimum": 0, "maximum": 300}
+      },
+      "required": ["offline_poll", "offline_mutation", "storage_read", "storage_mutation", "token_refresh"],
+      "additionalProperties": false
+    },
+    "storage_read_workers": {"type": "integer", "minimum": 1, "maximum": 4},
     "poll_interval": {"type": "number", "minimum": 0.1, "maximum": 300},
     "request_interval": {"type": "number", "minimum": 0, "maximum": 30},
     "save_directories": {
@@ -31,6 +47,6 @@
       }
     }
   },
-  "required": ["base_url", "passport_url", "auth_mode", "access_token", "refresh_token", "app_id", "auth_poll_timeout", "auth_poll_interval", "timeout", "download_timeout", "poll_interval", "request_interval", "save_directories"],
+  "required": ["base_url", "passport_url", "auth_mode", "access_token", "refresh_token", "app_id", "auth_poll_timeout", "auth_poll_interval", "timeout", "download_timeout", "poll_initial_interval", "poll_max_interval", "poll_backoff_factor", "endpoint_intervals", "storage_read_workers", "save_directories"],
   "additionalProperties": false
 }

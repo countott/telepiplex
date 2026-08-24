@@ -20,7 +20,7 @@ for source in (ROOT, SDK_SOURCE):
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Pressure-test the complete search -> download -> rename -> sync "
+            "Pressure-test the complete search -> download -> rename "
             "operation contract over real Unix RPC."
         )
     )
@@ -56,7 +56,7 @@ async def _run(
         raise ValueError("milestone_faults must not be negative")
 
     harness = OperationPipelineEndToEndTest(
-        methodName="test_full_pipeline_handoff_control_and_menu_use_real_rpc_events"
+        methodName="test_full_pipeline_ends_at_rename_without_sync_or_plex"
     )
     await harness.asyncSetUp()
     event_deliveries = []
@@ -64,12 +64,16 @@ async def _run(
     duplicate_milestones = 0
     recovered_milestones = 0
     semaphore = asyncio.Semaphore(concurrency)
-    original_complete_milestone = harness.coordinator.complete_milestone
+    original_complete_milestone = (
+        harness.coordinator.complete_milestone_delivery
+    )
     remaining_milestone_faults = milestone_faults
     interrupted_milestones = set()
+    recovered_milestone_keys = set()
 
     def complete_then_interrupt(*args):
         nonlocal remaining_milestone_faults
+        nonlocal recovered_milestones
         milestone_key = tuple(str(value) for value in args[:3])
         if (
             remaining_milestone_faults > 0
@@ -78,14 +82,24 @@ async def _run(
             interrupted_milestones.add(milestone_key)
             remaining_milestone_faults -= 1
             raise RuntimeError("injected milestone completion interruption")
-        return original_complete_milestone(*args)
+        result = original_complete_milestone(*args)
+        if (
+            milestone_key in interrupted_milestones
+            and milestone_key not in recovered_milestone_keys
+        ):
+            recovered_milestone_keys.add(milestone_key)
+            recovered_milestones += 1
+        return result
 
     if milestone_faults:
-        harness.coordinator.complete_milestone = complete_then_interrupt
+        harness.coordinator.complete_milestone_delivery = (
+            complete_then_interrupt
+        )
 
     async def record_event(owner: str, request: dict) -> dict:
         event_deliveries.append((
             owner,
+            str(request.get("event_type") or ""),
             str((request.get("payload") or {}).get("operation_id") or ""),
         ))
         return {"accepted": True}
@@ -103,11 +117,6 @@ async def _run(
         rename_manifest = harness._manifest(
             "rename",
             subscribes=("download.completed",),
-            publishes=("media.organized",),
-        )
-        sync_manifest = harness._manifest(
-            "sync",
-            subscribes=("media.organized",),
         )
         clients = {
             "search": HostClient(
@@ -118,9 +127,6 @@ async def _run(
             ),
             "rename": HostClient(
                 harness.broker.socket_path, "rename-pressure-token"
-            ),
-            "sync": HostClient(
-                harness.broker.socket_path, "sync-pressure-token"
             ),
         }
 
@@ -172,24 +178,13 @@ async def _run(
             else:
                 call = client.seal_operation_stage
                 kwargs = {}
-            for attempt in range(3):
-                try:
-                    first = await call(
-                        operation_id,
-                        milestone_id,
-                        f"pressure milestone {milestone_id}",
-                        **kwargs,
-                    )
-                    host_api_calls += 1
-                    break
-                except Exception as exc:
-                    host_api_calls += 1
-                    if (
-                        getattr(exc, "code", "") != "internal_error"
-                        or attempt == 2
-                    ):
-                        raise
-                    await asyncio.sleep(0.01 * (2 ** attempt))
+            first = await call(
+                operation_id,
+                milestone_id,
+                f"pressure milestone {milestone_id}",
+                **kwargs,
+            )
+            host_api_calls += 1
             replay = await call(
                 operation_id,
                 milestone_id,
@@ -201,8 +196,6 @@ async def _run(
                 raise AssertionError(
                     f"first milestone delivery was not accepted: {first}"
                 )
-            if first.get("recovered") is True:
-                recovered_milestones += 1
             if replay.get("duplicate") is not True:
                 raise AssertionError(
                     f"milestone replay was not idempotent: {replay}"
@@ -265,29 +258,10 @@ async def _run(
             )
             await report(
                 "rename", operation_id, record.chat_id, record.user_id,
-                8, "handed_off", "handoff_plex",
-                next_plugin_id="sync",
+                8, "completed", "completed",
             )
             await milestone(
                 "rename", operation_id, f"rename-stage:{index}"
-            )
-            await publish_event(
-                "rename", "media.organized", operation_id, 8
-            )
-            return {"accepted": True}
-
-        async def sync_event(request: dict) -> dict:
-            await record_event("sync", request)
-            payload = request["payload"]
-            operation_id = str(payload["operation_id"])
-            record = harness.coordinator.get(operation_id)
-            await report(
-                "sync", operation_id, record.chat_id, record.user_id,
-                9, "running", "scanning",
-            )
-            await report(
-                "sync", operation_id, record.chat_id, record.user_id,
-                10, "completed", "completed",
             )
             return {"accepted": True}
 
@@ -300,11 +274,6 @@ async def _run(
             rename_manifest,
             "rename-pressure-token",
             events={"download.completed": rename_event},
-        )
-        await harness._start_runtime(
-            sync_manifest,
-            "sync-pressure-token",
-            events={"media.organized": sync_event},
         )
         await harness._start_runtime(
             search_manifest,
@@ -380,18 +349,21 @@ async def _run(
             )
         expected_milestone_deliveries = pipelines * 4
         expected_faults = min(milestone_faults, expected_milestone_deliveries)
-        expected_host_api_calls = pipelines * 21 + expected_faults
-        async with asyncio.timeout(2):
-            while host_api_calls < expected_host_api_calls:
-                await asyncio.sleep(0.001)
+        expected_host_api_calls = pipelines * 18
+        async with asyncio.timeout(10):
+            while duplicate_milestones != expected_milestone_deliveries:
+                await asyncio.sleep(0.01)
+        await harness.milestone_sink.drain()
         elapsed = time.perf_counter() - started
 
         expected_operations = {
             f"pressure-operation-{index:04d}" for index in range(pipelines)
         }
-        delivered_by_owner = Counter(owner for owner, _ in event_deliveries)
+        delivered_by_owner = Counter(
+            owner for owner, _, _ in event_deliveries
+        )
         delivered_operations = {
-            operation_id for _, operation_id in event_deliveries
+            operation_id for _, _, operation_id in event_deliveries
         }
         final_records = [
             harness.coordinator.get(operation_id)
@@ -399,10 +371,15 @@ async def _run(
         ]
         completed = sum(
             record is not None
-            and record.plugin_id == "sync"
+            and record.plugin_id == "rename"
             and record.state == "completed"
             for record in final_records
         )
+        terminal_owners = sorted({
+            record.plugin_id
+            for record in final_records
+            if record is not None and record.state == "completed"
+        })
         if host_api_calls != expected_host_api_calls:
             raise AssertionError(
                 f"host API call count {host_api_calls} != {expected_host_api_calls}"
@@ -424,7 +401,6 @@ async def _run(
             raise AssertionError("unexpected milestone fault injection count")
         if delivered_by_owner != Counter({
             "rename": pipelines,
-            "sync": pipelines,
         }):
             raise AssertionError(
                 f"unexpected event deliveries: {dict(delivered_by_owner)}"
@@ -440,13 +416,17 @@ async def _run(
             "pipelines": pipelines,
             "concurrency": concurrency,
             "host_api_calls": host_api_calls,
-            "milestone_requests": pipelines * 8 + expected_faults,
+            "milestone_requests": pipelines * 8,
             "milestone_deliveries": len(harness.milestone_deliveries),
             "duplicate_milestones": duplicate_milestones,
             "injected_milestone_faults": expected_faults,
             "recovered_milestones": recovered_milestones,
             "event_deliveries": len(event_deliveries),
+            "event_types": sorted({
+                event_type for _, event_type, _ in event_deliveries
+            }),
             "completed_operations": completed,
+            "terminal_owners": terminal_owners,
             "failures": 0,
             "elapsed_seconds": round(elapsed, 3),
             "pipelines_per_second": round(pipelines / elapsed, 2),

@@ -33,6 +33,13 @@
             "indexer_timeout": {"type": "number", "minimum": 1, "maximum": 600, "title": "单 Indexer 超时（秒）"},
             "status_timeout": {"type": "number", "minimum": 1, "maximum": 300, "title": "状态超时（秒）"},
             "indexer_ids": {"type": "string", "title": "Indexer IDs"},
+            "first_wave_indexer_ids": {
+              "type": "array",
+              "title": "首波 Indexer IDs",
+              "uniqueItems": true,
+              "items": {"type": "integer", "minimum": 1}
+            },
+            "wave_delay": {"type": "number", "minimum": 0, "maximum": 30, "title": "尾波延迟（秒）"},
             "categories": {
               "type": "object",
               "title": "搜索分类",

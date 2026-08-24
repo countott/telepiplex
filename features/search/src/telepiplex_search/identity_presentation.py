@@ -12,6 +12,7 @@ _PROVIDER_LABELS = {
     "tvdb": "TVDB",
     "wikipedia": "Wikipedia",
 }
+_MISSING = object()
 
 
 def _text(value) -> str:
@@ -38,18 +39,40 @@ def _title(identity: dict) -> str:
     return chinese or english or "未知作品"
 
 
-def _scope(contract: dict, media_type: str) -> str:
+def _coordinate(value) -> int | None:
+    try:
+        coordinate = int(value)
+    except (TypeError, ValueError):
+        return None
+    return coordinate if coordinate > 0 else None
+
+
+def _scope_coordinates(contract: dict) -> tuple[str, int | None, int | None]:
     retrieval = contract.get("retrieval") or {}
     placement = contract.get("placement") or {}
     scope = _text(retrieval.get("scope")).casefold()
-    season = placement.get("season_number")
-    episode = placement.get("episode_number")
+    evidence = contract.get("evidence") or {}
+    decision = evidence.get("decision") or {}
+    decision = decision if isinstance(decision, dict) else {}
+    raw_season = decision.get("season_number", _MISSING)
+    raw_episode = decision.get("episode_number", _MISSING)
+    season = _coordinate(raw_season)
+    episode = _coordinate(raw_episode)
+    if scope in {"season", "episode"} and raw_season is _MISSING:
+        season = _coordinate(placement.get("season_number"))
+    if scope == "episode" and raw_episode is _MISSING:
+        episode = _coordinate(placement.get("episode_number"))
+    return scope, season, episode
+
+
+def _scope(contract: dict, media_type: str) -> str:
+    scope, season, episode = _scope_coordinates(contract)
     if media_type == "movie":
         return "电影"
-    if scope == "episode" and season and episode:
-        return f"S{int(season):02d}E{int(episode):02d}"
-    if scope == "season" and season:
-        return f"第 {int(season)} 季"
+    if scope == "episode" and season is not None and episode is not None:
+        return f"S{season:02d}E{episode:02d}"
+    if scope == "season" and season is not None:
+        return f"第 {season} 季"
     return "全剧"
 
 
@@ -90,6 +113,7 @@ def build_identity_presentation(contract: dict) -> dict:
         _PROVIDER_LABELS.get(item, item)
         for item in provider_values
     ) or "来源未知"
+    scope, season_number, episode_number = _scope_coordinates(contract)
     scope_label = _scope(contract, media_type)
     year = _text(identity.get("year")) or "年份未知"
     text = (
@@ -102,7 +126,10 @@ def build_identity_presentation(contract: dict) -> dict:
         "title": title,
         "year": year,
         "media_type": media_type,
-        "scope": scope_label,
+        "scope": scope,
+        "scope_label": scope_label,
+        "season_number": season_number,
+        "episode_number": episode_number,
     }
     digest = hashlib.sha256(json.dumps(
         stable_identity,

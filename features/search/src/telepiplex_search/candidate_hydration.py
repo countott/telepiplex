@@ -152,15 +152,13 @@ def _exact_fact_id(link: dict, facts) -> str:
     return matches[0] if len(set(matches)) == 1 else ""
 
 
-def hydrate_frozen_candidate(
+def _materialize_exact_candidate(
     candidate: dict,
     *,
-    metadata_id: str,
-    raw_query: str,
     require_anchor: bool = False,
     resolver=resolve_direct_link,
-) -> dict:
-    """Return a hydrated candidate using only its saved source URLs."""
+):
+    """Exact-read and validate a frozen anchor without building a contract."""
 
     if not isinstance(candidate, dict) or not candidate.get("links_frozen"):
         raise CandidateHydrationError("candidate_not_frozen")
@@ -345,8 +343,12 @@ def hydrate_frozen_candidate(
         anchored,
         unresolved_sources=unresolved,
     )
+    return anchored
+
+
+def _strict_contract(anchored, *, metadata_id: str, raw_query: str) -> dict:
     try:
-        contract = build_media_metadata_v1(
+        return build_media_metadata_v1(
             anchored,
             metadata_id=metadata_id,
             raw_query=raw_query,
@@ -356,6 +358,16 @@ def hydrate_frozen_candidate(
             exc.code,
             exc.missing_fields,
         ) from exc
+
+
+def _candidate_result(
+    candidate: dict,
+    anchored,
+    contract: dict,
+    *,
+    metadata_hydrated: bool,
+) -> dict:
+    """Project exact-read facts back onto the frozen candidate payload."""
 
     douban_match_mode = _text(candidate.get("douban_match_mode"))
     if douban_match_mode:
@@ -402,6 +414,185 @@ def hydrate_frozen_candidate(
             )
             else "v0"
         ),
-        "metadata_hydrated": True,
+        "anchor_hydrated": True,
+        "metadata_hydrated": metadata_hydrated,
     })
+    if not metadata_hydrated:
+        result["prowlarr_queries"] = []
     return result
+
+
+def _scope_coordinates(anchored) -> tuple[int | None, int | None]:
+    scoped = next(
+        (
+            link
+            for link in anchored.source_links
+            if link.fact_id == anchored.anchor_fact_id
+            and link.role in {"season", "episode"}
+        ),
+        next(
+            (
+                link
+                for link in anchored.source_links
+                if link.role == anchored.intended_scope
+            ),
+            None,
+        ),
+    )
+    if scoped is None:
+        return None, None
+    return (
+        scoped.season_number or scoped.proposed_season_number,
+        scoped.episode_number or scoped.proposed_episode_number,
+    )
+
+
+def _identity_validated_intermediate_contract(
+    anchored,
+    *,
+    metadata_id: str,
+    raw_query: str,
+) -> dict:
+    """Validate every strict field except the known-missing bounded scope."""
+
+    identity_links = tuple(
+        replace(
+            link,
+            role=(
+                "series_root"
+                if link.role in {"season", "episode"}
+                else link.role
+            ),
+            season_number=None,
+            episode_number=None,
+            verification=(
+                "fact_verified"
+                if link.verification == "unresolved_scope_link"
+                else link.verification
+            ),
+            proposed_season_number=None,
+            proposed_episode_number=None,
+        )
+        for link in anchored.source_links
+    )
+    identity_candidate = replace(
+        anchored,
+        intended_scope="whole_series",
+        source_links=identity_links,
+        unresolved_sources=tuple(
+            item
+            for item in anchored.unresolved_sources
+            if "unresolved_scope_link" not in _text(item)
+        ),
+    )
+    contract = _strict_contract(
+        identity_candidate,
+        metadata_id=metadata_id,
+        raw_query=raw_query,
+    )
+    season_number, episode_number = _scope_coordinates(anchored)
+    contract["retrieval"].update({
+        "scope": anchored.intended_scope,
+        "query": "",
+        "queries": [],
+    })
+    evidence = contract.get("evidence") or {}
+    evidence["source_links"] = [
+        link.to_dict() for link in anchored.source_links
+    ]
+    evidence["unresolved"] = list(anchored.unresolved_sources)
+    decision = evidence.get("decision") or {}
+    decision.update({
+        "scope": anchored.intended_scope,
+        "season_number": season_number,
+        "episode_number": episode_number,
+    })
+    evidence["decision"] = decision
+    contract["evidence"] = evidence
+    anchor_link = next(
+        (
+            link
+            for link in anchored.source_links
+            if link.fact_id == anchored.anchor_fact_id
+        ),
+        anchored.source_links[0],
+    )
+    contract["source_entry"]["verification"] = anchor_link.verification
+    return contract
+
+
+def hydrate_frozen_candidate_anchor(
+    candidate: dict,
+    *,
+    metadata_id: str,
+    raw_query: str,
+    require_anchor: bool = False,
+    resolver=resolve_direct_link,
+) -> dict:
+    """Exact-read a frozen anchor, allowing only missing verified scope."""
+
+    anchored = _materialize_exact_candidate(
+        candidate,
+        require_anchor=require_anchor,
+        resolver=resolver,
+    )
+    try:
+        contract = build_media_metadata_v1(
+            anchored,
+            metadata_id=metadata_id,
+            raw_query=raw_query,
+        )
+    except MetadataV1Error as exc:
+        if not (
+            exc.code == "metadata_incomplete"
+            and exc.missing_fields == ("verified_scope",)
+        ):
+            raise CandidateHydrationError(
+                exc.code,
+                exc.missing_fields,
+            ) from exc
+        contract = _identity_validated_intermediate_contract(
+            anchored,
+            metadata_id=metadata_id,
+            raw_query=raw_query,
+        )
+        return _candidate_result(
+            candidate,
+            anchored,
+            contract,
+            metadata_hydrated=False,
+        )
+    return _candidate_result(
+        candidate,
+        anchored,
+        contract,
+        metadata_hydrated=True,
+    )
+
+
+def hydrate_frozen_candidate(
+    candidate: dict,
+    *,
+    metadata_id: str,
+    raw_query: str,
+    require_anchor: bool = False,
+    resolver=resolve_direct_link,
+) -> dict:
+    """Return a strict hydrated candidate using only saved source URLs."""
+
+    anchored = _materialize_exact_candidate(
+        candidate,
+        require_anchor=require_anchor,
+        resolver=resolver,
+    )
+    contract = _strict_contract(
+        anchored,
+        metadata_id=metadata_id,
+        raw_query=raw_query,
+    )
+    return _candidate_result(
+        candidate,
+        anchored,
+        contract,
+        metadata_hydrated=True,
+    )

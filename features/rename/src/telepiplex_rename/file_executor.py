@@ -5,8 +5,137 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from collections import defaultdict
 from pathlib import PurePosixPath
+from types import MappingProxyType
+from typing import Mapping
 
 from .file_plan import FileResolution, normalize_storage_path
+
+
+def _normalized_text_scalar(value, *, field: str, lower=False) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise TypeError(f"{field} must be a string or integer scalar")
+    normalized = str(value).strip()
+    return normalized.lower() if lower else normalized
+
+
+def _normalized_size_scalar(value) -> int:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise TypeError("size must be a string or integer scalar")
+    try:
+        normalized = int(str(value).strip())
+    except ValueError as exc:
+        raise TypeError("size must be an integer scalar") from exc
+    if normalized < 0:
+        raise ValueError("size must not be negative")
+    return normalized
+
+
+@dataclass(frozen=True, slots=True)
+class PreflightFileInfo:
+    provider_id: str
+    sha1: str
+    size: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "provider_id",
+            _normalized_text_scalar(self.provider_id, field="provider_id"),
+        )
+        object.__setattr__(
+            self,
+            "sha1",
+            _normalized_text_scalar(self.sha1, field="sha1", lower=True),
+        )
+        object.__setattr__(self, "size", _normalized_size_scalar(self.size))
+
+
+@dataclass(frozen=True, slots=True)
+class FileTransactionSnapshot:
+    """Immutable pre-mutation facts for one synchronous file transaction."""
+
+    file_info: Mapping[str, PreflightFileInfo | None]
+    source_parent_ids: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        normalized_info = {}
+        for path, value in dict(self.file_info).items():
+            normalized = normalize_storage_path(path)
+            if not normalized:
+                raise ValueError("snapshot file path must be non-empty")
+            if value is not None and not isinstance(value, PreflightFileInfo):
+                raise TypeError("snapshot file facts must be projected values")
+            if normalized in normalized_info and normalized_info[normalized] != value:
+                raise ValueError(f"conflicting snapshot facts for {normalized}")
+            normalized_info[normalized] = value
+        normalized_parents = {}
+        for path, provider_id in dict(self.source_parent_ids).items():
+            normalized = normalize_storage_path(path)
+            if not normalized:
+                raise ValueError("snapshot parent path must be non-empty")
+            value = _normalized_text_scalar(
+                provider_id,
+                field="source_parent_id",
+            )
+            if (
+                normalized in normalized_parents
+                and normalized_parents[normalized] != value
+            ):
+                raise ValueError(f"conflicting snapshot parent IDs for {normalized}")
+            normalized_parents[normalized] = value
+        for path, provider_id in normalized_parents.items():
+            if path not in normalized_info:
+                raise ValueError(
+                    f"source parent fact missing from snapshot: {path}"
+                )
+            parent_fact = normalized_info[path]
+            projected_id = (
+                "" if parent_fact is None else parent_fact.provider_id
+            )
+            if projected_id != provider_id:
+                raise ValueError(
+                    f"source parent ID mismatch for {path}"
+                )
+        object.__setattr__(
+            self, "file_info", MappingProxyType(dict(normalized_info))
+        )
+        object.__setattr__(
+            self,
+            "source_parent_ids",
+            MappingProxyType(dict(normalized_parents)),
+        )
+
+    @classmethod
+    def from_provider_facts(
+        cls,
+        file_info: Mapping[str, object],
+        source_parent_ids: Mapping[str, str],
+    ) -> FileTransactionSnapshot:
+        projected = {}
+        for path, value in dict(file_info).items():
+            normalized = normalize_storage_path(path)
+            projected_value = (
+                None
+                if value is None
+                else PreflightFileInfo(
+                    provider_id=_provider_id(value),
+                    sha1=_sha1(value),
+                    size=_size(value),
+                )
+            )
+            if (
+                normalized in projected
+                and projected[normalized] != projected_value
+            ):
+                raise ValueError(f"conflicting snapshot facts for {normalized}")
+            projected[normalized] = projected_value
+        return cls(projected, source_parent_ids)
+
+    def require_file_info(self, path: str) -> PreflightFileInfo | None:
+        return self.file_info[normalize_storage_path(path)]
+
+    def require_source_parent_id(self, path: str) -> str:
+        return self.source_parent_ids[normalize_storage_path(path)]
 
 
 @dataclass(frozen=True)
@@ -68,48 +197,102 @@ class DirectoryCleanupSummary:
 
 
 def _provider_id(value) -> str:
+    if isinstance(value, PreflightFileInfo):
+        return value.provider_id
     if not isinstance(value, dict):
         return ""
-    return str(
-        value.get("source_id")
-        or value.get("file_id")
-        or value.get("fid")
-        or value.get("id")
-        or ""
-    ).strip()
+    for key in ("source_id", "file_id", "fid", "id"):
+        if key not in value:
+            continue
+        candidate = value[key]
+        if candidate is None:
+            continue
+        if isinstance(candidate, str) and not candidate.strip():
+            continue
+        return _normalized_text_scalar(candidate, field="provider_id")
+    return ""
 
 
 def _sha1(value) -> str:
+    if isinstance(value, PreflightFileInfo):
+        return value.sha1
     if not isinstance(value, dict):
         return ""
-    return str(
-        value.get("sha1") or value.get("sha") or value.get("file_sha1") or ""
-    ).strip().lower()
+    for key in ("sha1", "sha", "file_sha1"):
+        if key not in value:
+            continue
+        candidate = value[key]
+        if candidate is None:
+            continue
+        if isinstance(candidate, str) and not candidate.strip():
+            continue
+        return _normalized_text_scalar(candidate, field="sha1", lower=True)
+    return ""
 
 
 def _size(value) -> int:
+    if isinstance(value, PreflightFileInfo):
+        return value.size
     if not isinstance(value, dict):
         return 0
-    try:
-        return int(
-            value.get("size") or value.get("fs") or value.get("size_byte") or 0
-        )
-    except (TypeError, ValueError):
-        return 0
+    for key in ("size", "fs", "size_byte"):
+        if key not in value:
+            continue
+        candidate = value[key]
+        if candidate is None or candidate == "":
+            continue
+        return _normalized_size_scalar(candidate)
+    return 0
 
 
 def _matches_fingerprint(expected, observed, *, source_id="") -> bool:
-    if not isinstance(observed, dict):
+    if not isinstance(observed, (dict, PreflightFileInfo)):
         return False
-    if source_id and _provider_id(observed) == str(source_id):
-        return True
+    observed_id = _provider_id(observed)
+    if source_id and observed_id:
+        return observed_id == str(source_id)
     expected_sha1 = _sha1(expected)
     observed_sha1 = _sha1(observed)
-    if expected_sha1 and observed_sha1:
-        return expected_sha1 == observed_sha1
     expected_size = _size(expected)
     observed_size = _size(observed)
-    return bool(expected_size and observed_size and expected_size == observed_size)
+    return bool(
+        expected_sha1
+        and observed_sha1
+        and expected_sha1 == observed_sha1
+        and expected_size
+        and observed_size
+        and expected_size == observed_size
+    )
+
+
+def _matches_resolution_identity(
+    resolution: FileResolution,
+    observed,
+) -> bool:
+    expected_id = str(resolution.source_id or "").strip()
+    if not expected_id:
+        return False
+    return _matches_fingerprint(
+        resolution.source_fingerprint,
+        observed,
+        source_id=expected_id,
+    )
+
+
+def _matches_legacy_copy_target(
+    expected,
+    observed,
+    *,
+    source_id: str,
+) -> bool:
+    """Accept a preserved object ID or a complete copy-content proof."""
+
+    if not isinstance(observed, (dict, PreflightFileInfo)):
+        return False
+    observed_id = _provider_id(observed)
+    if observed_id and observed_id == str(source_id):
+        return True
+    return _matches_fingerprint(expected, observed)
 
 
 def _get_info(storage, path: str):
@@ -131,16 +314,51 @@ def prefetch_file_info(storage, paths) -> dict[str, object]:
         return {}
     method = getattr(storage, "get_file_info_batch", None)
     if callable(method):
-        values = method(normalized)
-        if isinstance(values, dict):
-            return {
-                path: values.get(path)
-                for path in normalized
-            }
-    return {
-        path: _get_info(storage, path)
-        for path in normalized
+        try:
+            values = method(normalized)
+        except (AttributeError, NotImplementedError):
+            values = None
+        else:
+            if not isinstance(values, dict):
+                raise TypeError("storage file info batch must return a mapping")
+            missing = [path for path in normalized if path not in values]
+            if missing:
+                raise ValueError(
+                    "storage file info batch missing requested keys: "
+                    + ", ".join(missing)
+                )
+            return {path: values[path] for path in normalized}
+    direct = getattr(storage, "get_file_info", None)
+    if not callable(direct):
+        raise AttributeError("storage get_file_info capability is unavailable")
+    return {path: direct(path) for path in normalized}
+
+
+def build_file_transaction_snapshot(
+    storage,
+    *,
+    file_paths,
+    source_parent_paths,
+) -> FileTransactionSnapshot:
+    normalized_parents = tuple(dict.fromkeys(
+        normalize_storage_path(path)
+        for path in source_parent_paths or ()
+        if normalize_storage_path(path)
+    ))
+    requested = tuple(dict.fromkeys(
+        normalize_storage_path(path)
+        for path in (*tuple(file_paths or ()), *normalized_parents)
+        if normalize_storage_path(path)
+    ))
+    provider_facts = prefetch_file_info(storage, requested)
+    parent_ids = {
+        path: _provider_id(provider_facts[path])
+        for path in normalized_parents
     }
+    return FileTransactionSnapshot.from_provider_facts(
+        provider_facts,
+        parent_ids,
+    )
 
 
 def _transition(
@@ -182,6 +400,7 @@ def _execute_one(
     resolution: FileResolution,
     journal=None,
     initial_info=None,
+    source_parent_id: str | None = None,
 ):
     source = normalize_storage_path(resolution.source_path)
     target = normalize_storage_path(resolution.target_path)
@@ -197,7 +416,12 @@ def _execute_one(
         return _get_info(storage, path)
 
     target_info = initial(target)
-    if target and _provider_id(target_info) == resolution.source_id:
+    target_provider_id = _provider_id(target_info)
+    if (
+        target
+        and target_provider_id
+        and target_provider_id == resolution.source_id
+    ):
         _transition(journal, resolution, "verified", target, replay=True)
         return _outcome(resolution, "no_op", target, "target_identity_verified")
 
@@ -243,6 +467,13 @@ def _execute_one(
                 "failed",
                 source,
                 "source_identity_changed",
+            )
+        if source_parent_id is not None and not source_parent_id:
+            return _outcome(
+                resolution,
+                "failed",
+                source,
+                "source_directory_unverifiable",
             )
         try:
             deleted = storage.delete_single_file(source) is True
@@ -293,14 +524,19 @@ def _execute_one(
 
     if resolution.action == "no_op" or source == target:
         source_info = initial(source)
-        if source_info is not None and (
-            not _provider_id(source_info)
-            or _provider_id(source_info) == resolution.source_id
+        if source_info is not None and _matches_resolution_identity(
+            resolution,
+            source_info,
         ):
             _transition(journal, resolution, "verified", source, no_op=True)
             return _outcome(resolution, "no_op", source)
-        _transition(journal, resolution, "failed", source, reason="source_missing")
-        return _outcome(resolution, "failed", source, "source_missing")
+        reason = (
+            "source_missing"
+            if source_info is None
+            else "source_identity_changed"
+        )
+        _transition(journal, resolution, "failed", source, reason=reason)
+        return _outcome(resolution, "failed", source, reason)
 
     current = source
     try:
@@ -310,8 +546,7 @@ def _execute_one(
                 journal, resolution, "failed", current, reason="source_missing"
             )
             return _outcome(resolution, "failed", current, "source_missing")
-        source_id = _provider_id(source_info)
-        if source_id and source_id != resolution.source_id:
+        if not _matches_resolution_identity(resolution, source_info):
             _transition(
                 journal,
                 resolution,
@@ -331,6 +566,13 @@ def _execute_one(
                 reason="target_conflict",
             )
             return _outcome(resolution, "failed", target, "target_conflict")
+        if source_parent_id is not None and not source_parent_id:
+            return _outcome(
+                resolution,
+                "failed",
+                current,
+                "source_directory_unverifiable",
+            )
 
         target_path = PurePosixPath(target)
         current_path = PurePosixPath(current)
@@ -361,7 +603,7 @@ def _execute_one(
                     current,
                     "target_missing_after_rename",
                 )
-            if _provider_id(verified) not in {"", resolution.source_id}:
+            if not _matches_resolution_identity(resolution, verified):
                 _transition(
                     journal,
                     resolution,
@@ -436,7 +678,7 @@ def _execute_one(
             return _outcome(
                 resolution, "failed", target, "target_missing_after_move"
             )
-        if not _matches_fingerprint(
+        if not _matches_legacy_copy_target(
             source_info,
             verified,
             source_id=resolution.source_id,
@@ -488,26 +730,62 @@ def execute_file_resolutions(
     selected_root: str,
     journal=None,
     move_batch_size: int = 32,
+    preflight: FileTransactionSnapshot | None = None,
 ) -> FileExecutionSummary:
     del selected_root  # Cleanup is an explicit, separately verified phase.
     resolutions = list(resolutions or [])
-    initial_info = prefetch_file_info(
-        storage,
-        [
-            path
-            for resolution in resolutions
-            if resolution.action != "keep_original"
-            and resolution.status == "resolved"
-            for path in (resolution.source_path, resolution.target_path)
-            if path
-        ],
-    )
+    actionable = [
+        resolution
+        for resolution in resolutions
+        if resolution.action != "keep_original"
+        and resolution.status == "resolved"
+    ]
+    source_parent_paths = [
+        str(PurePosixPath(resolution.source_path).parent)
+        for resolution in actionable
+        if resolution.source_path
+    ]
+    if preflight is None:
+        preflight = build_file_transaction_snapshot(
+            storage,
+            file_paths=[
+                path
+                for resolution in actionable
+                for path in (resolution.source_path, resolution.target_path)
+                if path
+            ],
+            source_parent_paths=source_parent_paths,
+        )
+    initial_info = {
+        normalize_storage_path(path): preflight.require_file_info(path)
+        for resolution in actionable
+        for path in (resolution.source_path, resolution.target_path)
+        if path
+    }
+    source_parent_ids = {}
+    for path in source_parent_paths:
+        preflight.require_file_info(path)
+        source_parent_ids[normalize_storage_path(path)] = (
+            preflight.require_source_parent_id(path)
+        )
+
+    def captured_parent_id(resolution: FileResolution) -> str | None:
+        if (
+            resolution.action == "keep_original"
+            or resolution.status != "resolved"
+        ):
+            return None
+        parent = normalize_storage_path(
+            str(PurePosixPath(resolution.source_path).parent)
+        )
+        return source_parent_ids[parent]
     native_move = getattr(storage, "move_files_by_id", None)
     if callable(native_move):
         outcomes = _execute_with_native_batches(
             storage,
             resolutions,
             initial_info=initial_info,
+            preflight=preflight,
             journal=journal,
             move_batch_size=move_batch_size,
         )
@@ -518,6 +796,7 @@ def execute_file_resolutions(
                 resolution,
                 journal,
                 initial_info=initial_info,
+                source_parent_id=captured_parent_id(resolution),
             )
             for resolution in resolutions
         )
@@ -588,7 +867,13 @@ def _legacy_move_prepared(storage, prepared: dict, journal=None):
         source_path=current,
         action="move_only",
     )
-    legacy = _execute_one(storage, replacement, journal, initial_info={})
+    legacy = _execute_one(
+        storage,
+        replacement,
+        journal,
+        initial_info={},
+        source_parent_id=prepared["source_parent_id"],
+    )
     return FileExecutionOutcome(
         source_id=resolution.source_id,
         state=legacy.state,
@@ -605,12 +890,18 @@ def _prepare_native_move(
     *,
     initial_info: dict,
     directory_info: dict,
+    source_parent_id: str,
     journal=None,
 ):
     source = normalize_storage_path(resolution.source_path)
     target = normalize_storage_path(resolution.target_path)
     target_info = initial_info.get(target)
-    if target and _provider_id(target_info) == resolution.source_id:
+    target_provider_id = _provider_id(target_info)
+    if (
+        target
+        and target_provider_id
+        and target_provider_id == resolution.source_id
+    ):
         _transition(journal, resolution, "verified", target, replay=True)
         return _outcome(
             resolution, "no_op", target, "target_identity_verified"
@@ -618,19 +909,31 @@ def _prepare_native_move(
     source_info = initial_info.get(source)
     if source_info is None:
         return _outcome(resolution, "failed", source, "source_missing")
-    source_id = _provider_id(source_info)
-    if source_id and source_id != resolution.source_id:
+    if not _matches_resolution_identity(resolution, source_info):
         return _outcome(
             resolution, "failed", source, "source_identity_changed"
         )
     if target_info is not None:
         return _outcome(resolution, "failed", target, "target_conflict")
+    if not source_parent_id:
+        return _outcome(
+            resolution,
+            "failed",
+            source,
+            "source_directory_unverifiable",
+        )
 
     current = source
     target_path = PurePosixPath(target)
     current_path = PurePosixPath(current)
     if current_path.name != target_path.name:
         _transition(journal, resolution, "before_rename", current)
+        bound_journal = (
+            journal is not None
+            and getattr(storage, "journal", None) is journal
+            and isinstance(getattr(journal, "inverses", None), list)
+        )
+        inverse_count = len(journal.inverses) if bound_journal else 0
         try:
             renamed = storage.rename(current, target_path.name)
         except Exception:
@@ -639,16 +942,34 @@ def _prepare_native_move(
             return _outcome(resolution, "failed", current, "rename_failed")
         current = str(current_path.parent / target_path.name)
         _transition(journal, resolution, "after_rename", current)
+        if bound_journal:
+            inverse = (
+                journal.inverses[-1]
+                if len(journal.inverses) == inverse_count + 1
+                else None
+            )
+            if (
+                inverse is None
+                or normalize_storage_path(inverse.target_path)
+                != normalize_storage_path(current)
+                or str(inverse.file_id) != resolution.source_id
+            ):
+                return _outcome(
+                    resolution,
+                    "failed",
+                    current,
+                    "target_identity_changed",
+                )
 
     if normalize_storage_path(current) == target:
         verified = _get_info(storage, target)
-        if _provider_id(verified) not in {"", resolution.source_id}:
-            return _outcome(
-                resolution, "failed", current, "target_identity_changed"
-            )
         if verified is None:
             return _outcome(
                 resolution, "failed", current, "target_missing_after_rename"
+            )
+        if not _matches_resolution_identity(resolution, verified):
+            return _outcome(
+                resolution, "failed", current, "target_identity_changed"
             )
         _transition(journal, resolution, "verified", target)
         return _outcome(resolution, "organized", target)
@@ -669,16 +990,9 @@ def _prepare_native_move(
             target_dir_info = _get_info(storage, target_dir)
         directory_info[target_dir] = target_dir_info
     target_dir_id = _directory_id(target_dir_info)
-    source_parent = str(PurePosixPath(current).parent)
-    source_parent_info = _get_info(storage, source_parent)
-    source_parent_id = _directory_id(source_parent_info)
     if not target_dir_id:
         return _outcome(
             resolution, "failed", current, "target_directory_failed"
-        )
-    if not source_parent_id:
-        return _outcome(
-            resolution, "failed", current, "source_directory_unverifiable"
         )
     return {
         "resolution": resolution,
@@ -749,6 +1063,7 @@ def _execute_with_native_batches(
     resolutions: list[FileResolution],
     *,
     initial_info: dict,
+    preflight: FileTransactionSnapshot,
     journal=None,
     move_batch_size: int,
 ) -> tuple[FileExecutionOutcome, ...]:
@@ -764,30 +1079,30 @@ def _execute_with_native_batches(
             resolution.action not in {"move_only", "rename_and_move"}
             or resolution.status != "resolved"
         ):
+            source_parent_id = None
+            if (
+                resolution.action != "keep_original"
+                and resolution.status == "resolved"
+            ):
+                source_parent_id = preflight.require_source_parent_id(
+                    str(PurePosixPath(resolution.source_path).parent)
+                )
             indexed_outcomes[index] = _execute_one(
                 storage,
                 resolution,
                 journal,
                 initial_info=initial_info,
+                source_parent_id=source_parent_id,
             )
             continue
-        source_parent_id = _directory_id(_get_info(
-            storage,
-            str(PurePosixPath(resolution.source_path).parent),
-        ))
-        if not source_parent_id:
-            indexed_outcomes[index] = _execute_one(
-                storage,
-                resolution,
-                journal,
-                initial_info=initial_info,
-            )
-            continue
+        source_parent = str(PurePosixPath(resolution.source_path).parent)
+        source_parent_id = preflight.require_source_parent_id(source_parent)
         prepared = _prepare_native_move(
             storage,
             resolution,
             initial_info=initial_info,
             directory_info=directory_info,
+            source_parent_id=source_parent_id,
             journal=journal,
         )
         if isinstance(prepared, FileExecutionOutcome):

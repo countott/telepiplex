@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import threading
 import uuid
 from pathlib import PurePosixPath
@@ -327,6 +328,7 @@ class RenameFeature:
         self.operations = {}
         self.owner_operations = {}
         self.inventory_sessions = {}
+        self._finish_locks = {}
 
     def bind_runtime(self, runtime):
         self.runtime = runtime
@@ -391,9 +393,20 @@ class RenameFeature:
                 await self._complete_published_job(job["job_id"], outcome)
                 return
             if (
+                job.get("state") == "processed"
+                and not isinstance(
+                    outcome.get("terminal_operation_report"), dict
+                )
+            ):
+                await self._finish_operation(
+                    job["job_id"], outcome, operation_id
+                )
+                return
+            if (
                 operation_id
                 and not outcome.get("handoff_operation")
                 and operation_id not in self.operations
+                and not outcome.get("terminal_operation_report")
             ):
                 await self._accept_event_operation(
                     event_payload, job["job_id"]
@@ -1691,6 +1704,15 @@ class RenameFeature:
                         ),
                     }
                 outcome = existing.get("result") or {}
+                if (
+                    existing["state"] == "processed"
+                    and not isinstance(
+                        outcome.get("terminal_operation_report"), dict
+                    )
+                ):
+                    return await self._finish_operation(
+                        job_id, outcome, stored_operation_id
+                    )
                 if existing["state"] in {
                     "completed", "partial_completed", "failed", "cancelled"
                 }:
@@ -1709,6 +1731,7 @@ class RenameFeature:
                     and operation_id not in self.operations
                     and not outcome.get("handoff_reported")
                     and not outcome.get("handoff_operation")
+                    and not outcome.get("terminal_operation_report")
                 ):
                     restored = await self._accept_event_operation(
                         stored_payload, job_id
@@ -2055,6 +2078,8 @@ class RenameFeature:
             }
             if is_inventory:
                 outcome["inventory_batch_id"] = operation_id
+            else:
+                self._prepare_terminal_outcome(job_id, outcome, operation_id)
             if self.jobs:
                 self.jobs.update(job_id, "processed", outcome)
             processing_complete = True
@@ -2062,7 +2087,79 @@ class RenameFeature:
                 await self._finish_inventory_item(job_id, outcome)
             else:
                 await self._finish_operation(job_id, outcome, operation_id)
-        except (asyncio.CancelledError, OperationCancelled):
+        except (asyncio.CancelledError, OperationCancelled) as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                if processing_complete:
+                    raise
+                durable_terminal = False
+                durable_check_failed = False
+                try:
+                    durable = self.jobs.get(job_id) if self.jobs else None
+                    if durable is not None and not isinstance(durable, dict):
+                        raise ValueError("durable rename job is invalid")
+                    if not durable or durable.get("state") != "processed":
+                        durable = None
+                    durable_outcome = (
+                        durable.get("result") if durable else None
+                    )
+                    if durable is not None and not isinstance(
+                        durable_outcome, dict
+                    ):
+                        raise ValueError(
+                            "durable rename outcome is invalid"
+                        )
+                    terminal_report = (
+                        durable_outcome.get("terminal_operation_report")
+                        if durable_outcome is not None
+                        else None
+                    )
+                    if durable is not None and not isinstance(
+                        terminal_report, dict
+                    ):
+                        raise ValueError(
+                            "durable rename terminal report is invalid"
+                        )
+                    terminal_details = (
+                        terminal_report.get("details")
+                        if terminal_report is not None
+                        else None
+                    )
+                    if durable is not None and not isinstance(
+                        terminal_details, dict
+                    ):
+                        raise ValueError(
+                            "durable rename terminal details are invalid"
+                        )
+                    terminal_revision = int(
+                        terminal_report.get("revision") or 0
+                    ) if terminal_report is not None else 0
+                    facts = (
+                        self._terminal_facts(job_id, durable_outcome)
+                        if durable_outcome is not None
+                        else None
+                    )
+                    expected_terminal_state = (
+                        "completed" if facts["complete"] else "failed"
+                    ) if facts is not None else ""
+                    durable_terminal = bool(
+                        operation_id
+                        and terminal_report is not None
+                        and str(terminal_report.get("operation_id") or "")
+                        == operation_id
+                        and terminal_revision > 0
+                        and str(terminal_report.get("state") or "")
+                        == expected_terminal_state
+                        and terminal_details.get("effect_receipt")
+                        == facts["effect_receipt"]
+                    )
+                    if durable is not None and not durable_terminal:
+                        raise ValueError(
+                            "durable rename terminal proof conflicts"
+                        )
+                except Exception:
+                    durable_check_failed = True
+                if durable_check_failed or durable_terminal:
+                    raise
             stopped_at = (
                 (self.operations.get(operation_id) or {}).get("stage")
                 or "organizing"
@@ -2190,7 +2287,8 @@ class RenameFeature:
                 outcome,
             )
 
-    async def _finish_operation(self, job_id, outcome, operation_id):
+    @staticmethod
+    def _terminal_facts(job_id, outcome):
         cleanup_complete = bool(outcome.get("cleanup_complete", True))
         organized = bool(outcome.get("organized"))
         complete = organized and cleanup_complete
@@ -2202,8 +2300,145 @@ class RenameFeature:
             if partial_completed
             else "completed" if complete else "failed"
         )
+        effect_receipt = {
+            "effect_key": f"rename.organize:{job_id}",
+            "state": "completed" if complete else "failed",
+            "receipt": {
+                "job_id": str(job_id),
+                "organized": organized,
+                "cleanup_complete": cleanup_complete,
+                "partial_completed": partial_completed,
+                "final_path": str(outcome.get("final_path") or ""),
+            },
+        }
+        return {
+            "cleanup_complete": cleanup_complete,
+            "organized": organized,
+            "complete": complete,
+            "partial_completed": partial_completed,
+            "terminal_job_state": terminal_job_state,
+            "effect_receipt": effect_receipt,
+        }
+
+    def _prepare_terminal_outcome(self, job_id, outcome, operation_id):
+        if not operation_id:
+            return outcome
+        if isinstance(outcome.get("terminal_operation_report"), dict):
+            outcome.setdefault("terminal_stage_sealed", False)
+            return outcome
+        if operation_id not in self.operations:
+            raise FeatureError(
+                "operation_unavailable",
+                "rename terminal operation owner is unavailable",
+            )
+        facts = self._terminal_facts(job_id, outcome)
+        complete = facts["complete"]
+        partial_completed = facts["partial_completed"]
+        organized = facts["organized"]
+        terminal_report = self._advance_operation(
+            operation_id,
+            state="completed" if complete else "failed",
+            stage=(
+                "partial_completed"
+                if partial_completed
+                else "completed"
+                if complete
+                else "cleanup" if organized else "organizing"
+            ),
+            status_text=(
+                "明确匹配文件已整理，歧义文件保持原位并等待确认。"
+                if partial_completed
+                else "媒体整理完成。"
+                if complete
+                else outcome.get("message")
+                or "媒体整理未满足完整成功条件。"
+            ),
+            control="",
+            details={
+                "organized": organized,
+                "cleanup_complete": facts["cleanup_complete"],
+                "partial_completed": partial_completed,
+                "completion_kind": (
+                    "partial_completed" if partial_completed else "completed"
+                ) if complete else "failed",
+                "final_path": outcome.get("final_path"),
+                "effect_receipt": facts["effect_receipt"],
+            },
+        )
+        outcome["terminal_operation_report"] = deepcopy(terminal_report)
+        outcome["terminal_stage_sealed"] = not organized
+        return outcome
+
+    def _quarantine_legacy_processed(self, job_id, outcome):
+        quarantined = dict(outcome)
+        quarantined.update({
+            "terminal_recovery_required": True,
+            "message": (
+                "持久化整理结果缺少终态协调凭据；"
+                "为避免在文件变更后生成新 revision，已停止自动重放。"
+            ),
+        })
+        if self.jobs:
+            self.jobs.update(job_id, "failed", quarantined)
+        return {
+            "accepted": True,
+            "duplicate": True,
+            "state": "interrupted",
+            "organized": bool(quarantined.get("organized")),
+            "final_path": quarantined.get("final_path"),
+            "manual_check_required": True,
+        }
+
+    async def _finish_operation(self, job_id, outcome, operation_id):
+        lock = self._finish_locks.setdefault(str(job_id), asyncio.Lock())
+        async with lock:
+            return await self._finish_operation_serialized(
+                job_id, outcome, operation_id
+            )
+
+    async def _finish_operation_serialized(self, job_id, outcome, operation_id):
+        if self.jobs:
+            durable = self.jobs.get(job_id)
+            if durable and durable.get("state") in {
+                "completed", "partial_completed", "failed", "cancelled"
+            }:
+                durable_outcome = durable.get("result") or {}
+                return {
+                    "accepted": True,
+                    "duplicate": True,
+                    "state": str(durable["state"]),
+                    "organized": bool(durable_outcome.get("organized")),
+                    "final_path": durable_outcome.get("final_path"),
+                }
+            if durable and durable.get("state") == "processed":
+                durable_outcome = durable.get("result") or {}
+                if operation_id and not isinstance(
+                    durable_outcome.get("terminal_operation_report"), dict
+                ):
+                    return self._quarantine_legacy_processed(
+                        job_id, durable_outcome
+                    )
+                outcome = durable_outcome
+        if operation_id and not isinstance(
+            outcome.get("terminal_operation_report"), dict
+        ):
+            if self.jobs:
+                return self._quarantine_legacy_processed(job_id, outcome)
+            self._prepare_terminal_outcome(job_id, outcome, operation_id)
+        facts = self._terminal_facts(job_id, outcome)
+        cleanup_complete = facts["cleanup_complete"]
+        organized = facts["organized"]
+        complete = facts["complete"]
+        partial_completed = facts["partial_completed"]
+        terminal_job_state = facts["terminal_job_state"]
         if operation_id:
-            if organized:
+            stored_terminal = outcome.get("terminal_operation_report")
+            if stored_terminal is not None and not isinstance(stored_terminal, dict):
+                raise FeatureError(
+                    "invalid_terminal_report",
+                    "persisted rename terminal report is invalid",
+                )
+            if organized and not bool(outcome.get("terminal_stage_sealed")):
                 if cleanup_complete:
                     stage_text = (
                         "✅ 已整理全部明确匹配文件；"
@@ -2241,35 +2476,65 @@ class RenameFeature:
                         "stage_seal_failed",
                         "Host did not seal the completed rename stage",
                     )
-            await self._report_if_active(
-                operation_id,
-                state="completed" if complete else "failed",
-                stage=(
-                    "partial_completed"
-                    if partial_completed
-                    else "completed"
-                    if complete
-                    else "cleanup" if organized else "organizing"
-                ),
-                status_text=(
-                    "明确匹配文件已整理，歧义文件保持原位并等待确认。"
-                    if partial_completed
-                    else "媒体整理完成。"
-                    if complete
-                    else outcome.get("message")
-                    or "媒体整理未满足完整成功条件。"
-                ),
-                control="",
-                details={
-                    "organized": organized,
-                    "cleanup_complete": cleanup_complete,
-                    "partial_completed": partial_completed,
-                    "completion_kind": (
-                        "partial_completed" if partial_completed else "completed"
-                    ) if complete else "failed",
-                    "final_path": outcome.get("final_path"),
-                },
-            )
+                outcome["terminal_stage_sealed"] = True
+                if self.jobs:
+                    self.jobs.update(job_id, "processed", outcome)
+            terminal_report = deepcopy(stored_terminal)
+            terminal_details = terminal_report.get("details")
+            if not isinstance(terminal_details, dict):
+                terminal_details = {}
+            try:
+                terminal_revision = int(terminal_report.get("revision") or 0)
+            except (TypeError, ValueError):
+                terminal_revision = 0
+            if (
+                str(terminal_report.get("operation_id") or "") != operation_id
+                or terminal_revision <= 0
+                or str(terminal_report.get("state") or "")
+                != ("completed" if complete else "failed")
+                or terminal_details.get("effect_receipt")
+                != facts["effect_receipt"]
+            ):
+                raise FeatureError(
+                    "terminal_report_conflict",
+                    "persisted rename terminal report conflicts with the job result",
+                )
+            operation = self.operations.get(operation_id)
+            if operation is None:
+                operation = {
+                    "kind": "organization",
+                    "job_id": str(job_id),
+                    "cancel_event": threading.Event(),
+                    "journal": RenameOperationJournal(),
+                }
+                self.operations[operation_id] = operation
+            operation.update(deepcopy(terminal_report))
+            response = await self.host.report_operation(terminal_report)
+            response_matches = False
+            if isinstance(response, dict) and response.get("accepted") is True:
+                try:
+                    response_revision = int(response.get("revision") or 0)
+                except (TypeError, ValueError):
+                    response_revision = 0
+                response_matches = (
+                    str(response.get("operation_id") or "") == operation_id
+                    and str(response.get("state") or "")
+                    == str(terminal_report.get("state") or "")
+                    and response_revision == terminal_revision
+                )
+            if not response_matches:
+                operation = self.operations.get(operation_id)
+                if operation is not None:
+                    operation.update({
+                        "state": "interrupted",
+                        "status_text": "Host 未接受当前 Feature 的任务所有权。",
+                        "control": "",
+                        "next_plugin_id": "",
+                    })
+                raise FeatureError(
+                    "terminal_response_conflict",
+                    "Host did not confirm the exact rename terminal receipt",
+                )
         if self.jobs:
             self.jobs.update(
                 job_id,

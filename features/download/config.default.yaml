@@ -8,6 +8,14 @@ auth_poll_timeout: 300
 auth_poll_interval: 2
 timeout: 30
 download_timeout: 1800
-poll_interval: 10
-request_interval: 1
+poll_initial_interval: 2
+poll_max_interval: 30
+poll_backoff_factor: 1.7
+endpoint_intervals:
+  offline_poll: 1.0
+  offline_mutation: 1.0
+  storage_read: 0.25
+  storage_mutation: 1.0
+  token_refresh: 1.0
+storage_read_workers: 4
 save_directories: []

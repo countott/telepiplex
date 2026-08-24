@@ -26,10 +26,10 @@ def load_bot_module():
 
 
 class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
-    async def test_core_runtime_version_is_v3_5_4_host(self):
+    async def test_core_runtime_version_is_v3_5_5_host(self):
         bot_module = await asyncio.to_thread(load_bot_module)
 
-        self.assertEqual(bot_module.get_version(), "v3.5.4-host")
+        self.assertEqual(bot_module.get_version(), "v3.5.5-host")
 
     async def test_uncaught_telegram_error_uses_the_same_sanitized_incident_in_frontend_and_machine_log(self):
         from app.utils.logger import Logger
@@ -170,6 +170,14 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIsNotNone(manager.broker.operation_sink)
             self.assertIsNotNone(manager.broker.milestone_sink)
+            self.assertIs(
+                manager.broker.operation_coordinator,
+                manager.interaction_coordinator,
+            )
+            self.assertIs(
+                manager.broker.dispatcher.operation_coordinator,
+                manager.interaction_coordinator,
+            )
             self.assertEqual(manager.supervisor.restart_limit, 2)
             self.assertEqual(manager.broker.dispatcher.delivery_deadline, 777)
             self.assertEqual(manager.broker.socket_path, root / "plugins" / ".runtime/host.sock")
@@ -200,6 +208,46 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertIsInstance(first_lock, asyncio.Lock)
             self.assertIs(first_lock, second_lock)
+            self.assertFalse(manager.broker.milestone_sink._started)
+            self.assertEqual(manager.broker.milestone_sink._tasks, set())
+
+    async def test_start_host_runtime_starts_milestone_recovery_on_running_loop(self):
+        bot_module = await asyncio.to_thread(load_bot_module)
+        calls = []
+
+        class MilestoneSink:
+            async def start(self):
+                calls.append(("milestone", asyncio.get_running_loop()))
+
+        manager = SimpleNamespace(
+            broker=SimpleNamespace(milestone_sink=MilestoneSink()),
+            start=AsyncMock(side_effect=lambda: calls.append(("manager", None))),
+            available_updates=AsyncMock(return_value=[]),
+            interaction_coordinator=None,
+        )
+        application = SimpleNamespace(
+            bot=SimpleNamespace(
+                send_message=AsyncMock(),
+                set_my_commands=AsyncMock(),
+            ),
+            bot_data={},
+        )
+
+        with (
+            patch.object(bot_module.init, "bot_config", {
+                "allowed_user": 42,
+                "plugins": {"catalog_refresh_interval": 300},
+            }),
+            patch.object(bot_module, "queue_host_startup_notice"),
+        ):
+            await bot_module.start_host_runtime(application, manager)
+            monitor = application.bot_data["telepiplex_plugin_update_task"]
+            monitor.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await monitor
+
+        self.assertEqual([item[0] for item in calls], ["milestone", "manager"])
+        self.assertIs(calls[0][1], asyncio.get_running_loop())
 
     async def test_build_plugin_manager_preserves_remote_catalog_url(self):
         bot_module = await asyncio.to_thread(load_bot_module)

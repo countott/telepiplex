@@ -63,11 +63,18 @@ class EventDispatcher:
 
     async def deliver_once(self) -> int:
         delivered = 0
+        self._reconcile_dead_letters()
         for plugin_id in self.router.snapshot.plugin_ids:
             route = self.router.plugin_route(plugin_id)
             if route is None:
                 continue
             for event in self.journal.pending(plugin_id, self.batch_size):
+                if not self._ensure_handoff_binding(
+                    event.event_id,
+                    plugin_id,
+                    event.payload,
+                ):
+                    continue
                 if self._operation_is_terminal(event.payload):
                     if self.journal.ack(event.event_id, plugin_id):
                         delivered += 1
@@ -85,13 +92,174 @@ class EventDispatcher:
                     )
                 except Exception as exc:
                     if isinstance(exc, ContractError) and exc.code in _POISON_CODES:
-                        self.journal.record_failure(
+                        exhausted = self.journal.record_failure(
                             event.event_id, plugin_id, exc.code, self.max_attempts,
                         )
+                        if exhausted:
+                            self._project_dead_letter(
+                                event.event_id,
+                                plugin_id,
+                                exc.code,
+                            )
                     continue
                 if self.journal.ack(event.event_id, plugin_id):
                     delivered += 1
         return delivered
+
+    def _reconcile_dead_letters(self) -> None:
+        try:
+            pending = self.journal.unprojected_dead_letters(self.batch_size)
+        except Exception:
+            return
+        for failure in pending:
+            self._project_dead_letter(
+                str(failure.get("event_id") or ""),
+                str(failure.get("plugin_id") or ""),
+                str(failure.get("last_error") or "delivery_failed"),
+            )
+
+    def _project_dead_letter(
+        self,
+        event_id: str,
+        plugin_id: str,
+        error_code: str,
+    ) -> str:
+        coordinator = self.operation_coordinator
+        try:
+            binding = self.journal.handoff_binding(event_id)
+        except Exception:
+            return "retry"
+        if binding is None:
+            try:
+                payload = self.journal.event_payload(event_id)
+            except Exception:
+                return "retry"
+            if payload is None:
+                return "retry"
+            if not self._ensure_handoff_binding(event_id, plugin_id, payload):
+                return "binding_pending"
+            try:
+                binding = self.journal.handoff_binding(event_id)
+            except Exception:
+                return "retry"
+        elif binding.target_plugin_id != plugin_id:
+            self._ensure_handoff_binding(event_id, plugin_id)
+            try:
+                marked = self.journal.mark_dead_letter_projected(
+                    event_id,
+                    plugin_id,
+                )
+            except Exception:
+                return "retry"
+            return "not_applicable" if marked else "already_applied"
+        elif not self._ensure_handoff_binding(event_id, plugin_id):
+            return "binding_pending"
+        if binding is not None and binding.target_plugin_id != plugin_id:
+            try:
+                marked = self.journal.mark_dead_letter_projected(
+                    event_id,
+                    plugin_id,
+                )
+            except Exception:
+                return "retry"
+            return "not_applicable" if marked else "already_applied"
+        if coordinator is None:
+            if binding is not None:
+                return "binding_pending"
+            try:
+                marked = self.journal.mark_dead_letter_projected(
+                    event_id,
+                    plugin_id,
+                )
+            except Exception:
+                return "retry"
+            return "not_applicable" if marked else "already_applied"
+        try:
+            receipt = coordinator.fail_handoff_delivery(
+                event_id,
+                plugin_id,
+                error_code,
+            )
+            if binding is not None and receipt is None:
+                return "binding_pending"
+            marked = self.journal.mark_dead_letter_projected(event_id, plugin_id)
+        except Exception:
+            return "retry"
+        if not marked:
+            return "already_applied"
+        return "applied" if receipt is not None else "not_applicable"
+
+    def _ensure_handoff_binding(
+        self,
+        event_id: str,
+        plugin_id: str,
+        payload: dict | None = None,
+    ) -> bool:
+        try:
+            binding = self.journal.handoff_binding(event_id)
+        except Exception:
+            return False
+        if binding is None:
+            if payload is None:
+                try:
+                    payload = self.journal.event_payload(event_id)
+                except Exception:
+                    return False
+                if payload is None:
+                    return False
+            operation_id = str((payload or {}).get("operation_id") or "").strip()
+            if not operation_id:
+                return True
+            coordinator = self.operation_coordinator
+            if coordinator is None:
+                return False
+            try:
+                operation = coordinator.get(operation_id)
+            except Exception:
+                return False
+            if operation is None or operation.state != "handed_off":
+                return True
+            if (
+                not plugin_id
+                or operation.next_plugin_id != plugin_id
+                or not operation.plugin_id
+            ):
+                return False
+            try:
+                receipt = coordinator.capture_handoff(
+                    operation_id,
+                    operation.plugin_id,
+                )
+                if (
+                    receipt is None
+                    or receipt.operation_id != operation_id
+                    or receipt.source_plugin_id != operation.plugin_id
+                    or receipt.target_plugin_id != plugin_id
+                ):
+                    return False
+                binding = self.journal.attach_handoff_binding(
+                    event_id,
+                    receipt,
+                )
+            except Exception:
+                return False
+        coordinator = self.operation_coordinator
+        if coordinator is None:
+            return False
+        try:
+            receipt = coordinator.record_handoff_event(
+                binding.operation_id,
+                binding.event_id,
+                binding.target_plugin_id,
+                handoff_key=binding.handoff_key,
+            )
+        except Exception:
+            return False
+        return bool(
+            receipt is not None
+            and receipt.handoff_key == binding.handoff_key
+            and receipt.event_id == binding.event_id
+        )
 
     def _operation_is_terminal(self, payload: dict) -> bool:
         coordinator = self.operation_coordinator

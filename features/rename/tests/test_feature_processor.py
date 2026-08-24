@@ -1,5 +1,7 @@
 import ast
 import asyncio
+from copy import deepcopy
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,6 +29,9 @@ from telepiplex_rename.service import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = ROOT.parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 class InventoryCompletionCopyTest(unittest.TestCase):
@@ -84,7 +89,11 @@ class FakeStorage:
     def get_file_info(self, path):
         if path in self.missing_paths:
             return None
-        if path in {"/Downloads/Release", "/Downloads/Series.Release"}:
+        if path in {
+            "/Downloads",
+            "/Downloads/Release",
+            "/Downloads/Series.Release",
+        }:
             return {"file_id": "root", "file_category": "0"}
         if path in self.renamed_info:
             return dict(self.renamed_info[path])
@@ -1146,6 +1155,10 @@ class RenamingProcessorTest(unittest.TestCase):
             {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1_000_000},
             {"fn": "Subs/Movie.2024.CHS&ENG.sup", "fid": "2", "fc": "1", "fs": 100},
         ])
+        storage.renamed_info["/Downloads/Release/Subs"] = {
+            "file_id": "dir-release-subs",
+            "file_category": "0",
+        }
         event = DownloadCompletedEvent(
             link="magnet:?x", selected_path="/Movies", user_id=1,
             final_path="/Downloads/Release", resource_name="Movie.2024",
@@ -1473,6 +1486,10 @@ class RenamingProcessorTest(unittest.TestCase):
             {"fn": "English Series S01E01.mkv", "fid": "video", "fc": "1"},
             {"fn": "English.Series.S01E01.CHS.srt", "fid": "subtitle", "fc": "1"},
         ])
+        storage.renamed_info[target_root] = {
+            "file_id": "root",
+            "file_category": "0",
+        }
         event = DownloadCompletedEvent(
             link="magnet:?x", selected_path="/Series", user_id=1,
             final_path=target_root,
@@ -1645,6 +1662,10 @@ class RenamingProcessorTest(unittest.TestCase):
                 {"fn": "01.CHS.ass", "fid": "subtitle", "fc": "1"},
             ]),
         )
+        event.storage.renamed_info["/Downloads/Series.Release/Subs"] = {
+            "file_id": "dir-series-subs",
+            "file_category": "0",
+        }
 
         result = process_tvdb_episode(event)
 
@@ -1882,7 +1903,12 @@ class FakeHost:
             ("report", operation["state"], operation["stage"])
         )
         self.reports.append(operation)
-        return {"accepted": True, "revision": operation["revision"]}
+        return {
+            "accepted": True,
+            "operation_id": operation["operation_id"],
+            "state": operation["state"],
+            "revision": operation["revision"],
+        }
 
     async def publish_operation_milestone(
         self,
@@ -1954,6 +1980,11 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                         "is_dir": True,
                     }]
                 if params.get("cid") == "raw-movie-1":
+                    if (
+                        "/未整理/Movie.2024.1080p/Movie.2024.mkv"
+                        in self.missing_paths
+                    ):
+                        return []
                     return [{
                         "name": "Movie.2024.mkv",
                         "file_id": "movie-video-1",
@@ -1967,6 +1998,11 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     return None
                 if path == "/未整理":
                     return {"file_id": "root-unorganized", "file_category": "0"}
+                if path == "/未整理/Movie.2024.1080p":
+                    return {
+                        "file_id": "raw-movie-1",
+                        "file_category": "0",
+                    }
                 if path == "/未整理/Movie.2024.1080p/Movie.2024.mkv":
                     return {
                         "file_id": "movie-video-1",
@@ -2172,6 +2208,11 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 if path == "/真人电影":
                     return {"file_id": "root-movies", "file_category": "0"}
                 for name in ("Ambiguous.2024", "Resolved.2024"):
+                    if path == f"/真人电影/{name}":
+                        return {
+                            "file_id": f"dir-{name}",
+                            "file_category": "0",
+                        }
                     if path == (
                         f"/真人电影/{name}/{name}.Source.1080p.mkv"
                     ):
@@ -3328,6 +3369,17 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.reports[-1]["state"], "completed")
         self.assertEqual(host.reports[-1]["stage"], "completed")
         self.assertNotIn("next_plugin_id", host.reports[-1])
+        self.assertEqual(host.reports[-1]["details"]["effect_receipt"], {
+            "effect_key": "rename.organize:job-operation",
+            "state": "completed",
+            "receipt": {
+                "job_id": "job-operation",
+                "organized": True,
+                "cleanup_complete": True,
+                "partial_completed": False,
+                "final_path": "/Movies/中文电影 (English Movie)",
+            },
+        })
         self.assertEqual(host.events, [])
 
     async def test_upstream_identity_starts_new_rename_message_without_repeat(self):
@@ -3535,6 +3587,17 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.reports[-1]["state"], "completed")
         self.assertEqual(host.reports[-1]["stage"], "completed")
         self.assertNotIn("next_plugin_id", host.reports[-1])
+        self.assertEqual(host.reports[-1]["details"]["effect_receipt"], {
+            "effect_key": "rename.organize:job-rename-seal",
+            "state": "completed",
+            "receipt": {
+                "job_id": "job-rename-seal",
+                "organized": True,
+                "cleanup_complete": True,
+                "partial_completed": False,
+                "final_path": "/Movies/中文电影 (English Movie)",
+            },
+        })
 
     async def test_lost_rename_stage_response_retries_same_milestone(self):
         from telepiplex_plugin_sdk import FeatureError
@@ -3611,7 +3674,12 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "error_code": "handoff_target_unavailable",
                     "target_plugin_id": "sync",
                 }
-            return {"accepted": True, "revision": operation["revision"]}
+            return {
+                "accepted": True,
+                "operation_id": operation["operation_id"],
+                "state": operation["state"],
+                "revision": operation["revision"],
+            }
 
         host.report_operation = reject_missing_target
         runtime = FakeRuntime()
@@ -3982,6 +4050,20 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(host.events, [])
             self.assertTrue(host.notifications[0][1].startswith("⚠️"))
             self.assertEqual(jobs.get("job-cleanup-failed")["state"], "failed")
+            self.assertEqual(
+                host.reports[-1]["details"]["effect_receipt"],
+                {
+                    "effect_key": "rename.organize:job-cleanup-failed",
+                    "state": "failed",
+                    "receipt": {
+                        "job_id": "job-cleanup-failed",
+                        "organized": True,
+                        "cleanup_complete": False,
+                        "partial_completed": False,
+                        "final_path": "/Movies/中文电影 (English Movie)",
+                    },
+                },
+            )
             stage_milestone = next(
                 item for item in host.milestones
                 if item["mode"] == "stage"
@@ -4040,6 +4122,20 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 host.reports[-1]["details"]["completion_kind"],
                 "partial_completed",
+            )
+            self.assertEqual(
+                host.reports[-1]["details"]["effect_receipt"],
+                {
+                    "effect_key": "rename.organize:job-partial-accounting",
+                    "state": "completed",
+                    "receipt": {
+                        "job_id": "job-partial-accounting",
+                        "organized": True,
+                        "cleanup_complete": True,
+                        "partial_completed": True,
+                        "final_path": "/Series/中文剧集 (English Series)",
+                    },
+                },
             )
             self.assertEqual(stored["state"], "partial_completed")
             self.assertIn("file_results", stored["result"], stored)
@@ -4180,7 +4276,12 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 if self.report_attempts <= 2:
                     raise RuntimeError("Host response lost")
                 self.reports.append(dict(operation))
-                return {"accepted": True, "revision": operation["revision"]}
+                return {
+                    "accepted": True,
+                    "operation_id": operation["operation_id"],
+                    "state": operation["state"],
+                    "revision": operation["revision"],
+                }
 
         with tempfile.TemporaryDirectory() as tmpdir:
             host = LostAcceptAckHost()
@@ -4257,7 +4358,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(host.storage.moved, [])
             self.assertEqual(jobs.get("job-rejected-claim")["state"], "cancelled")
 
-    async def test_processed_replay_restores_operation_and_completes_locally(self):
+    async def test_legacy_processed_replay_quarantines_without_new_revision(self):
         from telepiplex_rename.jobs import RenameJobStore
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4286,7 +4387,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 host=host,
                 jobs=jobs,
             )
-            feature.bind_runtime(FakeRuntime())
+            feature.runtime = FakeRuntime()
 
             replay = await feature.download_completed({
                 "event_id": "same-event",
@@ -4299,10 +4400,730 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 },
             })
 
-            self.assertTrue(replay["organized"])
-            self.assertEqual(host.reports[-1]["state"], "completed")
+            self.assertEqual(replay["state"], "interrupted")
+            self.assertTrue(replay["manual_check_required"])
+            self.assertEqual(host.reports, [])
             self.assertEqual(host.events, [])
-            self.assertEqual(jobs.get("job-processed-replay")["state"], "completed")
+            quarantined = jobs.get("job-processed-replay")
+            self.assertEqual(quarantined["state"], "failed")
+            self.assertTrue(
+                quarantined["result"]["terminal_recovery_required"]
+            )
+
+    async def test_lost_terminal_report_replays_exact_receipt_without_file_mutation(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        class CommitThenLoseTerminalHost(FakeHost):
+            def __init__(self, storage):
+                super().__init__(storage)
+                self.lost_terminal = False
+
+            async def report_operation(self, operation):
+                response = await super().report_operation(operation)
+                if operation.get("state") == "completed" and not self.lost_terminal:
+                    self.lost_terminal = True
+                    raise RuntimeError("Host committed terminal receipt before response loss")
+                return response
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = EmptyAfterMoveStorage([
+                {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
+            ])
+            host = CommitThenLoseTerminalHost(storage)
+            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
+            feature = RenameFeature(
+                config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+                host=host,
+                jobs=jobs,
+            )
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+            await feature.download_completed({
+                "event_id": "event-terminal-response-loss",
+                "payload": {
+                    "job_id": "job-terminal-response-loss",
+                    "selected_path": "/Movies",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "final_path": "/Downloads/Release",
+                    "resource_name": "Movie.2024",
+                    "media_metadata": movie_contract(),
+                    "operation_id": "op-terminal-response-loss",
+                    "operation_revision": 8,
+                },
+            })
+            with self.assertRaises(RuntimeError):
+                await runtime.wait()
+
+            durable = jobs.get("job-terminal-response-loss")
+            self.assertEqual(durable["state"], "processed")
+            terminal_report = durable["result"]["terminal_operation_report"]
+            self.assertEqual(terminal_report, host.reports[-1])
+            self.assertEqual(
+                terminal_report["details"]["effect_receipt"],
+                {
+                    "effect_key": "rename.organize:job-terminal-response-loss",
+                    "state": "completed",
+                    "receipt": {
+                        "job_id": "job-terminal-response-loss",
+                        "organized": True,
+                        "cleanup_complete": True,
+                        "partial_completed": False,
+                        "final_path": "/Movies/中文电影 (English Movie)",
+                    },
+                },
+            )
+            mutation_counts = (
+                len(storage.renamed),
+                len(storage.moved),
+                len(storage.deleted),
+                len(storage.created),
+            )
+            reports_before_restart = len(host.reports)
+
+            restored = RenameFeature(
+                config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+                host=host,
+                jobs=jobs,
+            )
+            restored_runtime = FakeRuntime()
+            restored.bind_runtime(restored_runtime)
+            await restored_runtime.wait()
+
+            self.assertEqual(
+                host.reports[reports_before_restart:],
+                [terminal_report],
+            )
+            self.assertEqual(
+                (
+                    len(storage.renamed),
+                    len(storage.moved),
+                    len(storage.deleted),
+                    len(storage.created),
+                ),
+                mutation_counts,
+            )
+            self.assertEqual(
+                jobs.get("job-terminal-response-loss")["state"],
+                "completed",
+            )
+
+    async def test_first_processed_write_survives_crash_with_exact_terminal_envelope(self):
+        from app.handlers.interaction_handler import OperationReportSink
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+        from telepiplex_rename.jobs import RenameJobStore
+
+        class SimulatedProcessCrash(BaseException):
+            pass
+
+        class CrashAfterFirstProcessedStore(RenameJobStore):
+            def __init__(self, path):
+                super().__init__(path)
+                self.crash_once = True
+
+            def update(self, job_id, state, result):
+                stored = super().update(job_id, state, result)
+                if state == "processed" and self.crash_once:
+                    self.crash_once = False
+                    raise SimulatedProcessCrash()
+                return stored
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "core.db")
+            self.addCleanup(coordinator.close)
+            sink = OperationReportSink(coordinator)
+            for plugin_id, report in (
+                ("search", {
+                    "operation_id": "op-first-processed-crash",
+                    "chat_id": 10,
+                    "user_id": 123,
+                    "state": "running",
+                    "stage": "search",
+                    "status_text": "searching",
+                    "control": "cancel",
+                    "revision": 1,
+                }),
+                ("search", {
+                    "operation_id": "op-first-processed-crash",
+                    "chat_id": 10,
+                    "user_id": 123,
+                    "state": "handed_off",
+                    "stage": "handoff_download",
+                    "status_text": "to download",
+                    "control": "cancel",
+                    "revision": 2,
+                    "next_plugin_id": "download",
+                }),
+                ("download", {
+                    "operation_id": "op-first-processed-crash",
+                    "chat_id": 10,
+                    "user_id": 123,
+                    "state": "running",
+                    "stage": "download",
+                    "status_text": "downloading",
+                    "control": "cancel",
+                    "revision": 3,
+                }),
+                ("download", {
+                    "operation_id": "op-first-processed-crash",
+                    "chat_id": 10,
+                    "user_id": 123,
+                    "state": "handed_off",
+                    "stage": "handoff_rename",
+                    "status_text": "to rename",
+                    "control": "cancel",
+                    "revision": 4,
+                    "next_plugin_id": "rename",
+                }),
+            ):
+                accepted = await sink(plugin_id, report)
+                self.assertTrue(accepted["accepted"])
+
+            class CoreHost(FakeHost):
+                async def report_operation(self, operation):
+                    self.reports.append(deepcopy(operation))
+                    self.timeline.append(
+                        ("report", operation["state"], operation["stage"])
+                    )
+                    return await sink("rename", operation)
+
+            storage = EmptyAfterMoveStorage([
+                {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
+            ])
+            host = CoreHost(storage)
+            job_path = Path(tmpdir) / "rename.db"
+            jobs = CrashAfterFirstProcessedStore(job_path)
+            feature = RenameFeature(
+                config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+                host=host,
+                jobs=jobs,
+            )
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+            request = {
+                "event_id": "event-first-processed-crash",
+                "payload": {
+                    "job_id": "job-first-processed-crash",
+                    "selected_path": "/Movies",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "final_path": "/Downloads/Release",
+                    "resource_name": "Movie.2024",
+                    "media_metadata": movie_contract(),
+                    "operation_id": "op-first-processed-crash",
+                    "operation_revision": 4,
+                },
+            }
+            await feature.download_completed(request)
+            with self.assertRaises(SimulatedProcessCrash):
+                await runtime.wait()
+
+            first_durable = jobs.get("job-first-processed-crash")
+            mutation_counts = (
+                len(storage.renamed),
+                len(storage.moved),
+                len(storage.deleted),
+                len(storage.created),
+            )
+            reports_before_restart = len(host.reports)
+            restored = RenameFeature(
+                config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+                host=host,
+                jobs=RenameJobStore(job_path),
+            )
+            restored_runtime = FakeRuntime()
+            restored.bind_runtime(restored_runtime)
+            await restored_runtime.wait()
+
+            self.assertIn("terminal_operation_report", first_durable["result"])
+            self.assertFalse(first_durable["result"]["terminal_stage_sealed"])
+            restart_reports = host.reports[reports_before_restart:]
+            self.assertEqual(len(restart_reports), 1)
+            self.assertEqual(restart_reports[0]["state"], "completed")
+            self.assertEqual(
+                restart_reports[0],
+                first_durable["result"]["terminal_operation_report"],
+            )
+            self.assertEqual(
+                (
+                    len(storage.renamed),
+                    len(storage.moved),
+                    len(storage.deleted),
+                    len(storage.created),
+                ),
+                mutation_counts,
+            )
+            stored = restored.jobs.get("job-first-processed-crash")
+            self.assertEqual(stored["state"], "completed")
+            self.assertEqual(
+                coordinator.get("op-first-processed-crash").revision,
+                restart_reports[0]["revision"],
+            )
+
+    async def test_concurrent_redelivery_serializes_one_terminal_envelope(self):
+        from app.handlers.interaction_handler import OperationReportSink
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+        from telepiplex_rename.jobs import RenameJobStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "core.db")
+            self.addCleanup(coordinator.close)
+            sink = OperationReportSink(coordinator)
+            operation_id = "op-concurrent-terminal"
+            seed = [
+                ("search", "running", "search", 1, ""),
+                ("search", "handed_off", "handoff_download", 2, "download"),
+                ("download", "running", "download", 3, ""),
+                ("download", "handed_off", "handoff_rename", 4, "rename"),
+            ]
+            for plugin_id, state, stage, revision, target in seed:
+                report = {
+                    "operation_id": operation_id,
+                    "chat_id": 10,
+                    "user_id": 123,
+                    "state": state,
+                    "stage": stage,
+                    "status_text": stage,
+                    "control": "cancel",
+                    "revision": revision,
+                }
+                if target:
+                    report["next_plugin_id"] = target
+                accepted = await sink(plugin_id, report)
+                self.assertTrue(accepted["accepted"])
+
+            seal_started = asyncio.Event()
+            release_seal = asyncio.Event()
+
+            class CoreBarrierHost(FakeHost):
+                def __init__(self, storage):
+                    super().__init__(storage)
+                    self.seal_calls = 0
+
+                async def report_operation(self, operation):
+                    self.reports.append(deepcopy(operation))
+                    self.timeline.append(
+                        ("report", operation["state"], operation["stage"])
+                    )
+                    return await sink("rename", operation)
+
+                async def seal_operation_stage(self, *args, **kwargs):
+                    self.seal_calls += 1
+                    seal_started.set()
+                    await release_seal.wait()
+                    return {"accepted": True, "queued": True}
+
+            storage = EmptyAfterMoveStorage([
+                {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
+            ])
+            host = CoreBarrierHost(storage)
+            jobs = RenameJobStore(Path(tmpdir) / "rename.db")
+            feature = RenameFeature(
+                config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+                host=host,
+                jobs=jobs,
+            )
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+            request = {
+                "event_id": "event-concurrent-terminal",
+                "payload": {
+                    "job_id": "job-concurrent-terminal",
+                    "selected_path": "/Movies",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "final_path": "/Downloads/Release",
+                    "resource_name": "Movie.2024",
+                    "media_metadata": movie_contract(),
+                    "operation_id": operation_id,
+                    "operation_revision": 4,
+                },
+            }
+            await feature.download_completed(request)
+            async with asyncio.timeout(2):
+                await seal_started.wait()
+            duplicate = asyncio.create_task(feature.download_completed(request))
+            await asyncio.sleep(0.05)
+            release_seal.set()
+            results = await asyncio.gather(
+                runtime.wait(), duplicate, return_exceptions=True
+            )
+
+            self.assertTrue(all(not isinstance(item, Exception) for item in results))
+            self.assertEqual(host.seal_calls, 1)
+            terminal_reports = [
+                report for report in host.reports
+                if report["state"] in {"completed", "failed"}
+            ]
+            self.assertEqual(len(terminal_reports), 1)
+            stored = jobs.get("job-concurrent-terminal")
+            self.assertEqual(stored["state"], "completed")
+            self.assertEqual(
+                stored["result"]["terminal_operation_report"],
+                terminal_reports[0],
+            )
+            core = coordinator.get(operation_id)
+            self.assertEqual((core.state, core.revision), (
+                "completed", terminal_reports[0]["revision"]
+            ))
+            receipts = coordinator.get_effect_receipts(operation_id)
+            self.assertEqual(
+                [(item.effect_key, item.state) for item in receipts],
+                [("rename.organize:job-concurrent-terminal", "completed")],
+            )
+            self.assertEqual(len(storage.moved), 1)
+
+    async def test_async_cancel_during_terminal_stage_wait_preserves_processed_envelope(self):
+        from app.handlers.interaction_handler import OperationReportSink
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+        from telepiplex_rename.jobs import RenameJobStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "core.db")
+            self.addCleanup(coordinator.close)
+            sink = OperationReportSink(coordinator)
+            operation_id = "op-cancel-terminal-stage"
+            for plugin_id, state, stage, revision, target in (
+                ("search", "running", "search", 1, ""),
+                ("search", "handed_off", "handoff_download", 2, "download"),
+                ("download", "running", "download", 3, ""),
+                ("download", "handed_off", "handoff_rename", 4, "rename"),
+            ):
+                report = {
+                    "operation_id": operation_id,
+                    "chat_id": 10,
+                    "user_id": 123,
+                    "state": state,
+                    "stage": stage,
+                    "status_text": stage,
+                    "control": "cancel",
+                    "revision": revision,
+                }
+                if target:
+                    report["next_plugin_id"] = target
+                accepted = await sink(plugin_id, report)
+                self.assertTrue(accepted["accepted"])
+
+            seal_started = asyncio.Event()
+            release_seal = asyncio.Event()
+
+            class CancelAtStageHost(FakeHost):
+                def __init__(self, storage):
+                    super().__init__(storage)
+                    self.seal_calls = 0
+
+                async def report_operation(self, operation):
+                    self.reports.append(deepcopy(operation))
+                    self.timeline.append(
+                        ("report", operation["state"], operation["stage"])
+                    )
+                    return await sink("rename", operation)
+
+                async def seal_operation_stage(self, *args, **kwargs):
+                    self.seal_calls += 1
+                    seal_started.set()
+                    await release_seal.wait()
+                    return {"accepted": True, "queued": True}
+
+            storage = EmptyAfterMoveStorage([
+                {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
+            ])
+            host = CancelAtStageHost(storage)
+            job_path = Path(tmpdir) / "rename.db"
+
+            class UnreadableAfterProcessedStore(RenameJobStore):
+                def __init__(self, path):
+                    super().__init__(path)
+                    self.fail_reads = False
+                    self.failed_read_calls = 0
+
+                def get(self, job_id):
+                    if self.fail_reads:
+                        self.failed_read_calls += 1
+                        raise RuntimeError(
+                            "job store unavailable during teardown"
+                        )
+                    return super().get(job_id)
+
+            jobs = UnreadableAfterProcessedStore(job_path)
+            feature = RenameFeature(
+                config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+                host=host,
+                jobs=jobs,
+            )
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+            job_id = "job-cancel-terminal-stage"
+            await feature.download_completed({
+                "event_id": "event-cancel-terminal-stage",
+                "payload": {
+                    "job_id": job_id,
+                    "selected_path": "/Movies",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "final_path": "/Downloads/Release",
+                    "resource_name": "Movie.2024",
+                    "media_metadata": movie_contract(),
+                    "operation_id": operation_id,
+                    "operation_revision": 4,
+                },
+            })
+            task = runtime.tasks.pop(f"rename-{job_id}")
+            async with asyncio.timeout(2):
+                await seal_started.wait()
+
+            before_cancel = RenameJobStore.get(jobs, job_id)
+            self.assertEqual(before_cancel["state"], "processed")
+            self.assertIn(
+                "terminal_operation_report", before_cancel["result"]
+            )
+            self.assertFalse(before_cancel["result"]["terminal_stage_sealed"])
+            terminal_report = deepcopy(
+                before_cancel["result"]["terminal_operation_report"]
+            )
+            mutation_counts = (
+                len(storage.renamed),
+                len(storage.moved),
+                len(storage.deleted),
+                len(storage.created),
+            )
+
+            jobs.fail_reads = True
+            task.cancel()
+            cancelled = (await asyncio.gather(
+                task, return_exceptions=True
+            ))[0]
+            after_cancel = RenameJobStore.get(jobs, job_id)
+
+            self.assertEqual(after_cancel, before_cancel)
+            self.assertIsInstance(cancelled, asyncio.CancelledError)
+            self.assertEqual(jobs.failed_read_calls, 0)
+            self.assertFalse(feature._finish_locks[job_id].locked())
+
+            release_seal.set()
+            reports_before_restart = len(host.reports)
+            restored = RenameFeature(
+                config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+                host=host,
+                jobs=RenameJobStore(job_path),
+            )
+            restored_runtime = FakeRuntime()
+            restored.bind_runtime(restored_runtime)
+            await restored_runtime.wait()
+
+            self.assertEqual(
+                host.reports[reports_before_restart:], [terminal_report]
+            )
+            self.assertEqual(
+                (
+                    len(storage.renamed),
+                    len(storage.moved),
+                    len(storage.deleted),
+                    len(storage.created),
+                ),
+                mutation_counts,
+            )
+            self.assertEqual(restored.jobs.get(job_id)["state"], "completed")
+            self.assertEqual(
+                restored.jobs.get(job_id)["result"]["terminal_operation_report"],
+                terminal_report,
+            )
+            self.assertTrue(
+                restored.jobs.get(job_id)["result"]["terminal_stage_sealed"]
+            )
+            core = coordinator.get(operation_id)
+            self.assertEqual(
+                (core.state, core.revision),
+                ("completed", terminal_report["revision"]),
+            )
+            self.assertEqual(
+                [
+                    (receipt.effect_key, receipt.state)
+                    for receipt in coordinator.get_effect_receipts(operation_id)
+                ],
+                [(f"rename.organize:{job_id}", "completed")],
+            )
+
+    async def test_async_cancel_with_malformed_durable_terminal_keeps_original_error(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metadata_started = asyncio.Event()
+
+            class BlockingMetadataHost(FakeHost):
+                async def call_capability(
+                    self, capability, method, payload, **kwargs
+                ):
+                    if capability == "media.search":
+                        metadata_started.set()
+                        await asyncio.Event().wait()
+                    return await super().call_capability(
+                        capability, method, payload, **kwargs
+                    )
+
+            host = BlockingMetadataHost()
+            jobs = RenameJobStore(Path(tmpdir) / "rename.db")
+            feature = RenameFeature(
+                config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+                host=host,
+                jobs=jobs,
+            )
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+            job_id = "job-cancel-malformed-terminal"
+            operation_id = "op-cancel-malformed-terminal"
+            await feature.download_completed({
+                "event_id": "event-cancel-malformed-terminal",
+                "payload": {
+                    "job_id": job_id,
+                    "selected_path": "/Movies",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "final_path": "/Downloads/Unknown.Release",
+                    "resource_name": "Unknown.Release",
+                    "operation_id": operation_id,
+                    "operation_revision": 4,
+                },
+            })
+            task = runtime.tasks.pop(f"rename-{job_id}")
+            async with asyncio.timeout(2):
+                await metadata_started.wait()
+
+            malformed = {
+                "organized": True,
+                "cleanup_complete": True,
+                "partial_completed": False,
+                "final_path": "/Movies/Recovered",
+                "message": "verified elsewhere",
+                "user_id": 123,
+                "job_id": job_id,
+                "event_payload": {
+                    "job_id": job_id,
+                    "operation_id": operation_id,
+                    "operation_revision": 5,
+                    "user_id": 123,
+                    "chat_id": 10,
+                },
+                "terminal_stage_sealed": False,
+                "terminal_operation_report": {
+                    "operation_id": operation_id,
+                    "chat_id": 10,
+                    "user_id": 123,
+                    "state": "completed",
+                    "stage": "completed",
+                    "status_text": "completed elsewhere",
+                    "control": "",
+                    "revision": 6,
+                    "details": ["malformed", "not-a-mapping"],
+                },
+            }
+            jobs.update(job_id, "processed", malformed)
+            before_cancel = jobs.get(job_id)
+
+            task.cancel()
+            cancelled = (await asyncio.gather(
+                task, return_exceptions=True
+            ))[0]
+
+            self.assertIsInstance(cancelled, asyncio.CancelledError)
+            self.assertEqual(jobs.get(job_id), before_cancel)
+
+    async def test_async_cancel_while_waiting_finish_lock_preserves_processed_envelope(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = EmptyAfterMoveStorage([
+                {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
+            ])
+            host = FakeHost(storage)
+            job_path = Path(tmpdir) / "rename.db"
+            jobs = RenameJobStore(job_path)
+            feature = RenameFeature(
+                config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+                host=host,
+                jobs=jobs,
+            )
+            runtime = FakeRuntime()
+            feature.bind_runtime(runtime)
+            job_id = "job-cancel-finish-lock"
+            operation_id = "op-cancel-finish-lock"
+            finish_lock = feature._finish_locks.setdefault(
+                job_id, asyncio.Lock()
+            )
+            lock_owned = asyncio.Event()
+            release_lock = asyncio.Event()
+
+            async def own_finish_lock():
+                async with finish_lock:
+                    lock_owned.set()
+                    await release_lock.wait()
+
+            owner = asyncio.create_task(own_finish_lock())
+            await lock_owned.wait()
+            await feature.download_completed({
+                "event_id": "event-cancel-finish-lock",
+                "payload": {
+                    "job_id": job_id,
+                    "selected_path": "/Movies",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "final_path": "/Downloads/Release",
+                    "resource_name": "Movie.2024",
+                    "media_metadata": movie_contract(),
+                    "operation_id": operation_id,
+                    "operation_revision": 8,
+                },
+            })
+            task = runtime.tasks.pop(f"rename-{job_id}")
+            async with asyncio.timeout(2):
+                while (jobs.get(job_id) or {}).get("state") != "processed":
+                    await asyncio.sleep(0)
+
+            before_cancel = jobs.get(job_id)
+            terminal_report = deepcopy(
+                before_cancel["result"]["terminal_operation_report"]
+            )
+            mutation_counts = (
+                len(storage.renamed),
+                len(storage.moved),
+                len(storage.deleted),
+                len(storage.created),
+            )
+            task.cancel()
+            cancelled = (await asyncio.gather(
+                task, return_exceptions=True
+            ))[0]
+            after_cancel = jobs.get(job_id)
+
+            self.assertEqual(after_cancel, before_cancel)
+            self.assertIsInstance(cancelled, asyncio.CancelledError)
+
+            release_lock.set()
+            await owner
+            self.assertFalse(finish_lock.locked())
+            reports_before_restart = len(host.reports)
+            restored = RenameFeature(
+                config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+                host=host,
+                jobs=RenameJobStore(job_path),
+            )
+            restored_runtime = FakeRuntime()
+            restored.bind_runtime(restored_runtime)
+            await restored_runtime.wait()
+
+            self.assertEqual(
+                host.reports[reports_before_restart:], [terminal_report]
+            )
+            self.assertEqual(restored.jobs.get(job_id)["state"], "completed")
+            self.assertEqual(
+                (
+                    len(storage.renamed),
+                    len(storage.moved),
+                    len(storage.deleted),
+                    len(storage.created),
+                ),
+                mutation_counts,
+            )
 
     async def test_processed_replay_without_durable_identity_stops_downstream(self):
         from telepiplex_rename.jobs import RenameJobStore
@@ -4399,9 +5220,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.5.7")
+        self.assertEqual(manifest["version"], "1.5.8")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertIn('version = "1.5.7"', project)
+        self.assertIn('version = "1.5.8"', project)
         self.assertIn('telepiplex-plugin-sdk==1.3.2', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
@@ -4417,8 +5238,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.5.7.tpx", source)
-        self.assertNotIn("dist/rename-1.5.7.tpx", source)
+        self.assertIn("/tmp/rename-1.5.8.tpx", source)
+        self.assertNotIn("dist/rename-1.5.8.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

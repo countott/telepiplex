@@ -36,9 +36,9 @@ from .subtitles import (
     collect_subtitle_evidence,
 )
 from .file_executor import (
+    build_file_transaction_snapshot,
     cleanup_source_directories,
     execute_file_resolutions,
-    prefetch_file_info,
 )
 from .file_facts import build_file_facts, parse_file_evidence
 from .file_plan import normalize_storage_path, plan_file_resolutions
@@ -170,7 +170,27 @@ def process_file_first_media(
                     f"{str(node.get('relative_path') or node.get('name') or '').strip('/')}"
                 )
             )
-    missing_info = prefetch_file_info(storage, missing_paths)
+    operation_paths = []
+    source_parent_paths = []
+    for operation in operations or []:
+        source_path = normalize_storage_path(operation.get("source_path"))
+        target_path = normalize_storage_path(
+            operation.get("final_path")
+            or (
+                f"{str(operation.get('target_dir') or '').rstrip('/')}/"
+                f"{operation.get('rename_to') or ''}"
+            )
+        )
+        if source_path:
+            operation_paths.append(source_path)
+            source_parent_paths.append(str(Path(source_path).parent))
+        if target_path:
+            operation_paths.append(target_path)
+    preflight = build_file_transaction_snapshot(
+        storage,
+        file_paths=[*missing_paths, *operation_paths],
+        source_parent_paths=source_parent_paths,
+    )
     enriched_tree = []
     for node in file_tree:
         enriched = dict(node)
@@ -183,14 +203,11 @@ def process_file_first_media(
                 f"{str(root_path).rstrip('/')}/"
                 f"{str(enriched.get('relative_path') or enriched.get('name') or '').strip('/')}"
             )
-            info = missing_info.get(normalize_storage_path(absolute_path))
-            if isinstance(info, dict):
-                enriched["file_id"] = str(
-                    info.get("file_id") or info.get("fid") or ""
-                )
-                enriched["sha1"] = str(
-                    info.get("sha1") or info.get("sha") or ""
-                )
+            info = preflight.require_file_info(absolute_path)
+            if info is not None:
+                enriched["file_id"] = info.provider_id
+                enriched["sha1"] = info.sha1
+                enriched["size"] = info.size
         enriched_tree.append(enriched)
     file_tree = enriched_tree
     facts = build_file_facts(
@@ -232,14 +249,14 @@ def process_file_first_media(
         identities[fact.source_id] = dict(work_identity or {})
         operation_by_source[fact.source_id] = operation
         prepared_operations.append((target_path, operation))
-    target_info_by_path = prefetch_file_info(
-        storage,
-        [target_path for target_path, _operation in prepared_operations],
-    )
     for target_path, _operation in prepared_operations:
-        target_info = target_info_by_path.get(target_path)
-        if isinstance(target_info, dict):
-            existing_targets[target_path] = target_info
+        target_info = preflight.require_file_info(target_path)
+        if target_info is not None:
+            existing_targets[target_path] = {
+                "file_id": target_info.provider_id,
+                "sha1": target_info.sha1,
+                "size": target_info.size,
+            }
 
     resolutions = plan_file_resolutions(
         facts,
@@ -256,6 +273,7 @@ def process_file_first_media(
         move_batch_size=int(
             (runtime_context.config or {}).get("storage_move_batch_size") or 32
         ),
+        preflight=preflight,
     )
     source_root = event.download_root or event.final_path
     protected_category_root = normalize_storage_path(event.selected_path)

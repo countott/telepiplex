@@ -4,12 +4,14 @@ import asyncio
 from collections import Counter
 import html
 import json
+import math
 import re
 import time
 import unicodedata
 import uuid
 from copy import deepcopy
 from dataclasses import replace
+from types import MappingProxyType
 
 from telepiplex_plugin_sdk import FeatureError
 from telepiplex_plugin_sdk.media_metadata import resolve_category_route
@@ -70,6 +72,7 @@ from .context import runtime_context
 from .candidate_hydration import (
     CandidateHydrationError,
     hydrate_frozen_candidate,
+    hydrate_frozen_candidate_anchor,
 )
 from .candidate_locale import (
     localize_candidate_from_exact_douban,
@@ -88,10 +91,16 @@ from .identity_presentation import build_identity_presentation
 from .log_sanitizer import sanitize_log_value
 from .metadata_resolutions import MetadataResolutionStore
 from .errors import SearchPlanningError
+from .enrichment_policy import (
+    apply_deferred_presentation,
+    needs_authoritative_scope_enrichment,
+)
 from .prowlarr_query import (
     build_prowlarr_query,
     build_prowlarr_query_chain,
 )
+from .prowlarr_waves import plan_prowlarr_waves
+from .source_schedule import SourceRequestKey, SourceScheduler
 from .release_gate import gate_releases
 from .release_identity import deduplicate_releases, stable_release_id
 from .release_report import format_release_report, release_keyboard
@@ -119,6 +128,165 @@ _LATIN = re.compile(r"[A-Za-z]")
 
 def _text(value) -> str:
     return " ".join(str(value or "").replace("\xa0", " ").split())
+
+
+def _selected_https_cover(fact: dict | None) -> bool:
+    return bool(
+        isinstance(fact, dict)
+        and _text(
+            fact.get("cover_url") or fact.get("poster_url")
+        ).startswith("https://")
+    )
+
+
+def _flat_source_result(provider: str, value) -> dict:
+    facts = (
+        value
+        if isinstance(value, list)
+        else [value] if isinstance(value, dict) else []
+    )
+    return {
+        "source": provider,
+        "status": "ok" if facts else "not_found",
+        "facts": facts[:5],
+    }
+
+
+def _cacheable_tmdb_raw(
+    value,
+    identity: ConfirmedIdentity,
+    *,
+    require_https_cover: bool = False,
+) -> bool:
+    try:
+        selected = select_unique_tmdb_fact(
+            _flat_source_result("tmdb", value),
+            identity,
+        )
+    except Exception:
+        return False
+    return bool(
+        isinstance(selected, dict)
+        and (
+            not require_https_cover
+            or _selected_https_cover(selected)
+        )
+    )
+
+
+def _cacheable_anilist_raw(value, identity: ConfirmedIdentity) -> bool:
+    try:
+        selected = select_unique_anilist_fact(
+            _flat_source_result("anilist", value),
+            identity,
+        )
+    except Exception:
+        return False
+    return isinstance(selected, dict)
+
+
+def _cacheable_wikipedia_raw(value, identity: ConfirmedIdentity) -> bool:
+    try:
+        selected = select_unique_wikipedia_fact(value, identity)
+    except Exception:
+        return False
+    return isinstance(selected, dict)
+
+
+def _cacheable_douban_raw(value, identity: ConfirmedIdentity) -> bool:
+    try:
+        selected = select_unique_douban_fact(value, identity)
+    except Exception:
+        return False
+    return isinstance(selected, dict)
+
+
+def _cacheable_douban_subject(value, subject_id: str) -> bool:
+    if not isinstance(value, dict) or not value:
+        return False
+    external_ids = (
+        value.get("external_ids")
+        if isinstance(value.get("external_ids"), dict)
+        else {}
+    )
+    actual = _text(
+        value.get("subject_id")
+        or external_ids.get("douban_subject")
+    )
+    return bool(actual and actual == _text(subject_id))
+
+
+def _tvdb_source_result(value) -> dict:
+    series = (
+        value
+        if isinstance(value, list)
+        else [value] if isinstance(value, dict) else []
+    )
+    return {
+        "source": "tvdb",
+        "status": "ok" if series else "not_found",
+        "facts": [{
+            "movies": [],
+            "series": series[:5],
+            "episodes_by_series": {},
+        }],
+    }
+
+
+def _cacheable_tvdb_raw(
+    value,
+    identity: ConfirmedIdentity,
+    *,
+    require_episodes: bool = False,
+) -> bool:
+    try:
+        selected = select_unique_tvdb_series(
+            _tvdb_source_result(value),
+            identity,
+        )
+    except Exception:
+        return False
+    return bool(
+        isinstance(selected, dict)
+        and (
+            not require_episodes
+            or selected.get("episodes")
+        )
+    )
+
+
+def _cacheable_poster_raw(value, identity, selector) -> bool:
+    if isinstance(value, dict):
+        raw_facts = value.get("facts") or ()
+    elif isinstance(value, list):
+        raw_facts = value
+    else:
+        raw_facts = ()
+    facts = [item for item in raw_facts if isinstance(item, dict)]
+    try:
+        selected = selector(facts, identity)
+    except Exception:
+        return False
+    return _selected_https_cover(selected)
+
+
+def _poster_search_identity(
+    *,
+    endpoint: str,
+    query: str,
+    title: str,
+    year: str,
+    media_type: str,
+    stable_id: str,
+) -> str:
+    return json.dumps({
+        "endpoint": _text(endpoint),
+        "query": _text(query),
+        "title": _text(title),
+        "year": _text(year)[:4],
+        "media_type": _text(media_type).casefold(),
+        "stable_id": _text(stable_id),
+    }, ensure_ascii=False, sort_keys=True)
 
 
 def _compact_summary(value, limit: int = 240) -> str:
@@ -518,6 +686,7 @@ class SearchFeature:
         selected_candidate_supplementer=None,
         candidate_poster_lookup=None,
         metadata_resolution_store=None,
+        source_scheduler=None,
     ):
         self.config = config
         self.host = host
@@ -532,6 +701,9 @@ class SearchFeature:
         self.indexer_loader = indexer_loader or list_prowlarr_indexers
         self.indexer_search = indexer_search or search_prowlarr_indexer
         self.exact_link_resolver = exact_link_resolver or resolve_direct_link
+        self._uses_default_selected_candidate_supplementer = (
+            selected_candidate_supplementer is None
+        )
         self.selected_candidate_supplementer = (
             selected_candidate_supplementer
             or self._supplement_selected_candidate
@@ -543,6 +715,7 @@ class SearchFeature:
         self.metadata_resolution_store = (
             metadata_resolution_store or MetadataResolutionStore()
         )
+        self.source_scheduler = source_scheduler or SourceScheduler()
         self.plans = {}
         self.awaiting_queries = set()
         self.awaiting_scope_inputs = {}
@@ -551,8 +724,259 @@ class SearchFeature:
         self.operations = {}
         self.owner_operations = {}
 
+    @staticmethod
+    def _source_coordinates(candidate: dict) -> tuple[str, int | None, int | None]:
+        contract = candidate.get("media_metadata") or {}
+        decision = ((contract.get("evidence") or {}).get("decision") or {})
+        scope = _text(
+            candidate.get("intended_scope")
+            or (contract.get("retrieval") or {}).get("scope")
+            or decision.get("scope")
+            or "work"
+        ).casefold()
+
+        def positive(value):
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, float) and not value.is_integer():
+                return None
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                return None
+            return value if value > 0 else None
+
+        return (
+            scope,
+            positive(
+                candidate.get("requested_season_number")
+                or decision.get("season_number")
+            ),
+            positive(
+                candidate.get("requested_episode_number")
+                or decision.get("episode_number")
+            ),
+        )
+
+    async def _run_source_request(
+        self,
+        *,
+        provider: str,
+        purpose: str,
+        media_type: str,
+        identity: str,
+        scope: str,
+        season_number: int | None,
+        episode_number: int | None,
+        fetch,
+        cacheable,
+    ):
+        return await self.source_scheduler.run(
+            SourceRequestKey(
+                provider=provider,
+                purpose=purpose,
+                media_type=media_type,
+                identity=identity,
+                scope=scope,
+                season_number=season_number,
+                episode_number=episode_number,
+            ),
+            fetch,
+            cacheable=cacheable,
+        )
+
+    @staticmethod
+    def _exact_link_signature(link) -> tuple[str, str, str, str, str]:
+        return (
+            _text(getattr(link, "provider", "")),
+            _text(getattr(link, "media_type", "")),
+            _text(getattr(link, "entity_id", "")),
+            _text(getattr(link, "scope", "")),
+            _text(getattr(link, "url", "")),
+        )
+
+    @staticmethod
+    def _direct_matches_frozen(frozen: dict, direct) -> bool:
+        stable_identity = getattr(direct, "stable_identity", ())
+        if (
+            not isinstance(stable_identity, tuple)
+            or len(stable_identity) != 2
+        ):
+            return False
+        key, value = (_text(item) for item in stable_identity)
+        if not key or not value:
+            return False
+        frozen_ids = (
+            frozen.get("external_ids")
+            if isinstance(frozen.get("external_ids"), dict)
+            else {}
+        )
+        expected = _text(frozen_ids.get(key))
+        if expected and expected != value:
+            return False
+        evidence = getattr(direct, "evidence", None)
+        return bool(
+            isinstance(evidence, dict)
+            and _text(evidence.get("status")).casefold() == "ok"
+            and any(
+                isinstance(item, dict) and bool(item)
+                for item in evidence.get("facts") or ()
+            )
+        )
+
+    async def _prefetch_exact_resolver(self, candidate: dict):
+        candidate_scope, candidate_season, candidate_episode = (
+            self._source_coordinates(candidate)
+        )
+        media_type = _candidate_media_type(candidate)
+        requests = []
+        for frozen in candidate.get("source_links") or ():
+            if not isinstance(frozen, dict):
+                continue
+            parsed = classify_search_input(_text(frozen.get("url")))
+            if parsed.kind != "link" or parsed.link is None:
+                continue
+            link = parsed.link
+            signature = self._exact_link_signature(link)
+            frozen_ids = (
+                frozen.get("external_ids")
+                if isinstance(frozen.get("external_ids"), dict)
+                else {}
+            )
+            expected_ids = tuple(sorted(
+                (_text(key), _text(value))
+                for key, value in frozen_ids.items()
+                if _text(key) and _text(value)
+            ))
+            identity = json.dumps({
+                "request": {
+                    "provider": signature[0],
+                    "media_type": signature[1],
+                    "entity_id": signature[2],
+                    "scope": signature[3],
+                    "url": signature[4],
+                },
+                "expected_fact_id": _text(frozen.get("fact_id")).split(
+                    "@occurrence:",
+                    1,
+                )[0],
+                "expected_ids": expected_ids,
+            }, ensure_ascii=False, sort_keys=True)
+            scope = _text(frozen.get("role") or candidate_scope).casefold()
+            season_number = (
+                frozen.get("season_number")
+                or frozen.get("proposed_season_number")
+                or candidate_season
+            )
+            episode_number = (
+                frozen.get("episode_number")
+                or frozen.get("proposed_episode_number")
+                or candidate_episode
+            )
+            requests.append((
+                signature,
+                asyncio.create_task(self._run_source_request(
+                    provider=signature[0],
+                    purpose="anchor",
+                    media_type=signature[1] or media_type,
+                    identity=identity,
+                    scope=scope,
+                    season_number=season_number,
+                    episode_number=episode_number,
+                    fetch=lambda link=link: asyncio.to_thread(
+                        self.exact_link_resolver,
+                        link,
+                    ),
+                    cacheable=lambda value, frozen=frozen: (
+                        self._direct_matches_frozen(frozen, value)
+                    ),
+                )),
+            ))
+
+        results = await asyncio.gather(
+            *(task for _signature, task in requests),
+            return_exceptions=True,
+        )
+        collected = {}
+        for (signature, _task), result in zip(requests, results):
+            collected.setdefault(signature, []).append(result)
+        raw_by_link = MappingProxyType({
+            signature: tuple(values)
+            for signature, values in collected.items()
+        })
+        offsets = {}
+
+        def resolve(link):
+            signature = self._exact_link_signature(link)
+            values = raw_by_link.get(signature, ())
+            offset = offsets.get(signature, 0)
+            if offset >= len(values):
+                raise DirectLinkError("direct_link_prefetch_missing")
+            offsets[signature] = offset + 1
+            value = values[offset]
+            if isinstance(value, BaseException):
+                raise value
+            return deepcopy(value)
+
+        return resolve
+
     def bind_runtime(self, runtime):
         self.runtime = runtime
+
+    async def _hydrate_selected_candidate(
+        self,
+        candidate: dict,
+        *,
+        metadata_id: str,
+        raw_query: str,
+        require_anchor: bool,
+    ) -> dict:
+        anchor_resolver = await self._prefetch_exact_resolver(candidate)
+        hydrated = await asyncio.to_thread(
+            hydrate_frozen_candidate_anchor,
+            candidate,
+            metadata_id=metadata_id,
+            raw_query=raw_query,
+            require_anchor=require_anchor,
+            resolver=anchor_resolver,
+        )
+        if (
+            hydrated.get("metadata_hydrated")
+            and not needs_authoritative_scope_enrichment(hydrated)
+        ):
+            return hydrated
+        try:
+            if self._uses_default_selected_candidate_supplementer:
+                enriched = await self._supplement_selected_candidate(
+                    hydrated,
+                    raw_query,
+                    purpose="authoritative_scope",
+                )
+            else:
+                enriched = await self.selected_candidate_supplementer(
+                    hydrated,
+                    raw_query,
+                )
+        except Exception as exc:
+            if runtime_context.logger:
+                runtime_context.logger.warning(
+                    "search_supplement status=failed "
+                    "purpose=authoritative_scope "
+                    f"error={type(exc).__name__}"
+                )
+            raise CandidateHydrationError(
+                "metadata_incomplete",
+                ("verified_scope",),
+            ) from exc
+        strict_resolver = await self._prefetch_exact_resolver(enriched)
+        return await asyncio.to_thread(
+            hydrate_frozen_candidate,
+            enriched,
+            metadata_id=metadata_id,
+            raw_query=raw_query,
+            require_anchor=require_anchor,
+            resolver=strict_resolver,
+        )
 
     @staticmethod
     def _log_completed_once(
@@ -687,12 +1111,10 @@ class SearchFeature:
                     "reason_code": "invalid_candidate_ref",
                 }
         elif len(candidates) != 1:
-            preview_store = {"candidates": tuple(deepcopy(candidates[:5]))}
-            await self._supplement_candidate_posters(preview_store)
-            candidates = list(preview_store["candidates"])
+            frozen_candidates = deepcopy(candidates[:5])
             previews = [
                 preview
-                for item in candidates[:5]
+                for item in frozen_candidates
                 if (preview := _metadata_candidate_preview(item))["ref"]
             ]
             if not previews:
@@ -701,7 +1123,7 @@ class SearchFeature:
                     "reason_code": "candidate_ref_missing",
                 }
             frozen_plan = deepcopy(plan)
-            frozen_plan["candidates"] = deepcopy(candidates[:5])
+            frozen_plan["candidates"] = frozen_candidates
             self.metadata_resolution_store.save(plan_id, {
                 "query": raw_query,
                 "probe": deepcopy(probe),
@@ -717,25 +1139,11 @@ class SearchFeature:
         selected = deepcopy(candidates[0])
         if selected.get("links_frozen"):
             try:
-                selected = await self.selected_candidate_supplementer(
-                    selected,
-                    raw_query,
-                )
-            except Exception as exc:
-                if runtime_context.logger:
-                    runtime_context.logger.warning(
-                        "search_supplement status=failed "
-                        "stage=selected_candidate "
-                        f"error={type(exc).__name__}"
-                    )
-            try:
-                selected = await asyncio.to_thread(
-                    hydrate_frozen_candidate,
+                selected = await self._hydrate_selected_candidate(
                     selected,
                     metadata_id=plan_id,
                     raw_query=raw_query,
                     require_anchor=plan.get("entry_kind") == "link",
-                    resolver=self.exact_link_resolver,
                 )
             except CandidateHydrationError as exc:
                 details = ",".join(exc.details)
@@ -1210,6 +1618,14 @@ class SearchFeature:
                     control="exit",
                     details=deepcopy(action.get("data") or {}),
                 )
+                stored = self.plans.get(plan_id)
+                accepted = (
+                    stored.get("initial_candidate_report_accepted")
+                    if isinstance(stored, dict)
+                    else None
+                )
+                if accepted is not None:
+                    accepted.set()
             else:
                 await self._report_operation(
                     operation_id,
@@ -1434,6 +1850,14 @@ class SearchFeature:
             search_task.cancel()
         for task in stored.get("indexer_tasks") or ():
             if hasattr(task, "cancel") and not task.done():
+                task.cancel()
+        for field in ("wave_launcher_task", "incremental_report_task"):
+            task = stored.get(field)
+            if (
+                task is not None
+                and hasattr(task, "cancel")
+                and not task.done()
+            ):
                 task.cancel()
 
     async def _submission_task(self, plan_id, stored, raw_index, operation_id):
@@ -1752,8 +2176,8 @@ class SearchFeature:
             "selected_path": route["path"] if route else "",
             "results": [],
             "operation_id": operation_id,
+            "initial_candidate_report_accepted": asyncio.Event(),
         }
-        await self._supplement_candidate_posters(self.plans[plan_id])
         if plan.get("links_frozen") and plan.get("auto_confirm") is True:
             log_search_event(
                 runtime_context.logger,
@@ -1768,6 +2192,10 @@ class SearchFeature:
                 str(candidates.index(selectable[0])),
             )
             return selected_result
+        self._start_candidate_poster_enrichment(
+            plan_id,
+            self.plans[plan_id],
+        )
         action = (
             self._candidate_grid_action(self.plans[plan_id])
             if plan.get("links_frozen") and selectable
@@ -2163,25 +2591,11 @@ class SearchFeature:
                 (stored.get("plan") or {}).get("raw_query") or ""
             )
             try:
-                candidate = await self.selected_candidate_supplementer(
-                    candidate,
-                    raw_query,
-                )
-            except Exception as exc:
-                if runtime_context.logger:
-                    runtime_context.logger.warning(
-                        "search_supplement status=failed "
-                        "stage=selected_candidate "
-                        f"error={type(exc).__name__}"
-                    )
-            try:
-                candidate = await asyncio.to_thread(
-                    hydrate_frozen_candidate,
+                candidate = await self._hydrate_selected_candidate(
                     candidate,
                     metadata_id=plan_id,
                     raw_query=raw_query,
                     require_anchor=True,
-                    resolver=self.exact_link_resolver,
                 )
                 stored["candidates"][index].update(deepcopy(candidate))
             except CandidateHydrationError as exc:
@@ -2323,6 +2737,7 @@ class SearchFeature:
                         ]
                         keyboard[:] = [row for row in keyboard if row]
                     return {"actions": [action]}
+        stored["selected_candidate"] = deepcopy(candidate)
         selected_plan = {
             "plan_id": plan_id,
             "media_metadata": candidate["media_metadata"],
@@ -2336,6 +2751,7 @@ class SearchFeature:
             if placement.get("mapping_kind") == "temporary_related_special":
                 stored["plan"] = selected_plan
                 stored["selected_candidate_key"] = candidate.get("candidate_key") or ""
+                self._invalidate_candidate_poster_enrichment(stored)
                 return self._related_placement_action(plan_id, stored)
             if placement.get("library_type") == "series":
                 retrieval = contract.get("retrieval") or {}
@@ -2382,6 +2798,7 @@ class SearchFeature:
                     stored["selected_candidate_key"] = (
                         candidate.get("candidate_key") or ""
                     )
+                    self._invalidate_candidate_poster_enrichment(stored)
                     return self._series_scope_action(plan_id, stored)
         except (ValueError, SeriesScopeError):
             action = self._candidate_action(stored, index, edit=True)
@@ -2389,6 +2806,7 @@ class SearchFeature:
             return {"actions": [action]}
         stored["plan"] = selected_plan
         stored["selected_candidate_key"] = candidate.get("candidate_key") or ""
+        self._invalidate_candidate_poster_enrichment(stored)
         return self._start_selected_release(plan_id, stored)
 
     async def _apply_selected_relation(
@@ -2927,6 +3345,57 @@ class SearchFeature:
         )
         return self._start_release_search_task(plan_id, stored)
 
+    def _start_deferred_presentation_enrichment(
+        self,
+        plan_id: str,
+        stored: dict,
+    ) -> None:
+        current = stored.get("deferred_enrichment_task")
+        if current is not None and not current.done():
+            return
+        stored.pop("deferred_contract", None)
+        confirmed_contract = deepcopy(stored["confirmed_contract"])
+        candidate = deepcopy(stored.get("selected_candidate") or {
+            "media_metadata": confirmed_contract,
+        })
+        raw_query = str((stored.get("plan") or {}).get("raw_query") or "")
+
+        async def enrich() -> None:
+            try:
+                enriched_candidate = await self._supplement_selected_candidate(
+                    candidate,
+                    raw_query,
+                    purpose="presentation",
+                )
+                poster_store = {
+                    "candidates": (deepcopy(enriched_candidate),),
+                }
+                await self._supplement_candidate_posters(poster_store)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if runtime_context.logger:
+                    runtime_context.logger.warning(
+                        "search_deferred_enrichment status=failed "
+                        f"error={type(exc).__name__}"
+                    )
+                return
+            if self.plans.get(plan_id) is not stored:
+                return
+            deferred = apply_deferred_presentation(
+                confirmed_contract,
+                enriched_candidate,
+            )
+            poster_candidates = poster_store.get("candidates") or ()
+            if poster_candidates:
+                deferred = apply_deferred_presentation(
+                    deferred,
+                    poster_candidates[0],
+                )
+            stored["deferred_contract"] = deferred
+
+        stored["deferred_enrichment_task"] = asyncio.create_task(enrich())
+
     async def _confirm_and_search(self, plan_id: str, stored: dict) -> dict:
         plan = stored["plan"]
         contract = confirm_media_metadata(plan)
@@ -3076,7 +3545,12 @@ class SearchFeature:
             )
             for query in queries
         ]
-        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        stored["indexer_tasks"] = list(tasks)
+        self._start_deferred_presentation_enrichment(plan_id, stored)
+        try:
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            stored["indexer_tasks"] = []
         raw_items = []
         errors = {}
         successful_queries = 0
@@ -3216,6 +3690,47 @@ class SearchFeature:
         except (TypeError, ValueError):
             return 200
 
+    def _first_wave_indexer_ids(self) -> list[int]:
+        raw = (
+            ((self.config.get("search") or {}).get("prowlarr") or {})
+            .get("first_wave_indexer_ids", [])
+        )
+        if not isinstance(raw, (list, tuple)):
+            return []
+        result = []
+        for value in raw:
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, float) and not value.is_integer():
+                continue
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                continue
+            if value > 0 and value not in result:
+                result.append(value)
+        return result
+
+    def _prowlarr_wave_delay(self) -> float:
+        raw = (
+            ((self.config.get("search") or {}).get("prowlarr") or {})
+            .get("wave_delay", 1.5)
+        )
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return 1.5
+        if not math.isfinite(value):
+            return 1.5
+        return min(30.0, max(0.0, value))
+
+    def _prowlarr_indexer_scores(self) -> dict:
+        scores = (
+            ((self.config.get("search") or {}).get("scoring") or {})
+            .get("indexer_scores", {})
+        )
+        return dict(scores) if isinstance(scores, dict) else {}
+
     def _update_release_results(
         self,
         stored: dict,
@@ -3309,14 +3824,23 @@ class SearchFeature:
         contract: dict,
         indexers,
     ) -> dict:
-        normalized_indexers = [
-            {
-                "id": int(item["id"]),
-                "name": str(item.get("name") or item["id"]),
-            }
-            for item in indexers
-            if isinstance(item, dict) and item.get("id") is not None
-        ]
+        first_wave, remaining_wave = plan_prowlarr_waves(
+            indexers,
+            explicit_ids=self._first_wave_indexer_ids(),
+            indexer_scores=self._prowlarr_indexer_scores(),
+        )
+        normalized_indexers = [*first_wave, *remaining_wave]
+        if not normalized_indexers:
+            return await self._confirm_and_search_aggregate(
+                plan_id,
+                stored,
+                queries,
+                media_type,
+                contract,
+                indexer_list_error=(
+                    "Prowlarr enabled indexer list contained no valid IDs"
+                ),
+            )
         enabled_names = [item["name"] for item in normalized_indexers]
         raw_items = []
         down_indexers = []
@@ -3335,15 +3859,13 @@ class SearchFeature:
                     item["id"],
                 )
 
-        tasks = {
-            asyncio.create_task(search_variant(item, query)): (item, query)
-            for item in normalized_indexers
-            for query in queries
-        }
+        tasks = {}
+        pending = set()
         states = {
             item["id"]: {
                 "item": item,
                 "remaining": len(queries),
+                "completed_queries": set(),
                 "successful_queries": 0,
                 "errors": {},
                 "finalized": False,
@@ -3368,46 +3890,183 @@ class SearchFeature:
                 **error,
             })
 
-        pending = set(tasks)
-        stored["indexer_tasks"] = list(tasks)
+        stored["indexer_tasks"] = []
+
+        def launch_wave(wave) -> None:
+            for item in wave:
+                for query in queries:
+                    task = asyncio.create_task(
+                        search_variant(item, query)
+                    )
+                    tasks[task] = (item, query)
+                    pending.add(task)
+                    stored["indexer_tasks"].append(task)
+
+        launch_wave(first_wave)
+        self._start_deferred_presentation_enrichment(plan_id, stored)
         stored["selection_frozen"] = False
         stored["last_incremental_report"] = 0.0
+        remaining_launched = not bool(remaining_wave)
+        wave_timer = (
+            asyncio.create_task(
+                asyncio.sleep(max(
+                    0.0,
+                    self._prowlarr_wave_delay()
+                    - (time.monotonic() - started),
+                ))
+            )
+            if remaining_wave
+            else None
+        )
+        stored["wave_launcher_task"] = wave_timer
+        incremental_report_task = None
+        incremental_report_dirty = False
+        stored["incremental_report_task"] = None
+        first_wave_ids = {item["id"] for item in first_wave}
+        global_timed_out = False
+
+        async def cancel_wave_timer() -> None:
+            nonlocal wave_timer
+            if wave_timer is None:
+                stored["wave_launcher_task"] = None
+                return
+            if not wave_timer.done():
+                wave_timer.cancel()
+            await asyncio.gather(wave_timer, return_exceptions=True)
+            wave_timer = None
+            stored["wave_launcher_task"] = None
+
+        async def settle_incremental_report(
+            *,
+            cancel: bool = False,
+        ) -> None:
+            nonlocal incremental_report_task
+            task = incremental_report_task
+            if task is None:
+                stored["incremental_report_task"] = None
+                return
+            actively_cancelled = cancel and not task.done()
+            if actively_cancelled:
+                task.cancel()
+            outcome = await asyncio.gather(task, return_exceptions=True)
+            incremental_report_task = None
+            stored["incremental_report_task"] = None
+            error = outcome[0] if outcome else None
+            if not isinstance(error, BaseException):
+                return
+            if (
+                actively_cancelled
+                and isinstance(error, asyncio.CancelledError)
+            ):
+                return
+            raise error
+
+        def schedule_incremental_report(
+            gate,
+            results,
+            summary,
+        ) -> None:
+            nonlocal incremental_report_dirty, incremental_report_task
+            if (
+                incremental_report_task is not None
+                or not incremental_report_dirty
+            ):
+                return
+            incremental_report_dirty = False
+            incremental_report_task = asyncio.create_task(
+                self._report_incremental_releases(
+                    plan_id,
+                    stored,
+                    " | ".join(queries),
+                    deepcopy(gate),
+                    deepcopy(results),
+                    deepcopy(summary),
+                )
+            )
+            stored["incremental_report_task"] = incremental_report_task
+
+        def launch_remaining() -> None:
+            nonlocal remaining_launched
+            if remaining_launched:
+                return
+            launch_wave(remaining_wave)
+            remaining_launched = True
+
         try:
-            while pending and not stored.get("selection_frozen"):
+            while (
+                (pending or wave_timer is not None)
+                and not stored.get("selection_frozen")
+            ):
                 remaining = timeout - (time.monotonic() - started)
                 if remaining <= 0:
                     done = set()
                 else:
-                    done, pending = await asyncio.wait(
-                        pending,
+                    waiters = set(pending)
+                    if wave_timer is not None:
+                        waiters.add(wave_timer)
+                    if incremental_report_task is not None:
+                        waiters.add(incremental_report_task)
+                    done, _still_waiting = await asyncio.wait(
+                        waiters,
                         timeout=remaining,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
+                if (
+                    incremental_report_task is not None
+                    and incremental_report_task.done()
+                ):
+                    await settle_incremental_report()
                 if not done:
+                    global_timed_out = True
+                    timeout_error = {
+                        "message": (
+                            "超过 Prowlarr 全局搜索超时"
+                            f"（{int(timeout)} 秒）"
+                        ),
+                        "kind": "timeout",
+                        "http_status": 0,
+                        "retryable": True,
+                    }
                     for task in pending:
-                        item, query = tasks[task]
-                        state = states[item["id"]]
-                        state["remaining"] -= 1
-                        state["errors"][query] = {
-                            "message": (
-                                "超过 Prowlarr 全局搜索超时"
-                                f"（{int(timeout)} 秒）"
-                            ),
-                            "kind": "timeout",
-                            "http_status": 0,
-                            "retryable": True,
-                        }
                         task.cancel()
                     for state in states.values():
+                        for query in queries:
+                            if query in state["completed_queries"]:
+                                continue
+                            state["completed_queries"].add(query)
+                            state["errors"][query] = dict(timeout_error)
+                        state["remaining"] = 0
                         finalize_indexer(state)
-                    pending = set()
+                    await cancel_wave_timer()
                     break
-                for task in done:
+                if stored.get("selection_frozen"):
+                    break
+                timer_fired = bool(
+                    wave_timer is not None and wave_timer in done
+                )
+                if timer_fired:
+                    completed_timer = wave_timer
+                    wave_timer = None
+                    stored["wave_launcher_task"] = None
+                    await asyncio.gather(
+                        completed_timer,
+                        return_exceptions=True,
+                    )
+                done_tasks = [task for task in done if task in tasks]
+                pending.difference_update(done_tasks)
+                if done_tasks:
+                    incremental_report_dirty = True
+                for task in done_tasks:
                     item, query = tasks[task]
                     state = states[item["id"]]
                     state["remaining"] -= 1
+                    state["completed_queries"].add(query)
                     try:
                         batch = task.result()
+                    except asyncio.CancelledError:
+                        if stored.get("selection_frozen"):
+                            continue
+                        raise
                     except Exception as exc:
                         error = self._prowlarr_error(exc)
                         state["errors"][query] = error
@@ -3438,39 +4097,55 @@ class SearchFeature:
                         )
                         raw_items.append(normalized)
                     finalize_indexer(state)
-                summary = self._incremental_indexer_summary(
-                    enabled_names,
-                    raw_items,
-                    down_indexers,
-                    completed,
-                    final=not pending,
-                )
                 gate, results = self._update_release_results(
                     stored,
                     raw_items,
                     contract,
                 )
+                first_wave_complete = bool(first_wave_ids) and all(
+                    states[indexer_id]["finalized"]
+                    for indexer_id in first_wave_ids
+                )
+                if not remaining_launched and (
+                    timer_fired
+                    or (first_wave_complete and not results)
+                ):
+                    if not timer_fired:
+                        await cancel_wave_timer()
+                    launch_remaining()
+                search_incomplete = bool(
+                    pending
+                    or (remaining_wave and not remaining_launched)
+                )
+                summary = self._incremental_indexer_summary(
+                    enabled_names,
+                    raw_items,
+                    down_indexers,
+                    completed,
+                    final=not search_incomplete,
+                )
                 stored["indexer_summary"] = summary
-                if results and pending:
-                    await self._report_incremental_releases(
-                        plan_id,
-                        stored,
-                        " | ".join(queries),
-                        gate,
-                        results,
-                        summary,
-                    )
+                if results and search_incomplete:
+                    schedule_incremental_report(gate, results, summary)
+            await settle_incremental_report(
+                cancel=bool(
+                    stored.get("selection_frozen")
+                    or global_timed_out
+                ),
+            )
             last_report = float(stored.get("last_incremental_report") or 0)
             if last_report:
                 delay = 1.25 - (time.monotonic() - last_report)
                 if delay > 0:
                     await asyncio.sleep(delay)
         finally:
+            await cancel_wave_timer()
             for task in pending:
                 task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
             stored["indexer_tasks"] = []
+            await settle_incremental_report(cancel=True)
 
         summary = self._incremental_indexer_summary(
             enabled_names,
@@ -3479,6 +4154,7 @@ class SearchFeature:
             len(normalized_indexers),
             final=True,
         )
+        stored["indexer_summary"] = summary
         return self._finalize_release_results(
             plan_id,
             stored,
@@ -3639,7 +4315,18 @@ class SearchFeature:
                 release_id,
                 "magnet_missing",
             )
-        contract = deepcopy(stored["confirmed_contract"])
+        deferred_task = stored.get("deferred_enrichment_task")
+        deferred_contract = stored.get("deferred_contract")
+        contract = deepcopy(
+            deferred_contract
+            if (
+                deferred_task is not None
+                and deferred_task.done()
+                and not deferred_task.cancelled()
+                and isinstance(deferred_contract, dict)
+            )
+            else stored["confirmed_contract"]
+        )
         identity = contract["identity"]
         operation = self.operations[operation_id]
         handoff = operation.get("handoff_operation")
@@ -3786,15 +4473,31 @@ class SearchFeature:
             identity = (
                 (candidate.get("media_metadata") or {}).get("identity") or {}
             )
+            scope, season_number, episode_number = self._source_coordinates(
+                candidate
+            )
+            candidate_media_type = _candidate_media_type(candidate)
             subject_id = _text(
                 (identity.get("external_ids") or {}).get("douban_subject")
             )
             if subject_id:
                 try:
                     async with semaphore:
-                        fact = await asyncio.to_thread(
-                            lookup_douban_subject,
-                            subject_id,
+                        fact = await self._run_source_request(
+                            provider="douban",
+                            purpose="presentation_locale",
+                            media_type=candidate_media_type,
+                            identity=f"douban_subject:{subject_id}",
+                            scope=scope,
+                            season_number=season_number,
+                            episode_number=episode_number,
+                            fetch=lambda: asyncio.to_thread(
+                                lookup_douban_subject,
+                                subject_id,
+                            ),
+                            cacheable=lambda value: (
+                                _cacheable_douban_subject(value, subject_id)
+                            ),
                         )
                     localized = localize_candidate_from_exact_douban(
                         candidate,
@@ -3871,9 +4574,22 @@ class SearchFeature:
             )
             try:
                 async with semaphore:
-                    result = await asyncio.to_thread(
-                        self._douban_provider,
-                        {"source_queries": {"douban": [query]}},
+                    result = await self._run_source_request(
+                        provider="douban",
+                        purpose="presentation_locale",
+                        media_type=media_type,
+                        identity=f"query:{query}",
+                        scope=scope,
+                        season_number=season_number,
+                        episode_number=episode_number,
+                        fetch=lambda: asyncio.to_thread(
+                            self._douban_provider,
+                            {"source_queries": {"douban": [query]}},
+                        ),
+                        cacheable=lambda value: _cacheable_douban_raw(
+                            value,
+                            confirmed,
+                        ),
                     )
                 fact = select_unique_douban_fact(result, confirmed)
                 if not isinstance(fact, dict) or _text(
@@ -4021,13 +4737,41 @@ class SearchFeature:
     @staticmethod
     async def _resolve_confirmed_tmdb(
         identity: ConfirmedIdentity,
+        *,
+        source_scheduler: SourceScheduler | None = None,
+        purpose: str = "authoritative_scope",
     ) -> tuple[dict | None, str]:
+        async def fetch_raw(request_identity: str, fetch, cacheable):
+            if source_scheduler is None:
+                return await fetch()
+            return await source_scheduler.run(
+                SourceRequestKey(
+                    provider="tmdb",
+                    purpose=purpose,
+                    media_type=identity.media_type,
+                    identity=request_identity,
+                    scope=identity.requested_scope,
+                    season_number=identity.season_number,
+                    episode_number=None,
+                ),
+                fetch,
+                cacheable=cacheable,
+            )
+
         try:
             async def verified_detail(tmdb_id: str):
-                detail = await asyncio.to_thread(
-                    get_tmdb_entity,
-                    identity.media_type,
-                    tmdb_id,
+                detail = await fetch_raw(
+                    f"detail:{identity.media_type}:{tmdb_id}",
+                    lambda: asyncio.to_thread(
+                        get_tmdb_entity,
+                        identity.media_type,
+                        tmdb_id,
+                    ),
+                    lambda value: _cacheable_tmdb_raw(
+                        value,
+                        identity,
+                        require_https_cover=(purpose == "poster"),
+                    ),
                 )
                 return select_unique_tmdb_fact({
                     "source": "tmdb",
@@ -4050,11 +4794,19 @@ class SearchFeature:
                 if _text(identity.external_ids.get(source))
             ]
             for source, external_id in exact_sources:
-                candidates = await asyncio.to_thread(
-                    find_tmdb_by_external_id,
-                    source,
-                    external_id,
-                    identity.media_type,
+                candidates = await fetch_raw(
+                    f"find:{source}:{external_id}:{identity.media_type}",
+                    lambda: asyncio.to_thread(
+                        find_tmdb_by_external_id,
+                        source,
+                        external_id,
+                        identity.media_type,
+                    ),
+                    lambda value: _cacheable_tmdb_raw(
+                        value,
+                        identity,
+                        require_https_cover=(purpose == "poster"),
+                    ),
                 )
                 selected = select_unique_tmdb_fact({
                     "source": "tmdb",
@@ -4077,11 +4829,22 @@ class SearchFeature:
             query = build_tmdb_query(identity)
             if query is None:
                 return None, "unavailable"
-            candidates = await asyncio.to_thread(
-                search_tmdb,
-                query["title"],
-                query["media_type"],
-                query["year"],
+            candidates = await fetch_raw(
+                (
+                    f"search:{query['title']}:{query['media_type']}:"
+                    f"{query['year']}"
+                ),
+                lambda: asyncio.to_thread(
+                    search_tmdb,
+                    query["title"],
+                    query["media_type"],
+                    query["year"],
+                ),
+                lambda value: _cacheable_tmdb_raw(
+                    value,
+                    identity,
+                    require_https_cover=(purpose == "poster"),
+                ),
             )
             result = {
                 "source": "tmdb",
@@ -4114,15 +4877,40 @@ class SearchFeature:
     @staticmethod
     async def _resolve_confirmed_anilist(
         identity: ConfirmedIdentity,
+        *,
+        source_scheduler: SourceScheduler | None = None,
+        purpose: str = "optional_peer",
     ) -> tuple[dict | None, str]:
         query = build_anilist_query(identity)
         if query is None:
             return None, "not_applicable"
+
+        async def fetch_raw(request_identity: str, fetch, cacheable):
+            if source_scheduler is None:
+                return await fetch()
+            return await source_scheduler.run(
+                SourceRequestKey(
+                    provider="anilist",
+                    purpose=purpose,
+                    media_type=identity.media_type,
+                    identity=request_identity,
+                    scope=identity.requested_scope,
+                    season_number=identity.season_number,
+                    episode_number=None,
+                ),
+                fetch,
+                cacheable=cacheable,
+            )
+
         try:
-            candidates = await asyncio.to_thread(
-                search_anilist,
-                query["title"],
-                query["year"],
+            candidates = await fetch_raw(
+                f"search:{query['title']}:{query['year']}",
+                lambda: asyncio.to_thread(
+                    search_anilist,
+                    query["title"],
+                    query["year"],
+                ),
+                lambda value: _cacheable_anilist_raw(value, identity),
             )
             result = {
                 "source": "anilist",
@@ -4139,9 +4927,13 @@ class SearchFeature:
                 or selected.get("id")
                 or (selected.get("external_ids") or {}).get("anilist")
             )
-            detail = await asyncio.to_thread(
-                get_anilist_media,
-                anilist_id,
+            detail = await fetch_raw(
+                f"detail:{anilist_id}",
+                lambda: asyncio.to_thread(
+                    get_anilist_media,
+                    anilist_id,
+                ),
+                lambda value: _cacheable_anilist_raw(value, identity),
             )
             verified = select_unique_anilist_fact({
                 "source": "anilist",
@@ -4356,8 +5148,15 @@ class SearchFeature:
         identity = self._candidate_confirmed_identity(candidate)
         if identity.media_type not in {"movie", "series"}:
             return ""
+        scope, season_number, episode_number = self._source_coordinates(
+            candidate
+        )
         if provider == "tmdb":
-            fact, _status = await self._resolve_confirmed_tmdb(identity)
+            fact, _status = await self._resolve_confirmed_tmdb(
+                identity,
+                source_scheduler=self.source_scheduler,
+                purpose="poster",
+            )
         elif provider == "douban":
             query = _text(" ".join(filter(None, (
                 identity.chinese_title
@@ -4367,9 +5166,41 @@ class SearchFeature:
             ))))
             if not query:
                 return ""
-            result = await asyncio.to_thread(
-                self._douban_provider,
-                {"source_queries": {"douban": [query]}},
+            subject_id = _text(
+                identity.external_ids.get("douban_subject")
+            )
+            result = await self._run_source_request(
+                provider="douban",
+                purpose="poster",
+                media_type=identity.media_type,
+                identity=_poster_search_identity(
+                    endpoint="search",
+                    query=query,
+                    title=(
+                        identity.chinese_title
+                        or identity.english_title
+                        or identity.original_title
+                    ),
+                    year=identity.year,
+                    media_type=identity.media_type,
+                    stable_id=(
+                        f"douban_subject:{subject_id}"
+                        if subject_id
+                        else ""
+                    ),
+                ),
+                scope=scope,
+                season_number=season_number,
+                episode_number=episode_number,
+                fetch=lambda: asyncio.to_thread(
+                    self._douban_provider,
+                    {"source_queries": {"douban": [query]}},
+                ),
+                cacheable=lambda value: _cacheable_poster_raw(
+                    value,
+                    identity,
+                    self._select_unique_douban_poster_fact,
+                ),
             )
             fact = self._select_unique_douban_poster_fact(
                 list((result or {}).get("facts") or ()),
@@ -4388,7 +5219,33 @@ class SearchFeature:
                 if identity.media_type == "series"
                 else search_tvdb_movies
             )
-            facts = await asyncio.to_thread(loader, query, identity.year)
+            tvdb_id = _text(identity.external_ids.get("tvdb"))
+            facts = await self._run_source_request(
+                provider="tvdb",
+                purpose="poster",
+                media_type=identity.media_type,
+                identity=_poster_search_identity(
+                    endpoint="search",
+                    query=query,
+                    title=query,
+                    year=identity.year,
+                    media_type=identity.media_type,
+                    stable_id=f"tvdb:{tvdb_id}" if tvdb_id else "",
+                ),
+                scope=scope,
+                season_number=season_number,
+                episode_number=episode_number,
+                fetch=lambda: asyncio.to_thread(
+                    loader,
+                    query,
+                    identity.year,
+                ),
+                cacheable=lambda value: _cacheable_poster_raw(
+                    value,
+                    identity,
+                    self._select_unique_tvdb_poster_fact,
+                ),
+            )
             fact = self._select_unique_tvdb_poster_fact(facts, identity)
         else:
             return ""
@@ -4457,12 +5314,98 @@ class SearchFeature:
             identity["poster_source"] = provider
         stored["candidates"] = tuple(candidates)
 
+    def _start_candidate_poster_enrichment(
+        self,
+        plan_id: str,
+        stored: dict,
+    ) -> None:
+        current = stored.get("candidate_poster_task")
+        if current is not None and not current.done():
+            return
+        generation = int(stored.get("candidate_poster_generation") or 0) + 1
+        stored["candidate_poster_generation"] = generation
+
+        async def enrich() -> None:
+            preview = {
+                "candidates": tuple(deepcopy(stored.get("candidates") or ()))
+            }
+            try:
+                await self._supplement_candidate_posters(preview)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if runtime_context.logger:
+                    runtime_context.logger.warning(
+                        "search_candidate_posters status=failed "
+                        f"error={type(exc).__name__}"
+                    )
+                return
+            accepted = stored.get("initial_candidate_report_accepted")
+            if accepted is not None:
+                await accepted.wait()
+            operation = self.operations.get(stored.get("operation_id")) or {}
+            if (
+                self.plans.get(plan_id) is not stored
+                or stored.get("candidate_poster_generation") != generation
+                or not self._is_candidate_screen(operation)
+            ):
+                return
+            stored["candidates"] = tuple(preview["candidates"])
+            action = (
+                self._candidate_grid_action(stored)
+                if (stored.get("plan") or {}).get("links_frozen")
+                else self._candidate_action(stored, 0, edit=True)
+            )
+            try:
+                await self._report_operation(
+                    stored["operation_id"],
+                    state="awaiting_input",
+                    stage=str(operation.get("stage") or "candidate_selection"),
+                    status_text=action["text"],
+                    control="exit",
+                    details=deepcopy(action.get("data") or {}),
+                )
+            except Exception as exc:
+                if runtime_context.logger:
+                    runtime_context.logger.warning(
+                        "search_candidate_posters status=projection_failed "
+                        f"error={type(exc).__name__}"
+                    )
+
+        stored["candidate_poster_task"] = asyncio.create_task(enrich())
+
+    @staticmethod
+    def _invalidate_candidate_poster_enrichment(stored: dict) -> None:
+        stored["candidate_poster_generation"] = (
+            int(stored.get("candidate_poster_generation") or 0) + 1
+        )
+        task = stored.get("candidate_poster_task")
+        if task is not None and not task.done():
+            task.cancel()
+
+    @staticmethod
+    def _is_candidate_screen(operation: dict) -> bool:
+        return bool(
+            isinstance(operation, dict)
+            and operation.get("state") == "awaiting_input"
+            and operation.get("stage") in {
+                "candidate_selection",
+                "plan_confirmation",
+            }
+        )
+
     async def _supplement_selected_candidate(
         self,
         candidate: dict,
         raw_query: str,
+        *,
+        purpose: str = "all",
     ) -> dict:
         del raw_query
+        if purpose not in {"all", "authoritative_scope", "presentation"}:
+            raise ValueError("unsupported enrichment purpose")
+        include_authoritative = purpose in {"all", "authoritative_scope"}
+        include_presentation = purpose in {"all", "presentation"}
         result = deepcopy(candidate)
         contract = result.get("media_metadata") or {}
         identity_value = contract.get("identity") or {}
@@ -4489,6 +5432,9 @@ class SearchFeature:
             result.get("intended_scope")
             or (contract.get("retrieval") or {}).get("scope")
         ).casefold()
+        source_scope, source_season, source_episode = (
+            self._source_coordinates(result)
+        )
 
         def root_lookup_title(value):
             value = _text(value)
@@ -4654,7 +5600,7 @@ class SearchFeature:
         )
         wikipedia_fact = None
         tmdb_fact = None
-        if "wikipedia" not in providers:
+        if include_authoritative and "wikipedia" not in providers:
             queries = build_wikipedia_queries(confirmed)
             log_search_event(
                 runtime_context.logger,
@@ -4664,9 +5610,29 @@ class SearchFeature:
                 queries=queries,
             )
             try:
-                wikipedia_result = await asyncio.to_thread(
-                    self._wikipedia_provider,
-                    {"source_queries": queries},
+                wikipedia_result = await self._run_source_request(
+                    provider="wikipedia",
+                    purpose="authoritative_scope",
+                    media_type=confirmed.media_type,
+                    identity=(
+                        "queries:"
+                        + json.dumps(
+                            queries,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
+                    ),
+                    scope=source_scope,
+                    season_number=source_season,
+                    episode_number=source_episode,
+                    fetch=lambda: asyncio.to_thread(
+                        self._wikipedia_provider,
+                        {"source_queries": queries},
+                    ),
+                    cacheable=lambda value: _cacheable_wikipedia_raw(
+                        value,
+                        confirmed,
+                    ),
                 )
             except Exception:
                 wikipedia_result = {
@@ -4724,10 +5690,14 @@ class SearchFeature:
                 runtime_context.logger,
                 "search.wikipedia_skipped",
                 search_session_id=search_session_id,
-                reason="already_confirmed_source",
+                reason=(
+                    "already_confirmed_source"
+                    if "wikipedia" in providers
+                    else "purpose_excluded"
+                ),
             )
 
-        if "tmdb" not in providers:
+        if include_authoritative and "tmdb" not in providers:
             tmdb_external_ids = dict(confirmed.external_ids)
             if isinstance(wikipedia_fact, dict):
                 wikipedia_ids = (
@@ -4755,7 +5725,9 @@ class SearchFeature:
                 query=tmdb_query or {},
             )
             tmdb_fact, tmdb_status = await self._resolve_confirmed_tmdb(
-                tmdb_identity
+                tmdb_identity,
+                source_scheduler=self.source_scheduler,
+                purpose="authoritative_scope",
             )
             if tmdb_fact is not None:
                 tmdb_id = _text(
@@ -4801,10 +5773,18 @@ class SearchFeature:
                 runtime_context.logger,
                 "search.tmdb_skipped",
                 search_session_id=search_session_id,
-                reason="already_confirmed_source",
+                reason=(
+                    "already_confirmed_source"
+                    if "tmdb" in providers
+                    else "purpose_excluded"
+                ),
             )
 
-        if confirmed.media_type == "series" and "tvdb" not in providers:
+        if (
+            include_authoritative
+            and confirmed.media_type == "series"
+            and "tvdb" not in providers
+        ):
             tvdb_query = build_tvdb_query(
                 confirmed,
                 wikipedia_fact or tmdb_fact,
@@ -4820,16 +5800,58 @@ class SearchFeature:
             if tvdb_query is not None:
                 try:
                     stable_tvdb_id = _text(tvdb_query.get("tvdb_id"))
+                    tvdb_identity = replace(
+                        confirmed,
+                        english_title=tvdb_query["title"],
+                        external_ids={
+                            **confirmed.external_ids,
+                            **(
+                                {"tvdb": stable_tvdb_id}
+                                if stable_tvdb_id
+                                else {}
+                            ),
+                        },
+                    )
                     if stable_tvdb_id:
-                        tvdb_series = await asyncio.to_thread(
-                            get_tvdb_series,
-                            stable_tvdb_id,
+                        tvdb_series = await self._run_source_request(
+                            provider="tvdb",
+                            purpose="authoritative_scope",
+                            media_type=confirmed.media_type,
+                            identity=f"series:{stable_tvdb_id}",
+                            scope=source_scope,
+                            season_number=source_season,
+                            episode_number=source_episode,
+                            fetch=lambda: asyncio.to_thread(
+                                get_tvdb_series,
+                                stable_tvdb_id,
+                            ),
+                            cacheable=lambda value: _cacheable_tvdb_raw(
+                                value,
+                                tvdb_identity,
+                                require_episodes=True,
+                            ),
                         )
                     else:
-                        tvdb_candidates = await asyncio.to_thread(
-                            search_tvdb_series,
-                            tvdb_query["title"],
-                            tvdb_query["year"],
+                        tvdb_candidates = await self._run_source_request(
+                            provider="tvdb",
+                            purpose="authoritative_scope",
+                            media_type=confirmed.media_type,
+                            identity=(
+                                f"search:{tvdb_query['title']}:"
+                                f"{tvdb_query['year']}"
+                            ),
+                            scope=source_scope,
+                            season_number=source_season,
+                            episode_number=source_episode,
+                            fetch=lambda: asyncio.to_thread(
+                                search_tvdb_series,
+                                tvdb_query["title"],
+                                tvdb_query["year"],
+                            ),
+                            cacheable=lambda value: _cacheable_tvdb_raw(
+                                value,
+                                tvdb_identity,
+                            ),
                         )
                         tvdb_result = {
                             "source": "tvdb",
@@ -4842,10 +5864,6 @@ class SearchFeature:
                                 "episodes_by_series": {},
                             }],
                         }
-                        tvdb_identity = replace(
-                            confirmed,
-                            english_title=tvdb_query["title"],
-                        )
                         selected = select_unique_tvdb_series(
                             tvdb_result,
                             tvdb_identity,
@@ -4856,9 +5874,30 @@ class SearchFeature:
                                 or selected.get("tvdb_id")
                                 or selected.get("id")
                             )
-                            tvdb_series = await asyncio.to_thread(
-                                get_tvdb_series,
-                                tvdb_id,
+                            selected_tvdb_identity = replace(
+                                tvdb_identity,
+                                external_ids={
+                                    **tvdb_identity.external_ids,
+                                    "tvdb": tvdb_id,
+                                },
+                            )
+                            tvdb_series = await self._run_source_request(
+                                provider="tvdb",
+                                purpose="authoritative_scope",
+                                media_type=confirmed.media_type,
+                                identity=f"series:{tvdb_id}",
+                                scope=source_scope,
+                                season_number=source_season,
+                                episode_number=source_episode,
+                                fetch=lambda: asyncio.to_thread(
+                                    get_tvdb_series,
+                                    tvdb_id,
+                                ),
+                                cacheable=lambda value: _cacheable_tvdb_raw(
+                                    value,
+                                    selected_tvdb_identity,
+                                    require_episodes=True,
+                                ),
                             )
                         else:
                             tvdb_status = _text(
@@ -4942,11 +5981,15 @@ class SearchFeature:
                 reason=(
                     "not_series"
                     if confirmed.media_type != "series"
-                    else "already_confirmed_source"
+                    else (
+                        "already_confirmed_source"
+                        if "tvdb" in providers
+                        else "purpose_excluded"
+                    )
                 ),
             )
 
-        if "douban" not in providers:
+        if include_presentation and "douban" not in providers:
             douban_identity_ids = dict(confirmed.external_ids)
             if isinstance(tmdb_fact, dict):
                 douban_identity_ids.update({
@@ -5001,9 +6044,26 @@ class SearchFeature:
             douban_fact = None
             if douban_query:
                 try:
-                    douban_result = await asyncio.to_thread(
-                        self._douban_provider,
-                        {"source_queries": {"douban": [douban_query]}},
+                    douban_result = await self._run_source_request(
+                        provider="douban",
+                        purpose="presentation_locale",
+                        media_type=confirmed.media_type,
+                        identity=f"query:{douban_query}",
+                        scope=source_scope,
+                        season_number=source_season,
+                        episode_number=source_episode,
+                        fetch=lambda: asyncio.to_thread(
+                            self._douban_provider,
+                            {
+                                "source_queries": {
+                                    "douban": [douban_query],
+                                },
+                            },
+                        ),
+                        cacheable=lambda value: _cacheable_douban_raw(
+                            value,
+                            douban_identity,
+                        ),
                     )
                     douban_status = _text(
                         douban_result.get("status")
@@ -5076,7 +6136,11 @@ class SearchFeature:
                 unresolved.append(f"douban:{douban_status}")
 
         anilist_query = build_anilist_query(confirmed)
-        if anilist_query is not None and "anilist" not in providers:
+        if (
+            include_presentation
+            and anilist_query is not None
+            and "anilist" not in providers
+        ):
             log_search_event(
                 runtime_context.logger,
                 "search.anilist_started",
@@ -5084,7 +6148,11 @@ class SearchFeature:
                 query=anilist_query,
             )
             anilist_fact, anilist_status = (
-                await self._resolve_confirmed_anilist(confirmed)
+                await self._resolve_confirmed_anilist(
+                    confirmed,
+                    source_scheduler=self.source_scheduler,
+                    purpose="optional_peer",
+                )
             )
             if anilist_fact is not None:
                 anilist_id = _text(
@@ -5132,7 +6200,11 @@ class SearchFeature:
                 reason=(
                     "not_japanese_animation"
                     if anilist_query is None
-                    else "already_confirmed_source"
+                    else (
+                        "already_confirmed_source"
+                        if "anilist" in providers
+                        else "purpose_excluded"
+                    )
                 ),
             )
         result["source_links"] = source_links
@@ -5374,7 +6446,12 @@ class SearchFeature:
         )[0]
 
     def _release_plan(self, plan_id: str):
-        self.plans.pop(plan_id, None)
+        stored = self.plans.pop(plan_id, None)
+        if isinstance(stored, dict):
+            for key in ("candidate_poster_task", "deferred_enrichment_task"):
+                task = stored.get(key)
+                if task is not None and not task.done():
+                    task.cancel()
         for owner, pending in tuple(self.awaiting_scope_inputs.items()):
             if str(pending.get("plan_id") or "") == plan_id:
                 self.awaiting_scope_inputs.pop(owner, None)

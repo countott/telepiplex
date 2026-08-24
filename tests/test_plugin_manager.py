@@ -118,6 +118,48 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         executable.chmod(0o755)
 
+    async def test_close_stops_producers_then_drains_before_databases(self):
+        calls = []
+
+        async def stop_features():
+            calls.append("features")
+
+        async def stop_broker():
+            calls.append("broker")
+
+        class Sink:
+            def __init__(self, name):
+                self.name = name
+
+            async def drain(self, *, timeout):
+                self_timeout = timeout
+                self.assert_timeout = self_timeout
+                calls.append(self.name)
+                return True
+
+        report_sink = Sink("reports")
+        milestone_sink = Sink("milestones")
+        self.manager.supervisor.close_all = stop_features
+        self.manager.broker = SimpleNamespace(
+            close=stop_broker,
+            operation_sink=report_sink,
+            milestone_sink=milestone_sink,
+        )
+        self.manager.journal = SimpleNamespace(
+            close=lambda: calls.append("journal")
+        )
+        self.manager.interaction_coordinator = SimpleNamespace(
+            close=lambda: calls.append("coordinator")
+        )
+
+        await self.manager.close()
+
+        self.assertEqual(calls[:2], ["features", "broker"])
+        self.assertEqual(set(calls[2:4]), {"reports", "milestones"})
+        self.assertEqual(calls[4:], ["journal", "coordinator"])
+        self.assertEqual(report_sink.assert_timeout, self.manager.drain_timeout)
+        self.assertEqual(milestone_sink.assert_timeout, self.manager.drain_timeout)
+
     def _artifact(
         self,
         plugin_id="echo",

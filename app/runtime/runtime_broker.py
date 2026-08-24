@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.runtime.capability_router import CapabilityRouter, RoutingError
-from app.runtime.event_journal import EventJournal
+from app.runtime.event_journal import EventJournal, EventJournalError
 from app.runtime.interaction_coordinator import InteractionError
 from app.runtime.plugin_manifest import PluginManifest
 from telepiplex_plugin_sdk.diagnostics import (
@@ -41,6 +41,7 @@ class RuntimeBroker:
         notification_sink=None,
         milestone_sink=None,
         operation_sink=None,
+        operation_coordinator=None,
         logger=None,
         max_frame_bytes: int = 1024 * 1024,
         max_deadline: float = 300,
@@ -52,6 +53,7 @@ class RuntimeBroker:
         self.notification_sink = notification_sink
         self.milestone_sink = milestone_sink
         self.operation_sink = operation_sink
+        self.operation_coordinator = operation_coordinator
         self.logger = logger
         self.max_frame_bytes = int(max_frame_bytes)
         self.max_deadline = max(1, float(max_deadline))
@@ -318,9 +320,56 @@ class RuntimeBroker:
             payload = params.get("payload")
             if not isinstance(payload, dict):
                 raise BrokerError("invalid_request", "event payload must be an object")
-            event_id = self.journal.publish(event_type, payload, idempotency_key)
-            if self.dispatcher is not None:
-                self.dispatcher.wake()
+            coordinator = self.operation_coordinator
+            operation_id = str(payload.get("operation_id") or "").strip()
+            handoff = (
+                coordinator.capture_handoff(operation_id, identity.plugin_id)
+                if coordinator is not None and operation_id
+                else None
+            )
+            durable_handoff = None
+            if handoff is not None:
+                durable_handoff = {
+                    "operation_id": handoff.operation_id,
+                    "handoff_key": handoff.handoff_key,
+                    "source_plugin_id": handoff.source_plugin_id,
+                    "source_revision": handoff.source_revision,
+                    "target_plugin_id": handoff.target_plugin_id,
+                }
+            try:
+                event_id = self.journal.publish(
+                    event_type,
+                    payload,
+                    idempotency_key,
+                    handoff_binding=durable_handoff,
+                )
+            except EventJournalError as exc:
+                raise BrokerError(exc.code, exc.message) from None
+            try:
+                binding = self.journal.handoff_binding(event_id)
+                if binding is not None:
+                    if (
+                        binding.operation_id != operation_id
+                        or binding.source_plugin_id != identity.plugin_id
+                    ):
+                        raise BrokerError(
+                            "handoff_event_conflict",
+                            "event delivery belongs to another handoff",
+                        )
+                    if coordinator is None:
+                        raise BrokerError(
+                            "operation_unavailable",
+                            "Host operation coordinator is unavailable",
+                        )
+                    coordinator.record_handoff_event(
+                        binding.operation_id,
+                        event_id,
+                        binding.target_plugin_id,
+                        handoff_key=binding.handoff_key,
+                    )
+            finally:
+                if self.dispatcher is not None:
+                    self.dispatcher.wake()
             return {"event_id": event_id}
         if method == "notification.send":
             try:

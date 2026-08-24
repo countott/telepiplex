@@ -1,5 +1,4 @@
 import asyncio
-import inspect
 import json
 import logging
 import tempfile
@@ -256,7 +255,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             "rename", "running", 1,
         ))
 
-    async def test_operation_sink_waits_for_attached_renderer(self):
+    async def test_operation_sink_handoff_returns_before_attached_renderer(self):
         from app.handlers.interaction_handler import OperationReportSink
 
         release = asyncio.Event()
@@ -268,20 +267,49 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         sink = OperationReportSink(self.coordinator)
         sink.attach(render)
-        pending = sink("download", self.report(
+        response = await asyncio.wait_for(sink("download", self.report(
             state="handed_off",
             stage="handoff_rename",
             status_text="✅ 115 下载完成\n保存目录：/真人剧集/Veep.S01",
             next_plugin_id="rename",
-        ))
+        )), timeout=0.1)
 
-        self.assertTrue(inspect.isawaitable(pending))
-        task = asyncio.create_task(pending)
         await started.wait()
-        self.assertFalse(task.done())
-        release.set()
-        response = await task
         self.assertTrue(response["accepted"])
+        release.set()
+        await sink.drain()
+
+    async def test_operation_sink_coalesces_first_inflight_and_latest_pending(self):
+        from app.handlers.interaction_handler import OperationReportSink
+
+        release = asyncio.Event()
+        started = asyncio.Event()
+        revisions = []
+
+        async def render(record):
+            revisions.append(record.revision)
+            if record.revision == 1:
+                started.set()
+                await release.wait()
+
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(render)
+        self.assertTrue((await sink("search", self.report()))["accepted"])
+        await started.wait()
+
+        for revision in range(2, 52):
+            response = await sink("search", self.report(
+                revision=revision,
+                status_text=f"进度 {revision}",
+            ))
+            self.assertTrue(response["accepted"])
+
+        self.assertEqual(self.coordinator.get("op-1").revision, 51)
+        release.set()
+        await sink.drain()
+        self.assertEqual(revisions, [1, 51])
+        self.assertEqual(sink._pending, {})
+        self.assertEqual(sink._workers, {})
 
     async def test_operation_sink_does_not_block_running_report_on_renderer(self):
         from app.handlers.interaction_handler import OperationReportSink
@@ -343,6 +371,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             revision=2,
             next_plugin_id="rename",
         ))
+        await sink.drain()
         self.assertEqual(self.coordinator.get("op-1").message_id, 41)
         self.assertEqual(
             context.application.bot.edit_message_text.await_args.kwargs["text"],
@@ -372,7 +401,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(edited["message_id"], 42)
         self.assertEqual(edited["text"], "正在重命名媒体文件。")
 
-    async def test_operation_milestone_is_idempotent_and_photo_falls_back_to_text(self):
+    async def test_operation_milestone_is_idempotent_after_durable_enqueue(self):
         from app.handlers.interaction_handler import OperationMilestoneSink
 
         record = self.coordinator.report("search", self.report())
@@ -381,9 +410,10 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         def deliver(delivery_record, mode, photo_url, text):
             deliveries.append((delivery_record.chat_id, mode, photo_url, text))
-            return not photo_url
+            return True
 
         sink = OperationMilestoneSink(self.coordinator, deliver)
+        await sink.start()
         payload = {
             "operation_id": "op-1",
             "milestone_id": "media-douban-35981510",
@@ -393,9 +423,14 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         first = await sink("search", payload)
         duplicate = await sink("search", payload)
+        await sink.drain()
 
-        self.assertEqual(first, {"accepted": True, "duplicate": False})
-        self.assertEqual(duplicate, {"accepted": True, "duplicate": True})
+        self.assertEqual(first, {
+            "accepted": True, "queued": True, "duplicate": False,
+        })
+        self.assertEqual(duplicate, {
+            "accepted": True, "queued": True, "duplicate": True,
+        })
         self.assertEqual(deliveries, [
             (
                 10,
@@ -403,11 +438,10 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
                 "https://img.example/blossoms.jpg",
                 "繁花 (Blossoms Shanghai)",
             ),
-            (10, "identity", None, "繁花 (Blossoms Shanghai)"),
         ])
         self.assertIsNone(self.coordinator.get("op-1").message_id)
 
-    async def test_operation_milestone_waits_for_async_delivery(self):
+    async def test_operation_milestone_returns_after_enqueue_before_async_delivery(self):
         from app.handlers.interaction_handler import OperationMilestoneSink
 
         self.coordinator.report("search", self.report())
@@ -420,21 +454,253 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             return True
 
         sink = OperationMilestoneSink(self.coordinator, deliver)
-        pending = sink("search", {
+        await sink.start()
+        response = await asyncio.wait_for(sink("search", {
             "operation_id": "op-1",
             "milestone_id": "media-wait",
             "text": "繁花 (Blossoms Shanghai)",
             "photo_url": "https://img.example/blossoms.jpg",
-        })
+        }), timeout=0.1)
 
-        self.assertTrue(inspect.isawaitable(pending))
-        task = asyncio.create_task(pending)
         await started.wait()
-        self.assertFalse(task.done())
+        self.assertEqual(response, {
+            "accepted": True,
+            "queued": True,
+            "duplicate": False,
+        })
+        self.assertIn(
+            self.coordinator.get_milestone(
+                "op-1", "media-wait"
+            ).delivery_state,
+            {"pending", "delivering"},
+        )
         release.set()
+        await sink.drain()
         self.assertEqual(
-            await task,
-            {"accepted": True, "duplicate": False},
+            self.coordinator.get_milestone(
+                "op-1", "media-wait"
+            ).delivery_state,
+            "delivered",
+        )
+
+    async def test_operation_milestone_retries_only_explicit_rejection_three_times(self):
+        from app.handlers.interaction_handler import OperationMilestoneSink
+
+        self.coordinator.report("search", self.report())
+        delivery = AsyncMock(return_value={"accepted": False})
+        sink = OperationMilestoneSink(self.coordinator, delivery)
+        await sink.start()
+
+        response = await sink("search", {
+            "operation_id": "op-1",
+            "milestone_id": "media-rejected",
+            "mode": "stage",
+            "text": "搜索完成",
+            "photo_url": "",
+        })
+        await sink.drain()
+
+        self.assertTrue(response["accepted"])
+        self.assertEqual(delivery.await_count, 3)
+        intent = self.coordinator.get_milestone("op-1", "media-rejected")
+        self.assertEqual(intent.delivery_state, "failed")
+        self.assertEqual(intent.attempt_count, 3)
+
+    async def test_operation_milestone_uncertain_exception_is_unknown_without_retry(self):
+        from telegram.error import TimedOut
+        from app.handlers.interaction_handler import OperationMilestoneSink
+
+        self.coordinator.report("search", self.report())
+        delivery = AsyncMock(side_effect=TimedOut("uncertain"))
+        sink = OperationMilestoneSink(self.coordinator, delivery)
+        await sink.start()
+
+        response = await sink("search", {
+            "operation_id": "op-1",
+            "milestone_id": "media-uncertain",
+            "mode": "stage",
+            "text": "搜索完成",
+            "photo_url": "",
+        })
+        await sink.drain()
+
+        self.assertTrue(response["accepted"])
+        delivery.assert_awaited_once()
+        intent = self.coordinator.get_milestone("op-1", "media-uncertain")
+        self.assertEqual(intent.delivery_state, "unknown")
+        self.assertEqual(intent.attempt_count, 1)
+
+    async def test_malformed_milestone_targets_are_unknown_without_retry_or_cursor_cas(self):
+        from app.handlers.interaction_handler import OperationMilestoneSink
+
+        malformed_results = (
+            ("id-without-kind", {"accepted": True, "message_id": 99}),
+            ("kind-without-id", {"accepted": True, "message_kind": "text"}),
+            (
+                "invalid-kind",
+                {
+                    "accepted": True,
+                    "message_id": 99,
+                    "message_kind": "bogus",
+                },
+            ),
+            (
+                "zero-id",
+                {
+                    "accepted": True,
+                    "message_id": 0,
+                    "message_kind": "text",
+                },
+            ),
+            (
+                "non-numeric-id",
+                {
+                    "accepted": True,
+                    "message_id": "not-a-message-id",
+                    "message_kind": "text",
+                },
+            ),
+        )
+        for index, (case, result) in enumerate(malformed_results, 1):
+            with self.subTest(case=case):
+                operation_id = f"op-invalid-target-{index}"
+                self.coordinator.report("search", self.report(
+                    operation_id=operation_id,
+                    chat_id=100 + index,
+                    user_id=100 + index,
+                ))
+                self.coordinator.set_message_id(operation_id, 41, "text")
+                delivery = AsyncMock(return_value=result)
+                sink = OperationMilestoneSink(self.coordinator, delivery)
+                await sink.start()
+
+                response = await sink("search", {
+                    "operation_id": operation_id,
+                    "milestone_id": f"malformed-{case}",
+                    "mode": "stage",
+                    "text": "搜索完成",
+                    "photo_url": "",
+                })
+                await sink.drain()
+
+                self.assertTrue(response["accepted"])
+                delivery.assert_awaited_once()
+                intent = self.coordinator.get_milestone(
+                    operation_id, f"malformed-{case}"
+                )
+                self.assertEqual(intent.delivery_state, "unknown")
+                self.assertEqual(intent.attempt_count, 1)
+                self.assertIsNone(intent.delivered_message_id)
+                self.assertEqual(self.coordinator.get(operation_id).message_id, 41)
+
+    async def test_targetless_mapping_success_remains_delivered(self):
+        from app.handlers.interaction_handler import OperationMilestoneSink
+
+        self.coordinator.report("search", self.report())
+        delivery = AsyncMock(return_value={"accepted": True})
+        sink = OperationMilestoneSink(self.coordinator, delivery)
+        await sink.start()
+
+        await sink("search", {
+            "operation_id": "op-1",
+            "milestone_id": "targetless-success",
+            "mode": "stage",
+            "text": "搜索完成",
+            "photo_url": "",
+        })
+        await sink.drain()
+
+        delivery.assert_awaited_once()
+        intent = self.coordinator.get_milestone(
+            "op-1", "targetless-success"
+        )
+        self.assertEqual(intent.delivery_state, "delivered")
+        self.assertIsNone(intent.delivered_message_id)
+
+    async def test_telegram_success_without_message_id_omits_target_pair(self):
+        from app.handlers.interaction_handler import deliver_operation_milestone
+
+        context = self.context()
+        context.application.bot.send_message.return_value = SimpleNamespace()
+
+        result = await deliver_operation_milestone(
+            context.application,
+            self.coordinator.report("search", self.report()),
+            "stage",
+            "",
+            "搜索完成",
+        )
+
+        self.assertEqual(result, {"accepted": True})
+
+    async def test_fifty_duplicate_milestones_share_one_delivery_worker(self):
+        from app.handlers.interaction_handler import OperationMilestoneSink
+
+        self.coordinator.report("search", self.report())
+        release = asyncio.Event()
+        started = asyncio.Event()
+        delivery = Mock()
+
+        async def blocked_delivery(*_args):
+            delivery(*_args)
+            started.set()
+            await release.wait()
+            return True
+
+        sink = OperationMilestoneSink(self.coordinator, blocked_delivery)
+        await sink.start()
+        payload = {
+            "operation_id": "op-1",
+            "milestone_id": "media-duplicate-wave",
+            "mode": "stage",
+            "text": "搜索完成",
+            "photo_url": "",
+        }
+
+        responses = await asyncio.gather(*(
+            sink("search", payload) for _ in range(50)
+        ))
+        await started.wait()
+
+        self.assertEqual(sum(not item["duplicate"] for item in responses), 1)
+        self.assertEqual(len(sink._workers), 1)
+        self.assertEqual(delivery.call_count, 1)
+        release.set()
+        await sink.drain()
+        self.assertEqual(delivery.call_count, 1)
+
+    async def test_milestone_start_recovers_pending_once_idempotently(self):
+        from app.handlers.interaction_handler import OperationMilestoneSink
+
+        self.coordinator.report("search", self.report())
+        payload = {
+            "operation_id": "op-1",
+            "milestone_id": "media-restart",
+            "mode": "stage",
+            "text": "搜索完成",
+            "photo_url": "",
+        }
+        dormant = OperationMilestoneSink(self.coordinator, AsyncMock())
+        queued = await dormant("search", payload)
+        self.assertEqual(
+            self.coordinator.get_milestone(
+                "op-1", "media-restart"
+            ).delivery_state,
+            "pending",
+        )
+
+        delivery = AsyncMock(return_value=True)
+        recovered = OperationMilestoneSink(self.coordinator, delivery)
+        await asyncio.gather(recovered.start(), recovered.start())
+        await recovered.drain()
+
+        self.assertTrue(queued["accepted"])
+        delivery.assert_awaited_once()
+        self.assertEqual(
+            self.coordinator.get_milestone(
+                "op-1", "media-restart"
+            ).delivery_state,
+            "delivered",
         )
 
     @patch("app.handlers.interaction_handler.build_poster_grid")
@@ -453,7 +719,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         photo.name = "telepiplex-identity.jpg"
         build_grid.return_value = photo
         context = self.context()
-        original_complete = self.coordinator.complete_milestone
+        original_complete = self.coordinator.complete_milestone_delivery
         completion_lost = True
 
         def complete_then_lose(*args):
@@ -463,7 +729,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("completion interrupted")
             return original_complete(*args)
 
-        self.coordinator.complete_milestone = complete_then_lose
+        self.coordinator.complete_milestone_delivery = complete_then_lose
         sink = OperationMilestoneSink(
             self.coordinator,
             lambda current, mode, photo_url, text: deliver_operation_milestone(
@@ -474,6 +740,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
                 text,
             ),
         )
+        await sink.start()
         payload = {
             "operation_id": "op-1",
             "milestone_id": "media-recover",
@@ -482,22 +749,28 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             "photo_url": "https://img.example/poster.jpg",
         }
 
-        with self.assertRaisesRegex(RuntimeError, "completion interrupted"):
-            await sink("search", payload)
+        response = await sink("search", payload)
+        await sink.drain()
         self.assertIsNone(self.coordinator.get("op-1").message_id)
         context.application.bot.send_photo.assert_awaited_once()
 
-        recovered = await sink("search", payload)
         duplicate = await sink("search", payload)
+        await sink.drain()
 
-        self.assertEqual(recovered, {
-            "accepted": True,
-            "duplicate": False,
-            "recovered": True,
+        self.assertEqual(response, {
+            "accepted": True, "queued": True, "duplicate": False,
         })
-        self.assertEqual(duplicate, {"accepted": True, "duplicate": True})
+        self.assertEqual(duplicate, {
+            "accepted": True, "queued": True, "duplicate": True,
+        })
         context.application.bot.send_photo.assert_awaited_once()
         self.assertIsNone(self.coordinator.get("op-1").message_id)
+        self.assertEqual(
+            self.coordinator.get_milestone(
+                "op-1", "media-recover"
+            ).delivery_state,
+            "delivered",
+        )
 
     @patch("app.handlers.interaction_handler.build_poster_grid")
     async def test_milestone_retry_does_not_resend_when_target_record_fails(
@@ -515,8 +788,9 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         photo.name = "telepiplex-identity.jpg"
         build_grid.return_value = photo
         context = self.context()
-        original_record = self.coordinator.record_milestone_delivery
         record_lost = True
+
+        original_record = self.coordinator.record_milestone_delivery_target
 
         def record_then_lose(*args):
             nonlocal record_lost
@@ -525,7 +799,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("delivery target record interrupted")
             return original_record(*args)
 
-        self.coordinator.record_milestone_delivery = record_then_lose
+        self.coordinator.record_milestone_delivery_target = record_then_lose
         sink = OperationMilestoneSink(
             self.coordinator,
             lambda current, mode, photo_url, text: deliver_operation_milestone(
@@ -536,6 +810,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
                 text,
             ),
         )
+        await sink.start()
         payload = {
             "operation_id": "op-1",
             "milestone_id": "media-record-recover",
@@ -544,25 +819,27 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             "photo_url": "https://img.example/poster.jpg",
         }
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "delivery target record interrupted",
-        ):
-            await sink("search", payload)
+        response = await sink("search", payload)
+        await sink.drain()
         context.application.bot.send_photo.assert_awaited_once()
 
-        recovered = await sink("search", payload)
         duplicate = await sink("search", payload)
+        await sink.drain()
 
-        self.assertEqual(recovered, {
-            "accepted": True,
-            "duplicate": False,
-            "recovered": True,
-            "delivery_uncertain": True,
+        self.assertEqual(response, {
+            "accepted": True, "queued": True, "duplicate": False,
         })
-        self.assertEqual(duplicate, {"accepted": True, "duplicate": True})
+        self.assertEqual(duplicate, {
+            "accepted": True, "queued": True, "duplicate": True,
+        })
         context.application.bot.send_photo.assert_awaited_once()
-        self.assertIsNone(self.coordinator.get("op-1").message_id)
+        self.assertEqual(self.coordinator.get("op-1").message_id, 42)
+        self.assertEqual(
+            self.coordinator.get_milestone(
+                "op-1", "media-record-recover"
+            ).delivery_state,
+            "unknown",
+        )
 
     async def test_operation_milestone_shares_operation_render_lock(self):
         from app.handlers.interaction_handler import OperationMilestoneSink
@@ -575,25 +852,26 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             delivery,
             lambda _operation_id: render_lock,
         )
+        await sink.start()
         await render_lock.acquire()
-        task = asyncio.create_task(sink("search", {
+        response = await sink("search", {
             "operation_id": "op-1",
             "milestone_id": "media-locked",
             "mode": "stage",
             "text": "资源搜索已完成。",
-        }))
+        })
 
         await asyncio.sleep(0)
         delivery.assert_not_awaited()
         render_lock.release()
 
-        self.assertEqual(
-            await task,
-            {"accepted": True, "duplicate": False},
-        )
+        self.assertEqual(response, {
+            "accepted": True, "queued": True, "duplicate": False,
+        })
+        await sink.drain()
         delivery.assert_awaited_once()
 
-    async def test_cancelled_operation_milestone_can_be_retried(self):
+    async def test_cancelled_operation_milestone_becomes_unknown_without_retry(self):
         from app.handlers.interaction_handler import OperationMilestoneSink
 
         self.coordinator.report("search", self.report())
@@ -604,25 +882,26 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
 
         sink = OperationMilestoneSink(self.coordinator, deliver)
+        await sink.start()
         payload = {
             "operation_id": "op-1",
             "milestone_id": "media-cancelled",
             "text": "繁花 (Blossoms Shanghai)",
             "photo_url": "",
         }
-        task = asyncio.create_task(sink("search", payload))
+        response = await sink("search", payload)
         await started.wait()
-        task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
+        self.assertFalse(await sink.drain(timeout=0.01))
 
-        self.assertIsNotNone(
-            self.coordinator.claim_milestone(
-                "search",
-                "op-1",
-                "media-cancelled",
-            )
+        self.assertTrue(response["accepted"])
+        self.assertEqual(
+            self.coordinator.get_milestone(
+                "op-1", "media-cancelled"
+            ).delivery_state,
+            "unknown",
         )
+        self.assertEqual(sink._workers, {})
+        self.assertEqual(sink._tasks, set())
 
     @patch("app.handlers.interaction_handler.build_poster_grid")
     async def test_identity_milestone_replaces_current_photo_then_rotates_cursor(
@@ -650,6 +929,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
                 text,
             ),
         )
+        await sink.start()
 
         result = await sink("search", {
             "operation_id": "op-1",
@@ -658,8 +938,11 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             "text": "🎬 繁花 (Blossoms Shanghai)",
             "photo_url": "https://img.example/poster.jpg",
         })
+        await sink.drain()
 
-        self.assertEqual(result, {"accepted": True, "duplicate": False})
+        self.assertEqual(result, {
+            "accepted": True, "queued": True, "duplicate": False,
+        })
         context.application.bot.edit_message_media.assert_awaited_once()
         edited = context.application.bot.edit_message_media.await_args.kwargs
         self.assertEqual(edited["chat_id"], 10)
@@ -687,6 +970,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
                 text,
             ),
         )
+        await sink.start()
 
         result = await sink("download", {
             "operation_id": "op-1",
@@ -695,8 +979,11 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             "text": "✅ 115 下载完成",
             "photo_url": "",
         })
+        await sink.drain()
 
-        self.assertEqual(result, {"accepted": True, "duplicate": False})
+        self.assertEqual(result, {
+            "accepted": True, "queued": True, "duplicate": False,
+        })
         context.application.bot.edit_message_text.assert_awaited_once_with(
             chat_id=10,
             message_id=43,
@@ -715,6 +1002,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             self.coordinator,
             lambda _record, _mode, _photo_url, _text: False,
         )
+        await sink.start()
 
         result = await sink("download", {
             "operation_id": "op-1",
@@ -723,9 +1011,18 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             "text": "✅ 115 下载完成",
             "photo_url": "",
         })
+        await sink.drain()
 
-        self.assertEqual(result, {"accepted": False, "duplicate": False})
+        self.assertEqual(result, {
+            "accepted": True, "queued": True, "duplicate": False,
+        })
         self.assertEqual(self.coordinator.get("op-1").message_id, 43)
+        self.assertEqual(
+            self.coordinator.get_milestone(
+                "op-1", "download-completed"
+            ).delivery_state,
+            "failed",
+        )
 
     @patch("app.handlers.interaction_handler.build_poster_grid")
     async def test_identity_delivery_without_remote_url_sends_title_placeholder(
@@ -803,6 +1100,74 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             record.operation_id,
         )
         self.assertEqual(completed["diagnostic_fields"]["output"]["message_id"], 90)
+
+    async def test_stage_transport_timeout_does_not_fallback_or_resend(self):
+        from telegram.error import TimedOut
+        from app.handlers.interaction_handler import deliver_operation_milestone
+
+        created = self.coordinator.report("search", self.report())
+        record = self.coordinator.set_message_id(
+            created.operation_id, 43, "text"
+        )
+        context = self.context()
+        context.application.bot.edit_message_text.side_effect = TimedOut(
+            "uncertain"
+        )
+
+        with self.assertRaises(TimedOut):
+            await deliver_operation_milestone(
+                context.application,
+                record,
+                "stage",
+                "",
+                "搜索完成",
+            )
+
+        context.application.bot.edit_message_text.assert_awaited_once()
+        context.application.bot.send_message.assert_not_awaited()
+
+    @patch("app.handlers.interaction_handler.build_poster_grid")
+    async def test_identity_transport_timeout_does_not_fallback_to_text(
+        self, build_grid
+    ):
+        from telegram.error import TimedOut
+        from app.handlers.interaction_handler import deliver_operation_milestone
+
+        photo = BytesIO(b"identity")
+        photo.name = "telepiplex-identity.jpg"
+        build_grid.return_value = photo
+        context = self.context()
+        context.application.bot.send_photo.side_effect = TimedOut("uncertain")
+
+        with self.assertRaises(TimedOut):
+            await deliver_operation_milestone(
+                context.application,
+                10,
+                "https://img.example/poster.jpg",
+                "🎬 繁花",
+            )
+
+        context.application.bot.send_photo.assert_awaited_once()
+        context.application.bot.send_message.assert_not_awaited()
+
+    async def test_final_bad_request_is_an_explicit_milestone_rejection(self):
+        from app.handlers.interaction_handler import deliver_operation_milestone
+
+        context = self.context()
+        context.application.bot.send_message.side_effect = BadRequest(
+            "chat rejected"
+        )
+
+        result = await deliver_operation_milestone(
+            context.application,
+            self.coordinator.report("search", self.report()),
+            "stage",
+            "",
+            "搜索完成",
+        )
+
+        self.assertEqual(result["accepted"], False)
+        context.application.bot.send_message.assert_awaited_once()
 
     @patch("app.handlers.interaction_handler.build_poster_grid")
     async def test_identity_delivery_reuses_title_placeholder_when_remote_fails(
@@ -1289,6 +1654,35 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("message_kind=text", warning)
         self.assertIn("access_token=***redacted***", warning)
         self.assertNotIn("should-not-leak", warning)
+
+    async def test_stale_supplied_snapshot_cannot_overwrite_newer_cursor_owner(self):
+        from app.handlers.interaction_handler import render_operation
+
+        stale = self.coordinator.report("search", self.report())
+        self.coordinator.report("search", self.report(
+            state="handed_off",
+            stage="handoff_download",
+            revision=2,
+            next_plugin_id="download",
+        ))
+        self.coordinator.report("download", self.report(
+            stage="downloading",
+            revision=3,
+        ))
+        context = self.context()
+        context.application.bot.send_message.return_value = SimpleNamespace(
+            message_id=88
+        )
+
+        rendered = await render_operation(
+            context.application, Mock(), stale
+        )
+
+        self.assertEqual(rendered, 88)
+        current = self.coordinator.get("op-1")
+        self.assertEqual(current.plugin_id, "download")
+        self.assertEqual(current.revision, 3)
+        self.assertIsNone(current.message_id)
 
     async def test_unchanged_status_edit_does_not_send_duplicate_message(self):
         from app.handlers.interaction_handler import render_operation

@@ -50,6 +50,7 @@ def manifest(plugin_id, *, provides=(), requires=(), publishes=(), subscribes=()
 class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from app.runtime.capability_router import CapabilityRouter
+        from app.runtime.interaction_coordinator import InteractionCoordinator
         from app.runtime.runtime_broker import RuntimeBroker
         from app.runtime.event_journal import EventJournal
 
@@ -57,6 +58,7 @@ class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
         root = Path(self.temp.name)
         self.router = CapabilityRouter()
         self.journal = EventJournal(root / "host.db")
+        self.coordinator = InteractionCoordinator(root / "host.db")
         self.notifications = []
         self.milestones = []
         self.operation_sink = AsyncMock(return_value={"accepted": True, "revision": 1})
@@ -69,11 +71,13 @@ class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
                 (plugin_id, payload)
             ),
             operation_sink=self.operation_sink,
+            operation_coordinator=self.coordinator,
         )
         await self.broker.start()
 
     async def asyncTearDown(self):
         await self.broker.close()
+        self.coordinator.close()
         self.journal.close()
         self.temp.cleanup()
 
@@ -292,6 +296,278 @@ class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(FeatureError) as raised:
             await client.publish_event("download.completed", {}, deadline=1)
         self.assertEqual(raised.exception.code, "unauthorized")
+
+    async def test_event_publish_records_the_matching_handoff_submission(self):
+        from telepiplex_plugin_sdk import HostClient
+
+        report = {
+            "operation_id": "op-event-receipt",
+            "chat_id": 10,
+            "user_id": 1,
+            "state": "running",
+            "stage": "downloading",
+            "status_text": "下载中",
+            "control": "cancel",
+            "revision": 1,
+        }
+        self.coordinator.report("download", report)
+        self.coordinator.report(
+            "download",
+            {
+                **report,
+                "state": "handed_off",
+                "stage": "handoff_rename",
+                "next_plugin_id": "rename",
+                "revision": 2,
+            },
+        )
+        self.broker.register(
+            "download",
+            "receipt-token",
+            manifest("download", publishes=("download.completed",)),
+        )
+        client = HostClient(self.broker.socket_path, "receipt-token")
+
+        first = await client.publish_event(
+            "download.completed",
+            {"operation_id": "op-event-receipt", "job_id": "job-1"},
+            idempotency_key="rename.enqueue:job-1",
+            deadline=1,
+        )
+        duplicate = await client.publish_event(
+            "download.completed",
+            {"operation_id": "op-event-receipt", "job_id": "job-1"},
+            idempotency_key="rename.enqueue:job-1",
+            deadline=1,
+        )
+
+        self.assertEqual(first, duplicate)
+        handoffs = self.coordinator.get_handoffs("op-event-receipt")
+        self.assertEqual(len(handoffs), 1)
+        self.assertEqual(handoffs[0].state, "submitted")
+        self.assertEqual(handoffs[0].event_id, first["event_id"])
+
+    async def test_event_publish_binds_the_captured_handoff_after_target_accepts(self):
+        from telepiplex_plugin_sdk import HostClient
+
+        report = {
+            "operation_id": "op-event-race",
+            "chat_id": 20,
+            "user_id": 2,
+            "state": "running",
+            "stage": "downloading",
+            "status_text": "下载中",
+            "control": "cancel",
+            "revision": 1,
+        }
+        self.coordinator.report("download", report)
+        self.coordinator.report("download", {
+            **report,
+            "state": "handed_off",
+            "stage": "handoff_rename",
+            "next_plugin_id": "rename",
+            "revision": 2,
+        })
+        self.broker.register(
+            "download",
+            "race-token",
+            manifest("download", publishes=("download.completed",)),
+        )
+        publish = self.journal.publish
+
+        def publish_then_accept(
+            event_type,
+            payload,
+            idempotency_key,
+            *,
+            handoff_binding=None,
+        ):
+            event_id = publish(
+                event_type,
+                payload,
+                idempotency_key,
+                handoff_binding=handoff_binding,
+            )
+            self.coordinator.report(
+                "rename",
+                {
+                    **report,
+                    "state": "running",
+                    "stage": "rename",
+                    "revision": 3,
+                },
+            )
+            return event_id
+
+        self.journal.publish = publish_then_accept
+
+        result = await HostClient(
+            self.broker.socket_path,
+            "race-token",
+        ).publish_event(
+            "download.completed",
+            {"operation_id": "op-event-race", "job_id": "job-race"},
+            idempotency_key="rename.enqueue:job-race",
+            deadline=1,
+        )
+
+        receipt = self.coordinator.get_handoffs("op-event-race")[0]
+        self.assertEqual(receipt.state, "accepted")
+        self.assertEqual(receipt.event_id, result["event_id"])
+
+    async def test_event_publish_retry_after_restart_recovers_durable_handoff_binding(self):
+        from app.runtime.event_journal import EventJournal
+        from app.runtime.runtime_broker import RuntimeBroker
+        from telepiplex_plugin_sdk import FeatureError, HostClient
+
+        report = {
+            "operation_id": "op-event-restart",
+            "chat_id": 25,
+            "user_id": 5,
+            "state": "running",
+            "stage": "downloading",
+            "status_text": "下载中",
+            "control": "cancel",
+            "revision": 1,
+        }
+        self.coordinator.report("download", report)
+        self.coordinator.report("download", {
+            **report,
+            "state": "handed_off",
+            "stage": "handoff_rename",
+            "next_plugin_id": "rename",
+            "revision": 2,
+        })
+        self.journal.set_subscriptions("rename", ["download.completed"])
+        publisher = manifest("download", publishes=("download.completed",))
+        self.broker.register("download", "restart-token", publisher)
+        client = HostClient(self.broker.socket_path, "restart-token")
+        bind = self.coordinator.record_handoff_event
+
+        def stop_after_journal_commit(*args, **kwargs):
+            raise RuntimeError("injected stop after journal commit")
+
+        self.coordinator.record_handoff_event = stop_after_journal_commit
+        with self.assertRaises(FeatureError) as raised:
+            await client.publish_event(
+                "download.completed",
+                {"operation_id": "op-event-restart", "job_id": "job-restart"},
+                idempotency_key="rename.enqueue:job-restart",
+                deadline=1,
+            )
+        self.assertEqual(raised.exception.code, "internal_error")
+        event_id = self.journal.pending("rename")[0].event_id
+        database = self.journal.database_path
+        socket_path = self.broker.socket_path
+
+        await self.broker.close()
+        self.journal.close()
+        self.coordinator.record_handoff_event = bind
+        self.coordinator.report("rename", {
+            **report,
+            "state": "running",
+            "stage": "rename",
+            "revision": 3,
+        })
+        self.assertIsNone(
+            self.coordinator.capture_handoff("op-event-restart", "download")
+        )
+
+        self.journal = EventJournal(database)
+        durable = self.journal.handoff_binding(event_id)
+        self.assertIsNotNone(durable)
+        self.assertEqual(durable.handoff_key, "op-event-restart:2:rename")
+        self.broker = RuntimeBroker(
+            self.router,
+            self.journal,
+            socket_path,
+            operation_coordinator=self.coordinator,
+        )
+        self.broker.register("download", "restart-token", publisher)
+        await self.broker.start()
+
+        retried = await HostClient(
+            socket_path,
+            "restart-token",
+        ).publish_event(
+            "download.completed",
+            {"operation_id": "op-event-restart", "job_id": "job-restart"},
+            idempotency_key="rename.enqueue:job-restart",
+            deadline=1,
+        )
+
+        self.assertEqual(retried["event_id"], event_id)
+        receipt = self.coordinator.get_handoffs("op-event-restart")[0]
+        self.assertEqual(receipt.state, "accepted")
+        self.assertEqual(receipt.event_id, event_id)
+
+    async def test_event_idempotency_collision_cannot_rebind_another_operation(self):
+        from telepiplex_plugin_sdk import FeatureError, HostClient
+
+        self.journal.set_subscriptions("rename", ["download.completed"])
+        self.broker.register(
+            "download",
+            "collision-token",
+            manifest("download", publishes=("download.completed",)),
+        )
+        client = HostClient(self.broker.socket_path, "collision-token")
+
+        def handoff(operation_id, chat_id, user_id):
+            report = {
+                "operation_id": operation_id,
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "state": "running",
+                "stage": "downloading",
+                "status_text": "下载中",
+                "control": "cancel",
+                "revision": 1,
+            }
+            self.coordinator.report("download", report)
+            self.coordinator.report("download", {
+                **report,
+                "state": "handed_off",
+                "stage": "handoff_rename",
+                "next_plugin_id": "rename",
+                "revision": 2,
+            })
+
+        handoff("op-collision-1", 31, 3)
+        first = await client.publish_event(
+            "download.completed",
+            {"operation_id": "op-collision-1"},
+            idempotency_key="shared-rename-enqueue",
+            deadline=1,
+        )
+        handoff("op-collision-2", 41, 4)
+
+        with self.assertRaises(FeatureError) as raised:
+            await client.publish_event(
+                "download.completed",
+                {"operation_id": "op-collision-2"},
+                idempotency_key="shared-rename-enqueue",
+                deadline=1,
+            )
+
+        self.assertEqual(raised.exception.code, "handoff_event_conflict")
+        first_receipt = self.coordinator.get_handoffs("op-collision-1")[0]
+        second_receipt = self.coordinator.get_handoffs("op-collision-2")[0]
+        self.assertEqual(first_receipt.event_id, first["event_id"])
+        self.assertEqual(first_receipt.state, "submitted")
+        self.assertEqual(second_receipt.event_id, "")
+        self.assertEqual(second_receipt.state, "prepared")
+        self.assertEqual(len(self.journal.pending("rename")), 1)
+
+    async def test_runtime_broker_keeps_the_legacy_constructor_compatible(self):
+        from app.runtime.runtime_broker import RuntimeBroker
+
+        broker = RuntimeBroker(
+            self.router,
+            self.journal,
+            Path(self.temp.name) / "legacy-host.sock",
+        )
+
+        self.assertIsNone(broker.operation_coordinator)
 
     async def test_authenticated_feature_can_send_bounded_user_notification(self):
         from telepiplex_plugin_sdk import HostClient, FeatureError

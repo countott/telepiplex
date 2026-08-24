@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 import hashlib
+import math
 import re
 import secrets
 import threading
@@ -9,6 +12,8 @@ import time
 from pathlib import PurePosixPath
 
 import requests
+
+from .pacing import EndpointPacer
 
 
 class Open115Error(RuntimeError):
@@ -25,7 +30,32 @@ class Open115Client:
         re.IGNORECASE,
     )
 
-    def __init__(self, config: dict, *, session=None, on_tokens_changed=None):
+    _ENDPOINT_CLASSES = {
+        ("GET", "/open/offline/get_task_list"): "offline.poll",
+        ("POST", "/open/offline/add_task_urls"): "offline.mutation",
+        ("POST", "/open/offline/del_task"): "offline.mutation",
+        ("GET", "/open/folder/get_info"): "storage.read",
+        ("GET", "/open/ufile/files"): "storage.read",
+        ("POST", "/open/folder/add"): "storage.mutation",
+        ("POST", "/open/ufile/update"): "storage.mutation",
+        ("POST", "/open/ufile/copy"): "storage.mutation",
+        ("POST", "/open/ufile/delete"): "storage.mutation",
+        ("POST", "/open/ufile/move"): "storage.mutation",
+    }
+    _MUTATION_CLASSES = {
+        "offline.mutation",
+        "storage.mutation",
+        "token.refresh",
+    }
+
+    def __init__(
+        self,
+        config: dict,
+        *,
+        session=None,
+        on_tokens_changed=None,
+        pacer=None,
+    ):
         self.config = config
         self.base_url = str(config.get("base_url") or "https://proapi.115.com").rstrip("/")
         self.passport_url = str(config.get("passport_url") or "https://passportapi.115.com").rstrip("/")
@@ -35,8 +65,33 @@ class Open115Client:
         self.request_interval = max(0, float(config.get("request_interval") or 1))
         self.session = session or requests.Session()
         self.on_tokens_changed = on_tokens_changed
-        self._lock = threading.Lock()
-        self._last_request = 0.0
+        endpoint_intervals = config.get("endpoint_intervals")
+        if not isinstance(endpoint_intervals, dict):
+            legacy_interval = config.get("request_interval")
+            if legacy_interval is None:
+                endpoint_intervals = {}
+            else:
+                endpoint_intervals = {
+                    "offline_poll": legacy_interval,
+                    "offline_mutation": legacy_interval,
+                    "storage_read": legacy_interval,
+                    "storage_mutation": legacy_interval,
+                    "token_refresh": legacy_interval,
+                }
+        self._pacer = pacer or EndpointPacer(endpoint_intervals)
+        self._mutation_guard = threading.Lock()
+        try:
+            configured_workers = int(config.get("storage_read_workers", 4))
+        except (TypeError, ValueError):
+            configured_workers = 4
+        self.storage_read_workers = min(4, max(1, configured_workers))
+        self._storage_read_slots = threading.BoundedSemaphore(
+            self.storage_read_workers
+        )
+        self._cache_lock = threading.Lock()
+        self._cache_condition = threading.Condition(self._cache_lock)
+        self._cache_generation = 0
+        self._storage_mutation_active = False
         self._file_cache = {}
 
     def set_tokens(self, access_token: str, refresh_token: str):
@@ -73,23 +128,46 @@ class Open115Client:
         files=None,
         retry=True,
     ):
-        with self._lock:
-            remaining = self.request_interval - (time.monotonic() - self._last_request)
-            if remaining > 0:
-                time.sleep(remaining)
-            self._last_request = time.monotonic()
+        endpoint_class = self._classify_endpoint(method, path)
         try:
-            response = self.session.request(
-                method,
-                f"{self.base_url}{path}",
-                headers=self._headers(),
-                params=params,
-                data=data,
-                files=files,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            result = response.json()
+            if endpoint_class in self._MUTATION_CLASSES:
+                guard = self._mutation_guard
+            elif endpoint_class == "storage.read":
+                guard = self._storage_read_slots
+            else:
+                guard = nullcontext()
+            with guard:
+                self._pacer.acquire(endpoint_class)
+                storage_mutation = endpoint_class == "storage.mutation"
+                if storage_mutation:
+                    self._begin_storage_mutation()
+                result = None
+                request_completed = False
+                try:
+                    response = self.session.request(
+                        method,
+                        f"{self.base_url}{path}",
+                        headers=self._headers(),
+                        params=params,
+                        data=data,
+                        files=files,
+                        timeout=self.timeout,
+                    )
+                    self._observe_http_throttle(endpoint_class, response)
+                    response.raise_for_status()
+                    result = response.json()
+                    request_completed = True
+                finally:
+                    if storage_mutation:
+                        token_expired = (
+                            isinstance(result, dict)
+                            and result.get("code") in self.TOKEN_EXPIRED_CODES
+                        )
+                        self._finish_storage_mutation(
+                            request_completed
+                            and not token_expired
+                            and self._successful(result)
+                        )
         except (requests.RequestException, ValueError) as exc:
             raise Open115Error(
                 f"115 request failed: {type(exc).__name__}",
@@ -113,6 +191,37 @@ class Open115Client:
             )
         return result
 
+    def _classify_endpoint(self, method: str, path: str) -> str:
+        key = (str(method or "").upper(), str(path or ""))
+        endpoint_class = self._ENDPOINT_CLASSES.get(key)
+        if endpoint_class is None:
+            raise Open115Error(
+                f"115 endpoint is not classified: {key[0]} {key[1]}",
+                code="unclassified_endpoint",
+                operation=key[1],
+            )
+        return endpoint_class
+
+    def _observe_http_throttle(self, endpoint_class: str, response) -> None:
+        if int(getattr(response, "status_code", 0) or 0) != 429:
+            return
+        headers = getattr(response, "headers", {})
+        retry_after = headers.get("Retry-After") if hasattr(headers, "get") else None
+        self._pacer.observe_throttle(endpoint_class, retry_after)
+
+    def _passport_post(self, path: str, *, data: dict):
+        with self._mutation_guard:
+            self._pacer.acquire("token.refresh")
+            response = self.session.post(
+                f"{self.passport_url}{path}",
+                headers={"User-Agent": "telepiplex-Feature/1.0"},
+                data=data,
+                timeout=self.timeout,
+            )
+            self._observe_http_throttle("token.refresh", response)
+            response.raise_for_status()
+            return response.json()
+
     def refresh_access_token(self):
         if not self.refresh_token:
             raise Open115Error(
@@ -121,14 +230,10 @@ class Open115Client:
                 operation="refresh_access_token",
             )
         try:
-            response = self.session.post(
-                f"{self.passport_url}/open/refreshToken",
-                headers={"User-Agent": "telepiplex-Feature/1.0"},
+            result = self._passport_post(
+                "/open/refreshToken",
                 data={"refresh_token": self.refresh_token},
-                timeout=self.timeout,
             )
-            response.raise_for_status()
-            result = response.json()
         except (requests.RequestException, ValueError) as exc:
             raise Open115Error(
                 f"115 token refresh failed: {type(exc).__name__}",
@@ -159,18 +264,14 @@ class Open115Client:
             raise Open115Error("115 app_id is not configured")
         verifier, challenge = self._pkce_pair()
         try:
-            response = self.session.post(
-                f"{self.passport_url}/open/authDeviceCode",
-                headers={"User-Agent": "telepiplex-Feature/1.0"},
+            result = self._passport_post(
+                "/open/authDeviceCode",
                 data={
                     "client_id": app_id,
                     "code_challenge": challenge,
                     "code_challenge_method": "sha256",
                 },
-                timeout=self.timeout,
             )
-            response.raise_for_status()
-            result = response.json()
         except (requests.RequestException, ValueError) as exc:
             raise Open115Error(
                 f"115 device authorization failed: {type(exc).__name__}"
@@ -234,17 +335,13 @@ class Open115Client:
             raise Open115Error("115 device authorization timed out")
 
         try:
-            response = self.session.post(
-                f"{self.passport_url}/open/deviceCodeToToken",
-                headers={"User-Agent": "telepiplex-Feature/1.0"},
+            result = self._passport_post(
+                "/open/deviceCodeToToken",
                 data={
                     "uid": authorization["uid"],
                     "code_verifier": authorization["code_verifier"],
                 },
-                timeout=self.timeout,
             )
-            response.raise_for_status()
-            result = response.json()
         except (requests.RequestException, ValueError) as exc:
             raise Open115Error(
                 f"115 device token exchange failed: {type(exc).__name__}"
@@ -266,15 +363,57 @@ class Open115Client:
             result.get("state") is True or result.get("code") == 0
         )
 
+    def _begin_storage_mutation(self) -> None:
+        with self._cache_condition:
+            while self._storage_mutation_active:
+                self._cache_condition.wait()
+            self._storage_mutation_active = True
+
+    def _finish_storage_mutation(self, successful: bool) -> None:
+        with self._cache_condition:
+            if successful:
+                self._cache_generation += 1
+                self._file_cache.clear()
+            self._storage_mutation_active = False
+            self._cache_condition.notify_all()
+
+    def _wait_for_storage_mutation(self) -> None:
+        while self._storage_mutation_active:
+            self._cache_condition.wait()
+
+    def _remove_cached_file(self, path: str) -> None:
+        with self._cache_condition:
+            self._wait_for_storage_mutation()
+            self._file_cache.pop(path, None)
+
+    @staticmethod
+    def _has_stable_file_identity(value) -> bool:
+        if not isinstance(value, dict):
+            return False
+        for key in ("file_id", "fid", "cid", "id"):
+            identity = value.get(key)
+            if isinstance(identity, bool):
+                continue
+            if isinstance(identity, (str, int)) and str(identity).strip():
+                return True
+        return False
+
     def get_file_info(self, path: str):
         path = self._normalize(path)
-        if path in self._file_cache:
-            return self._file_cache[path]
+        with self._cache_condition:
+            self._wait_for_storage_mutation()
+            if path in self._file_cache:
+                return self._file_cache[path]
+            generation = self._cache_generation
         result = self._request("GET", "/open/folder/get_info", params={"path": path})
-        if not self._successful(result) or not isinstance(result.get("data"), dict):
+        value = result.get("data") if self._successful(result) else None
+        if not self._has_stable_file_identity(value):
             return None
-        self._file_cache[path] = result["data"]
-        return result["data"]
+        with self._cache_condition:
+            self._wait_for_storage_mutation()
+            if generation == self._cache_generation:
+                self._file_cache[path] = value
+        return value
 
     def get_file_info_batch(self, paths: list[str]):
         if not isinstance(paths, list) or len(paths) > 32:
@@ -286,14 +425,31 @@ class Open115Client:
             if value and value not in seen:
                 seen.add(value)
                 normalized.append(value)
-        return {
-            path: self.get_file_info(path)
-            for path in normalized
-        }
+        values = {}
+        with self._cache_condition:
+            self._wait_for_storage_mutation()
+            for path in normalized:
+                if path in self._file_cache:
+                    values[path] = self._file_cache[path]
+        missing = [path for path in normalized if path not in values]
+
+        def fetch(path):
+            try:
+                return self.get_file_info(path)
+            except Exception:
+                return None
+
+        if missing:
+            worker_count = min(self.storage_read_workers, len(missing))
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                fetched = executor.map(fetch, missing)
+                values.update(zip(missing, fetched))
+        return {path: values.get(path) for path in normalized}
 
     def get_file_info_by_id(self, file_id: str):
         result = self._request("GET", "/open/folder/get_info", params={"file_id": file_id})
-        return result.get("data") if self._successful(result) else None
+        value = result.get("data") if self._successful(result) else None
+        return value if self._has_stable_file_identity(value) else None
 
     def get_file_list(self, params: dict):
         result = self._request("GET", "/open/ufile/files", params=dict(params))
@@ -328,7 +484,7 @@ class Open115Client:
                 current_info.get("file_id") or current_info.get("cid") or 0,
                 part,
             )
-            self._file_cache.pop(current_path, None)
+            self._remove_cached_file(current_path)
             info = self.get_file_info(current_path)
             if not info and isinstance(created, dict):
                 info = created
@@ -443,12 +599,43 @@ class Open115Client:
         *,
         existing_task=None,
         timeout: float,
-        poll_interval: float,
+        poll_interval: float | None = None,
+        poll_initial_interval: float | None = None,
+        poll_max_interval: float = 30,
+        poll_backoff_factor: float = 1.7,
         cancel_event=None,
         progress_callback=None,
     ):
+        if poll_initial_interval is None:
+            poll_initial_interval = (
+                poll_interval if poll_interval is not None else 2.0
+            )
+        try:
+            initial_interval = float(poll_initial_interval)
+        except (TypeError, ValueError):
+            initial_interval = 2.0
+        if not math.isfinite(initial_interval) or initial_interval <= 0:
+            initial_interval = 2.0
+        try:
+            maximum_interval = float(poll_max_interval)
+        except (TypeError, ValueError):
+            maximum_interval = 30.0
+        if not math.isfinite(maximum_interval):
+            maximum_interval = 30.0
+        maximum_interval = max(initial_interval, maximum_interval)
+        try:
+            backoff_factor = float(poll_backoff_factor)
+        except (TypeError, ValueError):
+            backoff_factor = 1.7
+        if not math.isfinite(backoff_factor):
+            backoff_factor = 1.7
+        backoff_factor = max(1.0, backoff_factor)
+
         deadline = time.monotonic() + float(timeout)
         last = {"name": "", "info_hash": "", "percentDone": 0}
+        unobserved = object()
+        previous_snapshot = unobserved
+        next_delay = initial_interval
         bound_hash = ""
         if isinstance(existing_task, dict):
             bound_hash = (
@@ -458,6 +645,7 @@ class Open115Client:
         while time.monotonic() < deadline:
             if cancel_event is not None and cancel_event.is_set():
                 raise Open115Error("115 download cancelled")
+            current_snapshot = None
             for task in self.get_offline_tasks():
                 if bound_hash:
                     task_hashes = {
@@ -471,11 +659,24 @@ class Open115Client:
                 if not matched:
                     continue
                 last = task
-                progress = float(task.get("percentDone") or 0)
+                try:
+                    progress = float(task.get("percentDone") or 0)
+                except (TypeError, ValueError):
+                    progress = 0.0
+                if not math.isfinite(progress):
+                    progress = 0.0
                 try:
                     task_status = int(task.get("status"))
                 except (TypeError, ValueError):
-                    task_status = task.get("status")
+                    task_status = str(task.get("status") or "")
+                raw_info_hash = str(task.get("info_hash") or "").strip()
+                current_snapshot = (
+                    self._normalize_info_hash(raw_info_hash)
+                    or raw_info_hash.lower(),
+                    str(task.get("name") or "").strip(),
+                    task_status,
+                    progress,
+                )
                 if progress_callback is not None:
                     progress_callback({
                         "resource_name": str(task.get("name") or ""),
@@ -490,7 +691,18 @@ class Open115Client:
                         "progress": 100,
                     }
                 break
-            delay = max(float(poll_interval), 0.01)
+            if previous_snapshot is unobserved or current_snapshot != previous_snapshot:
+                next_delay = initial_interval
+            else:
+                next_delay = min(
+                    next_delay * backoff_factor,
+                    maximum_interval,
+                )
+            previous_snapshot = current_snapshot
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            delay = min(next_delay, remaining)
             if cancel_event is not None:
                 if cancel_event.wait(delay):
                     raise Open115Error("115 download cancelled")
@@ -518,7 +730,6 @@ class Open115Client:
             data={"file_id": info["file_id"], "file_name": new_name},
         )
         if self._successful(result):
-            self._file_cache.clear()
             return True
         return False
 
@@ -537,7 +748,6 @@ class Open115Client:
             },
         )
         if self._successful(result):
-            self._file_cache.clear()
             return True
         return False
 
@@ -549,7 +759,6 @@ class Open115Client:
             "POST", "/open/ufile/delete", data={"file_ids": info["file_id"]}
         )
         if self._successful(result):
-            self._file_cache.clear()
             return True
         return False
 
@@ -581,8 +790,6 @@ class Open115Client:
             },
         )
         submitted = self._successful(result)
-        if submitted:
-            self._file_cache.clear()
         return {
             "state": "submitted" if submitted else "provider_rejected",
             "submitted": submitted,

@@ -1,6 +1,6 @@
 # download Feature
 
-`features/download` 是独立 Feature 源码目录，提供 `download.provider` 与 `storage.provider`。1.0.17 新增 `move_files_by_id`，使用 115 官方 `POST /open/ufile/move` 服务端移动接口，一次接收 1–100 个去重文件 ID 与目标目录 ID；正常 115 整理不再通过 copy 后 delete 放大请求和等待时间。旧 `move_file_detailed` 仅保留给不支持新 capability 的兼容路径。`get_file_info_batch` 的单次上限仍为 32 个路径，文件树继续保留 provider 返回的 SHA1。它使用 SDK 1.3.2 的有界非阻塞诊断传输；下载阶段 milestone 已投递但 Host 落账或回执中断时仍复用同一个 milestone ID 恢复。它由 telepiplex 构建为不可变 `.tpx`，安装后在 telepiplex 容器内以独立 venv/子进程运行。
+`features/download` 是独立 Feature 源码目录，提供 `download.provider` 与 `storage.provider`。1.0.18 为 115 离线轮询、离线写入、存储读取、存储写入和 Token 刷新分别限速，并把长时间不变的下载轮询从 2 秒起按 1.7 倍退避到最多 30 秒；进度或状态变化会立即把下一次等待恢复为 2 秒。存储读取全局最多四路并发，成功写入与文件信息缓存通过同一代际屏障收敛，残缺或没有稳定 provider ID 的文件事实不会进入缓存。`move_files_by_id` 使用 115 官方 `POST /open/ufile/move` 服务端移动接口，一次接收 1–100 个去重文件 ID 与目标目录 ID；正常 115 整理不再通过 copy 后 delete 放大请求和等待时间。旧 `move_file_detailed` 仅保留给不支持新 capability 的兼容路径。`get_file_info_batch` 的单次上限仍为 32 个路径，文件树继续保留 provider 返回的 SHA1。它使用 SDK 1.3.2 的有界非阻塞诊断传输；下载阶段 milestone 已投递但 Host 落账或回执中断时仍复用同一个 milestone ID 恢复。它由 telepiplex 构建为不可变 `.tpx`，安装后在 telepiplex 容器内以独立 venv/子进程运行。
 
 配置位于 `/config/plugins/download/config.yaml`。telepiplex `/config` 选择 download 后，可进入“授权配置”或“保存目录”：授权支持分步录入 Access/Refresh Token 与 115 扫码，保存目录支持逐条新增、编辑和删除，并在“保存并完成”后统一原子写入、立即生效。新增目录分两步：第一步填写只用于按钮展示的名称；第二步填写实际保存路径。单级目录可依次输入显示名称 `真人电影`、保存路径 `真人电影`；多级路径可填写 `series/live action`。路径末尾 `/` 可省略，但不要以 / 开头，因为 Telegram 会将它识别为命令。直接发送 `/auth` 仍会进入授权方式选择。两种授权路线及自动刷新只原子写回该 Feature 私有配置，Token 不进入消息与日志。
 
@@ -11,7 +11,7 @@
 纯本地验证构建（不读取 Git 元数据）：
 
 ```bash
-python tools/build_feature.py features/download /tmp/download-1.0.17.tpx \
+python tools/build_feature.py features/download /tmp/download-1.0.18.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

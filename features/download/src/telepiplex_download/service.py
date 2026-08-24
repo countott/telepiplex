@@ -1424,6 +1424,17 @@ class DownloadFeature:
             "cancel_cleanup_done": asyncio.Event(),
         })
         self.active_job_ids.add(job_id)
+        acceptance_details = {
+            "effect_receipt": {
+                "effect_key": f"download.submit:{job_id}",
+                "state": "completed",
+                "receipt": {
+                    "job_id": job_id,
+                    "selected_path": selected_path,
+                },
+            },
+        }
+        operation["details"] = deepcopy(acceptance_details)
         report_error = None
         try:
             operation_view = await self._report_operation(
@@ -1432,6 +1443,7 @@ class DownloadFeature:
                 stage="preparing_submission",
                 status_text="正在准备提交 115 离线下载任务。",
                 control="cancel",
+                details=acceptance_details,
             )
         except Exception as exc:
             if not _ambiguous_host_report_error(exc):
@@ -1608,7 +1620,14 @@ class DownloadFeature:
                 link,
                 existing_task=existing_task,
                 timeout=float(self.config.get("download_timeout") or 1800),
-                poll_interval=float(self.config.get("poll_interval") or 10),
+                poll_initial_interval=self.config.get(
+                    "poll_initial_interval",
+                    self.config.get("poll_interval", 2),
+                ),
+                poll_max_interval=self.config.get("poll_max_interval", 30),
+                poll_backoff_factor=self.config.get(
+                    "poll_backoff_factor", 1.7
+                ),
                 cancel_event=cancel_event,
                 progress_callback=progress,
             )
@@ -1649,6 +1668,9 @@ class DownloadFeature:
                 "release": payload.get("release"),
                 "operation_id": operation_id,
             }
+            self._prepare_download_handoff(
+                job_id, event_payload, operation_id
+            )
             if self.jobs:
                 self.jobs.update(job_id, "downloaded", result=event_payload)
             logger.info(
@@ -1763,76 +1785,196 @@ class DownloadFeature:
         operation["ownership_pending"] = False
         operation.pop("ownership_report", None)
 
+    def _prepare_download_handoff(self, job_id, payload, operation_id):
+        existing = payload.get("download_handoff_report")
+        if isinstance(existing, dict):
+            return deepcopy(existing)
+        operation = self.operations.get(operation_id)
+        if operation is None:
+            raise FeatureError(
+                "operation_unavailable",
+                "download handoff operation owner is unavailable",
+            )
+        handoff = self._advance_operation(
+            operation_id,
+            state="handed_off",
+            stage="handoff_rename",
+            status_text=(
+                "✅ 115 下载完成\n"
+                f"保存目录：{payload.get('final_path')}"
+            ),
+            control="cancel",
+            next_plugin_id="rename",
+        )
+        payload["download_handoff_report"] = deepcopy(handoff)
+        payload["download_handoff_accepted"] = False
+        payload["operation_revision"] = int(handoff["revision"])
+        return handoff
+
+    async def _confirm_download_handoff(self, report):
+        response = await self.host.report_operation(report)
+        if isinstance(response, dict):
+            if (
+                response.get("accepted") is False
+                and response.get("error_code") == "handoff_target_unavailable"
+                and response.get("target_plugin_id") == "rename"
+            ):
+                raise FeatureError(
+                    "handoff_target_unavailable",
+                    "Target Feature is not active",
+                )
+            try:
+                response_revision = int(response.get("revision") or 0)
+            except (TypeError, ValueError):
+                response_revision = 0
+            if (
+                response.get("accepted") is True
+                and str(response.get("operation_id") or "")
+                == str(report.get("operation_id") or "")
+                and str(response.get("state") or "") == "handed_off"
+                and response_revision == int(report.get("revision") or 0)
+            ):
+                return
+        raise FeatureError(
+            "handoff_response_conflict",
+            "Host did not confirm the exact Download-to-Rename handoff",
+        )
+
     async def _publish_downloaded(self, job):
-        payload = job.get("result") or {}
+        payload = dict(job.get("result") or {})
         job_id = str(job["job_id"])
         operation_id = str(payload.get("operation_id") or "")
-        if operation_id and operation_id in self.operations:
-            current = self.operations[operation_id]
-            if current.get("state") == "handed_off":
-                operation = self._operation_view(current)
+        if operation_id:
+            handoff = payload.get("download_handoff_report")
+            if not isinstance(handoff, dict):
+                if self.jobs:
+                    raise FeatureError(
+                        "handoff_recovery_required",
+                        "downloaded job lacks its exact durable handoff report",
+                    )
+                handoff = self._prepare_download_handoff(
+                    job_id, payload, operation_id
+                )
+            try:
+                handoff_revision = int(handoff.get("revision") or 0)
+                payload_revision = int(
+                    payload.get("operation_revision") or 0
+                )
+            except (TypeError, ValueError):
+                handoff_revision = 0
+                payload_revision = 0
+            if (
+                str(handoff.get("operation_id") or "") != operation_id
+                or handoff_revision <= 0
+                or str(handoff.get("state") or "") != "handed_off"
+                or str(handoff.get("next_plugin_id") or "") != "rename"
+                or payload_revision != handoff_revision
+            ):
+                raise FeatureError(
+                    "handoff_report_conflict",
+                    "persisted Download-to-Rename handoff is invalid",
+                )
+            current = self.operations.get(operation_id)
+            if current is None:
+                current = {
+                    "kind": "download",
+                    "job_id": job_id,
+                    "cancel_event": threading.Event(),
+                    "info_hash": "",
+                    "offline_delete_attempted": False,
+                    "offline_task_record": "unknown",
+                    "cancel_cleanup_done": asyncio.Event(),
+                }
+                self.operations[operation_id] = current
+            current.update(deepcopy(handoff))
+            try:
+                if payload.get("download_handoff_accepted") is not True:
+                    await self._confirm_download_handoff(handoff)
+                    payload["download_handoff_accepted"] = True
+                    if self.jobs:
+                        self.jobs.update(job_id, "downloaded", result=payload)
                 await self._seal_download_stage(
                     operation_id,
                     job_id,
                     payload,
                 )
-            else:
-                try:
-                    operation = await self._report_operation(
-                        operation_id,
-                        state="handed_off",
-                        stage="handoff_rename",
-                        status_text=(
+            except FeatureError as exc:
+                if exc.code != "handoff_target_unavailable":
+                    raise
+                payload["downstream_skipped"] = "rename"
+                await self._report_operation(
+                    operation_id,
+                    state="completed",
+                    stage="completed",
+                    status_text=(
+                        "115 下载完成；媒体整理未安装，"
+                        "已跳过自动整理。"
+                    ),
+                    control="",
+                    details={"downstream_skipped": "rename"},
+                )
+                if self.jobs:
+                    self.jobs.update(
+                        job_id, "completed", result=payload
+                    )
+                user_id = int(payload.get("user_id") or 0)
+                if user_id:
+                    await self.host.notify_user(
+                        user_id,
+                        (
                             "✅ 115 下载完成\n"
+                            "媒体整理未安装，已跳过自动整理。\n"
                             f"保存目录：{payload.get('final_path')}"
                         ),
-                        control="cancel",
-                        next_plugin_id="rename",
+                        idempotency_key=f"{job_id}:download-notice",
                     )
-                    await self._seal_download_stage(
-                        operation_id,
-                        job_id,
-                        payload,
-                    )
-                except FeatureError as exc:
-                    if exc.code != "handoff_target_unavailable":
-                        raise
-                    payload["downstream_skipped"] = "rename"
-                    await self._report_operation(
-                        operation_id,
-                        state="completed",
-                        stage="completed",
-                        status_text=(
-                            "115 下载完成；媒体整理未安装，"
-                            "已跳过自动整理。"
-                        ),
-                        control="",
-                        details={"downstream_skipped": "rename"},
-                    )
-                    if self.jobs:
-                        self.jobs.update(
-                            job_id, "completed", result=payload
-                        )
-                    user_id = int(payload.get("user_id") or 0)
-                    if user_id:
-                        await self.host.notify_user(
-                            user_id,
-                            (
-                                "✅ 115 下载完成\n"
-                                "媒体整理未安装，已跳过自动整理。\n"
-                                f"保存目录：{payload.get('final_path')}"
-                            ),
-                            idempotency_key=f"{job_id}:download-notice",
-                        )
-                    return
-            payload["operation_revision"] = operation["revision"]
+                return
             if self.jobs:
                 self.jobs.update(job_id, "downloaded", result=payload)
             self._raise_if_cancelled(current)
-        await self.host.publish_event("download.completed", payload, idempotency_key=f"{job_id}:completed")
+        event_key = str(
+            payload.get("completion_event_idempotency_key") or ""
+        ).strip()
+        if not event_key:
+            event_key = f"{job_id}:completed"
+        payload["completion_event_idempotency_key"] = event_key
+        if self.jobs:
+            self.jobs.update(job_id, "downloaded", result=payload)
+        event_payload = {
+            key: value for key, value in payload.items()
+            if key not in {
+                "completion_event_idempotency_key",
+                "completion_event_id",
+                "download_handoff_report",
+                "download_handoff_accepted",
+            }
+        }
+        response = await self.host.publish_event(
+            "download.completed",
+            event_payload,
+            idempotency_key=event_key,
+        )
+        event_id = str(
+            response.get("event_id") if isinstance(response, dict) else ""
+        ).strip()
+        if not event_id:
+            raise FeatureError(
+                "invalid_response",
+                "Host did not return a durable download completion event identity",
+            )
+        stored_event_id = str(payload.get("completion_event_id") or "").strip()
+        if stored_event_id and stored_event_id != event_id:
+            raise FeatureError(
+                "event_identity_conflict",
+                "download completion replay resolved to another event identity",
+            )
+        payload["completion_event_id"] = event_id
+        if self.jobs:
+            self.jobs.update(job_id, "downloaded", result=payload)
         logger.info(
             "download_download_published "
-            f"job_id={job_id} final_path={payload.get('final_path') or ''}"
+            f"job_id={job_id} event_id={event_id} "
+            f"final_path={payload.get('final_path') or ''}"
         )
         if self.jobs:
             self.jobs.update(job_id, "completed", result=payload)
@@ -2144,29 +2286,62 @@ class DownloadFeature:
         )
 
     def _restore_downloaded_operation(self, job: dict):
-        payload = job.get("result") or {}
+        payload = dict(job.get("result") or {})
         operation_id = str(payload.get("operation_id") or "")
         if not operation_id or operation_id in self.operations:
             return
+        handoff = payload.get("download_handoff_report")
         try:
-            revision = max(1, int(payload.get("operation_revision") or 1))
+            revision = int(payload.get("operation_revision") or 0)
             user_id = int(payload.get("user_id") or 0)
             chat_id = int(payload.get("chat_id") or user_id or 0)
         except (TypeError, ValueError):
             return
-        if user_id <= 0 or chat_id == 0:
+        if user_id <= 0 or chat_id == 0 or revision <= 0:
             return
-        self.operations[operation_id] = {
-            "operation_id": operation_id,
-            "chat_id": chat_id,
-            "user_id": user_id,
-            "state": "handed_off",
-            "stage": "handoff_rename",
-            "status_text": "115 下载已完成，正在重试交给媒体整理。",
-            "control": "cancel",
-            "revision": revision,
-            "details": {"downloaded_content": "preserved"},
-            "next_plugin_id": "rename",
+        if not isinstance(handoff, dict):
+            handoff = {
+                "operation_id": operation_id,
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "state": "handed_off",
+                "stage": "handoff_rename",
+                "status_text": (
+                    "✅ 115 下载完成\n"
+                    f"保存目录：{payload.get('final_path')}"
+                ),
+                "control": "cancel",
+                "revision": revision,
+                "details": {"downloaded_content": "preserved"},
+                "next_plugin_id": "rename",
+            }
+            payload["download_handoff_report"] = deepcopy(handoff)
+            payload["download_handoff_accepted"] = True
+            job["result"] = payload
+            if self.jobs:
+                self.jobs.update(
+                    str(job.get("job_id") or ""),
+                    "downloaded",
+                    result=payload,
+                )
+        try:
+            report_revision = int(handoff.get("revision") or 0)
+            report_chat_id = int(handoff.get("chat_id") or 0)
+            report_user_id = int(handoff.get("user_id") or 0)
+        except (TypeError, ValueError):
+            return
+        if (
+            str(handoff.get("operation_id") or "") != operation_id
+            or report_revision != revision
+            or report_chat_id != chat_id
+            or report_user_id != user_id
+            or str(handoff.get("state") or "") != "handed_off"
+            or str(handoff.get("stage") or "") != "handoff_rename"
+            or str(handoff.get("next_plugin_id") or "") != "rename"
+        ):
+            return
+        operation = deepcopy(handoff)
+        operation.update({
             "kind": "download",
             "job_id": str(job.get("job_id") or ""),
             "cancel_event": threading.Event(),
@@ -2174,7 +2349,8 @@ class DownloadFeature:
             "offline_delete_attempted": False,
             "offline_task_record": "unknown",
             "cancel_cleanup_done": asyncio.Event(),
-        }
+        })
+        self.operations[operation_id] = operation
 
     @staticmethod
     def _raise_if_cancelled(operation):

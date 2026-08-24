@@ -24,6 +24,8 @@ search:
     indexer_timeout: 75
     status_timeout: 15
     indexer_ids: "-2"
+    first_wave_indexer_ids: []
+    wave_delay: 1.5
     categories:
       movie: 2000
       tv: 5000

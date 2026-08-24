@@ -10,15 +10,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSchemaContractTest(unittest.TestCase):
-    def test_search_release_version_is_1_11_1_with_config_schema_v2(self):
+    def test_search_release_version_is_1_11_5_with_config_schema_v2(self):
         manifest = yaml.safe_load(
             (ROOT / "manifest.yaml").read_text(encoding="utf-8")
         )
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.11.4")
+        self.assertEqual(manifest["version"], "1.11.5")
         self.assertEqual(manifest["config_schema_version"], 2)
-        self.assertIn('version = "1.11.4"', pyproject)
+        self.assertIn('version = "1.11.5"', pyproject)
 
     def test_config_schema_v2_declares_removal_of_legacy_ai_section(self):
         migration = json.loads(
@@ -192,6 +192,56 @@ class ConfigSchemaContractTest(unittest.TestCase):
             default["search"]["prowlarr"]["indexer_timeout"],
             75,
         )
+
+    def test_prowlarr_wave_defaults_and_schema_are_additive(self):
+        schema = json.loads(
+            (ROOT / "config.schema.json").read_text(encoding="utf-8")
+        )
+        default = yaml.safe_load(
+            (ROOT / "config.default.yaml").read_text(encoding="utf-8")
+        )
+        prowlarr = (
+            schema["properties"]["search"]["properties"]["prowlarr"]
+        )
+
+        self.assertEqual(
+            default["search"]["prowlarr"]["first_wave_indexer_ids"],
+            [],
+        )
+        self.assertEqual(
+            default["search"]["prowlarr"]["wave_delay"],
+            1.5,
+        )
+        first_ids = prowlarr["properties"]["first_wave_indexer_ids"]
+        self.assertEqual(first_ids["type"], "array")
+        self.assertTrue(first_ids["uniqueItems"])
+        self.assertEqual(first_ids["items"]["minimum"], 1)
+        wave_delay = prowlarr["properties"]["wave_delay"]
+        self.assertEqual(wave_delay["minimum"], 0)
+        self.assertEqual(wave_delay["maximum"], 30)
+        self.assertNotIn("first_wave_indexer_ids", prowlarr.get("required", []))
+        self.assertNotIn("wave_delay", prowlarr.get("required", []))
+
+    def test_legacy_and_malformed_wave_config_uses_safe_runtime_defaults(self):
+        from telepiplex_search.service import SearchFeature
+
+        feature = SearchFeature(
+            config={"search": {"prowlarr": {}, "scoring": {}}},
+            host=object(),
+        )
+        self.assertEqual(feature._first_wave_indexer_ids(), [])
+        self.assertEqual(feature._prowlarr_wave_delay(), 1.5)
+
+        feature.config["search"]["prowlarr"].update({
+            "first_wave_indexer_ids": [3, "2", 3, True, -1, "bad"],
+            "wave_delay": float("nan"),
+        })
+        self.assertEqual(feature._first_wave_indexer_ids(), [3, 2])
+        self.assertEqual(feature._prowlarr_wave_delay(), 1.5)
+        feature.config["search"]["prowlarr"]["wave_delay"] = -10
+        self.assertEqual(feature._prowlarr_wave_delay(), 0)
+        feature.config["search"]["prowlarr"]["wave_delay"] = 99
+        self.assertEqual(feature._prowlarr_wave_delay(), 30)
 
 
 if __name__ == "__main__":

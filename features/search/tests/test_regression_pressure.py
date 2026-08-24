@@ -12,6 +12,10 @@ from telepiplex_search.confirmed_enrichment import (
     ConfirmedIdentity,
     build_tvdb_query,
 )
+from telepiplex_search.enrichment_policy import (
+    apply_deferred_presentation,
+    needs_authoritative_scope_enrichment,
+)
 from telepiplex_search.service import SearchFeature
 from tests.test_feature_service import series_ranked_search_plan
 
@@ -36,6 +40,81 @@ def _latin_candidate(index: int) -> dict:
 
 
 class CandidateLocalizationPressureTest(unittest.IsolatedAsyncioTestCase):
+    def test_enrichment_policy_preserves_frozen_contract_authority(self):
+        movie = _latin_candidate(1)
+        movie["media_metadata"].update({
+            "retrieval": {"media_type": "movie", "scope": "movie"},
+            "evidence": {},
+            "items": [],
+        })
+        complete_series = _latin_candidate(2)
+        complete_series["media_metadata"].update({
+            "retrieval": {
+                "media_type": "series",
+                "scope": "season",
+                "query": "Series 2 S02",
+            },
+            "evidence": {
+                "decision": {"season_number": 2, "episode_number": None},
+                "series_inventory": {"season_totals": {2: 8}},
+            },
+            "items": [{"season_number": 2, "episode_number": 1}],
+        })
+        incomplete_series = deepcopy(complete_series)
+        incomplete_series["media_metadata"]["items"] = []
+        incomplete_series["media_metadata"]["evidence"][
+            "series_inventory"
+        ] = {"season_totals": {}}
+
+        self.assertFalse(needs_authoritative_scope_enrichment(movie))
+        self.assertFalse(
+            needs_authoritative_scope_enrichment(complete_series)
+        )
+        self.assertTrue(
+            needs_authoritative_scope_enrichment(incomplete_series)
+        )
+
+        frozen = deepcopy(complete_series["media_metadata"])
+        frozen["identity"].update({
+            "chinese_title": "",
+            "poster_url": "",
+            "external_ids": {"tvdb": "2"},
+        })
+        enriched = apply_deferred_presentation(frozen, {
+            "identity": {
+                "chinese_title": "中文展示名",
+                "poster_url": "https://image.example/poster.jpg",
+                "external_ids": {"tvdb": "999"},
+            },
+            "retrieval": {
+                "scope": "episode",
+                "query": "Unsafe Query S02E01",
+            },
+        })
+
+        self.assertEqual(enriched["identity"]["chinese_title"], "中文展示名")
+        self.assertEqual(
+            enriched["identity"]["poster_url"],
+            "https://image.example/poster.jpg",
+        )
+        self.assertEqual(enriched["identity"]["external_ids"], {"tvdb": "2"})
+        self.assertEqual(enriched["retrieval"], frozen["retrieval"])
+
+        existing_poster = deepcopy(frozen)
+        existing_poster["identity"]["poster_url"] = (
+            "http://legacy.example/poster.jpg"
+        )
+        preserved = apply_deferred_presentation(
+            existing_poster,
+            {"identity": {
+                "poster_url": "https://image.example/replacement.jpg",
+            }},
+        )
+        self.assertEqual(
+            preserved["identity"]["poster_url"],
+            "http://legacy.example/poster.jpg",
+        )
+
     async def test_veep_sixty_five_episode_result_is_compact_and_diagnostic_safe(self):
         async def planner(_raw_query, plan_id):
             plan = deepcopy(series_ranked_search_plan())
@@ -238,6 +317,51 @@ class CandidateLocalizationPressureTest(unittest.IsolatedAsyncioTestCase):
             "蜂蜜与四叶草",
         )
         self.assertEqual(supplemented["douban_match_mode"], "strong_fields")
+
+    async def test_authoritative_scope_enrichment_excludes_optional_sources(self):
+        candidate = _latin_candidate(43)
+        candidate["anchor_fact_id"] = "wikipedia:Q43"
+        candidate["intended_scope"] = "season"
+        candidate["requested_season_number"] = 1
+        candidate["source_links"] = [{
+            "provider": provider,
+            "fact_id": (
+                "wikipedia:Q43" if provider == "wikipedia" else f"{provider}:43"
+            ),
+            "url": f"https://example.test/{provider}/43",
+            "external_ids": {provider: "43"},
+            "role": "season" if provider == "tvdb" else "series_root",
+            "season_number": 1 if provider == "tvdb" else None,
+            "episode_number": None,
+            "verification": (
+                "tvdb_inventory_verified" if provider == "tvdb" else "fact_verified"
+            ),
+        } for provider in ("wikipedia", "tmdb", "tvdb")]
+        optional_calls = []
+        feature = SearchFeature(config={}, host=None)
+        feature._douban_provider = lambda _payload: optional_calls.append("douban")
+
+        async def anilist(_identity):
+            optional_calls.append("anilist")
+            return None, "not_found"
+
+        feature._resolve_confirmed_anilist = anilist
+
+        supplemented = await feature._supplement_selected_candidate(
+            candidate,
+            "蜂蜜与四叶草 第一季",
+            purpose="authoritative_scope",
+        )
+
+        self.assertEqual(optional_calls, [])
+        self.assertEqual(
+            supplemented["media_metadata"]["identity"]["chinese_title"],
+            "",
+        )
+        self.assertEqual(
+            {item["provider"] for item in supplemented["source_links"]},
+            {"wikipedia", "tmdb", "tvdb"},
+        )
 
     async def test_preview_strong_field_lookup_is_bounded_to_five_candidates(self):
         calls = []

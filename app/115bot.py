@@ -99,7 +99,7 @@ DEFAULT_PLUGIN_CATALOG_URL = (
 
 
 def get_version(md_format=False):
-    version = "v3.5.4-host"
+    version = "v3.5.5-host"
     if md_format:
         return escape_markdown(version, version=2)
     return version
@@ -194,6 +194,7 @@ def build_plugin_manager(config=None, host_database=None):
         ),
         milestone_sink=milestone_sink,
         operation_sink=operation_sink,
+        operation_coordinator=coordinator,
         logger=init.logger,
     )
     supervisor = PluginSupervisor(
@@ -750,6 +751,11 @@ def configure_application(application, manager):
 
 
 async def start_host_runtime(application, manager):
+    milestone_sink = getattr(
+        getattr(manager, "broker", None), "milestone_sink", None
+    )
+    if hasattr(milestone_sink, "start"):
+        await milestone_sink.start()
     await manager.start()
     coordinator = getattr(manager, "interaction_coordinator", None)
     if coordinator is not None:
