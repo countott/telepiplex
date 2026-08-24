@@ -465,7 +465,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.search_queries, [("English Title", "movie")])
         self.assertIn(
-            "✅ 中文标题 (English Title)",
+            "中文标题 (English Title)",
             self.host.reports[-1]["status_text"],
         )
         self.assertEqual(self.host.reports[-1]["state"], "awaiting_input")
@@ -874,7 +874,10 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             and report["details"].get("keyboard")
         ]
         self.assertTrue(partial)
-        self.assertIn("🔍 中文标题 (English Title)", partial[-1]["status_text"])
+        self.assertIn(
+            "正在搜索：中文标题 (English Title)",
+            partial[-1]["status_text"],
+        )
         self.assertNotIn("Fast", partial[-1]["status_text"])
         first_callback = partial[-1]["details"]["keyboard"][0][0][
             "callback_data"
@@ -901,7 +904,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             first_release_id,
             stored["release_by_id"],
         )
-        self.assertIn("✅ 中文标题 (English Title)", result["actions"][0]["text"])
+        self.assertIn("中文标题 (English Title)", result["actions"][0]["text"])
         self.assertNotIn("Slow", result["actions"][0]["text"])
 
         await self.feature._submit_release(
@@ -2218,7 +2221,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Partial", str(
             stored["indexer_summary"]["down_indexers"]
         ))
-        self.assertIn("✅ 黑暗荣耀 (The Glory)", result["actions"][0]["text"])
+        self.assertIn("黑暗荣耀 (The Glory)", result["actions"][0]["text"])
 
     async def test_aggregate_whole_series_keeps_successful_variants(self):
         from telepiplex_search.adapters.prowlarr import ProwlarrRequestError
@@ -2264,7 +2267,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             ("The Glory Complete", "series"),
         ])
         self.assertEqual(len(stored["results"]), 1)
-        self.assertIn("✅ 黑暗荣耀 (The Glory)", result["actions"][0]["text"])
+        self.assertIn("黑暗荣耀 (The Glory)", result["actions"][0]["text"])
 
     async def test_selected_release_calls_download_provider_with_canonical_contract(self):
         plan_id = await self._prepare_search()
@@ -3856,7 +3859,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(self.host.milestones), 1)
         self.assertIn(
-            "🎬 中文标题1 (English Title)",
+            "中文标题1 (English Title)",
             self.host.milestones[0]["text"],
         )
         self.assertEqual(self.host.milestones[0]["deadline"], 45)
@@ -6013,9 +6016,9 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "1.11.5")
+        self.assertEqual(manifest["version"], "1.11.6")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertEqual(project["project"]["version"], "1.11.5")
+        self.assertEqual(project["project"]["version"], "1.11.6")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.3.2",
@@ -6049,14 +6052,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.11.5.tpx", source)
+        self.assertIn("/tmp/search-1.11.6.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-1.11.5.tpx", source)
+        self.assertNotIn("dist/search-1.11.6.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

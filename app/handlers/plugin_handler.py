@@ -627,15 +627,14 @@ async def dynamic_message_gateway(update, context):
         *key,
     ):
         await update.effective_message.reply_text(
-            f"⚠️ 当前 {active.plugin_id} 任务正在等待按钮操作；"
-            "请先完成或退出。"
+            "当前任务未结束，请先完成或取消。"
         )
         return
     if isinstance(session, dict):
         if float(session.get("expires_at") or 0) <= time.time():
             _drop_session(bot_data, key)
             await update.effective_message.reply_text(
-                "⚠️ Feature 会话已超时，请重新发起命令。"
+                "会话已超时，请重新开始。"
             )
             return
         route = (
@@ -646,7 +645,7 @@ async def dynamic_message_gateway(update, context):
         if route is None:
             _drop_session(bot_data, key)
             await update.effective_message.reply_text(
-                "⚠️ Feature 已停用或更新，本次会话已结束。"
+                "本次会话已结束，请重新开始。"
             )
             return
     else:
@@ -715,7 +714,7 @@ async def handle_feature_result(update, context, route, result: dict):
             )
             await _feature_feedback(
                 update,
-                "❌ Feature 返回了无效任务状态。",
+                "任务状态无效，请重新开始。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
             )
             return
@@ -768,7 +767,7 @@ async def handle_feature_result(update, context, route, result: dict):
             )
             await _feature_feedback(
                 update,
-                f"❌ operation_report_failed：{_safe_error(exc)}",
+                "任务状态未更新，请稍后重试。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
             )
             return
@@ -824,7 +823,7 @@ async def handle_feature_result(update, context, route, result: dict):
         )
         await _feature_feedback(
             update,
-            "❌ Feature 返回了无效会话状态。",
+            "会话状态无效，请重新开始。",
             prefer_edit=bool(getattr(update, "callback_query", None)),
         )
         return
@@ -850,7 +849,7 @@ async def handle_feature_result(update, context, route, result: dict):
                 "user_id": active.user_id,
                 "state": "cancelled",
                 "stage": active.stage,
-                "status_text": "交互已退出。",
+                "status_text": "已退出。",
                 "control": "",
                 "revision": active.revision + 1,
                 "details": dict(active.details),
@@ -925,7 +924,7 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
         )
         await _feature_feedback(
             update,
-            "❌ invalid_config_patch：Feature 配置补丁无效。",
+            "配置内容无效。",
             prefer_edit=prefer_edit,
         )
         return
@@ -934,11 +933,11 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
         _finish_feature_config_operation(
             context, route, result,
             state="failed",
-            status_text="Feature 配置管理器不可用，配置未写入。",
+            status_text="配置不可用。",
         )
         await _feature_feedback(
             update,
-            "❌ config_manager_unavailable：Feature 插件管理器尚未初始化。",
+            "配置不可用。",
             prefer_edit=prefer_edit,
         )
         return
@@ -949,11 +948,11 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
         _finish_feature_config_operation(
             context, route, result,
             state="failed",
-            status_text=f"读取旧配置失败：{type(exc).__name__}。",
+            status_text="读取配置失败。",
         )
         await _feature_feedback(
             update,
-            f"❌ config_read_failed：{type(exc).__name__}",
+            "读取配置失败。",
             prefer_edit=prefer_edit,
         )
         return
@@ -974,9 +973,7 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
                 "user_id": record.user_id,
                 "state": "running",
                 "stage": "config_apply",
-                "status_text": (
-                    f"正在保存并重新加载 {route.plugin_id} 配置。"
-                ),
+                "status_text": "正在保存配置。",
                 "control": "rollback",
                 "revision": record.revision + 1,
                 "details": {
@@ -993,7 +990,7 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
             }
     await _feature_feedback(
         update,
-        f"⏳ 正在保存并重新加载 {route.plugin_id} 配置...",
+        "正在保存配置。",
         prefer_edit=prefer_edit,
     )
     try:
@@ -1017,15 +1014,15 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
                 if rollback_verified
                 else "配置回滚未能完整验证，请人工检查当前配置和路由。"
                 if cancelled
-                else f"Feature 配置失败：{exc.code}。"
+                else "配置保存失败。"
             ),
         )
         await _feature_feedback(
             update,
             (
-                "✅ 已取消配置切换并恢复原配置。"
+                "配置已取消，原配置已恢复。"
                 if rollback_verified
-                else f"❌ {exc.code}：配置未写入或重新加载失败。"
+                else "配置保存失败，请检查配置。"
             ),
             prefer_edit=prefer_edit,
         )
@@ -1034,11 +1031,11 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
         _finish_feature_config_operation(
             context, route, result,
             state="failed",
-            status_text=f"Feature 配置失败：{type(exc).__name__}。",
+            status_text="配置保存失败。",
         )
         await _feature_feedback(
             update,
-            f"❌ config_failed：{type(exc).__name__}",
+            "配置保存失败，请检查配置。",
             prefer_edit=prefer_edit,
         )
         return
@@ -1057,25 +1054,22 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
             _finish_feature_config_operation(
                 context, route, result,
                 state="partially_rolled_back",
-                status_text=(
-                    "配置切换已完成，但自动恢复原配置失败："
-                    f"{type(exc).__name__}。"
-                ),
+                status_text="配置回滚失败，请检查配置。",
             )
             await _feature_feedback(
                 update,
-                "❌ config_rollback_failed：请人工检查当前配置和路由。",
+                "配置回滚失败，请检查配置。",
                 prefer_edit=prefer_edit,
             )
             return
         _finish_feature_config_operation(
             context, route, result,
             state="rolled_back",
-            status_text="配置切换已取消，原配置和原 Feature 路由已恢复。",
+            status_text="配置已取消，原配置已恢复。",
         )
         await _feature_feedback(
             update,
-            "✅ 已取消配置切换并恢复原配置。",
+            "配置已取消，原配置已恢复。",
             prefer_edit=prefer_edit,
         )
         return
@@ -1083,11 +1077,11 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
     _finish_feature_config_operation(
         context, route, result,
         state="completed",
-        status_text=f"{outcome.plugin_id} 配置已写入并重新加载。",
+        status_text="配置已更新。",
     )
     await _feature_feedback(
         update,
-        f"✅ {outcome.plugin_id} 配置已写入并重新加载。",
+        "配置已更新。",
         prefer_edit=prefer_edit,
     )
 

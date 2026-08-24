@@ -258,7 +258,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         )])
         self.assertNotIn("telepiplex_plugin_sessions", context.application.bot_data)
         message = update.effective_message.reply_text.await_args.args[0]
-        self.assertIn("已写入并重新加载", message)
+        self.assertEqual(message, "配置已更新。")
         self.assertNotIn("kept-secret", message)
 
     async def test_successful_feature_config_patch_completes_operation(self):
@@ -611,7 +611,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
                 ],
                 "search:release:current",
             )
-            stale.callback_query.answer.assert_awaited_once_with("当前任务执行中")
+            stale.callback_query.answer.assert_awaited_once_with("当前任务进行中")
 
     async def test_feature_result_persists_candidate_photo_for_operation_rendering(self):
         from app.handlers.plugin_handler import _with_rendered_keyboard
@@ -970,8 +970,8 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             messages,
             [
-                "⏳ 正在保存并重新加载 search 配置...",
-                "✅ search 配置已写入并重新加载。",
+                "正在保存配置。",
+                "配置已更新。",
             ],
         )
         update.effective_message.reply_text.assert_not_awaited()
@@ -993,7 +993,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(manager.configurations, [])
         self.assertIn(
-            "invalid_config_patch",
+            "配置内容无效。",
             update.effective_message.reply_text.await_args.args[0],
         )
 
@@ -1032,7 +1032,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             })
 
             self.assertIn(
-                "config_manager_unavailable",
+                "配置不可用。",
                 update.effective_message.reply_text.await_args.args[0],
             )
             self.assertEqual(
@@ -1059,7 +1059,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.configurations, [])
         update.callback_query.edit_message_text.assert_awaited_once()
         self.assertIn(
-            "invalid_config_patch",
+            "配置内容无效。",
             update.callback_query.edit_message_text.await_args.args[0],
         )
         update.effective_message.reply_text.assert_not_awaited()
@@ -1249,7 +1249,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         router.direct_message_route.assert_not_called()
         client.request.assert_not_awaited()
         self.assertIn(
-            "等待按钮",
+            "当前任务未结束",
             update.effective_message.reply_text.await_args.args[0],
         )
 

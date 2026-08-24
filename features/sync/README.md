@@ -2,7 +2,7 @@
 
 `features/sync` 是独立 Feature 源码目录。telepiplex 将其构建为不可变 `.tpx`，并在 telepiplex 容器内以独立 venv/子进程运行。
 
-## 升级到 1.1.4
+## 升级到 1.1.5
 
 1.0.0 删除了本地 AI 配置。更新 Feature 前，先编辑 `/config/plugins/sync/config.yaml`，删除整个 `ai:` 配置段并保留其他现有值，然后再执行更新。
 
@@ -10,7 +10,7 @@ telepiplex 对删除或改名的配置字段采用 fail-closed 策略；如果�
 
 ## 独立手动管理
 
-sync 1.1.4 不订阅 rename 事件，也不会在 rename 完成后自动扫描 Plex。Plex 扫描与增强只能由用户通过 Telegram 命令或带确认令牌的 MCP 写工具独立发起；rename 的成功或失败不依赖 sync 是否安装、启用或可用。
+sync 1.1.5 不订阅 rename 事件，也不会在 rename 完成后自动扫描 Plex。Plex 扫描与增强只能由用户通过 Telegram 命令或带确认令牌的 MCP 写工具独立发起；rename 的成功或失败不依赖 sync 是否安装、启用或可用。
 
 用户明确发起增强 Job 后，Plex 自己负责识别、匹配和基础元数据，插件执行：
 
@@ -41,7 +41,7 @@ MCP 对外地址由 `mcp.host`、`mcp.port`、`mcp.path` 控制；非本机监�
 纯本地验证构建（不读取 Git 元数据）：
 
 ```bash
-python tools/build_feature.py features/sync /tmp/sync-1.1.4.tpx \
+python tools/build_feature.py features/sync /tmp/sync-1.1.5.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

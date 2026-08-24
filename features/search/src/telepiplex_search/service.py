@@ -1267,7 +1267,7 @@ class SearchFeature:
                 request,
                 state="awaiting_input",
                 stage="config_section",
-                status_text="等待选择 search 配置项。",
+                status_text="选择搜索配置。",
                 control="exit",
                 kind="config",
             )
@@ -1284,7 +1284,7 @@ class SearchFeature:
                 request,
                 state="awaiting_input",
                 stage="query_input",
-                status_text="等待输入片名。",
+                status_text="输入片名。",
                 control="exit",
                 kind="search",
             )
@@ -1340,7 +1340,7 @@ class SearchFeature:
             if parsed.kind in {"link", "resolvable_link", "invalid_link"}:
                 return self._start_plan_task(raw_query, request)
             return {
-                "actions": [{"kind": "send_message", "text": "⚠️ 搜索会话已失效。"}],
+                "actions": [{"kind": "send_message", "text": "会话已失效，请重新开始。"}],
                 "session": {"state": "close"},
             }
         self.awaiting_queries.discard(key)
@@ -1388,7 +1388,7 @@ class SearchFeature:
                     operation_id,
                     state="cancelled",
                     stage="cancelled",
-                    status_text="已退出本次搜索。",
+                    status_text="已退出搜索。",
                     control="",
                 )
             return result
@@ -1411,7 +1411,7 @@ class SearchFeature:
                     operation_id,
                     state="cancelled",
                     stage="user_rejected",
-                    status_text="用户选择“都不是”，本次搜索结束。",
+                    status_text="已取消搜索。",
                     control="",
                 )
             return result
@@ -1485,7 +1485,7 @@ class SearchFeature:
                 request,
                 state="running",
                 stage="planning",
-                status_text="正在规划媒体证据。",
+                status_text="正在识别媒体。",
                 control="cancel",
                 kind="search",
             )
@@ -1495,7 +1495,7 @@ class SearchFeature:
                 operation["operation_id"],
                 state="running",
                 stage="planning",
-                status_text="正在规划媒体证据。",
+                status_text="正在识别媒体。",
                 control="cancel",
                 details={},
             )
@@ -1540,7 +1540,7 @@ class SearchFeature:
         return {
             "actions": [{
                 "kind": "send_message",
-                "text": "⏳ 正在规划媒体证据...",
+                "text": "正在识别媒体...",
             }],
             "session": {"state": "close"},
             "operation": operation_view,
@@ -1760,7 +1760,7 @@ class SearchFeature:
                 operation_id,
                 state="cancelled",
                 stage="prowlarr_search",
-                status_text="资源搜索已取消。",
+                status_text="已取消搜索。",
                 control="",
                 details=self._prowlarr_status_details(operation_id),
             )
@@ -1821,7 +1821,7 @@ class SearchFeature:
             operation_id,
             state="running",
             stage="resolving_release",
-            status_text="正在解析片源下载链接。",
+            status_text="正在获取下载链接。",
             control="cancel",
             details={},
         )
@@ -1834,7 +1834,7 @@ class SearchFeature:
         return {
             "actions": [{
                 "kind": "edit_message",
-                "text": "⏳ 正在解析片源并提交下载...",
+                "text": "正在提交下载...",
             }],
             "operation": operation_view,
         }
@@ -1898,7 +1898,7 @@ class SearchFeature:
                 operation_id,
                 state="cancelled",
                 stage="resolving_release",
-                status_text="片源提交已取消。",
+                status_text="已取消下载提交。",
                 control="",
             )
         except Exception as exc:
@@ -2276,7 +2276,7 @@ class SearchFeature:
         action = (result.get("actions") or [{}])[0]
         action.update({
             "kind": "edit_message",
-            "text": f"⏳ 已选择{label}，正在重新验证媒体证据...",
+            "text": f"已选择{label}，正在确认媒体身份。",
         })
         if operation_id:
             result["operation"] = self._operation_view(
@@ -3465,13 +3465,11 @@ class SearchFeature:
                 stored["operation_id"],
                 state="running",
                 stage="prowlarr_search",
-                status_text=(
-                    f"🔍 {_text(presentation.get('title')) or '未知作品'}"
-                ),
+                status_text="已确认身份，开始搜索",
                 control="cancel",
-                details=self._prowlarr_status_details(
+                details=(self._prowlarr_status_details(
                     stored["operation_id"]
-                ),
+                ) | {"telegram_visibility": "silent"}),
             )
         evidence = contract.get("evidence") or {}
         if isinstance(evidence.get("source_links"), list):
@@ -4335,7 +4333,7 @@ class SearchFeature:
                 operation_id,
                 state="handed_off",
                 stage="submitting_download",
-                status_text="片源已解析，正在交给 115 下载任务。",
+                status_text="已提交下载",
                 control="cancel",
                 next_plugin_id="download",
             )
@@ -4421,7 +4419,7 @@ class SearchFeature:
         return {
             "actions": [{
                 "kind": "edit_message",
-                "text": f"✅ 已提交下载任务：{result.get('job_id') or plan_id}",
+                "text": "已提交下载",
             }]
         }
 
@@ -4435,7 +4433,7 @@ class SearchFeature:
                 response = await self.host.seal_operation_stage(
                     operation_id,
                     milestone_id,
-                    "✅ 资源搜索已完成，已选定片源。",
+                    "已提交下载",
                     deadline=45,
                 )
             except Exception as exc:
@@ -6498,7 +6496,7 @@ class SearchFeature:
                 operation_id,
                 state="cancelled",
                 stage=operation.get("stage") or "cancelled",
-                status_text="已退出 search 任务。",
+                status_text="已退出搜索。",
                 control="",
             )
             return {"actions": [], "operation": terminal}
@@ -6506,7 +6504,7 @@ class SearchFeature:
             operation_id,
             state="cancelling",
             stage=operation.get("stage") or "cancelling",
-            status_text="取消请求已接受，正在停止当前本地任务。",
+            status_text="正在取消搜索。",
             control="cancel",
         )
         return {"actions": [], "operation": cancelling}
@@ -6532,7 +6530,7 @@ class SearchFeature:
                 operation["operation_id"],
                 state="running",
                 stage="config_apply",
-                status_text="正在保存并重新加载 search 配置。",
+                status_text="正在保存搜索配置。",
                 control="cancel",
             )
         elif isinstance(session, dict) and session.get("state") == "open":
@@ -6541,7 +6539,7 @@ class SearchFeature:
                 operation["operation_id"],
                 state="awaiting_input",
                 stage=f"config_{wizard_session.get('stage') or 'input'}",
-                status_text="等待 search 配置输入。",
+                status_text="输入搜索配置。",
                 control="exit",
             )
         else:
@@ -6549,7 +6547,7 @@ class SearchFeature:
                 operation["operation_id"],
                 state="cancelled",
                 stage="config_cancelled",
-                status_text="已退出 search 配置。",
+                status_text="已退出搜索配置。",
                 control="",
             )
         result["operation"] = view
@@ -6573,7 +6571,7 @@ class SearchFeature:
             operation["operation_id"],
             state="cancelled",
             stage=operation.get("stage") or "cancelled",
-            status_text="已退出 search 任务。",
+            status_text="已退出搜索。",
             control="",
         )
         result = self._closed("已退出 search 任务。")

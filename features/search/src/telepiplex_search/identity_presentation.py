@@ -117,9 +117,10 @@ def build_identity_presentation(contract: dict) -> dict:
     scope_label = _scope(contract, media_type)
     year = _text(identity.get("year")) or "年份未知"
     text = (
-        f"🎬 {title}\n"
+        f"{title}\n"
         f"{year}｜{country_label}｜{media_label}｜{scope_label}\n"
-        f"来源：{provider_label}"
+        f"来源：{provider_label}\n"
+        "已确认身份，开始搜索"
     )
     stable_identity = {
         "external_ids": dict(identity.get("external_ids") or {}),

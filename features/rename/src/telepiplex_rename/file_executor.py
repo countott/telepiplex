@@ -235,7 +235,9 @@ def _size(value) -> int:
         return value.size
     if not isinstance(value, dict):
         return 0
-    for key in ("size", "fs", "size_byte"):
+    # 115 may expose ``size`` as a human-readable display value (for example,
+    # ``11.57GB``); prefer its exact byte-count fields for fingerprinting.
+    for key in ("size_byte", "fs", "size"):
         if key not in value:
             continue
         candidate = value[key]

@@ -1316,12 +1316,9 @@ class LibrarySyncService:
 
     @staticmethod
     def format_job_summary(job):
-        icon = "✅" if job.get("state") == "completed" else "⚠️"
-        name = job.get("payload", {}).get("resource_name") or f"Job {job.get('id')}"
-        text = f"{icon} Plex 管理：{name}\n状态：{job.get('state')}"
-        if job.get("error"):
-            text += f"\n错误：{job['error']}"
-        return text
+        if job.get("state") == "completed":
+            return "Plex 入库完成。"
+        return "Plex 入库失败，请检查 Plex。"
 
     def retry_job(self, job_id):
         job = self.jobs.get(job_id)

@@ -35,6 +35,24 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 class InventoryCompletionCopyTest(unittest.TestCase):
+    def test_inventory_ready_text_explains_the_count_boundary(self):
+        from telepiplex_rename import service
+
+        text = service._inventory_ready_text(
+            root_name="未整理",
+            ready_groups=3,
+            media_files=17,
+            kept_unresolved=4,
+        )
+
+        self.assertEqual(
+            text,
+            "未整理扫描完成。\n"
+            "可整理作品：3\n"
+            "媒体文件：17\n"
+            "无法确认：4（保留在原目录）",
+        )
+
     def test_already_standard_files_are_not_reported_as_actual_changes(self):
         text = _inventory_completion_text(
             total=1,
@@ -51,9 +69,39 @@ class InventoryCompletionCopyTest(unittest.TestCase):
             },
         )
 
-        self.assertIn("实际改动：0", text)
-        self.assertIn("本来已规范：65", text)
+        self.assertIn("补整理完成：作品 1/1", text)
+        self.assertIn("媒体文件：65｜已整理：0｜已规范：65", text)
+        self.assertNotIn("实际改动", text)
         self.assertNotIn("成功重命名", text)
+
+
+class OrganizationStatusCopyTest(unittest.TestCase):
+    def test_single_file_organization_keeps_one_short_status(self):
+        from telepiplex_rename import service
+
+        self.assertEqual(service._organization_status_text(1, 0), "正在整理")
+
+    def test_multi_file_organization_uses_generic_progress_without_storage_detail(self):
+        from telepiplex_rename import service
+
+        self.assertEqual(
+            service._organization_status_text(8, 2),
+            "正在整理\n▰▰▱",
+        )
+
+    def test_partial_completion_keeps_unresolved_files_at_original_location(self):
+        from telepiplex_rename import service
+
+        self.assertEqual(
+            service._organization_status_text(
+                8,
+                completed=True,
+                folder_name="繁花 (Blossoms Shanghai)",
+                kept_unresolved=2,
+            ),
+            "已整理：繁花 (Blossoms Shanghai)\n"
+            "另有 2 个文件无法确认，保留在原目录。",
+        )
 
 
 class StorageProxyBatchTest(unittest.TestCase):
@@ -2074,9 +2122,9 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "completed",
                 jobs.get(inventory_job_id),
             )
-            self.assertIn("作品组完成：1", host.reports[-1]["status_text"])
-            self.assertIn("文件总数：1", host.reports[-1]["status_text"])
-            self.assertIn("实际改动：1", host.reports[-1]["status_text"])
+            self.assertIn("补整理完成：作品 1/1", host.reports[-1]["status_text"])
+            self.assertIn("媒体文件：1", host.reports[-1]["status_text"])
+            self.assertIn("已整理：1", host.reports[-1]["status_text"])
             self.assertTrue(
                 jobs.get(inventory_job_id)["result"]["organized"]
             )
@@ -2352,8 +2400,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(host.resolve_calls, 2)
             self.assertEqual(host.events, [])
             self.assertEqual(host.reports[-1]["state"], "failed")
-            self.assertIn("作品组完成：1", host.reports[-1]["status_text"])
-            self.assertIn("作品组失败：1", host.reports[-1]["status_text"])
+            self.assertIn("补整理完成：作品 1/2", host.reports[-1]["status_text"])
+            self.assertIn("失败：作品 1", host.reports[-1]["status_text"])
             self.assertEqual(
                 [jobs.get(job_id)["state"] for job_id in inventory_job_ids],
                 ["completed", "failed"],
@@ -2472,7 +2520,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         preview = host.reports[-1]
         self.assertEqual(preview["state"], "awaiting_input")
         self.assertEqual(preview["stage"], "inventory_confirmation")
-        self.assertIn("待解析作品组：2", preview["status_text"])
+        self.assertIn("可整理作品：2", preview["status_text"])
         self.assertIn("媒体文件：2", preview["status_text"])
         self.assertEqual(
             preview["details"]["counts"],
@@ -3078,7 +3126,10 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.storage.renamed, [])
         self.assertEqual(host.storage.moved, [])
         self.assertEqual(host.storage.deleted, [])
-        self.assertIn("文件保持原位", host.notifications[-1][1])
+        self.assertEqual(
+            host.notifications[-1][1],
+            "无法确定整理规则，文件保留在原目录。",
+        )
 
     async def test_media_search_failure_stops_before_storage_and_reports_envelope(self):
         from telepiplex_plugin_sdk import FeatureError
@@ -3130,8 +3181,11 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "stopped_at": "metadata_resolution",
             },
         )
-        self.assertIn("元数据解析失败", host.notifications[-1][1])
-        self.assertIn("metadata_source_unavailable", host.notifications[-1][1])
+        self.assertEqual(host.notifications, [])
+        self.assertEqual(
+            host.reports[-1]["status_text"],
+            "无法确认媒体身份，未移动文件。",
+        )
 
     async def test_unresolved_fallback_keeps_selected_root_in_place(self):
         host = FakeHost(FakeStorage([]))
@@ -3153,7 +3207,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.handled)
         self.assertEqual(result.final_path, "/Downloads/Unknown.Release")
-        self.assertIn("文件保持原位", result.message)
+        self.assertEqual(result.message, "无法确定整理规则，文件保留在原目录。")
         self.assertEqual(host.storage.created, [])
         self.assertEqual(host.storage.moved, [])
         self.assertEqual(host.storage.deleted, [])
@@ -3362,10 +3416,11 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.reports[0]["operation_id"], "op-chain")
         self.assertEqual(host.reports[0]["revision"], 9)
         stages = {item["stage"] for item in host.reports}
-        self.assertTrue({
-            "organizing", "conflict_validation", "directory_preparation",
-            "rename", "moving",
-        }.issubset(stages))
+        self.assertIn("organizing", stages)
+        self.assertNotIn("conflict_validation", stages)
+        self.assertNotIn("directory_preparation", stages)
+        self.assertNotIn("rename", stages)
+        self.assertNotIn("moving", stages)
         self.assertEqual(host.reports[-1]["state"], "completed")
         self.assertEqual(host.reports[-1]["stage"], "completed")
         self.assertNotIn("next_plugin_id", host.reports[-1])
@@ -3706,7 +3761,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         await runtime.wait()
 
         self.assertEqual(host.events, [])
-        self.assertNotIn("Plex", host.notifications[-1][1])
+        self.assertEqual(host.notifications, [])
         self.assertEqual(host.reports[-1]["state"], "completed")
         self.assertNotIn("next_plugin_id", host.reports[-1])
 
@@ -4003,8 +4058,10 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(host.assert_capability, "storage.provider")
         self.assertEqual(host.events, [])
-        self.assertIn("整理结果", host.notifications[0][1])
-        self.assertNotIn("`", host.notifications[0][1])
+        self.assertEqual(
+            host.notifications[0][1],
+            "已整理：中文电影 (English Movie)",
+        )
 
     async def test_cleanup_failure_publishes_nothing_and_is_not_success(self):
         from telepiplex_rename.jobs import RenameJobStore
@@ -4048,7 +4105,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             await runtime.wait()
 
             self.assertEqual(host.events, [])
-            self.assertTrue(host.notifications[0][1].startswith("⚠️"))
+            self.assertEqual(host.notifications, [])
             self.assertEqual(jobs.get("job-cleanup-failed")["state"], "failed")
             self.assertEqual(
                 host.reports[-1]["details"]["effect_receipt"],
@@ -4068,7 +4125,9 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 item for item in host.milestones
                 if item["mode"] == "stage"
             )
-            self.assertTrue(stage_milestone["text"].startswith("⚠️"))
+            self.assertTrue(
+                stage_milestone["text"].startswith("已整理，但源目录清理未完成。")
+            )
 
     async def test_safe_partial_file_accounting_completes_with_partial_state(self):
         from telepiplex_rename.jobs import RenameJobStore
@@ -4216,7 +4275,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(host.reports[-1]["details"]["partial"], 1)
             self.assertIn(
-                "作品组部分完成：1",
+                "补整理完成：作品 1/1",
                 host.reports[-1]["status_text"],
             )
 
@@ -5220,9 +5279,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.5.8")
+        self.assertEqual(manifest["version"], "1.5.10")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertIn('version = "1.5.8"', project)
+        self.assertIn('version = "1.5.10"', project)
         self.assertIn('telepiplex-plugin-sdk==1.3.2', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
@@ -5238,8 +5297,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.5.8.tpx", source)
-        self.assertNotIn("dist/rename-1.5.8.tpx", source)
+        self.assertIn("/tmp/rename-1.5.10.tpx", source)
+        self.assertNotIn("dist/rename-1.5.10.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

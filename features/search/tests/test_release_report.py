@@ -62,8 +62,8 @@ class ReleaseReportTest(unittest.TestCase):
         self.assertEqual(
             text.splitlines(),
             [
-                "✅ 康斯坦丁 (Constantine)",
-                "搜索器 3/3，失败 0",
+                "康斯坦丁 (Constantine)",
+                "搜索完成：3/3",
                 "",
                 (
                     "① 1080p · BluRay · Remastered · 6ch环绕"
@@ -261,10 +261,10 @@ class ReleaseReportTest(unittest.TestCase):
         )
 
         lines = text.splitlines()
-        self.assertEqual(lines[0], "🔍 Constantine 2005")
+        self.assertEqual(lines[0], "正在搜索：Constantine 2005")
         self.assertEqual(
             lines[1],
-            "搜索器 0/1，失败 2",
+            "搜索进度：1/3，失败 2",
         )
         self.assertEqual(lines[2], "")
         self.assertEqual(lines[3], "① 2160p · REMUX · ?ch")
@@ -376,9 +376,8 @@ class ReleaseReportTest(unittest.TestCase):
         )
 
         self.assertEqual(text.splitlines(), [
-            "✅ Title S01",
-            "搜索词：Veep S01 / Veep Season 01",
-            "搜索器 0/0，失败 0",
+            "Title S01",
+            "搜索完成：0/0",
             "没有同身份、同范围的可用片源。",
         ])
 
@@ -402,7 +401,7 @@ class ReleaseReportTest(unittest.TestCase):
                 "expected": (
                     "① 2160p · ?ch\n   1.4 GB｜疑似死种"
                 ),
-                "expected_title": "✅ Constantine 2005",
+                "expected_title": "Constantine 2005",
             },
             {
                 "name": "season",
@@ -422,7 +421,7 @@ class ReleaseReportTest(unittest.TestCase):
                 "expected": (
                     "① 1080p · WEB-DL · ?ch沉浸\n   10.6 GB｜活种"
                 ),
-                "expected_title": "✅ The Glory S02 · 第2季整季",
+                "expected_title": "The Glory S02 · 第2季整季",
             },
             {
                 "name": "episode_unknown_specs",
@@ -438,7 +437,7 @@ class ReleaseReportTest(unittest.TestCase):
                 "expected": (
                     "① ?ch\n   未知大小｜疑似死种"
                 ),
-                "expected_title": "✅ The Glory S01E02 · S01E02",
+                "expected_title": "The Glory S01E02 · S01E02",
             },
         ]
 
@@ -464,7 +463,7 @@ class ReleaseReportTest(unittest.TestCase):
 
                 self.assertEqual(text.splitlines(), [
                     case["expected_title"],
-                    "搜索器 2/2，失败 0",
+                    "搜索完成：2/2",
                     "",
                     *case["expected"].splitlines(),
                 ])

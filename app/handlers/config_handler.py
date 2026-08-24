@@ -108,7 +108,7 @@ async def _show_config_menu(update, context, *, edit: bool):
 
 async def config_command(update, context):
     if not init.check_user(update.effective_user.id):
-        await update.effective_message.reply_text("⚠️ 当前账号无权配置 Feature。")
+        await update.effective_message.reply_text("无权配置。")
         return ConversationHandler.END
     return await _show_config_menu(update, context, edit=False)
 
@@ -117,7 +117,7 @@ async def config_open_callback(update, context):
     query = update.callback_query
     await query.answer()
     if not init.check_user(update.effective_user.id):
-        await query.edit_message_text("⚠️ 当前账号无权配置 Feature。")
+        await query.edit_message_text("无权配置。")
         return ConversationHandler.END
     return await _show_config_menu(update, context, edit=True)
 
@@ -155,7 +155,7 @@ async def _dispatch_config(plugin_id: str, update, context):
         await handle_feature_result(update, context, route, result)
     except Exception:
         await update.callback_query.edit_message_text(
-            "❌ custom_config_failed：Feature 独立配置向导暂时不可用。"
+            "配置向导暂时不可用。"
         )
     clear_config_session(context.user_data)
     return ConversationHandler.END
@@ -165,12 +165,12 @@ async def select_config_plugin(update, context):
     query = update.callback_query
     await query.answer()
     if not init.check_user(update.effective_user.id):
-        await query.edit_message_text("⚠️ 当前账号无权配置 Feature。")
+        await query.edit_message_text("无权配置。")
         return ConversationHandler.END
     index = _callback_index(query.data)
     plugin_ids = context.user_data.get("host_config_plugins") or []
     if index < 0 or index >= len(plugin_ids):
-        await query.edit_message_text("❌ 配置会话已失效，请重新发送 /config。")
+        await query.edit_message_text("配置会话已失效，请重新开始。")
         return ConversationHandler.END
     return await _dispatch_config(plugin_ids[index], update, context)
 
@@ -179,11 +179,11 @@ async def direct_config_callback(update, context):
     query = update.callback_query
     await query.answer()
     if not init.check_user(update.effective_user.id):
-        await query.edit_message_text("⚠️ 当前账号无权配置 Feature。")
+        await query.edit_message_text("无权配置。")
         return ConversationHandler.END
     match = _DIRECT_CALLBACK_RE.fullmatch(str(query.data or ""))
     if match is None:
-        await query.edit_message_text("❌ 配置入口无效。")
+        await query.edit_message_text("配置入口无效。")
         return ConversationHandler.END
     return await _dispatch_config(match.group("plugin_id"), update, context)
 
@@ -192,9 +192,9 @@ async def quit_config_conversation(update, context):
     clear_config_session(context.user_data)
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text("已退出 Feature 配置。")
+        await update.callback_query.edit_message_text("已退出配置。")
     else:
-        await update.effective_message.reply_text("已退出 Feature 配置。")
+        await update.effective_message.reply_text("已退出配置。")
     return ConversationHandler.END
 
 

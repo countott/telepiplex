@@ -881,17 +881,16 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
 
                 reattached = [
                     report for report in host.reports
-                    if "重新接入" in report["status_text"]
+                    if "已接入现有下载" in report["status_text"]
                 ]
                 self.assertEqual(len(reattached), 1)
-                self.assertIn(status_text, reattached[0]["status_text"])
+                self.assertIn(f"{percent:.1f}%", reattached[0]["status_text"])
                 self.assertTrue(reattached[0]["details"]["reattached"])
                 self.assertEqual(
                     reattached[0]["details"]["provider_status"],
                     status,
                 )
-                self.assertIn("重新接入", host.notifications[0][1])
-                self.assertIn(status_text, host.notifications[0][1])
+                self.assertEqual(host.notifications, [])
                 self.assertEqual(client.wait_existing_task, existing_task)
                 self.assertEqual(host.events[0][0], "download.completed")
                 self.assertEqual(
@@ -1043,10 +1042,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/auth", failure["remedy"])
         self.assertEqual(kwargs["idempotency_key"], "auth-expired:failed")
 
-        notification = self.host.notifications[-1][1]
-        self.assertIn("115 授权已失效", notification)
-        self.assertIn("登录状态已失效", notification)
-        self.assertIn("/auth", notification)
+        self.assertEqual(self.host.notifications, [])
 
         report = self.host.reports[-1]
         self.assertEqual(report["state"], "failed")
@@ -1071,7 +1067,6 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         for surface in (
             failure["error_message"],
             failure["remedy"],
-            notification,
             report["status_text"],
             str(report["details"]),
             output,
@@ -1106,6 +1101,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "selected_path": "/Downloads",
                 },
             },
+            "telegram_visibility": "silent",
         })
         await self.runtime.tasks.pop("download-operation-1")
 
@@ -1122,7 +1118,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host.reports[-1]["next_plugin_id"], "rename")
         self.assertEqual(
             self.host.reports[-1]["status_text"],
-            "✅ 115 下载完成\n保存目录：/Downloads/Show.S01E01.mkv",
+            "已下载，开始整理",
         )
         self.assertEqual(self.host.events[0][1]["operation_id"], "op-download-1")
         self.assertEqual(self.host.events[0][1]["chat_id"], 10)
@@ -1167,10 +1163,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLess(handoff_index, seal_index)
         self.assertLess(seal_index, event_index)
-        self.assertIn(
-            "保存目录：/Downloads/Show.S01E01.mkv",
-            self.host.milestones[0]["text"],
-        )
+        self.assertEqual(self.host.milestones[0]["text"], "已下载，开始整理")
         self.assertEqual(
             [event[0] for event in self.host.events],
             ["download.completed"],
@@ -1277,8 +1270,11 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["accepted"])
         self.assertEqual(self.host.events, [])
-        self.assertIn("媒体整理未安装", self.host.notifications[-1][1])
-        self.assertIn("/Downloads/Show.S01E01.mkv", self.host.notifications[-1][1])
+        self.assertEqual(self.host.notifications, [])
+        self.assertEqual(
+            self.host.reports[-1]["status_text"],
+            "已下载，未自动整理\n保存目录：/Downloads/Show.S01E01.mkv",
+        )
         self.assertEqual(self.host.reports[-1]["state"], "completed")
         self.assertNotIn("next_plugin_id", self.host.reports[-1])
 
@@ -1433,7 +1429,10 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
             self.host.reports[-1]["details"]["offline_task_record"],
             "retained",
         )
-        self.assertIn("记录已保留", self.host.reports[-1]["status_text"])
+        self.assertEqual(
+            self.host.reports[-1]["status_text"],
+            "下载已停止；已下载内容保留。",
+        )
 
     async def test_source_can_cancel_before_rename_accepts_handoff(self):
         await self.feature.download_capability({
@@ -1681,6 +1680,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "selected_path": "/Downloads",
                 },
             },
+            "telegram_visibility": "silent",
         }
         self.assertEqual(accepted["operation"]["details"], expected_effect)
         self.assertEqual(list(runtime.tasks), ["lost-running-response"])
@@ -1914,10 +1914,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
             "user_id": 1,
             "state": "handed_off",
             "stage": "handoff_rename",
-            "status_text": (
-                "✅ 115 下载完成\n"
-                "保存目录：/Downloads/Legacy.Movie.mkv"
-            ),
+            "status_text": "已下载，开始整理",
             "control": "cancel",
             "revision": 7,
             "details": {"downloaded_content": "preserved"},
@@ -2121,7 +2118,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
             "update_id": 22,
         })
         self.assertEqual(callback["session"]["state"], "close")
-        self.assertIn("已加入 115 下载队列", callback["actions"][0]["text"])
+        self.assertEqual(callback["actions"][0]["text"], "已提交下载")
         self.assertEqual(callback["operation"]["state"], "running")
         self.assertEqual(len(self.runtime.tasks), 1)
         task_id = next(iter(self.runtime.tasks))
@@ -2555,7 +2552,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["session"]["state"], "close")
         self.assertEqual(
             response["actions"][0]["text"],
-            "已退出当前交互。",
+            "已退出。",
         )
         self.assertNotIn((10, 1), self.feature.sessions)
         self.assertEqual(self.feature.config_store.writes, [])
@@ -3067,17 +3064,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.0.18")
+        self.assertEqual(manifest["version"], "1.0.19")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.0.18")
+        self.assertEqual(project["project"]["version"], "1.0.19")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.3.2",
         )
-        self.assertIn("/tmp/download-1.0.18.tpx", readme)
-        self.assertNotIn("dist/download-1.0.18.tpx", readme)
+        self.assertIn("/tmp/download-1.0.19.tpx", readme)
+        self.assertNotIn("dist/download-1.0.19.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)

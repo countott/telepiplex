@@ -311,6 +311,25 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sink._pending, {})
         self.assertEqual(sink._workers, {})
 
+    async def test_operation_sink_persists_silent_transition_without_rendering(self):
+        from app.handlers.interaction_handler import OperationReportSink
+
+        rendered = AsyncMock()
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(rendered)
+
+        response = await sink("download", self.report(
+            details={"telegram_visibility": "silent"},
+        ))
+        await sink.drain()
+
+        self.assertTrue(response["accepted"])
+        self.assertEqual(
+            self.coordinator.get("op-1").details["telegram_visibility"],
+            "silent",
+        )
+        rendered.assert_not_awaited()
+
     async def test_operation_sink_does_not_block_running_report_on_renderer(self):
         from app.handlers.interaction_handler import OperationReportSink
 
@@ -1248,7 +1267,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApplicationHandlerStop):
             await operation_gate(update, self.context())
 
-        update.callback_query.answer.assert_awaited_once_with("当前任务执行中")
+        update.callback_query.answer.assert_awaited_once_with("当前任务进行中")
 
     async def test_running_prowlarr_allows_only_current_opted_in_release_button(self):
         from app.handlers.interaction_handler import operation_gate
@@ -1283,7 +1302,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         stale = self.callback_update("search:release:stale")
         with self.assertRaises(ApplicationHandlerStop):
             await operation_gate(stale, self.context(router=router))
-        stale.callback_query.answer.assert_awaited_once_with("当前任务执行中")
+        stale.callback_query.answer.assert_awaited_once_with("当前任务进行中")
 
     async def test_button_only_operation_rejects_plain_text_and_allows_owned_callback(self):
         from app.handlers.interaction_handler import operation_gate
@@ -1315,7 +1334,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApplicationHandlerStop):
             await operation_gate(blocked, context)
         self.assertIn(
-            "等待按钮",
+            "当前任务未结束",
             blocked.effective_message.reply_text.await_args.args[0],
         )
         owned = self.callback_update("search:release:1")
@@ -1326,7 +1345,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         unrelated = self.callback_update("download:path:1")
         with self.assertRaises(ApplicationHandlerStop):
             await operation_gate(unrelated, context)
-        unrelated.callback_query.answer.assert_awaited_once_with("当前任务执行中")
+        unrelated.callback_query.answer.assert_awaited_once_with("当前任务进行中")
 
     async def test_awaiting_input_allows_text_only_for_matching_open_session(self):
         from app.handlers.interaction_handler import operation_gate
@@ -1385,7 +1404,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApplicationHandlerStop):
             await operation_gate(update, self.context(router=router))
 
-        update.callback_query.answer.assert_awaited_once_with("当前任务执行中")
+        update.callback_query.answer.assert_awaited_once_with("当前任务进行中")
 
     async def test_awaiting_input_rejects_current_callback_from_old_message(self):
         from app.handlers.interaction_handler import operation_gate
@@ -1417,7 +1436,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApplicationHandlerStop):
             await operation_gate(update, self.context(router=router))
 
-        update.callback_query.answer.assert_awaited_once_with("当前任务执行中")
+        update.callback_query.answer.assert_awaited_once_with("当前任务进行中")
 
     async def test_terminal_control_press_is_idempotent_without_feature_dispatch(self):
         from app.handlers.interaction_handler import operation_control_callback

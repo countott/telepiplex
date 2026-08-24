@@ -396,7 +396,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             }})
 
         self.assertEqual(host.reports[-1]["state"], "failed")
-        self.assertIn("初始化失败", host.reports[-1]["status_text"])
+        self.assertEqual(host.reports[-1]["status_text"], "Plex 入库启动失败。")
 
     async def test_plex_non_numeric_argument_returns_usage_without_ai_task(self):
         result = await self.feature.command({
@@ -453,7 +453,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(
             cancelled["actions"][0]["text"],
-            "已退出 Plex 扫描选择。",
+            "已退出扫描。",
         )
         self.assertEqual(self.jobs.list(), [])
         self.assertEqual(self.runtime.tasks, {})
@@ -876,9 +876,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.jobs.get(job["id"])["state"], "cancelled")
         text = cancelled["operation"]["status_text"]
-        self.assertIn("后续步骤不会继续", text)
-        self.assertIn("扫描、海报和音轨/字幕写入", text)
-        self.assertIn("不会自动回滚", text)
+        self.assertEqual(text, "Plex 入库已停止；已完成变更保留。")
         self.assertEqual(service.resume_incomplete_jobs(), 0)
         self.assertEqual(self.jobs.get(job["id"])["state"], "cancelled")
 
@@ -1174,9 +1172,9 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             opened["operation"]["operation_id"],
         )
         self.assertEqual(cancelled["operation"]["state"], "cancelled")
-        self.assertIn(
-            "不会自动回滚",
+        self.assertEqual(
             cancelled["operation"]["status_text"],
+            "Plex 入库已停止；已完成变更保留。",
         )
 
     async def test_confirm_selection_checks_cancel_before_any_plex_mutation(self):
@@ -1283,7 +1281,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         report = self.feature.host.reports[-1]
         self.assertEqual(report["operation_id"], operation_id)
         self.assertEqual(report["state"], "cancelled")
-        self.assertIn("不会自动回滚", report["status_text"])
+        self.assertEqual(report["status_text"], "Plex 入库已停止；已完成变更保留。")
 
     async def test_choice_pick_confirms_and_continues_same_operation(self):
         job = self.make_waiting_job("artwork", [
@@ -1500,7 +1498,10 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("plex-resume-batch", runtime.tasks)
         self.assertEqual(self.jobs.get(job["id"])["state"], "interrupted")
         self.assertEqual(host.reports[-1]["state"], "interrupted")
-        self.assertIn("进程停止", host.reports[-1]["status_text"])
+        self.assertEqual(
+            host.reports[-1]["status_text"],
+            "Plex 入库已中断；已完成变更保留。",
+        )
 
     async def test_coordinated_interruption_reports_before_service_initializes(self):
         job = self.jobs.create_or_get("coordinated-broken-service", {
@@ -1576,7 +1577,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "plex": {"base_url": "", "token": ""},
         }), encoding="utf-8")
         context = SimpleNamespace(
-            manifest={"plugin_id": "sync", "version": "1.1.4"},
+            manifest={"plugin_id": "sync", "version": "1.1.5"},
             token="token",
             host=FakeHost(),
             config_path=config_path,
@@ -1614,7 +1615,7 @@ class FeatureSourceContractTest(unittest.TestCase):
         }
 
         self.assertEqual(commands["scan"], "扫描 Plex 媒体库")
-        self.assertEqual(manifest["version"], "1.1.4")
+        self.assertEqual(manifest["version"], "1.1.5")
         self.assertEqual(manifest["host_api"], ">=1.2,<2.0")
         self.assertEqual(manifest["state_schema_version"], 2)
 
@@ -1624,13 +1625,13 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         source = (ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertEqual(package["project"]["version"], "1.1.4")
+        self.assertEqual(package["project"]["version"], "1.1.5")
         self.assertEqual(
             package["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.3.2",
         )
-        self.assertIn("/tmp/sync-1.1.4.tpx", source)
-        self.assertNotIn("dist/sync-1.1.4.tpx", source)
+        self.assertIn("/tmp/sync-1.1.5.tpx", source)
+        self.assertNotIn("dist/sync-1.1.5.tpx", source)
         self.assertIn("独立手动", source)
         self.assertNotIn("media.organized", source)
         self.assertIn("`/scan`", source)

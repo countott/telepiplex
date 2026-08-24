@@ -190,7 +190,7 @@ class DownloadFeature:
             operation = self._new_operation(
                 request,
                 stage="destination_selection",
-                status_text="等待选择 115 保存目录。",
+                status_text="选择 115 保存目录。",
                 control="exit",
             )
             self.sessions[key] = {
@@ -206,7 +206,7 @@ class DownloadFeature:
             return {
                 "actions": [{
                     "kind": "send_message",
-                    "text": "请选择保存目录：",
+                    "text": "选择 115 保存目录：",
                     "data": {"keyboard": keyboard},
                 }],
                 "session": {"state": "open"},
@@ -214,11 +214,11 @@ class DownloadFeature:
             }
         if command == "q":
             key = self._session_key(request)
-            operation = self._close_interaction(key, "已退出当前交互。")
+            operation = self._close_interaction(key, "已退出。")
             result = {
                 "actions": [{
                     "kind": "send_message",
-                    "text": "已退出当前交互。",
+                    "text": "已退出。",
                 }],
                 "session": {"state": "close"},
             }
@@ -235,7 +235,7 @@ class DownloadFeature:
         payload = str(request.get("payload") or "")
         key = self._session_key(request)
         if payload == "exit":
-            operation = self._close_interaction(key, "已退出当前交互。")
+            operation = self._close_interaction(key, "已退出。")
             result = self._message_with_session("已退出。", "close")
             if operation is not None:
                 result["operation"] = operation
@@ -255,16 +255,16 @@ class DownloadFeature:
                 operation_id,
                 state="awaiting_input",
                 stage="access_token",
-                status_text="等待 Access token。",
+                status_text="输入 Access token。",
                 control="exit",
             )
             return self._interaction_message(
-                key, "请发送 Access token。", kind="edit_message", operation=operation
+                key, "输入 Access token。", kind="edit_message", operation=operation
             )
         if payload == "auth:scan":
             session = self.sessions.get(key)
             if not session or session.get("stage") != "choose_mode":
-                return self._message_with_session("⚠️ 会话已失效。", "close")
+                return self._message_with_session("会话已失效，请重新开始。", "close")
             return await self._start_scan_auth(request)
         session = self.sessions.get(key)
         if (
@@ -272,7 +272,7 @@ class DownloadFeature:
             or session.get("stage") != "path"
             or not payload.startswith("path:")
         ):
-            return {"actions": [{"kind": "send_message", "text": "⚠️ 会话已失效。"}], "session": {"state": "close"}}
+            return {"actions": [{"kind": "send_message", "text": "会话已失效，请重新开始。"}], "session": {"state": "close"}}
         try:
             directories = self.config.get("save_directories") or []
             index = self._bounded_index(
@@ -281,7 +281,7 @@ class DownloadFeature:
             directory = directories[index]
         except (IndexError, TypeError, ValueError):
             operation = self._close_interaction(key, "保存目录不可用。")
-            result = self._message_with_session("⚠️ 保存目录不可用。", "close")
+            result = self._message_with_session("保存目录不可用。", "close")
             if operation is not None:
                 result["operation"] = operation
             return result
@@ -305,7 +305,7 @@ class DownloadFeature:
         return {
             "actions": [{
                 "kind": "edit_message",
-                "text": f"✅ 已加入 115 下载队列：{result['job_id']}",
+                "text": "已提交下载",
             }],
             "session": {"state": "close"},
             "operation": result["operation"],
@@ -315,7 +315,7 @@ class DownloadFeature:
         key = self._session_key(request)
         session = self.sessions.get(key)
         if not session:
-            return self._message_with_session("⚠️ 会话已失效。", "close")
+            return self._message_with_session("会话已失效，请重新开始。", "close")
 
         stage = session.get("stage")
         if stage.startswith("directory_"):
@@ -328,12 +328,12 @@ class DownloadFeature:
                     session["operation_id"],
                     state="awaiting_input",
                     stage="access_token",
-                    status_text="Access token 无效，等待重新输入。",
+                    status_text="Access token 无效，请重新输入。",
                     control="exit",
                 )
                 return self._interaction_message(
                     key,
-                    "⚠️ Access token 无效，请重新发送单行 Token。",
+                    "Access token 无效，请重新输入。",
                     operation=operation,
                 )
             self.sessions[key] = {
@@ -346,12 +346,12 @@ class DownloadFeature:
                 session["operation_id"],
                 state="awaiting_input",
                 stage="refresh_token",
-                status_text="等待 Refresh token。",
+                status_text="输入 Refresh token。",
                 control="exit",
             )
             return self._interaction_message(
                 key,
-                "已收到 Access token。\n请发送 Refresh token。",
+                "已收到 Access token。\n输入 Refresh token。",
                 operation=operation,
             )
 
@@ -363,12 +363,12 @@ class DownloadFeature:
                     session["operation_id"],
                     state="awaiting_input",
                     stage="refresh_token",
-                    status_text="Refresh token 无效，等待重新输入。",
+                    status_text="Refresh token 无效，请重新输入。",
                     control="exit",
                 )
                 return self._interaction_message(
                     key,
-                    "⚠️ Refresh token 无效，请重新发送单行 Token。",
+                    "Refresh token 无效，请重新输入。",
                     operation=operation,
                 )
             access_token = session["access_token"]
@@ -382,7 +382,7 @@ class DownloadFeature:
                 session["operation_id"],
                 state="running",
                 stage="token_persistence",
-                status_text="正在验证并写入 115 Token。",
+                status_text="正在更新 115 授权。",
                 control="rollback",
             )
             try:
@@ -392,7 +392,7 @@ class DownloadFeature:
                 )
                 operation = await self._commit_token_persistence(
                     session["operation_id"],
-                    status_text="115 Token 已写入并立即生效。",
+                    status_text="115 授权已更新。",
                 )
             except TokenPersistenceCancelled as exc:
                 self._clear_auth_session(key)
@@ -464,12 +464,12 @@ class DownloadFeature:
             self._clear_auth_session(key)
             logger.info("download_direct_auth_updated auth_mode=direct")
             result = self._message_with_session(
-                "✅ 115 Token 已写入并立即生效。", "close"
+                "115 授权已更新。", "close"
             )
             result["operation"] = operation
             return result
 
-        return self._message_with_session("⚠️ 会话已失效。", "close")
+        return self._message_with_session("会话已失效，请重新开始。", "close")
 
     def _start_config_session(self, request: dict) -> dict:
         key = self._session_key(request)
@@ -477,7 +477,7 @@ class DownloadFeature:
         operation = self._new_operation(
             request,
             stage="config_home",
-            status_text="等待选择 download 配置项。",
+            status_text="选择 115 配置。",
             control="exit",
         )
         self.sessions[key] = {
@@ -513,10 +513,10 @@ class DownloadFeature:
                 "kind": kind,
                 "text": (
                     (f"{text_prefix}\n\n" if text_prefix else "") +
-                    "download 配置\n\n"
+                    "115 配置\n\n"
                     f"授权：{'已配置' if configured else '未配置'}\n"
                     f"保存目录：{directory_count} 个\n\n"
-                    "请选择要修改的配置。"
+                    "选择要修改的配置。"
                 ),
                 "data": {"keyboard": [
                     [{
@@ -537,7 +537,7 @@ class DownloadFeature:
     async def _config_callback(self, request, payload, key):
         session = self.sessions.get(key)
         if not session:
-            return self._message_with_session("⚠️ 配置会话已失效。", "close")
+            return self._message_with_session("配置会话已失效，请重新开始。", "close")
         stage = session.get("stage")
         if payload == "config:auth" and stage == "config_home":
             return self._start_auth_session(
@@ -562,7 +562,7 @@ class DownloadFeature:
                 session["operation_id"],
                 state="awaiting_input",
                 stage="directory_list",
-                status_text="正在管理 115 保存目录。",
+                status_text="管理 115 保存目录。",
                 control="exit",
             )
             return self._directory_list_message(
@@ -570,7 +570,7 @@ class DownloadFeature:
             )
         if payload == "config:back" and str(stage).startswith("directory_"):
             return self._return_to_directory_list(
-                key, "已返回保存目录列表。", kind="edit_message"
+                key, "保存目录列表。", kind="edit_message"
             )
         if (
             payload.startswith("config:page:")
@@ -592,7 +592,7 @@ class DownloadFeature:
                     "“真人电影”。该名称只用于按钮展示，不是保存路径。"
                 ),
                 stage="directory_add_name",
-                status_text="等待输入保存目录名称。",
+                status_text="输入保存目录名称。",
                 kind="edit_message",
             )
         if payload.startswith("config:item:") and stage == "directory_list":
@@ -614,7 +614,7 @@ class DownloadFeature:
                 session["operation_id"],
                 state="awaiting_input",
                 stage="directory_item",
-                status_text="等待选择保存目录编辑操作。",
+                status_text="选择目录操作。",
                 control="exit",
             )
             return {
@@ -656,7 +656,7 @@ class DownloadFeature:
                     "不是保存路径。"
                 ),
                 stage="directory_edit_name",
-                status_text="等待输入新的保存目录名称。",
+                status_text="输入新的保存目录名称。",
                 kind="edit_message",
             )
         if payload == "config:edit:path" and stage == "directory_item":
@@ -667,7 +667,7 @@ class DownloadFeature:
                     "“series/live action”。不要以 / 开头，末尾 / 可省略。"
                 ),
                 stage="directory_edit_path",
-                status_text="等待输入新的 115 保存路径。",
+                status_text="输入新的 115 保存路径。",
                 kind="edit_message",
             )
         if payload == "config:delete" and stage == "directory_item":
@@ -679,7 +679,7 @@ class DownloadFeature:
                 session["operation_id"],
                 state="awaiting_input",
                 stage="directory_delete_confirm",
-                status_text="等待确认删除保存目录。",
+                status_text="确认删除保存目录。",
                 control="exit",
             )
             return {
@@ -718,7 +718,7 @@ class DownloadFeature:
                     kind="edit_message",
                 )
             return self._return_to_directory_list(
-                key, "目录删除已暂存。", kind="edit_message"
+                key, "目录删除待保存。", kind="edit_message"
             )
         if payload == "config:save" and stage == "directory_list":
             return await self._save_directory_config(key)
@@ -750,7 +750,7 @@ class DownloadFeature:
                         "末尾 / 可省略。"
                     ),
                     stage="directory_add_path",
-                    status_text="等待输入 115 保存路径。",
+                    status_text="输入 115 保存路径。",
                 )
             if stage == "directory_add_path":
                 path = self._directory_path(
@@ -765,7 +765,7 @@ class DownloadFeature:
                     candidate
                 )
                 return self._return_to_directory_list(
-                    key, "目录新增已暂存。"
+                    key, "目录新增待保存。"
                 )
             if stage in {"directory_edit_name", "directory_edit_path"}:
                 index = int(session["selected_index"])
@@ -782,14 +782,14 @@ class DownloadFeature:
                     candidate
                 )
                 return self._return_to_directory_list(
-                    key, "目录修改已暂存。"
+                    key, "目录修改待保存。"
                 )
         except (IndexError, TypeError, ValueError) as exc:
             return self._directory_prompt(
                 key,
                 f"⚠️ {exc}",
                 stage=str(stage),
-                status_text="保存目录输入无效，等待重新输入。",
+                status_text="保存目录无效，请重新输入。",
             )
         return self._message_with_session("⚠️ 配置会话已失效。", "close")
 
@@ -843,7 +843,7 @@ class DownloadFeature:
     ):
         session = self.sessions.get(key)
         if not session:
-            return self._message_with_session("⚠️ 配置会话已失效。", "close")
+            return self._message_with_session("配置会话已失效，请重新开始。", "close")
         session["stage"] = stage
         self._schedule_sensitive_expiry(key)
         operation = self._advance_operation(
@@ -899,7 +899,7 @@ class DownloadFeature:
             operation_id,
             state="running",
             stage="config_persistence",
-            status_text="正在保存 115 目录配置。",
+            status_text="正在保存目录配置。",
             control="",
         )
         try:
@@ -922,13 +922,13 @@ class DownloadFeature:
                 operation_id,
                 state="awaiting_input",
                 stage="directory_list",
-                status_text="目录配置保存失败，工作副本已保留。",
+                status_text="保存失败，当前修改仍保留。",
                 control="exit",
             )
             return self._directory_list_message(
                 key,
                 operation=operation,
-                text_prefix="⚠️ 目录配置保存失败，请重试或退出。",
+                text_prefix="保存失败，请重试或退出。",
             )
         self.config.clear()
         self.config.update(updated)
@@ -937,11 +937,11 @@ class DownloadFeature:
             operation_id,
             state="completed",
             stage="completed",
-            status_text="115 保存目录已写入并立即生效。",
+            status_text="115 保存目录已更新。",
             control="",
         )
         result = self._message_with_session(
-            "✅ 115 保存目录已写入并立即生效。", "close"
+            "115 保存目录已更新。", "close"
         )
         result["operation"] = operation
         return result
@@ -959,7 +959,7 @@ class DownloadFeature:
             operation = self._new_operation(
                 request,
                 stage="authorization_mode",
-                status_text="等待选择 115 授权方式。",
+                status_text="选择 115 授权方式。",
                 control="exit",
             )
         else:
@@ -968,7 +968,7 @@ class DownloadFeature:
                 operation_id,
                 state="awaiting_input",
                 stage="authorization_mode",
-                status_text="等待选择 115 授权方式。",
+                status_text="选择 115 授权方式。",
                 control="exit",
             )
         self.sessions[key] = {
@@ -978,7 +978,7 @@ class DownloadFeature:
         return {
             "actions": [{
                 "kind": kind,
-                "text": "请选择 115 授权方式：",
+                "text": "选择 115 授权方式：",
                 "data": {"keyboard": [[
                     {
                         "text": "Access / Refresh Token",
@@ -1076,9 +1076,9 @@ class DownloadFeature:
             if operation_id in self.operations:
                 stage = str(expected.get("stage") or "")
                 status_text = (
-                    "目录配置已超时并退出。"
+                    "目录配置已超时。"
                     if stage.startswith("directory_") or stage == "config_home"
-                    else "授权输入已超时并退出。"
+                    else "授权输入已超时。"
                 )
                 operation = self._advance_operation(
                     operation_id,
@@ -1111,11 +1111,11 @@ class DownloadFeature:
                 operation_id,
                 state="failed",
                 stage="authorization_configuration",
-                status_text="扫码授权缺少 app_id，任务已结束。",
+                status_text="扫码授权缺少 app_id。",
                 control="",
             )
             result = self._message_with_session(
-                "⚠️ 扫码授权需要先在私有配置中填写 app_id。",
+                "扫码授权需要先配置 app_id。",
                 "close",
             )
             result["operation"] = operation
@@ -1138,11 +1138,11 @@ class DownloadFeature:
                 operation_id,
                 state="failed",
                 stage="qr_creation",
-                status_text=f"115 扫码授权启动失败：{type(exc).__name__}",
+                status_text="115 扫码授权启动失败。",
                 control="",
             )
             result = self._message_with_session(
-                f"⚠️ 115 扫码授权启动失败：{type(exc).__name__}",
+                "115 扫码授权启动失败。",
                 "close",
             )
             result["operation"] = operation
@@ -1165,7 +1165,7 @@ class DownloadFeature:
             operation_id,
             state="running",
             stage="qr_wait",
-            status_text="等待 115 App 扫码确认。",
+            status_text="请使用 115 App 扫码确认。",
             control="cancel",
         )
         self.runtime.spawn(
@@ -1178,7 +1178,7 @@ class DownloadFeature:
         return {
             "actions": [{
                 "kind": "edit_message",
-                "text": f"请使用 115 App 扫码并确认：\n<pre>{qr_text}</pre>",
+                "text": f"请使用 115 App 扫码确认：\n<pre>{qr_text}</pre>",
                 "parse_mode": "HTML",
             }],
             "session": {"state": "close"},
@@ -1203,7 +1203,7 @@ class DownloadFeature:
                 operation_id,
                 state="running",
                 stage="token_persistence",
-                status_text="扫码已确认，正在写入 115 Token。",
+                status_text="正在更新 115 授权。",
                 control="rollback",
             )
             await self._persist_tokens(
@@ -1214,13 +1214,13 @@ class DownloadFeature:
             )
             completed = await self._commit_token_persistence(
                 operation_id,
-                status_text="115 扫码授权成功，Token 已写入。",
+                status_text="115 授权已更新。",
             )
             logger.info(
                 "download_scan_auth_completed "
                 f"user_id={user_id} auth_uid={authorization['uid']}"
             )
-            message = "✅ 115 扫码授权成功，Token 已写回 Feature 私有配置。"
+            message = "115 授权已更新。"
             if completed["chat_id"] and completed["user_id"]:
                 await self.host.report_operation(completed)
         except Exception as exc:
@@ -1271,7 +1271,7 @@ class DownloadFeature:
                     operation_id,
                     state="cancelled",
                     stage="qr_wait",
-                    status_text="已取消 115 扫码授权，未写入 Token。",
+                    status_text="已取消 115 扫码授权。",
                     control="",
                 )
             else:
@@ -1280,16 +1280,15 @@ class DownloadFeature:
                     f"user_id={user_id} auth_uid={authorization.get('uid') or ''} "
                     f"error={type(exc).__name__}"
                 )
-                message = f"⚠️ 115 扫码授权失败：{type(exc).__name__}"
+                message = "115 扫码授权失败。"
                 await self._report_operation(
                     operation_id,
                     state="failed",
                     stage=operation.get("stage") or "qr_wait",
-                    status_text=f"115 扫码授权失败：{type(exc).__name__}",
+                    status_text="115 扫码授权失败。",
                     control="",
                 )
-        if user_id:
-            await self.host.notify_user(user_id, message)
+        del user_id
 
     @staticmethod
     def _render_qr(value: str) -> str:
@@ -1433,6 +1432,7 @@ class DownloadFeature:
                     "selected_path": selected_path,
                 },
             },
+            "telegram_visibility": "silent",
         }
         operation["details"] = deepcopy(acceptance_details)
         report_error = None
@@ -1441,7 +1441,7 @@ class DownloadFeature:
                 operation_id,
                 state="running",
                 stage="preparing_submission",
-                status_text="正在准备提交 115 离线下载任务。",
+                status_text="115：正在提交下载",
                 control="cancel",
                 details=acceptance_details,
             )
@@ -1561,9 +1561,8 @@ class DownloadFeature:
                 if info_hash:
                     operation["info_hash"] = info_hash
                 reattached_text = (
-                    "检测到已有 115 离线任务，已重新接入。"
-                    f"当前状态：{provider_status_text}"
-                    f"（{progress_value:.1f}%）。"
+                    "115：已接入现有下载"
+                    f"（{progress_value:.1f}%）"
                 )
                 await self._report_operation(
                     operation_id,
@@ -1577,31 +1576,28 @@ class DownloadFeature:
                         "progress": progress_value,
                     },
                 )
-                if user_id:
-                    try:
-                        await self.host.notify_user(
-                            user_id,
-                            reattached_text,
-                            idempotency_key=f"{job_id}:reattached",
-                        )
-                    except Exception:
-                        pass
             else:
                 self._raise_if_cancelled(operation)
+                hidden_details = dict(operation.get("details") or {})
+                hidden_details["telegram_visibility"] = "silent"
                 await self._report_operation(
                     operation_id,
                     state="running",
                     stage="submitted",
-                    status_text="115 离线任务已提交。",
+                    status_text="115：正在提交下载",
                     control="cancel",
+                    details=hidden_details,
                 )
                 self._raise_if_cancelled(operation)
+                visible_details = dict(operation.get("details") or {})
+                visible_details.pop("telegram_visibility", None)
                 await self._report_operation(
                     operation_id,
                     state="running",
                     stage="downloading",
-                    status_text="115 正在下载，等待任务完成。",
+                    status_text="115：下载中",
                     control="cancel",
+                    details=visible_details,
                 )
             self._raise_if_cancelled(operation)
 
@@ -1639,12 +1635,15 @@ class DownloadFeature:
             if not resource_name:
                 raise RuntimeError("115 completed task has no resource name")
             final_path = f"{selected_path.rstrip('/')}/{resource_name}"
+            hidden_details = dict(operation.get("details") or {})
+            hidden_details["telegram_visibility"] = "silent"
             await self._report_operation(
                 operation_id,
                 state="running",
                 stage="reading_files",
-                status_text="下载完成，正在读取 115 文件树。",
+                status_text="下载完成，读取文件",
                 control="cancel",
+                details=hidden_details,
             )
             self._raise_if_cancelled(operation)
             file_tree = await asyncio.to_thread(
@@ -1730,15 +1729,6 @@ class DownloadFeature:
                 )
             except Exception:
                 pass
-            if user_id:
-                try:
-                    await self.host.notify_user(
-                        user_id,
-                        failure_detail.user_text(),
-                        idempotency_key=f"{job_id}:failed-notice",
-                    )
-                except Exception:
-                    pass
             await self._report_operation(
                 operation_id,
                 state="failed",
@@ -1799,12 +1789,14 @@ class DownloadFeature:
             operation_id,
             state="handed_off",
             stage="handoff_rename",
-            status_text=(
-                "✅ 115 下载完成\n"
-                f"保存目录：{payload.get('final_path')}"
-            ),
+            status_text="已下载，开始整理",
             control="cancel",
             next_plugin_id="rename",
+            details={
+                key: value
+                for key, value in dict(operation.get("details") or {}).items()
+                if key != "telegram_visibility"
+            },
         )
         payload["download_handoff_report"] = deepcopy(handoff)
         payload["download_handoff_accepted"] = False
@@ -1907,8 +1899,8 @@ class DownloadFeature:
                     state="completed",
                     stage="completed",
                     status_text=(
-                        "115 下载完成；媒体整理未安装，"
-                        "已跳过自动整理。"
+                        "已下载，未自动整理\n"
+                        f"保存目录：{payload.get('final_path')}"
                     ),
                     control="",
                     details={"downstream_skipped": "rename"},
@@ -1916,17 +1908,6 @@ class DownloadFeature:
                 if self.jobs:
                     self.jobs.update(
                         job_id, "completed", result=payload
-                    )
-                user_id = int(payload.get("user_id") or 0)
-                if user_id:
-                    await self.host.notify_user(
-                        user_id,
-                        (
-                            "✅ 115 下载完成\n"
-                            "媒体整理未安装，已跳过自动整理。\n"
-                            f"保存目录：{payload.get('final_path')}"
-                        ),
-                        idempotency_key=f"{job_id}:download-notice",
                     )
                 return
             if self.jobs:
@@ -1990,10 +1971,7 @@ class DownloadFeature:
                 seal_response = await self.host.seal_operation_stage(
                     operation_id,
                     f"download-stage-complete:{job_id}",
-                    (
-                        "✅ 115 下载已完成。\n"
-                        f"保存目录：{payload.get('final_path')}"
-                    ),
+                    "已下载，开始整理",
                     deadline=45,
                 )
             except Exception as exc:
@@ -2037,7 +2015,7 @@ class DownloadFeature:
                 operation_id,
                 state="cancelled",
                 stage=operation.get("stage") or "interaction",
-                status_text="已退出当前交互。",
+                status_text="已退出。",
                 control="",
             )
             return {"actions": [], "operation": terminal}
@@ -2062,7 +2040,7 @@ class DownloadFeature:
                     operation_id,
                     state="rolling_back",
                     stage="token_persistence",
-                    status_text="正在停止 Token 写入并恢复原配置。",
+                    status_text="正在恢复原配置。",
                     control="",
                 )
             return {"actions": [], "operation": rolling}
@@ -2080,7 +2058,7 @@ class DownloadFeature:
             operation_id,
             state="cancelling",
             stage=operation.get("stage") or "cancelling",
-            status_text="取消请求已接受，正在当前安全检查点停止后续任务。",
+            status_text="正在取消下载。",
             control="cancel",
             details=details,
         )
@@ -2278,9 +2256,7 @@ class DownloadFeature:
             operation_id,
             state="cancelled",
             stage=operation.get("stage") or "download",
-            status_text=(
-                f"下载任务已停止；{record_text}；不删除已经下载的内容。"
-            ),
+            status_text="下载已停止；已下载内容保留。",
             control="",
             details=details,
         )
@@ -2306,10 +2282,7 @@ class DownloadFeature:
                 "user_id": user_id,
                 "state": "handed_off",
                 "stage": "handoff_rename",
-                "status_text": (
-                    "✅ 115 下载完成\n"
-                    f"保存目录：{payload.get('final_path')}"
-                ),
+                "status_text": "已下载，开始整理",
                 "control": "cancel",
                 "revision": revision,
                 "details": {"downloaded_content": "preserved"},

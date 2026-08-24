@@ -317,8 +317,6 @@ def format_release_report(
     ][:12]
     displayed = _display_versions(releases)
     failed = len(down)
-    available = max(0, total - failed)
-    successful_completed = max(0, completed - failed)
     final = bool(
         summary.get("final")
         if summary.get("final") is not None
@@ -330,15 +328,13 @@ def format_release_report(
         title = f"{_clip(query, title_limit) or '未知作品'} · {scope}"
     else:
         title = _clip(query, 120) or "未知作品"
-    lines = [f"{'✅' if final else '🔍'} {title}"]
-    visible_queries = list(dict.fromkeys(
-        _clip(item, 120)
-        for item in search_queries or ()
-        if _clip(item, 120)
-    ))
-    if visible_queries:
-        lines.append("搜索词：" + " / ".join(visible_queries))
-    lines.append(f"搜索器 {successful_completed}/{available}，失败 {failed}")
+    del search_queries
+    if final:
+        lines = [title, f"搜索完成：{completed}/{total}"]
+    else:
+        lines = [f"正在搜索：{title}", f"搜索进度：{completed}/{total}"]
+    if failed:
+        lines[-1] += f"，失败 {failed}"
     if displayed:
         lines.append("")
     if not displayed:

@@ -156,7 +156,7 @@ class ConfigHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             update.callback_query.edit_message_text.await_args.args[0],
-            "已退出 Feature 配置。",
+            "已退出配置。",
         )
 
     async def test_invalid_config_feature_remains_visible_with_stable_error_code(self):
@@ -298,7 +298,7 @@ class ConfigHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(state, -1)
         message = update.callback_query.edit_message_text.await_args.args[0]
-        self.assertIn("custom_config_failed", message)
+        self.assertEqual(message, "配置向导暂时不可用。")
         self.assertNotIn("secret-value", message)
 
     async def test_unauthorized_command_does_not_read_manager(self):

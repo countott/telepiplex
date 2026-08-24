@@ -760,6 +760,28 @@ def test_file_transaction_snapshot_is_deeply_immutable_and_normalized():
         snapshot.require_file_info("/never/queried.mkv")
 
 
+def test_snapshot_uses_size_byte_when_provider_also_returns_human_size():
+    snapshot = file_executor.FileTransactionSnapshot.from_provider_facts(
+        {
+            "/Downloads/episode.mkv": {
+                "file_id": "episode",
+                "sha1": "ABCDEF",
+                "size": "11.57GB",
+                "size_byte": 12_419_471_418,
+            },
+        },
+        {},
+    )
+
+    assert snapshot.file_info["/Downloads/episode.mkv"] == (
+        file_executor.PreflightFileInfo(
+            "episode",
+            "abcdef",
+            12_419_471_418,
+        )
+    )
+
+
 def test_native_snapshot_uses_captured_parent_id_without_parent_reread():
     class NativeStorage(StatefulStorage):
         def __init__(self):

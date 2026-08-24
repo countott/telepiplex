@@ -16,11 +16,11 @@ from .sync_service import LibrarySyncService, PlexOperationCancelled
 
 
 _PLEX_STAGE_TEXT = {
-    "scan_preparing": "正在准备 Plex 扫描任务。",
-    "scanning": "Plex 已接受媒体库扫描，等待当前调用完成。",
-    "artwork": "正在处理 Plex 海报。",
-    "audio": "正在处理 Plex 音轨选择。",
-    "subtitle": "正在处理 Plex 字幕选择。",
+    "scan_preparing": "Plex：正在入库\n▱▱▱",
+    "scanning": "Plex：正在入库\n▰▱▱",
+    "artwork": "Plex：正在入库\n▰▰▱",
+    "audio": "Plex：正在入库\n▰▰▰",
+    "subtitle": "Plex：正在入库\n▰▰▰",
 }
 
 
@@ -101,10 +101,7 @@ class SyncFeature:
                 operation_id,
                 state="failed",
                 stage="scan_preparing",
-                status_text=(
-                    "Plex 管理初始化失败，任务未进入扫描："
-                    f"{type(exc).__name__}"
-                ),
+                status_text="Plex 入库启动失败。",
                 control="",
             )
             raise
@@ -113,14 +110,9 @@ class SyncFeature:
                 operation_id,
                 state="failed",
                 stage="scan_preparing",
-                status_text="Plex 管理拒绝了不完整的媒体元数据。",
+                status_text="Plex 入库失败：媒体信息不完整。",
                 control="",
             )
-            if payload.get("user_id"):
-                await self.host.notify_user(
-                    int(payload["user_id"]),
-                    "⚠️ Plex 管理拒绝了不完整的 canonical metadata；请人工检查。",
-                )
             result = {"accepted": True, "state": "rejected"}
             if operation:
                 result["operation"] = self._operation_view(
@@ -197,9 +189,9 @@ class SyncFeature:
                         state=terminal_state,
                         stage=terminal_state,
                         status_text=(
-                            "Plex 管理任务已完成。"
+                            "Plex 入库完成。"
                             if terminal_state == "completed"
-                            else "Plex 管理任务未能启动。"
+                            else "Plex 入库启动失败。"
                         ),
                         control="",
                     )
@@ -215,7 +207,7 @@ class SyncFeature:
                 request,
                 state="awaiting_input",
                 stage="config_section",
-                status_text="等待选择 sync 配置项。",
+                status_text="选择 Plex 配置。",
                 control="exit",
                 kind="config",
             )
@@ -342,7 +334,7 @@ class SyncFeature:
             return {
                 "actions": [{
                     "kind": "edit_message",
-                    "text": "已退出 Plex 扫描选择。",
+                    "text": "已退出扫描。",
                 }]
             }
         if payload.startswith("scan:page:"):
@@ -379,7 +371,7 @@ class SyncFeature:
                 return {
                     "actions": [{
                         "kind": "edit_message",
-                        "text": "⚠️ Plex 媒体库列表已变化，请重新执行 /scan。",
+                    "text": "媒体库列表已变化，请重新扫描。",
                     }]
                 }
             library_ids = [selected]
@@ -389,7 +381,7 @@ class SyncFeature:
             request,
             state="running",
             stage="scanning",
-            status_text=f"正在提交 Plex 扫描：{target_text}。",
+            status_text=f"正在扫描：{target_text}",
             control="cancel",
             kind="manual_scan",
         )
@@ -406,7 +398,7 @@ class SyncFeature:
         return {
             "actions": [{
                 "kind": "edit_message",
-                "text": f"⏳ 正在提交 Plex 扫描：{target_text}...",
+                "text": f"正在扫描：{target_text}",
             }],
             "operation": operation,
         }
@@ -441,7 +433,7 @@ class SyncFeature:
                 operation_id,
                 state="failed",
                 stage="scanning",
-                status_text=f"Plex 手动扫描失败：{type(exc).__name__}",
+                status_text="扫描失败，请重试。",
                 control="",
             )
 
@@ -449,10 +441,10 @@ class SyncFeature:
     def _scan_summary(result):
         succeeded = list((result or {}).get("succeeded") or [])
         failed = list((result or {}).get("failed") or [])
-        lines = ["Plex 媒体库扫描提交完成。"]
+        lines = ["扫描完成。"]
         if succeeded:
             lines.append(
-                "成功：" + "、".join(
+                "已提交：" + "、".join(
                     str(library.get("title") or library.get("id") or "")
                     for library in succeeded
                 )
@@ -545,7 +537,7 @@ class SyncFeature:
             operation_id,
             state="running",
             stage=str(waiting["kind"]),
-            status_text="已确认候选，继续执行 Plex 管理任务。",
+            status_text="已确认选择，继续入库。",
             control="cancel",
             details={"job_id": job_id},
         )
@@ -569,7 +561,7 @@ class SyncFeature:
                 if str(waiting.get("kind") or "") == "artwork"
                 else "edit_message"
             ),
-            "text": "⏳ 已确认候选，继续执行 Plex 管理任务...",
+            "text": "已确认选择，继续入库。",
         }
         if progress["kind"] == "edit_photo":
             progress["data"] = {
@@ -629,10 +621,7 @@ class SyncFeature:
             position = f"（第 {page + 1}/{page_count} 页）"
         else:
             position = ""
-        return (
-            f"Plex 任务 #{job['id']}：{name}\n"
-            f"请选择{kind_labels.get(kind, '候选')}{position}。"
-        )
+        return f"{name}\n选择{kind_labels.get(kind, '候选')}{position}。"
 
     def _selection_details(self, job, waiting):
         action = self._selection_action(job, waiting)
@@ -804,7 +793,7 @@ class SyncFeature:
                     (self.operations.get(operation_id) or {}).get("stage")
                     or "selection"
                 ),
-                status_text=f"Plex 候选确认失败：{type(exc).__name__}",
+                status_text="选择确认失败，请重试。",
                 control="",
             )
 
@@ -851,7 +840,7 @@ class SyncFeature:
             PlexAdapter(base_url, token, sync_config.get("timeout", 15)),
             tmdb=(TmdbAdapter(tmdb_config["api_key"], tmdb_config.get("timeout", 15)) if tmdb_config.get("api_key") else None),
             fanart=(FanartAdapter(fanart_config["api_key"], fanart_config.get("timeout", 15)) if fanart_config.get("api_key") else None),
-            notifier=self._notify_sync,
+            notifier=None,
             category_folders=self.config.get("category_folder") or [],
             scan_poll_interval=sync_config.get("scan_poll_interval", 5),
             scan_timeout=sync_config.get("scan_timeout", 300),
@@ -900,7 +889,7 @@ class SyncFeature:
                     (self.operations.get(operation_id) or {}).get("stage")
                     or "scan_preparing"
                 ),
-                status_text=f"Plex 管理任务失败：{type(exc).__name__}",
+                status_text="Plex 入库失败，请检查 Plex。",
                 control="",
             )
         finally:
@@ -944,7 +933,7 @@ class SyncFeature:
             "user_id": user_id,
             "state": "running",
             "stage": "accepted",
-            "status_text": "sync 已接受任务。",
+            "status_text": _PLEX_STAGE_TEXT["scan_preparing"],
             "control": "cancel",
             "revision": revision,
             "details": {"completed_effects": []},
@@ -1023,7 +1012,7 @@ class SyncFeature:
             operation_id,
             state="running",
             stage=stage,
-            status_text=_PLEX_STAGE_TEXT.get(stage, "Plex 管理任务执行中。"),
+            status_text=_PLEX_STAGE_TEXT.get(stage, "Plex：正在入库"),
             control="cancel",
             details=details,
         )
@@ -1063,7 +1052,7 @@ class SyncFeature:
             operation_id,
             state="completed",
             stage="completed",
-            status_text="Plex 管理任务已完成。",
+            status_text="Plex 入库完成。",
             control="",
             details={"completed_effects": list(_PLEX_STAGE_TEXT)},
         )
@@ -1089,9 +1078,7 @@ class SyncFeature:
     @staticmethod
     def _cancelled_status(effects=()):
         return (
-            "已取消 Plex 任务，后续步骤不会继续。"
-            + (f" 已完成步骤：{'、'.join(effects)}。" if effects else "")
-            + " 已由 Plex 接受的扫描、海报和音轨/字幕写入不会自动回滚。"
+            "Plex 入库已停止；已完成变更保留。"
         )
 
     def _is_cancelled(self, operation_id):
@@ -1129,7 +1116,7 @@ class SyncFeature:
                 operation_id,
                 state="cancelled",
                 stage=operation.get("stage") or "interaction",
-                status_text="已退出 Plex 交互。",
+                status_text="已退出。",
                 control="",
             )
             return {"actions": [], "operation": terminal}
@@ -1180,7 +1167,7 @@ class SyncFeature:
             operation_id,
             state="cancelling",
             stage=operation.get("stage") or "running",
-            status_text="取消请求已接受，将在当前 Plex 调用结束后停止。",
+            status_text="正在取消 Plex 入库。",
             control="cancel",
             details=dict(operation.get("details") or {}),
         )
@@ -1232,7 +1219,7 @@ class SyncFeature:
                 operation["operation_id"],
                 state="running",
                 stage="config_apply",
-                status_text="正在保存并重新加载 sync 配置。",
+                status_text="正在保存 Plex 配置。",
                 control="cancel",
             )
         elif isinstance(session, dict) and session.get("state") == "open":
@@ -1241,7 +1228,7 @@ class SyncFeature:
                 operation["operation_id"],
                 state="awaiting_input",
                 stage=f"config_{wizard_session.get('stage') or 'input'}",
-                status_text="等待 sync 配置输入。",
+                status_text="输入 Plex 配置。",
                 control="exit",
             )
         else:
@@ -1249,7 +1236,7 @@ class SyncFeature:
                 operation["operation_id"],
                 state="cancelled",
                 stage="config_cancelled",
-                status_text="已退出 sync 配置。",
+                status_text="已退出 Plex 配置。",
                 control="",
             )
         result["operation"] = view
@@ -1379,10 +1366,7 @@ class SyncFeature:
             "user_id": user_id,
             "state": "interrupted",
             "stage": str((job or {}).get("state") or "interrupted"),
-            "status_text": (
-                "Plex Feature 进程停止，协调任务已中断；"
-                "已完成的 Plex 远端操作不会自动回滚。"
-            ),
+            "status_text": "Plex 入库已中断；已完成变更保留。",
             "control": "",
             "revision": revision,
             "details": {

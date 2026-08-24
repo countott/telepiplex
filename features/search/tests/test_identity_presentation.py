@@ -43,9 +43,10 @@ class IdentityPresentationTest(unittest.TestCase):
         self.assertEqual(first["photo_url"], "https://img.example/blossoms.jpg")
         self.assertEqual(
             first["text"],
-            "🎬 繁花 (Blossoms Shanghai)\n"
+            "繁花 (Blossoms Shanghai)\n"
             "2023｜中国大陆｜剧集｜全剧\n"
-            "来源：豆瓣、TVDB",
+            "来源：豆瓣、TVDB\n"
+            "已确认身份，开始搜索",
         )
         self.assertRegex(first["milestone_id"], r"^media-[0-9a-f]{24}$")
 

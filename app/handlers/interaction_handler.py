@@ -721,7 +721,11 @@ class OperationReportSink:
             and str(report.get("next_plugin_id") or "")
             == record.next_plugin_id
         )
-        if accepted and self._listener is not None:
+        silent = (
+            isinstance(report.get("details"), dict)
+            and report["details"].get("telegram_visibility") == "silent"
+        )
+        if accepted and not silent and self._listener is not None:
             pending = self._pending.get(record.operation_id)
             if pending is None or record.revision >= pending.revision:
                 self._pending[record.operation_id] = record
@@ -888,7 +892,7 @@ async def operation_gate(update, context):
                 and callback_message_id == record.message_id
             ):
                 return
-        await query.answer("当前任务执行中")
+        await query.answer("当前任务进行中")
         raise ApplicationHandlerStop
 
     message = getattr(update, "effective_message", None)
@@ -907,15 +911,9 @@ async def operation_gate(update, context):
                 record.state == "awaiting_input"
                 and isinstance(record.details.get("keyboard"), list)
             ):
-                await reply_text(
-                    f"⚠️ 当前 {record.plugin_id} 任务正在等待按钮操作；"
-                    "请先完成或退出。"
-                )
+                await reply_text("当前任务未结束，请先完成或取消。")
             else:
-                await reply_text(
-                    f"⚠️ 当前 {record.plugin_id} 任务正在执行；"
-                    "请先等待完成或取消。"
-                )
+                await reply_text("当前任务未结束，请先完成或取消。")
     raise ApplicationHandlerStop
 
 
@@ -1084,7 +1082,7 @@ async def operation_control_callback(update, context):
         try:
             await context.application.bot.send_message(
                 chat_id=record.chat_id,
-                text="❌ 任务控制请求未被执行器接受；任务状态未改变。",
+                text="任务控制未执行，请稍后重试。",
             )
         except Exception:
             pass

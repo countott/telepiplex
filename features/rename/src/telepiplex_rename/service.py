@@ -72,18 +72,76 @@ def _inventory_completion_text(
     file_counts: dict,
     partial: int = 0,
 ) -> str:
-    return (
-        "存量媒体补整理完成。\n"
-        f"作品组完成：{success}\n"
-        f"作品组部分完成：{partial}\n作品组失败：{failed}\n"
-        f"作品组总计：{total}\n"
-        f"文件总数：{file_counts['media_files_total']}\n"
-        f"实际改动：{file_counts['organized_files']}，"
-        f"本来已规范：{file_counts['canonical_no_ops']}，"
-        f"原位保留：{file_counts['kept_unresolved']}，"
-        f"目标冲突：{file_counts['target_conflicts']}，"
-        f"失败：{file_counts['failed_files']}，"
-        f"已验证作品组：{file_counts['verified_work_groups']}"
+    finished = int(success) + int(partial)
+    lines = [
+        f"补整理完成：作品 {finished}/{total}",
+        (
+            f"媒体文件：{file_counts['media_files_total']}｜"
+            f"已整理：{file_counts['organized_files']}｜"
+            f"已规范：{file_counts['canonical_no_ops']}"
+        ),
+    ]
+    kept = int(file_counts.get("kept_unresolved") or 0)
+    if kept:
+        lines.append(f"无法确认：{kept}（保留在原目录）")
+    failed_files = int(file_counts.get("failed_files") or 0)
+    if failed or failed_files:
+        lines.append(f"失败：作品 {failed}｜文件 {failed_files}")
+    return "\n".join(lines)
+
+
+def _inventory_ready_text(
+    *,
+    root_name: str,
+    ready_groups: int,
+    media_files: int,
+    kept_unresolved: int,
+) -> str:
+    return "\n".join((
+        f"{root_name or '所选目录'}扫描完成。",
+        f"可整理作品：{int(ready_groups)}",
+        f"媒体文件：{int(media_files)}",
+        f"无法确认：{int(kept_unresolved)}（保留在原目录）",
+    ))
+
+
+def _organization_status_text(
+    media_file_count: int,
+    progress_phase: int = 0,
+    *,
+    completed: bool = False,
+    folder_name: str = "",
+    kept_unresolved: int = 0,
+) -> str:
+    if completed:
+        text = f"已整理：{folder_name or '目标目录'}"
+        if kept_unresolved:
+            text += (
+                f"\n另有 {int(kept_unresolved)} 个文件无法确认，"
+                "保留在原目录。"
+            )
+        return text
+    if int(media_file_count) <= 1:
+        return "正在整理"
+    completed_cells = max(0, min(3, int(progress_phase)))
+    return "正在整理\n" + "▰" * completed_cells + "▱" * (3 - completed_cells)
+
+
+def _organization_folder_name(final_path: str) -> str:
+    return PurePosixPath(str(final_path or "").rstrip("/")).name
+
+
+def _visible_video_file_count(file_tree) -> int:
+    video_suffixes = {
+        ".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts", ".m2ts", ".wmv",
+    }
+    return sum(
+        1
+        for item in file_tree or ()
+        if isinstance(item, dict)
+        and not item.get("is_dir")
+        and PurePosixPath(str(item.get("name") or item.get("path") or "")).suffix.lower()
+        in video_suffixes
     )
 
 
@@ -437,7 +495,7 @@ class RenameFeature:
             request,
             state="awaiting_input",
             stage="config_section",
-            status_text="等待选择 rename 配置项。",
+            status_text="选择整理配置。",
             control="exit",
             kind="config",
         )
@@ -484,14 +542,14 @@ class RenameFeature:
             return {
                 "actions": [{
                     "kind": "send_message",
-                    "text": "⚠️ rename 没有可扫描的分类目录或未整理目录。",
+                    "text": "没有可扫描的目录。",
                 }],
             }
         operation = self._new_operation(
             request,
             state="awaiting_input",
             stage="inventory_root_selection",
-            status_text="等待选择要扫描的 115 目录。",
+            status_text="选择要扫描的目录。",
             control="exit",
             kind="inventory",
         )
@@ -512,7 +570,7 @@ class RenameFeature:
         return {
             "actions": [{
                 "kind": "send_message",
-                "text": "请选择要扫描的 115 目录：",
+                "text": "选择要扫描的目录：",
                 "data": {"keyboard": keyboard},
             }],
             "session": {"state": "open"},
@@ -559,13 +617,13 @@ class RenameFeature:
                 operation_id,
                 state="cancelled",
                 stage="inventory_cancelled",
-                status_text="已退出存量媒体扫描。",
+                status_text="已退出扫描。",
                 control="",
             )
             return {
                 "actions": [{
                     "kind": "edit_message",
-                    "text": "已退出存量媒体扫描。",
+                    "text": "已退出扫描。",
                 }],
                 "session": {"state": "close"},
                 "operation": terminal,
@@ -591,7 +649,7 @@ class RenameFeature:
                 operation_id,
                 state="running",
                 stage="inventory_scan",
-                status_text=f"正在扫描 {root['name']} 的完整文件树。",
+                status_text="正在扫描。",
                 control="cancel",
             )
             task = self.runtime.spawn(
@@ -628,7 +686,7 @@ class RenameFeature:
                 operation_id,
                 state="running",
                 stage="inventory_batch",
-                status_text=f"开始串行补整理，共 {len(pending)} 项。",
+                status_text=f"正在补整理：0/{len(pending)}",
                 control="cancel",
                 details={
                     "total": len(pending),
@@ -952,11 +1010,11 @@ class RenameFeature:
                 "text": "取消",
                 "callback_data": "rename:inventory:cancel",
             }])
-            text = (
-                f"{root.get('name') or '所选目录'}扫描完成：\n"
-                f"待解析作品组：{counts['pending']}\n"
-                f"媒体文件：{len(media_facts)}\n"
-                f"保留未解析：{unresolved_files}"
+            text = _inventory_ready_text(
+                root_name=str(root.get("name") or "所选目录"),
+                ready_groups=counts["pending"],
+                media_files=len(media_facts),
+                kept_unresolved=unresolved_files,
             )
             await self._report_if_active(
                 operation_id,
@@ -972,7 +1030,7 @@ class RenameFeature:
                 operation_id,
                 state="cancelled",
                 stage="inventory_scan",
-                status_text="存量媒体扫描已取消。",
+                status_text="扫描已取消。",
                 control="",
                 details={"counts": counts},
             )
@@ -982,10 +1040,7 @@ class RenameFeature:
                 operation_id,
                 state="failed",
                 stage="inventory_scan",
-                status_text=(
-                    "存量媒体扫描失败："
-                    f"{getattr(exc, 'code', type(exc).__name__)}。"
-                ),
+                status_text="扫描失败，请重试。",
                 control="",
                 details={"counts": counts},
             )
@@ -1058,10 +1113,7 @@ class RenameFeature:
                     operation_id,
                     state="running",
                     stage="inventory_batch",
-                    status_text=(
-                        f"正在补整理 {index + 1}/{len(pending)}："
-                        f"{item.get('resource_name') or item.get('source_path')}"
-                    ),
+                    status_text=f"正在补整理：{index + 1}/{len(pending)}",
                     control="cancel",
                     details={
                         "total": len(pending),
@@ -1177,7 +1229,7 @@ class RenameFeature:
                 operation_id,
                 state="cancelled",
                 stage="inventory_batch",
-                status_text="存量媒体补整理已停止；已完成的文件变更保持不变。",
+                status_text="补整理已停止；已完成变更保留。",
                 control="",
             )
         except Exception as exc:
@@ -1186,10 +1238,7 @@ class RenameFeature:
                 operation_id,
                 state="failed",
                 stage="inventory_batch",
-                status_text=(
-                    "存量媒体补整理异常终止："
-                    f"{getattr(exc, 'code', type(exc).__name__)}。"
-                ),
+                status_text="补整理失败，请重新扫描。",
                 control="",
                 details={"manual_check_required": True},
             )
@@ -1267,7 +1316,7 @@ class RenameFeature:
             operation_id,
             state="running",
             stage="metadata_resolution",
-            status_text="已确认候选，正在读取精确媒体元数据。",
+            status_text="已确认身份，正在整理。",
             control="cancel",
             details={},
         )
@@ -1373,9 +1422,13 @@ class RenameFeature:
                 state="running",
                 stage="inventory_batch" if is_inventory else "organizing",
                 status_text=(
-                    "正在恢复存量媒体整理任务。"
+                    "正在补整理。"
                     if is_inventory
-                    else "正在规划媒体目录。"
+                    else _organization_status_text(
+                        _visible_video_file_count(
+                            event_payload.get("file_tree")
+                        )
+                    )
                 ),
                 control="cancel",
                 details={},
@@ -1410,7 +1463,7 @@ class RenameFeature:
                 operation_id,
                 state="cancelled",
                 stage="metadata_resolution",
-                status_text="已取消媒体候选确认，未开始文件变更。",
+                status_text="已取消身份确认。文件未移动。",
                 control="",
                 details={},
             )
@@ -1455,9 +1508,9 @@ class RenameFeature:
                 state="failed",
                 stage="metadata_resolution",
                 status_text=(
-                    "媒体候选确认已过期，请重新执行 rename 扫描。"
+                    "身份确认已过期，请重新扫描。"
                     if expired
-                    else f"媒体候选确认失败：{code}。"
+                    else "身份确认失败，请重新扫描。"
                 ),
                 control="",
                 details={"error_code": code},
@@ -1651,7 +1704,7 @@ class RenameFeature:
                 "session": {"state": "open"},
             }
         return {
-            "actions": [{"kind": "send_message", "text": "⚠️ rename 配置会话已失效。"}],
+            "actions": [{"kind": "send_message", "text": "配置会话已失效，请重新开始。"}],
             "session": {"state": "close"},
         }
 
@@ -1846,13 +1899,6 @@ class RenameFeature:
                 else None
             )
             if not metadata:
-                await self._report_if_active(
-                    operation_id,
-                    state="running",
-                    stage="metadata_resolution",
-                    status_text="正在解析媒体元数据。",
-                    control="cancel",
-                )
                 try:
                     probe = await asyncio.to_thread(
                         recover_metadata_probe,
@@ -1927,15 +1973,21 @@ class RenameFeature:
             if metadata:
                 await self._publish_metadata_identity(payload, operation_id)
             self._raise_if_cancelled(operation_id)
+            operation_state = self.operations.get(operation_id) or {}
+            media_file_count = _visible_video_file_count(
+                payload.get("file_tree")
+            )
+            operation_state["media_file_count"] = media_file_count
+            operation_state["progress_phase"] = 0
             await self._report_if_active(
                 operation_id,
                 state="running",
                 stage="organizing",
-                status_text="正在规划媒体目录。",
+                status_text=_organization_status_text(media_file_count),
                 control="cancel",
+                details={},
             )
             loop = asyncio.get_running_loop()
-            operation_state = self.operations.get(operation_id) or {}
             journal = operation_state.get("journal") or RenameOperationJournal()
             operation_state["journal"] = journal
             storage = StorageProxy(
@@ -2169,10 +2221,7 @@ class RenameFeature:
                 "final_path": event.final_path if event else str(
                     payload.get("final_path") or ""
                 ),
-                "message": (
-                    f"整理任务已停止；停止位置：{stopped_at}。"
-                    "已完成的远端文件变更未自动回滚。"
-                ),
+                "message": "整理已停止；已完成变更保留。",
                 "user_id": user_id,
                 "job_id": job_id,
             }
@@ -2228,15 +2277,9 @@ class RenameFeature:
                 "stopped_at": stopped_at,
             }
             if stopped_at == "metadata_resolution":
-                error_message = (
-                    "⚠️ 元数据解析失败，未移动媒体文件："
-                    f"{error_code}（{error_detail}）"
-                )
+                error_message = "无法确认媒体身份，未移动文件。"
             else:
-                error_message = (
-                    "⚠️ 整理执行异常，已停止自动重试，请人工检查："
-                    f"{error_code}（{error_detail}）"
-                )
+                error_message = "整理失败，部分变更可能已完成，请检查目录。"
             outcome = {
                 "organized": False,
                 "final_path": event.final_path if event else str(
@@ -2259,15 +2302,6 @@ class RenameFeature:
                 control="",
                 details=error_details,
             )
-            if user_id:
-                try:
-                    await self.host.notify_user(
-                        user_id,
-                        outcome["message"],
-                        idempotency_key=f"{job_id}:rename-notice",
-                    )
-                except Exception:
-                    pass
 
     async def _finish_inventory_item(self, job_id: str, outcome: dict) -> None:
         if self.jobs:
@@ -2335,6 +2369,15 @@ class RenameFeature:
         complete = facts["complete"]
         partial_completed = facts["partial_completed"]
         organized = facts["organized"]
+        file_results = dict(outcome.get("file_results") or {})
+        terminal_text = _organization_status_text(
+            int(file_results.get("media_files_total") or 0),
+            completed=True,
+            folder_name=_organization_folder_name(
+                str(outcome.get("final_path") or "")
+            ),
+            kept_unresolved=int(file_results.get("kept_unresolved") or 0),
+        )
         terminal_report = self._advance_operation(
             operation_id,
             state="completed" if complete else "failed",
@@ -2346,9 +2389,7 @@ class RenameFeature:
                 else "cleanup" if organized else "organizing"
             ),
             status_text=(
-                "明确匹配文件已整理，歧义文件保持原位并等待确认。"
-                if partial_completed
-                else "媒体整理完成。"
+                terminal_text
                 if complete
                 else outcome.get("message")
                 or "媒体整理未满足完整成功条件。"
@@ -2440,15 +2481,20 @@ class RenameFeature:
                 )
             if organized and not bool(outcome.get("terminal_stage_sealed")):
                 if cleanup_complete:
-                    stage_text = (
-                        "✅ 已整理全部明确匹配文件；"
-                        "歧义文件已保持原位。\n"
-                        if partial_completed
-                        else "✅ 媒体整理已完成。\n"
-                    ) + f"目标目录：{outcome.get('final_path') or ''}"
+                    file_results = dict(outcome.get("file_results") or {})
+                    stage_text = _organization_status_text(
+                        int(file_results.get("media_files_total") or 0),
+                        completed=True,
+                        folder_name=_organization_folder_name(
+                            str(outcome.get("final_path") or "")
+                        ),
+                        kept_unresolved=int(
+                            file_results.get("kept_unresolved") or 0
+                        ),
+                    )
                 else:
                     stage_text = (
-                        "⚠️ 媒体文件已移动，但源目录清理未完成。\n"
+                        "已整理，但源目录清理未完成。\n"
                         f"目标目录：{outcome.get('final_path') or ''}"
                     )
                 for attempt in range(3):
@@ -2544,17 +2590,35 @@ class RenameFeature:
         return await self._complete_published_job(job_id, outcome)
 
     async def _complete_published_job(self, job_id, outcome):
-        if outcome.get("user_id") and outcome.get("message"):
+        if (
+            outcome.get("user_id")
+            and not outcome.get("terminal_operation_report")
+            and not outcome.get("inventory_batch_id")
+        ):
+            file_results = dict(outcome.get("file_results") or {})
+            text = (
+                _organization_status_text(
+                    int(file_results.get("media_files_total") or 0),
+                    completed=True,
+                    folder_name=_organization_folder_name(
+                        str(outcome.get("final_path") or "")
+                    ),
+                    kept_unresolved=int(
+                        file_results.get("kept_unresolved") or 0
+                    ),
+                )
+                if outcome.get("organized")
+                else str(outcome.get("message") or "整理失败，请检查目录。")
+            )
             try:
                 await self.host.notify_user(
                     int(outcome["user_id"]),
-                    _plain_notification(outcome["message"]),
+                    text,
                     idempotency_key=f"{job_id}:rename-notice",
                 )
             except Exception as exc:
                 runtime_context.logger.warning(
-                    "rename completion notification failed without changing "
-                    "the verified job state: job_id=%s error=%s",
+                    "rename completion notification failed: job_id=%s error=%s",
                     job_id,
                     type(exc).__name__,
                 )
@@ -2622,7 +2686,7 @@ class RenameFeature:
                 stage="identity_confirmation",
                 status_text="正在确认媒体身份。",
                 control="cancel",
-                details={},
+                details={"telegram_visibility": "silent"},
             )
         for attempt in range(3):
             try:
@@ -2674,10 +2738,16 @@ class RenameFeature:
             "user_id": user_id,
             "state": "running",
             "stage": "accepted",
-            "status_text": "rename 已接受媒体整理任务。",
+            "status_text": _organization_status_text(
+                _visible_video_file_count(payload.get("file_tree"))
+            ),
             "control": "cancel",
             "revision": revision,
-            "details": {},
+            "details": {
+                "media_file_count": _visible_video_file_count(
+                    payload.get("file_tree")
+                ),
+            },
             "kind": "organization",
             "job_id": job_id,
             "cancel_event": threading.Event(),
@@ -2685,17 +2755,20 @@ class RenameFeature:
         }
         self.operations[operation_id] = operation
         self.owner_operations[(chat_id, user_id)] = operation_id
-        has_metadata = isinstance(payload.get("media_metadata"), dict)
+        media_file_count = _visible_video_file_count(payload.get("file_tree"))
+        operation["media_file_count"] = media_file_count
+        operation["progress_phase"] = 0
         return await self._report_operation(
             operation_id,
             state="running",
-            stage="organizing" if has_metadata else "metadata_resolution",
-            status_text=(
-                "正在规划媒体目录。"
-                if has_metadata
-                else "rename 已接受任务，正在解析媒体元数据。"
+            stage=(
+                "organizing"
+                if isinstance(payload.get("media_metadata"), dict)
+                else "metadata_resolution"
             ),
+            status_text=_organization_status_text(media_file_count),
             control="cancel",
+            details={},
         )
 
     async def _storage_stage(
@@ -2708,16 +2781,27 @@ class RenameFeature:
         }:
             return
         operation.setdefault("details", {})["last_storage_method"] = method
-        if (
-            operation.get("stage") == stage
-            and operation.get("control") == control
-        ):
+        if int(operation.get("media_file_count") or 0) <= 1:
             return
+        progress_phase = {
+            "planning": 1,
+            "conflict_validation": 1,
+            "directory_preparation": 2,
+            "rename": 2,
+            "moving": 2,
+            "cleanup": 3,
+        }.get(stage, 1)
+        if progress_phase <= int(operation.get("progress_phase") or 0):
+            return
+        operation["progress_phase"] = progress_phase
         await self._report_operation(
             operation_id,
             state="running",
-            stage=stage,
-            status_text=status_text,
+            stage="organizing",
+            status_text=_organization_status_text(
+                int(operation.get("media_file_count") or 0),
+                progress_phase,
+            ),
             control=control,
             details={"last_storage_method": method},
         )
@@ -2773,7 +2857,7 @@ class RenameFeature:
                 operation_id,
                 state="cancelled",
                 stage=operation.get("stage") or "interaction",
-                status_text="已退出 rename 交互。",
+                status_text="已退出。",
                 control="",
             )
             return {"actions": [], "operation": terminal}
@@ -2791,7 +2875,7 @@ class RenameFeature:
                 operation_id,
                 state="rolling_back",
                 stage=operation.get("stage") or "rename",
-                status_text="取消请求已接受，正在验证并回滚重命名。",
+                status_text="正在回滚整理。",
                 control="",
             )
             forward_task = operation.get("task")
@@ -2808,7 +2892,7 @@ class RenameFeature:
             operation_id,
             state="cancelling",
             stage=operation.get("stage") or "organizing",
-            status_text="取消请求已接受，将在当前存储调用结束后停止。",
+            status_text="正在取消整理。",
             control="cancel",
             details={
                 "stopped_at": operation.get("stage") or "organizing",
@@ -2889,7 +2973,7 @@ class RenameFeature:
                 operation["operation_id"],
                 state="running",
                 stage="config_apply",
-                status_text="正在保存并重新加载 rename 配置。",
+                status_text="正在保存整理配置。",
                 control="cancel",
             )
         elif isinstance(session, dict) and session.get("state") == "open":
@@ -2898,7 +2982,7 @@ class RenameFeature:
                 operation["operation_id"],
                 state="awaiting_input",
                 stage=f"config_{wizard_session.get('stage') or 'input'}",
-                status_text="等待 rename 配置输入。",
+                status_text="输入整理配置。",
                 control="exit",
             )
         else:
@@ -2906,7 +2990,7 @@ class RenameFeature:
                 operation["operation_id"],
                 state="cancelled",
                 stage="config_cancelled",
-                status_text="已退出 rename 配置。",
+                status_text="已退出整理配置。",
                 control="",
             )
         result["operation"] = view
@@ -3065,7 +3149,7 @@ class RenameFeature:
         return PostDownloadResult(
             True,
             final_path=event.final_path,
-            message="⚠️ 元数据反查未确认媒体身份，文件保持原位。",
+            message="无法确认媒体身份，文件保留在原目录。",
             should_stop=True,
             metadata=event.metadata,
         )
@@ -3074,10 +3158,7 @@ class RenameFeature:
         return PostDownloadResult(
             True,
             final_path=event.final_path,
-            message=(
-                "⚠️ 无法确定文件级整理规则，文件保持原位；"
-                "未移动整个目录。"
-            ),
+            message="无法确定整理规则，文件保留在原目录。",
             should_stop=True,
             metadata=event.metadata,
         )
