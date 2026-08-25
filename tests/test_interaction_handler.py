@@ -311,6 +311,259 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sink._pending, {})
         self.assertEqual(sink._workers, {})
 
+    async def test_identity_segment_starts_as_one_photo_and_binds_its_message(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+
+        context = self.context()
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(lambda record: render_operation(
+            context.application,
+            Mock(),
+            record,
+        ))
+
+        response = await sink(
+            "search",
+            self.report(
+                status_text="正在识别媒体…",
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+            ),
+        )
+        await sink.drain()
+
+        self.assertTrue(response["accepted"])
+        context.application.bot.send_photo.assert_awaited_once()
+        context.application.bot.send_message.assert_not_awaited()
+        segment = self.coordinator.get_active_segment("op-1")
+        self.assertEqual(segment.message_id, 91)
+        self.assertEqual(segment.message_kind, "photo")
+        self.assertEqual(segment.rendered_revision, 1)
+
+    async def test_segment_update_arriving_during_first_send_edits_the_same_message(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        async def delayed_photo(**_kwargs):
+            send_started.set()
+            await release_send.wait()
+            return SimpleNamespace(message_id=91)
+
+        context = self.context()
+        context.application.bot.send_photo.side_effect = delayed_photo
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(lambda record: render_operation(
+            context.application,
+            Mock(),
+            record,
+        ))
+
+        await sink("search", self.report(
+            status_text="正在识别媒体…",
+            segment={
+                "role": "identity",
+                "presentation_kind": "photo",
+            },
+        ))
+        await asyncio.wait_for(send_started.wait(), timeout=1)
+        await sink("search", self.report(
+            revision=2,
+            state="awaiting_input",
+            stage="candidate_selection",
+            status_text="请选择作品",
+            segment={
+                "role": "identity",
+                "presentation_kind": "photo",
+            },
+        ))
+
+        release_send.set()
+        await sink.drain()
+
+        context.application.bot.send_photo.assert_awaited_once()
+        context.application.bot.send_message.assert_not_awaited()
+        context.application.bot.edit_message_caption.assert_awaited_once()
+        self.assertEqual(
+            context.application.bot.edit_message_caption.await_args.kwargs[
+                "message_id"
+            ],
+            91,
+        )
+        self.assertEqual(
+            context.application.bot.edit_message_caption.await_args.kwargs[
+                "caption"
+            ],
+            "请选择作品",
+        )
+        segment = self.coordinator.get_active_segment("op-1")
+        self.assertEqual(segment.message_id, 91)
+        self.assertEqual(segment.business_revision, 2)
+        self.assertEqual(segment.rendered_revision, 2)
+
+    async def test_segment_edit_failure_is_quarantined_without_sending_a_replacement(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+
+        context = self.context()
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(lambda record: render_operation(
+            context.application,
+            Mock(),
+            record,
+        ))
+        await sink("search", self.report(
+            stage="prowlarr_search",
+            status_text="正在搜索片源…",
+            segment={
+                "role": "search",
+                "presentation_kind": "text",
+            },
+        ))
+        await sink.drain()
+        context.application.bot.edit_message_text.side_effect = RuntimeError(
+            "telegram edit outcome unknown"
+        )
+
+        await sink("search", self.report(
+            revision=2,
+            stage="release_selection",
+            state="awaiting_input",
+            status_text="请选择片源",
+            segment={
+                "role": "search",
+                "presentation_kind": "text",
+            },
+        ))
+        await sink.drain()
+
+        context.application.bot.send_message.assert_awaited_once()
+        context.application.bot.send_photo.assert_not_awaited()
+        segment = self.coordinator.get_active_segment("op-1")
+        self.assertEqual(segment.state, "delivery_uncertain")
+        self.assertEqual(segment.delivery_state, "uncertain")
+        self.assertEqual(segment.message_id, 90)
+
+    async def test_segment_first_send_failure_is_uncertain_and_never_falls_back(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+
+        context = self.context()
+        context.application.bot.send_photo.side_effect = RuntimeError(
+            "telegram send outcome unknown"
+        )
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(lambda record: render_operation(
+            context.application,
+            Mock(),
+            record,
+        ))
+
+        await sink("search", self.report(
+            status_text="正在识别媒体…",
+            segment={
+                "role": "identity",
+                "presentation_kind": "photo",
+            },
+        ))
+        await sink.drain()
+
+        context.application.bot.send_photo.assert_awaited_once()
+        context.application.bot.send_message.assert_not_awaited()
+        segment = self.coordinator.get_active_segment("op-1")
+        self.assertEqual(segment.state, "delivery_uncertain")
+        self.assertEqual(segment.delivery_state, "uncertain")
+        self.assertIsNone(segment.message_id)
+
+    async def test_same_projection_hash_advances_revision_without_telegram_edit(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+
+        context = self.context()
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(lambda record: render_operation(
+            context.application,
+            Mock(),
+            record,
+        ))
+        projection = {"text": "正在搜索片源…", "buttons": []}
+        await sink("search", self.report(
+            stage="prowlarr_search",
+            status_text="正在搜索片源…",
+            projection=projection,
+            segment={
+                "role": "search",
+                "presentation_kind": "text",
+            },
+        ))
+        await sink.drain()
+
+        await sink("search", self.report(
+            revision=2,
+            stage="prowlarr_search",
+            status_text="正在搜索片源…",
+            projection=projection,
+            segment={
+                "role": "search",
+                "presentation_kind": "text",
+            },
+        ))
+        await sink.drain()
+
+        context.application.bot.send_message.assert_awaited_once()
+        context.application.bot.edit_message_text.assert_not_awaited()
+        segment = self.coordinator.get_active_segment("op-1")
+        self.assertEqual(segment.business_revision, 2)
+        self.assertEqual(segment.rendered_revision, 2)
+
+    async def test_operation_sink_seals_only_after_the_latest_segment_render(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+
+        context = self.context()
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(lambda record: render_operation(
+            context.application,
+            Mock(),
+            record,
+        ))
+        await sink("search", self.report(
+            stage="prowlarr_search",
+            status_text="搜索完成",
+            segment={
+                "role": "search",
+                "presentation_kind": "text",
+            },
+        ))
+        await sink.drain()
+
+        response = await sink.seal("search", "op-1", "search")
+        await sink.drain()
+
+        self.assertTrue(response["accepted"])
+        self.assertEqual(response["segment"]["state"], "sealing")
+        self.assertIsNone(self.coordinator.get_active_segment("op-1"))
+        sealed = self.coordinator.get_segment(response["segment"]["segment_id"])
+        self.assertEqual(sealed.state, "sealed")
+        self.assertIsNotNone(sealed.sealed_at)
+
     async def test_operation_sink_persists_silent_transition_without_rendering(self):
         from app.handlers.interaction_handler import OperationReportSink
 
@@ -1303,6 +1556,63 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApplicationHandlerStop):
             await operation_gate(stale, self.context(router=router))
         stale.callback_query.answer.assert_awaited_once_with("当前任务进行中")
+
+    async def test_segment_keyboard_claim_disables_double_click_before_feature_dispatch(self):
+        from app.handlers.interaction_handler import operation_gate, operation_markup
+
+        operation, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                state="awaiting_input",
+                stage="candidate_selection",
+                status_text="请选择作品",
+                details={"keyboard": [[{
+                    "text": "死神：千年血战篇",
+                    "callback_data": "search:select:p1:0",
+                }]]},
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+            ),
+        )
+        segment = self.coordinator.bind_segment_message(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            chat_id=10,
+            message_id=92,
+        )
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        router = Mock()
+        router.plugin_route.return_value = route
+        markup = operation_markup(operation, router, segment=segment)
+        encoded = markup.inline_keyboard[0][0].callback_data
+        self.assertNotEqual(encoded, "search:select:p1:0")
+
+        context = self.context(router=router)
+        accepted = self.callback_update(encoded, message_id=92)
+        await operation_gate(accepted, context)
+
+        self.assertEqual(accepted.callback_query.data, "search:select:p1:0")
+        self.assertEqual(
+            self.coordinator.get_active_segment("op-1").callback_generation,
+            2,
+        )
+        context.application.bot.edit_message_caption.assert_awaited_once_with(
+            chat_id=10,
+            message_id=92,
+            caption="正在确认媒体身份…",
+            reply_markup=None,
+        )
+
+        replay = self.callback_update(encoded, message_id=92)
+        with self.assertRaises(ApplicationHandlerStop):
+            await operation_gate(replay, context)
+        replay.callback_query.answer.assert_awaited_once_with("当前任务进行中")
 
     async def test_button_only_operation_rejects_plain_text_and_allows_owned_callback(self):
         from app.handlers.interaction_handler import operation_gate

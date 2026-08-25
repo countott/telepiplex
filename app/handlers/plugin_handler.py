@@ -703,6 +703,7 @@ def _is_stale_operation_snapshot(operation, active) -> bool:
 async def handle_feature_result(update, context, route, result: dict):
     coordinator = context.application.bot_data.get(COORDINATOR_KEY)
     operation_record = None
+    operation_segment = None
     stale_operation_snapshot = False
     operation = result.get("operation") if isinstance(result, dict) else None
     if operation is not None:
@@ -719,10 +720,23 @@ async def handle_feature_result(update, context, route, result: dict):
             )
             return
         try:
-            operation_record = coordinator.report(
-                route.plugin_id,
-                _with_rendered_keyboard(route, result, operation),
+            normalized_operation = _with_rendered_keyboard(
+                route,
+                result,
+                operation,
             )
+            if normalized_operation.get("segment") is not None:
+                operation_record, operation_segment = (
+                    coordinator.accept_segment_report(
+                        route.plugin_id,
+                        normalized_operation,
+                    )
+                )
+            else:
+                operation_record = coordinator.report(
+                    route.plugin_id,
+                    normalized_operation,
+                )
             stale_operation_snapshot = _is_stale_operation_snapshot(
                 operation,
                 operation_record,
@@ -774,7 +788,19 @@ async def handle_feature_result(update, context, route, result: dict):
     if isinstance(result, dict) and "config_patch" in result:
         await _apply_feature_config_patch(update, context, route, result)
         return
-    if operation_record is not None and stale_operation_snapshot:
+    if operation_record is not None and operation_segment is not None:
+        message_id = await render_operation(
+            context.application,
+            context.application.bot_data.get(ROUTER_KEY),
+            operation_record,
+        )
+        message_kind = (
+            operation_segment.presentation_kind
+            if message_id is not None
+            else None
+        )
+        rendered = True
+    elif operation_record is not None and stale_operation_snapshot:
         message_id = await render_operation(
             context.application,
             context.application.bot_data.get(ROUTER_KEY),

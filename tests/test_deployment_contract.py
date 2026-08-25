@@ -112,21 +112,22 @@ class DeploymentContractTest(unittest.TestCase):
             ):
                 self.assertIn(term, source, f"{name}: {term}")
 
-    def test_operation_milestones_are_declared_as_host_api_1_6(self):
+    def test_operation_segments_are_declared_as_host_api_1_7(self):
         from app.runtime.plugin_contract import HOST_API_VERSION
 
-        self.assertEqual(HOST_API_VERSION, "1.6")
+        self.assertEqual(HOST_API_VERSION, "1.7")
         for name in ("README.md", "README_EN.md"):
             source = (ROOT / name).read_text(encoding="utf-8")
             self.assertIn("Host API 1.5", source)
             self.assertIn("Host API 1.6", source)
+            self.assertIn("Host API 1.7", source)
 
-    def test_plugin_sdk_release_identity_is_1_3_2(self):
+    def test_plugin_sdk_release_identity_is_1_4_0(self):
         project = tomllib.loads(
             (ROOT / "sdk" / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(project["project"]["version"], "1.3.2")
+        self.assertEqual(project["project"]["version"], "1.4.0")
 
     def test_build_script_only_references_existing_dockerfiles(self):
         source = (ROOT / "build.sh").read_text(encoding="utf-8")

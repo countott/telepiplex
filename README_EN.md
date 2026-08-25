@@ -53,6 +53,10 @@ Host API 1.6 adds identity and stage operation milestones. A Feature can replace
 
 The API 1.4 idempotent `operation.milestone` and running-result callback contracts remain unchanged: a Feature can publish the final media identity as a standalone message that later status edits cannot overwrite, and an available Prowlarr result can be selected while the current status message and keyboard match. Both `/start` and Telegram's native command menu remain generated from currently enabled, routable Feature manifests.
 
+## Host API 1.7 and operation message segments
+
+Host API 1.7 adds durable operation segments. A Feature assigns a stable role such as `identity`, `search`, `download`, or `rename` and a presentation kind to a message segment. Within that segment, the Host edits one Telegram message and uses revision/CAS checks, explicit sealing, and operation snapshots to recover safely from duplicate callbacks, uncertain delivery receipts, and process restarts. Candidate selection, confirmation progress, and the final identity share the `identity` message; Prowlarr results open the next `search` message, followed by one message each for Download and Rename. Features that depend on this contract must declare `host_api: ">=1.7,<2.0"`.
+
 Each user may own only one active interaction at a time. While input is requested, telepiplex accepts only ordinary text or callback IDs shown by the current status message. While work is running, cancelling, or rolling back, unrelated commands and stale buttons are blocked. Controls mean:
 
 - **Exit** ends a pre-execution interaction without business changes.

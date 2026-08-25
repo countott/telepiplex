@@ -195,13 +195,20 @@ class SearchPipelineLoggingTest(unittest.IsolatedAsyncioTestCase):
         original = runtime_context.logger
         runtime_context.logger = logger
         contract = {
+            "schema_version": 1,
             "metadata_id": "query-log",
+            "confirmed": True,
             "identity": {
                 "canonical_search_title": "Backrooms",
                 "search_title_policy": "official_english",
+                "chinese_title": "后室",
+                "original_title": "Backrooms",
                 "year": "2022",
+                "media_type": "movie",
+                "external_ids": {"wikidata": "Q113638282"},
             },
             "retrieval": {"media_type": "movie", "scope": "movie"},
+            "placement": {"category_kind": "live_action_movie"},
             "evidence": {"decision": {}, "source_links": []},
         }
         confirm.return_value = contract
@@ -209,6 +216,10 @@ class SearchPipelineLoggingTest(unittest.IsolatedAsyncioTestCase):
         host.publish_operation_milestone = AsyncMock(return_value={
             "accepted": True,
             "duplicate": False,
+        })
+        host.seal_operation_segment = AsyncMock(return_value={
+            "accepted": True,
+            "state": "sealed",
         })
         feature = SearchFeature(config={}, host=host)
         feature.indexer_loader = lambda: []

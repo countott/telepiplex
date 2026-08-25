@@ -76,13 +76,138 @@ def wikipedia_result():
 
 
 class WorkDiscoveryTest(unittest.TestCase):
-    def test_top_non_media_wikidata_english_title_gets_one_bounded_retry(self):
+    def test_spaced_query_uses_ranked_wikipedia_result_without_exact_title_gate(self):
         calls = []
 
         def wikipedia(payload):
             calls.append(payload)
-            query = payload["source_queries"]["wikipedia_en"][0]
-            if query.startswith("冰果"):
+            return {
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [{
+                    "language": "zh",
+                    "query": "死神 千年血战",
+                    "search_rank": 1,
+                    "page_id": 7788,
+                    "is_disambiguation": False,
+                    "title": "死神：千年血战篇",
+                    "canonical_title": "BLEACH 千年血戦篇",
+                    "url": "https://zh.wikipedia.org/wiki/死神：千年血战篇",
+                    "wikibase_item": "Q114103300",
+                }],
+            }
+
+        roots = discover_root_works(
+            classify_search_input("死神 千年血战"),
+            wikipedia,
+            lambda qids: {
+                "Q114103300": {
+                    "wikibase_item": "Q114103300",
+                    "chinese_title": "死神：千年血战篇",
+                    "english_title": "Bleach: Thousand-Year Blood War",
+                    "aliases": [],
+                    "media_type": "series",
+                    "year": "2022",
+                    "countries": ["Q17"],
+                },
+                "Q17": {
+                    "chinese_title": "日本",
+                    "english_title": "Japan",
+                },
+            },
+        )
+
+        self.assertEqual(calls, [{
+            "source_queries": {
+                "wikipedia_zh": ["死神 千年血战"],
+                "wikipedia_en": [],
+            }
+        }])
+        self.assertEqual([item["qid"] for item in roots], ["Q114103300"])
+        self.assertEqual(roots[0]["search_rank"], 1)
+        self.assertFalse(roots[0]["exact_title"])
+
+    def test_english_wikipedia_runs_only_after_zero_structurally_valid_zh_works(self):
+        calls = []
+
+        def wikipedia(payload):
+            calls.append(payload)
+            if payload["source_queries"]["wikipedia_zh"]:
+                return {
+                    "source": "wikipedia",
+                    "status": "ok",
+                    "facts": [{
+                        "language": "zh",
+                        "search_rank": 1,
+                        "page_id": 1,
+                        "is_disambiguation": False,
+                        "title": "死神 (漫画)",
+                        "url": "https://zh.wikipedia.org/wiki/死神_(漫画)",
+                        "wikibase_item": "Q166887",
+                    }],
+                }
+            return {
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [{
+                    "language": "en",
+                    "search_rank": 1,
+                    "page_id": 2,
+                    "is_disambiguation": False,
+                    "title": "Bleach: Thousand-Year Blood War",
+                    "url": "https://en.wikipedia.org/wiki/Bleach:_Thousand-Year_Blood_War",
+                    "wikibase_item": "Q114103300",
+                }],
+            }
+
+        entities = {
+            "Q166887": {
+                "wikibase_item": "Q166887",
+                "chinese_title": "BLEACH",
+                "english_title": "Bleach",
+                "aliases": ["死神"],
+                "media_type": "",
+                "year": "2001",
+            },
+            "Q114103300": {
+                "wikibase_item": "Q114103300",
+                "chinese_title": "死神：千年血战篇",
+                "english_title": "Bleach: Thousand-Year Blood War",
+                "aliases": [],
+                "media_type": "series",
+                "year": "2022",
+            },
+        }
+        roots = discover_root_works(
+            classify_search_input("死神 千年血战"),
+            wikipedia,
+            lambda qids: {
+                qid: entities[qid] for qid in qids if qid in entities
+            },
+        )
+
+        self.assertEqual(calls, [
+            {
+                "source_queries": {
+                    "wikipedia_zh": ["死神 千年血战"],
+                    "wikipedia_en": [],
+                }
+            },
+            {
+                "source_queries": {
+                    "wikipedia_zh": [],
+                    "wikipedia_en": ["死神 千年血战"],
+                }
+            },
+        ])
+        self.assertEqual([item["qid"] for item in roots], ["Q114103300"])
+
+    def test_non_media_zh_result_falls_back_to_same_query_in_english(self):
+        calls = []
+
+        def wikipedia(payload):
+            calls.append(payload)
+            if payload["source_queries"]["wikipedia_zh"]:
                 return {
                     "source": "wikipedia",
                     "status": "ok",
@@ -120,11 +245,11 @@ class WorkDiscoveryTest(unittest.TestCase):
                 "year": "2001",
                 "countries": ["Q17"],
             },
-            "Q99853668": {
+                "Q99853668": {
                 "wikibase_item": "Q99853668",
                 "chinese_title": "冰菓",
                 "english_title": "Hyouka",
-                "aliases": [],
+                "aliases": ["冰果"],
                 "media_type": "series",
                 "year": "2012",
                 "countries": ["Q17"],
@@ -149,7 +274,7 @@ class WorkDiscoveryTest(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(
             calls[1]["source_queries"]["wikipedia_en"],
-            ["Hyouka 2012 TV series", "Hyouka"],
+            ["冰果 2012"],
         )
 
     def test_non_media_retry_is_capped_when_alias_still_has_no_media_root(self):
@@ -414,7 +539,7 @@ class WorkDiscoveryTest(unittest.TestCase):
 
         self.assertEqual([item["qid"] for item in roots], ["Q74801"])
 
-    def test_untyped_title_expands_to_movie_and_series_queries(self):
+    def test_untyped_title_preserves_full_query_for_staged_languages(self):
         calls = []
         with self.assertRaisesRegex(Exception, "no_match"):
             build_root_work_search_plan(
@@ -428,21 +553,18 @@ class WorkDiscoveryTest(unittest.TestCase):
                 lambda _qids: {},
             )
 
-        self.assertEqual(
-            calls[0]["source_queries"],
-            {
-                "wikipedia_zh": [
-                    "副总统 电视剧",
-                    "副总统 电影",
-                ],
-                "wikipedia_en": [
-                    "副总统 TV series",
-                    "副总统 film",
-                ],
-            },
-        )
+        self.assertEqual(calls, [
+            {"source_queries": {
+                "wikipedia_zh": ["副总统"],
+                "wikipedia_en": [],
+            }},
+            {"source_queries": {
+                "wikipedia_zh": [],
+                "wikipedia_en": ["副总统"],
+            }},
+        ])
 
-    def test_source_queries_use_language_specific_media_type_terms(self):
+    def test_episode_query_is_not_rewritten_for_wikipedia(self):
         calls = []
         with self.assertRaisesRegex(Exception, "no_match"):
             build_root_work_search_plan(
@@ -464,13 +586,16 @@ class WorkDiscoveryTest(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(
-            calls[0]["source_queries"],
-            {
-                "wikipedia_zh": ["The Office 电视剧", "The Office"],
-                "wikipedia_en": ["The Office TV series", "The Office"],
-            },
-        )
+        self.assertEqual(calls, [
+            {"source_queries": {
+                "wikipedia_zh": ["The Office"],
+                "wikipedia_en": [],
+            }},
+            {"source_queries": {
+                "wikipedia_zh": [],
+                "wikipedia_en": ["The Office"],
+            }},
+        ])
     def test_filters_by_exact_identity_deduplicates_qid_and_keeps_rank(self):
         calls = []
 

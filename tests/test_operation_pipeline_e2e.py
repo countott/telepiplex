@@ -692,8 +692,45 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
                         )
                 return response
 
-            async def seal_operation_stage(self, *_args, **_kwargs):
-                return {"accepted": True, "queued": True}
+            async def seal_operation_segment(
+                self,
+                operation_id,
+                role,
+                **_kwargs,
+            ):
+                segment = self_coordinator.get_active_segment(operation_id)
+                if segment.state == "creating":
+                    self_coordinator.claim_segment_delivery(
+                        segment.segment_id,
+                        owner_plugin_id="download",
+                        generation=segment.generation,
+                    )
+                    self_coordinator.bind_segment_message(
+                        segment.segment_id,
+                        owner_plugin_id="download",
+                        generation=segment.generation,
+                        chat_id=10,
+                        message_id=7001,
+                    )
+                    segment = self_coordinator.get_active_segment(
+                        operation_id
+                    )
+                self_coordinator.record_segment_rendered(
+                    segment.segment_id,
+                    owner_plugin_id="download",
+                    generation=segment.generation,
+                    business_revision=segment.business_revision,
+                    projection_hash=segment.projection_hash,
+                )
+                sealing = self_coordinator.seal_segment(
+                    "download", operation_id, role
+                )
+                sealed = self_coordinator.complete_segment_seal(
+                    sealing.segment_id,
+                    owner_plugin_id="download",
+                    generation=sealing.generation,
+                )
+                return {"accepted": True, "state": sealed.state}
 
             async def publish_event(self, event_type, payload, **_kwargs):
                 self.publish_count += 1

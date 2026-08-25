@@ -738,6 +738,98 @@ class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.operation_sink.await_args.args[0], "echo")
         self.assertEqual(self.operation_sink.await_args.args[1]["operation_id"], "op-1")
 
+    async def test_operation_report_transports_a_typed_segment_declaration(self):
+        from telepiplex_plugin_sdk import HostClient
+
+        self.broker.register("search", "segment-token", manifest("search"))
+        result = await HostClient(
+            self.broker.socket_path,
+            "segment-token",
+        ).report_operation(
+            {
+                "operation_id": "op-segment",
+                "chat_id": 10,
+                "user_id": 1,
+                "state": "running",
+                "stage": "identifying",
+                "status_text": "正在识别媒体…",
+                "control": "cancel",
+                "revision": 1,
+            },
+            segment={
+                "role": "identity",
+                "presentation_kind": "photo",
+            },
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(
+            self.operation_sink.await_args.args[1]["segment"],
+            {
+                "role": "identity",
+                "presentation_kind": "photo",
+            },
+        )
+
+    async def test_feature_can_seal_its_named_operation_segment(self):
+        from telepiplex_plugin_sdk import HostClient
+
+        self.operation_sink.seal = AsyncMock(return_value={
+            "accepted": True,
+            "segment": {
+                "segment_id": "seg-1",
+                "generation": 1,
+                "state": "sealing",
+            },
+        })
+        self.broker.register("search", "segment-seal-token", manifest("search"))
+
+        result = await HostClient(
+            self.broker.socket_path,
+            "segment-seal-token",
+        ).seal_operation_segment("op-segment", "identity", deadline=1)
+
+        self.assertTrue(result["accepted"])
+        self.operation_sink.seal.assert_awaited_once_with(
+            "search",
+            "op-segment",
+            "identity",
+        )
+
+    async def test_operation_snapshot_is_limited_to_owner_or_handoff_participant(self):
+        from telepiplex_plugin_sdk import FeatureError, HostClient
+
+        self.coordinator.report("search", {
+            "operation_id": "op-snapshot",
+            "chat_id": 10,
+            "user_id": 1,
+            "state": "running",
+            "stage": "identifying",
+            "status_text": "正在识别媒体…",
+            "control": "cancel",
+            "revision": 1,
+        })
+        self.broker.register("search", "snapshot-owner", manifest("search"))
+        self.broker.register("echo", "snapshot-other", manifest("echo"))
+
+        snapshot = await HostClient(
+            self.broker.socket_path,
+            "snapshot-owner",
+        ).get_operation_snapshot("op-snapshot", deadline=1)
+
+        self.assertEqual(snapshot["operation_id"], "op-snapshot")
+        self.assertEqual(snapshot["owner_plugin_id"], "search")
+        self.assertEqual(snapshot["state"], "running")
+        self.assertNotIn("chat_id", snapshot)
+        self.assertNotIn("user_id", snapshot)
+
+        with self.assertRaises(FeatureError) as raised:
+            await HostClient(
+                self.broker.socket_path,
+                "snapshot-other",
+            ).get_operation_snapshot("op-snapshot", deadline=1)
+        self.assertEqual(raised.exception.code, "operation_forbidden")
+
 
 if __name__ == "__main__":
     unittest.main()

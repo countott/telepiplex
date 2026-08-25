@@ -935,6 +935,108 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
                 55,
             )
 
+    async def test_segment_bound_callback_never_writes_the_legacy_operation_cursor(self):
+        from app.handlers.interaction_handler import COORDINATOR_KEY, ROUTER_KEY
+        from app.handlers.plugin_handler import handle_feature_result
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "host.db")
+            self.addCleanup(coordinator.close)
+            operation, segment = coordinator.accept_segment_report(
+                "search",
+                {
+                    "operation_id": "op-segment-callback",
+                    "chat_id": 10,
+                    "user_id": 1,
+                    "state": "awaiting_input",
+                    "stage": "candidate_selection",
+                    "status_text": "请选择作品",
+                    "control": "exit",
+                    "revision": 1,
+                    "details": {
+                        "photo_url": "https://image.example/candidates.jpg"
+                    },
+                    "segment": {
+                        "role": "identity",
+                        "presentation_kind": "photo",
+                    },
+                },
+            )
+            segment = coordinator.bind_segment_message(
+                segment.segment_id,
+                owner_plugin_id="search",
+                generation=segment.generation,
+                chat_id=10,
+                message_id=55,
+            )
+            coordinator.record_segment_rendered(
+                segment.segment_id,
+                owner_plugin_id="search",
+                generation=segment.generation,
+                business_revision=1,
+                projection_hash=segment.projection_hash,
+            )
+            update, context, _manager = self._request([], user_id=1)
+            update.callback_query = SimpleNamespace(
+                edit_message_reply_markup=AsyncMock(),
+            )
+            update.effective_message.edit_media = AsyncMock(
+                return_value=SimpleNamespace(message_id=55)
+            )
+            route = SimpleNamespace(
+                plugin_id="search",
+                manifest=SimpleNamespace(callbacks=("search",)),
+            )
+            router = Mock()
+            router.plugin_route.return_value = route
+            context.application.bot_data.update({
+                COORDINATOR_KEY: coordinator,
+                ROUTER_KEY: router,
+            })
+            context.application.bot = SimpleNamespace(
+                edit_message_media=AsyncMock(),
+                edit_message_caption=AsyncMock(),
+                edit_message_text=AsyncMock(),
+                edit_message_reply_markup=AsyncMock(),
+                send_photo=AsyncMock(),
+                send_message=AsyncMock(),
+            )
+
+            await handle_feature_result(update, context, route, {
+                "actions": [{
+                    "kind": "edit_photo",
+                    "text": "正在确认媒体身份…",
+                    "data": {
+                        "photo_url": "https://image.example/candidates.jpg"
+                    },
+                }],
+                "operation": {
+                    "operation_id": operation.operation_id,
+                    "chat_id": 10,
+                    "user_id": 1,
+                    "state": "running",
+                    "stage": "confirming_identity",
+                    "status_text": "正在确认媒体身份…",
+                    "control": "cancel",
+                    "revision": 2,
+                    "details": {},
+                    "segment": {
+                        "role": "identity",
+                        "presentation_kind": "photo",
+                    },
+                },
+            })
+
+            current = coordinator.get(operation.operation_id)
+            active = coordinator.get_active_segment(operation.operation_id)
+            self.assertIsNone(current.message_id)
+            self.assertEqual(active.message_id, 55)
+            self.assertEqual(active.business_revision, 2)
+            self.assertEqual(active.rendered_revision, 2)
+            context.application.bot.edit_message_media.assert_awaited_once()
+            update.effective_message.edit_media.assert_not_awaited()
+
     async def test_feature_config_patch_from_callback_updates_original_message(self):
         from app.handlers.plugin_handler import handle_feature_result
 

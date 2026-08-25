@@ -199,9 +199,9 @@ class UnraidPublishScriptTest(unittest.TestCase):
             tag_pushes,
             [
                 "push origin refs/tags/telepiplex-v3.5.6",
-                "push origin refs/tags/download-v1.0.19",
-                "push origin refs/tags/search-v1.11.6",
-                "push origin refs/tags/rename-v1.5.10",
+                "push origin refs/tags/download-v1.1.0",
+                "push origin refs/tags/search-v1.12.0",
+                "push origin refs/tags/rename-v1.6.0",
                 "push origin refs/tags/sync-v1.1.5",
             ],
         )
@@ -222,9 +222,9 @@ class UnraidPublishScriptTest(unittest.TestCase):
             remote_tags="\n".join(
                 (
                     "host refs/tags/telepiplex-v3.5.6",
-                    "a refs/tags/download-v1.0.19",
-                    "b refs/tags/search-v1.11.6",
-                    "c refs/tags/rename-v1.5.10",
+                    "a refs/tags/download-v1.1.0",
+                    "b refs/tags/search-v1.12.0",
+                    "c refs/tags/rename-v1.6.0",
                     "d refs/tags/sync-v1.1.5",
                     "e refs/tags/caption-v0.1.4",
                 )
@@ -233,8 +233,8 @@ class UnraidPublishScriptTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("仅进入 main、不创建标签", result.stdout)
-        self.assertIn("download 1.0.19", result.stdout)
-        self.assertNotIn("refs/tags/download-v1.0.19", git_log.read_text())
+        self.assertIn("download 1.1.0", result.stdout)
+        self.assertNotIn("refs/tags/download-v1.1.0", git_log.read_text())
 
     def test_unpublished_feature_version_is_tagged(self):
         result, git_log = self._run_script(
@@ -242,9 +242,9 @@ class UnraidPublishScriptTest(unittest.TestCase):
             remote_tags="\n".join(
                 (
                     "host refs/tags/telepiplex-v3.5.6",
-                    "a refs/tags/download-v1.0.19",
-                    "b refs/tags/search-v1.11.5",
-                    "c refs/tags/rename-v1.5.10",
+                    "a refs/tags/download-v1.1.0",
+                    "b refs/tags/search-v1.11.7",
+                    "c refs/tags/rename-v1.6.0",
                     "d refs/tags/sync-v1.1.5",
                     "e refs/tags/caption-v0.1.4",
                 )
@@ -252,9 +252,9 @@ class UnraidPublishScriptTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("search-v1.11.6", result.stdout)
+        self.assertIn("search-v1.12.0", result.stdout)
         self.assertIn(
-            "push origin refs/tags/search-v1.11.6",
+            "push origin refs/tags/search-v1.12.0",
             git_log.read_text(encoding="utf-8"),
         )
 
@@ -268,9 +268,9 @@ class UnraidPublishScriptTest(unittest.TestCase):
             remote_tags="\n".join(
                 (
                     "host refs/tags/telepiplex-v3.5.6",
-                    "a refs/tags/download-v1.0.19",
-                    "b refs/tags/search-v1.11.6",
-                    "c refs/tags/rename-v1.5.10",
+                    "a refs/tags/download-v1.1.0",
+                    "b refs/tags/search-v1.12.0",
+                    "c refs/tags/rename-v1.6.0",
                     "d refs/tags/sync-v1.1.5",
                     "e refs/tags/caption-v0.1.4",
                 )

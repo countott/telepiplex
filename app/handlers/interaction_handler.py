@@ -34,6 +34,10 @@ _CONTROL_RE = re.compile(
     r"^host-operation:(?P<action>exit|cancel|rollback):"
     r"(?P<operation_id>[A-Za-z0-9_-]{1,40})$"
 )
+_SEGMENT_CALLBACK_RE = re.compile(
+    r"^~(?P<segment_generation>[0-9a-f]+)\."
+    r"(?P<callback_generation>[0-9a-f]+)~(?P<data>.+)$"
+)
 _CONTROL_LABELS = {
     "exit": "退出",
     "cancel": "取消任务",
@@ -701,11 +705,42 @@ class OperationReportSink:
     def attach(self, listener):
         self._listener = listener
 
+    async def seal(
+        self,
+        plugin_id: str,
+        operation_id: str,
+        role: str,
+    ) -> dict:
+        segment = self.coordinator.seal_segment(
+            plugin_id,
+            operation_id,
+            role,
+        )
+        record = self.coordinator.get(operation_id)
+        if record is not None and self._listener is not None:
+            self._pending[record.operation_id] = record
+            self._ensure_worker(record.operation_id)
+        return {
+            "accepted": True,
+            "segment": {
+                "segment_id": segment.segment_id,
+                "generation": segment.generation,
+                "state": segment.state,
+            },
+        }
+
     async def __call__(self, plugin_id: str, report: dict) -> dict:
         unavailable = self._unavailable_handoff(report)
         if unavailable is not None:
             return unavailable
-        record = self.coordinator.report(plugin_id, report)
+        segment = None
+        if isinstance(report, dict) and report.get("segment") is not None:
+            record, segment = self.coordinator.accept_segment_report(
+                plugin_id,
+                report,
+            )
+        else:
+            record = self.coordinator.report(plugin_id, report)
         try:
             submitted_revision = int(report.get("revision"))
         except (TypeError, ValueError):
@@ -730,12 +765,19 @@ class OperationReportSink:
             if pending is None or record.revision >= pending.revision:
                 self._pending[record.operation_id] = record
             self._ensure_worker(record.operation_id)
-        return {
+        response = {
             "accepted": accepted,
             "operation_id": record.operation_id,
             "state": record.state,
             "revision": record.revision,
         }
+        if segment is not None:
+            response["segment"] = {
+                "segment_id": segment.segment_id,
+                "generation": segment.generation,
+                "state": segment.state,
+            }
+        return response
 
     def _unavailable_handoff(self, report: dict) -> dict | None:
         if (
@@ -871,6 +913,43 @@ async def operation_gate(update, context):
         control = _CONTROL_RE.fullmatch(data)
         if control is not None and control.group("operation_id") == record.operation_id:
             return
+        encoded_segment_callback = _decode_segment_callback(data)
+        if encoded_segment_callback is not None:
+            raw_data, segment_generation, callback_generation = (
+                encoded_segment_callback
+            )
+            segment = coordinator.get_active_segment(record.operation_id)
+            router = bot_data.get(ROUTER_KEY)
+            allowed = {
+                str(button.callback_data)
+                for row in _feature_status_rows(record, router)
+                for button in row
+            }
+            callback_message_id = getattr(
+                getattr(query, "message", None), "message_id", None
+            )
+            claimed = None
+            if segment is not None and raw_data in allowed:
+                busy_text = _segment_callback_busy_text(segment)
+                claimed = coordinator.claim_segment_callback(
+                    record.plugin_id,
+                    record.operation_id,
+                    message_id=callback_message_id,
+                    segment_generation=segment_generation,
+                    callback_generation=callback_generation,
+                    callback_token=raw_data,
+                    busy_text=busy_text,
+                )
+            if claimed is not None:
+                query.data = raw_data
+                await _render_claimed_segment_busy(
+                    context.application,
+                    record,
+                    claimed,
+                )
+                return
+            await query.answer("当前任务进行中")
+            raise ApplicationHandlerStop
         running_interaction = bool(
             record.state == "running"
             and record.stage == "prowlarr_search"
@@ -1112,11 +1191,11 @@ def _normalize_control_result(record: OperationRecord, result: dict) -> dict:
     return normalized
 
 
-def operation_markup(record: OperationRecord, router=None):
+def operation_markup(record: OperationRecord, router=None, *, segment=None):
     if record.state in TERMINAL_STATES:
         return None
     rows = deduplicate_terminal_controls(
-        _feature_status_rows(record, router)
+        _feature_status_rows(record, router, segment=segment)
     )
     explicit_control = any(
         button.text in set(_CONTROL_LABELS.values()) | {"取消"}
@@ -1154,7 +1233,7 @@ def deduplicate_terminal_controls(rows):
     return result
 
 
-def _feature_status_rows(record: OperationRecord, router):
+def _feature_status_rows(record: OperationRecord, router, *, segment=None):
     keyboard = record.details.get("keyboard")
     if not isinstance(keyboard, list) or router is None:
         return []
@@ -1173,21 +1252,306 @@ def _feature_status_rows(record: OperationRecord, router):
             text = str(raw_button.get("text") or "").strip()
             callback_data = str(raw_button.get("callback_data") or "")
             namespace, separator, _payload = callback_data.partition(":")
+            rendered_callback_data = (
+                _encode_segment_callback(callback_data, segment)
+                if segment is not None
+                else callback_data
+            )
             if (
                 text
                 and separator
                 and namespace in namespaces
-                and len(callback_data.encode("utf-8")) <= 64
+                and len(rendered_callback_data.encode("utf-8")) <= 64
             ):
-                buttons.append(InlineKeyboardButton(text, callback_data=callback_data))
+                buttons.append(InlineKeyboardButton(
+                    text,
+                    callback_data=rendered_callback_data,
+                ))
         if buttons:
             rows.append(buttons)
     return rows
 
 
+def _encode_segment_callback(callback_data: str, segment) -> str:
+    return (
+        f"~{int(segment.generation):x}."
+        f"{int(segment.callback_generation):x}~{callback_data}"
+    )
+
+
+def _decode_segment_callback(value: str) -> tuple[str, int, int] | None:
+    match = _SEGMENT_CALLBACK_RE.fullmatch(str(value or ""))
+    if match is None:
+        return None
+    try:
+        segment_generation = int(match.group("segment_generation"), 16)
+        callback_generation = int(match.group("callback_generation"), 16)
+    except ValueError:
+        return None
+    if segment_generation <= 0 or callback_generation <= 0:
+        return None
+    return match.group("data"), segment_generation, callback_generation
+
+
+async def _render_claimed_segment_busy(application, record, segment) -> None:
+    busy_text = segment.callback_busy_text or _segment_callback_busy_text(segment)
+    if segment.presentation_kind == "photo":
+        await application.bot.edit_message_caption(
+            chat_id=record.chat_id,
+            message_id=segment.message_id,
+            caption=busy_text,
+            reply_markup=None,
+        )
+        return
+    await application.bot.edit_message_text(
+        chat_id=record.chat_id,
+        message_id=segment.message_id,
+        text=busy_text,
+        reply_markup=None,
+    )
+
+
+def _segment_callback_busy_text(segment) -> str:
+    if segment.role == "identity":
+        return "正在确认媒体身份…"
+    if segment.role == "search":
+        return "正在处理所选片源…"
+    return "正在处理…"
+
+
 async def render_operation(application, _router, record: OperationRecord):
     async with operation_render_lock(application, record.operation_id):
+        coordinator = application.bot_data.get(COORDINATOR_KEY)
+        segment = (
+            coordinator.get_active_segment(record.operation_id)
+            if coordinator is not None
+            else None
+        )
+        if (
+            segment is not None
+            and segment.role != "legacy"
+            and segment.owner_plugin_id == record.plugin_id
+        ):
+            return await _render_operation_segment_locked(
+                application,
+                _router,
+                record.operation_id,
+                segment.segment_id,
+            )
         return await _render_operation_locked(application, _router, record)
+
+
+async def _render_operation_segment_locked(
+    application,
+    router,
+    operation_id: str,
+    segment_id: str,
+):
+    coordinator = application.bot_data.get(COORDINATOR_KEY)
+    if coordinator is None:
+        return None
+    segment = coordinator.get_segment(segment_id)
+    record = coordinator.get(operation_id)
+    if (
+        segment is None
+        or record is None
+        or record.active_segment_id != segment.segment_id
+        or record.plugin_id != segment.owner_plugin_id
+    ):
+        return None
+    if segment.state == "delivery_uncertain":
+        return segment.message_id
+    if (
+        segment.state == "sealing"
+        and segment.message_id is not None
+        and segment.rendered_revision >= segment.business_revision
+    ):
+        sealed = coordinator.complete_segment_seal(
+            segment.segment_id,
+            owner_plugin_id=segment.owner_plugin_id,
+            generation=segment.generation,
+        )
+        return sealed.message_id
+
+    if segment.message_id is None:
+        claimed = coordinator.claim_segment_delivery(
+            segment.segment_id,
+            owner_plugin_id=segment.owner_plugin_id,
+            generation=segment.generation,
+        )
+        if claimed is None:
+            return None
+        sent_revision = claimed.business_revision
+        sent_hash = claimed.projection_hash
+        sent_record = coordinator.get(operation_id)
+        if sent_record is None:
+            return None
+        try:
+            message = await _send_new_segment_message(
+                application,
+                router,
+                sent_record,
+                claimed,
+            )
+        except Exception:
+            coordinator.mark_segment_delivery_uncertain(
+                claimed.segment_id,
+                owner_plugin_id=claimed.owner_plugin_id,
+                generation=claimed.generation,
+            )
+            return None
+        message_id = getattr(message, "message_id", None)
+        if not isinstance(message_id, int) or message_id <= 0:
+            return None
+        bound = coordinator.bind_segment_message(
+            claimed.segment_id,
+            owner_plugin_id=claimed.owner_plugin_id,
+            generation=claimed.generation,
+            chat_id=sent_record.chat_id,
+            message_id=message_id,
+        )
+        if bound is None:
+            return None
+        coordinator.record_segment_rendered(
+            bound.segment_id,
+            owner_plugin_id=bound.owner_plugin_id,
+            generation=bound.generation,
+            business_revision=sent_revision,
+            projection_hash=sent_hash,
+        )
+
+    while True:
+        segment = coordinator.get_segment(segment_id)
+        record = coordinator.get(operation_id)
+        if segment is None or record is None or segment.message_id is None:
+            return None
+        if segment.rendered_revision >= segment.business_revision:
+            if segment.state == "sealing":
+                segment = coordinator.complete_segment_seal(
+                    segment.segment_id,
+                    owner_plugin_id=segment.owner_plugin_id,
+                    generation=segment.generation,
+                )
+            return segment.message_id
+        if segment.rendered_projection_hash == segment.projection_hash:
+            coordinator.record_segment_rendered(
+                segment.segment_id,
+                owner_plugin_id=segment.owner_plugin_id,
+                generation=segment.generation,
+                business_revision=segment.business_revision,
+                projection_hash=segment.projection_hash,
+            )
+            continue
+        try:
+            await _edit_segment_message(application, router, record, segment)
+        except Exception:
+            coordinator.mark_segment_delivery_uncertain(
+                segment.segment_id,
+                owner_plugin_id=segment.owner_plugin_id,
+                generation=segment.generation,
+            )
+            return segment.message_id
+        rendered = coordinator.record_segment_rendered(
+            segment.segment_id,
+            owner_plugin_id=segment.owner_plugin_id,
+            generation=segment.generation,
+            business_revision=segment.business_revision,
+            projection_hash=segment.projection_hash,
+        )
+        if rendered is None:
+            continue
+
+
+async def _send_new_segment_message(application, router, record, segment):
+    text = record.status_text or (
+        f"任务状态：{record.state}\n阶段：{record.stage or '-'}"
+    )
+    markup = operation_markup(record, router, segment=segment)
+    if segment.presentation_kind == "text":
+        return await application.bot.send_message(
+            chat_id=record.chat_id,
+            text=text,
+            reply_markup=markup,
+        )
+    caption, parse_mode = bounded_photo_caption(
+        text,
+        record.details.get("parse_mode"),
+    )
+    photo = await _segment_photo_media(record)
+    kwargs = {
+        "chat_id": record.chat_id,
+        "photo": photo,
+        "caption": caption,
+        "reply_markup": markup,
+    }
+    if parse_mode:
+        kwargs["parse_mode"] = parse_mode
+    return await application.bot.send_photo(**kwargs)
+
+
+async def _edit_segment_message(application, router, record, segment):
+    text = record.status_text or (
+        f"任务状态：{record.state}\n阶段：{record.stage or '-'}"
+    )
+    markup = operation_markup(record, router, segment=segment)
+    if segment.presentation_kind == "text":
+        try:
+            await application.bot.edit_message_text(
+                chat_id=record.chat_id,
+                message_id=segment.message_id,
+                text=text,
+                reply_markup=markup,
+            )
+        except Exception as exc:
+            if not _message_not_modified(exc):
+                raise
+        return
+    caption, parse_mode = bounded_photo_caption(
+        text,
+        record.details.get("parse_mode"),
+    )
+    poster_items = _operation_poster_items(record.details)
+    photo_url = _operation_photo_url(record.details)
+    if poster_items or photo_url:
+        try:
+            await application.bot.edit_message_media(
+                chat_id=record.chat_id,
+                message_id=segment.message_id,
+                media=InputMediaPhoto(
+                    media=await _segment_photo_media(record),
+                    caption=caption,
+                    parse_mode=parse_mode,
+                ),
+                reply_markup=markup,
+            )
+            return
+        except Exception as exc:
+            if _message_not_modified(exc):
+                return
+    try:
+        await application.bot.edit_message_caption(
+            chat_id=record.chat_id,
+            message_id=segment.message_id,
+            caption=caption,
+            parse_mode=parse_mode,
+            reply_markup=markup,
+        )
+    except Exception as exc:
+        if not _message_not_modified(exc):
+            raise
+
+
+async def _segment_photo_media(record):
+    poster_items = _operation_poster_items(record.details)
+    if poster_items:
+        return await asyncio.to_thread(build_poster_grid, poster_items)
+    photo_url = _operation_photo_url(record.details)
+    if photo_url:
+        return photo_url
+    return await asyncio.to_thread(
+        build_poster_grid,
+        [{"number": 1, "title": "telepiplex"}],
+    )
 
 
 async def _render_operation_locked(application, _router, record: OperationRecord):

@@ -71,13 +71,51 @@ class HostClient:
         self,
         report: dict,
         *,
+        segment: dict | None = None,
         deadline: float = 10,
     ) -> dict:
         if not isinstance(report, dict):
             raise FeatureError("invalid_request", "operation report must be an object")
+        payload = dict(report)
+        if segment is not None:
+            if not isinstance(segment, dict):
+                raise FeatureError(
+                    "invalid_request",
+                    "operation segment must be an object",
+                )
+            payload["segment"] = dict(segment)
         return await self._request(
             "operation.report",
-            dict(report),
+            payload,
+            deadline=deadline,
+        )
+
+    async def seal_operation_segment(
+        self,
+        operation_id: str,
+        role: str,
+        *,
+        deadline: float = 10,
+    ) -> dict:
+        return await self._request(
+            "operation.seal",
+            {
+                "operation_id": str(operation_id),
+                "role": str(role),
+            },
+            deadline=deadline,
+            idempotency_key=f"{str(operation_id)}:{str(role)}:seal",
+        )
+
+    async def get_operation_snapshot(
+        self,
+        operation_id: str,
+        *,
+        deadline: float = 10,
+    ) -> dict:
+        return await self._request(
+            "operation.get",
+            {"operation_id": str(operation_id)},
             deadline=deadline,
         )
 

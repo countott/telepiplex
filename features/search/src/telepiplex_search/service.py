@@ -91,6 +91,7 @@ from .input_contract import classify_search_input, contains_url
 from .identity_presentation import build_identity_presentation
 from .log_sanitizer import sanitize_log_value
 from .metadata_resolutions import MetadataResolutionStore
+from .media_metadata_v2 import project_confirmed_media_metadata_v2
 from .errors import SearchPlanningError
 from .enrichment_policy import (
     apply_deferred_presentation,
@@ -133,6 +134,39 @@ _LATIN = re.compile(r"[A-Za-z]")
 
 def _text(value) -> str:
     return " ".join(str(value or "").replace("\xa0", " ").split())
+
+
+def _v2_scope_from_private_contract(contract: dict) -> dict:
+    media_type = _text(
+        (contract.get("retrieval") or {}).get("media_type")
+        or (contract.get("placement") or {}).get("library_type")
+    ).casefold()
+    if media_type == "movie":
+        return {
+            "kind": "movie",
+            "season_number": None,
+            "episode_number": None,
+        }
+    decision = (contract.get("evidence") or {}).get("decision") or {}
+    kind = _text(
+        (contract.get("retrieval") or {}).get("scope")
+        or decision.get("scope")
+    )
+    if kind not in {"whole_series", "season", "episode"}:
+        raise ValueError("confirmed_scope_required")
+    return {
+        "kind": kind,
+        "season_number": (
+            int(decision.get("season_number"))
+            if kind in {"season", "episode"}
+            else None
+        ),
+        "episode_number": (
+            int(decision.get("episode_number"))
+            if kind == "episode"
+            else None
+        ),
+    }
 
 
 def _selected_https_cover(fact: dict | None) -> bool:
@@ -1297,28 +1331,31 @@ class SearchFeature:
                     }
                 selected_plan["media_metadata"] = contract
         try:
-            contract = confirm_media_metadata(selected_plan)
+            private_contract = confirm_media_metadata(selected_plan)
         except ValueError as exc:
             raise FeatureError(
                 "metadata_unresolved",
                 "resolved metadata did not pass the canonical contract: "
                 f"{exc}",
             ) from exc
-        identity = contract["identity"]
+        projection_candidate = deepcopy(selected)
+        projection_candidate["media_metadata"] = private_contract
+        try:
+            contract = project_confirmed_media_metadata_v2(
+                projection_candidate,
+                requested_scope=_v2_scope_from_private_contract(
+                    private_contract
+                ),
+            )
+        except ValueError as exc:
+            raise FeatureError(
+                "metadata_unresolved",
+                f"minimal media identity could not be frozen: {exc}",
+            ) from exc
         result = {
             "status": "resolved",
             "media_metadata": contract,
-            "naming_metadata": {
-                "source": "search-live",
-                "media_type": (
-                    (contract.get("retrieval") or {}).get("media_type")
-                    or contract["placement"]["library_type"]
-                ),
-                "chinese_title": identity.get("chinese_title") or "",
-                "english_title": identity.get("english_title") or "",
-                "year": identity.get("year") or "",
-            },
-            "presentation": build_identity_presentation(contract),
+            "presentation": build_identity_presentation(private_contract),
         }
         if method == "confirm_metadata":
             self.metadata_resolution_store.cache_result(
@@ -2295,6 +2332,12 @@ class SearchFeature:
                 )
                 self.allocator.release(plan_id)
                 return self._closed("❌ 媒体分类没有对应保存目录。")
+        poster_preview = {"candidates": tuple(deepcopy(candidates))}
+        await self._supplement_candidate_posters(poster_preview)
+        candidates = list(poster_preview["candidates"])
+        selectable = [
+            item for item in candidates if item.get("selectable") is not False
+        ]
         self.plans[plan_id] = {
             "owner": self._owner_key(request),
             "created_at": time.time(),
@@ -2303,7 +2346,6 @@ class SearchFeature:
             "selected_path": route["path"] if route else "",
             "results": [],
             "operation_id": operation_id,
-            "initial_candidate_report_accepted": asyncio.Event(),
         }
         if plan.get("links_frozen") and plan.get("auto_confirm") is True:
             log_search_event(
@@ -2319,10 +2361,6 @@ class SearchFeature:
                 str(candidates.index(selectable[0])),
             )
             return selected_result
-        self._start_candidate_poster_enrichment(
-            plan_id,
-            self.plans[plan_id],
-        )
         action = (
             self._candidate_grid_action(self.plans[plan_id])
             if plan.get("links_frozen") and selectable
@@ -3528,66 +3566,42 @@ class SearchFeature:
         plan = stored["plan"]
         contract = confirm_media_metadata(plan)
         presentation = build_identity_presentation(contract)
+        projection_candidate = deepcopy(
+            stored.get("selected_candidate") or {}
+        )
+        projection_candidate["media_metadata"] = contract
+        public_contract = project_confirmed_media_metadata_v2(
+            projection_candidate,
+            requested_scope=_v2_scope_from_private_contract(contract),
+        )
         stored["identity_presentation"] = deepcopy(presentation)
-        if (
-            stored.get("identity_milestone_id")
-            != presentation["milestone_id"]
-        ):
+        if not stored.get("identity_segment_sealed"):
             if stored["operation_id"] in self.operations:
                 await self._report_operation(
                     stored["operation_id"],
                     state="running",
                     stage="identity_confirmation",
-                    status_text=(
-                        "正在确认媒体身份："
-                        f"{_text(presentation.get('title')) or '未知作品'}"
-                    ),
+                    status_text=presentation["text"],
                     control="cancel",
-                    details={},
+                    details={"photo_url": presentation["photo_url"]},
                 )
-            for attempt in range(3):
-                try:
-                    response = await self.host.publish_operation_milestone(
-                        stored["operation_id"],
-                        presentation["milestone_id"],
-                        presentation["text"],
-                        photo_url=presentation["photo_url"],
-                        deadline=45,
-                    )
-                except Exception as exc:
-                    if (
-                        _ambiguous_milestone_error(exc)
-                        and attempt < 2
-                    ):
-                        await asyncio.sleep(0.25 * (2 ** attempt))
-                        continue
-                    if runtime_context.logger:
-                        runtime_context.logger.warning(
-                            "search_identity_milestone "
-                            "status=failed "
-                            f"error_code={getattr(exc, 'code', type(exc).__name__)} "
-                            f"error_type={type(exc).__name__}"
-                        )
-                    raise FeatureError(
-                        "identity_delivery_failed",
-                        "Host did not deliver the confirmed media identity",
-                    ) from exc
-                delivered = bool(
-                    isinstance(response, dict)
-                    and (
-                        response.get("accepted") is True
-                        or response.get("duplicate") is True
-                    )
+            try:
+                await self._seal_operation_segment(
+                    stored["operation_id"],
+                    "identity",
                 )
-                if not delivered:
-                    raise FeatureError(
-                        "identity_delivery_failed",
-                        "Host did not deliver the confirmed media identity",
+            except Exception as exc:
+                if runtime_context.logger:
+                    runtime_context.logger.warning(
+                        "search_identity_segment status=failed "
+                        f"error_code={getattr(exc, 'code', type(exc).__name__)} "
+                        f"error_type={type(exc).__name__}"
                     )
-                stored["identity_milestone_id"] = (
-                    presentation["milestone_id"]
-                )
-                break
+                raise FeatureError(
+                    "identity_delivery_failed",
+                    "Host did not seal the confirmed media identity",
+                ) from exc
+            stored["identity_segment_sealed"] = True
         if stored["operation_id"] in self.operations:
             await self._report_operation(
                 stored["operation_id"],
@@ -3624,7 +3638,8 @@ class SearchFeature:
             ),
             year=(contract.get("identity") or {}).get("year"),
         )
-        stored["confirmed_contract"] = contract
+        stored["private_confirmed_contract"] = contract
+        stored["confirmed_contract"] = public_contract
         stored["active_prowlarr_queries"] = list(queries)
         try:
             indexers = await asyncio.to_thread(self.indexer_loader)
@@ -3672,7 +3687,6 @@ class SearchFeature:
             for query in queries
         ]
         stored["indexer_tasks"] = list(tasks)
-        self._start_deferred_presentation_enrichment(plan_id, stored)
         try:
             outcomes = await asyncio.gather(*tasks, return_exceptions=True)
         finally:
@@ -4059,7 +4073,6 @@ class SearchFeature:
                     stored["indexer_tasks"].append(task)
 
         launch_wave(first_wave)
-        self._start_deferred_presentation_enrichment(plan_id, stored)
         stored["selection_frozen"] = False
         stored["last_incremental_report"] = 0.0
         remaining_launched = not bool(remaining_wave)
@@ -4471,20 +4484,19 @@ class SearchFeature:
                 release_id,
                 "magnet_missing",
             )
-        deferred_task = stored.get("deferred_enrichment_task")
-        deferred_contract = stored.get("deferred_contract")
-        contract = deepcopy(
-            deferred_contract
-            if (
-                deferred_task is not None
-                and deferred_task.done()
-                and not deferred_task.cancelled()
-                and isinstance(deferred_contract, dict)
-            )
-            else stored["confirmed_contract"]
-        )
-        identity = contract["identity"]
+        contract = deepcopy(stored["confirmed_contract"])
         operation = self.operations[operation_id]
+        if not operation.get("search_segment_sealed"):
+            await self._report_operation(
+                operation_id,
+                state="running",
+                stage="submitting_download",
+                status_text="已选定片源，准备提交下载。",
+                control="cancel",
+                details={},
+            )
+            await self._seal_operation_segment(operation_id, "search")
+            operation["search_segment_sealed"] = True
         handoff = operation.get("handoff_operation")
         if not isinstance(handoff, dict):
             handoff = self._advance_operation(
@@ -4532,10 +4544,6 @@ class SearchFeature:
                 "Host rejected search handoff ownership",
             )
         operation["handoff_pending"] = False
-        await self._seal_search_stage(
-            operation_id,
-            f"search-stage-complete:{plan_id}:{release_id}",
-        )
         try:
             result = await self.host.call_capability(
                 "download.provider",
@@ -4548,13 +4556,6 @@ class SearchFeature:
                     "operation_id": operation_id,
                     "operation_revision": handoff["revision"],
                     "media_metadata": contract,
-                    "naming_metadata": {
-                        "source": "confirmed",
-                        "media_type": contract["placement"]["library_type"],
-                        "chinese_title": identity.get("chinese_title") or "",
-                        "english_title": identity.get("english_title") or "",
-                        "year": identity.get("year") or "",
-                    },
                     "release": {
                         "title": item.get("title") or "",
                         "indexer": item.get("indexer") or "",
@@ -4607,6 +4608,34 @@ class SearchFeature:
             raise FeatureError(
                 "stage_seal_failed",
                 "Host did not seal the completed search stage",
+            )
+
+    async def _seal_operation_segment(
+        self,
+        operation_id: str,
+        role: str,
+    ) -> None:
+        for attempt in range(3):
+            try:
+                response = await self.host.seal_operation_segment(
+                    operation_id,
+                    role,
+                    deadline=45,
+                )
+            except Exception as exc:
+                if not _ambiguous_milestone_error(exc) or attempt == 2:
+                    raise
+                await asyncio.sleep(0.25 * (2 ** attempt))
+                continue
+            if isinstance(response, dict) and (
+                response.get("accepted") is True
+                or response.get("duplicate") is True
+                or response.get("state") == "sealed"
+            ):
+                return
+            raise FeatureError(
+                "operation_seal_failed",
+                f"Host did not accept the {role} segment seal",
             )
 
     async def _localize_exact_douban_candidates(
@@ -6856,6 +6885,19 @@ class SearchFeature:
         }
         if operation.get("next_plugin_id"):
             view["next_plugin_id"] = str(operation["next_plugin_id"])
+        if view["state"] != "handed_off":
+            search_stages = {
+                "prowlarr_search",
+                "prowlarr_recovery",
+                "release_selection",
+                "resolving_release",
+                "submitting_download",
+            }
+            role = "search" if view["stage"] in search_stages else "identity"
+            view["segment"] = {
+                "role": role,
+                "presentation_kind": "text" if role == "search" else "photo",
+            }
         return view
 
     @staticmethod

@@ -330,7 +330,7 @@ def lookup_wikipedia_evidence(
                         "action": "query",
                         "generator": "search",
                         "gsrsearch": query,
-                        "gsrlimit": 5,
+                        "gsrlimit": 10,
                         "prop": "extracts|pageprops|info|langlinks",
                         "exintro": 1,
                         "explaintext": 1,

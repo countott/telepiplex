@@ -8,6 +8,9 @@ import threading
 import uuid
 
 from telepiplex_plugin_sdk import FeatureError
+from telepiplex_plugin_sdk.media_metadata_v2 import (
+    validate_media_metadata_v2,
+)
 
 from .client import Open115Error
 from .context import logger
@@ -1314,6 +1317,22 @@ class DownloadFeature:
     async def _start_download(self, payload: dict, call_context: dict) -> dict:
         if self.runtime is None:
             raise FeatureError("not_ready", "download runtime is not ready")
+        payload = deepcopy(payload) if isinstance(payload, dict) else {}
+        if "naming_metadata" in payload:
+            raise FeatureError(
+                "invalid_media_metadata",
+                "new download submissions do not accept naming_metadata",
+            )
+        if "media_metadata" in payload:
+            validated_metadata = validate_media_metadata_v2(
+                payload.get("media_metadata")
+            )
+            if validated_metadata is None:
+                raise FeatureError(
+                    "invalid_media_metadata",
+                    "download requires confirmed media_metadata v2",
+                )
+            payload["media_metadata"] = validated_metadata
         link = str(payload.get("link") or "").strip()
         selected_path = "/" + str(payload.get("selected_path") or "").strip("/")
         if not _MAGNET.fullmatch(link) or selected_path == "/":
@@ -1663,13 +1682,9 @@ class DownloadFeature:
                 "final_path": final_path,
                 "file_tree": file_tree,
                 "media_metadata": payload.get("media_metadata"),
-                "naming_metadata": payload.get("naming_metadata"),
                 "release": payload.get("release"),
                 "operation_id": operation_id,
             }
-            self._prepare_download_handoff(
-                job_id, event_payload, operation_id
-            )
             if self.jobs:
                 self.jobs.update(job_id, "downloaded", result=event_payload)
             logger.info(
@@ -1839,14 +1854,32 @@ class DownloadFeature:
         if operation_id:
             handoff = payload.get("download_handoff_report")
             if not isinstance(handoff, dict):
-                if self.jobs:
+                if (
+                    operation_id not in self.operations
+                    and int(payload.get("operation_revision") or 0) <= 0
+                ):
                     raise FeatureError(
                         "handoff_recovery_required",
-                        "downloaded job lacks its exact durable handoff report",
+                        "downloaded job lacks proven operation ownership",
                     )
+                await self._report_operation(
+                    operation_id,
+                    state="running",
+                    stage="downloaded",
+                    status_text="已下载，准备整理。",
+                    control="cancel",
+                    details={},
+                )
+                await self._seal_download_stage(
+                    operation_id,
+                    job_id,
+                    payload,
+                )
                 handoff = self._prepare_download_handoff(
                     job_id, payload, operation_id
                 )
+                if self.jobs:
+                    self.jobs.update(job_id, "downloaded", result=payload)
             try:
                 handoff_revision = int(handoff.get("revision") or 0)
                 payload_revision = int(
@@ -1885,11 +1918,6 @@ class DownloadFeature:
                     payload["download_handoff_accepted"] = True
                     if self.jobs:
                         self.jobs.update(job_id, "downloaded", result=payload)
-                await self._seal_download_stage(
-                    operation_id,
-                    job_id,
-                    payload,
-                )
             except FeatureError as exc:
                 if exc.code != "handoff_target_unavailable":
                     raise
@@ -1968,10 +1996,9 @@ class DownloadFeature:
     ) -> None:
         for attempt in range(3):
             try:
-                seal_response = await self.host.seal_operation_stage(
+                seal_response = await self.host.seal_operation_segment(
                     operation_id,
-                    f"download-stage-complete:{job_id}",
-                    "已下载，开始整理",
+                    "download",
                     deadline=45,
                 )
             except Exception as exc:
@@ -1985,6 +2012,7 @@ class DownloadFeature:
             if isinstance(seal_response, dict) and (
                 seal_response.get("accepted") is True
                 or seal_response.get("duplicate") is True
+                or seal_response.get("state") == "sealed"
             ):
                 return
             raise FeatureError(
@@ -2415,6 +2443,11 @@ class DownloadFeature:
         next_plugin_id = str(operation.get("next_plugin_id") or "")
         if next_plugin_id:
             view["next_plugin_id"] = next_plugin_id
+        if view["state"] != "handed_off":
+            view["segment"] = {
+                "role": "download",
+                "presentation_kind": "text",
+            }
         return view
 
     def _close_interaction(self, key, status_text):

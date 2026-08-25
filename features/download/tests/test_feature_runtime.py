@@ -315,6 +315,16 @@ class FakeHost:
         })
         return {"accepted": True, "duplicate": False}
 
+    async def seal_operation_segment(
+        self,
+        operation_id,
+        role,
+        *,
+        deadline=10,
+    ):
+        self.timeline.append(("segment_sealed", role, operation_id))
+        return {"accepted": True, "state": "sealed"}
+
 
 class FakeRuntime:
     def __init__(self):
@@ -481,12 +491,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "selected_path": "/Downloads",
                 "user_id": 123,
                 "target_folder_name": "中文名 (English)",
-                "media_metadata": {"schema_version": 1, "metadata_id": "m1"},
-                "naming_metadata": {
-                    "source": "search-live",
-                    "chinese_title": "中文名",
-                    "english_title": "English",
-                },
+                "media_metadata": media_metadata_v2(),
                 "release": {"title": "Show.S01E01.1080p", "indexer": "Prowlarr"},
             },
             "context": {"idempotency_key": "plan-1"},
@@ -503,13 +508,46 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["resource_name"], "Show.S01E01.mkv")
         self.assertEqual(payload["file_tree"][0]["path"], payload["download_root"])
         self.assertEqual(payload["release"]["title"], "Show.S01E01.1080p")
-        self.assertEqual(payload["media_metadata"]["metadata_id"], "m1")
-        self.assertEqual(payload["naming_metadata"]["source"], "search-live")
-        self.assertEqual(payload["naming_metadata"]["chinese_title"], "中文名")
+        self.assertEqual(payload["media_metadata"], media_metadata_v2())
+        self.assertNotIn("naming_metadata", payload)
         self.assertEqual(kwargs["idempotency_key"], "plan-1:completed")
         self.assertEqual(self.client.renamed, [])
         self.assertEqual(self.client.moved, [])
         self.assertEqual(self.client.deleted_tasks, [("hash-1", 0)])
+
+    async def test_v2_is_copied_before_background_work_and_malformed_v2_has_no_side_effect(self):
+        metadata = media_metadata_v2()
+        await self.feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "b" * 40,
+                "selected_path": "/Downloads",
+                "media_metadata": metadata,
+            },
+            "context": {"idempotency_key": "v2-copy"},
+        })
+        metadata["identity"]["title_zh"] = "调用方后来修改"
+        await self.runtime.tasks.pop("v2-copy")
+
+        self.assertEqual(
+            self.host.events[-1][1]["media_metadata"]["identity"]["title_zh"],
+            "中文名",
+        )
+
+        malformed = media_metadata_v2()
+        malformed["identity"]["provider_refs"]["wikidata"] = "Q2"
+        added_before = list(self.client.added)
+        with self.assertRaisesRegex(Exception, "media_metadata v2"):
+            await self.feature.download_capability({
+                "method": "submit",
+                "payload": {
+                    "link": "magnet:?xt=urn:btih:" + "c" * 40,
+                    "selected_path": "/Downloads",
+                    "media_metadata": malformed,
+                },
+                "context": {"idempotency_key": "v2-invalid"},
+            })
+        self.assertEqual(self.client.added, added_before)
 
     async def test_service_wires_new_adaptive_polling_config(self):
         self.feature.config.update({
@@ -1125,7 +1163,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host.notifications, [])
 
     async def test_download_stage_seals_before_rename_event_is_published(self):
-        original_seal = self.host.seal_operation_stage
+        original_seal = self.host.seal_operation_segment
 
         async def queue_before_later_delivery_failure(*args, **kwargs):
             response = await original_seal(*args, **kwargs)
@@ -1135,7 +1173,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "delivery_state": "failed",
             }
 
-        self.host.seal_operation_stage = queue_before_later_delivery_failure
+        self.host.seal_operation_segment = queue_before_later_delivery_failure
         await self.feature.download_capability({
             "method": "submit",
             "payload": {
@@ -1156,37 +1194,34 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         seal_index = next(
             index for index, item in enumerate(self.host.timeline)
-            if item[:2] == ("milestone", "stage")
+            if item[:2] == ("segment_sealed", "download")
         )
         event_index = self.host.timeline.index(
             ("event", "download.completed")
         )
-        self.assertLess(handoff_index, seal_index)
-        self.assertLess(seal_index, event_index)
-        self.assertEqual(self.host.milestones[0]["text"], "已下载，开始整理")
+        self.assertLess(seal_index, handoff_index)
+        self.assertLess(handoff_index, event_index)
         self.assertEqual(
             [event[0] for event in self.host.events],
             ["download.completed"],
         )
 
-    async def test_lost_download_stage_response_retries_same_milestone(self):
+    async def test_lost_download_segment_response_retries_same_role(self):
         from telepiplex_plugin_sdk import FeatureError
 
-        original_seal = self.host.seal_operation_stage
+        original_seal = self.host.seal_operation_segment
         attempts = []
 
         async def accept_then_lose(
             operation_id,
-            milestone_id,
-            text,
+            role,
             *,
             deadline=10,
         ):
-            attempts.append(milestone_id)
+            attempts.append(role)
             response = await original_seal(
                 operation_id,
-                milestone_id,
-                text,
+                role,
                 deadline=deadline,
             )
             if len(attempts) == 1:
@@ -1196,7 +1231,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
                 )
             return {**response, "accepted": False, "duplicate": True}
 
-        self.host.seal_operation_stage = accept_then_lose
+        self.host.seal_operation_segment = accept_then_lose
 
         await self.feature._seal_download_stage(
             "op-download-lost-stage",
@@ -1218,7 +1253,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "operation belongs to another Feature",
             )
 
-        self.host.seal_operation_stage = reject_owner
+        self.host.seal_operation_segment = reject_owner
 
         with self.assertRaises(FeatureError) as raised:
             await self.feature._seal_download_stage(
@@ -3064,17 +3099,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.0.20")
-        self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
+        self.assertEqual(manifest["version"], "1.1.0")
+        self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.0.20")
+        self.assertEqual(project["project"]["version"], "1.1.0")
         self.assertEqual(
             project["project"]["dependencies"][0],
-            "telepiplex-plugin-sdk==1.3.2",
+            "telepiplex-plugin-sdk==1.4.0",
         )
-        self.assertIn("/tmp/download-1.0.20.tpx", readme)
-        self.assertNotIn("dist/download-1.0.20.tpx", readme)
+        self.assertIn("/tmp/download-1.1.0.tpx", readme)
+        self.assertNotIn("dist/download-1.1.0.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)
@@ -3101,3 +3136,29 @@ class FeatureSourceContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+from telepiplex_plugin_sdk.media_metadata_v2 import (
+    build_media_metadata_v2_id,
+)
+
+
+def media_metadata_v2():
+    value = {
+        "schema_version": 2,
+        "confirmed": True,
+        "identity": {
+            "primary_ref": {"provider": "wikidata", "id": "Q1"},
+            "provider_refs": {"wikidata": "Q1"},
+            "media_type": "movie",
+            "title_zh": "中文名",
+            "title_original": "English",
+            "year": 2024,
+        },
+        "scope": {
+            "kind": "movie",
+            "season_number": None,
+            "episode_number": None,
+        },
+        "placement": {"category_kind": "live_action_movie"},
+    }
+    value["metadata_id"] = build_media_metadata_v2_id(value)
+    return value

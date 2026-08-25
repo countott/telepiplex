@@ -41,7 +41,7 @@ class FeatureBuilderTest(unittest.TestCase):
             pyproject = source / "pyproject.toml"
             pyproject.write_text(
                 pyproject.read_text(encoding="utf-8").replace(
-                    "telepiplex-plugin-sdk==1.3.2",
+                    "telepiplex-plugin-sdk==1.4.0",
                     "telepiplex-plugin-sdk==1.1.0",
                 ),
                 encoding="utf-8",

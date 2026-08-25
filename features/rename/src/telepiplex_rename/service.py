@@ -13,6 +13,10 @@ from telepiplex_plugin_sdk.media_metadata import (
     extract_confirmed_media_metadata,
     resolve_category_route,
 )
+from telepiplex_plugin_sdk.media_metadata_v2 import (
+    convert_media_metadata_v1_to_v2,
+    validate_media_metadata_v2,
+)
 
 from .config_wizard import RenameConfigWizard
 from .content_probe import build_metadata_probe
@@ -20,6 +24,10 @@ from .context import runtime_context
 from .file_facts import build_file_facts, parse_file_evidence
 from .file_groups import build_provisional_groups
 from .models import DownloadCompletedEvent, PostDownloadResult
+from .media_metadata_v2 import (
+    naming_identity_from_v2,
+    private_v1_adapter_from_v2,
+)
 from .operations import OperationCancelled, RenameOperationJournal
 from .processor import process_generic_media, process_tvdb_episode
 from .query_recovery import recover_metadata_probe
@@ -401,6 +409,74 @@ class RenameFeature:
         try:
             outcome = job.get("result") or {}
             event_payload = outcome.get("event_payload") or {}
+            operation_id = str(event_payload.get("operation_id") or "")
+            snapshot_reader = getattr(
+                self.host,
+                "get_operation_snapshot",
+                None,
+            )
+            if operation_id and callable(snapshot_reader):
+                try:
+                    snapshot = await snapshot_reader(
+                        operation_id,
+                        deadline=10,
+                    )
+                except FeatureError as exc:
+                    if exc.code == "not_found":
+                        orphaned = {
+                            **outcome,
+                            "error_code": "orphaned_operation",
+                            "message": "Host 中不存在对应协调任务；未恢复文件操作。",
+                        }
+                        if self.jobs:
+                            self.jobs.update(
+                                job["job_id"],
+                                "orphaned_operation",
+                                orphaned,
+                            )
+                        return
+                    raise
+                state = str((snapshot or {}).get("state") or "")
+                owner = str(
+                    (snapshot or {}).get("owner_plugin_id") or ""
+                )
+                if state in {
+                    "completed", "cancelled", "failed", "rolled_back",
+                    "partially_rolled_back", "interrupted",
+                }:
+                    cancelled = {
+                        **outcome,
+                        "error_code": "external_operation_terminal",
+                        "host_operation_state": state,
+                        "message": "Host 协调任务已结束；未恢复文件操作。",
+                    }
+                    if self.jobs:
+                        self.jobs.update(
+                            job["job_id"],
+                            "external_cancelled",
+                            cancelled,
+                        )
+                    return
+                latest_handoff = (snapshot or {}).get("latest_handoff") or {}
+                accepted_rename_handoff = bool(
+                    latest_handoff.get("target_plugin_id") == "rename"
+                    and latest_handoff.get("state") in {
+                        "accepted", "completed", "delivered",
+                    }
+                )
+                if owner != "rename" and not accepted_rename_handoff:
+                    rejected = {
+                        **outcome,
+                        "error_code": "handoff_not_accepted",
+                        "message": "Rename 尚未取得协调任务所有权；未恢复文件操作。",
+                    }
+                    if self.jobs:
+                        self.jobs.update(
+                            job["job_id"],
+                            "handoff_not_accepted",
+                            rejected,
+                        )
+                    return
             if (
                 outcome.get("inventory_batch_id")
                 or event_payload.get("_inventory_batch_id")
@@ -1888,13 +1964,45 @@ class RenameFeature:
             await self._confirm_operation_ownership(operation_id)
             self._raise_if_cancelled(operation_id)
             metadata = {}
-            if isinstance(payload.get("media_metadata"), dict):
+            public_contract = validate_media_metadata_v2(
+                payload.get("media_metadata")
+            )
+            metadata_migration = ""
+            if public_contract is None and isinstance(
+                payload.get("media_metadata"), dict
+            ):
+                converted, _issue = convert_media_metadata_v1_to_v2(
+                    payload["media_metadata"]
+                )
+                if converted is not None:
+                    public_contract = converted
+                    payload["media_metadata"] = deepcopy(converted)
+                    payload.pop("naming_metadata", None)
+                    metadata_migration = "v1_to_v2"
+            if public_contract is not None:
+                payload["media_metadata"] = deepcopy(public_contract)
+                payload.pop("naming_metadata", None)
+                private_contract = private_v1_adapter_from_v2(
+                    public_contract,
+                    payload.get("file_tree")
+                    if isinstance(payload.get("file_tree"), list)
+                    else [],
+                )
+                metadata = attach_media_metadata({}, private_contract)
+                if self.jobs:
+                    self.jobs.update(job_id, "processing", {
+                        "event_payload": deepcopy(payload),
+                        "metadata_migration": metadata_migration,
+                    })
+            elif isinstance(payload.get("media_metadata"), dict):
                 try:
                     metadata = attach_media_metadata({}, payload["media_metadata"])
                 except ValueError:
                     metadata = {MEDIA_METADATA_KEY: payload["media_metadata"]}
             naming_metadata = (
-                payload.get("naming_metadata")
+                naming_identity_from_v2(public_contract)
+                if public_contract is not None
+                else payload.get("naming_metadata")
                 if isinstance(payload.get("naming_metadata"), dict)
                 else None
             )
@@ -1970,7 +2078,7 @@ class RenameFeature:
                         "confirmed metadata has no configured category route",
                     )
                 payload["selected_path"] = route["path"]
-            if metadata:
+            if metadata and public_contract is None:
                 await self._publish_metadata_identity(payload, operation_id)
             self._raise_if_cancelled(operation_id)
             operation_state = self.operations.get(operation_id) or {}
@@ -2081,8 +2189,12 @@ class RenameFeature:
                     else str(result.message or "").startswith("✅")
                 )
             )
-            contract = extract_confirmed_media_metadata(
-                result.metadata or event.metadata
+            contract = (
+                deepcopy(public_contract)
+                if public_contract is not None
+                else extract_confirmed_media_metadata(
+                    result.metadata or event.metadata
+                )
             )
             downstream_file_results = {
                 key: value
@@ -2107,6 +2219,14 @@ class RenameFeature:
                 "file_results": downstream_file_results,
                 "file_warnings": list(file_results.get("warnings") or []),
             }
+            event_payload["organization_result"] = {
+                "status": "completed" if organized else "failed",
+                "files": deepcopy(file_results.get("files") or []),
+                "target_relative_dir": str(
+                    file_results.get("target_relative_dir") or ""
+                ),
+                "final_path": result.final_path,
+            }
             if not is_inventory:
                 event_payload.update({
                     "operation_id": operation_id,
@@ -2124,6 +2244,7 @@ class RenameFeature:
                 "file_results": file_results,
                 "cleanup_complete": cleanup_complete,
                 "partial_completed": partial_completed,
+                "metadata_migration": metadata_migration,
                 "completion_kind": (
                     "partial_completed" if partial_completed else "completed"
                 ) if organized else "failed",
@@ -2378,6 +2499,11 @@ class RenameFeature:
             ),
             kept_unresolved=int(file_results.get("kept_unresolved") or 0),
         )
+        if organized and not facts["cleanup_complete"]:
+            terminal_text = (
+                "已整理，但源目录清理未完成。\n"
+                f"目标目录：{outcome.get('final_path') or ''}"
+            )
         terminal_report = self._advance_operation(
             operation_id,
             state="completed" if complete else "failed",
@@ -2390,7 +2516,7 @@ class RenameFeature:
             ),
             status_text=(
                 terminal_text
-                if complete
+                if complete or organized
                 else outcome.get("message")
                 or "媒体整理未满足完整成功条件。"
             ),
@@ -2407,7 +2533,7 @@ class RenameFeature:
             },
         )
         outcome["terminal_operation_report"] = deepcopy(terminal_report)
-        outcome["terminal_stage_sealed"] = not organized
+        outcome["terminal_stage_sealed"] = False
         return outcome
 
     def _quarantine_legacy_processed(self, job_id, outcome):
@@ -2479,7 +2605,26 @@ class RenameFeature:
                     "invalid_terminal_report",
                     "persisted rename terminal report is invalid",
                 )
-            if organized and not bool(outcome.get("terminal_stage_sealed")):
+            if not outcome.get("terminal_report_delivered"):
+                terminal_response = await self.host.report_operation(
+                    stored_terminal
+                )
+                if not (
+                    isinstance(terminal_response, dict)
+                    and terminal_response.get("accepted") is True
+                    and str(terminal_response.get("operation_id") or "")
+                    == operation_id
+                    and int(terminal_response.get("revision") or 0)
+                    == int(stored_terminal.get("revision") or 0)
+                ):
+                    raise FeatureError(
+                        "terminal_response_conflict",
+                        "Host did not confirm the exact rename terminal receipt",
+                    )
+                outcome["terminal_report_delivered"] = True
+                if self.jobs:
+                    self.jobs.update(job_id, "processed", outcome)
+            if not bool(outcome.get("terminal_stage_sealed")):
                 if cleanup_complete:
                     file_results = dict(outcome.get("file_results") or {})
                     stage_text = _organization_status_text(
@@ -2499,10 +2644,9 @@ class RenameFeature:
                     )
                 for attempt in range(3):
                     try:
-                        seal_response = await self.host.seal_operation_stage(
+                        seal_response = await self.host.seal_operation_segment(
                             operation_id,
-                            f"rename-stage-complete:{job_id}",
-                            stage_text,
+                            "rename",
                             deadline=45,
                         )
                     except Exception as exc:
@@ -2516,6 +2660,7 @@ class RenameFeature:
                     if isinstance(seal_response, dict) and (
                         seal_response.get("accepted") is True
                         or seal_response.get("duplicate") is True
+                        or seal_response.get("state") == "sealed"
                     ):
                         break
                     raise FeatureError(
@@ -2555,7 +2700,12 @@ class RenameFeature:
                 }
                 self.operations[operation_id] = operation
             operation.update(deepcopy(terminal_report))
-            response = await self.host.report_operation(terminal_report)
+            response = {
+                "accepted": True,
+                "operation_id": operation_id,
+                "state": terminal_report.get("state"),
+                "revision": terminal_revision,
+            }
             response_matches = False
             if isinstance(response, dict) and response.get("accepted") is True:
                 try:
@@ -3127,6 +3277,11 @@ class RenameFeature:
         }
         if operation.get("next_plugin_id"):
             view["next_plugin_id"] = str(operation["next_plugin_id"])
+        if view["state"] != "handed_off":
+            view["segment"] = {
+                "role": "rename",
+                "presentation_kind": "text",
+            }
         return view
 
     @staticmethod

@@ -11,6 +11,7 @@ from unittest.mock import patch
 import yaml
 
 from telepiplex_plugin_sdk.media_metadata import attach_media_metadata
+from telepiplex_plugin_sdk.media_metadata_v2 import build_media_metadata_v2_id
 
 from telepiplex_rename.content_probe import build_metadata_probe
 from telepiplex_rename.ai import recover_query_with_ai
@@ -349,6 +350,29 @@ def movie_contract():
         },
         "evidence": {}, "warnings": [], "items": [],
     }
+
+
+def movie_contract_v2():
+    value = {
+        "schema_version": 2,
+        "confirmed": True,
+        "identity": {
+            "primary_ref": {"provider": "wikidata", "id": "Q1"},
+            "provider_refs": {"wikidata": "Q1"},
+            "media_type": "movie",
+            "title_zh": "中文电影",
+            "title_original": "English Movie",
+            "year": 2024,
+        },
+        "scope": {
+            "kind": "movie",
+            "season_number": None,
+            "episode_number": None,
+        },
+        "placement": {"category_kind": "live_action_movie"},
+    }
+    value["metadata_id"] = build_media_metadata_v2_id(value)
+    return value
 
 
 def series_contract():
@@ -2072,6 +2096,16 @@ class FakeHost:
             deadline=deadline,
         )
 
+    async def seal_operation_segment(
+        self,
+        operation_id,
+        role,
+        *,
+        deadline=10,
+    ):
+        self.timeline.append(("segment_sealed", role, operation_id))
+        return {"accepted": True, "state": "sealed"}
+
 
 class FakeRuntime:
     def __init__(self):
@@ -3132,6 +3166,64 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "/Downloads/Movie.2024.mkv",
             )
 
+    async def test_terminal_host_operation_blocks_durable_resume_before_side_effects(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        class TerminalSnapshotHost(FakeHost):
+            async def get_operation_snapshot(
+                self,
+                operation_id,
+                *,
+                deadline=10,
+            ):
+                self.snapshot_request = (operation_id, deadline)
+                return {
+                    "operation_id": operation_id,
+                    "state": "completed",
+                    "owner_plugin_id": "rename",
+                    "latest_handoff": {
+                        "target_plugin_id": "rename",
+                        "state": "accepted",
+                    },
+                }
+
+            async def call_capability(self, *_args, **_kwargs):
+                raise AssertionError(
+                    "terminal Host operation must not resume metadata"
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = RenameJobStore(Path(tmpdir) / "jobs.db")
+            jobs.claim("job-terminal-host-operation")
+            jobs.update("job-terminal-host-operation", "resolving_metadata", {
+                "event_payload": {
+                    "job_id": "job-terminal-host-operation",
+                    "operation_id": "op-terminal-host-operation",
+                    "operation_revision": 8,
+                    "final_path": "/Downloads/Movie.2024.mkv",
+                },
+            })
+            host = TerminalSnapshotHost()
+            feature = RenameFeature(
+                config={"unorganized_path": "/Unorganized"},
+                host=host,
+                jobs=jobs,
+            )
+
+            await feature._resume_durable_job(
+                jobs.get("job-terminal-host-operation")
+            )
+
+            stored = jobs.get("job-terminal-host-operation")
+            self.assertEqual(host.snapshot_request[0], "op-terminal-host-operation")
+            self.assertEqual(stored["state"], "external_cancelled")
+            self.assertEqual(
+                stored["result"]["error_code"],
+                "external_operation_terminal",
+            )
+            self.assertEqual(host.storage.renamed, [])
+            self.assertEqual(host.storage.moved, [])
+
     async def test_resume_durable_job_defers_transient_failure(self):
         feature = RenameFeature(
             config={"unorganized_path": "/Unorganized"},
@@ -3526,6 +3618,60 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(host.events, [])
 
+    async def test_v2_download_event_stays_immutable_and_writes_separate_organization_result(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = RenameJobStore(Path(tmp) / "rename.sqlite3")
+            host = FakeHost(EmptyAfterMoveStorage([
+                {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
+            ]))
+            runtime = FakeRuntime()
+            feature = RenameFeature(
+                config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+                host=host,
+                jobs=jobs,
+            )
+            feature.bind_runtime(runtime)
+            metadata = movie_contract_v2()
+            before = deepcopy(metadata)
+
+            await feature.download_completed({
+                "event_id": "event-v2",
+                "payload": {
+                    "job_id": "job-v2",
+                    "selected_path": "/Movies",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "final_path": "/Downloads/Release",
+                    "resource_name": "Movie.2024",
+                    "media_metadata": metadata,
+                    "operation_id": "op-v2",
+                    "operation_revision": 8,
+                },
+            })
+            await runtime.wait()
+
+            saved = jobs.get("job-v2")["result"]["event_payload"]
+            self.assertEqual(saved["media_metadata"], before)
+            self.assertEqual(metadata, before)
+            self.assertEqual(
+                saved["organization_result"]["status"],
+                "completed",
+            )
+            self.assertNotIn("naming_metadata", saved)
+            self.assertTrue(all(
+                report["segment"] == {
+                    "role": "rename",
+                    "presentation_kind": "text",
+                }
+                for report in host.reports
+            ))
+            self.assertTrue(any(
+                item[:2] == ("segment_sealed", "rename")
+                for item in host.timeline
+            ))
+
     async def test_upstream_identity_starts_new_rename_message_without_repeat(self):
         host = FakeHost(EmptyAfterMoveStorage([
             {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
@@ -3748,7 +3894,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             },
         })
 
-    async def test_lost_rename_stage_response_retries_same_milestone(self):
+    async def test_lost_rename_segment_response_retries_same_role(self):
         from telepiplex_plugin_sdk import FeatureError
 
         host = FakeHost(EmptyAfterMoveStorage([
@@ -3760,31 +3906,29 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             host=host,
         )
         feature.bind_runtime(runtime)
-        original_seal = host.seal_operation_stage
+        original_seal = host.seal_operation_segment
         attempts = []
 
         async def accept_then_lose(
             operation_id,
-            milestone_id,
-            text,
+            role,
             *,
             deadline=10,
         ):
-            attempts.append(milestone_id)
+            attempts.append(role)
             response = await original_seal(
                 operation_id,
-                milestone_id,
-                text,
+                role,
                 deadline=deadline,
             )
             if len(attempts) == 1:
                 raise FeatureError(
                     "internal_error",
-                    "Host milestone bookkeeping was interrupted",
+                    "Host segment bookkeeping was interrupted",
                 )
             return {**response, "accepted": False, "duplicate": True}
 
-        host.seal_operation_stage = accept_then_lose
+        host.seal_operation_segment = accept_then_lose
 
         await feature.download_completed({
             "event_id": "event-rename-lost-stage",
@@ -4215,12 +4359,14 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     },
                 },
             )
-            stage_milestone = next(
-                item for item in host.milestones
-                if item["mode"] == "stage"
-            )
             self.assertTrue(
-                stage_milestone["text"].startswith("已整理，但源目录清理未完成。")
+                host.reports[-1]["status_text"].startswith(
+                    "已整理，但源目录清理未完成。"
+                )
+            )
+            self.assertEqual(
+                host.timeline[-1],
+                ("segment_sealed", "rename", "op-cleanup-failed"),
             )
 
     async def test_safe_partial_file_accounting_completes_with_partial_state(self):
@@ -4860,7 +5006,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     )
                     return await sink("rename", operation)
 
-                async def seal_operation_stage(self, *args, **kwargs):
+                async def seal_operation_segment(self, *args, **kwargs):
                     self.seal_calls += 1
                     seal_started.set()
                     await release_seal.wait()
@@ -4972,7 +5118,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     )
                     return await sink("rename", operation)
 
-                async def seal_operation_stage(self, *args, **kwargs):
+                async def seal_operation_segment(self, *args, **kwargs):
                     self.seal_calls += 1
                     seal_started.set()
                     await release_seal.wait()
@@ -5030,6 +5176,9 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn(
                 "terminal_operation_report", before_cancel["result"]
             )
+            self.assertTrue(
+                before_cancel["result"]["terminal_report_delivered"]
+            )
             self.assertFalse(before_cancel["result"]["terminal_stage_sealed"])
             terminal_report = deepcopy(
                 before_cancel["result"]["terminal_operation_report"]
@@ -5064,9 +5213,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             restored.bind_runtime(restored_runtime)
             await restored_runtime.wait()
 
-            self.assertEqual(
-                host.reports[reports_before_restart:], [terminal_report]
-            )
+            self.assertEqual(host.reports[reports_before_restart:], [])
             self.assertEqual(
                 (
                     len(storage.renamed),
@@ -5373,10 +5520,10 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.5.11")
-        self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertIn('version = "1.5.11"', project)
-        self.assertIn('telepiplex-plugin-sdk==1.3.2', project)
+        self.assertEqual(manifest["version"], "1.6.0")
+        self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
+        self.assertIn('version = "1.6.0"', project)
+        self.assertIn('telepiplex-plugin-sdk==1.4.0', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
         manifest = yaml.safe_load(
@@ -5391,8 +5538,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.5.11.tpx", source)
-        self.assertNotIn("dist/rename-1.5.11.tpx", source)
+        self.assertIn("/tmp/rename-1.6.0.tpx", source)
+        self.assertNotIn("dist/rename-1.6.0.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

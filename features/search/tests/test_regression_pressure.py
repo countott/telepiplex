@@ -163,10 +163,18 @@ class CandidateLocalizationPressureTest(unittest.IsolatedAsyncioTestCase):
             separators=(",", ":"),
         ).encode("utf-8")
         self.assertEqual(
-            result["media_metadata"]["identity"]["chinese_title"],
+            result["media_metadata"]["identity"]["title_zh"],
             "副总统",
         )
-        self.assertEqual(len(result["media_metadata"]["items"]), 65)
+        self.assertEqual(
+            result["media_metadata"]["scope"],
+            {
+                "kind": "season",
+                "season_number": 7,
+                "episode_number": None,
+            },
+        )
+        self.assertNotIn("items", result["media_metadata"])
         self.assertNotIn("source_queries", result)
         self.assertNotIn("evidence", result)
         self.assertLess(len(encoded), 32 * 1024)

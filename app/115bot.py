@@ -99,7 +99,7 @@ DEFAULT_PLUGIN_CATALOG_URL = (
 
 
 def get_version(md_format=False):
-    version = "v3.5.6-host"
+    version = "v3.6.0-host"
     if md_format:
         return escape_markdown(version, version=2)
     return version

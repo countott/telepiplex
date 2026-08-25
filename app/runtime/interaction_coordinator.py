@@ -4,11 +4,22 @@ import json
 import re
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 from types import MappingProxyType
 from typing import Any, Mapping
+
+from .operation_segments import (
+    ACTIVE_SEGMENT_STATES,
+    SEGMENT_DELIVERY_STATES,
+    SEGMENT_STATES,
+    OperationMessageSegment,
+    freeze_projection,
+    projection_hash,
+    validate_segment_declaration,
+)
 
 
 VALID_STATES = {
@@ -83,6 +94,7 @@ class OperationRecord:
     revision: int
     message_id: int | None
     message_kind: str
+    active_segment_id: str
     next_plugin_id: str
     details: Mapping[str, Any]
     created_at: float
@@ -163,6 +175,15 @@ class InteractionCoordinator:
         milestone_states = ", ".join(
             f"'{value}'" for value in sorted(MILESTONE_DELIVERY_STATES)
         )
+        segment_states = ", ".join(
+            f"'{value}'" for value in sorted(SEGMENT_STATES)
+        )
+        segment_delivery_states = ", ".join(
+            f"'{value}'" for value in sorted(SEGMENT_DELIVERY_STATES)
+        )
+        active_segment_states = ", ".join(
+            f"'{value}'" for value in sorted(ACTIVE_SEGMENT_STATES)
+        )
         self._connection.executescript(f"""
             CREATE TABLE IF NOT EXISTS operations (
                 operation_id TEXT PRIMARY KEY,
@@ -176,6 +197,7 @@ class InteractionCoordinator:
                 revision INTEGER NOT NULL CHECK(revision > 0),
                 message_id INTEGER,
                 message_kind TEXT NOT NULL DEFAULT 'text',
+                active_segment_id TEXT NOT NULL DEFAULT '',
                 next_plugin_id TEXT NOT NULL DEFAULT '',
                 details_json TEXT NOT NULL DEFAULT '{{}}',
                 created_at REAL NOT NULL,
@@ -186,6 +208,43 @@ class InteractionCoordinator:
             WHERE state IN ({active_states});
             CREATE INDEX IF NOT EXISTS operations_active_plugin
             ON operations(plugin_id, state, updated_at);
+            CREATE TABLE IF NOT EXISTS operation_message_segments (
+                segment_id TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL CHECK(sequence > 0),
+                owner_plugin_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                generation INTEGER NOT NULL CHECK(generation > 0),
+                presentation_kind TEXT NOT NULL
+                    CHECK(presentation_kind IN ('text', 'photo')),
+                state TEXT NOT NULL CHECK(state IN ({segment_states})),
+                message_id INTEGER,
+                message_kind TEXT NOT NULL DEFAULT '',
+                business_revision INTEGER NOT NULL CHECK(business_revision > 0),
+                rendered_revision INTEGER NOT NULL DEFAULT 0
+                    CHECK(rendered_revision >= 0),
+                projection_hash TEXT NOT NULL,
+                rendered_projection_hash TEXT NOT NULL DEFAULT '',
+                projection_json TEXT NOT NULL DEFAULT '{{}}',
+                callback_generation INTEGER NOT NULL DEFAULT 1
+                    CHECK(callback_generation > 0),
+                callback_state TEXT NOT NULL DEFAULT 'idle'
+                    CHECK(callback_state IN ('idle', 'busy')),
+                callback_token TEXT NOT NULL DEFAULT '',
+                callback_busy_text TEXT NOT NULL DEFAULT '',
+                delivery_state TEXT NOT NULL
+                    CHECK(delivery_state IN ({segment_delivery_states})),
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                sealed_at REAL,
+                UNIQUE(operation_id, sequence),
+                FOREIGN KEY(operation_id) REFERENCES operations(operation_id)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS operation_segments_one_active
+            ON operation_message_segments(operation_id)
+            WHERE state IN ({active_segment_states});
+            CREATE INDEX IF NOT EXISTS operation_segments_owner
+            ON operation_message_segments(operation_id, owner_plugin_id, sequence);
             CREATE TABLE IF NOT EXISTS operation_milestones (
                 operation_id TEXT NOT NULL,
                 milestone_id TEXT NOT NULL,
@@ -253,6 +312,33 @@ class InteractionCoordinator:
                 "ALTER TABLE operations ADD COLUMN "
                 "message_kind TEXT NOT NULL DEFAULT 'text'"
             )
+        if "active_segment_id" not in columns:
+            self._connection.execute(
+                "ALTER TABLE operations ADD COLUMN "
+                "active_segment_id TEXT NOT NULL DEFAULT ''"
+            )
+        segment_columns = {
+            str(row["name"])
+            for row in self._connection.execute(
+                "PRAGMA table_info(operation_message_segments)"
+            ).fetchall()
+        }
+        for column, declaration in {
+            "rendered_projection_hash": "TEXT NOT NULL DEFAULT ''",
+            "callback_state": "TEXT NOT NULL DEFAULT 'idle'",
+            "callback_token": "TEXT NOT NULL DEFAULT ''",
+            "callback_busy_text": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if column not in segment_columns:
+                self._connection.execute(
+                    f"ALTER TABLE operation_message_segments ADD COLUMN "
+                    f"{column} {declaration}"
+                )
+        self._connection.execute(
+            "UPDATE operation_message_segments "
+            "SET rendered_projection_hash = projection_hash "
+            "WHERE rendered_projection_hash = '' AND rendered_revision > 0"
+        )
         milestone_columns = {
             str(row["name"])
             for row in self._connection.execute(
@@ -351,6 +437,90 @@ class InteractionCoordinator:
             "ELSE updated_at END",
             (MILESTONE_MAX_ATTEMPTS, MILESTONE_MAX_ATTEMPTS),
         )
+        self._migrate_legacy_message_cursors()
+
+    def _migrate_legacy_message_cursors(self) -> None:
+        placeholders = ",".join("?" for _ in ACTIVE_STATES)
+        rows = self._connection.execute(
+            f"SELECT * FROM operations WHERE active_segment_id = '' "
+            f"AND message_id IS NOT NULL AND message_id > 0 "
+            f"AND state IN ({placeholders}) ORDER BY created_at, operation_id",
+            tuple(sorted(ACTIVE_STATES)),
+        ).fetchall()
+        if not rows:
+            return
+        with self._connection:
+            for row in rows:
+                operation_id = str(row["operation_id"])
+                current = self._connection.execute(
+                    "SELECT active_segment_id FROM operations "
+                    "WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+                if current is None or str(current["active_segment_id"] or ""):
+                    continue
+                counters = self._connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) AS sequence, "
+                    "COALESCE(MAX(generation), 0) AS generation "
+                    "FROM operation_message_segments WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+                sequence = int(counters["sequence"]) + 1
+                generation = int(counters["generation"]) + 1
+                message_kind = str(row["message_kind"] or "text").casefold()
+                if message_kind not in {"text", "photo"}:
+                    message_kind = "text"
+                projection = {
+                    "state": str(row["state"]),
+                    "stage": str(row["stage"]),
+                    "status_text": str(row["status_text"]),
+                    "control": str(row["control"]),
+                    "details": json.loads(str(row["details_json"])),
+                }
+                projection_json = json.dumps(
+                    projection,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                now = time.time()
+                segment_id = "legacy-" + uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"telepiplex:operation-segment:{operation_id}:{sequence}",
+                ).hex
+                self._connection.execute(
+                    "INSERT OR IGNORE INTO operation_message_segments("
+                    "segment_id, operation_id, sequence, owner_plugin_id, role, "
+                    "generation, presentation_kind, state, message_id, message_kind, "
+                    "business_revision, rendered_revision, projection_hash, "
+                    "rendered_projection_hash, projection_json, "
+                    "callback_generation, delivery_state, "
+                    "created_at, updated_at, sealed_at"
+                    ") VALUES (?, ?, ?, ?, 'legacy', ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, "
+                    "1, 'delivered', ?, ?, NULL)",
+                    (
+                        segment_id,
+                        operation_id,
+                        sequence,
+                        str(row["plugin_id"]),
+                        generation,
+                        message_kind,
+                        int(row["message_id"]),
+                        message_kind,
+                        int(row["revision"]),
+                        int(row["revision"]),
+                        projection_hash(projection),
+                        projection_hash(projection),
+                        projection_json,
+                        float(row["created_at"]),
+                        now,
+                    ),
+                )
+                self._connection.execute(
+                    "UPDATE operations SET active_segment_id = ? "
+                    "WHERE operation_id = ? AND active_segment_id = ''",
+                    (segment_id, operation_id),
+                )
 
     def close(self):
         with self._lock:
@@ -394,6 +564,14 @@ class InteractionCoordinator:
                 else:
                     current = previous
                     self._validate_existing_owner(current, values)
+                    if (
+                        values["state"] == "handed_off"
+                        and current.active_segment_id
+                    ):
+                        raise InteractionError(
+                            "segment_not_sealed",
+                            "active message segment must be sealed before handoff",
+                        )
                     if current.state in TERMINAL_STATES:
                         self._connection.execute("COMMIT")
                         return current
@@ -443,6 +621,650 @@ class InteractionCoordinator:
                 self._connection.execute("ROLLBACK")
                 raise
 
+    def accept_segment_report(
+        self,
+        plugin_id: str,
+        report: dict,
+    ) -> tuple[OperationRecord, OperationMessageSegment]:
+        values = self._validate_report(plugin_id, report)
+        try:
+            role, presentation_kind = validate_segment_declaration(
+                report.get("segment") if isinstance(report, dict) else None
+            )
+            projection = report.get("projection")
+            if projection is None:
+                projection = {
+                    "state": values["state"],
+                    "stage": values["stage"],
+                    "status_text": values["status_text"],
+                    "control": values["control"],
+                    "details": json.loads(values["details_json"]),
+                }
+            normalized_projection_hash = projection_hash(projection)
+            projection_json = json.dumps(
+                projection,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise InteractionError("invalid_segment", str(exc)) from exc
+
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing_row = self._connection.execute(
+                    "SELECT * FROM operations WHERE operation_id = ?",
+                    (values["operation_id"],),
+                ).fetchone()
+                now = time.time()
+                previous = (
+                    self._from_row(existing_row)
+                    if existing_row is not None
+                    else None
+                )
+                if previous is None:
+                    self._reject_active_conflict(values)
+                    self._connection.execute(
+                        "INSERT INTO operations("
+                        "operation_id, chat_id, user_id, plugin_id, state, stage, "
+                        "status_text, control, revision, message_id, next_plugin_id, "
+                        "details_json, created_at, updated_at"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)",
+                        (
+                            values["operation_id"],
+                            values["chat_id"],
+                            values["user_id"],
+                            values["plugin_id"],
+                            values["state"],
+                            values["stage"],
+                            values["status_text"],
+                            values["control"],
+                            values["revision"],
+                            values["next_plugin_id"],
+                            values["details_json"],
+                            now,
+                            now,
+                        ),
+                    )
+                else:
+                    self._validate_existing_owner(previous, values)
+                    if previous.state in TERMINAL_STATES:
+                        raise InteractionError(
+                            "operation_terminal",
+                            "terminal operation cannot update a message segment",
+                        )
+                    if values["revision"] > previous.revision:
+                        owner_changed = previous.plugin_id != values["plugin_id"]
+                        next_plugin_id = (
+                            "" if owner_changed else values["next_plugin_id"]
+                        )
+                        self._connection.execute(
+                            "UPDATE operations SET plugin_id = ?, state = ?, "
+                            "stage = ?, status_text = ?, control = ?, revision = ?, "
+                            "next_plugin_id = ?, details_json = ?, updated_at = ? "
+                            "WHERE operation_id = ?",
+                            (
+                                values["plugin_id"],
+                                values["state"],
+                                values["stage"],
+                                values["status_text"],
+                                values["control"],
+                                values["revision"],
+                                next_plugin_id,
+                                values["details_json"],
+                                now,
+                                values["operation_id"],
+                            ),
+                        )
+
+                active_row = self._connection.execute(
+                    "SELECT segment.* FROM operations operation "
+                    "JOIN operation_message_segments segment "
+                    "ON segment.segment_id = operation.active_segment_id "
+                    "WHERE operation.operation_id = ?",
+                    (values["operation_id"],),
+                ).fetchone()
+                if active_row is None:
+                    counters = self._connection.execute(
+                        "SELECT COALESCE(MAX(sequence), 0) AS sequence, "
+                        "COALESCE(MAX(generation), 0) AS generation "
+                        "FROM operation_message_segments WHERE operation_id = ?",
+                        (values["operation_id"],),
+                    ).fetchone()
+                    sequence = int(counters["sequence"]) + 1
+                    generation = int(counters["generation"]) + 1
+                    segment_id = uuid.uuid4().hex
+                    self._connection.execute(
+                        "INSERT INTO operation_message_segments("
+                        "segment_id, operation_id, sequence, owner_plugin_id, role, "
+                        "generation, presentation_kind, state, message_id, "
+                        "message_kind, business_revision, rendered_revision, "
+                        "projection_hash, rendered_projection_hash, projection_json, "
+                        "callback_generation, "
+                        "delivery_state, created_at, updated_at, sealed_at"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, 'creating', NULL, '', ?, 0, "
+                        "?, '', ?, 1, 'reserved', ?, ?, NULL)",
+                        (
+                            segment_id,
+                            values["operation_id"],
+                            sequence,
+                            values["plugin_id"],
+                            role,
+                            generation,
+                            presentation_kind,
+                            values["revision"],
+                            normalized_projection_hash,
+                            projection_json,
+                            now,
+                            now,
+                        ),
+                    )
+                    self._connection.execute(
+                        "UPDATE operations SET active_segment_id = ? "
+                        "WHERE operation_id = ?",
+                        (segment_id, values["operation_id"]),
+                    )
+                else:
+                    segment_id = str(active_row["segment_id"])
+                    if str(active_row["owner_plugin_id"]) != values["plugin_id"]:
+                        raise InteractionError(
+                            "segment_owner_conflict",
+                            "active message segment belongs to another Feature",
+                        )
+                    if (
+                        str(active_row["role"]) != role
+                        or str(active_row["presentation_kind"])
+                        != presentation_kind
+                    ):
+                        raise InteractionError(
+                            "segment_role_conflict",
+                            "active message segment role or kind is incompatible",
+                        )
+                    current_business_revision = int(
+                        active_row["business_revision"]
+                    )
+                    if values["revision"] > current_business_revision:
+                        self._connection.execute(
+                            "UPDATE operation_message_segments SET "
+                            "business_revision = ?, projection_hash = ?, "
+                            "projection_json = ?, callback_state = 'idle', "
+                            "callback_token = '', callback_busy_text = '', "
+                            "updated_at = ? "
+                            "WHERE segment_id = ?",
+                            (
+                                values["revision"],
+                                normalized_projection_hash,
+                                projection_json,
+                                now,
+                                segment_id,
+                            ),
+                        )
+                    elif (
+                        values["revision"] == current_business_revision
+                        and normalized_projection_hash
+                        == str(active_row["projection_hash"])
+                    ):
+                        pass
+                    elif values["revision"] == current_business_revision:
+                        raise InteractionError(
+                            "segment_revision_conflict",
+                            "segment revision already has another projection",
+                        )
+                    else:
+                        raise InteractionError(
+                            "invalid_revision",
+                            "segment business revision cannot decrease",
+                        )
+                if previous is None or values["revision"] > previous.revision:
+                    self._apply_receipt_transitions(previous, values)
+                operation_row = self._connection.execute(
+                    "SELECT * FROM operations WHERE operation_id = ?",
+                    (values["operation_id"],),
+                ).fetchone()
+                segment_row = self._connection.execute(
+                    "SELECT * FROM operation_message_segments WHERE segment_id = ?",
+                    (segment_id,),
+                ).fetchone()
+                self._connection.execute("COMMIT")
+            except InteractionError:
+                self._connection.execute("ROLLBACK")
+                raise
+            except sqlite3.IntegrityError as exc:
+                self._connection.execute("ROLLBACK")
+                raise InteractionError(
+                    "operation_conflict", "another operation already owns this user"
+                ) from exc
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+        return self._from_row(operation_row), self._segment_from_row(segment_row)
+
+    def get_active_segment(
+        self,
+        operation_id: str,
+    ) -> OperationMessageSegment | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT segment.* FROM operations operation "
+                "JOIN operation_message_segments segment "
+                "ON segment.segment_id = operation.active_segment_id "
+                "WHERE operation.operation_id = ?",
+                (str(operation_id),),
+            ).fetchone()
+        return self._segment_from_row(row) if row is not None else None
+
+    def get_segment(self, segment_id: str) -> OperationMessageSegment | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM operation_message_segments WHERE segment_id = ?",
+                (str(segment_id),),
+            ).fetchone()
+        return self._segment_from_row(row) if row is not None else None
+
+    def bind_segment_message(
+        self,
+        segment_id: str,
+        *,
+        owner_plugin_id: str,
+        generation: int,
+        chat_id: int,
+        message_id: int,
+    ) -> OperationMessageSegment | None:
+        try:
+            normalized_generation = int(generation)
+            normalized_chat_id = int(chat_id)
+            normalized_message_id = int(message_id)
+        except (TypeError, ValueError):
+            normalized_generation = normalized_chat_id = normalized_message_id = 0
+        normalized_owner = str(owner_plugin_id or "").strip()
+        if (
+            not normalized_owner
+            or normalized_generation <= 0
+            or normalized_chat_id == 0
+            or normalized_message_id <= 0
+        ):
+            raise InteractionError(
+                "invalid_segment_delivery",
+                "segment delivery target is invalid",
+            )
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE operation_message_segments SET "
+                "message_id = ?, message_kind = presentation_kind, "
+                "state = 'open', delivery_state = 'delivered', updated_at = ? "
+                "WHERE segment_id = ? AND owner_plugin_id = ? AND generation = ? "
+                "AND state = 'creating' AND delivery_state IN ('reserved', 'delivering') "
+                "AND EXISTS (SELECT 1 FROM operations operation "
+                "WHERE operation.operation_id = operation_message_segments.operation_id "
+                "AND operation.chat_id = ? "
+                "AND operation.active_segment_id = operation_message_segments.segment_id)",
+                (
+                    normalized_message_id,
+                    time.time(),
+                    str(segment_id),
+                    normalized_owner,
+                    normalized_generation,
+                    normalized_chat_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = self._connection.execute(
+                "SELECT * FROM operation_message_segments WHERE segment_id = ?",
+                (str(segment_id),),
+            ).fetchone()
+        return self._segment_from_row(row)
+
+    def claim_segment_delivery(
+        self,
+        segment_id: str,
+        *,
+        owner_plugin_id: str,
+        generation: int,
+    ) -> OperationMessageSegment | None:
+        try:
+            normalized_generation = int(generation)
+        except (TypeError, ValueError):
+            normalized_generation = 0
+        normalized_owner = str(owner_plugin_id or "").strip()
+        if not normalized_owner or normalized_generation <= 0:
+            raise InteractionError(
+                "invalid_segment_delivery",
+                "segment delivery identity is invalid",
+            )
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE operation_message_segments SET "
+                "delivery_state = 'delivering', updated_at = ? "
+                "WHERE segment_id = ? AND owner_plugin_id = ? AND generation = ? "
+                "AND state = 'creating' AND delivery_state = 'reserved' "
+                "AND message_id IS NULL AND EXISTS ("
+                "SELECT 1 FROM operations operation "
+                "WHERE operation.active_segment_id = "
+                "operation_message_segments.segment_id)",
+                (
+                    time.time(),
+                    str(segment_id),
+                    normalized_owner,
+                    normalized_generation,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = self._connection.execute(
+                "SELECT * FROM operation_message_segments WHERE segment_id = ?",
+                (str(segment_id),),
+            ).fetchone()
+        return self._segment_from_row(row)
+
+    def record_segment_rendered(
+        self,
+        segment_id: str,
+        *,
+        owner_plugin_id: str,
+        generation: int,
+        business_revision: int,
+        projection_hash: str,
+    ) -> OperationMessageSegment | None:
+        try:
+            normalized_generation = int(generation)
+            normalized_revision = int(business_revision)
+        except (TypeError, ValueError):
+            normalized_generation = normalized_revision = 0
+        normalized_owner = str(owner_plugin_id or "").strip()
+        normalized_hash = str(projection_hash or "").strip()
+        if (
+            not normalized_owner
+            or normalized_generation <= 0
+            or normalized_revision <= 0
+            or not re.fullmatch(r"[0-9a-f]{64}", normalized_hash)
+        ):
+            raise InteractionError(
+                "invalid_segment_render",
+                "rendered segment identity is invalid",
+            )
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE operation_message_segments SET rendered_revision = ?, "
+                "rendered_projection_hash = ?, "
+                "updated_at = ? WHERE segment_id = ? AND owner_plugin_id = ? "
+                "AND generation = ? AND state IN ('open', 'sealing') "
+                "AND message_id IS NOT NULL AND business_revision >= ? "
+                "AND projection_hash = ? AND rendered_revision < ?",
+                (
+                    normalized_revision,
+                    normalized_hash,
+                    time.time(),
+                    str(segment_id),
+                    normalized_owner,
+                    normalized_generation,
+                    normalized_revision,
+                    normalized_hash,
+                    normalized_revision,
+                ),
+            )
+            if cursor.rowcount != 1:
+                row = self._connection.execute(
+                    "SELECT * FROM operation_message_segments "
+                    "WHERE segment_id = ? AND owner_plugin_id = ? "
+                    "AND generation = ? AND rendered_revision = ? "
+                    "AND projection_hash = ?",
+                    (
+                        str(segment_id),
+                        normalized_owner,
+                        normalized_generation,
+                        normalized_revision,
+                        normalized_hash,
+                    ),
+                ).fetchone()
+                return self._segment_from_row(row) if row is not None else None
+            row = self._connection.execute(
+                "SELECT * FROM operation_message_segments WHERE segment_id = ?",
+                (str(segment_id),),
+            ).fetchone()
+        return self._segment_from_row(row)
+
+    def mark_segment_delivery_uncertain(
+        self,
+        segment_id: str,
+        *,
+        owner_plugin_id: str,
+        generation: int,
+    ) -> OperationMessageSegment | None:
+        try:
+            normalized_generation = int(generation)
+        except (TypeError, ValueError):
+            normalized_generation = 0
+        normalized_owner = str(owner_plugin_id or "").strip()
+        if not normalized_owner or normalized_generation <= 0:
+            raise InteractionError(
+                "invalid_segment_delivery",
+                "segment delivery identity is invalid",
+            )
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE operation_message_segments SET "
+                "state = 'delivery_uncertain', delivery_state = 'uncertain', "
+                "updated_at = ? WHERE segment_id = ? AND owner_plugin_id = ? "
+                "AND generation = ? "
+                "AND state IN ('creating', 'open', 'sealing')",
+                (
+                    time.time(),
+                    str(segment_id),
+                    normalized_owner,
+                    normalized_generation,
+                ),
+            )
+            if cursor.rowcount != 1:
+                row = self._connection.execute(
+                    "SELECT * FROM operation_message_segments "
+                    "WHERE segment_id = ? AND owner_plugin_id = ? "
+                    "AND generation = ? AND state = 'delivery_uncertain'",
+                    (
+                        str(segment_id),
+                        normalized_owner,
+                        normalized_generation,
+                    ),
+                ).fetchone()
+                return self._segment_from_row(row) if row is not None else None
+            row = self._connection.execute(
+                "SELECT * FROM operation_message_segments WHERE segment_id = ?",
+                (str(segment_id),),
+            ).fetchone()
+        return self._segment_from_row(row)
+
+    def seal_segment(
+        self,
+        plugin_id: str,
+        operation_id: str,
+        role: str,
+    ) -> OperationMessageSegment:
+        normalized_plugin = str(plugin_id or "").strip()
+        normalized_operation = str(operation_id or "").strip()
+        normalized_role = str(role or "").strip()
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT segment.* FROM operations operation "
+                "JOIN operation_message_segments segment "
+                "ON segment.segment_id = operation.active_segment_id "
+                "WHERE operation.operation_id = ?",
+                (normalized_operation,),
+            ).fetchone()
+            if row is None:
+                raise InteractionError(
+                    "segment_not_found", "active message segment was not found"
+                )
+            if str(row["owner_plugin_id"]) != normalized_plugin:
+                raise InteractionError(
+                    "segment_owner_conflict",
+                    "active message segment belongs to another Feature",
+                )
+            if str(row["role"]) != normalized_role or normalized_role == "legacy":
+                raise InteractionError(
+                    "segment_role_conflict",
+                    "active message segment role is incompatible",
+                )
+            if str(row["state"]) == "sealing":
+                return self._segment_from_row(row)
+            if str(row["state"]) != "open":
+                raise InteractionError(
+                    "segment_state_conflict",
+                    "message segment is not ready to seal",
+                )
+            self._connection.execute(
+                "UPDATE operation_message_segments SET state = 'sealing', "
+                "updated_at = ? WHERE segment_id = ? AND state = 'open'",
+                (time.time(), str(row["segment_id"])),
+            )
+            stored = self._connection.execute(
+                "SELECT * FROM operation_message_segments WHERE segment_id = ?",
+                (str(row["segment_id"]),),
+            ).fetchone()
+        return self._segment_from_row(stored)
+
+    def complete_segment_seal(
+        self,
+        segment_id: str,
+        *,
+        owner_plugin_id: str,
+        generation: int,
+    ) -> OperationMessageSegment:
+        try:
+            normalized_generation = int(generation)
+        except (TypeError, ValueError):
+            normalized_generation = 0
+        normalized_owner = str(owner_plugin_id or "").strip()
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT * FROM operation_message_segments "
+                    "WHERE segment_id = ? AND owner_plugin_id = ? "
+                    "AND generation = ?",
+                    (
+                        str(segment_id),
+                        normalized_owner,
+                        normalized_generation,
+                    ),
+                ).fetchone()
+                if row is None:
+                    raise InteractionError(
+                        "segment_not_found", "message segment was not found"
+                    )
+                if str(row["state"]) == "sealed":
+                    self._connection.execute("COMMIT")
+                    return self._segment_from_row(row)
+                if (
+                    str(row["state"]) != "sealing"
+                    or row["message_id"] is None
+                    or int(row["rendered_revision"])
+                    != int(row["business_revision"])
+                ):
+                    raise InteractionError(
+                        "segment_state_conflict",
+                        "message segment has not rendered its latest revision",
+                    )
+                now = time.time()
+                self._connection.execute(
+                    "UPDATE operation_message_segments SET state = 'sealed', "
+                    "sealed_at = ?, updated_at = ? WHERE segment_id = ?",
+                    (now, now, str(segment_id)),
+                )
+                self._connection.execute(
+                    "UPDATE operations SET active_segment_id = '', updated_at = ? "
+                    "WHERE operation_id = ? AND active_segment_id = ?",
+                    (now, str(row["operation_id"]), str(segment_id)),
+                )
+                stored = self._connection.execute(
+                    "SELECT * FROM operation_message_segments WHERE segment_id = ?",
+                    (str(segment_id),),
+                ).fetchone()
+                self._connection.execute("COMMIT")
+            except InteractionError:
+                self._connection.execute("ROLLBACK")
+                raise
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+        return self._segment_from_row(stored)
+
+    def claim_segment_callback(
+        self,
+        plugin_id: str,
+        operation_id: str,
+        *,
+        message_id: int,
+        segment_generation: int,
+        callback_generation: int,
+        callback_token: str = "",
+        busy_text: str = "",
+    ) -> OperationMessageSegment | None:
+        try:
+            normalized_message_id = int(message_id)
+            normalized_segment_generation = int(segment_generation)
+            normalized_callback_generation = int(callback_generation)
+        except (TypeError, ValueError):
+            normalized_message_id = 0
+            normalized_segment_generation = 0
+            normalized_callback_generation = 0
+        normalized_plugin = str(plugin_id or "").strip()
+        normalized_operation = str(operation_id or "").strip()
+        normalized_token = str(callback_token or "")
+        normalized_busy_text = str(busy_text or "")
+        if (
+            not normalized_plugin
+            or not normalized_operation
+            or normalized_message_id <= 0
+            or normalized_segment_generation <= 0
+            or normalized_callback_generation <= 0
+            or len(normalized_token.encode("utf-8")) > 64
+            or len(normalized_busy_text) > 1024
+        ):
+            raise InteractionError(
+                "invalid_segment_callback",
+                "segment callback identity is invalid",
+            )
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE operation_message_segments SET "
+                "callback_generation = callback_generation + 1, "
+                "callback_state = 'busy', callback_token = ?, "
+                "callback_busy_text = ?, updated_at = ? "
+                "WHERE operation_id = ? AND owner_plugin_id = ? "
+                "AND generation = ? AND callback_generation = ? "
+                "AND message_id = ? AND state = 'open' AND role != 'legacy' "
+                "AND EXISTS (SELECT 1 FROM operations operation "
+                "WHERE operation.operation_id = operation_message_segments.operation_id "
+                "AND operation.active_segment_id = operation_message_segments.segment_id "
+                "AND operation.plugin_id = ? "
+                "AND operation.state IN ('awaiting_input', 'running'))",
+                (
+                    normalized_token,
+                    normalized_busy_text,
+                    time.time(),
+                    normalized_operation,
+                    normalized_plugin,
+                    normalized_segment_generation,
+                    normalized_callback_generation,
+                    normalized_message_id,
+                    normalized_plugin,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = self._connection.execute(
+                "SELECT * FROM operation_message_segments "
+                "WHERE operation_id = ? AND owner_plugin_id = ? "
+                "AND generation = ?",
+                (
+                    normalized_operation,
+                    normalized_plugin,
+                    normalized_segment_generation,
+                ),
+            ).fetchone()
+        return self._segment_from_row(row)
+
     def get(self, operation_id: str) -> OperationRecord | None:
         with self._lock:
             row = self._connection.execute(
@@ -468,6 +1290,59 @@ class InteractionCoordinator:
                 (str(operation_id),),
             ).fetchall()
         return [self._effect_from_row(row) for row in rows]
+
+    def operation_snapshot(
+        self,
+        plugin_id: str,
+        operation_id: str,
+    ) -> dict:
+        normalized_plugin = str(plugin_id or "").strip()
+        normalized_operation = str(operation_id or "").strip()
+        record = self.get(normalized_operation)
+        if record is None:
+            raise InteractionError("not_found", "operation was not found")
+        handoffs = self.get_handoffs(normalized_operation)
+        participants = {record.plugin_id}
+        for handoff in handoffs:
+            participants.add(handoff.source_plugin_id)
+            participants.add(handoff.target_plugin_id)
+        if normalized_plugin not in participants:
+            raise InteractionError(
+                "operation_forbidden",
+                "Feature is not an operation participant",
+            )
+        segment = self.get_active_segment(normalized_operation)
+        snapshot = {
+            "operation_id": record.operation_id,
+            "owner_plugin_id": record.plugin_id,
+            "state": record.state,
+            "stage": record.stage,
+            "revision": record.revision,
+            "active_segment": None,
+            "latest_handoff": None,
+        }
+        if segment is not None:
+            snapshot["active_segment"] = {
+                "segment_id": segment.segment_id,
+                "owner_plugin_id": segment.owner_plugin_id,
+                "role": segment.role,
+                "generation": segment.generation,
+                "state": segment.state,
+                "business_revision": segment.business_revision,
+                "rendered_revision": segment.rendered_revision,
+                "delivery_state": segment.delivery_state,
+                "callback_generation": segment.callback_generation,
+            }
+        if handoffs:
+            latest = handoffs[-1]
+            snapshot["latest_handoff"] = {
+                "handoff_key": latest.handoff_key,
+                "source_plugin_id": latest.source_plugin_id,
+                "target_plugin_id": latest.target_plugin_id,
+                "state": latest.state,
+                "event_id": latest.event_id,
+            }
+        return snapshot
 
     def capture_handoff(
         self,
@@ -1135,6 +2010,7 @@ class InteractionCoordinator:
                 if intent.expected_message_id is not None
                 else ""
             ),
+            active_segment_id=current.active_segment_id,
             next_plugin_id=current.next_plugin_id,
             details=current.details,
             created_at=current.created_at,
@@ -2015,10 +2891,49 @@ class InteractionCoordinator:
             revision=int(row["revision"]),
             message_id=(int(row["message_id"]) if row["message_id"] is not None else None),
             message_kind=str(row["message_kind"] or "text"),
+            active_segment_id=str(row["active_segment_id"] or ""),
             next_plugin_id=str(row["next_plugin_id"]),
             details=MappingProxyType(json.loads(str(row["details_json"]))),
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _segment_from_row(row: sqlite3.Row) -> OperationMessageSegment:
+        return OperationMessageSegment(
+            segment_id=str(row["segment_id"]),
+            operation_id=str(row["operation_id"]),
+            sequence=int(row["sequence"]),
+            owner_plugin_id=str(row["owner_plugin_id"]),
+            role=str(row["role"]),
+            generation=int(row["generation"]),
+            presentation_kind=str(row["presentation_kind"]),
+            state=str(row["state"]),
+            message_id=(
+                int(row["message_id"])
+                if row["message_id"] is not None
+                else None
+            ),
+            message_kind=str(row["message_kind"] or ""),
+            business_revision=int(row["business_revision"]),
+            rendered_revision=int(row["rendered_revision"]),
+            projection_hash=str(row["projection_hash"]),
+            rendered_projection_hash=str(
+                row["rendered_projection_hash"] or ""
+            ),
+            projection=freeze_projection(json.loads(str(row["projection_json"]))),
+            callback_generation=int(row["callback_generation"]),
+            callback_state=str(row["callback_state"] or "idle"),
+            callback_token=str(row["callback_token"] or ""),
+            callback_busy_text=str(row["callback_busy_text"] or ""),
+            delivery_state=str(row["delivery_state"]),
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
+            sealed_at=(
+                float(row["sealed_at"])
+                if row["sealed_at"] is not None
+                else None
+            ),
         )
 
     @staticmethod

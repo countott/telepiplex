@@ -401,6 +401,61 @@ class RuntimeBroker:
                     "internal_error", "Host operation sink must return an object"
                 )
             return result
+        if method == "operation.seal":
+            operation_id = str(params.get("operation_id") or "").strip()
+            role = str(params.get("role") or "").strip()
+            if not operation_id or role not in {
+                "identity", "search", "download", "rename"
+            }:
+                raise BrokerError(
+                    "invalid_segment",
+                    "operation segment seal identity is invalid",
+                )
+            seal = getattr(self.operation_sink, "seal", None)
+            if callable(seal):
+                result = seal(identity.plugin_id, operation_id, role)
+                if inspect.isawaitable(result):
+                    result = await result
+                if not isinstance(result, dict):
+                    raise BrokerError(
+                        "internal_error",
+                        "Host operation seal sink must return an object",
+                    )
+                return result
+            if self.operation_coordinator is None:
+                raise BrokerError(
+                    "operation_unavailable",
+                    "Host operation coordinator is unavailable",
+                )
+            segment = self.operation_coordinator.seal_segment(
+                identity.plugin_id,
+                operation_id,
+                role,
+            )
+            return {
+                "accepted": True,
+                "segment": {
+                    "segment_id": segment.segment_id,
+                    "generation": segment.generation,
+                    "state": segment.state,
+                },
+            }
+        if method == "operation.get":
+            operation_id = str(params.get("operation_id") or "").strip()
+            if not operation_id:
+                raise BrokerError(
+                    "invalid_operation",
+                    "operation identity is invalid",
+                )
+            if self.operation_coordinator is None:
+                raise BrokerError(
+                    "operation_unavailable",
+                    "Host operation coordinator is unavailable",
+                )
+            return self.operation_coordinator.operation_snapshot(
+                identity.plugin_id,
+                operation_id,
+            )
         if method == "operation.milestone":
             operation_id = str(params.get("operation_id") or "").strip()
             milestone_id = str(params.get("milestone_id") or "").strip()

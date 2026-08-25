@@ -54,49 +54,33 @@ def _entity_title_relevant(entity: dict, expected_title: str) -> bool:
     )
 
 
-def _query_payload(parsed: ParsedInput) -> dict:
-    if not parsed.media_type:
-        base = _text(" ".join(filter(None, (parsed.title, parsed.year))))
-        return {
-            "source_queries": {
-                "wikipedia_zh": [
-                    f"{base} 电视剧",
-                    f"{base} 电影",
-                ] if base else [],
-                "wikipedia_en": [
-                    f"{base} TV series",
-                    f"{base} film",
-                ] if base else [],
-            }
-        }
-    zh_suffix = ""
-    en_suffix = ""
-    if parsed.media_type == "movie":
-        zh_suffix = "电影"
-        en_suffix = "film"
-    elif parsed.media_type == "series":
-        zh_suffix = "电视剧"
-        en_suffix = "TV series"
-    base_query = _text(" ".join(filter(None, (
-        parsed.title,
-        parsed.year,
-    ))))
-    zh_query = _text(" ".join(filter(None, (
-        parsed.title,
-        parsed.year,
-        zh_suffix,
-    ))))
-    en_query = _text(" ".join(filter(None, (
-        parsed.title,
-        parsed.year,
-        en_suffix,
-    ))))
+def _query_payload(
+    parsed: ParsedInput,
+    *,
+    languages: tuple[str, ...] = ("zh", "en"),
+) -> dict:
+    query = _text(parsed.raw_query)
     return {
         "source_queries": {
-            "wikipedia_zh": _unique((zh_query, parsed.title)),
-            "wikipedia_en": _unique((en_query, parsed.title)),
+            "wikipedia_zh": [query] if query and "zh" in languages else [],
+            "wikipedia_en": [query] if query and "en" in languages else [],
         }
     }
+
+
+def _structurally_eligible(parsed: ParsedInput, entity: dict) -> bool:
+    media_type = _text(entity.get("media_type")).casefold()
+    year = _text(entity.get("year"))[:4]
+    if media_type not in {"movie", "series"}:
+        return False
+    if parsed.media_type and parsed.media_type != media_type:
+        return False
+    if parsed.year and parsed.year != year:
+        return False
+    return not (
+        parsed.scope in {"whole_series", "season", "episode"}
+        and media_type != "series"
+    )
 
 
 def _preferred_page(pages: list[dict]) -> dict:
@@ -140,57 +124,51 @@ def discover_root_works(
     wikidata_lookup: Callable[[list[str]], dict[str, dict]],
     *,
     wikidata_search=None,
-    _allow_retry: bool = True,
 ) -> list[dict]:
-    """Return roots verified by exact titles or bounded Wikidata edges."""
+    """Return structurally valid roots in Wikipedia search-rank order."""
 
     if parsed.kind != "text" or not _text(parsed.title):
         return []
 
-    try:
-        wikipedia_result = wikipedia_lookup(_query_payload(parsed))
-    except Exception:
-        wikipedia_result = {}
-    wikipedia_facts = (
-        wikipedia_result.get("facts") or ()
-        if isinstance(wikipedia_result, dict)
-        and wikipedia_result.get("status") == "ok"
-        else ()
-    )
     pages_by_qid: dict[str, list[dict]] = {}
     first_order: dict[str, int] = {}
-    for order, raw in enumerate(wikipedia_facts):
-        if not isinstance(raw, dict) or raw.get("is_disambiguation") is True:
-            continue
-        qid = _text(
-            raw.get("wikibase_item")
-            or (raw.get("external_ids") or {}).get("wikidata")
-        ).upper()
-        if not (qid.startswith("Q") and qid[1:].isdigit()):
-            continue
-        pages_by_qid.setdefault(qid, []).append(deepcopy(raw))
-        first_order.setdefault(qid, order)
+    next_order = 0
 
-    search_qids: list[str] = []
-    if wikidata_search is not None:
+    def collect_wikipedia(language: str) -> list[str]:
+        nonlocal next_order
         try:
-            found = wikidata_search(parsed.title)
+            result = wikipedia_lookup(
+                _query_payload(parsed, languages=(language,))
+            )
         except Exception:
-            found = ()
-        for raw_qid in found or ():
-            qid = _text(raw_qid).upper()
-            if (
-                qid.startswith("Q")
-                and qid[1:].isdigit()
-                and qid not in search_qids
-            ):
-                search_qids.append(qid)
+            result = {}
+        facts = (
+            result.get("facts") or ()
+            if isinstance(result, dict) and result.get("status") == "ok"
+            else ()
+        )
+        collected = []
+        for raw in facts:
+            if not isinstance(raw, dict) or raw.get("is_disambiguation") is True:
+                continue
+            fact_language = _text(raw.get("language")).casefold()
+            if fact_language and not fact_language.startswith(language):
+                continue
+            qid = _text(
+                raw.get("wikibase_item")
+                or (raw.get("external_ids") or {}).get("wikidata")
+            ).upper()
+            if not (qid.startswith("Q") and qid[1:].isdigit()):
+                continue
+            pages_by_qid.setdefault(qid, []).append(deepcopy(raw))
+            first_order.setdefault(qid, next_order)
+            next_order += 1
+            if qid not in collected:
+                collected.append(qid)
+        return collected
 
-    seed_qids = list(pages_by_qid)
-    seed_qids.extend(qid for qid in search_qids if qid not in seed_qids)
-    if not seed_qids:
-        return []
-    looked_up = wikidata_lookup(seed_qids)
+    zh_qids = collect_wikipedia("zh")
+    looked_up = wikidata_lookup(zh_qids) if zh_qids else {}
     entities = dict(looked_up) if isinstance(looked_up, dict) else {}
     expected_title = normalize_title(parsed.title)
 
@@ -214,6 +192,57 @@ def discover_root_works(
             if normalize_title(value)
         }
 
+    def ranked_wikipedia_admitted(qid: str) -> bool:
+        titles = normalized_titles(qid, entities.get(qid) or {})
+        if expected_title in titles:
+            return True
+        pages = pages_by_qid.get(qid) or ()
+        best_rank = min(
+            (int(page.get("search_rank") or 1_000_000) for page in pages),
+            default=1_000_000,
+        )
+        return bool(
+            best_rank == 1
+            and expected_title
+            and any(title.startswith(expected_title) for title in titles)
+        )
+
+    if not any(
+        _structurally_eligible(parsed, entities.get(qid) or {})
+        and ranked_wikipedia_admitted(qid)
+        for qid in zh_qids
+    ):
+        en_qids = collect_wikipedia("en")
+        missing = [qid for qid in en_qids if qid not in entities]
+        if missing:
+            looked_up = wikidata_lookup(missing)
+            if isinstance(looked_up, dict):
+                entities.update(looked_up)
+
+    search_qids: list[str] = []
+    if wikidata_search is not None:
+        try:
+            found = wikidata_search(parsed.title)
+        except Exception:
+            found = ()
+        for raw_qid in found or ():
+            qid = _text(raw_qid).upper()
+            if (
+                qid.startswith("Q")
+                and qid[1:].isdigit()
+                and qid not in search_qids
+            ):
+                search_qids.append(qid)
+
+    seed_qids = list(pages_by_qid)
+    seed_qids.extend(qid for qid in search_qids if qid not in seed_qids)
+    if not seed_qids:
+        return []
+    missing = [qid for qid in seed_qids if qid not in entities]
+    if missing:
+        looked_up = wikidata_lookup(missing)
+        if isinstance(looked_up, dict):
+            entities.update(looked_up)
     exact_seed_qids = [
         qid for qid in seed_qids
         if isinstance(entities.get(qid), dict)
@@ -276,64 +305,14 @@ def discover_root_works(
         if not isinstance(entity, dict):
             continue
         is_exact = qid in exact_seed_qids
+        is_ranked_wikipedia_result = ranked_wikipedia_admitted(qid)
         is_related = qid in relation_paths
-        if not (is_exact or is_related):
+        if not (is_ranked_wikipedia_result or is_exact or is_related):
             continue
-        media_type = _text(entity.get("media_type")).casefold()
-        year = _text(entity.get("year"))[:4]
-        if media_type not in {"movie", "series"}:
-            continue
-        if parsed.media_type and parsed.media_type != media_type:
-            continue
-        if parsed.year and parsed.year != year:
-            continue
-        if (
-            parsed.scope in {"whole_series", "season", "episode"}
-            and media_type != "series"
-        ):
+        if not _structurally_eligible(parsed, entity):
             continue
         if qid not in selectable_qids:
             selectable_qids.append(qid)
-
-    if not selectable_qids and parsed.media_type and _allow_retry:
-        retry_titles = []
-        for qid in exact_seed_qids:
-            entity = entities.get(qid) or {}
-            for value in (
-                entity.get("english_title"),
-                *(entity.get("aliases") or ()),
-            ):
-                value = _text(value)
-                if (
-                    re.search(r"[A-Za-z]", value)
-                    and normalize_title(value) != expected_title
-                    and value not in retry_titles
-                ):
-                    retry_titles.append(value)
-        if retry_titles:
-            retry_parsed = ParsedInput(
-                kind="text",
-                raw_query=parsed.raw_query,
-                title=retry_titles[0],
-                year=parsed.year,
-                media_type=parsed.media_type,
-                scope=parsed.scope,
-                season_number=parsed.season_number,
-                episode_number=parsed.episode_number,
-            )
-            retry_result = wikipedia_lookup(_query_payload(retry_parsed))
-            roots = discover_root_works(
-                retry_parsed,
-                lambda _payload: retry_result,
-                wikidata_lookup,
-                wikidata_search=wikidata_search,
-                _allow_retry=False,
-            )
-            for root in roots:
-                if parsed.title not in root["aliases"]:
-                    root["aliases"].append(parsed.title)
-                    root["source_fact"]["aliases"].append(parsed.title)
-            return roots
 
     country_ids = _unique(
         country

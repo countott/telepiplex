@@ -9,6 +9,14 @@ from .media_metadata import (
     validate_media_metadata,
     validate_media_metadata_detailed,
 )
+from .media_metadata_v2 import (
+    attach_media_metadata_v2,
+    build_media_metadata_v2_id,
+    convert_media_metadata_v1_to_v2,
+    extract_confirmed_media_metadata_v2,
+    validate_media_metadata_v2,
+    validate_media_metadata_v2_detailed,
+)
 
 __all__ = [
     "HostClient",
@@ -18,8 +26,14 @@ __all__ = [
     "ResponseAction",
     "RuntimeContext",
     "attach_media_metadata",
+    "attach_media_metadata_v2",
+    "build_media_metadata_v2_id",
+    "convert_media_metadata_v1_to_v2",
     "extract_confirmed_media_metadata",
+    "extract_confirmed_media_metadata_v2",
     "merge_resolved_items",
     "validate_media_metadata",
     "validate_media_metadata_detailed",
+    "validate_media_metadata_v2",
+    "validate_media_metadata_v2_detailed",
 ]

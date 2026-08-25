@@ -97,6 +97,10 @@ class WikipediaAdapterTest(unittest.TestCase):
         self.assertEqual(result["facts"][0]["page_id"], 10)
         self.assertFalse(result["facts"][0]["is_disambiguation"])
         self.assertTrue(result["facts"][1]["is_disambiguation"])
+        self.assertEqual(
+            get_mock.call_args.kwargs["params"]["gsrlimit"],
+            10,
+        )
 
     def test_empty_expanded_queries_are_unavailable_not_not_found(self):
         result = lookup_wikipedia_evidence([], languages=("zh",))

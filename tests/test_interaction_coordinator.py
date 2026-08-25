@@ -48,6 +48,415 @@ class InteractionCoordinatorTest(unittest.TestCase):
         self.assertEqual(terminal.state, "completed")
         self.assertIsNone(self.coordinator.active(10, 1))
 
+    def test_segment_report_opens_durable_owner_scoped_photo_segment(self):
+        operation, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+                projection={
+                    "text": "正在识别媒体…",
+                    "buttons": [],
+                },
+            ),
+        )
+
+        self.assertEqual(operation.operation_id, "op-1")
+        self.assertEqual(segment.operation_id, "op-1")
+        self.assertEqual(segment.sequence, 1)
+        self.assertEqual(segment.owner_plugin_id, "search")
+        self.assertEqual(segment.role, "identity")
+        self.assertEqual(segment.generation, 1)
+        self.assertEqual(segment.presentation_kind, "photo")
+        self.assertEqual(segment.state, "creating")
+        self.assertEqual(segment.business_revision, 1)
+        self.assertEqual(segment.rendered_revision, 0)
+        self.assertEqual(segment.callback_generation, 1)
+        self.assertEqual(segment.delivery_state, "reserved")
+        self.assertIsNone(segment.message_id)
+        self.assertEqual(self.coordinator.get_active_segment("op-1"), segment)
+
+    def test_bound_segment_message_survives_coordinator_restart(self):
+        _operation, created = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                }
+            ),
+        )
+
+        bound = self.coordinator.bind_segment_message(
+            created.segment_id,
+            owner_plugin_id="search",
+            generation=1,
+            chat_id=10,
+            message_id=77,
+        )
+        self.coordinator.close()
+
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        self.coordinator = InteractionCoordinator(self.database_path)
+        reloaded = self.coordinator.get_active_segment("op-1")
+
+        self.assertEqual(reloaded, bound)
+        self.assertEqual(reloaded.state, "open")
+        self.assertEqual(reloaded.delivery_state, "delivered")
+        self.assertEqual(reloaded.message_id, 77)
+        self.assertEqual(reloaded.message_kind, "photo")
+        self.assertIsNone(self.coordinator.get("op-1").message_id)
+
+    def test_only_one_creator_can_claim_a_reserved_segment_delivery(self):
+        _operation, created = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                }
+            ),
+        )
+
+        claimed = self.coordinator.claim_segment_delivery(
+            created.segment_id,
+            owner_plugin_id="search",
+            generation=created.generation,
+        )
+        competing = self.coordinator.claim_segment_delivery(
+            created.segment_id,
+            owner_plugin_id="search",
+            generation=created.generation,
+        )
+
+        self.assertEqual(claimed.delivery_state, "delivering")
+        self.assertIsNone(competing)
+
+    def test_same_segment_accepts_a_newer_business_revision_in_place(self):
+        _operation, created = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+                projection={"text": "正在识别媒体…", "buttons": []},
+            ),
+        )
+
+        operation, updated = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                revision=2,
+                stage="candidates",
+                status_text="请选择作品",
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+                projection={
+                    "text": "请选择作品",
+                    "buttons": [["死神：千年血战篇"]],
+                },
+            ),
+        )
+
+        self.assertEqual(updated.segment_id, created.segment_id)
+        self.assertEqual(updated.sequence, 1)
+        self.assertEqual(updated.business_revision, 2)
+        self.assertEqual(updated.rendered_revision, 0)
+        self.assertEqual(updated.projection, {
+            "text": "请选择作品",
+            "buttons": [["死神：千年血战篇"]],
+        })
+        self.assertEqual(operation.revision, 2)
+        self.assertEqual(operation.active_segment_id, created.segment_id)
+
+    def test_active_segment_rejects_role_or_presentation_kind_conflict(self):
+        from app.runtime.interaction_coordinator import InteractionError
+
+        _operation, created = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                }
+            ),
+        )
+
+        with self.assertRaises(InteractionError) as raised:
+            self.coordinator.accept_segment_report(
+                "search",
+                self.report(
+                    revision=2,
+                    segment={
+                        "role": "search",
+                        "presentation_kind": "text",
+                    },
+                ),
+            )
+
+        self.assertEqual(raised.exception.code, "segment_role_conflict")
+        self.assertEqual(self.coordinator.get("op-1").revision, 1)
+        self.assertEqual(self.coordinator.get_active_segment("op-1"), created)
+
+    def test_same_segment_revision_and_projection_is_idempotent(self):
+        report = self.report(
+            segment={
+                "role": "identity",
+                "presentation_kind": "photo",
+            },
+            projection={"text": "正在识别媒体…", "buttons": []},
+        )
+        first_operation, first_segment = self.coordinator.accept_segment_report(
+            "search", report
+        )
+
+        replay_operation, replay_segment = self.coordinator.accept_segment_report(
+            "search", report
+        )
+
+        self.assertEqual(replay_operation, first_operation)
+        self.assertEqual(replay_segment, first_segment)
+
+    def test_legacy_message_cursor_migrates_once_to_read_only_open_segment(self):
+        created = self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id(created.operation_id, 88, "photo")
+        self.coordinator.close()
+
+        from app.runtime.interaction_coordinator import (
+            InteractionCoordinator,
+            InteractionError,
+        )
+
+        self.coordinator = InteractionCoordinator(self.database_path)
+        migrated = self.coordinator.get_active_segment("op-1")
+
+        self.assertEqual(migrated.role, "legacy")
+        self.assertEqual(migrated.owner_plugin_id, "search")
+        self.assertEqual(migrated.state, "open")
+        self.assertEqual(migrated.delivery_state, "delivered")
+        self.assertEqual(migrated.message_id, 88)
+        self.assertEqual(migrated.message_kind, "photo")
+
+        self.coordinator.close()
+        self.coordinator = InteractionCoordinator(self.database_path)
+        replay = self.coordinator.get_active_segment("op-1")
+        self.assertEqual(replay.segment_id, migrated.segment_id)
+
+        with self.assertRaises(InteractionError) as raised:
+            self.coordinator.accept_segment_report(
+                "search",
+                self.report(
+                    revision=2,
+                    segment={
+                        "role": "identity",
+                        "presentation_kind": "photo",
+                    },
+                ),
+            )
+        self.assertEqual(raised.exception.code, "segment_role_conflict")
+
+    def test_rendered_segment_seals_before_the_next_role_opens(self):
+        _operation, identity = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+                projection={"text": "已确认：死神：千年血战篇"},
+            ),
+        )
+        identity = self.coordinator.bind_segment_message(
+            identity.segment_id,
+            owner_plugin_id="search",
+            generation=identity.generation,
+            chat_id=10,
+            message_id=91,
+        )
+        identity = self.coordinator.record_segment_rendered(
+            identity.segment_id,
+            owner_plugin_id="search",
+            generation=identity.generation,
+            business_revision=1,
+            projection_hash=identity.projection_hash,
+        )
+
+        sealing = self.coordinator.seal_segment(
+            "search", "op-1", "identity"
+        )
+        sealed = self.coordinator.complete_segment_seal(
+            sealing.segment_id,
+            owner_plugin_id="search",
+            generation=sealing.generation,
+        )
+
+        self.assertEqual(identity.rendered_revision, 1)
+        self.assertEqual(sealing.state, "sealing")
+        self.assertEqual(sealed.state, "sealed")
+        self.assertIsNotNone(sealed.sealed_at)
+        self.assertIsNone(self.coordinator.get_active_segment("op-1"))
+
+        operation, search_segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                revision=2,
+                stage="prowlarr",
+                segment={
+                    "role": "search",
+                    "presentation_kind": "text",
+                },
+                projection={"text": "正在搜索片源…"},
+            ),
+        )
+        self.assertEqual(operation.revision, 2)
+        self.assertEqual(search_segment.sequence, 2)
+        self.assertEqual(search_segment.generation, 2)
+        self.assertEqual(search_segment.role, "search")
+        self.assertNotEqual(search_segment.segment_id, sealed.segment_id)
+
+    def test_owner_handoff_is_rejected_until_the_source_segment_is_sealed(self):
+        from app.runtime.interaction_coordinator import InteractionError
+
+        _operation, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                segment={
+                    "role": "search",
+                    "presentation_kind": "text",
+                }
+            ),
+        )
+        segment = self.coordinator.bind_segment_message(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            chat_id=10,
+            message_id=93,
+        )
+        segment = self.coordinator.record_segment_rendered(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            business_revision=1,
+            projection_hash=segment.projection_hash,
+        )
+
+        with self.assertRaises(InteractionError) as raised:
+            self.coordinator.report(
+                "search",
+                self.report(
+                    revision=2,
+                    state="handed_off",
+                    next_plugin_id="download",
+                ),
+            )
+        self.assertEqual(raised.exception.code, "segment_not_sealed")
+        self.assertEqual(self.coordinator.get("op-1").revision, 1)
+
+        self.coordinator.seal_segment("search", "op-1", "search")
+        self.coordinator.complete_segment_seal(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+        )
+        handed_off = self.coordinator.report(
+            "search",
+            self.report(
+                revision=2,
+                state="handed_off",
+                next_plugin_id="download",
+            ),
+        )
+        operation, download = self.coordinator.accept_segment_report(
+            "download",
+            self.report(
+                revision=3,
+                stage="download",
+                segment={
+                    "role": "download",
+                    "presentation_kind": "text",
+                },
+            ),
+        )
+
+        self.assertEqual(handed_off.state, "handed_off")
+        self.assertEqual(operation.plugin_id, "download")
+        self.assertEqual(download.sequence, 2)
+        self.assertNotEqual(download.segment_id, segment.segment_id)
+
+    def test_segment_callback_claim_accepts_only_the_first_keyboard_generation(self):
+        _operation, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                state="awaiting_input",
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+                projection={"text": "请选择作品", "buttons": [["死神"]]},
+            ),
+        )
+        segment = self.coordinator.bind_segment_message(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            chat_id=10,
+            message_id=92,
+        )
+
+        accepted = self.coordinator.claim_segment_callback(
+            "search",
+            "op-1",
+            message_id=92,
+            segment_generation=segment.generation,
+            callback_generation=1,
+            callback_token="search:select:p1:0",
+            busy_text="正在确认媒体身份…",
+        )
+        replay = self.coordinator.claim_segment_callback(
+            "search",
+            "op-1",
+            message_id=92,
+            segment_generation=segment.generation,
+            callback_generation=1,
+            callback_token="search:select:p1:0",
+            busy_text="正在确认媒体身份…",
+        )
+
+        self.assertEqual(accepted.callback_generation, 2)
+        self.assertEqual(accepted.callback_state, "busy")
+        self.assertEqual(accepted.callback_token, "search:select:p1:0")
+        self.assertEqual(accepted.callback_busy_text, "正在确认媒体身份…")
+        self.assertIsNone(replay)
+        self.assertEqual(
+            self.coordinator.get_active_segment("op-1").callback_generation,
+            2,
+        )
+
+        _operation, refreshed = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                revision=2,
+                state="awaiting_input",
+                stage="candidate_selection",
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+                projection={"text": "请选择作品（第 2 页）"},
+            ),
+        )
+        self.assertEqual(refreshed.callback_generation, 2)
+        self.assertEqual(refreshed.callback_state, "idle")
+        self.assertEqual(refreshed.callback_token, "")
+        self.assertEqual(refreshed.callback_busy_text, "")
+
     def test_operation_milestone_is_duplicate_only_after_atomic_completion(self):
         from app.runtime.interaction_coordinator import InteractionError
 

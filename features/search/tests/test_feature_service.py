@@ -28,7 +28,7 @@ def search_plan():
                 "english_title": "English Title",
                 "year": "2024",
                 "content_kind": "movie",
-                "external_ids": {},
+                "external_ids": {"wikidata": "QTESTMOVIE1"},
             },
             "retrieval": {
                 "media_type": "movie",
@@ -91,6 +91,8 @@ def ranked_search_plan():
         contract["retrieval"]["query"] = f"{title} {year}"
         candidates.append({
             "candidate_key": f"tvdb:movie:{index + 1}",
+            "candidate_id": f"tvdb:movie:{index + 1}",
+            "anchor_fact_id": f"tvdb:{index + 1}",
             "score": {"total": 92 - index * 10},
             "recommended": index == 0,
             "selectable": True,
@@ -98,6 +100,13 @@ def ranked_search_plan():
             "prowlarr_queries": [f"{title} {year}"],
             "poster_url": poster,
             "reasons": [],
+            "source_links": [{
+                "provider": "tvdb",
+                "fact_id": f"tvdb:{index + 1}",
+                "external_ids": {"tvdb": str(index + 1)},
+                "verification": "fact_verified",
+                "role": "movie",
+            }],
             "entity_snapshot": {
                 "entity_key": f"tvdb:movie:{index + 1}",
                 "content_kind": "movie",
@@ -255,6 +264,7 @@ class FakeHost:
         self.calls = []
         self.reports = []
         self.milestones = []
+        self.segments_sealed = []
         self.timeline = []
 
     async def call_capability(self, capability, method, payload, **kwargs):
@@ -307,6 +317,21 @@ class FakeHost:
             mode="stage",
             deadline=deadline,
         )
+
+    async def seal_operation_segment(
+        self,
+        operation_id,
+        role,
+        *,
+        deadline=10,
+    ):
+        self.timeline.append(("segment_sealed", role, operation_id))
+        self.segments_sealed.append({
+            "operation_id": operation_id,
+            "role": role,
+            "deadline": deadline,
+        })
+        return {"accepted": True, "state": "sealed"}
 
 
 class FakeRuntime:
@@ -587,16 +612,50 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         identity_stage_index = self.host.timeline.index(
             ("report", "running", "identity_confirmation")
         )
-        milestone_index = next(
+        seal_index = next(
             index for index, item in enumerate(self.host.timeline)
-            if item[:2] == ("milestone", "identity")
+            if item[:2] == ("segment_sealed", "identity")
         )
         prowlarr_index = next(
             index for index, item in enumerate(self.host.timeline)
             if item == ("report", "running", "prowlarr_search")
         )
-        self.assertLess(identity_stage_index, milestone_index)
-        self.assertLess(milestone_index, prowlarr_index)
+        self.assertLess(identity_stage_index, seal_index)
+        self.assertLess(seal_index, prowlarr_index)
+
+    async def test_search_reports_use_identity_then_search_message_segments(self):
+        plan_id = await self._prepare_search()
+        await self.feature.callback({
+            "namespace": "search",
+            "payload": f"confirm:{plan_id}",
+            "user_id": 1,
+            "chat_id": 10,
+        })
+
+        await self.runtime.run("search-releases-")
+
+        identity_reports = [
+            report for report in self.host.reports
+            if (report.get("segment") or {}).get("role") == "identity"
+        ]
+        search_reports = [
+            report for report in self.host.reports
+            if (report.get("segment") or {}).get("role") == "search"
+        ]
+        self.assertTrue(identity_reports)
+        self.assertTrue(search_reports)
+        self.assertTrue(all(
+            report["segment"]["presentation_kind"] == "photo"
+            for report in identity_reports
+        ))
+        self.assertTrue(all(
+            report["segment"]["presentation_kind"] == "text"
+            for report in search_reports
+        ))
+        self.assertEqual(
+            self.host.segments_sealed[0]["role"],
+            "identity",
+        )
 
     async def test_prowlarr_failure_keeps_plan_and_offers_retry_exit(self):
         from telepiplex_search.adapters.prowlarr import ProwlarrRequestError
@@ -729,9 +788,8 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         plan_id = await self._prepare_search()
         stored = self.feature.plans[plan_id]
         stored["selected_path"] = "/Movies"
-        self.host.publish_operation_milestone = AsyncMock(return_value={
+        self.host.seal_operation_segment = AsyncMock(return_value={
             "accepted": False,
-            "duplicate": False,
         })
         release_calls = []
         self.feature.release_search = (
@@ -744,31 +802,25 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.code, "identity_delivery_failed")
         self.assertEqual(release_calls, [])
 
-    async def test_lost_identity_response_retries_same_milestone(self):
+    async def test_lost_identity_seal_response_retries_same_segment(self):
         from telepiplex_plugin_sdk import FeatureError
 
         plan_id = await self._prepare_search()
         stored = self.feature.plans[plan_id]
         stored["selected_path"] = "/Movies"
-        original_publish = self.host.publish_operation_milestone
+        original_seal = self.host.seal_operation_segment
         attempts = []
 
         async def accept_then_lose(
             operation_id,
-            milestone_id,
-            text,
+            role,
             *,
-            mode="identity",
-            photo_url="",
             deadline=10,
         ):
-            attempts.append(milestone_id)
-            response = await original_publish(
+            attempts.append(role)
+            response = await original_seal(
                 operation_id,
-                milestone_id,
-                text,
-                mode=mode,
-                photo_url=photo_url,
+                role,
                 deadline=deadline,
             )
             if len(attempts) == 1:
@@ -778,18 +830,15 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 )
             return {**response, "accepted": False, "duplicate": True}
 
-        self.host.publish_operation_milestone = accept_then_lose
+        self.host.seal_operation_segment = accept_then_lose
 
         await self.feature._confirm_and_search(plan_id, stored)
 
         self.assertEqual(attempts, [attempts[0], attempts[0]])
         self.assertTrue(self.search_queries)
-        self.assertEqual(
-            stored["identity_milestone_id"],
-            attempts[0],
-        )
+        self.assertTrue(stored["identity_segment_sealed"])
 
-    async def test_rejected_identity_milestone_is_not_retried(self):
+    async def test_rejected_identity_segment_seal_is_not_retried(self):
         from telepiplex_plugin_sdk import FeatureError
 
         plan_id = await self._prepare_search()
@@ -804,7 +853,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "operation belongs to another Feature",
             )
 
-        self.host.publish_operation_milestone = reject_owner
+        self.host.seal_operation_segment = reject_owner
 
         with self.assertRaises(FeatureError) as raised:
             await self.feature._confirm_and_search(plan_id, stored)
@@ -812,7 +861,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.code, "identity_delivery_failed")
         self.assertEqual(attempts, ["owner_mismatch"])
 
-    async def test_identity_milestone_failure_reports_contract_code_not_type(
+    async def test_identity_segment_failure_reports_contract_code_not_type(
         self,
     ):
         from telepiplex_plugin_sdk import FeatureError
@@ -825,7 +874,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "Host milestone bookkeeping was interrupted",
             )
 
-        self.host.publish_operation_milestone = fail_internal
+        self.host.seal_operation_segment = fail_internal
         await self.feature.callback({
             "namespace": "search",
             "payload": f"confirm:{plan_id}",
@@ -1647,7 +1696,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(aggregate.call_count, 1)
         self.feature.indexer_search.assert_not_called()
 
-    async def test_optional_enrichment_starts_after_indexer_tasks_without_blocking(self):
+    async def test_no_optional_enrichment_can_mutate_confirmed_v2_during_indexer_search(self):
         plan_id = await self._prepare_search()
         stored = self.feature.plans[plan_id]
         stored["selected_candidate"] = deepcopy(
@@ -1659,83 +1708,26 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "magnet_url": "magnet:?xt=urn:btih:" + "d" * 40,
             "indexer": "Fast",
         }]
-        optional_started = asyncio.Event()
-        release_optional = asyncio.Event()
+        optional = AsyncMock(side_effect=AssertionError(
+            "post-confirmation enrichment must not run"
+        ))
+        self.feature._supplement_selected_candidate = optional
 
-        async def slow_optional(candidate, _raw_query, *, purpose="all"):
-            self.assertEqual(purpose, "presentation")
-            self.assertTrue(stored["indexer_tasks"])
-            optional_started.set()
-            await release_optional.wait()
-            enriched = deepcopy(candidate)
-            enriched["media_metadata"]["identity"].update({
-                "chinese_title": "延迟中文名",
-                "poster_url": "https://image.example/deferred.jpg",
-                "external_ids": {"tvdb": "unsafe"},
-            })
-            enriched["media_metadata"]["retrieval"].update({
-                "scope": "episode",
-                "query": "Unsafe Query S01E01",
-            })
-            return enriched
-
-        self.feature._supplement_selected_candidate = slow_optional
-        search_task = asyncio.create_task(
-            self.feature._confirm_and_search(plan_id, stored)
-        )
-        await asyncio.wait_for(optional_started.wait(), timeout=0.1)
-        frozen_retrieval = deepcopy(stored["confirmed_contract"]["retrieval"])
-        frozen_ids = deepcopy(
-            stored["confirmed_contract"]["identity"]["external_ids"]
-        )
-        frozen_queries = list(stored["active_prowlarr_queries"])
-
-        result = await asyncio.wait_for(search_task, timeout=0.2)
+        result = await self.feature._confirm_and_search(plan_id, stored)
 
         self.assertTrue(result["actions"])
         self.assertNotIn("deferred_contract", stored)
-        self.assertEqual(
-            stored["confirmed_contract"]["retrieval"],
-            frozen_retrieval,
-        )
-        self.assertEqual(
-            stored["confirmed_contract"]["identity"]["external_ids"],
-            frozen_ids,
-        )
-        self.assertEqual(stored["active_prowlarr_queries"], frozen_queries)
+        self.assertEqual(stored["confirmed_contract"]["schema_version"], 2)
+        optional.assert_not_awaited()
 
-        release_optional.set()
-        await stored["deferred_enrichment_task"]
-        self.assertEqual(
-            stored["deferred_contract"]["identity"]["chinese_title"],
-            "中文标题",
-        )
-        self.assertEqual(
-            stored["deferred_contract"]["identity"]["poster_url"],
-            "https://image.example/deferred.jpg",
-        )
-        self.assertEqual(
-            stored["deferred_contract"]["identity"]["external_ids"],
-            frozen_ids,
-        )
-        self.assertEqual(
-            stored["deferred_contract"]["retrieval"],
-            frozen_retrieval,
-        )
-
-    async def test_optional_enrichment_starts_after_aggregate_query_tasks(self):
-        import threading
-
+    async def test_aggregate_search_does_not_start_post_confirmation_enrichment(self):
         plan_id = await self._prepare_search()
         stored = self.feature.plans[plan_id]
         stored["selected_candidate"] = deepcopy(
             ranked_search_plan()["candidates"][0]
         )
         self.feature.indexer_loader = lambda: []
-        release_search = threading.Event()
-
         def aggregate_search(_query, _media_type):
-            release_search.wait(timeout=0.5)
             return [{
                 "title": "English.Title.2024.1080p.WEB-DL",
                 "magnet_url": "magnet:?xt=urn:btih:" + "e" * 40,
@@ -1743,29 +1735,19 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             }]
 
         self.feature.release_search = aggregate_search
-        optional_started = asyncio.Event()
-        release_optional = asyncio.Event()
+        optional = AsyncMock(side_effect=AssertionError(
+            "post-confirmation enrichment must not run"
+        ))
+        self.feature._supplement_selected_candidate = optional
 
-        async def slow_optional(candidate, _raw_query, *, purpose="all"):
-            self.assertEqual(purpose, "presentation")
-            self.assertTrue(stored["indexer_tasks"])
-            optional_started.set()
-            release_search.set()
-            await release_optional.wait()
-            return deepcopy(candidate)
-
-        self.feature._supplement_selected_candidate = slow_optional
-        search_task = asyncio.create_task(
-            self.feature._confirm_and_search(plan_id, stored)
+        result = await self.feature._confirm_and_search(
+            plan_id,
+            stored,
         )
 
-        await asyncio.wait_for(optional_started.wait(), timeout=0.1)
-        result = await asyncio.wait_for(search_task, timeout=0.2)
-
         self.assertTrue(result["actions"])
-        self.assertFalse(stored["deferred_enrichment_task"].done())
-        release_optional.set()
-        await stored["deferred_enrichment_task"]
+        self.assertNotIn("deferred_enrichment_task", stored)
+        optional.assert_not_awaited()
 
     async def test_restarted_deferred_enrichment_discards_previous_result(self):
         plan_id = "deferred-restart"
@@ -2391,22 +2373,13 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         capability, method, payload, kwargs = self.host.calls[0]
         self.assertEqual((capability, method), ("download.provider", "submit"))
         self.assertEqual(payload["selected_path"], "/Movies")
-        self.assertEqual(payload["media_metadata"]["schema_version"], 1)
+        self.assertEqual(payload["media_metadata"]["schema_version"], 2)
         self.assertTrue(payload["media_metadata"]["confirmed"])
         self.assertEqual(
-            payload["media_metadata"]["identity"]["chinese_title"],
+            payload["media_metadata"]["identity"]["title_zh"],
             "中文标题",
         )
-        self.assertEqual(
-            payload["naming_metadata"],
-            {
-                "source": "confirmed",
-                "media_type": "movie",
-                "chinese_title": "中文标题",
-                "english_title": "English Title",
-                "year": "2024",
-            },
-        )
+        self.assertNotIn("naming_metadata", payload)
         self.assertEqual(
             payload["release"],
             {
@@ -2432,10 +2405,9 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         await self.runtime.run("search-releases-")
         stored = self.feature.plans[plan_id]
         release_id = next(iter(stored["release_by_id"]))
-        deferred = deepcopy(stored["confirmed_contract"])
-        deferred["identity"]["poster_url"] = (
-            "https://image.example/completed.jpg"
-        )
+        frozen = deepcopy(stored["confirmed_contract"])
+        deferred = deepcopy(frozen)
+        deferred["identity"]["title_zh"] = "不应进入下游"
         completed = asyncio.create_task(asyncio.sleep(0))
         await completed
         stored["deferred_contract"] = deferred
@@ -2450,10 +2422,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
 
         payload = self.host.calls[-1][2]
-        self.assertEqual(
-            payload["media_metadata"]["identity"]["poster_url"],
-            "https://image.example/completed.jpg",
-        )
+        self.assertEqual(payload["media_metadata"], frozen)
         self.assertEqual(payload["release"]["title"], selected_title)
 
     async def test_submit_release_never_waits_for_running_deferred_contract(self):
@@ -2755,7 +2724,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         stored = self.feature.plans[plan_id]
         release_id = next(iter(stored["release_by_id"]))
         self.host.timeline.clear()
-        original_seal = self.host.seal_operation_stage
+        original_seal = self.host.seal_operation_segment
 
         async def queue_before_later_delivery_failure(*args, **kwargs):
             response = await original_seal(*args, **kwargs)
@@ -2765,7 +2734,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "delivery_state": "failed",
             }
 
-        self.host.seal_operation_stage = queue_before_later_delivery_failure
+        self.host.seal_operation_segment = queue_before_later_delivery_failure
 
         await self.feature._submit_release(
             plan_id,
@@ -2776,7 +2745,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         seal_index = next(
             index for index, item in enumerate(self.host.timeline)
-            if item[:2] == ("milestone", "stage")
+            if item[:2] == ("segment_sealed", "search")
         )
         handoff_index = self.host.timeline.index(
             ("report", "handed_off", "submitting_download")
@@ -2785,11 +2754,11 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             index for index, item in enumerate(self.host.timeline)
             if item[:2] == ("capability", "download.provider")
         )
-        self.assertLess(handoff_index, seal_index)
-        self.assertLess(seal_index, capability_index)
+        self.assertLess(seal_index, handoff_index)
+        self.assertLess(handoff_index, capability_index)
         self.assertEqual(len(self.host.calls), 1)
 
-    async def test_lost_stage_seal_response_retries_same_milestone(self):
+    async def test_lost_search_segment_seal_response_retries_same_role(self):
         from telepiplex_plugin_sdk import FeatureError
 
         plan_id = await self._prepare_search()
@@ -2802,21 +2771,19 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         await self.runtime.run("search-releases-")
         stored = self.feature.plans[plan_id]
         release_id = next(iter(stored["release_by_id"]))
-        original_seal = self.host.seal_operation_stage
+        original_seal = self.host.seal_operation_segment
         attempts = []
 
         async def accept_then_lose(
             operation_id,
-            milestone_id,
-            text,
+            role,
             *,
             deadline=10,
         ):
-            attempts.append(milestone_id)
+            attempts.append(role)
             response = await original_seal(
                 operation_id,
-                milestone_id,
-                text,
+                role,
                 deadline=deadline,
             )
             if len(attempts) == 1:
@@ -2826,7 +2793,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 )
             return {**response, "accepted": False, "duplicate": True}
 
-        self.host.seal_operation_stage = accept_then_lose
+        self.host.seal_operation_segment = accept_then_lose
 
         result = await self.feature._submit_release(
             plan_id,
@@ -3115,9 +3082,8 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(stored["candidates"][0]["poster_url"], "")
 
-    async def test_prepare_plan_does_not_wait_for_candidate_posters(self):
+    async def test_prepare_plan_bounds_poster_lookup_before_single_candidate_report(self):
         poster_started = asyncio.Event()
-        release_poster = asyncio.Event()
 
         async def planner(_raw_query, plan_id):
             result = ranked_search_plan()
@@ -3129,11 +3095,11 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         async def slow_lookup(_candidate, _provider):
             poster_started.set()
-            await release_poster.wait()
-            return "https://image.example/deferred.jpg"
+            await asyncio.Event().wait()
 
         self.feature.plan_builder = planner
         self.feature.candidate_poster_lookup = slow_lookup
+        self.feature.candidate_poster_timeout = 0.01
         operation = self.feature._new_operation(
             {"chat_id": 10, "user_id": 1},
             state="running",
@@ -3150,26 +3116,19 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         ))
         await poster_started.wait()
 
-        result = await asyncio.wait_for(asyncio.shield(prepare), timeout=0.05)
+        result = await asyncio.wait_for(asyncio.shield(prepare), timeout=0.2)
 
         action = result["actions"][0]
         self.assertIn("中文标题1", action["text"])
         self.assertIn("2024", action["text"])
         self.assertIn("电影", action["text"])
         self.assertTrue(action["data"]["keyboard"])
-        self.feature.plans["poster-critical-path"][
-            "initial_candidate_report_accepted"
-        ].set()
-        release_poster.set()
-        await self.feature.plans["poster-critical-path"][
-            "candidate_poster_task"
-        ]
+        self.assertNotIn(
+            "candidate_poster_task",
+            self.feature.plans["poster-critical-path"],
+        )
 
-    async def test_poster_refresh_waits_for_initial_host_acceptance(self):
-        initial_report_started = asyncio.Event()
-        accept_initial_report = asyncio.Event()
-        poster_lookup_finished = asyncio.Event()
-
+    async def test_candidate_posters_are_in_the_single_initial_host_report(self):
         async def planner(_raw_query, plan_id):
             result = ranked_search_plan()
             result.update({
@@ -3196,34 +3155,12 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             return result
 
         async def lookup(_candidate, provider):
-            lookup.calls += 1
-            if lookup.calls == 6:
-                poster_lookup_finished.set()
             if provider == "tmdb":
                 return "https://image.example/reversed-race.jpg"
             return ""
 
-        lookup.calls = 0
-
-        async def delayed_report(operation):
-            self.host.reports.append(deepcopy(operation))
-            if len(self.host.reports) == 1:
-                initial_report_started.set()
-                await accept_initial_report.wait()
-                if len(self.host.reports) != 1:
-                    return {
-                        "accepted": False,
-                        "error_code": "stale_revision",
-                    }
-            return {
-                "accepted": True,
-                "state": operation["state"],
-                "revision": operation["revision"],
-            }
-
         self.feature.plan_builder = planner
         self.feature.candidate_poster_lookup = lookup
-        self.host.report_operation = delayed_report
         command = await self.feature.command({
             "command": "s",
             "args": ["候选"],
@@ -3231,31 +3168,15 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "chat_id": 10,
         })
         operation_id = command["operation"]["operation_id"]
-        prepare = asyncio.create_task(self.runtime.run("search-plan-"))
-
-        await initial_report_started.wait()
-        await poster_lookup_finished.wait()
-        await asyncio.sleep(0.02)
-
-        reports_before_acceptance = len(self.host.reports)
-        accept_initial_report.set()
-        await prepare
+        await self.runtime.run("search-plan-")
         active_plan_ids = tuple(self.feature.plans)
-        if active_plan_ids:
-            await self.feature.plans[active_plan_ids[0]][
-                "candidate_poster_task"
-            ]
 
-        self.assertEqual(reports_before_acceptance, 1)
-        self.assertEqual(len(self.host.reports), 2)
-        self.assertEqual(
-            [report["stage"] for report in self.host.reports],
-            ["candidate_selection", "candidate_selection"],
-        )
-        self.assertLess(
-            self.host.reports[0]["revision"],
-            self.host.reports[1]["revision"],
-        )
+        self.assertEqual(len(self.host.reports), 1)
+        self.assertEqual(self.host.reports[0]["stage"], "candidate_selection")
+        self.assertTrue(all(
+            item["poster_url"] == "https://image.example/reversed-race.jpg"
+            for item in self.feature.plans[active_plan_ids[0]]["candidates"]
+        ))
         self.assertEqual(len(active_plan_ids), 1)
         self.assertIn(active_plan_ids[0], self.feature.plans)
         self.assertEqual(
@@ -3263,7 +3184,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "awaiting_input",
         )
 
-    async def test_normal_plan_task_reports_background_poster_refresh(self):
+    async def test_normal_plan_task_reports_candidates_once_after_poster_lookup(self):
         async def planner(_raw_query, plan_id):
             result = ranked_search_plan()
             result["plan_id"] = plan_id
@@ -3288,13 +3209,11 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "chat_id": 10,
         })
         await self.runtime.run("search-plan-")
-        plan_id = next(iter(self.feature.plans))
-        await self.feature.plans[plan_id]["candidate_poster_task"]
 
-        self.assertEqual(len(self.host.reports), 2)
+        self.assertEqual(len(self.host.reports), 1)
         self.assertEqual(
             [report["stage"] for report in self.host.reports],
-            ["plan_confirmation", "plan_confirmation"],
+            ["plan_confirmation"],
         )
         self.assertEqual(
             self.host.reports[-1]["details"]["photo_url"],
@@ -3957,12 +3876,15 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         await self.runtime.run("search-plan-")
         await self.runtime.run("search-releases-")
 
-        self.assertEqual(len(self.host.milestones), 1)
+        identity_report = next(
+            report for report in self.host.reports
+            if report["stage"] == "identity_confirmation"
+        )
         self.assertIn(
             "中文标题1 (English Title)",
-            self.host.milestones[0]["text"],
+            identity_report["status_text"],
         )
-        self.assertEqual(self.host.milestones[0]["deadline"], 45)
+        self.assertEqual(self.host.segments_sealed[0]["role"], "identity")
         self.assertNotIn("已识别为", self.host.reports[-1]["status_text"])
 
     async def test_multi_candidate_exact_read_retry_keeps_selected_index(self):
@@ -5570,10 +5492,10 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             for line in captured.output
         ))
         self.assertEqual(
-            resolved["media_metadata"]["identity"]["english_title"],
+            resolved["media_metadata"]["identity"]["title_original"],
             "English Title",
         )
-        self.assertEqual(resolved["naming_metadata"]["source"], "search-live")
+        self.assertNotIn("naming_metadata", resolved)
         self.assertNotIn("source_queries", resolved)
         self.assertNotIn("evidence", resolved)
         self.assertEqual(self.host.calls, [])
@@ -5721,10 +5643,10 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         })
 
         contract = resolved["media_metadata"]
-        self.assertEqual(contract["identity"]["chinese_title"], "同名剧集")
-        self.assertEqual(contract["identity"]["content_kind"], "series")
+        self.assertEqual(contract["identity"]["title_zh"], "同名剧集")
+        self.assertEqual(contract["identity"]["media_type"], "series")
         self.assertEqual(
-            contract["evidence"]["decision"]["scope"],
+            contract["scope"]["kind"],
             "season",
         )
 
@@ -5780,7 +5702,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(confirmed["status"], "resolved")
         self.assertEqual(len(planner_calls), 1)
         self.assertEqual(
-            confirmed["media_metadata"]["identity"]["chinese_title"],
+            confirmed["media_metadata"]["identity"]["title_zh"],
             "剧集乙",
         )
         for _index in range(100):
@@ -5880,7 +5802,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         hydrate.assert_called_once()
         self.assertEqual(supplement_calls, [])
         self.assertEqual(
-            resolved["media_metadata"]["identity"]["english_title"],
+            resolved["media_metadata"]["identity"]["title_original"],
             "Hydrated Exact Title",
         )
 
@@ -5945,10 +5867,10 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "method": "resolve_metadata",
                     "payload": {"query": "黑暗荣耀", "probe": probe},
                 })
-                decision = resolved["media_metadata"]["evidence"]["decision"]
+                decision = resolved["media_metadata"]["scope"]
                 self.assertEqual(
                     (
-                        decision["scope"],
+                        decision["kind"],
                         decision["season_number"],
                         decision["episode_number"],
                     ),
@@ -6001,24 +5923,10 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         contract = resolved["media_metadata"]
         self.assertEqual(resolved["status"], "resolved")
-        self.assertEqual(len(contract["items"]), 36)
-        self.assertEqual(contract["identity"]["chinese_title"], "蜂蜜与四叶草")
-        self.assertEqual(
-            contract["evidence"]["decision"]["scope_source"],
-            "file_probe",
-        )
-        self.assertEqual(
-            contract["evidence"]["inventory_reconciliation"]["unresolved"],
-            [{
-                "season_number": 1,
-                "episode_number": 25,
-                "reason_code": "canonical_coordinate_unavailable",
-            }, {
-                "season_number": 1,
-                "episode_number": 26,
-                "reason_code": "canonical_coordinate_unavailable",
-            }],
-        )
+        self.assertEqual(contract["identity"]["title_zh"], "蜂蜜与四叶草")
+        self.assertEqual(contract["scope"]["kind"], "whole_series")
+        self.assertNotIn("items", contract)
+        self.assertNotIn("evidence", contract)
 
     async def test_metadata_capability_maps_unscoped_episode_probe_only_with_unique_inventory(self):
         async def live_planner(_raw_query, plan_id):
@@ -6045,8 +5953,8 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 },
             },
         })
-        pack_decision = pack["media_metadata"]["evidence"]["decision"]
-        self.assertEqual(pack_decision["scope"], "season")
+        pack_decision = pack["media_metadata"]["scope"]
+        self.assertEqual(pack_decision["kind"], "season")
         self.assertEqual(pack_decision["season_number"], 1)
 
         episode = await self.feature.metadata_capability({
@@ -6064,8 +5972,8 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 },
             },
         })
-        episode_decision = episode["media_metadata"]["evidence"]["decision"]
-        self.assertEqual(episode_decision["scope"], "episode")
+        episode_decision = episode["media_metadata"]["scope"]
+        self.assertEqual(episode_decision["kind"], "episode")
         self.assertEqual(episode_decision["season_number"], 1)
         self.assertEqual(episode_decision["episode_number"], 3)
 
@@ -6116,12 +6024,12 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "1.11.7")
-        self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertEqual(project["project"]["version"], "1.11.7")
+        self.assertEqual(manifest["version"], "1.12.0")
+        self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
+        self.assertEqual(project["project"]["version"], "1.12.0")
         self.assertEqual(
             project["project"]["dependencies"][0],
-            "telepiplex-plugin-sdk==1.3.2",
+            "telepiplex-plugin-sdk==1.4.0",
         )
 
     def test_default_config_enables_free_and_configured_sources(self):
@@ -6152,14 +6060,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.11.7.tpx", source)
+        self.assertIn("/tmp/search-1.12.0.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-1.11.7.tpx", source)
+        self.assertNotIn("dist/search-1.12.0.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

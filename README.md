@@ -54,6 +54,10 @@ Host API 1.6 增加 identity/stage operation milestone：Feature 可以覆盖当
 
 API 1.4 的幂等 `operation.milestone` 和运行中结果按钮合同保持不变：Feature 可以把最终作品身份作为独立消息发送，后续状态更新不会覆盖它；Prowlarr 搜索阶段可在当前状态消息和键盘匹配时选择已有结果并中止剩余搜索。`/start` 与 Telegram 原生命令列表仍从当前已启用且依赖可路由的 Feature `manifest.yaml` 动态生成。
 
+## Host API 1.7 与任务消息段
+
+Host API 1.7 增加持久化 operation segment。Feature 以 `identity`、`search`、`download`、`rename` 等稳定角色声明一段消息的展示类型；Host 在同一段内只覆写同一条 Telegram 消息，并以 revision/CAS、显式 seal 和 operation snapshot 处理重复 callback、超时后回执不确定及崩溃恢复。身份候选、确认中状态和最终身份复用 `identity` 消息；Prowlarr 结果才开启新的 `search` 消息，后续 Download 与 Rename 各自只使用一条消息。依赖该契约的 Feature 必须声明 `host_api: ">=1.7,<2.0"`。
+
 同一用户同一时间只允许一个活动交互。等待输入时，只接受当前状态消息实际展示的按钮或普通文本；任务运行、取消或回滚期间，其他命令和过期按钮会被拦截。按钮含义如下：
 
 - **退出**：执行前结束交互，不产生业务变更。
