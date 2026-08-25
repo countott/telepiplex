@@ -394,6 +394,106 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         callback_data = plan_report["details"]["keyboard"][0][0]["callback_data"]
         return callback_data.rsplit(":", 1)[-1]
 
+    async def test_discovery_observation_is_bounded_and_omits_query_text(self):
+        from telepiplex_search.context import runtime_context
+
+        logger = Mock()
+        original = runtime_context.logger
+        runtime_context.logger = logger
+        try:
+            await self._prepare_search()
+        finally:
+            runtime_context.logger = original
+
+        observations = [
+            call.kwargs["extra"]
+            for call in logger.info.call_args_list
+            if call.kwargs.get("extra", {}).get("event_name")
+            == "search.discovery.completed"
+        ]
+        self.assertEqual(len(observations), 1)
+        fields = observations[0]["diagnostic_fields"]
+        self.assertTrue(fields["input"]["search_session_id"])
+        self.assertEqual(fields["output"]["candidate_count"], 1)
+        self.assertNotIn("English Title", repr(observations[0]))
+
+    async def test_hydration_observation_omits_frozen_source_url(self):
+        from telepiplex_search.context import runtime_context
+
+        logger = Mock()
+        original = runtime_context.logger
+        runtime_context.logger = logger
+        candidate = frozen_douban_movie_candidate()
+        try:
+            with patch.object(
+                self.feature,
+                "_prefetch_exact_resolver",
+                new=AsyncMock(return_value=lambda _link: {}),
+            ), patch(
+                "telepiplex_search.service.hydrate_frozen_candidate_anchor",
+                return_value={"metadata_hydrated": True},
+            ), patch(
+                "telepiplex_search.service.needs_authoritative_scope_enrichment",
+                return_value=False,
+            ):
+                await self.feature._hydrate_selected_candidate(
+                    candidate,
+                    metadata_id="plan-1",
+                    raw_query="private query",
+                    require_anchor=True,
+                )
+        finally:
+            runtime_context.logger = original
+
+        observations = [
+            call.kwargs["extra"]
+            for call in logger.info.call_args_list
+            if call.kwargs.get("extra", {}).get("event_name")
+            == "search.hydration.completed"
+        ]
+        self.assertEqual(len(observations), 1)
+        output = observations[0]["diagnostic_fields"]["output"]
+        self.assertTrue(output["metadata_hydrated"])
+        self.assertNotIn("movie.douban.com", repr(observations[0]))
+        self.assertNotIn("private query", repr(observations[0]))
+
+    async def test_first_and_tail_prowlarr_waves_are_observed_without_query(self):
+        from telepiplex_search.context import runtime_context
+
+        logger = Mock()
+        original = runtime_context.logger
+        runtime_context.logger = logger
+        try:
+            plan_id = await self._prepare_search()
+            stored = self.feature.plans[plan_id]
+            self.feature.config["search"]["prowlarr"].update({
+                "first_wave_indexer_ids": [1],
+                "wave_delay": 0.0,
+            })
+            self.feature.indexer_loader = lambda: [
+                {"id": 1, "name": "First"},
+                {"id": 2, "name": "Tail"},
+            ]
+            self.feature.indexer_search = lambda *_args: []
+            await self.feature._confirm_and_search(plan_id, stored)
+        finally:
+            runtime_context.logger = original
+
+        observations = [
+            call.kwargs["extra"]
+            for call in logger.info.call_args_list
+            if call.kwargs.get("extra", {}).get("event_name")
+            == "search.prowlarr.wave.completed"
+        ]
+        self.assertEqual(
+            {item["diagnostic_fields"]["output"]["wave"] for item in observations},
+            {"first", "tail"},
+        )
+        self.assertTrue(all(
+            "English Title" not in repr(item)
+            for item in observations
+        ))
+
     async def test_background_operation_rejection_is_logged_once_without_second_report(
         self,
     ):
@@ -6016,9 +6116,9 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "1.11.6")
+        self.assertEqual(manifest["version"], "1.11.7")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertEqual(project["project"]["version"], "1.11.6")
+        self.assertEqual(project["project"]["version"], "1.11.7")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.3.2",
@@ -6052,14 +6152,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.11.6.tpx", source)
+        self.assertIn("/tmp/search-1.11.7.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-1.11.6.tpx", source)
+        self.assertNotIn("dist/search-1.11.7.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

@@ -333,7 +333,7 @@ def test_replay_accepts_verified_target_identity_without_mutation():
     assert journal.file_transitions[-1]["stage"] == "verified"
 
 
-def test_sixty_five_no_op_files_use_one_initial_batch_lookup():
+def test_sixty_five_no_op_files_with_unverifiable_parent_fall_back_to_exact_batch():
     class BatchStorage(StatefulStorage):
         def __init__(self, files):
             super().__init__(files=files)
@@ -365,8 +365,8 @@ def test_sixty_five_no_op_files_use_one_initial_batch_lookup():
     )
 
     assert summary.canonical_no_ops == 65
-    assert len(storage.batch_calls) == 1
-    assert set(storage.batch_calls[0]) == {*paths, "/TV/Veep"}
+    assert storage.batch_calls[0] == ("/TV/Veep",)
+    assert set(storage.batch_calls[1]) == {*paths, "/TV/Veep"}
     assert storage.individual_calls == []
 
 
@@ -810,12 +810,12 @@ def test_native_snapshot_uses_captured_parent_id_without_parent_reread():
     storage = NativeStorage()
     snapshot = file_executor.FileTransactionSnapshot.from_provider_facts(
         {
-            "/Downloads/episode.mkv": {"file_id": "episode"},
-            "/Series/Show/episode.mkv": None,
-            "/Downloads": {"file_id": "source-dir"},
-        },
-        {"/Downloads": "source-dir"},
-    )
+                "/Downloads/episode.mkv": {"file_id": "episode"},
+                "/Series/Show/episode.mkv": None,
+                "/Downloads": {"file_id": "dir:/Downloads"},
+            },
+            {"/Downloads": "dir:/Downloads"},
+        )
 
     summary = execute_file_resolutions(
         storage,
@@ -1076,6 +1076,601 @@ def test_native_fresh_listing_failure_never_uses_preflight_as_postcondition():
     )
 
     assert summary.outcomes[0].reason_codes == ("fresh_listing_failed",)
+
+
+class _FreshGateStorage(StatefulStorage):
+    """Storage whose live listing may diverge from a supplied preflight."""
+
+    def __init__(self, *, files=(), directories=(), failing_directory_ids=()):
+        super().__init__(files=files, directories=directories)
+        self.failing_directory_ids = set(failing_directory_ids)
+        self.native_calls = []
+
+    def get_file_list(self, params):
+        if params["cid"] in self.failing_directory_ids:
+            raise RuntimeError("fresh listing unavailable")
+        return super().get_file_list(params)
+
+    def move_files_by_id(self, file_ids, target_dir_id):
+        self.native_calls.append((tuple(file_ids), target_dir_id))
+        target_dir = str(target_dir_id)[4:]
+        for file_id in file_ids:
+            source = next(
+                path for path, info in self.files.items()
+                if info["file_id"] == file_id
+            )
+            target = str(PurePosixPath(target_dir) / PurePosixPath(source).name)
+            self.files[target] = self.files.pop(source)
+        return {"state": "submitted"}
+
+
+def _native_gate_snapshot(*resolutions):
+    source_parent = str(PurePosixPath(resolutions[0].source_path).parent)
+    facts = {
+        source_parent: {"file_id": f"dir:{source_parent}"},
+    }
+    for resolution in resolutions:
+        facts[resolution.source_path] = {"file_id": resolution.source_id}
+        facts[resolution.target_path] = None
+    return file_executor.FileTransactionSnapshot.from_provider_facts(
+        facts,
+        {source_parent: f"dir:{source_parent}"},
+    )
+
+
+def _native_snapshot_from_storage(storage, *resolutions):
+    return file_executor.build_file_transaction_snapshot(
+        storage,
+        file_paths=[
+            path
+            for resolution in resolutions
+            for path in (resolution.source_path, resolution.target_path)
+        ],
+        source_parent_paths=[
+            str(PurePosixPath(resolution.source_path).parent)
+            for resolution in resolutions
+        ],
+    )
+
+
+def test_native_transaction_guard_rejects_same_logical_target_before_mutation():
+    first = _resolution(
+        "first",
+        "/Downloads/A/first.mkv",
+        "/Series/Show/collision.mkv",
+        "rename_and_move",
+    )
+    second = _resolution(
+        "second",
+        "/Downloads/B/second.mkv",
+        "/Series/Show/collision.mkv",
+        "rename_and_move",
+    )
+    safe = _resolution(
+        "safe",
+        "/Downloads/C/safe.mkv",
+        "/Series/Show/safe.mkv",
+        "move_only",
+    )
+    storage = _FreshGateStorage(
+        files=[
+            (first.source_path, first.source_id),
+            (second.source_path, second.source_id),
+            (safe.source_path, safe.source_id),
+        ],
+        directories=[
+            "/Downloads/A", "/Downloads/B", "/Downloads/C", "/Series/Show",
+        ],
+    )
+
+    summary = execute_file_resolutions(
+        storage,
+        [first, second, safe],
+        selected_root="/Downloads",
+        move_batch_size=1,
+        preflight=_native_snapshot_from_storage(storage, first, second, safe),
+    )
+
+    assert [(item.source_id, item.state) for item in summary.outcomes] == [
+        ("first", "failed"),
+        ("second", "failed"),
+        ("safe", "organized"),
+    ]
+    assert all(
+        item.reason_codes == ("planned_target_collision",)
+        for item in summary.outcomes[:2]
+    )
+    assert storage.renames == []
+    assert storage.native_calls == [(('safe',), 'dir:/Series/Show')]
+    assert first.source_path in storage.files
+    assert second.source_path in storage.files
+
+
+def test_native_transaction_guard_rejects_duplicate_source_id_before_submission():
+    first = _resolution(
+        "duplicate",
+        "/Downloads/A/one.mkv",
+        "/Series/Show/one.mkv",
+        "move_only",
+    )
+    second = _resolution(
+        "duplicate",
+        "/Downloads/B/two.mkv",
+        "/Series/Show/two.mkv",
+        "move_only",
+    )
+    safe = _resolution(
+        "safe",
+        "/Downloads/C/safe.mkv",
+        "/Series/Show/safe.mkv",
+        "move_only",
+    )
+    storage = _FreshGateStorage(
+        files=[
+            (first.source_path, first.source_id),
+            (second.source_path, second.source_id),
+            (safe.source_path, safe.source_id),
+        ],
+        directories=[
+            "/Downloads/A", "/Downloads/B", "/Downloads/C", "/Series/Show",
+        ],
+    )
+
+    summary = execute_file_resolutions(
+        storage,
+        [first, second, safe],
+        selected_root="/Downloads",
+        move_batch_size=1,
+        preflight=_native_snapshot_from_storage(storage, first, second, safe),
+    )
+
+    assert [(item.source_id, item.state) for item in summary.outcomes] == [
+        ("duplicate", "failed"),
+        ("duplicate", "failed"),
+        ("safe", "organized"),
+    ]
+    assert all(
+        item.reason_codes == ("duplicate_source_id_in_transaction",)
+        for item in summary.outcomes[:2]
+    )
+    assert storage.renames == []
+    assert storage.native_calls == [(('safe',), 'dir:/Series/Show')]
+
+
+def test_native_transaction_guard_rejects_physical_target_directory_aliases():
+    first = _resolution(
+        "first",
+        "/Downloads/A/episode.mkv",
+        "/Series/First/episode.mkv",
+        "move_only",
+    )
+    second = _resolution(
+        "second",
+        "/Downloads/B/episode.mkv",
+        "/Series/Second/episode.mkv",
+        "move_only",
+    )
+
+    class AliasedTargetStorage(_FreshGateStorage):
+        def get_file_info(self, path):
+            if path in {"/Series/First", "/Series/Second"}:
+                return {"file_id": "dir:/Series/Shared", "file_category": "0"}
+            return super().get_file_info(path)
+
+        def get_file_list(self, params):
+            if params["cid"] == "dir:/Series/Shared":
+                return []
+            return super().get_file_list(params)
+
+    storage = AliasedTargetStorage(
+        files=[
+            (first.source_path, first.source_id),
+            (second.source_path, second.source_id),
+        ],
+        directories=[
+            "/Downloads/A", "/Downloads/B", "/Series/First", "/Series/Second",
+        ],
+    )
+
+    summary = execute_file_resolutions(
+        storage,
+        [first, second],
+        selected_root="/Downloads",
+        move_batch_size=1,
+        preflight=_native_snapshot_from_storage(storage, first, second),
+    )
+
+    assert [item.state for item in summary.outcomes] == ["failed", "failed"]
+    assert all(
+        item.reason_codes == ("planned_target_collision",)
+        for item in summary.outcomes
+    )
+    assert storage.renames == []
+    assert storage.native_calls == []
+
+
+def test_native_gate_rejects_stale_source_identity_name_and_foreign_target():
+    stale_id = _resolution(
+        "stale-id",
+        "/Downloads/stale-id.mkv",
+        "/Series/Show/stale-id.mkv",
+        "move_only",
+    )
+    stale_name = _resolution(
+        "stale-name",
+        "/Downloads/stale-name.mkv",
+        "/Series/Show/stale-name.mkv",
+        "move_only",
+    )
+    foreign_target = _resolution(
+        "foreign-source",
+        "/Downloads/foreign-target.mkv",
+        "/Series/Show/foreign-target.mkv",
+        "move_only",
+    )
+    storage = _FreshGateStorage(
+        files=[
+            ("/Downloads/stale-id.mkv", "replacement"),
+            ("/Downloads/stale-name-renamed.mkv", "stale-name"),
+            ("/Downloads/foreign-target.mkv", "foreign-source"),
+            ("/Series/Show/foreign-target.mkv", "foreign"),
+        ],
+        directories=["/Downloads", "/Series/Show"],
+    )
+
+    summary = execute_file_resolutions(
+        storage,
+        [stale_id, stale_name, foreign_target],
+        selected_root="/Downloads",
+        preflight=_native_gate_snapshot(
+            stale_id, stale_name, foreign_target,
+        ),
+    )
+
+    assert summary.failed_files == 3
+    assert storage.native_calls == []
+    assert "/Downloads/stale-id.mkv" in storage.files
+    assert "/Downloads/stale-name-renamed.mkv" in storage.files
+    assert storage.files["/Series/Show/foreign-target.mkv"]["file_id"] == "foreign"
+
+
+def test_native_gate_marks_exact_target_replay_organized_without_move():
+    resolution = _resolution(
+        "episode",
+        "/Downloads/episode.mkv",
+        "/Series/Show/episode.mkv",
+        "move_only",
+    )
+    journal = RenameOperationJournal()
+    storage = _FreshGateStorage(
+        files=[("/Series/Show/episode.mkv", "episode")],
+        directories=["/Downloads", "/Series/Show"],
+    )
+
+    summary = execute_file_resolutions(
+        storage,
+        [resolution],
+        selected_root="/Downloads",
+        journal=journal,
+        preflight=_native_gate_snapshot(resolution),
+    )
+
+    assert summary.outcomes[0].state == "organized"
+    assert summary.outcomes[0].observed_path == "/Series/Show/episode.mkv"
+    assert storage.native_calls == []
+    assert journal.file_transitions[-1]["stage"] == "verified"
+
+
+def test_native_gate_replay_rejects_foreign_replacement_at_original_source_name():
+    resolution = _resolution(
+        "episode",
+        "/Downloads/episode.mkv",
+        "/Series/Show/episode.mkv",
+        "move_only",
+    )
+    storage = _FreshGateStorage(
+        files=[("/Downloads/episode.mkv", "episode")],
+        directories=["/Downloads", "/Series/Show"],
+    )
+    snapshot = file_executor.build_file_transaction_snapshot(
+        storage,
+        file_paths=[resolution.source_path, resolution.target_path],
+        source_parent_paths=["/Downloads"],
+    )
+    storage.files[resolution.target_path] = storage.files.pop(
+        resolution.source_path
+    )
+    storage.files[resolution.source_path] = {
+        "file_id": "foreign-replacement",
+        "file_category": "1",
+    }
+
+    summary = execute_file_resolutions(
+        storage,
+        [resolution],
+        selected_root="/Downloads",
+        preflight=snapshot,
+    )
+
+    assert summary.outcomes[0].state == "failed"
+    assert storage.native_calls == []
+    assert storage.files[resolution.source_path]["file_id"] == (
+        "foreign-replacement"
+    )
+    assert storage.files[resolution.target_path]["file_id"] == "episode"
+
+
+def test_native_gate_submits_safe_peer_but_omits_rejected_same_target_chunk():
+    stale = _resolution(
+        "stale",
+        "/Downloads/stale.mkv",
+        "/Series/Show/stale.mkv",
+        "move_only",
+    )
+    foreign_target = _resolution(
+        "foreign-source",
+        "/Downloads/foreign-target.mkv",
+        "/Series/Show/foreign-target.mkv",
+        "move_only",
+    )
+    safe = _resolution(
+        "safe",
+        "/Downloads/safe.mkv",
+        "/Series/Show/safe.mkv",
+        "move_only",
+    )
+    storage = _FreshGateStorage(
+        files=[
+            ("/Downloads/stale.mkv", "replacement"),
+            ("/Downloads/foreign-target.mkv", "foreign-source"),
+            ("/Downloads/safe.mkv", "safe"),
+            ("/Series/Show/foreign-target.mkv", "foreign"),
+        ],
+        directories=["/Downloads", "/Series/Show"],
+    )
+
+    summary = execute_file_resolutions(
+        storage,
+        [stale, foreign_target, safe],
+        selected_root="/Downloads",
+        preflight=_native_gate_snapshot(stale, foreign_target, safe),
+    )
+
+    assert [(item.source_id, item.state) for item in summary.outcomes] == [
+        ("stale", "failed"),
+        ("foreign-source", "failed"),
+        ("safe", "organized"),
+    ]
+    assert storage.native_calls == [(('safe',), 'dir:/Series/Show')]
+    assert "/Downloads/stale.mkv" in storage.files
+    assert "/Downloads/foreign-target.mkv" in storage.files
+    assert "/Series/Show/safe.mkv" in storage.files
+
+
+def test_native_gate_rejects_duplicate_source_name_but_moves_safe_peer():
+    ambiguous = _resolution(
+        "episode",
+        "/Downloads/episode.mkv",
+        "/Series/Show/episode.mkv",
+        "move_only",
+    )
+    safe = _resolution(
+        "safe",
+        "/Downloads/safe.mkv",
+        "/Series/Show/safe.mkv",
+        "move_only",
+    )
+
+    class DuplicateSourceNameStorage(_FreshGateStorage):
+        def get_file_list(self, params):
+            items = super().get_file_list(params)
+            if params["cid"] == "dir:/Downloads":
+                return [*items, {
+                    "file_id": "foreign-duplicate",
+                    "file_category": "1",
+                    "fn": "episode.mkv",
+                }]
+            return items
+
+    storage = DuplicateSourceNameStorage(
+        files=[
+            ("/Downloads/episode.mkv", "episode"),
+            ("/Downloads/safe.mkv", "safe"),
+        ],
+        directories=["/Downloads", "/Series/Show"],
+    )
+
+    summary = execute_file_resolutions(
+        storage,
+        [ambiguous, safe],
+        selected_root="/Downloads",
+        preflight=_native_gate_snapshot(ambiguous, safe),
+    )
+
+    assert [(item.source_id, item.state) for item in summary.outcomes] == [
+        ("episode", "failed"),
+        ("safe", "organized"),
+    ]
+    assert storage.native_calls == [(('safe',), 'dir:/Series/Show')]
+    assert "/Downloads/episode.mkv" in storage.files
+    assert "/Series/Show/safe.mkv" in storage.files
+
+
+def test_native_gate_rejects_selected_id_already_at_target_under_another_name():
+    unsafe = _resolution(
+        "episode",
+        "/Downloads/episode.mkv",
+        "/Series/Show/episode.mkv",
+        "move_only",
+    )
+    safe = _resolution(
+        "safe",
+        "/Downloads/safe.mkv",
+        "/Series/Show/safe.mkv",
+        "move_only",
+    )
+
+    class TargetIdentityCollisionStorage(_FreshGateStorage):
+        def get_file_list(self, params):
+            items = super().get_file_list(params)
+            if params["cid"] == "dir:/Series/Show":
+                return [*items, {
+                    "file_id": "episode",
+                    "file_category": "1",
+                    "fn": "episode-other-name.mkv",
+                }]
+            return items
+
+    storage = TargetIdentityCollisionStorage(
+        files=[
+            ("/Downloads/episode.mkv", "episode"),
+            ("/Downloads/safe.mkv", "safe"),
+        ],
+        directories=["/Downloads", "/Series/Show"],
+    )
+
+    summary = execute_file_resolutions(
+        storage,
+        [unsafe, safe],
+        selected_root="/Downloads",
+        preflight=_native_gate_snapshot(unsafe, safe),
+    )
+
+    assert [(item.source_id, item.state) for item in summary.outcomes] == [
+        ("episode", "failed"),
+        ("safe", "organized"),
+    ]
+    assert storage.native_calls == [(('safe',), 'dir:/Series/Show')]
+    assert "/Downloads/episode.mkv" in storage.files
+    assert "/Series/Show/safe.mkv" in storage.files
+
+
+def test_native_gate_rejects_selected_id_duplicated_under_second_source_name(
+    monkeypatch,
+):
+    unsafe = _resolution(
+        "episode",
+        "/Downloads/episode.mkv",
+        "/Series/Show/episode.mkv",
+        "move_only",
+    )
+    safe = _resolution(
+        "safe",
+        "/Downloads/safe.mkv",
+        "/Series/Show/safe.mkv",
+        "move_only",
+    )
+
+    storage = _FreshGateStorage(
+        files=[
+            ("/Downloads/episode.mkv", "episode"),
+            ("/Downloads/safe.mkv", "safe"),
+        ],
+        directories=["/Downloads", "/Series/Show"],
+    )
+    complete_items = file_executor._complete_directory_items
+
+    def duplicate_source_id(storage_arg, directory_id):
+        items = complete_items(storage_arg, directory_id)
+        if directory_id == "dir:/Downloads":
+            return [*items, {
+                "file_id": "episode",
+                "file_category": "1",
+                "fn": "episode-other-name.mkv",
+            }]
+        return items
+
+    monkeypatch.setattr(
+        file_executor,
+        "_complete_directory_items",
+        duplicate_source_id,
+    )
+
+    summary = execute_file_resolutions(
+        storage,
+        [unsafe, safe],
+        selected_root="/Downloads",
+        preflight=_native_gate_snapshot(unsafe, safe),
+    )
+
+    assert [(item.source_id, item.state) for item in summary.outcomes] == [
+        ("episode", "failed"),
+        ("safe", "organized"),
+    ]
+    assert storage.native_calls == [(('safe',), 'dir:/Series/Show')]
+    assert "/Downloads/episode.mkv" in storage.files
+    assert "/Series/Show/safe.mkv" in storage.files
+
+
+def test_native_gate_uses_post_rename_current_name_before_native_move():
+    resolution = _resolution(
+        "episode",
+        "/Downloads/release-name.mkv",
+        "/Series/Show/canonical-name.mkv",
+        "rename_and_move",
+    )
+    storage = _FreshGateStorage(
+        files=[("/Downloads/release-name.mkv", "episode")],
+        directories=["/Downloads", "/Series/Show"],
+    )
+    snapshot = file_executor.build_file_transaction_snapshot(
+        storage,
+        file_paths=[resolution.source_path, resolution.target_path],
+        source_parent_paths=["/Downloads"],
+    )
+
+    summary = execute_file_resolutions(
+        storage,
+        [resolution],
+        selected_root="/Downloads",
+        preflight=snapshot,
+    )
+
+    assert summary.outcomes[0].state == "organized"
+    assert storage.renames == [(
+        "/Downloads/release-name.mkv", "canonical-name.mkv",
+    )]
+    assert storage.native_calls == [(('episode',), 'dir:/Series/Show')]
+    assert "/Series/Show/canonical-name.mkv" in storage.files
+
+
+def test_native_gate_listing_failure_blocks_only_that_target_group():
+    blocked = _resolution(
+        "blocked",
+        "/Downloads/blocked.mkv",
+        "/Series/A/blocked.mkv",
+        "move_only",
+    )
+    allowed = _resolution(
+        "allowed",
+        "/Downloads/allowed.mkv",
+        "/Series/B/allowed.mkv",
+        "move_only",
+    )
+    storage = _FreshGateStorage(
+        files=[
+            ("/Downloads/blocked.mkv", "blocked"),
+            ("/Downloads/allowed.mkv", "allowed"),
+        ],
+        directories=["/Downloads", "/Series/A", "/Series/B"],
+        failing_directory_ids={"dir:/Series/A"},
+    )
+
+    summary = execute_file_resolutions(
+        storage,
+        [blocked, allowed],
+        selected_root="/Downloads",
+        preflight=_native_gate_snapshot(blocked, allowed),
+    )
+
+    assert [(item.source_id, item.state) for item in summary.outcomes] == [
+        ("blocked", "failed"),
+        ("allowed", "organized"),
+    ]
+    assert summary.outcomes[0].reason_codes == ("fresh_listing_failed",)
+    assert storage.native_calls == [(('allowed',), 'dir:/Series/B')]
+    assert "/Downloads/blocked.mkv" in storage.files
+    assert "/Series/B/allowed.mkv" in storage.files
 
 
 def _snapshot(source, target, source_info, *, parent_id="source-dir"):
@@ -1382,6 +1977,390 @@ def test_explicit_none_batch_value_is_queried_absence():
 
     assert "/target.mkv" in snapshot.file_info
     assert snapshot.file_info["/target.mkv"] is None
+
+
+class _DirectorySnapshotStorage:
+    """Controlled 115-shaped storage for snapshot preflight tests."""
+
+    def __init__(self, info, pages):
+        self.info = dict(info)
+        self.pages = dict(pages)
+        self.batch_requests = []
+        self.list_requests = []
+
+    def get_file_info_batch(self, paths):
+        requested = tuple(paths)
+        self.batch_requests.append(requested)
+        return {path: self.info.get(path) for path in requested}
+
+    def get_file_list(self, params):
+        request = dict(params)
+        self.list_requests.append(request)
+        response = self.pages[(request["cid"], request["offset"])]
+        return response
+
+
+def _directory_snapshot_info(*, target_parent=True):
+    info = {
+        "/Downloads/Release": {"file_id": "source-dir", "file_category": "0"},
+        "/Downloads/Release/one.mkv": {
+            "file_id": "one",
+            "sha1": "SHA-ONE",
+            "size": 11,
+        },
+        "/Downloads/Release/two.mkv": {
+            "file_id": "two",
+            "sha1": "SHA-TWO",
+            "size": 22,
+        },
+    }
+    if target_parent:
+        info["/Series/Show"] = {"file_id": "target-dir", "file_category": "0"}
+    return info
+
+
+def _directory_item(provider_id, name, sha1, size):
+    return {
+        "file_id": provider_id,
+        "fn": name,
+        "sha1": sha1,
+        "size": size,
+    }
+
+
+def test_directory_snapshot_uses_complete_shared_parent_lists_for_preflight_facts():
+    storage = _DirectorySnapshotStorage(
+        _directory_snapshot_info(),
+        {
+            ("source-dir", 0): [
+                _directory_item("one", "one.mkv", "SHA-ONE", 11),
+                _directory_item("two", "two.mkv", "SHA-TWO", 22),
+            ],
+            ("target-dir", 0): [],
+        },
+    )
+
+    snapshot = file_executor.build_file_transaction_snapshot(
+        storage,
+        file_paths=(
+            "/Downloads/Release/one.mkv",
+            "/Downloads/Release/two.mkv",
+            "/Series/Show/one.mkv",
+            "/Series/Show/two.mkv",
+        ),
+        source_parent_paths=("/Downloads/Release",),
+    )
+
+    assert snapshot.require_file_info("/Downloads/Release/one.mkv") == (
+        file_executor.PreflightFileInfo("one", "sha-one", 11)
+    )
+    assert snapshot.require_file_info("/Downloads/Release/two.mkv") == (
+        file_executor.PreflightFileInfo("two", "sha-two", 22)
+    )
+    assert snapshot.require_file_info("/Series/Show/one.mkv") is None
+    assert snapshot.require_file_info("/Series/Show/two.mkv") is None
+    assert snapshot.require_source_parent_id("/Downloads/Release") == "source-dir"
+    assert storage.batch_requests == [
+        ("/Downloads/Release", "/Series/Show"),
+    ]
+    assert [request["cid"] for request in storage.list_requests] == [
+        "source-dir",
+        "target-dir",
+    ]
+
+
+def test_directory_snapshot_keeps_one_file_per_directory_on_exact_reads():
+    storage = _DirectorySnapshotStorage(
+        {
+            "/Downloads/Release": {"file_id": "source-dir", "file_category": "0"},
+            "/Downloads/Release/one.mkv": {
+                "file_id": "one", "sha1": "SHA-ONE", "size": 11,
+            },
+            "/Series/Show/one.mkv": None,
+        },
+        {},
+    )
+
+    snapshot = file_executor.build_file_transaction_snapshot(
+        storage,
+        file_paths=(
+            "/Downloads/Release/one.mkv",
+            "/Series/Show/one.mkv",
+        ),
+        source_parent_paths=("/Downloads/Release",),
+    )
+
+    assert snapshot.require_file_info("/Downloads/Release/one.mkv").provider_id == "one"
+    assert snapshot.require_file_info("/Series/Show/one.mkv") is None
+    assert storage.batch_requests == [(
+        "/Downloads/Release/one.mkv",
+        "/Series/Show/one.mkv",
+        "/Downloads/Release",
+    )]
+    assert storage.list_requests == []
+
+
+def test_directory_snapshot_allows_absent_target_parent_to_prove_target_absence():
+    info = _directory_snapshot_info(target_parent=False)
+    info["/Series/Show/one.mkv"] = None
+    info["/Series/Show/two.mkv"] = None
+    storage = _DirectorySnapshotStorage(
+        info,
+        {
+            ("source-dir", 0): [
+                _directory_item("one", "one.mkv", "SHA-ONE", 11),
+                _directory_item("two", "two.mkv", "SHA-TWO", 22),
+            ],
+        },
+    )
+
+    snapshot = file_executor.build_file_transaction_snapshot(
+        storage,
+        file_paths=(
+            "/Downloads/Release/one.mkv",
+            "/Downloads/Release/two.mkv",
+            "/Series/Show/one.mkv",
+            "/Series/Show/two.mkv",
+        ),
+        source_parent_paths=("/Downloads/Release",),
+    )
+
+    assert snapshot.require_file_info("/Series/Show/one.mkv") is None
+    assert snapshot.require_file_info("/Series/Show/two.mkv") is None
+    assert storage.batch_requests == [
+        ("/Downloads/Release", "/Series/Show"),
+    ]
+    assert [request["cid"] for request in storage.list_requests] == ["source-dir"]
+
+
+def test_directory_snapshot_reads_all_pages_before_projecting_requested_child():
+    first_page = [
+        _directory_item(f"filler-{index}", f"filler-{index}.mkv", "filler", 1)
+        for index in range(999)
+    ] + [_directory_item("one", "one.mkv", "SHA-ONE", 11)]
+    storage = _DirectorySnapshotStorage(
+        _directory_snapshot_info(),
+        {
+            ("source-dir", 0): {"list": first_page, "has_more": True},
+            ("source-dir", 1000): {"list": [
+                _directory_item("two", "two.mkv", "SHA-TWO", 22),
+            ]},
+            ("target-dir", 0): [],
+        },
+    )
+
+    snapshot = file_executor.build_file_transaction_snapshot(
+        storage,
+        file_paths=(
+            "/Downloads/Release/one.mkv",
+            "/Downloads/Release/two.mkv",
+            "/Series/Show/one.mkv",
+            "/Series/Show/two.mkv",
+        ),
+        source_parent_paths=("/Downloads/Release",),
+    )
+
+    assert snapshot.require_file_info("/Downloads/Release/two.mkv").provider_id == "two"
+    assert [request["offset"] for request in storage.list_requests] == [0, 1000, 0]
+
+
+@pytest.mark.parametrize(
+    ("source_pages", "reason"),
+    [
+        (
+            {
+                0: {"list": [], "has_more": True},
+            },
+            "empty page with has_more",
+        ),
+        (
+            {
+                0: {"list": [
+                    _directory_item("one", "one.mkv", "SHA-ONE", 11),
+                ], "has_more": True},
+                1: {"list": [
+                    _directory_item("one", "one.mkv", "SHA-ONE", 11),
+                ], "has_more": True},
+            },
+            "repeated page",
+        ),
+        (
+            {
+                0: {"list": [
+                    _directory_item("one", "one.mkv", "SHA-ONE", 11),
+                    _directory_item("one", "two.mkv", "SHA-TWO", 22),
+                ]},
+            },
+            "conflicting duplicate id",
+        ),
+        (
+            {
+                0: {"list": [
+                    {"file_id": "one", "fn": "one.mkv"},
+                    _directory_item("two", "two.mkv", "SHA-TWO", 22),
+                ]},
+            },
+            "missing sha and size",
+        ),
+    ],
+)
+def test_directory_snapshot_discards_untrusted_listing_and_uses_exact_fallback(
+    source_pages,
+    reason,
+):
+    pages = {
+        ("source-dir", offset): response
+        for offset, response in source_pages.items()
+    }
+    storage = _DirectorySnapshotStorage(_directory_snapshot_info(), pages)
+    storage.pages[("target-dir", 0)] = []
+
+    snapshot = file_executor.build_file_transaction_snapshot(
+        storage,
+        file_paths=(
+            "/Downloads/Release/one.mkv",
+            "/Downloads/Release/two.mkv",
+            "/Series/Show/one.mkv",
+            "/Series/Show/two.mkv",
+        ),
+        source_parent_paths=("/Downloads/Release",),
+    )
+
+    assert snapshot.require_file_info("/Downloads/Release/one.mkv").provider_id == "one", reason
+    assert snapshot.require_file_info("/Downloads/Release/two.mkv").provider_id == "two", reason
+    assert storage.batch_requests[-1] == (
+        "/Downloads/Release/one.mkv",
+        "/Downloads/Release/two.mkv",
+        "/Series/Show/one.mkv",
+        "/Series/Show/two.mkv",
+        "/Downloads/Release",
+    ), reason
+
+
+def test_directory_snapshot_unrelated_malformed_item_falls_back_without_raising():
+    storage = _DirectorySnapshotStorage(
+        _directory_snapshot_info(),
+        {
+            ("source-dir", 0): [
+                _directory_item("one", "one.mkv", "SHA-ONE", 11),
+                _directory_item("two", "two.mkv", "SHA-TWO", 22),
+                {
+                    "file_id": "unrelated",
+                    "fn": "metadata.nfo",
+                    "sha1": [],
+                    "size": 1,
+                },
+            ],
+            ("target-dir", 0): [],
+        },
+    )
+
+    snapshot = file_executor.build_file_transaction_snapshot(
+        storage,
+        file_paths=(
+            "/Downloads/Release/one.mkv",
+            "/Downloads/Release/two.mkv",
+            "/Series/Show/one.mkv",
+            "/Series/Show/two.mkv",
+        ),
+        source_parent_paths=("/Downloads/Release",),
+    )
+
+    assert snapshot.require_file_info("/Downloads/Release/one.mkv").provider_id == "one"
+    assert storage.batch_requests[-1] == (
+        "/Downloads/Release/one.mkv",
+        "/Downloads/Release/two.mkv",
+        "/Series/Show/one.mkv",
+        "/Series/Show/two.mkv",
+        "/Downloads/Release",
+    )
+
+
+def test_directory_snapshot_semantically_repeated_volatile_page_falls_back_to_exact():
+    volatile_one = {
+        "volatile": "new-token",
+        "size": 11,
+        "sha1": "SHA-ONE",
+        "fn": "one.mkv",
+        "file_id": "one",
+    }
+    volatile_two = {
+        "volatile": "new-token",
+        "size": 22,
+        "sha1": "SHA-TWO",
+        "fn": "two.mkv",
+        "file_id": "two",
+    }
+    storage = _DirectorySnapshotStorage(
+        _directory_snapshot_info(),
+        {
+            ("source-dir", 0): {
+                "list": [
+                    _directory_item("one", "one.mkv", "SHA-ONE", 11),
+                    _directory_item("two", "two.mkv", "SHA-TWO", 22),
+                ],
+                "has_more": True,
+            },
+            ("source-dir", 2): {"list": [volatile_two, volatile_one]},
+            ("target-dir", 0): [],
+        },
+    )
+
+    snapshot = file_executor.build_file_transaction_snapshot(
+        storage,
+        file_paths=(
+            "/Downloads/Release/one.mkv",
+            "/Downloads/Release/two.mkv",
+            "/Series/Show/one.mkv",
+            "/Series/Show/two.mkv",
+        ),
+        source_parent_paths=("/Downloads/Release",),
+    )
+
+    assert snapshot.require_file_info("/Series/Show/one.mkv") is None
+    assert storage.batch_requests[-1] == (
+        "/Downloads/Release/one.mkv",
+        "/Downloads/Release/two.mkv",
+        "/Series/Show/one.mkv",
+        "/Series/Show/two.mkv",
+        "/Downloads/Release",
+    )
+
+
+def test_directory_snapshot_malformed_has_more_falls_back_to_exact():
+    storage = _DirectorySnapshotStorage(
+        _directory_snapshot_info(),
+        {
+            ("source-dir", 0): {
+                "list": [
+                    _directory_item("one", "one.mkv", "SHA-ONE", 11),
+                    _directory_item("two", "two.mkv", "SHA-TWO", 22),
+                ],
+                "has_more": "yes",
+            },
+            ("target-dir", 0): [],
+        },
+    )
+
+    snapshot = file_executor.build_file_transaction_snapshot(
+        storage,
+        file_paths=(
+            "/Downloads/Release/one.mkv",
+            "/Downloads/Release/two.mkv",
+            "/Series/Show/one.mkv",
+            "/Series/Show/two.mkv",
+        ),
+        source_parent_paths=("/Downloads/Release",),
+    )
+
+    assert snapshot.require_file_info("/Series/Show/two.mkv") is None
+    assert storage.batch_requests[-1] == (
+        "/Downloads/Release/one.mkv",
+        "/Downloads/Release/two.mkv",
+        "/Series/Show/one.mkv",
+        "/Series/Show/two.mkv",
+        "/Downloads/Release",
+    )
 
 
 def test_unsupported_batch_stub_falls_back_but_other_errors_propagate():

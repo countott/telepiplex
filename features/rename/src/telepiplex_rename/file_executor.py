@@ -352,6 +352,14 @@ def build_file_transaction_snapshot(
         for path in (*tuple(file_paths or ()), *normalized_parents)
         if normalize_storage_path(path)
     ))
+    directory_snapshot = _build_directory_preflight_snapshot(
+        storage,
+        requested=requested,
+        file_paths=file_paths,
+        source_parent_paths=normalized_parents,
+    )
+    if directory_snapshot is not None:
+        return directory_snapshot
     provider_facts = prefetch_file_info(storage, requested)
     parent_ids = {
         path: _provider_id(provider_facts[path])
@@ -361,6 +369,110 @@ def build_file_transaction_snapshot(
         provider_facts,
         parent_ids,
     )
+
+
+def _build_directory_preflight_snapshot(
+    storage,
+    *,
+    requested: tuple[str, ...],
+    file_paths,
+    source_parent_paths: tuple[str, ...],
+) -> FileTransactionSnapshot | None:
+    """Build all pre-mutation facts from complete listings, or none of them."""
+
+    normalized_files = tuple(dict.fromkeys(
+        normalize_storage_path(path)
+        for path in file_paths or ()
+        if normalize_storage_path(path)
+    ))
+    if not requested or not normalized_files:
+        return None
+    directory_paths = tuple(dict.fromkeys(
+        normalize_storage_path(str(PurePosixPath(path).parent))
+        for path in normalized_files
+    ))
+    parent_lookup_paths = tuple(dict.fromkeys(
+        (*directory_paths, *source_parent_paths)
+    ))
+    exact_budget = len(requested)
+    optimistic_directory_budget = (
+        len(parent_lookup_paths) + len(directory_paths)
+    )
+    if optimistic_directory_budget >= exact_budget:
+        return None
+    if not callable(getattr(storage, "get_file_info_batch", None)):
+        return None
+    try:
+        parent_facts = prefetch_file_info(storage, parent_lookup_paths)
+    except Exception:
+        return None
+
+    requested_by_parent = defaultdict(dict)
+    for path in normalized_files:
+        parent = normalize_storage_path(str(PurePosixPath(path).parent))
+        requested_by_parent[parent][PurePosixPath(path).name] = path
+
+    projected = {}
+    for parent_path in directory_paths:
+        parent_fact = parent_facts.get(parent_path)
+        if parent_fact is None:
+            if parent_path in source_parent_paths:
+                return None
+            for path in requested_by_parent[parent_path].values():
+                projected[path] = None
+            continue
+        directory_id = _directory_id(parent_fact)
+        if not directory_id:
+            return None
+        items = _complete_directory_items(storage, directory_id)
+        if items is None:
+            return None
+        requested_children = requested_by_parent[parent_path]
+        matched = {}
+        for item in items:
+            name = _item_name(item)
+            path = requested_children.get(name)
+            if not path:
+                continue
+            try:
+                fact = _trusted_listing_file_info(item)
+            except (TypeError, ValueError):
+                return None
+            if not fact:
+                return None
+            existing = matched.get(path)
+            if existing is not None and existing != fact:
+                return None
+            matched[path] = fact
+        for path in requested_children.values():
+            projected[path] = matched.get(path)
+
+    provider_facts = {
+        path: projected[path] if path in projected else parent_facts[path]
+        for path in requested
+    }
+    parent_ids = {
+        path: _provider_id(parent_facts[path])
+        for path in source_parent_paths
+    }
+    try:
+        return FileTransactionSnapshot.from_provider_facts(
+            provider_facts,
+            parent_ids,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _trusted_listing_file_info(value) -> PreflightFileInfo | None:
+    provider_id, _name, sha1, size = _listing_item_facts(value)
+    has_size = any(
+        key in value and value[key] not in (None, "")
+        for key in ("size_byte", "fs", "size")
+    )
+    if not provider_id or not sha1 or not has_size:
+        return None
+    return PreflightFileInfo(provider_id, sha1, size)
 
 
 def _transition(
@@ -861,6 +973,110 @@ def _fresh_directory_items(storage, directory_id: str):
     return None
 
 
+def _complete_directory_items(storage, directory_id: str) -> list[dict] | None:
+    """Return a strictly complete listing suitable for immutable preflight."""
+
+    if not directory_id:
+        return None
+    collected = []
+    seen_page_signatures = set()
+    seen_item_facts = set()
+    seen_ids = {}
+    offset = 0
+    limit = 1000
+    for _page in range(100):
+        try:
+            response = storage.get_file_list({
+                "cid": directory_id,
+                "offset": offset,
+                "limit": limit,
+                "show_dir": 1,
+            })
+        except Exception:
+            return None
+        items = _list_items(response)
+        if items is None or any(not isinstance(item, dict) for item in items):
+            return None
+        has_more = _listing_has_more(response)
+        if has_more is None:
+            return None
+        if not items:
+            return None if has_more else collected
+        try:
+            page_facts = tuple(_listing_item_facts(item) for item in items)
+        except Exception:
+            return None
+        page_signature = frozenset(page_facts)
+        if len(page_signature) != len(page_facts):
+            return None
+        if page_signature in seen_page_signatures:
+            return None
+        seen_page_signatures.add(page_signature)
+        added_item = False
+        for item, facts in zip(items, page_facts):
+            provider_id, _name, _sha1_value, _size_value = facts
+            if facts not in seen_item_facts:
+                seen_item_facts.add(facts)
+                added_item = True
+            identity = facts[1:]
+            prior_identity = seen_ids.get(provider_id)
+            if prior_identity is not None and prior_identity != identity:
+                return None
+            seen_ids[provider_id] = identity
+        if not added_item:
+            return None
+        collected.extend(items)
+        if not has_more and len(items) < limit:
+            return collected
+        offset += len(items)
+    return None
+
+
+def _listing_item_facts(value) -> tuple[str, str, str, int]:
+    """Project a list entry to the stable fields used for pagination trust."""
+
+    if not isinstance(value, dict):
+        raise TypeError("directory listing item must be a mapping")
+    provider_id = _provider_id(value)
+    if not provider_id:
+        raise ValueError("directory listing item lacks a provider ID")
+    name_value = None
+    for key in ("fn", "n", "file_name", "name"):
+        candidate = value.get(key)
+        if candidate is None or candidate == "":
+            continue
+        name_value = candidate
+        break
+    if name_value is None:
+        raise ValueError("directory listing item lacks a name")
+    return (
+        provider_id,
+        _normalized_text_scalar(name_value, field="file_name"),
+        _sha1(value),
+        _size(value),
+    )
+
+
+def _listing_has_more(response) -> bool | None:
+    if not isinstance(response, dict):
+        return False
+    values = []
+    if "has_more" in response:
+        value = response["has_more"]
+        if type(value) is not bool:
+            return None
+        values.append(value)
+    data = response.get("data")
+    if isinstance(data, dict) and "has_more" in data:
+        value = data["has_more"]
+        if type(value) is not bool:
+            return None
+        values.append(value)
+    if len(set(values)) > 1:
+        return None
+    return values[0] if values else False
+
+
 def _legacy_move_prepared(storage, prepared: dict, journal=None):
     resolution = prepared["resolution"]
     current = prepared["current_path"]
@@ -1060,6 +1276,224 @@ def _reconcile_native_chunk(storage, chunk: list[dict], journal=None):
     return outcomes
 
 
+def _gate_native_move_chunk(
+    storage,
+    chunk: list[dict],
+    journal=None,
+) -> tuple[list[dict], dict[int, FileExecutionOutcome]]:
+    """Freshly prove each native move is still safe to submit.
+
+    ``FileTransactionSnapshot`` is intentionally only pre-mutation evidence.
+    This gate uses complete current listings for the source and target
+    directories immediately before submitting a native move batch.
+    """
+
+    listings = {}
+    directory_ids = {
+        item["source_parent_id"] for item in chunk
+    } | {
+        item["target_dir_id"] for item in chunk
+    }
+    for directory_id in directory_ids:
+        items = _complete_directory_items(storage, directory_id)
+        if items is None:
+            outcomes = {}
+            for item in chunk:
+                resolution = item["resolution"]
+                _transition(
+                    journal,
+                    resolution,
+                    "failed",
+                    item["current_path"],
+                    reason="fresh_listing_failed",
+                )
+                outcomes[item["index"]] = _outcome(
+                    resolution,
+                    "failed",
+                    item["current_path"],
+                    "fresh_listing_failed",
+                )
+            return [], outcomes
+        listings[directory_id] = items
+
+    accepted = []
+    outcomes = {}
+    for item in chunk:
+        resolution = item["resolution"]
+        source_items = listings[item["source_parent_id"]]
+        target_items = listings[item["target_dir_id"]]
+        source_id = str(resolution.source_id)
+        expected_source_name = PurePosixPath(item["current_path"]).name
+        target_name = PurePosixPath(item["target_path"]).name
+        source_identity_indexes = [
+            index for index, value in enumerate(source_items)
+            if _provider_id(value) == source_id
+        ]
+        source_name_indexes = [
+            index for index, value in enumerate(source_items)
+            if _item_name(value) == expected_source_name
+        ]
+        target_identity_indexes = [
+            index for index, value in enumerate(target_items)
+            if _provider_id(value) == source_id
+        ]
+        target_name_indexes = [
+            index for index, value in enumerate(target_items)
+            if _item_name(value) == target_name
+        ]
+        source_is_expected = (
+            len(source_identity_indexes) == 1
+            and len(source_name_indexes) == 1
+            and source_identity_indexes == source_name_indexes
+        )
+        source_is_absent = not source_identity_indexes and not source_name_indexes
+        target_is_clear = not target_identity_indexes and not target_name_indexes
+        target_is_exact_replay = (
+            len(target_identity_indexes) == 1
+            and len(target_name_indexes) == 1
+            and target_identity_indexes == target_name_indexes
+        )
+
+        if source_is_absent and target_is_exact_replay:
+            _transition(
+                journal,
+                resolution,
+                "verified",
+                item["target_path"],
+                replay=True,
+                native_move_gate=True,
+            )
+            outcomes[item["index"]] = _outcome(
+                resolution,
+                "organized",
+                item["target_path"],
+                "target_identity_verified",
+            )
+            continue
+
+        if not source_is_expected:
+            reason = "source_identity_changed_before_move"
+        elif not target_is_clear:
+            reason = "target_conflict_before_move"
+        else:
+            accepted.append(item)
+            continue
+        _transition(
+            journal,
+            resolution,
+            "failed",
+            item["current_path"],
+            reason=reason,
+        )
+        outcomes[item["index"]] = _outcome(
+            resolution,
+            "failed",
+            item["current_path"],
+            reason,
+        )
+    return accepted, outcomes
+
+
+def _transaction_collision_reasons(
+    *,
+    source_keys: Mapping[int, str],
+    target_keys: Mapping[int, object],
+) -> dict[int, tuple[str, ...]]:
+    """Return stable, fail-closed reasons for transaction-wide aliases."""
+
+    source_indexes = defaultdict(list)
+    target_indexes = defaultdict(list)
+    for index, source_id in source_keys.items():
+        if source_id:
+            source_indexes[source_id].append(index)
+    for index, target_key in target_keys.items():
+        if target_key:
+            target_indexes[target_key].append(index)
+    duplicate_sources = {
+        index
+        for indexes in source_indexes.values()
+        if len(indexes) > 1
+        for index in indexes
+    }
+    duplicate_targets = {
+        index
+        for indexes in target_indexes.values()
+        if len(indexes) > 1
+        for index in indexes
+    }
+    return {
+        index: tuple(
+            code for code, indexes in (
+                ("planned_target_collision", duplicate_targets),
+                ("duplicate_source_id_in_transaction", duplicate_sources),
+            )
+            if index in indexes
+        )
+        for index in duplicate_sources | duplicate_targets
+    }
+
+
+def _logical_native_collision_reasons(
+    resolutions: list[FileResolution],
+) -> dict[int, tuple[str, ...]]:
+    source_keys = {}
+    target_keys = {}
+    for index, resolution in enumerate(resolutions):
+        if (
+            resolution.action not in {"move_only", "rename_and_move"}
+            or resolution.status != "resolved"
+        ):
+            continue
+        source_keys[index] = str(resolution.source_id or "").strip()
+        target_keys[index] = normalize_storage_path(resolution.target_path)
+    return _transaction_collision_reasons(
+        source_keys=source_keys,
+        target_keys=target_keys,
+    )
+
+
+def _prepared_native_collision_reasons(
+    prepared: list[dict],
+) -> dict[int, tuple[str, ...]]:
+    source_keys = {}
+    target_keys = {}
+    for item in prepared:
+        index = item["index"]
+        resolution = item["resolution"]
+        source_keys[index] = str(resolution.source_id or "").strip()
+        target_name = PurePosixPath(item["target_path"]).name
+        target_directory_id = str(item["target_dir_id"] or "").strip()
+        if target_directory_id and target_name:
+            target_keys[index] = (target_directory_id, target_name)
+    return _transaction_collision_reasons(
+        source_keys=source_keys,
+        target_keys=target_keys,
+    )
+
+
+def _transaction_collision_outcome(
+    resolution: FileResolution,
+    *,
+    observed_path: str,
+    reason_codes: tuple[str, ...],
+    journal=None,
+) -> FileExecutionOutcome:
+    _transition(
+        journal,
+        resolution,
+        "failed",
+        observed_path,
+        reason=reason_codes[0],
+        reason_codes=reason_codes,
+    )
+    return _outcome(
+        resolution,
+        "failed",
+        observed_path,
+        *reason_codes,
+    )
+
+
 def _execute_with_native_batches(
     storage,
     resolutions: list[FileResolution],
@@ -1074,9 +1508,18 @@ def _execute_with_native_batches(
     except (TypeError, ValueError):
         batch_size = 32
     indexed_outcomes = {}
-    prepared_by_target = defaultdict(list)
+    logical_collision_reasons = _logical_native_collision_reasons(resolutions)
+    prepared_items = []
     directory_info = {}
     for index, resolution in enumerate(resolutions):
+        if index in logical_collision_reasons:
+            indexed_outcomes[index] = _transaction_collision_outcome(
+                resolution,
+                observed_path=resolution.source_path,
+                reason_codes=logical_collision_reasons[index],
+                journal=journal,
+            )
+            continue
         if (
             resolution.action not in {"move_only", "rename_and_move"}
             or resolution.status != "resolved"
@@ -1111,6 +1554,22 @@ def _execute_with_native_batches(
             indexed_outcomes[index] = prepared
             continue
         prepared["index"] = index
+        prepared_items.append(prepared)
+
+    prepared_by_target = defaultdict(list)
+    prepared_collision_reasons = _prepared_native_collision_reasons(
+        prepared_items
+    )
+    for prepared in prepared_items:
+        index = prepared["index"]
+        if index in prepared_collision_reasons:
+            indexed_outcomes[index] = _transaction_collision_outcome(
+                prepared["resolution"],
+                observed_path=prepared["current_path"],
+                reason_codes=prepared_collision_reasons[index],
+                journal=journal,
+            )
+            continue
         prepared_by_target[prepared["target_dir"]].append(prepared)
 
     native_unavailable = False
@@ -1123,6 +1582,14 @@ def _execute_with_native_batches(
                     indexed_outcomes[item["index"]] = _legacy_move_prepared(
                         storage, item, journal
                     )
+                continue
+            chunk, gate_outcomes = _gate_native_move_chunk(
+                storage,
+                chunk,
+                journal,
+            )
+            indexed_outcomes.update(gate_outcomes)
+            if not chunk:
                 continue
             for item in chunk:
                 _transition(

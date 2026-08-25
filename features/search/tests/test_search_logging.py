@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+import telepiplex_search.search_logging as search_logging
+
 from telepiplex_search.search_logging import (
     bind_search_log_context,
     log_search_event,
@@ -10,6 +12,33 @@ from telepiplex_search.service import SearchFeature
 
 
 class SearchLoggingTest(unittest.TestCase):
+    def test_measurement_uses_explicit_diagnostic_fields_without_query_text(self):
+        logger = Mock()
+
+        search_logging.log_search_measurement(
+            logger,
+            "search.discovery.completed",
+            search_session_id="session-1",
+            duration_ms=12,
+            query_chars=6,
+            candidate_count=2,
+            query="private search text",
+        )
+
+        extra = logger.info.call_args.kwargs["extra"]
+        self.assertEqual(extra["event_name"], "search.discovery.completed")
+        self.assertEqual(extra["diagnostic_fields"]["duration_ms"], 12)
+        self.assertEqual(
+            extra["diagnostic_fields"]["input"],
+            {"search_session_id": "session-1"},
+        )
+        self.assertEqual(
+            extra["diagnostic_fields"]["output"]["candidate_count"],
+            2,
+        )
+        self.assertNotIn("query", repr(extra))
+        self.assertNotIn("private search text", repr(extra))
+
     def test_event_contains_session_fields_and_sanitizes_secrets(self):
         logger = Mock()
 

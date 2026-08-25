@@ -10,6 +10,82 @@ from .log_sanitizer import sanitize_log_value
 
 _SEARCH_LOG_CONTEXTS: dict[str, dict] = {}
 
+_MEASUREMENT_PRIVATE_KEYS = {
+    "query", "title", "url", "uri", "link", "identity", "raw",
+    "result", "exception", "message",
+}
+
+
+def _is_private_measurement_key(key: object) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(key).casefold()).strip("_")
+    if normalized.endswith(("_count", "_chars", "_length", "_ms")):
+        return False
+    return any(
+        part in _MEASUREMENT_PRIVATE_KEYS
+        for part in normalized.split("_")
+    )
+
+
+def _safe_measurement_value(value):
+    if isinstance(value, dict):
+        return {
+            str(key): _safe_measurement_value(item)
+            for key, item in value.items()
+            if not _is_private_measurement_key(key)
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_safe_measurement_value(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return type(value).__name__
+
+
+def _safe_measurement_key(key: object) -> str:
+    normalized = str(key)
+    if normalized == "query_chars":
+        return "input_chars"
+    return normalized
+
+
+def log_search_measurement(
+    logger,
+    event: str,
+    *,
+    search_session_id: str,
+    status: str = "completed",
+    duration_ms=None,
+    **facts,
+) -> None:
+    """Emit one bounded, privacy-safe search diagnostic record."""
+    method = getattr(logger, "info", None) if logger is not None else None
+    if not callable(method):
+        return
+    safe_facts = {
+        _safe_measurement_key(key): _safe_measurement_value(value)
+        for key, value in facts.items()
+        if not _is_private_measurement_key(key)
+    }
+    try:
+        method(
+            "search_measurement",
+            extra={
+                "event_name": str(event or "").strip(),
+                "diagnostic_fields": {
+                    "stage": "performance",
+                    "status": str(status or "completed"),
+                    "duration_ms": duration_ms,
+                    "input": {
+                        "search_session_id": str(
+                            search_session_id or ""
+                        ).strip(),
+                    },
+                    "output": safe_facts,
+                },
+            },
+        )
+    except Exception:
+        pass
+
 
 def bind_search_log_context(
     search_session_id: str,

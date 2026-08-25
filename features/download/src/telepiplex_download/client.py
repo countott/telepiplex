@@ -47,6 +47,18 @@ class Open115Client:
         "storage.mutation",
         "token.refresh",
     }
+    _OPERATIONS = {
+        ("GET", "/open/offline/get_task_list"): "get_offline_tasks",
+        ("POST", "/open/offline/add_task_urls"): "add_offline_task",
+        ("POST", "/open/offline/del_task"): "delete_offline_task",
+        ("GET", "/open/folder/get_info"): "get_file_info",
+        ("GET", "/open/ufile/files"): "get_file_list",
+        ("POST", "/open/folder/add"): "create_directory",
+        ("POST", "/open/ufile/update"): "rename_file",
+        ("POST", "/open/ufile/copy"): "move_files",
+        ("POST", "/open/ufile/delete"): "delete_file",
+        ("POST", "/open/ufile/move"): "move_files",
+    }
 
     def __init__(
         self,
@@ -55,6 +67,7 @@ class Open115Client:
         session=None,
         on_tokens_changed=None,
         pacer=None,
+        on_observation=None,
     ):
         self.config = config
         self.base_url = str(config.get("base_url") or "https://proapi.115.com").rstrip("/")
@@ -65,6 +78,7 @@ class Open115Client:
         self.request_interval = max(0, float(config.get("request_interval") or 1))
         self.session = session or requests.Session()
         self.on_tokens_changed = on_tokens_changed
+        self.on_observation = on_observation
         endpoint_intervals = config.get("endpoint_intervals")
         if not isinstance(endpoint_intervals, dict):
             legacy_interval = config.get("request_interval")
@@ -129,6 +143,10 @@ class Open115Client:
         retry=True,
     ):
         endpoint_class = self._classify_endpoint(method, path)
+        operation = self._operation_for_endpoint(method, path)
+        pacer_wait_ms = 0
+        http_started = None
+        status_class = "unknown"
         try:
             if endpoint_class in self._MUTATION_CLASSES:
                 guard = self._mutation_guard
@@ -137,13 +155,23 @@ class Open115Client:
             else:
                 guard = nullcontext()
             with guard:
-                self._pacer.acquire(endpoint_class)
+                pacer_wait_ms = round(
+                    max(0.0, float(self._pacer.acquire(endpoint_class))) * 1000
+                )
+                if pacer_wait_ms >= 50:
+                    self._emit_observation(
+                        "download.pacing.waited",
+                        endpoint_class=endpoint_class,
+                        operation=operation,
+                        pacer_wait_ms=pacer_wait_ms,
+                    )
                 storage_mutation = endpoint_class == "storage.mutation"
                 if storage_mutation:
                     self._begin_storage_mutation()
                 result = None
                 request_completed = False
                 try:
+                    http_started = time.monotonic()
                     response = self.session.request(
                         method,
                         f"{self.base_url}{path}",
@@ -153,7 +181,12 @@ class Open115Client:
                         files=files,
                         timeout=self.timeout,
                     )
-                    self._observe_http_throttle(endpoint_class, response)
+                    status_class = self._status_class(response)
+                    self._observe_http_throttle(
+                        endpoint_class,
+                        response,
+                        operation=operation,
+                    )
                     response.raise_for_status()
                     result = response.json()
                     request_completed = True
@@ -169,16 +202,43 @@ class Open115Client:
                             and self._successful(result)
                         )
         except (requests.RequestException, ValueError) as exc:
+            self._emit_observation(
+                "download.request.failed",
+                endpoint_class=endpoint_class,
+                operation=operation,
+                pacer_wait_ms=pacer_wait_ms,
+                http_elapsed_ms=self._elapsed_ms(http_started),
+                status_class=status_class,
+                retryable=self._status_is_retryable(status_class),
+            )
             raise Open115Error(
                 f"115 request failed: {type(exc).__name__}",
                 operation=path,
             ) from exc
         if not isinstance(result, dict):
+            self._emit_observation(
+                "download.request.failed",
+                endpoint_class=endpoint_class,
+                operation=operation,
+                pacer_wait_ms=pacer_wait_ms,
+                http_elapsed_ms=self._elapsed_ms(http_started),
+                status_class=status_class,
+                retryable=False,
+            )
             raise Open115Error(
                 "115 returned a non-object response",
                 code="invalid_response",
                 operation=path,
             )
+        self._emit_observation(
+            "download.request.completed",
+            endpoint_class=endpoint_class,
+            operation=operation,
+            pacer_wait_ms=pacer_wait_ms,
+            http_elapsed_ms=self._elapsed_ms(http_started),
+            status_class=status_class,
+            retryable=False,
+        )
         if retry and result.get("code") in self.TOKEN_EXPIRED_CODES:
             self.refresh_access_token()
             return self._request(
@@ -191,6 +251,42 @@ class Open115Client:
             )
         return result
 
+    @classmethod
+    def _operation_for_endpoint(cls, method: str, path: str) -> str:
+        return cls._OPERATIONS[(str(method or "").upper(), str(path or ""))]
+
+    def _emit_observation(self, event_name: str, **facts) -> None:
+        if not callable(self.on_observation):
+            return
+        try:
+            self.on_observation(event_name, dict(facts))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _elapsed_ms(started: float | None) -> int:
+        if started is None:
+            return 0
+        return max(0, round((time.monotonic() - started) * 1000))
+
+    @staticmethod
+    def _status_class(response) -> str:
+        try:
+            status_code = int(getattr(response, "status_code", 0) or 0)
+        except (TypeError, ValueError):
+            status_code = 0
+        if 200 <= status_code < 300:
+            return "2xx"
+        if 400 <= status_code < 500:
+            return "4xx"
+        if 500 <= status_code < 600:
+            return "5xx"
+        return "unknown"
+
+    @staticmethod
+    def _status_is_retryable(status_class: str) -> bool:
+        return status_class in {"4xx", "5xx"}
+
     def _classify_endpoint(self, method: str, path: str) -> str:
         key = (str(method or "").upper(), str(path or ""))
         endpoint_class = self._ENDPOINT_CLASSES.get(key)
@@ -202,25 +298,72 @@ class Open115Client:
             )
         return endpoint_class
 
-    def _observe_http_throttle(self, endpoint_class: str, response) -> None:
+    def _observe_http_throttle(self, endpoint_class: str, response, *, operation="") -> None:
         if int(getattr(response, "status_code", 0) or 0) != 429:
-            return
+            return 0.0
         headers = getattr(response, "headers", {})
         retry_after = headers.get("Retry-After") if hasattr(headers, "get") else None
-        self._pacer.observe_throttle(endpoint_class, retry_after)
+        cooldown = self._pacer.observe_throttle(endpoint_class, retry_after)
+        self._emit_observation(
+            "download.pacing.throttled",
+            endpoint_class=endpoint_class,
+            operation=operation,
+            status_class="4xx",
+            retryable=True,
+            cooldown_ms=max(0, round(float(cooldown) * 1000)),
+        )
+        return cooldown
 
     def _passport_post(self, path: str, *, data: dict):
         with self._mutation_guard:
-            self._pacer.acquire("token.refresh")
-            response = self.session.post(
-                f"{self.passport_url}{path}",
-                headers={"User-Agent": "telepiplex-Feature/1.0"},
-                data=data,
-                timeout=self.timeout,
+            pacer_wait_ms = round(
+                max(0.0, float(self._pacer.acquire("token.refresh"))) * 1000
             )
-            self._observe_http_throttle("token.refresh", response)
-            response.raise_for_status()
-            return response.json()
+            if pacer_wait_ms >= 50:
+                self._emit_observation(
+                    "download.pacing.waited",
+                    endpoint_class="token.refresh",
+                    operation="refresh_access_token",
+                    pacer_wait_ms=pacer_wait_ms,
+                )
+            started = time.monotonic()
+            status_class = "unknown"
+            try:
+                response = self.session.post(
+                    f"{self.passport_url}{path}",
+                    headers={"User-Agent": "telepiplex-Feature/1.0"},
+                    data=data,
+                    timeout=self.timeout,
+                )
+                status_class = self._status_class(response)
+                self._observe_http_throttle(
+                    "token.refresh",
+                    response,
+                    operation="refresh_access_token",
+                )
+                response.raise_for_status()
+                result = response.json()
+            except (requests.RequestException, ValueError):
+                self._emit_observation(
+                    "download.request.failed",
+                    endpoint_class="token.refresh",
+                    operation="refresh_access_token",
+                    pacer_wait_ms=pacer_wait_ms,
+                    http_elapsed_ms=self._elapsed_ms(started),
+                    status_class=status_class,
+                    retryable=self._status_is_retryable(status_class),
+                )
+                raise
+            self._emit_observation(
+                "download.request.completed",
+                endpoint_class="token.refresh",
+                operation="refresh_access_token",
+                pacer_wait_ms=pacer_wait_ms,
+                http_elapsed_ms=self._elapsed_ms(started),
+                status_class=status_class,
+                retryable=False,
+            )
+            return result
 
     def refresh_access_token(self):
         if not self.refresh_token:
@@ -694,10 +837,18 @@ class Open115Client:
             if previous_snapshot is unobserved or current_snapshot != previous_snapshot:
                 next_delay = initial_interval
             else:
+                prior_delay = next_delay
                 next_delay = min(
                     next_delay * backoff_factor,
                     maximum_interval,
                 )
+                if next_delay != prior_delay:
+                    self._emit_observation(
+                        "download.poll.backoff_changed",
+                        operation="wait_for_download",
+                        previous_delay_ms=round(prior_delay * 1000),
+                        next_delay_ms=round(next_delay * 1000),
+                    )
             previous_snapshot = current_snapshot
             remaining = deadline - time.monotonic()
             if remaining <= 0:

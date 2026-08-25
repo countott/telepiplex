@@ -342,7 +342,7 @@ def _logical_file_first_fixture(parent_paths):
     return storage, result
 
 
-def test_attachment_equivalent_transaction_uses_59_logical_calls():
+def test_attachment_equivalent_transaction_uses_directory_snapshot_and_fresh_native_gate_without_child_preflight_reads():
     storage, result = _logical_file_first_fixture(
         ["/Downloads/Release"] * 16
     )
@@ -351,30 +351,48 @@ def test_attachment_equivalent_transaction_uses_59_logical_calls():
     assert result["organized_files"] == 16
     assert result["cleanup"]["complete"] is True
     assert counts == {
-        "get_file_info_batch": 2,
+        "get_file_info_batch": 1,
         "get_file_info": 35,
         "rename": 16,
         "create_dir_recursive": 1,
         "move_files_by_id": 1,
-        "get_file_list": 3,
+        "get_file_list": 6,
         "delete_single_file": 1,
     }
-    assert len(storage.calls) == 59
+    assert len(storage.calls) == 61
     snapshot_paths = [
         path
         for _phase, method, args, _kwargs in storage.calls
         if method == "get_file_info_batch"
         for path in args[0]
     ]
-    assert snapshot_paths.count("/Downloads/Release") == 1
+    assert snapshot_paths == ["/Downloads/Release", "/Series/Show"]
+    pre_submit_lists = [
+        args[0]
+        for phase, method, args, _kwargs in storage.calls
+        if phase == "pre_move" and method == "get_file_list"
+    ]
+    assert Counter(params["cid"] for params in pre_submit_lists) == {
+        "dir:/Downloads/Release": 2,
+        "dir:/Series/Show": 1,
+    }
+    post_move_lists = [
+        args[0]
+        for phase, method, args, _kwargs in storage.calls
+        if phase == "post_move" and method == "get_file_list"
+    ]
+    assert Counter(params["cid"] for params in post_move_lists) == {
+        "dir:/Downloads/Release": 2,
+        "dir:/Series/Show": 1,
+    }
     assert all(
         phase == "post_move"
         for phase, method, _args, _kwargs in storage.calls
-        if method in {"get_file_list", "delete_single_file"}
+        if method == "delete_single_file"
     )
 
 
-def test_two_interleaved_source_parents_are_order_independent_at_68_calls():
+def test_two_interleaved_source_parents_are_order_independent_at_72_calls_with_fresh_native_gate():
     parents = [
         f"/Downloads/Release/Part-{index % 2 + 1}"
         for index in range(16)
@@ -385,20 +403,44 @@ def test_two_interleaved_source_parents_are_order_independent_at_68_calls():
     assert result["organized_files"] == 16
     assert result["cleanup"]["complete"] is True
     assert counts == {
-        "get_file_info_batch": 2,
+        "get_file_info_batch": 1,
         "get_file_info": 39,
         "rename": 16,
         "create_dir_recursive": 1,
         "move_files_by_id": 1,
-        "get_file_list": 6,
+        "get_file_list": 11,
         "delete_single_file": 3,
     }
-    assert len(storage.calls) == 68
+    assert len(storage.calls) == 72
     snapshot_paths = [
         path
         for _phase, method, args, _kwargs in storage.calls
         if method == "get_file_info_batch"
         for path in args[0]
     ]
-    assert snapshot_paths.count("/Downloads/Release/Part-1") == 1
-    assert snapshot_paths.count("/Downloads/Release/Part-2") == 1
+    assert set(snapshot_paths) == {
+        "/Downloads/Release/Part-1",
+        "/Downloads/Release/Part-2",
+        "/Series/Show",
+    }
+    pre_submit_lists = [
+        args[0]
+        for phase, method, args, _kwargs in storage.calls
+        if phase == "pre_move" and method == "get_file_list"
+    ]
+    assert Counter(params["cid"] for params in pre_submit_lists) == {
+        "dir:/Downloads/Release/Part-1": 2,
+        "dir:/Downloads/Release/Part-2": 2,
+        "dir:/Series/Show": 1,
+    }
+    post_move_lists = [
+        args[0]
+        for phase, method, args, _kwargs in storage.calls
+        if phase == "post_move" and method == "get_file_list"
+    ]
+    assert Counter(params["cid"] for params in post_move_lists) == {
+        "dir:/Downloads/Release": 1,
+        "dir:/Downloads/Release/Part-1": 2,
+        "dir:/Downloads/Release/Part-2": 2,
+        "dir:/Series/Show": 1,
+    }

@@ -123,6 +123,44 @@ class StorageProxyBatchTest(unittest.TestCase):
         self.assertEqual(len(result), 65)
         self.assertEqual([len(call[1]) for call in proxy.calls], [32, 32, 1])
 
+    def test_fake_storage_rename_updates_fresh_listing_with_same_provider_id(self):
+        storage = FakeStorage([
+            {"fn": "Movie.2024.mkv", "fid": "source-1", "fc": "1", "fs": 1000},
+        ])
+
+        self.assertTrue(
+            storage.rename(
+                "/Downloads/Release/Movie.2024.mkv",
+                "English Movie.mkv",
+            )
+        )
+
+        listed = storage.get_file_list({"cid": "root"})
+        self.assertEqual(
+            [(item["fid"], item["fn"]) for item in listed],
+            [("source-1", "English Movie.mkv")],
+        )
+
+    def test_fake_storage_move_removes_provider_id_from_fresh_source_listing(self):
+        storage = FakeStorage([
+            {"fn": "Movie.2024.mkv", "fid": "source-1", "fc": "1", "fs": 1000},
+        ])
+
+        self.assertTrue(
+            storage.move_file(
+                "/Downloads/Release/Movie.2024.mkv",
+                "/Movies/中文电影 (English Movie)",
+            )
+        )
+
+        self.assertEqual(storage.get_file_list({"cid": "root"}), [])
+        self.assertEqual(
+            storage.get_file_info(
+                "/Movies/中文电影 (English Movie)/Movie.2024.mkv"
+            )["file_id"],
+            "source-1",
+        )
+
 
 class FakeStorage:
     def __init__(self, items):
@@ -132,6 +170,7 @@ class FakeStorage:
         self.deleted = []
         self.created = []
         self.renamed_info = {}
+        self.renamed_provider_ids = set()
         self.missing_paths = set()
 
     def get_file_info(self, path):
@@ -147,10 +186,13 @@ class FakeStorage:
             return dict(self.renamed_info[path])
         name = str(path).rsplit("/", 1)[-1]
         for item in self.items:
+            item_id = str(item.get("fid") or item.get("file_id") or "")
+            if item_id in self.renamed_provider_ids:
+                continue
             item_name = str(item.get("fn") or item.get("name") or "")
             if item_name == name or str(path).endswith(f"/{item_name}"):
                 return {
-                    "file_id": str(item.get("fid") or item.get("file_id") or ""),
+                    "file_id": item_id,
                     "file_category": str(item.get("fc") or "1"),
                     "sha1": item.get("sha1") or item.get("sha") or "",
                 }
@@ -158,6 +200,19 @@ class FakeStorage:
 
     def get_file_list(self, params):
         return self.items if params.get("cid") == "root" else []
+
+    def fresh_listing_item(self, item):
+        provider_id = str(item.get("fid") or item.get("file_id") or "")
+        for path, info in self.renamed_info.items():
+            if str(info.get("file_id") or "") != provider_id:
+                continue
+            updated = dict(item)
+            if "fn" in updated or "name" not in updated:
+                updated["fn"] = str(path).rsplit("/", 1)[-1]
+            else:
+                updated["name"] = str(path).rsplit("/", 1)[-1]
+            return updated
+        return item
 
     def create_dir_recursive(self, path):
         self.created.append(path)
@@ -168,6 +223,19 @@ class FakeStorage:
         info = self.get_file_info(path)
         if info:
             parent = path.rsplit("/", 1)[0]
+            source_id = str(info.get("file_id") or "")
+            source_name = str(path).rsplit("/", 1)[-1]
+            for item in self.items:
+                item_id = str(item.get("fid") or item.get("file_id") or "")
+                item_name = str(item.get("fn") or item.get("name") or "")
+                if item_id != source_id or item_name != source_name:
+                    continue
+                if "fn" in item or "name" not in item:
+                    item["fn"] = name
+                else:
+                    item["name"] = name
+                self.renamed_provider_ids.add(source_id)
+                break
             self.renamed_info[f"{parent}/{name}"] = info
             self.missing_paths.add(path)
         return True
@@ -176,6 +244,12 @@ class FakeStorage:
         self.moved.append((source, target))
         info = self.get_file_info(source)
         if info:
+            source_id = str(info.get("file_id") or "")
+            self.items[:] = [
+                item for item in self.items
+                if str(item.get("fid") or item.get("file_id") or "")
+                != source_id
+            ]
             self.renamed_info[
                 f"{str(target).rstrip('/')}/{str(source).rsplit('/', 1)[-1]}"
             ] = info
@@ -1270,6 +1344,7 @@ class RenamingProcessorTest(unittest.TestCase):
         storage = FakeStorage([
             {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1_000_000},
             {"fn": "Movie.2024.srt", "fid": "2", "fc": "1", "fs": 100},
+            {"fn": "release.nfo", "fid": "retain", "fc": "1", "fs": 1},
         ])
         event = DownloadCompletedEvent(
             link="magnet:?x", selected_path="/Movies", user_id=1,
@@ -1349,6 +1424,7 @@ class RenamingProcessorTest(unittest.TestCase):
     def test_nonempty_download_root_is_retained_but_not_reported_success(self):
         storage = CleanupFailureStorage([
             {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1_000_000},
+            {"fn": "release.nfo", "fid": "retain", "fc": "1", "fs": 1},
         ])
         event = DownloadCompletedEvent(
             link="magnet:?x", selected_path="/Movies", user_id=1,
@@ -1590,6 +1666,7 @@ class RenamingProcessorTest(unittest.TestCase):
         storage = FakeStorage([
             {"fn": "English.Series.S01E01.mkv", "fid": "1", "fc": "1", "fs": 1000},
             {"fn": "English.Series.S01E01.srt", "fid": "2", "fc": "1", "fs": 100},
+            {"fn": "release.nfo", "fid": "retain", "fc": "1", "fs": 1},
         ])
         event = DownloadCompletedEvent(
             link="magnet:?x", selected_path="/Series", user_id=1,
@@ -2031,14 +2108,15 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     if (
                         "/未整理/Movie.2024.1080p/Movie.2024.mkv"
                         in self.missing_paths
+                        and self.moved
                     ):
                         return []
-                    return [{
+                    return [self.fresh_listing_item({
                         "name": "Movie.2024.mkv",
                         "file_id": "movie-video-1",
                         "is_dir": False,
                         "size": 1000,
-                    }]
+                    })]
                 return []
 
             def get_file_info(self, path):
@@ -2150,12 +2228,14 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
 
             def get_file_list(self, params):
                 if params.get("cid") == "root-movies":
-                    return [{
+                    if self.moved:
+                        return []
+                    return [self.fresh_listing_item({
                         "file_id": "loose-video-1",
                         "name": "Loose:<Movie>?.mkv",
                         "is_dir": False,
                         "size": 1000,
-                    }]
+                    })]
                 return []
 
         class PortableNameHost(FakeHost):
@@ -2233,6 +2313,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 storage.moved,
                 [("/真人电影/CON_.mkv", target_dir)],
             )
+            self.assertEqual(storage.get_file_list({"cid": "root-movies"}), [])
             self.assertEqual(host.events, [])
             self.assertEqual(
                 host.reports[-1]["state"],
@@ -2285,15 +2366,23 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 names = {
                     "ambiguous-1": "Ambiguous.2024",
                     "resolved-2": "Resolved.2024",
+                    "dir-Ambiguous.2024": "Ambiguous.2024",
+                    "dir-Resolved.2024": "Resolved.2024",
                 }
                 if cid in names:
                     name = names[cid]
-                    return [{
+                    source_directory = f"/真人电影/{name}"
+                    if any(
+                        str(source).rsplit("/", 1)[0] == source_directory
+                        for source, _target in self.moved
+                    ):
+                        return []
+                    return [self.fresh_listing_item({
                         "name": f"{name}.Source.1080p.mkv",
                         "file_id": f"video-{name}",
                         "is_dir": False,
                         "size": 1000,
-                    }]
+                    })]
                 return []
 
         class AmbiguousFirstHost(FakeHost):
@@ -3608,9 +3697,10 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempts, ["owner_mismatch"])
 
     async def test_rename_completes_without_sync_handoff_or_organized_event(self):
-        host = FakeHost(EmptyAfterMoveStorage([
+        storage = EmptyAfterMoveStorage([
             {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
-        ]))
+        ])
+        host = FakeHost(storage)
         runtime = FakeRuntime()
         feature = RenameFeature(
             config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
@@ -3641,6 +3731,10 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(host.reports[-1]["state"], "completed")
         self.assertEqual(host.reports[-1]["stage"], "completed")
+        self.assertEqual(storage.moved, [(
+            "/Downloads/Release/English Movie.mkv",
+            "/Movies/中文电影 (English Movie)",
+        )])
         self.assertNotIn("next_plugin_id", host.reports[-1])
         self.assertEqual(host.reports[-1]["details"]["effect_receipt"], {
             "effect_key": "rename.organize:job-rename-seal",
@@ -5279,9 +5373,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.5.10")
+        self.assertEqual(manifest["version"], "1.5.11")
         self.assertEqual(manifest["host_api"], ">=1.6,<2.0")
-        self.assertIn('version = "1.5.10"', project)
+        self.assertIn('version = "1.5.11"', project)
         self.assertIn('telepiplex-plugin-sdk==1.3.2', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
@@ -5297,8 +5391,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.5.10.tpx", source)
-        self.assertNotIn("dist/rename-1.5.10.tpx", source)
+        self.assertIn("/tmp/rename-1.5.11.tpx", source)
+        self.assertNotIn("dist/rename-1.5.11.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

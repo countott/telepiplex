@@ -7,6 +7,7 @@ from .config_store import FeatureConfigStore
 from .directories import normalize_save_directories
 from .service import DownloadFeature
 from .jobs import DownloadJobStore
+from .observability import emit_download_observation
 
 
 def main(context: RuntimeContext) -> FeatureRuntime:
@@ -28,7 +29,14 @@ def main(context: RuntimeContext) -> FeatureRuntime:
             auth_mode=mode if mode in {"direct", "scan"} else "direct",
         )
 
-    client = Open115Client(config, on_tokens_changed=persist_refreshed_tokens)
+    def observe_client(event_name, facts):
+        emit_download_observation(event_name, **facts)
+
+    client = Open115Client(
+        config,
+        on_tokens_changed=persist_refreshed_tokens,
+        on_observation=observe_client,
+    )
     feature = DownloadFeature(
         config=config,
         host=context.host,

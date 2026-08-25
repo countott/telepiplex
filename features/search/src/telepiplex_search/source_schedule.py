@@ -79,10 +79,12 @@ class SourceScheduler:
         max_success_entries: int = 256,
         max_concurrency: int = 16,
         clock: Callable[[], float] = time.monotonic,
+        observer=None,
     ) -> None:
         self._success_ttl = max(0.0, float(success_ttl))
         self._max_success_entries = max(0, int(max_success_entries))
         self._clock = clock
+        self._observer = observer
         self._lock = asyncio.Lock()
         self._semaphore = asyncio.Semaphore(max(1, int(max_concurrency)))
         self._flights: dict[SourceRequestKey, asyncio.Task] = {}
@@ -90,6 +92,24 @@ class SourceScheduler:
             SourceRequestKey,
             tuple[float, Any],
         ] = OrderedDict()
+
+    async def _observe(self, outcome: str, key: SourceRequestKey, **facts):
+        if not callable(self._observer):
+            return
+        payload = {
+            "provider": key.provider,
+            "purpose": key.purpose,
+            "media_type": key.media_type,
+            "scope": key.scope,
+            "outcome": outcome,
+            **facts,
+        }
+        try:
+            observed = self._observer("search.source.request", payload)
+            if inspect.isawaitable(observed):
+                await observed
+        except Exception:
+            pass
 
     @property
     def success_entry_count(self) -> int:
@@ -124,8 +144,20 @@ class SourceScheduler:
         cacheable,
     ):
         current = asyncio.current_task()
+        started_at = self._clock()
         try:
+            was_queued = self._semaphore.locked()
             async with self._semaphore:
+                wait_ms = max(
+                    0,
+                    round((self._clock() - started_at) * 1000),
+                )
+                if was_queued:
+                    await self._observe(
+                        "queue_waited",
+                        key,
+                        wait_ms=wait_ms,
+                    )
                 value = fetch()
                 if inspect.isawaitable(value):
                     value = await value
@@ -151,7 +183,27 @@ class SourceScheduler:
                         > self._max_success_entries
                     ):
                         self._successes.popitem(last=False)
+            await self._observe(
+                "completed",
+                key,
+                duration_ms=max(
+                    0,
+                    round((self._clock() - started_at) * 1000),
+                ),
+                cacheable=should_cache,
+            )
             return value
+        except Exception as exc:
+            await self._observe(
+                "failed",
+                key,
+                duration_ms=max(
+                    0,
+                    round((self._clock() - started_at) * 1000),
+                ),
+                error_code=type(exc).__name__,
+            )
+            raise
         finally:
             async with self._lock:
                 if self._flights.get(key) is current:
@@ -167,19 +219,33 @@ class SourceScheduler:
         if not isinstance(key, SourceRequestKey):
             raise TypeError("key must be a SourceRequestKey")
         now = self._clock()
+        cache_hit = False
+        joined_flight = False
         async with self._lock:
             self._purge_expired_locked(now)
             cached = self._successes.get(key)
             if cached is not None:
                 self._successes.move_to_end(key)
-                return deepcopy(cached[1])
-            flight = self._flights.get(key)
-            if flight is None:
-                flight = asyncio.create_task(
-                    self._execute(key, fetch, cacheable)
-                )
-                flight.add_done_callback(self._consume_completion)
-                self._flights[key] = flight
+                cached_value = deepcopy(cached[1])
+                cache_hit = True
+            else:
+                cached_value = None
+            if cache_hit:
+                flight = None
+            else:
+                flight = self._flights.get(key)
+                joined_flight = flight is not None
+                if flight is None:
+                    flight = asyncio.create_task(
+                        self._execute(key, fetch, cacheable)
+                    )
+                    flight.add_done_callback(self._consume_completion)
+                    self._flights[key] = flight
+        if cache_hit:
+            await self._observe("cache_hit", key, cacheable=True)
+            return cached_value
+        if joined_flight:
+            await self._observe("single_flight_join", key)
         value = await asyncio.shield(flight)
         return deepcopy(value)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
+from contextvars import ContextVar
 import html
 import json
 import math
@@ -111,7 +112,11 @@ from .search_plan import (
     finalize_search_plan,
 )
 from .search_resolution import parse_search_intent
-from .search_logging import bind_search_log_context, log_search_event
+from .search_logging import (
+    bind_search_log_context,
+    log_search_event,
+    log_search_measurement,
+)
 from .series_scope import (
     SeriesScopeError,
     apply_inventory_probe_scope,
@@ -715,7 +720,13 @@ class SearchFeature:
         self.metadata_resolution_store = (
             metadata_resolution_store or MetadataResolutionStore()
         )
-        self.source_scheduler = source_scheduler or SourceScheduler()
+        self._measurement_session_id = ContextVar(
+            "search_measurement_session_id",
+            default="",
+        )
+        self.source_scheduler = source_scheduler or SourceScheduler(
+            observer=self._observe_source_request,
+        )
         self.plans = {}
         self.awaiting_queries = set()
         self.awaiting_scope_inputs = {}
@@ -723,6 +734,31 @@ class SearchFeature:
         self.runtime = None
         self.operations = {}
         self.owner_operations = {}
+
+    @staticmethod
+    def _log_measurement(
+        event: str,
+        *,
+        search_session_id: str,
+        status: str = "completed",
+        duration_ms=None,
+        **facts,
+    ) -> None:
+        log_search_measurement(
+            runtime_context.logger,
+            event,
+            search_session_id=search_session_id,
+            status=status,
+            duration_ms=duration_ms,
+            **facts,
+        )
+
+    def _observe_source_request(self, event: str, facts: dict) -> None:
+        self._log_measurement(
+            event,
+            search_session_id=self._measurement_session_id.get(),
+            **facts,
+        )
 
     @staticmethod
     def _source_coordinates(candidate: dict) -> tuple[str, int | None, int | None]:
@@ -931,52 +967,92 @@ class SearchFeature:
         raw_query: str,
         require_anchor: bool,
     ) -> dict:
-        anchor_resolver = await self._prefetch_exact_resolver(candidate)
-        hydrated = await asyncio.to_thread(
-            hydrate_frozen_candidate_anchor,
-            candidate,
-            metadata_id=metadata_id,
-            raw_query=raw_query,
-            require_anchor=require_anchor,
-            resolver=anchor_resolver,
-        )
-        if (
-            hydrated.get("metadata_hydrated")
-            and not needs_authoritative_scope_enrichment(hydrated)
-        ):
-            return hydrated
+        self._measurement_session_id.set(metadata_id)
+        started_at = time.monotonic()
         try:
-            if self._uses_default_selected_candidate_supplementer:
-                enriched = await self._supplement_selected_candidate(
-                    hydrated,
-                    raw_query,
-                    purpose="authoritative_scope",
+            anchor_resolver = await self._prefetch_exact_resolver(candidate)
+            hydrated = await asyncio.to_thread(
+                hydrate_frozen_candidate_anchor,
+                candidate,
+                metadata_id=metadata_id,
+                raw_query=raw_query,
+                require_anchor=require_anchor,
+                resolver=anchor_resolver,
+            )
+            if (
+                hydrated.get("metadata_hydrated")
+                and not needs_authoritative_scope_enrichment(hydrated)
+            ):
+                self._log_measurement(
+                    "search.hydration.completed",
+                    search_session_id=metadata_id,
+                    duration_ms=round((time.monotonic() - started_at) * 1000),
+                    frozen_link_count=len(candidate.get("source_links") or ()),
+                    anchor_required=bool(require_anchor),
+                    metadata_hydrated=True,
+                    enrichment_needed=False,
                 )
-            else:
-                enriched = await self.selected_candidate_supplementer(
-                    hydrated,
-                    raw_query,
-                )
+                return hydrated
+            try:
+                if self._uses_default_selected_candidate_supplementer:
+                    enriched = await self._supplement_selected_candidate(
+                        hydrated,
+                        raw_query,
+                        purpose="authoritative_scope",
+                    )
+                else:
+                    enriched = await self.selected_candidate_supplementer(
+                        hydrated,
+                        raw_query,
+                    )
+            except Exception as exc:
+                if runtime_context.logger:
+                    runtime_context.logger.warning(
+                        "search_supplement status=failed "
+                        "purpose=authoritative_scope "
+                        f"error={type(exc).__name__}"
+                    )
+                raise CandidateHydrationError(
+                    "metadata_incomplete",
+                    ("verified_scope",),
+                ) from exc
+            strict_resolver = await self._prefetch_exact_resolver(enriched)
+            result = await asyncio.to_thread(
+                hydrate_frozen_candidate,
+                enriched,
+                metadata_id=metadata_id,
+                raw_query=raw_query,
+                require_anchor=require_anchor,
+                resolver=strict_resolver,
+            )
+            self._log_measurement(
+                "search.hydration.completed",
+                search_session_id=metadata_id,
+                duration_ms=round((time.monotonic() - started_at) * 1000),
+                frozen_link_count=len(candidate.get("source_links") or ()),
+                anchor_required=bool(require_anchor),
+                metadata_hydrated=bool(result.get("metadata_hydrated")),
+                enrichment_needed=True,
+            )
+            return result
+        except CandidateHydrationError as exc:
+            self._log_measurement(
+                "search.hydration.failed",
+                search_session_id=metadata_id,
+                status="failed",
+                duration_ms=round((time.monotonic() - started_at) * 1000),
+                error_code=exc.code,
+            )
+            raise
         except Exception as exc:
-            if runtime_context.logger:
-                runtime_context.logger.warning(
-                    "search_supplement status=failed "
-                    "purpose=authoritative_scope "
-                    f"error={type(exc).__name__}"
-                )
-            raise CandidateHydrationError(
-                "metadata_incomplete",
-                ("verified_scope",),
-            ) from exc
-        strict_resolver = await self._prefetch_exact_resolver(enriched)
-        return await asyncio.to_thread(
-            hydrate_frozen_candidate,
-            enriched,
-            metadata_id=metadata_id,
-            raw_query=raw_query,
-            require_anchor=require_anchor,
-            resolver=strict_resolver,
-        )
+            self._log_measurement(
+                "search.hydration.failed",
+                search_session_id=metadata_id,
+                status="failed",
+                duration_ms=round((time.monotonic() - started_at) * 1000),
+                error_code=type(exc).__name__,
+            )
+            raise
 
     @staticmethod
     def _log_completed_once(
@@ -1953,6 +2029,9 @@ class SearchFeature:
     ) -> dict:
         if not raw_query:
             return self._closed("⚠️ 搜索内容不能为空。")
+        self._measurement_session_id.set(plan_id)
+        discovery_started_at = time.monotonic()
+        input_kind = classify_search_input(raw_query).kind
         try:
             if locked_identity:
                 plan = await self.plan_builder(
@@ -1964,6 +2043,18 @@ class SearchFeature:
                 plan = await self.plan_builder(raw_query, plan_id)
         except SearchPlanningError as exc:
             code = getattr(exc, "code", str(exc))
+            self._log_measurement(
+                "search.discovery.failed",
+                search_session_id=plan_id,
+                status="failed",
+                duration_ms=max(
+                    0,
+                    round((time.monotonic() - discovery_started_at) * 1000),
+                ),
+                entry_kind=input_kind,
+                query_chars=len(str(raw_query or "")),
+                error_code=code,
+            )
             reason_codes = tuple(
                 getattr(exc, "reason_codes", ()) or ()
             )
@@ -2046,6 +2137,18 @@ class SearchFeature:
             )
             return self._closed(f"❌ 无法生成媒体元数据：{message}")
         except Exception as exc:
+            self._log_measurement(
+                "search.discovery.failed",
+                search_session_id=plan_id,
+                status="failed",
+                duration_ms=max(
+                    0,
+                    round((time.monotonic() - discovery_started_at) * 1000),
+                ),
+                entry_kind=input_kind,
+                query_chars=len(str(raw_query or "")),
+                error_code=type(exc).__name__,
+            )
             log_search_event(
                 runtime_context.logger,
                 "search.completed",
@@ -2055,6 +2158,30 @@ class SearchFeature:
                 error=type(exc).__name__,
             )
             return self._closed(f"❌ 媒体规划失败：{type(exc).__name__}")
+        discovery_summary = (
+            plan.get("discovery_summary")
+            if isinstance(plan.get("discovery_summary"), dict)
+            else {}
+        )
+        discovered_candidates = plan.get("candidates")
+        self._log_measurement(
+            "search.discovery.completed",
+            search_session_id=plan_id,
+            duration_ms=max(
+                0,
+                round((time.monotonic() - discovery_started_at) * 1000),
+            ),
+            entry_kind=input_kind,
+            query_chars=len(str(raw_query or "")),
+            candidate_count=(
+                len(discovered_candidates)
+                if isinstance(discovered_candidates, list)
+                and discovered_candidates
+                else 1
+            ),
+            exact_count=int(discovery_summary.get("exact_count") or 0),
+            relation_count=int(discovery_summary.get("relation_count") or 0),
+        )
         clarification = (
             plan.get("clarification")
             if isinstance(plan.get("clarification"), dict)
@@ -3397,6 +3524,7 @@ class SearchFeature:
         stored["deferred_enrichment_task"] = asyncio.create_task(enrich())
 
     async def _confirm_and_search(self, plan_id: str, stored: dict) -> dict:
+        self._measurement_session_id.set(plan_id)
         plan = stored["plan"]
         contract = confirm_media_metadata(plan)
         presentation = build_identity_presentation(contract)
@@ -3840,6 +3968,16 @@ class SearchFeature:
                 ),
             )
         enabled_names = [item["name"] for item in normalized_indexers]
+        wave_by_indexer_id = {
+            item["id"]: "first" for item in first_wave
+        } | {
+            item["id"]: "tail" for item in remaining_wave
+        }
+        wave_indexer_ids = {
+            "first": {item["id"] for item in first_wave},
+            "tail": {item["id"] for item in remaining_wave},
+        }
+        completed_wave_indexer_ids = {"first": set(), "tail": set()}
         raw_items = []
         down_indexers = []
         completed = 0
@@ -3877,6 +4015,26 @@ class SearchFeature:
                 return
             state["finalized"] = True
             completed += 1
+            wave = wave_by_indexer_id[state["item"]["id"]]
+            completed_wave_indexer_ids[wave].add(state["item"]["id"])
+            if (
+                wave_indexer_ids[wave]
+                and completed_wave_indexer_ids[wave]
+                == wave_indexer_ids[wave]
+            ):
+                self._log_measurement(
+                    "search.prowlarr.wave.completed",
+                    search_session_id=plan_id,
+                    duration_ms=max(
+                        0,
+                        round((time.monotonic() - started) * 1000),
+                    ),
+                    wave=wave,
+                    indexer_count=len(wave_indexer_ids[wave]),
+                    query_count=len(queries),
+                    raw_count=len(raw_items),
+                    status_class="completed",
+                )
             if state["successful_queries"]:
                 return
             error = self._all_query_variants_error(

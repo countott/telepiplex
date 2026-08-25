@@ -1,6 +1,6 @@
 # rename Feature
 
-`features/rename` 是 telepiplex 的独立媒体整理 Feature。rename 1.5.10 消费 durable `download.completed`，也支持 Telegram `/rename` 扫描 115 存量目录；媒体候选确认会先持久化状态，再转入后台调用 search，因此 Telegram callback 不再等待长链路，取消操作也能及时生效。文件阶段在首次写入前构建一份不可变预检快照，让目标冲突规划与执行共享同一批源、目标和父目录事实；rename、批量移动、目录清理与源端消失仍以写入后的新鲜读取作为后置条件。文件规划使用 download 1.0.19 的 32 路径分批身份读取，并优先调用 115 官方服务端批量移动，同一目标目录默认按 32 个文件一批提交；每批完成后重新列出源、目标目录，核对 provider ID 和规范文件名，不采信单独的成功回执。动画资源中的 NCOP、NCED 以及带季号或变体号的 OP、ED 会作为同一作品的附加内容保留，不再建立独立媒体搜索任务；无法唯一映射的正片文件仍保持原位并单独提示用户查证。rename 的完整或部分完成终态只表示本地媒体整理安全收敛，不发布下游整理事件，也不自动交接 sync/Plex。媒体候选按钮使用短持久令牌，满足 Telegram callback 的 64-byte 限制，同时支持直接回复候选编号。
+`features/rename` 是 telepiplex 的独立媒体整理 Feature。rename 1.5.11 消费 durable `download.completed`，也支持 Telegram `/rename` 扫描 115 存量目录；媒体候选确认会先持久化状态，再转入后台调用 search，因此 Telegram callback 不再等待长链路，取消操作也能及时生效。文件阶段在首次写入前构建一份不可变预检快照，让目标冲突规划与执行共享同一批源、目标和父目录事实；rename、批量移动、目录清理与源端消失仍以写入后的新鲜读取作为后置条件。文件规划使用 download 1.0.20 的 32 路径分批身份读取，并优先调用 115 官方服务端批量移动，同一目标目录默认按 32 个文件一批提交；每批完成后重新列出源、目标目录，核对 provider ID 和规范文件名，不采信单独的成功回执。动画资源中的 NCOP、NCED 以及带季号或变体号的 OP、ED 会作为同一作品的附加内容保留，不再建立独立媒体搜索任务；无法唯一映射的正片文件仍保持原位并单独提示用户查证。rename 的完整或部分完成终态只表示本地媒体整理安全收敛，不发布下游整理事件，也不自动交接 sync/Plex。媒体候选按钮使用短持久令牌，满足 Telegram callback 的 64-byte 限制，同时支持直接回复候选编号。
 
 ## file-first 整理链路
 
@@ -35,7 +35,7 @@ rename 会在写操作前按文件预检目标冲突。已有目标与相同 pro
 rename 在媒体文件全部被核验为已整理或规范 `no_op`、不存在原位保留/目标冲突/文件失败，并且源作品目录清理完成时写入 `completed`。若已验证文件至少一个、其余媒体文件仅为安全原位保留，且没有冲突、执行失败或意外清理失败，则写入 `partial_completed`；完全无法匹配仍失败关闭且不执行移动。Telegram 通知是尽力投递的旁路；通知失败不会把已经核验完成的 Job 改成失败，也不会触发重复文件操作。用户通知使用纯文本，文件名和路径不会依赖 Telegram Markdown 转义。
 
 ```bash
-python tools/build_feature.py features/rename /tmp/rename-1.5.10.tpx \
+python tools/build_feature.py features/rename /tmp/rename-1.5.11.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

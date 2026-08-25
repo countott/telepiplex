@@ -23,6 +23,92 @@ def request_key(**overrides):
 
 
 class SourceSchedulerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_cache_hit_and_completion_are_observed_without_identity(self):
+        observations = []
+        scheduler = SourceScheduler(
+            observer=lambda event, facts: observations.append((event, facts))
+        )
+
+        async def fetch():
+            return {"ok": True}
+
+        await scheduler.run(request_key(identity="private-identity"), fetch)
+        await scheduler.run(request_key(identity="private-identity"), fetch)
+
+        outcomes = [facts["outcome"] for _event, facts in observations]
+        self.assertIn("completed", outcomes)
+        self.assertIn("cache_hit", outcomes)
+        self.assertTrue(all(
+            event == "search.source.request"
+            and "identity" not in facts
+            and "private-identity" not in repr(facts)
+            for event, facts in observations
+        ))
+
+    async def test_single_flight_join_and_queued_completion_are_observed(self):
+        observations = []
+        scheduler = SourceScheduler(
+            max_concurrency=1,
+            observer=lambda event, facts: observations.append((event, facts)),
+        )
+        first_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_fetch():
+            first_started.set()
+            await release.wait()
+            return {"ok": True}
+
+        first = asyncio.create_task(scheduler.run(request_key(), slow_fetch))
+        await first_started.wait()
+        joined = asyncio.create_task(scheduler.run(request_key(), slow_fetch))
+        queued = asyncio.create_task(scheduler.run(
+            request_key(identity="other-private-identity"),
+            slow_fetch,
+        ))
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(first, joined, queued)
+
+        outcomes = [facts["outcome"] for _event, facts in observations]
+        self.assertIn("single_flight_join", outcomes)
+        self.assertIn("queue_waited", outcomes)
+
+    async def test_observer_errors_do_not_change_provider_result(self):
+        def broken_observer(_event, _facts):
+            raise RuntimeError("observer failure must be isolated")
+
+        scheduler = SourceScheduler(observer=broken_observer)
+
+        result = await scheduler.run(
+            request_key(),
+            lambda: {"ok": True},
+        )
+
+        self.assertEqual(result, {"ok": True})
+
+    async def test_cache_hit_observer_cancellation_propagates_to_caller(self):
+        observer_started = asyncio.Event()
+        observer_release = asyncio.Event()
+
+        async def blocking_observer(_event, facts):
+            if facts["outcome"] == "cache_hit":
+                observer_started.set()
+                await observer_release.wait()
+
+        scheduler = SourceScheduler(observer=blocking_observer)
+        key = request_key()
+        await scheduler.run(key, lambda: {"ok": True})
+
+        waiting = asyncio.create_task(
+            scheduler.run(key, lambda: {"ok": "should stay cached"})
+        )
+        await observer_started.wait()
+        waiting.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await waiting
+
     async def test_identical_requests_share_one_flight_and_return_copies(self):
         scheduler = SourceScheduler()
         started = asyncio.Event()

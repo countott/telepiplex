@@ -10,6 +10,7 @@ import pytest
 import requests
 
 from telepiplex_download.client import Open115Client, Open115Error
+from telepiplex_download.observability import emit_download_observation
 from telepiplex_download.pacing import EndpointPacer
 
 
@@ -588,3 +589,234 @@ def test_endpoint_intervals_override_legacy_request_interval_when_present():
         client._request("GET", "/open/folder/get_info")
 
     assert clock.sleeps == pytest.approx([0.25])
+
+
+def test_request_observation_exposes_timing_without_private_request_values():
+    """Fails if request observations expose the provider path or request payload."""
+    observed = []
+    client = Open115Client(
+        {"access_token": "access"},
+        session=QueueSession(requests_=[FakeResponse({
+            "state": True,
+            "code": 0,
+            "data": {"file_id": "private-file-id"},
+        })]),
+        pacer=RecordingPacer(),
+        on_observation=lambda name, facts: observed.append((name, facts)),
+    )
+
+    assert client.get_file_info("/private/file.mkv") == {"file_id": "private-file-id"}
+
+    name, facts = observed[-1]
+    assert name == "download.request.completed"
+    assert facts["endpoint_class"] == "storage.read"
+    assert facts["operation"] == "get_file_info"
+    assert facts["status_class"] == "2xx"
+    assert facts["http_elapsed_ms"] >= 0
+    forbidden = {"path", "params", "data", "files", "response", "url", "token", "headers"}
+    assert not (forbidden & set(facts))
+    assert "/private/file.mkv" not in repr(facts)
+
+
+def test_request_observation_reports_material_pacer_wait_only():
+    """Fails if a >=50 ms pacing reservation is omitted or reported as a request input."""
+    class WaitingPacer(RecordingPacer):
+        def acquire(self, endpoint_class):
+            self.acquired.append(endpoint_class)
+            return 0.05
+
+    observed = []
+    client = Open115Client(
+        {"access_token": "access"},
+        session=QueueSession(),
+        pacer=WaitingPacer(),
+        on_observation=lambda name, facts: observed.append((name, facts)),
+    )
+
+    client._request("GET", "/open/folder/get_info")
+
+    waited = [facts for name, facts in observed if name == "download.pacing.waited"]
+    assert waited == [{
+        "endpoint_class": "storage.read",
+        "operation": "get_file_info",
+        "pacer_wait_ms": 50,
+    }]
+
+
+def test_429_observation_reports_only_bounded_cooldown_details():
+    """Fails if a throttled request does not expose its parsed cooldown safely."""
+    observed = []
+    client = Open115Client(
+        {"access_token": "access"},
+        session=QueueSession(requests_=[FakeResponse(
+            {"state": False, "code": 429},
+            status_code=429,
+            headers={"Retry-After": "17", "Authorization": "private"},
+        )]),
+        pacer=EndpointPacer({"offline_poll": 0}),
+        on_observation=lambda name, facts: observed.append((name, facts)),
+    )
+
+    with pytest.raises(Open115Error):
+        client._request("GET", "/open/offline/get_task_list")
+
+    throttled = [facts for name, facts in observed if name == "download.pacing.throttled"]
+    assert throttled == [{
+        "endpoint_class": "offline.poll",
+        "operation": "get_offline_tasks",
+        "status_class": "4xx",
+        "retryable": True,
+        "cooldown_ms": 17_000,
+    }]
+    assert "Authorization" not in repr(throttled)
+
+
+def test_download_poll_observation_emits_only_when_backoff_delay_changes():
+    """Fails if unchanged polling state emits noise or an increased delay is invisible."""
+    clock = FakeClock()
+    observed = []
+    client = Open115Client(
+        {"access_token": "access"},
+        session=QueueSession(),
+        pacer=RecordingPacer(),
+        on_observation=lambda name, facts: observed.append((name, facts)),
+    )
+    snapshots = iter([
+        [{"info_hash": "A" * 40, "name": "private.mkv", "status": 1, "percentDone": 25}],
+        [{"info_hash": "A" * 40, "name": "private.mkv", "status": 1, "percentDone": 25}],
+        [{"info_hash": "A" * 40, "name": "private.mkv", "status": 2, "percentDone": 100}],
+    ])
+    client.get_offline_tasks = lambda: next(snapshots)
+
+    with patch(
+        "telepiplex_download.client.time.monotonic",
+        side_effect=clock.monotonic,
+    ), patch(
+        "telepiplex_download.client.time.sleep",
+        side_effect=clock.sleep,
+    ):
+        completed = client.wait_for_download(
+            "magnet:?xt=urn:btih:" + "A" * 40,
+            timeout=20,
+            poll_initial_interval=2,
+            poll_max_interval=10,
+            poll_backoff_factor=2,
+        )
+
+    assert completed["progress"] == 100
+    backoffs = [facts for name, facts in observed if name == "download.poll.backoff_changed"]
+    assert backoffs == [{
+        "operation": "wait_for_download",
+        "previous_delay_ms": 2_000,
+        "next_delay_ms": 4_000,
+    }]
+    assert "private.mkv" not in repr(backoffs)
+
+
+def test_observer_failure_never_changes_request_or_poll_outcome():
+    """Fails if an observation callback exception escapes a successful provider flow."""
+    def broken_observer(_name, _facts):
+        raise RuntimeError("private observer failure")
+
+    client = Open115Client(
+        {"access_token": "access"},
+        session=QueueSession(requests_=[FakeResponse({
+            "state": True,
+            "code": 0,
+            "data": {"file_id": "file-1"},
+        })]),
+        pacer=RecordingPacer(),
+        on_observation=broken_observer,
+    )
+
+    assert client.get_file_info("/private/file.mkv") == {"file_id": "file-1"}
+
+    poll_client = Open115Client(
+        {"access_token": "access"},
+        session=QueueSession(),
+        pacer=RecordingPacer(),
+        on_observation=broken_observer,
+    )
+    poll_client.get_offline_tasks = lambda: [{
+        "info_hash": "A" * 40,
+        "name": "private.mkv",
+        "status": 2,
+        "percentDone": 100,
+    }]
+
+    assert poll_client.wait_for_download(
+        "magnet:?xt=urn:btih:" + "A" * 40,
+        timeout=1,
+    )["progress"] == 100
+
+
+def test_logger_adapter_whitelists_private_completed_and_failed_observations():
+    """Fails if adapter-side filtering lets provider inputs reach diagnostics."""
+    private_facts = {
+        "config": {"access_token": "private-config-token"},
+        "path": "/private/file.mkv",
+        "params": {"path": "/private/file.mkv"},
+        "data": {"magnet": "private"},
+        "files": {"upload": "private"},
+        "response": {"body": "private"},
+        "url": "https://private.example/file.mkv",
+        "token": "private-token",
+        "headers": {"Authorization": "Bearer private"},
+        "raw_payload": {"name": "private.mkv"},
+        "exception_text": "private exception details",
+    }
+
+    with patch("telepiplex_download.observability.logger") as logger:
+        emit_download_observation(
+            "download.request.completed",
+            endpoint_class="storage.read",
+            operation="get_file_info",
+            status_class="2xx",
+            retryable=False,
+            pacer_wait_ms=49.6,
+            http_elapsed_ms=12.4,
+            **private_facts,
+        )
+        emit_download_observation(
+            "download.request.failed",
+            endpoint_class="offline.poll",
+            operation="get_offline_tasks",
+            status_class="4xx",
+            retryable=True,
+            cooldown_ms=17_000,
+            **private_facts,
+        )
+
+    records = [call.kwargs["extra"] for call in logger.info.call_args_list]
+    assert records == [
+        {
+            "event_name": "download.request.completed",
+            "diagnostic_fields": {
+                "stage": "performance",
+                "status": "completed",
+                "output": {
+                    "endpoint_class": "storage.read",
+                    "operation": "get_file_info",
+                    "status_class": "2xx",
+                    "retryable": False,
+                    "pacer_wait_ms": 50,
+                    "http_elapsed_ms": 12,
+                },
+            },
+        },
+        {
+            "event_name": "download.request.failed",
+            "diagnostic_fields": {
+                "stage": "performance",
+                "status": "failed",
+                "output": {
+                    "endpoint_class": "offline.poll",
+                    "operation": "get_offline_tasks",
+                    "status_class": "4xx",
+                    "retryable": True,
+                    "cooldown_ms": 17_000,
+                },
+            },
+        },
+    ]
+    assert all("private" not in repr(record) for record in records)
