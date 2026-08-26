@@ -4,6 +4,7 @@ import logging
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +44,8 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(
             send_message=AsyncMock(return_value=SimpleNamespace(message_id=90)),
             send_photo=AsyncMock(return_value=SimpleNamespace(message_id=91)),
+            answer_callback_query=AsyncMock(),
+            delete_message=AsyncMock(),
             edit_message_text=AsyncMock(),
             edit_message_media=AsyncMock(),
             edit_message_caption=AsyncMock(),
@@ -102,6 +105,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         from app.handlers import interaction_handler
         from app.handlers.interaction_handler import operation_gate
         from app.utils.logger import Logger
+        from telepiplex_plugin_sdk.diagnostics import set_diagnostic_context
 
         logger = Logger(
             config_root=Path(self.temp.name) / "diagnostics",
@@ -110,10 +114,12 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         update = self.message_update(
             "/search 蜂蜜与四叶草 access_token=command-secret"
         )
+        set_diagnostic_context(operation_id="stale-operation")
         try:
             with patch.object(interaction_handler.init, "logger", logger):
                 await operation_gate(update, self.context())
         finally:
+            set_diagnostic_context(operation_id=None)
             for handler in list(logging.getLogger().handlers):
                 if getattr(handler, "_telepiplex_handler_kind", ""):
                     logging.getLogger().removeHandler(handler)
@@ -121,6 +127,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         event = json.loads(logger.session.machine_path.read_text(encoding="utf-8"))
         assert event["event"]["name"] == "telegram.interaction.received"
+        assert event["identity"]["operation_id"] is None
         assert event["facts"]["user_surface"] == {
             "direction": "incoming",
             "kind": "command",
@@ -311,17 +318,52 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sink._pending, {})
         self.assertEqual(sink._workers, {})
 
-    async def test_identity_segment_starts_as_one_photo_and_binds_its_message(self):
+    @patch("app.handlers.interaction_handler.build_poster_grid")
+    async def test_identity_segment_defers_photo_until_candidate_media(
+        self,
+        build_poster_grid,
+    ):
         from app.handlers.interaction_handler import (
             OperationReportSink,
             render_operation,
         )
 
-        context = self.context()
+        candidate_grid = BytesIO(b"candidate-grid")
+        candidate_grid.name = "telepiplex-candidates.jpg"
+        build_poster_grid.return_value = candidate_grid
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        router = Mock()
+        router.plugin_route.return_value = route
+        context = self.context(router=router)
+        events = []
+
+        async def send_photo(**kwargs):
+            events.append(("send_photo", kwargs.get("reply_markup")))
+            return SimpleNamespace(message_id=91)
+
+        async def delete_message(**_kwargs):
+            events.append(("delete_old", None))
+
+        async def attach_keyboard(**kwargs):
+            events.append(("attach_keyboard", kwargs.get("reply_markup")))
+            raise RuntimeError("telegram keyboard edit timed out")
+
+        async def retry_photo(**kwargs):
+            events.append(("retry_photo", kwargs.get("reply_markup")))
+
+        context.application.bot.send_photo.side_effect = send_photo
+        context.application.bot.delete_message.side_effect = delete_message
+        context.application.bot.edit_message_reply_markup.side_effect = (
+            attach_keyboard
+        )
+        context.application.bot.edit_message_media.side_effect = retry_photo
         sink = OperationReportSink(self.coordinator)
         sink.attach(lambda record: render_operation(
             context.application,
-            Mock(),
+            router,
             record,
         ))
 
@@ -329,6 +371,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             "search",
             self.report(
                 status_text="正在识别媒体…",
+                details={"defer_photo_until_media": True},
                 segment={
                     "role": "identity",
                     "presentation_kind": "photo",
@@ -338,12 +381,148 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         await sink.drain()
 
         self.assertTrue(response["accepted"])
+        context.application.bot.send_message.assert_awaited_once()
+        context.application.bot.send_photo.assert_not_awaited()
+        segment = self.coordinator.get_active_segment("op-1")
+        self.assertEqual(segment.message_id, 90)
+        self.assertEqual(segment.message_kind, "text")
+        self.assertEqual(segment.rendered_revision, 1)
+
+        original_replace = self.coordinator.replace_segment_message
+
+        def replace_message(*args, **kwargs):
+            events.append(("replace_cursor", None))
+            return original_replace(*args, **kwargs)
+
+        with patch.object(
+            self.coordinator,
+            "replace_segment_message",
+            side_effect=replace_message,
+        ):
+            await sink(
+                "search",
+                self.report(
+                    revision=2,
+                    state="awaiting_input",
+                    stage="candidate_selection",
+                    status_text="请选择作品",
+                    control="exit",
+                    details={
+                        "defer_photo_until_media": True,
+                        "poster_items": [{
+                            "number": 1,
+                            "title": "蜂蜜与四叶草",
+                            "poster_url": "https://image.example/poster.jpg",
+                        }],
+                        "keyboard": [[{
+                            "text": "① 蜂蜜与四叶草",
+                            "callback_data": "search:select:plan:0",
+                        }]],
+                    },
+                    segment={
+                        "role": "identity",
+                        "presentation_kind": "photo",
+                    },
+                ),
+            )
+            await sink.drain()
+
+        context.application.bot.send_message.assert_awaited_once()
         context.application.bot.send_photo.assert_awaited_once()
-        context.application.bot.send_message.assert_not_awaited()
+        context.application.bot.delete_message.assert_awaited_once_with(
+            chat_id=10,
+            message_id=90,
+        )
         segment = self.coordinator.get_active_segment("op-1")
         self.assertEqual(segment.message_id, 91)
         self.assertEqual(segment.message_kind, "photo")
-        self.assertEqual(segment.rendered_revision, 1)
+        self.assertEqual(segment.rendered_revision, 2)
+        self.assertEqual(
+            [name for name, _value in events],
+            [
+                "send_photo",
+                "replace_cursor",
+                "delete_old",
+                "attach_keyboard",
+                "retry_photo",
+            ],
+        )
+        self.assertIsNone(events[0][1])
+        self.assertIsNotNone(events[-1][1])
+        self.assertTrue(
+            events[-1][1].inline_keyboard[0][0].callback_data.startswith("~1.1~")
+        )
+
+    @patch("app.handlers.interaction_handler.build_poster_grid")
+    async def test_photo_promotion_discards_new_message_when_cursor_cas_raises(
+        self,
+        build_poster_grid,
+    ):
+        from app.handlers.interaction_handler import (
+            _promote_segment_text_to_photo,
+        )
+
+        candidate_grid = BytesIO(b"candidate-grid")
+        candidate_grid.name = "telepiplex-candidates.jpg"
+        build_poster_grid.return_value = candidate_grid
+        operation, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                details={"defer_photo_until_media": True},
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+            ),
+        )
+        segment = self.coordinator.bind_segment_message(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            chat_id=10,
+            message_id=90,
+            message_kind="text",
+        )
+        operation, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                revision=2,
+                state="awaiting_input",
+                stage="candidate_selection",
+                status_text="请选择作品",
+                details={
+                    "poster_items": [{
+                        "number": 1,
+                        "title": "蜂蜜与四叶草",
+                        "poster_url": "https://image.example/poster.jpg",
+                    }],
+                },
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+            ),
+        )
+        context = self.context()
+
+        with patch.object(
+            self.coordinator,
+            "replace_segment_message",
+            side_effect=RuntimeError("cursor database unavailable"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+                await _promote_segment_text_to_photo(
+                    context.application,
+                    operation,
+                    segment,
+                    text="请选择作品",
+                    markup=Mock(),
+                )
+
+        context.application.bot.delete_message.assert_awaited_once_with(
+            chat_id=10,
+            message_id=91,
+        )
 
     async def test_segment_update_arriving_during_first_send_edits_the_same_message(self):
         from app.handlers.interaction_handler import (
@@ -410,7 +589,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(segment.business_revision, 2)
         self.assertEqual(segment.rendered_revision, 2)
 
-    async def test_segment_edit_failure_is_quarantined_without_sending_a_replacement(self):
+    async def test_segment_edit_failure_retries_same_known_message_without_replacement(self):
         from app.handlers.interaction_handler import (
             OperationReportSink,
             render_operation,
@@ -432,9 +611,10 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             },
         ))
         await sink.drain()
-        context.application.bot.edit_message_text.side_effect = RuntimeError(
-            "telegram edit outcome unknown"
-        )
+        context.application.bot.edit_message_text.side_effect = [
+            RuntimeError("telegram edit outcome unknown"),
+            None,
+        ]
 
         await sink("search", self.report(
             revision=2,
@@ -450,10 +630,15 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         context.application.bot.send_message.assert_awaited_once()
         context.application.bot.send_photo.assert_not_awaited()
+        self.assertEqual(
+            context.application.bot.edit_message_text.await_count,
+            2,
+        )
         segment = self.coordinator.get_active_segment("op-1")
-        self.assertEqual(segment.state, "delivery_uncertain")
-        self.assertEqual(segment.delivery_state, "uncertain")
+        self.assertEqual(segment.state, "open")
+        self.assertEqual(segment.delivery_state, "delivered")
         self.assertEqual(segment.message_id, 90)
+        self.assertEqual(segment.rendered_revision, 2)
 
     async def test_segment_first_send_failure_is_uncertain_and_never_falls_back(self):
         from app.handlers.interaction_handler import (
@@ -1558,7 +1743,9 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         stale.callback_query.answer.assert_awaited_once_with("当前任务进行中")
 
     async def test_segment_keyboard_claim_disables_double_click_before_feature_dispatch(self):
+        from telegram import CallbackQuery, Chat, Message, User
         from app.handlers.interaction_handler import operation_gate, operation_markup
+        from app.handlers.plugin_handler import dynamic_callback_gateway
 
         operation, segment = self.coordinator.accept_segment_report(
             "search",
@@ -1583,21 +1770,77 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             chat_id=10,
             message_id=92,
         )
+        client = SimpleNamespace(request=AsyncMock(return_value={"actions": []}))
         route = SimpleNamespace(
             plugin_id="search",
             manifest=SimpleNamespace(callbacks=("search",)),
+            client=client,
         )
         router = Mock()
         router.plugin_route.return_value = route
+        router.callback_route.return_value = route
         markup = operation_markup(operation, router, segment=segment)
         encoded = markup.inline_keyboard[0][0].callback_data
         self.assertNotEqual(encoded, "search:select:p1:0")
 
         context = self.context(router=router)
-        accepted = self.callback_update(encoded, message_id=92)
-        await operation_gate(accepted, context)
+        callback_query = CallbackQuery(
+            id="candidate-click",
+            from_user=User(id=1, first_name="Tester", is_bot=False),
+            chat_instance="candidate-chat",
+            message=Message(
+                message_id=92,
+                date=datetime.now(timezone.utc),
+                chat=Chat(id=10, type="private"),
+            ),
+            data=encoded,
+        )
+        callback_query.set_bot(context.application.bot)
+        accepted = SimpleNamespace(
+            update_id=11,
+            effective_chat=SimpleNamespace(id=10),
+            effective_user=SimpleNamespace(id=1),
+            effective_message=SimpleNamespace(text=None),
+            callback_query=callback_query,
+        )
+        busy_started = asyncio.Event()
+        release_busy = asyncio.Event()
 
-        self.assertEqual(accepted.callback_query.data, "search:select:p1:0")
+        async def delayed_busy_caption(**_kwargs):
+            busy_started.set()
+            await release_busy.wait()
+
+        context.application.bot.edit_message_caption.side_effect = (
+            delayed_busy_caption
+        )
+        gate_task = asyncio.create_task(operation_gate(accepted, context))
+        await asyncio.wait_for(busy_started.wait(), timeout=1)
+        self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                revision=2,
+                state="awaiting_input",
+                stage="candidate_selection",
+                status_text="候选证据已刷新",
+                details={"keyboard": [[{
+                    "text": "死神：千年血战篇",
+                    "callback_data": "search:select:p1:0",
+                }]]},
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+                projection={"text": "候选证据已刷新"},
+            ),
+        )
+        self.assertEqual(
+            self.coordinator.get_active_segment("op-1").callback_state,
+            "busy",
+        )
+        release_busy.set()
+        await gate_task
+
+        self.assertEqual(accepted.callback_query.data, encoded)
         self.assertEqual(
             self.coordinator.get_active_segment("op-1").callback_generation,
             2,
@@ -1608,11 +1851,86 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             caption="正在确认媒体身份…",
             reply_markup=None,
         )
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await dynamic_callback_gateway(accepted, context)
+        request = client.request.await_args
+        self.assertEqual(request.args[0], "callback.dispatch")
+        self.assertEqual(request.args[1]["namespace"], "search")
+        self.assertEqual(request.args[1]["payload"], "select:p1:0")
+        released = self.coordinator.get_active_segment("op-1")
+        self.assertEqual(released.callback_state, "idle")
+        self.assertEqual(released.callback_token, "")
+        self.assertGreaterEqual(
+            context.application.bot.edit_message_caption.await_count,
+            2,
+        )
 
         replay = self.callback_update(encoded, message_id=92)
         with self.assertRaises(ApplicationHandlerStop):
             await operation_gate(replay, context)
         replay.callback_query.answer.assert_awaited_once_with("当前任务进行中")
+
+    async def test_segment_callback_busy_render_failure_does_not_drop_dispatch(self):
+        from app.handlers.interaction_handler import (
+            callback_dispatch_data,
+            operation_gate,
+            operation_markup,
+        )
+        from app.handlers.plugin_handler import dynamic_callback_gateway
+
+        operation, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                state="awaiting_input",
+                stage="candidate_selection",
+                details={"keyboard": [[{
+                    "text": "蜂蜜与四叶草",
+                    "callback_data": "search:select:p1:0",
+                }]]},
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+            ),
+        )
+        segment = self.coordinator.bind_segment_message(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            chat_id=10,
+            message_id=92,
+        )
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+            client=SimpleNamespace(
+                request=AsyncMock(return_value={"actions": []}),
+            ),
+        )
+        router = Mock()
+        router.plugin_route.return_value = route
+        router.callback_route.return_value = route
+        markup = operation_markup(operation, router, segment=segment)
+        encoded = markup.inline_keyboard[0][0].callback_data
+        update = self.callback_update(encoded, message_id=92)
+        context = self.context(router=router)
+        context.application.bot.edit_message_caption.side_effect = [
+            RuntimeError("telegram timeout"),
+            None,
+        ]
+
+        await operation_gate(update, context)
+
+        self.assertEqual(
+            callback_dispatch_data(update, self.coordinator),
+            "search:select:p1:0",
+        )
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await dynamic_callback_gateway(update, context)
+        route.client.request.assert_awaited_once()
+        released = self.coordinator.get_active_segment("op-1")
+        self.assertEqual(released.callback_state, "idle")
+        self.assertEqual(released.state, "open")
 
     async def test_button_only_operation_rejects_plain_text_and_allows_owned_callback(self):
         from app.handlers.interaction_handler import operation_gate

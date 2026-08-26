@@ -50,6 +50,7 @@ _TERMINAL_CONTROL_LABELS = frozenset({
     "取消并回滚",
 })
 _CONTROL_IN_PROGRESS_STATES = {"cancelling", "rolling_back"}
+_SEGMENT_EDIT_MAX_ATTEMPTS = 3
 
 
 def _log(level: str, message: str):
@@ -891,7 +892,11 @@ async def operation_gate(update, context):
     update_id = getattr(update, "update_id", None)
     set_diagnostic_context(
         trace_id=f"TG-{update_id}" if update_id is not None else new_trace_id(),
+        span_id=None,
+        parent_span_id=None,
+        operation_id=None,
         request_id=f"telegram-update:{update_id}" if update_id is not None else None,
+        incident_id=None,
     )
     _log_incoming_telegram_interaction(update)
     chat = getattr(update, "effective_chat", None)
@@ -941,7 +946,6 @@ async def operation_gate(update, context):
                     busy_text=busy_text,
                 )
             if claimed is not None:
-                query.data = raw_data
                 await _render_claimed_segment_busy(
                     context.application,
                     record,
@@ -1194,6 +1198,8 @@ def _normalize_control_result(record: OperationRecord, result: dict) -> dict:
 def operation_markup(record: OperationRecord, router=None, *, segment=None):
     if record.state in TERMINAL_STATES:
         return None
+    if segment is not None and segment.callback_state == "busy":
+        return None
     rows = deduplicate_terminal_controls(
         _feature_status_rows(record, router, segment=segment)
     )
@@ -1293,22 +1299,97 @@ def _decode_segment_callback(value: str) -> tuple[str, int, int] | None:
     return match.group("data"), segment_generation, callback_generation
 
 
+def callback_dispatch_data(update, coordinator) -> str | None:
+    """Return the callback payload authorized by the operation gate.
+
+    Telegram objects are immutable, so the gate cannot rewrite encoded
+    segment callbacks in place.  For encoded callbacks, authorize the raw
+    payload only after the coordinator proves that this exact click claimed
+    the current segment generation and keyboard generation.
+    """
+    query = getattr(update, "callback_query", None)
+    data = str(getattr(query, "data", "") or "")
+    decoded = _decode_segment_callback(data)
+    if decoded is None:
+        return data
+    if coordinator is None or query is None:
+        return None
+    raw_data, segment_generation, callback_generation = decoded
+    chat = getattr(update, "effective_chat", None)
+    user = getattr(update, "effective_user", None)
+    if chat is None or user is None:
+        return None
+    record = coordinator.active(int(chat.id), int(user.id))
+    if record is None:
+        return None
+    segment = coordinator.get_active_segment(record.operation_id)
+    message_id = getattr(getattr(query, "message", None), "message_id", None)
+    if (
+        segment is None
+        or segment.owner_plugin_id != record.plugin_id
+        or segment.generation != segment_generation
+        or segment.callback_generation != callback_generation + 1
+        or segment.callback_state != "busy"
+        or segment.callback_token != raw_data
+        or segment.message_id != message_id
+    ):
+        return None
+    return raw_data
+
+
+async def release_callback_dispatch(update, application, coordinator):
+    """Release the exact claimed callback after its Feature RPC finishes."""
+    query = getattr(update, "callback_query", None)
+    data = str(getattr(query, "data", "") or "")
+    decoded = _decode_segment_callback(data)
+    if decoded is None or coordinator is None or query is None:
+        return None
+    raw_data, segment_generation, callback_generation = decoded
+    chat = getattr(update, "effective_chat", None)
+    user = getattr(update, "effective_user", None)
+    if chat is None or user is None:
+        return None
+    record = coordinator.active(int(chat.id), int(user.id))
+    if record is None:
+        return None
+    message_id = getattr(getattr(query, "message", None), "message_id", None)
+    async with operation_render_lock(application, record.operation_id):
+        return coordinator.release_segment_callback(
+            record.plugin_id,
+            record.operation_id,
+            message_id=message_id,
+            segment_generation=segment_generation,
+            callback_generation=callback_generation + 1,
+            callback_token=raw_data,
+        )
+
+
 async def _render_claimed_segment_busy(application, record, segment) -> None:
     busy_text = segment.callback_busy_text or _segment_callback_busy_text(segment)
-    if segment.presentation_kind == "photo":
-        await application.bot.edit_message_caption(
+    try:
+        if segment.presentation_kind == "photo":
+            await application.bot.edit_message_caption(
+                chat_id=record.chat_id,
+                message_id=segment.message_id,
+                caption=busy_text,
+                reply_markup=None,
+            )
+            return
+        await application.bot.edit_message_text(
             chat_id=record.chat_id,
             message_id=segment.message_id,
-            caption=busy_text,
+            text=busy_text,
             reply_markup=None,
         )
-        return
-    await application.bot.edit_message_text(
-        chat_id=record.chat_id,
-        message_id=segment.message_id,
-        text=busy_text,
-        reply_markup=None,
-    )
+    except Exception as exc:
+        if not _message_not_modified(exc):
+            _log(
+                "warn",
+                "任务按钮已锁定，但处理提示未能刷新；继续分发本次点击："
+                f"operation_id={record.operation_id}, "
+                f"message_id={segment.message_id}, "
+                f"error={_render_error(exc)}",
+            )
 
 
 def _segment_callback_busy_text(segment) -> str:
@@ -1387,7 +1468,7 @@ async def _render_operation_segment_locked(
         if sent_record is None:
             return None
         try:
-            message = await _send_new_segment_message(
+            message, message_kind = await _send_new_segment_message(
                 application,
                 router,
                 sent_record,
@@ -1409,6 +1490,7 @@ async def _render_operation_segment_locked(
             generation=claimed.generation,
             chat_id=sent_record.chat_id,
             message_id=message_id,
+            message_kind=message_kind,
         )
         if bound is None:
             return None
@@ -1420,6 +1502,7 @@ async def _render_operation_segment_locked(
             projection_hash=sent_hash,
         )
 
+    edit_attempts = 0
     while True:
         segment = coordinator.get_segment(segment_id)
         record = coordinator.get(operation_id)
@@ -1444,13 +1527,21 @@ async def _render_operation_segment_locked(
             continue
         try:
             await _edit_segment_message(application, router, record, segment)
-        except Exception:
-            coordinator.mark_segment_delivery_uncertain(
-                segment.segment_id,
-                owner_plugin_id=segment.owner_plugin_id,
-                generation=segment.generation,
+        except Exception as exc:
+            edit_attempts += 1
+            _log(
+                "warn",
+                "已知任务消息编辑失败，将只重试同一消息游标："
+                f"operation_id={record.operation_id}, "
+                f"message_id={segment.message_id}, "
+                f"attempt={edit_attempts}/{_SEGMENT_EDIT_MAX_ATTEMPTS}, "
+                f"error={_render_error(exc)}",
             )
-            return segment.message_id
+            if edit_attempts >= _SEGMENT_EDIT_MAX_ATTEMPTS:
+                return segment.message_id
+            await asyncio.sleep(0)
+            continue
+        edit_attempts = 0
         rendered = coordinator.record_segment_rendered(
             segment.segment_id,
             owner_plugin_id=segment.owner_plugin_id,
@@ -1468,10 +1559,28 @@ async def _send_new_segment_message(application, router, record, segment):
     )
     markup = operation_markup(record, router, segment=segment)
     if segment.presentation_kind == "text":
-        return await application.bot.send_message(
-            chat_id=record.chat_id,
-            text=text,
-            reply_markup=markup,
+        return (
+            await application.bot.send_message(
+                chat_id=record.chat_id,
+                text=text,
+                reply_markup=markup,
+            ),
+            "text",
+        )
+    poster_items = _operation_poster_items(record.details)
+    photo_url = _operation_photo_url(record.details)
+    if (
+        record.details.get("defer_photo_until_media") is True
+        and not poster_items
+        and not photo_url
+    ):
+        return (
+            await application.bot.send_message(
+                chat_id=record.chat_id,
+                text=text,
+                reply_markup=markup,
+            ),
+            "text",
         )
     caption, parse_mode = bounded_photo_caption(
         text,
@@ -1486,7 +1595,7 @@ async def _send_new_segment_message(application, router, record, segment):
     }
     if parse_mode:
         kwargs["parse_mode"] = parse_mode
-    return await application.bot.send_photo(**kwargs)
+    return await application.bot.send_photo(**kwargs), "photo"
 
 
 async def _edit_segment_message(application, router, record, segment):
@@ -1506,12 +1615,33 @@ async def _edit_segment_message(application, router, record, segment):
             if not _message_not_modified(exc):
                 raise
         return
+    poster_items = _operation_poster_items(record.details)
+    photo_url = _operation_photo_url(record.details)
+    if segment.message_kind == "text":
+        if not poster_items and not photo_url:
+            try:
+                await application.bot.edit_message_text(
+                    chat_id=record.chat_id,
+                    message_id=segment.message_id,
+                    text=text,
+                    reply_markup=markup,
+                )
+            except Exception as exc:
+                if not _message_not_modified(exc):
+                    raise
+            return
+        await _promote_segment_text_to_photo(
+            application,
+            record,
+            segment,
+            text=text,
+            markup=markup,
+        )
+        return
     caption, parse_mode = bounded_photo_caption(
         text,
         record.details.get("parse_mode"),
     )
-    poster_items = _operation_poster_items(record.details)
-    photo_url = _operation_photo_url(record.details)
     if poster_items or photo_url:
         try:
             await application.bot.edit_message_media(
@@ -1539,6 +1669,114 @@ async def _edit_segment_message(application, router, record, segment):
     except Exception as exc:
         if not _message_not_modified(exc):
             raise
+
+
+async def _promote_segment_text_to_photo(
+    application,
+    record,
+    segment,
+    *,
+    text: str,
+    markup,
+) -> None:
+    caption, parse_mode = bounded_photo_caption(
+        text,
+        record.details.get("parse_mode"),
+    )
+    kwargs = {
+        "chat_id": record.chat_id,
+        "photo": await _segment_photo_media(record),
+        "caption": caption,
+        "reply_markup": None,
+    }
+    if parse_mode:
+        kwargs["parse_mode"] = parse_mode
+    message = await application.bot.send_photo(**kwargs)
+    message_id = getattr(message, "message_id", None)
+    if not isinstance(message_id, int) or message_id <= 0:
+        raise RuntimeError("promoted segment photo has no Telegram message id")
+    coordinator = application.bot_data.get(COORDINATOR_KEY)
+    try:
+        promoted = (
+            coordinator.replace_segment_message(
+                segment.segment_id,
+                owner_plugin_id=segment.owner_plugin_id,
+                generation=segment.generation,
+                chat_id=record.chat_id,
+                expected_message_id=segment.message_id,
+                expected_message_kind="text",
+                message_id=message_id,
+                message_kind="photo",
+            )
+            if coordinator is not None
+            else None
+        )
+    except Exception:
+        await _discard_unbound_segment_message(
+            application,
+            record.chat_id,
+            message_id,
+        )
+        raise
+    if promoted is None:
+        await _discard_unbound_segment_message(
+            application,
+            record.chat_id,
+            message_id,
+        )
+        raise RuntimeError("segment photo promotion lost its active cursor")
+    await _discard_replaced_segment_message(
+        application,
+        record.chat_id,
+        segment.message_id,
+    )
+    if markup is not None:
+        await application.bot.edit_message_reply_markup(
+            chat_id=record.chat_id,
+            message_id=message_id,
+            reply_markup=markup,
+        )
+
+
+async def _discard_unbound_segment_message(
+    application,
+    chat_id: int,
+    message_id: int,
+) -> None:
+    try:
+        await application.bot.delete_message(
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+    except Exception:
+        pass
+
+
+async def _discard_replaced_segment_message(
+    application,
+    chat_id: int,
+    message_id: int,
+) -> None:
+    try:
+        await application.bot.delete_message(
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+        return
+    except Exception as exc:
+        try:
+            await application.bot.edit_message_reply_markup(
+                chat_id=chat_id,
+                message_id=message_id,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+        _log(
+            "warn",
+            "任务媒体就绪后未能删除旧文本状态，已清理其按钮："
+            f"message_id={message_id}, error={_render_error(exc)}",
+        )
 
 
 async def _segment_photo_media(record):

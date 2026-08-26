@@ -1,9 +1,9 @@
 # Search 候选准入、消息段与最小媒体合同设计
 
 **日期：** 2026-08-25  
-**状态：** 已完成分段设计确认，等待书面设计复核  
+**状态：** 已实现；已吸收 INC-4EDFD96C264B 现场回归  
 **范围：** Host、Plugin SDK、search、download、rename  
-**目标版本：** Host `v3.6.0-host`、Host API `1.7`、SDK `1.4.0`、search `1.12.0`、download `1.1.0`、rename `1.6.0`
+**目标版本：** Host `v3.6.1-host`、Host API `1.7`、SDK `1.4.0`、search `1.12.1`、download `1.1.0`、rename `1.6.0`
 
 ## 1. 目标
 
@@ -130,25 +130,27 @@ SDK `1.4.0` 增加：
 
 1. 在数据库中预留唯一 `segment_id/generation`，状态为 `creating/reserved`。
 2. 在 per-operation 串行队列中把 delivery 标记为 `delivering`。
-3. 只允许预留该段的 creator 执行一次 Telegram `sendPhoto` 或 `sendMessage`。
+3. 只允许预留该段的 creator 执行一次初始 Telegram `sendPhoto` 或 `sendMessage`；声明延迟媒体的 identity 段先发送文字状态。
 4. 发送期间到达的新 revision 只替换数据库中的最新待渲染快照，不启动第二个 creator。
 5. 首次发送返回后，以 `segment_id + owner + generation` CAS 保存 message ID；该 CAS 不要求业务 revision 仍等于发送开始时的 revision。
-6. 在同一 message ID 上循环渲染最新快照，直到 `rendered_revision == business_revision`。
+6. 延迟媒体段首次取得海报后，Host 先发送不带按钮的真实 photo，再以 `segment_id + owner + generation + old message cursor` CAS 把有效游标迁移到 photo，清理旧文字状态后才给新 photo 挂载键盘；CAS 返回失败或抛出异常时都删除未绑定的新消息。
+7. 除上述一次性文字到真实 photo 的受控迁移外，在同一 message ID 上循环渲染最新快照，直到 `rendered_revision == business_revision`。
 
 这替代现有“首次在飞 render 加最后 pending render 都各自执行”的行为。业务 revision 推进不再导致第二次 Telegram `send`。
 
 `projection_hash` 相同视为 UI no-op：Host 不调用 Telegram，search 也不得因为海报补全结果未变化而产生新的候选业务 revision。
 
-### 5.4 presentation kind 不可变
+### 5.4 目标 presentation kind 不可变
 
-消息段创建后不能在 text 和 photo 之间转换：
+消息段的目标 `presentation_kind` 创建后不可变；`message_kind` 记录 Telegram 当前实际载体。identity 段允许一次受控的 `text -> photo` 实际载体迁移：
 
-- identity 段从开始就是 Host 本地生成占位图的 photo 消息；caption 初始为“正在识别媒体…”。
-- 候选海报宫格通过 `editMessageMedia` 替换占位图，按钮和文字通过 caption 更新。
-- 海报生成或媒体编辑失败时保留现有图片，只更新精简 caption 和按钮；不得另发 text fallback。
+- search 在 identity 段声明 `defer_photo_until_media`；planning 只发送“正在识别媒体…”文字，不生成海报占位图。
+- 候选海报数据形成后，Host 先发送无按钮 photo，把段的有效 cursor 原子迁移到该消息，再删除或去活旧文字状态，最后给权威 photo 挂载键盘；任何时刻最多只有一个有效交互目标。
+- 迁移后的候选、确认 busy 和最终 identity 继续在同一 photo message ID 上编辑。
+- 候选个别远程海报缺失时可以在候选宫格内生成标题卡，但 planning 阶段不得因此提前出现图片。
 - search、download 和 rename 执行段使用 text 消息，只做文本与键盘编辑。
 
-占位图必须由 Host 本地确定性生成，不依赖远程 Provider。Telegram caption 必须在 Host 边界内压缩到合法长度。
+候选标题卡必须由 Host 本地确定性生成，不依赖远程 Provider。Telegram caption 必须在 Host 边界内压缩到合法长度。旧文字删除失败时必须至少清空其按钮，使其不再是有效交互目标。
 
 ## 6. Callback 与首次点击反馈
 
@@ -169,6 +171,10 @@ Feature callback 必须同时满足：
 5. 再调用可能耗时的 search hydration 或下游 capability。
 
 同一 token 的重放返回当前 busy/result 状态，不重复调用 Feature。不同 token 在 busy 状态下返回当前任务状态。正常 Telegram 网络条件下，点击后一秒内必须出现持久可见反馈。
+
+编码 callback 的原始 payload 只能由已经持久化成功的 segment claim 恢复。Host 不得改写 python-telegram-bot 的只读 `CallbackQuery.data`；动态路由必须再次核对 operation、segment generation、callback generation、token 和 message ID 后再分发。
+
+claim 的生命周期独立于业务 revision：后台 Provider 进度或候选补全报告只能更新段投影，不能把 `callback_state/token` 重置为 idle。对应 Feature RPC 返回或失败后，Host 才在 operation render lock 内按 owner、segment generation、callback generation、token 和 message ID CAS 释放 claim，并强制重渲染最新投影。Telegram busy caption/text 编辑属于尽力而为的视觉反馈；它失败或返回 `message is not modified` 都不能阻断已经持久化成功的点击分发。
 
 operation 级 cancel/exit 仍可由 Host 处理，但终态投影也必须进入当前消息段串行队列，不能绕过段 owner/generation 后直接写 Telegram。
 
@@ -436,7 +442,7 @@ Rename 的 source/final path、冲突、写后验证和目录清理摘要写入�
 
 ### 11.1 新旧生产边界
 
-- search `1.12.0` 只生产 v2。
+- search `1.12.1` 只生产 v2。
 - download `1.1.0` 接受 v2，并为仍在运行的旧任务继续原样传递 v1。
 - rename `1.6.0` 原生消费 v2；v1 只在恢复/输入边界转换一次。
 - 新代码不得生产新的 `naming_metadata`；旧任务携带的 naming metadata 只供 converter 补足必需标题或分类。
@@ -531,7 +537,7 @@ Telegram Bot API 不提供业务幂等键。Host 如果在 Telegram 已接受 se
 
 硬性保证是任何时候最多只有一条有效交互消息。正常并发 revision、Provider 进度和 callback 不得产生重复可见消息；只有 Telegram send 响应丢失加 Host 进程中断这一不可判定窗口允许留下无效历史消息。
 
-已知 message ID 的 edit 响应丢失可以安全重试同一目标，不得新发消息。
+已知 message ID 的 edit 响应丢失可以安全重试同一目标，不得新发消息，也不得把已落库游标误标为 `delivery_uncertain`。单次渲染最多连续尝试三次；仍失败时保持段为 `open/delivered` 且不推进 `rendered_revision`，由下一次同游标渲染继续收敛。文字到 photo promotion 的挂键盘失败同样通过已落库 photo 游标重试，绝不再发送第二张图片。
 
 ### 14.2 Seal 与 Handoff 失败
 
@@ -549,9 +555,12 @@ Telegram Bot API 不提供业务幂等键。Host 如果在 Telegram 已接受 se
 - 阻塞首次 Prowlarr `sendMessage`，期间推进 5/25、11/25、25/25；断言只有一个 Prowlarr message ID。
 - 候选 photo、确认 busy、identity milestone 共享一个 segment/message ID。
 - foreground callback 与 background report 竞争时，不能发生无条件 cursor 回写或跨 owner message 复用。
+- claim 与后台 revision 竞争时，首击必须恰好分发一次；后台报告不得提前释放 claim，RPC 完成后才恢复最新键盘。
 - projection hash 相同不调用 Telegram；无变化海报补全不产生新候选 revision。
 - 旧 segment 的 message ID、generation 或 callback token 均被 gate 拒绝。
 - 慢 hydration fixture 下，首次点击后一秒内移除键盘并持久显示处理中；相同 token 重放不重复调用 Feature。
+- busy 提示编辑超时或失败时仍继续分发已 claim 的点击；延迟媒体 promotion 必须按“无按钮 photo -> cursor CAS -> 旧消息去活 -> 新键盘”顺序执行。
+- promotion 挂键盘首次失败时，只在同一已知 photo 游标上重试；最终保持 `open/delivered` 并推进到最新 rendered revision，不进入 delivery uncertain。
 - identity、Search、Download、Rename 的 seal/handoff 顺序严格成立。
 - Host reload 后开放、封口、delivery uncertain 和 callback generation 状态保持一致。
 
@@ -591,7 +600,7 @@ Telegram Bot API 不提供业务幂等键。Host 如果在 Telegram 已接受 se
 Telegram 顺序必须是：
 
 ```text
-1. Search identity photo
+1. Search planning text -> Search identity photo（删除旧 planning text）
 2. Search/Prowlarr text
 3. Download text
 4. Rename text
@@ -613,12 +622,12 @@ Telegram 顺序必须是：
 
 | 组件 | 当前 | 目标 | 要求 |
 |---|---:|---:|---|
-| Host | `v3.5.6-host` | `v3.6.0-host` | 提供消息段存储、渲染与 Host API 1.7 |
-| Host API | `1.6` | `1.7` | 兼容旧 operation report，新增 segment 契约 |
-| Plugin SDK | `1.3.2` | `1.4.0` | v2 validator、converter、segment RPC |
-| search | `1.11.7` | `1.12.0` | 要求 Host API `>=1.7,<2.0`、SDK `1.4.0` |
-| download | `1.0.20` | `1.1.0` | 要求 Host API `>=1.7,<2.0`、SDK `1.4.0` |
-| rename | `1.5.11` | `1.6.0` | 要求 Host API `>=1.7,<2.0`、SDK `1.4.0` |
+| Host | `v3.6.0-host` | `v3.6.1-host` | 延迟 identity photo、只读 callback 路由与 update 诊断隔离 |
+| Host API | `1.7` | `1.7` | segment RPC 兼容不变 |
+| Plugin SDK | `1.4.0` | `1.4.0` | 无接口变化 |
+| search | `1.12.0` | `1.12.1` | 声明 planning 延迟媒体；继续要求 Host API `>=1.7,<2.0`、SDK `1.4.0` |
+| download | `1.1.0` | `1.1.0` | 无生产改动 |
+| rename | `1.6.0` | `1.6.0` | 无生产改动 |
 | sync | 不变 | 不变 | 不恢复自动订阅 |
 | caption | 不变 | 不变 | 无生产改动 |
 

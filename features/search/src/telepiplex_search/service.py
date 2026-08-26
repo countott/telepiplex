@@ -6894,6 +6894,12 @@ class SearchFeature:
                 "submitting_download",
             }
             role = "search" if view["stage"] in search_stages else "identity"
+            if (
+                role == "identity"
+                and operation.get("kind") == "search"
+                and view["stage"] == "planning"
+            ):
+                view["details"]["defer_photo_until_media"] = True
             view["segment"] = {
                 "role": role,
                 "presentation_kind": "text" if role == "search" else "photo",

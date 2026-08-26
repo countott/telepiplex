@@ -788,9 +788,7 @@ class InteractionCoordinator:
                         self._connection.execute(
                             "UPDATE operation_message_segments SET "
                             "business_revision = ?, projection_hash = ?, "
-                            "projection_json = ?, callback_state = 'idle', "
-                            "callback_token = '', callback_busy_text = '', "
-                            "updated_at = ? "
+                            "projection_json = ?, updated_at = ? "
                             "WHERE segment_id = ?",
                             (
                                 values["revision"],
@@ -870,6 +868,7 @@ class InteractionCoordinator:
         generation: int,
         chat_id: int,
         message_id: int,
+        message_kind: str | None = None,
     ) -> OperationMessageSegment | None:
         try:
             normalized_generation = int(generation)
@@ -878,11 +877,13 @@ class InteractionCoordinator:
         except (TypeError, ValueError):
             normalized_generation = normalized_chat_id = normalized_message_id = 0
         normalized_owner = str(owner_plugin_id or "").strip()
+        normalized_kind = str(message_kind or "").strip().casefold()
         if (
             not normalized_owner
             or normalized_generation <= 0
             or normalized_chat_id == 0
             or normalized_message_id <= 0
+            or normalized_kind not in {"", "text", "photo"}
         ):
             raise InteractionError(
                 "invalid_segment_delivery",
@@ -891,7 +892,8 @@ class InteractionCoordinator:
         with self._lock, self._connection:
             cursor = self._connection.execute(
                 "UPDATE operation_message_segments SET "
-                "message_id = ?, message_kind = presentation_kind, "
+                "message_id = ?, message_kind = CASE "
+                "WHEN ? = '' THEN presentation_kind ELSE ? END, "
                 "state = 'open', delivery_state = 'delivered', updated_at = ? "
                 "WHERE segment_id = ? AND owner_plugin_id = ? AND generation = ? "
                 "AND state = 'creating' AND delivery_state IN ('reserved', 'delivering') "
@@ -901,6 +903,8 @@ class InteractionCoordinator:
                 "AND operation.active_segment_id = operation_message_segments.segment_id)",
                 (
                     normalized_message_id,
+                    normalized_kind,
+                    normalized_kind,
                     time.time(),
                     str(segment_id),
                     normalized_owner,
@@ -912,6 +916,79 @@ class InteractionCoordinator:
                 return None
             row = self._connection.execute(
                 "SELECT * FROM operation_message_segments WHERE segment_id = ?",
+                (str(segment_id),),
+            ).fetchone()
+        return self._segment_from_row(row)
+
+    def replace_segment_message(
+        self,
+        segment_id: str,
+        *,
+        owner_plugin_id: str,
+        generation: int,
+        chat_id: int,
+        expected_message_id: int,
+        expected_message_kind: str,
+        message_id: int,
+        message_kind: str,
+    ) -> OperationMessageSegment | None:
+        try:
+            normalized_generation = int(generation)
+            normalized_chat_id = int(chat_id)
+            normalized_expected_id = int(expected_message_id)
+            normalized_message_id = int(message_id)
+        except (TypeError, ValueError):
+            normalized_generation = normalized_chat_id = 0
+            normalized_expected_id = normalized_message_id = 0
+        normalized_owner = str(owner_plugin_id or "").strip()
+        normalized_expected_kind = str(
+            expected_message_kind or ""
+        ).strip().casefold()
+        normalized_kind = str(message_kind or "").strip().casefold()
+        if (
+            not normalized_owner
+            or normalized_generation <= 0
+            or normalized_chat_id == 0
+            or normalized_expected_id <= 0
+            or normalized_message_id <= 0
+            or normalized_expected_kind not in {"text", "photo"}
+            or normalized_kind not in {"text", "photo"}
+        ):
+            raise InteractionError(
+                "invalid_segment_delivery",
+                "replacement segment delivery target is invalid",
+            )
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE operation_message_segments SET message_id = ?, "
+                "message_kind = ?, updated_at = ? "
+                "WHERE segment_id = ? AND owner_plugin_id = ? "
+                "AND generation = ? AND state = 'open' "
+                "AND delivery_state = 'delivered' "
+                "AND message_id = ? AND message_kind = ? "
+                "AND EXISTS (SELECT 1 FROM operations operation "
+                "WHERE operation.operation_id = "
+                "operation_message_segments.operation_id "
+                "AND operation.chat_id = ? "
+                "AND operation.active_segment_id = "
+                "operation_message_segments.segment_id)",
+                (
+                    normalized_message_id,
+                    normalized_kind,
+                    time.time(),
+                    str(segment_id),
+                    normalized_owner,
+                    normalized_generation,
+                    normalized_expected_id,
+                    normalized_expected_kind,
+                    normalized_chat_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = self._connection.execute(
+                "SELECT * FROM operation_message_segments "
+                "WHERE segment_id = ?",
                 (str(segment_id),),
             ).fetchone()
         return self._segment_from_row(row)
@@ -1248,6 +1325,81 @@ class InteractionCoordinator:
                     normalized_segment_generation,
                     normalized_callback_generation,
                     normalized_message_id,
+                    normalized_plugin,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = self._connection.execute(
+                "SELECT * FROM operation_message_segments "
+                "WHERE operation_id = ? AND owner_plugin_id = ? "
+                "AND generation = ?",
+                (
+                    normalized_operation,
+                    normalized_plugin,
+                    normalized_segment_generation,
+                ),
+            ).fetchone()
+        return self._segment_from_row(row)
+
+    def release_segment_callback(
+        self,
+        plugin_id: str,
+        operation_id: str,
+        *,
+        message_id: int,
+        segment_generation: int,
+        callback_generation: int,
+        callback_token: str,
+    ) -> OperationMessageSegment | None:
+        try:
+            normalized_message_id = int(message_id)
+            normalized_segment_generation = int(segment_generation)
+            normalized_callback_generation = int(callback_generation)
+        except (TypeError, ValueError):
+            normalized_message_id = 0
+            normalized_segment_generation = 0
+            normalized_callback_generation = 0
+        normalized_plugin = str(plugin_id or "").strip()
+        normalized_operation = str(operation_id or "").strip()
+        normalized_token = str(callback_token or "")
+        if (
+            not normalized_plugin
+            or not normalized_operation
+            or normalized_message_id <= 0
+            or normalized_segment_generation <= 0
+            or normalized_callback_generation <= 0
+            or not normalized_token
+            or len(normalized_token.encode("utf-8")) > 64
+        ):
+            raise InteractionError(
+                "invalid_segment_callback",
+                "segment callback release identity is invalid",
+            )
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE operation_message_segments SET "
+                "callback_state = 'idle', callback_token = '', "
+                "callback_busy_text = '', rendered_projection_hash = '', "
+                "updated_at = ? "
+                "WHERE operation_id = ? AND owner_plugin_id = ? "
+                "AND generation = ? AND callback_generation = ? "
+                "AND message_id = ? AND callback_state = 'busy' "
+                "AND callback_token = ? AND state = 'open' "
+                "AND EXISTS (SELECT 1 FROM operations operation "
+                "WHERE operation.operation_id = "
+                "operation_message_segments.operation_id "
+                "AND operation.active_segment_id = "
+                "operation_message_segments.segment_id "
+                "AND operation.plugin_id = ?)",
+                (
+                    time.time(),
+                    normalized_operation,
+                    normalized_plugin,
+                    normalized_segment_generation,
+                    normalized_callback_generation,
+                    normalized_message_id,
+                    normalized_token,
                     normalized_plugin,
                 ),
             )

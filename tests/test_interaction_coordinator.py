@@ -453,9 +453,22 @@ class InteractionCoordinatorTest(unittest.TestCase):
             ),
         )
         self.assertEqual(refreshed.callback_generation, 2)
-        self.assertEqual(refreshed.callback_state, "idle")
-        self.assertEqual(refreshed.callback_token, "")
-        self.assertEqual(refreshed.callback_busy_text, "")
+        self.assertEqual(refreshed.callback_state, "busy")
+        self.assertEqual(refreshed.callback_token, "search:select:p1:0")
+        self.assertEqual(refreshed.callback_busy_text, "正在确认媒体身份…")
+
+        released = self.coordinator.release_segment_callback(
+            "search",
+            "op-1",
+            message_id=92,
+            segment_generation=segment.generation,
+            callback_generation=2,
+            callback_token="search:select:p1:0",
+        )
+        self.assertEqual(released.callback_state, "idle")
+        self.assertEqual(released.callback_token, "")
+        self.assertEqual(released.callback_busy_text, "")
+        self.assertEqual(released.rendered_projection_hash, "")
 
     def test_operation_milestone_is_duplicate_only_after_atomic_completion(self):
         from app.runtime.interaction_coordinator import InteractionError

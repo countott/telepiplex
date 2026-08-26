@@ -21,10 +21,12 @@ from app.utils.log_sanitizer import sanitize_log_value
 from app.handlers.interaction_handler import (
     CONFIG_OPERATION_TASKS_KEY,
     COORDINATOR_KEY,
+    callback_dispatch_data,
     deduplicate_terminal_controls,
     operation_markup,
     operation_accepts_text,
     operation_render_lock,
+    release_callback_dispatch,
     render_operation,
 )
 
@@ -573,16 +575,60 @@ async def dynamic_command_gateway(update, context):
 
 async def dynamic_callback_gateway(update, context):
     query = update.callback_query
-    await query.answer(text="处理中...")
     if not init.check_user(update.effective_user.id):
         return
-    data = str(query.data or "")
+    coordinator = context.application.bot_data.get(COORDINATOR_KEY)
+    data = callback_dispatch_data(
+        update,
+        coordinator,
+    )
+    if data is None:
+        await query.answer(text="当前任务进行中")
+        return
+    try:
+        await query.answer(text="处理中...")
+    except Exception:
+        pass
+
+    release_attempted = False
+    released_segment = None
+
+    async def release_claim():
+        nonlocal release_attempted, released_segment
+        if not release_attempted:
+            release_attempted = True
+            released_segment = await release_callback_dispatch(
+                update,
+                context.application,
+                coordinator,
+            )
+        return released_segment
+
+    async def rerender_released_segment():
+        if released_segment is None or coordinator is None:
+            return
+        current = coordinator.get(released_segment.operation_id)
+        if (
+            current is None
+            or current.active_segment_id != released_segment.segment_id
+        ):
+            return
+        await render_operation(
+            context.application,
+            context.application.bot_data.get(ROUTER_KEY),
+            current,
+        )
+
     namespace, separator, payload = data.partition(":")
     if not separator:
+        await release_claim()
+        await rerender_released_segment()
         return
     router = context.application.bot_data.get(ROUTER_KEY)
     route = router.callback_route(namespace) if router is not None else None
     if route is None:
+        await release_claim()
+        await rerender_released_segment()
         return
     try:
         result = await route.client.request(
@@ -597,14 +643,18 @@ async def dynamic_callback_gateway(update, context):
             deadline=30,
             idempotency_key=f"telegram:{getattr(update, 'update_id', '')}",
         )
+        await release_claim()
         await handle_feature_result(update, context, route, result)
     except Exception as exc:
+        await release_claim()
         code = getattr(exc, "code", "feature_callback_failed")
         await _feature_feedback(
             update,
             f"❌ {code}：{_safe_error(exc)}",
             prefer_edit=True,
         )
+    finally:
+        await rerender_released_segment()
 
 
 async def dynamic_message_gateway(update, context):
