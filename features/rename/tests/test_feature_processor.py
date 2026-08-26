@@ -361,6 +361,7 @@ def movie_contract_v2():
             "provider_refs": {"wikidata": "Q1"},
             "media_type": "movie",
             "title_zh": "中文电影",
+            "title_en": "English Movie",
             "title_original": "English Movie",
             "year": 2024,
         },
@@ -370,6 +371,30 @@ def movie_contract_v2():
             "episode_number": None,
         },
         "placement": {"category_kind": "live_action_movie"},
+    }
+    value["metadata_id"] = build_media_metadata_v2_id(value)
+    return value
+
+
+def series_contract_v2():
+    value = {
+        "schema_version": 2,
+        "confirmed": True,
+        "identity": {
+            "primary_ref": {"provider": "wikidata", "id": "Q826750"},
+            "provider_refs": {"wikidata": "Q826750"},
+            "media_type": "series",
+            "title_zh": "游戏人生",
+            "title_en": "No Game, No Life",
+            "title_original": "ノーゲーム・ノーライフ",
+            "year": 2014,
+        },
+        "scope": {
+            "kind": "episode",
+            "season_number": 1,
+            "episode_number": 1,
+        },
+        "placement": {"category_kind": "animated_series"},
     }
     value["metadata_id"] = build_media_metadata_v2_id(value)
     return value
@@ -1606,6 +1631,39 @@ class RenamingProcessorTest(unittest.TestCase):
             for _source, target in storage.moved
         ))
 
+    @patch("telepiplex_rename.processor.infer_tvdb_episode_plan_with_ai")
+    def test_v2_series_uses_english_title_for_every_rename_level(self, ai_mock):
+        storage = FakeStorage([{
+            "fn": "No.Game.No.Life.S01E01.mkv",
+            "fid": "1",
+            "fc": "1",
+            "fs": 1000,
+        }])
+        event = DownloadCompletedEvent(
+            link="magnet:?x",
+            selected_path="/Series",
+            user_id=1,
+            final_path="/Downloads/Series.Release",
+            resource_name="No.Game.No.Life.S01E01",
+            metadata={"media_metadata": series_contract_v2()},
+            storage=storage,
+        )
+
+        result = process_tvdb_episode(event)
+
+        self.assertTrue(result.handled)
+        self.assertEqual(result.final_path, "/Series/游戏人生 (No Game, No Life)")
+        self.assertEqual(storage.renamed, [(
+            "/Downloads/Series.Release/No.Game.No.Life.S01E01.mkv",
+            "No Game, No Life S01E01.mkv",
+        )])
+        self.assertEqual(storage.moved, [(
+            "/Downloads/Series.Release/No Game, No Life S01E01.mkv",
+            "/Series/游戏人生 (No Game, No Life)/No Game, No Life Season 01",
+        )])
+        self.assertNotIn("ノーゲーム", repr(storage.renamed + storage.moved))
+        ai_mock.assert_not_called()
+
     def test_series_subtitle_only_input_is_organized(self):
         contract = series_contract()
         storage = FakeStorage([
@@ -2019,7 +2077,7 @@ class FakeHost:
             self.metadata_query = payload["query"]
             return {
                 "status": "resolved",
-                "media_metadata": movie_contract(),
+                "media_metadata": movie_contract_v2(),
                 "naming_metadata": {
                     "source": "search",
                     "media_type": "movie",
@@ -2277,11 +2335,14 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 self, capability, method, payload, **kwargs
             ):
                 if capability == "media.search" and method == "resolve_metadata":
-                    contract = movie_contract()
+                    contract = movie_contract_v2()
                     contract["identity"].update({
-                        "chinese_title": "设<备>：名?",
-                        "english_title": "CON",
+                        "title_zh": "设<备>：名?",
+                        "title_en": "CON",
                     })
+                    contract["metadata_id"] = build_media_metadata_v2_id(
+                        contract
+                    )
                     self.metadata_payload = payload
                     return {
                         "status": "resolved",
@@ -2447,7 +2508,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 if capability == "media.search" and method == "confirm_metadata":
                     return {
                         "status": "resolved",
-                        "media_metadata": movie_contract(),
+                        "media_metadata": movie_contract_v2(),
                         "naming_metadata": {
                             "source": "search",
                             "media_type": "movie",
@@ -2855,7 +2916,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     self.confirm_payload = payload
                     return {
                         "status": "resolved",
-                        "media_metadata": movie_contract(),
+                        "media_metadata": movie_contract_v2(),
                         "naming_metadata": {
                             "source": "search",
                             "media_type": "movie",
@@ -3090,7 +3151,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     self.confirm_payload = payload
                     return {
                         "status": "resolved",
-                        "media_metadata": movie_contract(),
+                        "media_metadata": movie_contract_v2(),
                         "naming_metadata": {
                             "source": "search",
                             "media_type": "movie",
@@ -3584,7 +3645,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "chat_id": 10,
                 "final_path": "/Downloads/Release",
                 "resource_name": "Movie.2024",
-                "media_metadata": movie_contract(),
+                "media_metadata": movie_contract_v2(),
                 "operation_id": "op-chain",
                 "operation_revision": 8,
             },
@@ -3672,6 +3733,82 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 for item in host.timeline
             ))
 
+    async def test_m_recovery_accepts_v2_metadata_and_emits_one_terminal_report(self):
+        from telepiplex_rename.jobs import RenameJobStore
+
+        class RecoveryHost(FakeHost):
+            async def call_capability(
+                self, capability, method, payload, **kwargs
+            ):
+                if capability == "media.search" and method == "resolve_metadata":
+                    self.metadata_payload = payload
+                    return {
+                        "status": "resolved",
+                        "media_metadata": series_contract_v2(),
+                        "presentation": {
+                            "milestone_id": "game-life",
+                            "text": "📺 游戏人生 (No Game, No Life)",
+                        },
+                    }
+                return await super().call_capability(
+                    capability, method, payload, **kwargs
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = RenameJobStore(Path(tmp) / "rename.sqlite3")
+            host = RecoveryHost(EmptyAfterMoveStorage([{
+                "fn": "No.Game.No.Life.S01E01.mkv",
+                "fid": "1",
+                "fc": "1",
+                "fs": 1000,
+            }]))
+            runtime = FakeRuntime()
+            feature = RenameFeature(
+                config={"unorganized_path": "/Unorganized", "storage_timeout": 3},
+                host=host,
+                jobs=jobs,
+            )
+            feature.bind_runtime(runtime)
+
+            await feature.download_completed({
+                "event_id": "event-m-recovery-v2",
+                "payload": {
+                    "job_id": "job-m-recovery-v2",
+                    "selected_path": "/Series",
+                    "user_id": 123,
+                    "chat_id": 10,
+                    "final_path": "/Downloads/Series.Release",
+                    "resource_name": "No.Game.No.Life.S01E01",
+                    "file_tree": [{
+                        "relative_path": "No.Game.No.Life.S01E01.mkv",
+                        "is_dir": False,
+                    }],
+                    "operation_id": "op-m-recovery-v2",
+                    "operation_revision": 8,
+                },
+            })
+            await runtime.wait()
+
+            saved = jobs.get("job-m-recovery-v2")
+            self.assertEqual(saved["state"], "completed", saved)
+            self.assertEqual(
+                saved["result"]["event_payload"]["media_metadata"],
+                series_contract_v2(),
+            )
+            self.assertEqual(
+                saved["result"]["event_payload"]["organization_result"]["status"],
+                "completed",
+            )
+            terminal = [
+                report for report in host.reports
+                if report["state"] in {"completed", "failed", "cancelled"}
+            ]
+            self.assertEqual(len(terminal), 1, host.reports)
+            self.assertEqual(
+                terminal[0]["details"]["effect_receipt"]["receipt"]["final_path"],
+                "/Series/游戏人生 (No Game, No Life)",
+            )
+
     async def test_upstream_identity_starts_new_rename_message_without_repeat(self):
         host = FakeHost(EmptyAfterMoveStorage([
             {"fn": "Movie.2024.mkv", "fid": "1", "fc": "1", "fs": 1000},
@@ -3692,7 +3829,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "chat_id": 10,
                 "final_path": "/Downloads/Release",
                 "resource_name": "Movie.2024",
-                "media_metadata": movie_contract(),
+                "media_metadata": movie_contract_v2(),
                 "operation_id": "op-upstream-identity",
                 "operation_revision": 8,
             },
@@ -3863,7 +4000,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "chat_id": 10,
                 "final_path": "/Downloads/Release",
                 "resource_name": "Movie.2024",
-                "media_metadata": movie_contract(),
+                "media_metadata": movie_contract_v2(),
                 "operation_id": "op-rename-seal",
                 "operation_revision": 8,
             },
@@ -3939,7 +4076,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "chat_id": 10,
                 "final_path": "/Downloads/Release",
                 "resource_name": "Movie.2024",
-                "media_metadata": movie_contract(),
+                "media_metadata": movie_contract_v2(),
                 "operation_id": "op-rename-lost-stage",
                 "operation_revision": 8,
             },
@@ -3991,7 +4128,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "chat_id": 10,
                 "final_path": "/Downloads/Release",
                 "resource_name": "Movie.2024",
-                "media_metadata": movie_contract(),
+                "media_metadata": movie_contract_v2(),
                 "operation_id": "op-no-sync",
                 "operation_revision": 8,
             },
@@ -4289,7 +4426,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "final_path": "/Downloads/Release",
                 "resource_name": "Movie.2024",
                 "provider": "download",
-                "media_metadata": movie_contract(),
+                "media_metadata": movie_contract_v2(),
             },
         })
         await runtime.wait()
@@ -4337,7 +4474,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "operation_revision": 2,
                     "final_path": "/Downloads/Release",
                     "resource_name": "Movie.2024",
-                    "media_metadata": movie_contract(),
+                    "media_metadata": movie_contract_v2(),
                 },
             })
             await runtime.wait()
@@ -4407,7 +4544,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "chat_id": 10,
                     "final_path": "/Downloads/Series.Release",
                     "resource_name": "English.Series.S01",
-                    "media_metadata": series_contract(),
+                    "media_metadata": series_contract_v2(),
                     "operation_id": "op-partial-accounting",
                     "operation_revision": 2,
                 },
@@ -4540,7 +4677,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             request = {"event_id": "event-replay", "payload": {
                 "job_id": "job-replay", "selected_path": "/Movies", "user_id": 123,
                 "final_path": "/Downloads/Release", "resource_name": "Movie.2024",
-                "media_metadata": movie_contract(),
+                "media_metadata": movie_contract_v2(),
             }}
             host.fail_notification = True
             await feature.download_completed(request)
@@ -4599,7 +4736,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "chat_id": 10,
                 "final_path": "/Downloads/Release",
                 "resource_name": "Movie.2024",
-                "media_metadata": movie_contract(),
+                "media_metadata": movie_contract_v2(),
                 "operation_id": "op-lost-accept-ack",
                 "operation_revision": 5,
             }}
@@ -4675,7 +4812,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "chat_id": 10,
                     "provider": "download",
                     "final_path": "/Movies/Movie",
-                    "media_metadata": movie_contract(),
+                    "media_metadata": movie_contract_v2(),
                     "operation_id": "op-processed-replay",
                     "operation_revision": 9,
                 },
@@ -4746,7 +4883,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "chat_id": 10,
                     "final_path": "/Downloads/Release",
                     "resource_name": "Movie.2024",
-                    "media_metadata": movie_contract(),
+                    "media_metadata": movie_contract_v2(),
                     "operation_id": "op-terminal-response-loss",
                     "operation_revision": 8,
                 },
@@ -4908,7 +5045,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "chat_id": 10,
                     "final_path": "/Downloads/Release",
                     "resource_name": "Movie.2024",
-                    "media_metadata": movie_contract(),
+                    "media_metadata": movie_contract_v2(),
                     "operation_id": "op-first-processed-crash",
                     "operation_revision": 4,
                 },
@@ -5033,7 +5170,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "chat_id": 10,
                     "final_path": "/Downloads/Release",
                     "resource_name": "Movie.2024",
-                    "media_metadata": movie_contract(),
+                    "media_metadata": movie_contract_v2(),
                     "operation_id": operation_id,
                     "operation_revision": 4,
                 },
@@ -5162,7 +5299,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "chat_id": 10,
                     "final_path": "/Downloads/Release",
                     "resource_name": "Movie.2024",
-                    "media_metadata": movie_contract(),
+                    "media_metadata": movie_contract_v2(),
                     "operation_id": operation_id,
                     "operation_revision": 4,
                 },
@@ -5369,7 +5506,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "chat_id": 10,
                     "final_path": "/Downloads/Release",
                     "resource_name": "Movie.2024",
-                    "media_metadata": movie_contract(),
+                    "media_metadata": movie_contract_v2(),
                     "operation_id": operation_id,
                     "operation_revision": 8,
                 },
@@ -5520,10 +5657,10 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "1.6.0")
+        self.assertEqual(manifest["version"], "2.0.0")
         self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
-        self.assertIn('version = "1.6.0"', project)
-        self.assertIn('telepiplex-plugin-sdk==1.4.0', project)
+        self.assertIn('version = "2.0.0"', project)
+        self.assertIn('telepiplex-plugin-sdk==2.0.0', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
         manifest = yaml.safe_load(
@@ -5538,8 +5675,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-1.6.0.tpx", source)
-        self.assertNotIn("dist/rename-1.6.0.tpx", source)
+        self.assertIn("/tmp/rename-2.0.0.tpx", source)
+        self.assertNotIn("dist/rename-2.0.0.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

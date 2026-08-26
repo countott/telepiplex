@@ -9,7 +9,6 @@ from copy import deepcopy
 from .media_metadata import (
     CATEGORY_LIBRARY_TYPES,
     MEDIA_METADATA_KEY,
-    sanitize_contract_name,
 )
 
 
@@ -38,6 +37,7 @@ IDENTITY_KEYS = frozenset({
     "provider_refs",
     "media_type",
     "title_zh",
+    "title_en",
     "title_original",
     "year",
 })
@@ -129,9 +129,20 @@ def _diagnose(
     if media_type not in {"movie", "series"}:
         return _issue("$.identity.media_type", "media_type_invalid", "media_type must be movie or series")
     title_zh = identity.get("title_zh")
+    title_en = identity.get("title_en")
     title_original = identity.get("title_original")
-    if not isinstance(title_zh, str) or not isinstance(title_original, str):
+    if (
+        not isinstance(title_zh, str)
+        or not isinstance(title_en, str)
+        or not isinstance(title_original, str)
+    ):
         return _issue("$.identity", "title_invalid", "titles must be strings")
+    if not _text(title_en):
+        return _issue(
+            "$.identity.title_en",
+            "english_title_required",
+            "a verified English title is required",
+        )
     if not (_text(title_zh) or _text(title_original)):
         return _issue("$.identity", "title_required", "at least one title is required")
     year = identity.get("year")
@@ -216,125 +227,3 @@ def extract_confirmed_media_metadata_v2(metadata: dict | None) -> dict | None:
     if not isinstance(metadata, dict):
         return None
     return validate_media_metadata_v2(metadata.get(MEDIA_METADATA_KEY))
-
-
-def convert_media_metadata_v1_to_v2(
-    value: object,
-) -> tuple[dict | None, dict | None]:
-    """Narrow one confirmed legacy contract without inventing an identity."""
-
-    failure = _issue(
-        "$",
-        "legacy_metadata_incomplete",
-        "legacy metadata lacks a safe minimal identity, scope, or placement",
-    )
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
-        return None, failure
-    if value.get("confirmed") is not True:
-        return None, failure
-    identity = value.get("identity") or {}
-    relation_target = (value.get("relation") or {}).get("target_series")
-    naming_identity = (
-        relation_target
-        if isinstance(relation_target, dict)
-        and (
-            _text(relation_target.get("chinese_title"))
-            or _text(relation_target.get("english_title"))
-        )
-        else identity
-    )
-    placement = value.get("placement") or {}
-    media_type = _text(
-        (value.get("retrieval") or {}).get("media_type")
-        or placement.get("library_type")
-    ).casefold()
-    if media_type not in {"movie", "series"}:
-        content_kind = _text(identity.get("content_kind")).casefold()
-        media_type = (
-            "movie" if content_kind == "movie" or content_kind.endswith("_movie")
-            else "series" if content_kind in {"series", "main_episode", "episode"}
-            else ""
-        )
-
-    external_ids = naming_identity.get("external_ids") or {}
-    if not isinstance(external_ids, dict):
-        return None, failure
-    refs = {}
-    for key in PROVIDER_REF_KEYS:
-        if _text(external_ids.get(key)):
-            refs[key] = _text(external_ids[key])
-    aliases = {
-        "wikidata": "wikidata",
-        "douban": "douban_subject",
-        "douban_subject": "douban_subject",
-        "anilist": "anilist",
-        "tmdb": f"tmdb_{'movie' if media_type == 'movie' else 'tv'}",
-        "tvdb": f"tvdb_{'movie' if media_type == 'movie' else 'series'}",
-    }
-    for source_key, target_key in aliases.items():
-        if _text(external_ids.get(source_key)):
-            refs.setdefault(target_key, _text(external_ids[source_key]))
-    if not refs:
-        return None, failure
-
-    preferred = (
-        "wikidata",
-        "tvdb_series",
-        "tvdb_movie",
-        "tmdb_tv",
-        "tmdb_movie",
-        "douban_subject",
-        "zhwiki_page_id",
-        "enwiki_page_id",
-        "anilist",
-    )
-    primary_provider = next((key for key in preferred if key in refs), "")
-    if not primary_provider:
-        return None, failure
-
-    retrieval = value.get("retrieval") or {}
-    decision = (value.get("evidence") or {}).get("decision") or {}
-    if media_type == "movie":
-        scope = {
-            "kind": "movie",
-            "season_number": None,
-            "episode_number": None,
-        }
-    else:
-        kind = _text(retrieval.get("scope") or decision.get("scope"))
-        if kind not in {"whole_series", "season", "episode"}:
-            return None, failure
-        scope = {
-            "kind": kind,
-            "season_number": decision.get("season_number") if kind in {"season", "episode"} else None,
-            "episode_number": decision.get("episode_number") if kind == "episode" else None,
-        }
-    try:
-        year = int(naming_identity.get("year")) if naming_identity.get("year") else None
-    except (TypeError, ValueError):
-        year = None
-    converted = {
-        "schema_version": 2,
-        "confirmed": True,
-        "identity": {
-            "primary_ref": {
-                "provider": primary_provider,
-                "id": refs[primary_provider],
-            },
-            "provider_refs": refs,
-            "media_type": media_type,
-            "title_zh": sanitize_contract_name(naming_identity.get("chinese_title")),
-            "title_original": sanitize_contract_name(
-                naming_identity.get("original_title")
-                or naming_identity.get("english_title")
-            ),
-            "year": year,
-        },
-        "scope": scope,
-        "placement": {
-            "category_kind": _text(placement.get("category_kind")),
-        },
-    }
-    converted["metadata_id"] = build_media_metadata_v2_id(converted)
-    validated, issue = validate_media_metadata_v2_detailed(converted)
-    return (validated, None) if validated is not None else (None, issue or failure)

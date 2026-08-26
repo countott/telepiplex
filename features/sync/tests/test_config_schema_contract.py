@@ -60,7 +60,7 @@ class ConfigSchemaContractTest(unittest.TestCase):
         validator.validate(legacy)
 
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("升级到 1.1.5", readme)
+        self.assertIn("升级到 2.0.0", readme)
         self.assertIn("删除整个 `ai:` 配置段", readme)
         self.assertIn("config_migration_required", readme)
 

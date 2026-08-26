@@ -4,7 +4,6 @@ import unittest
 from telepiplex_plugin_sdk.media_metadata_v2 import (
     attach_media_metadata_v2,
     build_media_metadata_v2_id,
-    convert_media_metadata_v1_to_v2,
     extract_confirmed_media_metadata_v2,
     validate_media_metadata_v2,
     validate_media_metadata_v2_detailed,
@@ -30,6 +29,7 @@ class MediaMetadataV2Test(unittest.TestCase):
                 },
                 "media_type": media_type,
                 "title_zh": "死神: 千年血战篇",
+                "title_en": "Bleach: Thousand-Year Blood War",
                 "title_original": "BLEACH 千年血戦篇",
                 "year": 2022,
             },
@@ -60,6 +60,7 @@ class MediaMetadataV2Test(unittest.TestCase):
         second = copy.deepcopy(first)
         second["identity"].update({
             "title_zh": "另一个显示名",
+            "title_en": "Another English display title",
             "title_original": "Another display title",
             "year": 2023,
         })
@@ -68,6 +69,32 @@ class MediaMetadataV2Test(unittest.TestCase):
         self.assertEqual(
             build_media_metadata_v2_id(first),
             build_media_metadata_v2_id(second),
+        )
+
+    def test_requires_a_distinct_verified_english_title(self):
+        value = self._value()
+        value["identity"].pop("title_en")
+
+        validated, issue = validate_media_metadata_v2_detailed(value)
+
+        self.assertIsNone(validated)
+        self.assertEqual(issue["path"], "$.identity")
+        self.assertEqual(issue["reason_code"], "keys_invalid")
+
+    def test_original_title_may_remain_japanese_when_english_is_present(self):
+        value = self._value()
+        value["identity"].update({
+            "title_zh": "游戏人生",
+            "title_en": "No Game, No Life",
+            "title_original": "ノーゲーム・ノーライフ",
+        })
+
+        validated = validate_media_metadata_v2(value)
+
+        self.assertEqual(validated["identity"]["title_en"], "No Game, No Life")
+        self.assertEqual(
+            validated["identity"]["title_original"],
+            "ノーゲーム・ノーライフ",
         )
 
     def test_rejects_unknown_or_rich_fields_at_every_public_boundary(self):
@@ -135,7 +162,7 @@ class MediaMetadataV2Test(unittest.TestCase):
         self.assertEqual(extracted["identity"]["title_zh"], "死神: 千年血战篇")
         self.assertEqual(metadata["source"], "search")
 
-    def test_legacy_v1_converts_once_without_rich_fields(self):
+    def test_schema_v1_is_rejected_without_a_converter(self):
         legacy = {
             "schema_version": 1,
             "metadata_id": "legacy-1",
@@ -167,39 +194,14 @@ class MediaMetadataV2Test(unittest.TestCase):
             "items": [{"season_number": 1, "episode_number": 1}],
         }
 
-        converted, issue = convert_media_metadata_v1_to_v2(legacy)
+        self.assertIsNone(validate_media_metadata_v2(legacy))
 
-        self.assertIsNone(issue)
-        self.assertIsNotNone(validate_media_metadata_v2(converted))
-        self.assertEqual(converted["scope"], {
-            "kind": "season",
-            "season_number": 1,
-            "episode_number": None,
-        })
-        self.assertNotIn("countries", converted)
-        self.assertNotIn("items", converted)
+    def test_sdk_no_longer_exports_the_v1_converter(self):
+        import telepiplex_plugin_sdk
 
-    def test_legacy_without_a_stable_verified_ref_fails_closed(self):
-        legacy = {
-            "schema_version": 1,
-            "confirmed": True,
-            "identity": {
-                "chinese_title": "无锚点作品",
-                "english_title": "",
-                "year": "2020",
-                "content_kind": "movie",
-                "external_ids": {},
-            },
-            "placement": {
-                "library_type": "movie",
-                "category_kind": "live_action_movie",
-            },
-        }
-
-        converted, issue = convert_media_metadata_v1_to_v2(legacy)
-
-        self.assertIsNone(converted)
-        self.assertEqual(issue["reason_code"], "legacy_metadata_incomplete")
+        self.assertFalse(
+            hasattr(telepiplex_plugin_sdk, "convert_media_metadata_v1_to_v2")
+        )
 
 
 if __name__ == "__main__":

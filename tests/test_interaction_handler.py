@@ -828,6 +828,79 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(search_response["accepted"])
         context.application.bot.send_message.assert_awaited_once()
 
+    async def test_terminal_segment_queued_behind_render_does_not_send_duplicate_text(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+
+        context = self.context()
+        sink = OperationReportSink(self.coordinator)
+        render_started = asyncio.Event()
+        release_render = asyncio.Event()
+        gated = False
+
+        async def listener(record):
+            nonlocal gated
+            if record.revision >= 2 and not gated:
+                gated = True
+                render_started.set()
+                await release_render.wait()
+            return await render_operation(
+                context.application,
+                Mock(),
+                record,
+            )
+
+        sink.attach(listener)
+        await sink("rename", self.report(
+            stage="organizing",
+            status_text="正在整理",
+            segment={
+                "role": "rename",
+                "presentation_kind": "text",
+            },
+        ))
+        await sink.drain()
+
+        await sink("rename", self.report(
+            revision=2,
+            stage="organizing",
+            status_text="正在整理文件",
+            segment={
+                "role": "rename",
+                "presentation_kind": "text",
+            },
+        ))
+        await render_started.wait()
+        await sink("rename", self.report(
+            revision=3,
+            state="failed",
+            stage="organizing",
+            status_text="无法确定整理规则，文件保留在原目录。",
+            control="",
+            segment={
+                "role": "rename",
+                "presentation_kind": "text",
+            },
+        ))
+        seal_task = asyncio.create_task(
+            sink.seal("rename", "op-1", "rename")
+        )
+        await asyncio.sleep(0)
+        release_render.set()
+
+        response = await seal_task
+        await sink.drain()
+
+        self.assertTrue(response["accepted"])
+        context.application.bot.send_message.assert_awaited_once()
+        context.application.bot.edit_message_text.assert_awaited_once()
+        self.assertEqual(
+            context.application.bot.edit_message_text.await_args.kwargs["text"],
+            "无法确定整理规则，文件保留在原目录。",
+        )
+
     async def test_operation_sink_persists_silent_transition_without_rendering(self):
         from app.handlers.interaction_handler import OperationReportSink
 

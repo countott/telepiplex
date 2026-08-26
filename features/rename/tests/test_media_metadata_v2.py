@@ -20,6 +20,7 @@ def contract(kind="whole_series"):
             "provider_refs": {"wikidata": "Q1"},
             "media_type": "series",
             "title_zh": "中文剧集",
+            "title_en": "English Series",
             "title_original": "English Series",
             "year": 2024,
         },
@@ -46,11 +47,30 @@ class RenameMediaMetadataV2Test(unittest.TestCase):
         ])
 
         self.assertEqual(naming["chinese_title"], "中文剧集")
+        self.assertEqual(naming["english_title"], "English Series")
         self.assertEqual(
             [(item["season_number"], item["episode_number"]) for item in plan["episode_map"]],
             [(1, 1), (2, 3)],
         )
         self.assertEqual(value, before)
+
+    def test_game_life_uses_verified_english_not_japanese_original(self):
+        value = contract()
+        value["identity"].update({
+            "title_zh": "游戏人生",
+            "title_en": "No Game, No Life",
+            "title_original": "ノーゲーム・ノーライフ",
+        })
+
+        naming = naming_identity_from_v2(value)
+
+        self.assertEqual(naming["english_title"], "No Game, No Life")
+        self.assertNotIn("ノーゲーム", naming["english_title"])
+
+    def test_private_v1_adapter_is_removed(self):
+        import telepiplex_rename.media_metadata_v2 as media_metadata_v2
+
+        self.assertFalse(hasattr(media_metadata_v2, "private_v1_adapter_from_v2"))
 
     def test_season_and_episode_scopes_never_broaden(self):
         self.assertTrue(scope_allows_coordinate(contract("season"), 2, 9))

@@ -10,9 +10,10 @@ import re
 from telepiplex_plugin_sdk import FeatureError
 from .context import runtime_context
 from telepiplex_plugin_sdk.media_metadata import (
-    MEDIA_METADATA_KEY,
-    attach_media_metadata,
-    extract_confirmed_media_metadata,
+    extract_confirmed_media_metadata as extract_confirmed_media_metadata_v1,
+)
+from telepiplex_plugin_sdk.media_metadata_v2 import (
+    extract_confirmed_media_metadata_v2,
 )
 from .models import DownloadCompletedEvent, PostDownloadResult
 from .ai import (
@@ -25,10 +26,13 @@ from .media_naming import (
     infer_english_title_from_release,
     parse_episode_marker,
 )
+from .media_metadata_v2 import (
+    naming_identity_from_v2,
+    observed_episode_plan,
+)
 from .tvdb_rename import (
     VIDEO_EXTENSIONS,
     build_confirmed_rename_plan,
-    enrich_media_metadata_with_rename_plan,
 )
 from .subtitles import (
     SUBTITLE_EXTENSIONS,
@@ -477,13 +481,10 @@ def _video_nodes(file_tree):
 
 def _movie_plan_hints(event, media_metadata):
     strong = []
-    for item in (media_metadata or {}).get("items") or []:
-        if isinstance(item, dict) and item.get("source_hint"):
-            strong.append(item["source_hint"])
     release = event.release if isinstance(event.release, dict) else {}
     ordinary = [
         release.get("title"),
-        (event.naming_metadata or {}).get("release_title"),
+        event.resource_name,
     ]
     return strong, ordinary
 
@@ -620,19 +621,64 @@ def _merge_tvdb_metadata(naming_metadata=None, metadata=None, filename_metadata=
 
 def _media_metadata_state(event: DownloadCompletedEvent):
     metadata = event.metadata if isinstance(event.metadata, dict) else {}
-    present = MEDIA_METADATA_KEY in metadata
-    return extract_confirmed_media_metadata(metadata), present
+    present = "media_metadata" in metadata
+    contract = extract_confirmed_media_metadata_v2(metadata)
+    if contract is None:
+        contract = extract_confirmed_media_metadata_v1(metadata)
+    return contract, present
 
 
 def _confirmed_series_metadata(event: DownloadCompletedEvent):
-    contract = extract_confirmed_media_metadata(event.metadata)
-    placement = contract.get("placement") if isinstance(contract, dict) else None
-    if not isinstance(placement, dict) or placement.get("library_type") != "series":
+    contract = extract_confirmed_media_metadata_v2(event.metadata)
+    if contract is None:
+        contract = extract_confirmed_media_metadata_v1(event.metadata)
+    identity = contract.get("identity") if isinstance(contract, dict) else None
+    is_series = bool(
+        isinstance(identity, dict)
+        and (
+            identity.get("media_type") == "series"
+            or (contract.get("placement") or {}).get("library_type") == "series"
+        )
+    )
+    if not is_series:
         return None
     return contract
 
 
 def _deterministic_episode_plan(media_metadata: dict, file_tree: list[dict]):
+    if media_metadata.get("schema_version") == 2:
+        observed = observed_episode_plan(media_metadata, file_tree)
+        if observed["unresolved"]:
+            return None
+        mapped = {
+            (item["season_number"], item["episode_number"]): item["source"]
+            for item in observed["episode_map"]
+        }
+        subtitle_map = []
+        subtitle_mapping_incomplete = False
+        for item in collect_subtitle_evidence(file_tree):
+            marker = item.get("episode_key")
+            if marker is None or marker not in mapped:
+                subtitle_mapping_incomplete = True
+                continue
+            subtitle_map.append({
+                "source_file": item["relative_path"],
+                "season_number": marker[0],
+                "episode_number": marker[1],
+            })
+        if not mapped and not subtitle_map:
+            return None
+        return {
+            "episode_map": [{
+                "source_file": node["relative_path"],
+                "season_number": season,
+                "episode_number": episode,
+                "content_role": "main_episode",
+            } for (season, episode), node in sorted(mapped.items())],
+            "subtitle_map": subtitle_map,
+            "subtitle_mapping_incomplete": subtitle_mapping_incomplete,
+            "warnings": [],
+        }
     placement = media_metadata.get("placement") or {}
     allowed = {
         (int(item["season_number"]), int(item["episode_number"]))
@@ -725,6 +771,31 @@ def _deterministic_episode_plan(media_metadata: dict, file_tree: list[dict]):
 
 
 def _locked_ai_context(media_metadata: dict) -> dict:
+    if media_metadata.get("schema_version") == 2:
+        identity = media_metadata.get("identity") or {}
+        refs = identity.get("provider_refs") or {}
+        series_id = str(refs.get("tvdb_series") or "").strip()
+        scope = media_metadata.get("scope") or {}
+        locked = []
+        if scope.get("kind") == "episode":
+            locked.append([
+                int(scope["season_number"]),
+                int(scope["episode_number"]),
+            ])
+        return {
+            "locked_identity": {
+                "tvdb_series_id": series_id,
+                "canonical_latin_title": identity.get("title_en") or "",
+                "content_kind": "series",
+            },
+            "locked_episode_keys": locked,
+            "tvdb_candidates": ([{
+                "tvdb_series_id": series_id,
+                "name": identity.get("title_en") or "",
+                "year": identity.get("year") or "",
+            }] if series_id else []),
+            "tvdb_episodes": [],
+        }
     identity = media_metadata.get("identity") or {}
     relation = media_metadata.get("relation") or {}
     target = relation.get("target_series") if isinstance(relation.get("target_series"), dict) else {}
@@ -866,10 +937,6 @@ def _attempt_confirmed_series_rename(
         file_first["failed_files"] == 0
         and (file_first.get("cleanup") or {}).get("complete") is True
     )
-    rename_plan["media_metadata"] = enrich_media_metadata_with_rename_plan(
-        media_metadata,
-        rename_plan,
-    )
     return rename_plan
 
 
@@ -960,18 +1027,12 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
         explanation = file_first.get("ambiguity_explanation") or {}
         if explanation.get("summary"):
             message += f"\n歧义说明：{explanation['summary']}"
-    result_metadata = event.metadata
-    if rename_plan.get("media_metadata"):
-        result_metadata = attach_media_metadata(
-            event.metadata,
-            rename_plan["media_metadata"],
-        )
     return PostDownloadResult(
         True,
         final_path=final_path,
         message=message,
         should_stop=True,
-        metadata=result_metadata,
+        metadata=event.metadata,
         file_results=_public_file_results(file_first),
     )
 
@@ -1035,27 +1096,33 @@ def _attempt_media_auto_rename(event: DownloadCompletedEvent, naming_metadata):
 
 
 def _standalone_contract_naming_metadata(event: DownloadCompletedEvent):
-    media_metadata = extract_confirmed_media_metadata(event.metadata)
-    placement = (
-        media_metadata.get("placement")
+    media_metadata = extract_confirmed_media_metadata_v2(event.metadata)
+    if media_metadata is None:
+        legacy = extract_confirmed_media_metadata_v1(event.metadata)
+        if legacy is not None:
+            identity = legacy.get("identity") or {}
+            return {
+                "source": "media_metadata_v1_legacy",
+                "chinese_title": identity.get("chinese_title") or "",
+                "english_title": identity.get("english_title") or "",
+                "year": identity.get("year") or "",
+                "release_title": event.resource_name,
+            }
+    identity = (
+        media_metadata.get("identity")
         if isinstance(media_metadata, dict)
         else None
     )
-    if not isinstance(placement, dict) or placement.get("mapping_kind") != "standalone":
+    if not isinstance(identity, dict) or identity.get("media_type") != "movie":
         return None
-    identity = media_metadata.get("identity")
-    if not isinstance(identity, dict):
-        return None
-    result = dict(identity)
+    result = naming_identity_from_v2(media_metadata)
     result["source"] = "media_metadata"
+    result["release_title"] = event.resource_name
     return result
 
 
 def process_generic_media(event: DownloadCompletedEvent) -> PostDownloadResult:
-    naming_auto_metadata = (
-        _standalone_contract_naming_metadata(event)
-        or event.naming_metadata
-    )
+    naming_auto_metadata = _standalone_contract_naming_metadata(event)
     result = _attempt_media_auto_rename(event, naming_auto_metadata)
     if not result:
         return PostDownloadResult(False, final_path=event.final_path)

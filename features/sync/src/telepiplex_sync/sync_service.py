@@ -8,12 +8,16 @@ import re
 import secrets
 import time
 from copy import deepcopy
+from pathlib import PurePosixPath
 
 from telepiplex_plugin_sdk.media_metadata import (
     MEDIA_METADATA_KEY,
     SERIES_EPISODE_MAPPINGS,
-    extract_confirmed_media_metadata,
+    extract_confirmed_media_metadata as extract_confirmed_media_metadata_v1,
     resolve_category_route,
+)
+from telepiplex_plugin_sdk.media_metadata_v2 import (
+    extract_confirmed_media_metadata_v2,
 )
 
 from . import rules as plex_rules
@@ -22,6 +26,10 @@ from .context import logger
 
 STEP_ORDER = ("scanning", "artwork", "audio", "subtitle")
 GATING_STEPS = {"scanning"}
+PLEX_VIDEO_EXTENSIONS = {
+    ".avi", ".flv", ".m2ts", ".m4v", ".mkv", ".mov", ".mp4",
+    ".ts", ".webm", ".wmv",
+}
 
 
 class WaitingForSelection(RuntimeError):
@@ -113,7 +121,7 @@ class LibrarySyncService:
         if not str(completion.terminal_processor or "").startswith("rename."):
             return None
         payload = self._completion_payload(completion)
-        return self._enqueue_payload(payload)
+        return self._enqueue_payload(payload, allow_legacy_v1=True)
 
     def enqueue_organized_event(self, event: dict):
         event = dict(event or {})
@@ -132,6 +140,11 @@ class LibrarySyncService:
             "operation_revision": int(event.get("operation_revision") or 0),
             "terminal_processor": "rename.feature",
             "metadata": metadata,
+            "organization_result": deepcopy(
+                event.get("organization_result")
+                if isinstance(event.get("organization_result"), dict)
+                else {}
+            ),
         }
         return self._enqueue_payload(payload)
 
@@ -139,10 +152,14 @@ class LibrarySyncService:
         job = self.enqueue_organized_event(event)
         return [job] if job else []
 
-    def _enqueue_payload(self, payload):
+    def _enqueue_payload(self, payload, *, allow_legacy_v1=False):
         metadata = payload["metadata"]
         contract_present = MEDIA_METADATA_KEY in metadata
-        contract = extract_confirmed_media_metadata(metadata)
+        contract = extract_confirmed_media_metadata_v2(metadata)
+        legacy_v1 = False
+        if contract is None and allow_legacy_v1:
+            contract = extract_confirmed_media_metadata_v1(metadata)
+            legacy_v1 = contract is not None
         if contract_present and contract is None:
             self._log_contract_rejection("invalid_contract")
             return None
@@ -161,6 +178,8 @@ class LibrarySyncService:
             return None
         payload = deepcopy(payload)
         payload["targets"] = targets
+        if legacy_v1:
+            payload["_legacy_media_metadata_v1"] = True
         key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         job, created = self.jobs.create_or_get_with_status(key, payload)
         result = dict(job)
@@ -181,6 +200,8 @@ class LibrarySyncService:
                 "final_path": payload["final_path"],
                 "category_kind": "",
             }]
+        if contract.get("schema_version") == 2:
+            return self._payload_targets_v2(payload, contract)
         placement = contract["placement"]
         if placement["library_type"] == "movie":
             if not payload["final_path"]:
@@ -219,6 +240,69 @@ class LibrarySyncService:
             self._log_contract_rejection(
                 "locked_episode_unresolved" if locked else "confirmed_series_unresolved"
             )
+        return targets
+
+    def _payload_targets_v2(self, payload, contract):
+        identity = contract["identity"]
+        scope = contract["scope"]
+        category_kind = contract["placement"]["category_kind"]
+        if identity["media_type"] == "movie":
+            final_path = str(payload.get("final_path") or "").strip()
+            if not final_path:
+                self._log_contract_rejection("terminal_path_missing")
+                return []
+            return [{
+                "target_id": "movie",
+                "media_type": "movie",
+                "final_path": final_path,
+                "season_number": None,
+                "episode_number": None,
+                "category_kind": category_kind,
+            }]
+
+        organization = payload.get("organization_result") or {}
+        if organization.get("status") != "completed":
+            self._log_contract_rejection("organization_incomplete")
+            return []
+        targets = []
+        seen_paths = set()
+        for index, item in enumerate(organization.get("files") or []):
+            if not isinstance(item, dict) or item.get("state") not in {
+                "organized", "no_op",
+            }:
+                continue
+            final_path = str(item.get("target_path") or "").strip()
+            if (
+                not final_path
+                or final_path in seen_paths
+                or PurePosixPath(final_path).suffix.lower()
+                not in PLEX_VIDEO_EXTENSIONS
+            ):
+                continue
+            season = scope.get("season_number")
+            episode = scope.get("episode_number")
+            if season is None or episode is None:
+                marker = re.search(
+                    r"(?i)(?:^|[^A-Z0-9])S(\d{1,3})E(\d{1,4})(?:[^A-Z0-9]|$)",
+                    PurePosixPath(final_path).name,
+                )
+                if marker:
+                    season, episode = int(marker.group(1)), int(marker.group(2))
+            if season is None or episode is None:
+                continue
+            seen_paths.add(final_path)
+            targets.append({
+                "target_id": str(
+                    item.get("source_id") or f"episode-{index + 1}"
+                ),
+                "media_type": "episode",
+                "final_path": final_path,
+                "season_number": int(season),
+                "episode_number": int(episode),
+                "category_kind": category_kind,
+            })
+        if not targets:
+            self._log_contract_rejection("organized_series_targets_missing")
         return targets
 
     @staticmethod
@@ -403,7 +487,12 @@ class LibrarySyncService:
     def _media_metadata(self, job):
         metadata = (job.get("payload") or {}).get("metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
-        contract = extract_confirmed_media_metadata(metadata)
+        contract = extract_confirmed_media_metadata_v2(metadata)
+        if (
+            contract is None
+            and (job.get("payload") or {}).get("_legacy_media_metadata_v1")
+        ):
+            contract = extract_confirmed_media_metadata_v1(metadata)
         if MEDIA_METADATA_KEY in metadata and contract is None:
             raise ValueError("Invalid or unsupported media_metadata contract")
         return contract
@@ -413,6 +502,36 @@ class LibrarySyncService:
         if not contract:
             return (job.get("payload") or {}).get("metadata") or {}
         identity = dict(contract.get("identity") or {})
+        if contract.get("schema_version") == 2:
+            provider_refs = dict(identity.get("provider_refs") or {})
+            external_ids = {
+                key: value
+                for key, value in provider_refs.items()
+                if key not in {
+                    "tmdb_movie", "tmdb_tv", "tvdb_movie", "tvdb_series"
+                }
+            }
+            external_ids["tmdb"] = str(
+                provider_refs.get("tmdb_movie")
+                or provider_refs.get("tmdb_tv")
+                or ""
+            )
+            external_ids["tvdb"] = str(
+                provider_refs.get("tvdb_movie")
+                or provider_refs.get("tvdb_series")
+                or ""
+            )
+            external_ids = {
+                key: value for key, value in external_ids.items() if value
+            }
+            return {
+                **identity,
+                "title": identity.get("title_zh") or identity.get("title_en") or "",
+                "original_title": identity.get("title_original") or "",
+                "english_title": identity.get("title_en") or "",
+                "media_type": "tv" if identity.get("media_type") == "series" else "movie",
+                "external_ids": external_ids,
+            }
         identity["title"] = (
             identity.get("chinese_title")
             or identity.get("english_title")

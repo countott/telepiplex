@@ -86,6 +86,7 @@ class SearchMediaMetadataV2ProjectionTest(unittest.TestCase):
             },
             "media_type": "series",
             "title_zh": "死神: 千年血战篇",
+            "title_en": "Bleach: Thousand-Year Blood War",
             "title_original": "BLEACH 千年血戦篇",
             "year": 2022,
         })
@@ -102,6 +103,29 @@ class SearchMediaMetadataV2ProjectionTest(unittest.TestCase):
         self.assertNotIn("poster_url", projected)
         self.assertNotIn("evidence", projected)
         self.assertNotIn("items", projected)
+
+    def test_keeps_verified_english_separate_from_japanese_original(self):
+        candidate = self._candidate()
+        candidate["media_metadata"]["identity"].update({
+            "chinese_title": "游戏人生",
+            "english_title": "No Game, No Life",
+            "original_title": "ノーゲーム・ノーライフ",
+        })
+
+        projected = project_confirmed_media_metadata_v2(
+            candidate,
+            requested_scope={
+                "kind": "whole_series",
+                "season_number": None,
+                "episode_number": None,
+            },
+        )
+
+        self.assertEqual(projected["identity"]["title_en"], "No Game, No Life")
+        self.assertEqual(
+            projected["identity"]["title_original"],
+            "ノーゲーム・ノーライフ",
+        )
 
     def test_fails_when_no_verified_stable_provider_ref_exists(self):
         candidate = self._candidate()

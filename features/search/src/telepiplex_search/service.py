@@ -4492,7 +4492,7 @@ class SearchFeature:
                 operation_id,
                 state="running",
                 stage="submitting_download",
-                status_text="已选定片源，准备提交下载。",
+                status_text="已选定片源，提交下载",
                 control="cancel",
                 details={},
             )

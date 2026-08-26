@@ -7,14 +7,9 @@ import uuid
 from pathlib import PurePosixPath
 
 from telepiplex_plugin_sdk import FeatureError
-from telepiplex_plugin_sdk.media_metadata import (
-    MEDIA_METADATA_KEY,
-    attach_media_metadata,
-    extract_confirmed_media_metadata,
-    resolve_category_route,
-)
+from telepiplex_plugin_sdk.media_metadata import resolve_category_route
 from telepiplex_plugin_sdk.media_metadata_v2 import (
-    convert_media_metadata_v1_to_v2,
+    attach_media_metadata_v2,
     validate_media_metadata_v2,
 )
 
@@ -26,7 +21,6 @@ from .file_groups import build_provisional_groups
 from .models import DownloadCompletedEvent, PostDownloadResult
 from .media_metadata_v2 import (
     naming_identity_from_v2,
-    private_v1_adapter_from_v2,
 )
 from .operations import OperationCancelled, RenameOperationJournal
 from .processor import process_generic_media, process_tvdb_episode
@@ -1964,41 +1958,26 @@ class RenameFeature:
             await self._confirm_operation_ownership(operation_id)
             self._raise_if_cancelled(operation_id)
             metadata = {}
+            metadata_recovered = False
             public_contract = validate_media_metadata_v2(
                 payload.get("media_metadata")
             )
-            metadata_migration = ""
-            if public_contract is None and isinstance(
-                payload.get("media_metadata"), dict
-            ):
-                converted, _issue = convert_media_metadata_v1_to_v2(
-                    payload["media_metadata"]
+            raw_contract = payload.get("media_metadata")
+            if public_contract is None and isinstance(raw_contract, dict):
+                reason = (
+                    "unsupported_media_metadata_v1"
+                    if raw_contract.get("schema_version") == 1
+                    else "invalid_media_metadata_v2"
                 )
-                if converted is not None:
-                    public_contract = converted
-                    payload["media_metadata"] = deepcopy(converted)
-                    payload.pop("naming_metadata", None)
-                    metadata_migration = "v1_to_v2"
+                raise FeatureError(reason, reason)
             if public_contract is not None:
                 payload["media_metadata"] = deepcopy(public_contract)
                 payload.pop("naming_metadata", None)
-                private_contract = private_v1_adapter_from_v2(
-                    public_contract,
-                    payload.get("file_tree")
-                    if isinstance(payload.get("file_tree"), list)
-                    else [],
-                )
-                metadata = attach_media_metadata({}, private_contract)
+                metadata = attach_media_metadata_v2({}, public_contract)
                 if self.jobs:
                     self.jobs.update(job_id, "processing", {
                         "event_payload": deepcopy(payload),
-                        "metadata_migration": metadata_migration,
                     })
-            elif isinstance(payload.get("media_metadata"), dict):
-                try:
-                    metadata = attach_media_metadata({}, payload["media_metadata"])
-                except ValueError:
-                    metadata = {MEDIA_METADATA_KEY: payload["media_metadata"]}
             naming_metadata = (
                 naming_identity_from_v2(public_contract)
                 if public_contract is not None
@@ -2046,14 +2025,24 @@ class RenameFeature:
                 if resolved.get("status") == "unresolved":
                     resolved = {}
                 if isinstance(resolved.get("media_metadata"), dict):
-                    try:
-                        metadata = attach_media_metadata(
-                            {}, resolved["media_metadata"]
+                    recovered_contract = validate_media_metadata_v2(
+                        resolved["media_metadata"]
+                    )
+                    if recovered_contract is None:
+                        raise FeatureError(
+                            "invalid_media_metadata_v2",
+                            "media.search returned invalid media_metadata v2",
                         )
-                    except ValueError:
-                        metadata = {}
-                    if isinstance(resolved.get("naming_metadata"), dict):
-                        naming_metadata = resolved["naming_metadata"]
+                    public_contract = recovered_contract
+                    payload["media_metadata"] = deepcopy(public_contract)
+                    payload.pop("naming_metadata", None)
+                    metadata = attach_media_metadata_v2({}, public_contract)
+                    naming_metadata = naming_identity_from_v2(public_contract)
+                    metadata_recovered = True
+                    if self.jobs:
+                        self.jobs.update(job_id, "processing", {
+                            "event_payload": deepcopy(payload),
+                        })
                     presentation = resolved.get("presentation")
                     if isinstance(presentation, dict):
                         payload["_metadata_presentation"] = presentation
@@ -2062,12 +2051,7 @@ class RenameFeature:
                 and payload.get("_inventory_source_kind") == "unorganized"
                 and metadata
             ):
-                contract = extract_confirmed_media_metadata(metadata)
-                placement = (
-                    contract.get("placement")
-                    if isinstance(contract, dict)
-                    else None
-                )
+                placement = public_contract.get("placement") or {}
                 route = resolve_category_route(
                     {"category_folder": self.config.get("category_folder") or []},
                     str((placement or {}).get("category_kind") or ""),
@@ -2078,7 +2062,7 @@ class RenameFeature:
                         "confirmed metadata has no configured category route",
                     )
                 payload["selected_path"] = route["path"]
-            if metadata and public_contract is None:
+            if metadata_recovered:
                 await self._publish_metadata_identity(payload, operation_id)
             self._raise_if_cancelled(operation_id)
             operation_state = self.operations.get(operation_id) or {}
@@ -2189,13 +2173,7 @@ class RenameFeature:
                     else str(result.message or "").startswith("✅")
                 )
             )
-            contract = (
-                deepcopy(public_contract)
-                if public_contract is not None
-                else extract_confirmed_media_metadata(
-                    result.metadata or event.metadata
-                )
-            )
+            contract = deepcopy(public_contract)
             downstream_file_results = {
                 key: value
                 for key, value in file_results.items()
@@ -2244,7 +2222,6 @@ class RenameFeature:
                 "file_results": file_results,
                 "cleanup_complete": cleanup_complete,
                 "partial_completed": partial_completed,
-                "metadata_migration": metadata_migration,
                 "completion_kind": (
                     "partial_completed" if partial_completed else "completed"
                 ) if organized else "failed",

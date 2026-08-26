@@ -1,6 +1,6 @@
 # rename Feature
 
-`features/rename` 是 telepiplex 的独立媒体整理 Feature。rename 1.6.0 消费 durable `download.completed`，并在任何文件副作用前严格校验 `media_metadata v2`；旧的已确认 v1 任务只有在可无损提取稳定身份时才迁移为 v2 并持久化。v2 合同保持不可变，实际整理结果写入独立 `organization_result`，不会把 Rename 观察到的文件事实反写为作品元数据。每次恢复还会读取 Host operation snapshot；任务不存在、已终态或 handoff 未被 Rename 接受时失败关闭，避免脱离全链路所有权后继续改动文件。Rename 的进度和终态只覆写一条 `rename` 消息，终态回执持久化后只重试消息段封存，不重复上报终态。
+`features/rename` 是 telepiplex 的独立媒体整理 Feature。rename 2.0.0 消费 durable `download.completed`，并在任何文件副作用前严格校验 `media_metadata v2`；v1 事件直接拒绝，不再转换或迁移。v2 合同保持不可变，实际整理结果写入独立 `organization_result`，不会把 Rename 观察到的文件事实反写为作品元数据。每次恢复还会读取 Host operation snapshot；任务不存在、已终态或 handoff 未被 Rename 接受时失败关闭，避免脱离全链路所有权后继续改动文件。Rename 的进度和终态只覆写一条 `rename` 消息，终态回执持久化后只重试消息段封存，不重复上报终态。
 
 它也支持 Telegram `/rename` 扫描 115 存量目录；媒体候选确认会先持久化状态，再转入后台调用 search，因此 Telegram callback 不等待长链路，取消操作也能及时生效。文件阶段在首次写入前构建一份不可变预检快照，让目标冲突规划与执行共享同一批源、目标和父目录事实；rename、批量移动、目录清理与源端消失仍以写入后的新鲜读取作为后置条件。文件规划使用 download 1.1.0 的 32 路径分批身份读取，并优先调用 115 官方服务端批量移动，同一目标目录默认按 32 个文件一批提交；每批完成后重新列出源、目标目录，核对 provider ID 和规范文件名，不采信单独的成功回执。动画资源中的 NCOP、NCED 以及带季号或变体号的 OP、ED 会作为同一作品的附加内容保留，不再建立独立媒体搜索任务；无法唯一映射的正片文件仍保持原位并单独提示用户查证。rename 的完整或部分完成终态只表示本地媒体整理安全收敛，不发布下游整理事件，也不自动交接 sync/Plex。媒体候选按钮使用短持久令牌，满足 Telegram callback 的 64-byte 限制，同时支持直接回复候选编号。
 
@@ -28,7 +28,7 @@ rename 会对下载根或用户选择的扫描根建立一次完整、递归、�
 | 电影外挂字幕 | `分类/中文名 (English Title)/English Title.chi.srt` | 同样支持 `.ass`、`.sup`、`.vtt`；可与视频同批，也可纯字幕合入已有目录 |
 | 剧集外挂字幕 | `分类/中文名 (English Title)/English Title Season NN/English Title SxxExx.chi.ass` | 可平铺在源根、跨目录且只覆盖部分集；目标与同集视频共享名字主体 |
 
-英语原作优先采用确认元数据中的原始英文标题；如果中文标题末尾已经重复英文标题，会去掉重复部分再生成 `中文名 (English Title)`。电影和剧集都先使用确认元数据与文件级确定性证据，只有仍无法映射的文件才交给有界 AI 兜底。
+所有业务命名只采用确认元数据中的 `title_en`；`title_original` 只保存原语种标题，即使它是日文也不会进入作品目录、季目录或媒体文件名。如果中文标题末尾已经重复英文标题，会去掉重复部分再生成 `中文名 (English Title)`。电影和剧集都先使用确认元数据与文件级确定性证据，只有仍无法映射的文件才交给有界 AI 兜底。
 
 rename 不识别也不筛选字幕语言。只要字幕已经映射到确认的电影或剧集集号，目标名就固定增加 `.chi`，并保留源文件真实扩展名；`forced`、`sdh`、`cc` 和原语言标记都不进入目标名。`.chi` 只是交给 caption 继续处理前的统一文件名标记，不代表 rename 检测到了中文。无法安全确认媒体身份或集号的字幕保持原名原位，不阻塞其他文件。多个同集、同扩展名字幕若会生成相同目标名，按稳定 `source_id` 分配规范名与 `.variant-NN.chi` 防重名，绝不静默丢弃。
 
@@ -37,7 +37,7 @@ rename 会在写操作前按文件预检目标冲突。已有目标与相同 pro
 rename 在媒体文件全部被核验为已整理或规范 `no_op`、不存在原位保留/目标冲突/文件失败，并且源作品目录清理完成时写入 `completed`。若已验证文件至少一个、其余媒体文件仅为安全原位保留，且没有冲突、执行失败或意外清理失败，则写入 `partial_completed`；完全无法匹配仍失败关闭且不执行移动。Telegram 通知是尽力投递的旁路；通知失败不会把已经核验完成的 Job 改成失败，也不会触发重复文件操作。用户通知使用纯文本，文件名和路径不会依赖 Telegram Markdown 转义。
 
 ```bash
-python tools/build_feature.py features/rename /tmp/rename-1.6.0.tpx \
+python tools/build_feature.py features/rename /tmp/rename-2.0.0.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

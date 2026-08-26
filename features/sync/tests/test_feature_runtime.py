@@ -1577,7 +1577,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "plex": {"base_url": "", "token": ""},
         }), encoding="utf-8")
         context = SimpleNamespace(
-            manifest={"plugin_id": "sync", "version": "1.1.5"},
+            manifest={"plugin_id": "sync", "version": "2.0.0"},
             token="token",
             host=FakeHost(),
             config_path=config_path,
@@ -1615,7 +1615,7 @@ class FeatureSourceContractTest(unittest.TestCase):
         }
 
         self.assertEqual(commands["scan"], "扫描 Plex 媒体库")
-        self.assertEqual(manifest["version"], "1.1.5")
+        self.assertEqual(manifest["version"], "2.0.0")
         self.assertEqual(manifest["host_api"], ">=1.2,<2.0")
         self.assertEqual(manifest["state_schema_version"], 2)
 
@@ -1625,13 +1625,13 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         source = (ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertEqual(package["project"]["version"], "1.1.5")
+        self.assertEqual(package["project"]["version"], "2.0.0")
         self.assertEqual(
             package["project"]["dependencies"][0],
-            "telepiplex-plugin-sdk==1.3.2",
+            "telepiplex-plugin-sdk==2.0.0",
         )
-        self.assertIn("/tmp/sync-1.1.5.tpx", source)
-        self.assertNotIn("dist/sync-1.1.5.tpx", source)
+        self.assertIn("/tmp/sync-2.0.0.tpx", source)
+        self.assertNotIn("dist/sync-2.0.0.tpx", source)
         self.assertIn("独立手动", source)
         self.assertNotIn("media.organized", source)
         self.assertIn("`/scan`", source)

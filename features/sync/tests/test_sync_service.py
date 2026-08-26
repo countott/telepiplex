@@ -65,6 +65,76 @@ def make_completion():
     )
 
 
+def make_media_metadata_v2(
+    *,
+    media_type="movie",
+    season=None,
+    episode=None,
+    category_kind=None,
+):
+    from telepiplex_plugin_sdk.media_metadata_v2 import (
+        build_media_metadata_v2_id,
+    )
+
+    is_series = media_type == "series"
+    value = {
+        "schema_version": 2,
+        "confirmed": True,
+        "identity": {
+            "primary_ref": {
+                "provider": "tmdb_tv" if is_series else "tmdb_movie",
+                "id": "20",
+            },
+            "provider_refs": {
+                "tmdb_tv" if is_series else "tmdb_movie": "20",
+            },
+            "media_type": media_type,
+            "title_zh": "游戏人生" if is_series else "中文电影",
+            "title_en": "No Game, No Life" if is_series else "English Movie",
+            "title_original": "ノーゲーム・ノーライフ" if is_series else "English Movie",
+            "year": 2014 if is_series else 2024,
+        },
+        "scope": {
+            "kind": (
+                "episode" if is_series and season is not None else
+                "whole_series" if is_series else
+                "movie"
+            ),
+            "season_number": season if is_series else None,
+            "episode_number": episode if is_series else None,
+        },
+        "placement": {
+            "category_kind": (
+                category_kind
+                or ("live_action_series" if is_series else "live_action_movie")
+            ),
+        },
+    }
+    value["metadata_id"] = build_media_metadata_v2_id(value)
+    return value
+
+
+def make_organized_series_payload(paths, **overrides):
+    event = {
+        "resource_name": "Show",
+        "final_path": "/Series/Show",
+        "selected_path": "/Series",
+        "media_metadata": make_media_metadata_v2(media_type="series"),
+        "organization_result": {
+            "status": "completed",
+            "files": [{
+                "source_id": f"episode-{index}",
+                "state": "organized",
+                "target_path": path,
+            } for index, path in enumerate(paths, start=1)],
+            "final_path": "/Series/Show",
+            "target_relative_dir": "",
+        },
+    }
+    event.update(overrides)
+    return event
+
+
 def make_media_metadata_completion(mapping_kind):
     from telepiplex_plugin_sdk.media_metadata import attach_media_metadata
 
@@ -442,6 +512,87 @@ class LibrarySyncServiceTest(unittest.TestCase):
             notifier=notifier,
         )
 
+    def test_organized_movie_consumes_v2_identity_and_final_path(self):
+        contract = make_media_metadata_v2()
+        service = self.make_service()
+
+        job = service.enqueue_organized_event({
+            "resource_name": "English Movie",
+            "final_path": "/真人电影/中文电影 (English Movie)",
+            "selected_path": "/真人电影",
+            "media_metadata": contract,
+            "organization_result": {
+                "status": "completed",
+                "files": [],
+                "final_path": "/真人电影/中文电影 (English Movie)",
+                "target_relative_dir": "",
+            },
+        })
+
+        self.assertIsNotNone(job)
+        self.assertEqual(job["payload"]["targets"], [{
+            "target_id": "movie",
+            "media_type": "movie",
+            "final_path": "/真人电影/中文电影 (English Movie)",
+            "season_number": None,
+            "episode_number": None,
+            "category_kind": "live_action_movie",
+        }])
+        self.assertEqual(
+            service._effective_metadata(job)["external_ids"],
+            {"tmdb": "20"},
+        )
+
+    def test_organized_episode_consumes_v2_and_organization_result_target(self):
+        contract = make_media_metadata_v2(
+            media_type="series",
+            season=1,
+            episode=1,
+            category_kind="animated_series",
+        )
+        target = (
+            "/动画剧集/游戏人生 (No Game, No Life)/"
+            "No Game, No Life Season 01/No Game, No Life S01E01.mkv"
+        )
+        service = self.make_service()
+
+        job = service.enqueue_organized_event({
+            "resource_name": "No Game, No Life S01E01",
+            "final_path": "/动画剧集/游戏人生 (No Game, No Life)",
+            "selected_path": "/动画剧集",
+            "media_metadata": contract,
+            "organization_result": {
+                "status": "completed",
+                "files": [{
+                    "source_id": "episode-1",
+                    "state": "organized",
+                    "target_path": target,
+                }],
+                "final_path": "/动画剧集/游戏人生 (No Game, No Life)",
+                "target_relative_dir": "",
+            },
+        })
+
+        self.assertIsNotNone(job)
+        self.assertEqual(job["payload"]["targets"], [{
+            "target_id": "episode-1",
+            "media_type": "episode",
+            "final_path": target,
+            "season_number": 1,
+            "episode_number": 1,
+            "category_kind": "animated_series",
+        }])
+
+    def test_organized_event_rejects_v1_metadata(self):
+        service = self.make_service()
+
+        job = service.enqueue_organized_event({
+            "final_path": "/真人电影/旧数据",
+            "media_metadata": {"schema_version": 1},
+        })
+
+        self.assertIsNone(job)
+
     def test_temporary_special_routes_by_kind_and_runs_only_enhancements(self):
         plex = FakePlex()
         plex.edit_custom_episode_metadata = Mock()
@@ -639,26 +790,22 @@ class LibrarySyncServiceTest(unittest.TestCase):
         self.assertNotIn("localizing", result["step_results"])
 
     def test_organized_series_creates_one_job_with_all_resolved_targets(self):
-        completion = make_unresolved_standalone_series_completion()
-        contract = completion.result.metadata["media_metadata"]
-        contract["items"][0]["final_path"] = "/Series/Show/Season 01/Show S01E01.mkv"
-        contract["items"].append({
-            "item_id": "episode-2", "content_role": "main_episode",
-            "season_number": 1, "episode_number": 2,
-            "final_path": "/Series/Show/Season 01/Show S01E02.mkv",
-        })
+        paths = [
+            "/Series/Show/Season 01/Show S01E01.mkv",
+            "/Series/Show/Season 01/Show S01E02.mkv",
+        ]
+        event = make_organized_series_payload(
+            paths,
+            final_path="/Series/Test",
+            chat_id=10,
+            user_id=123,
+            operation_id="op-series",
+            operation_revision=7,
+        )
+        contract = event["media_metadata"]
 
         service = self.make_service()
-        job = service.enqueue_organized_event({
-            "resource_name": "Show",
-            "final_path": "/Series/Test",
-            "selected_path": "/Series",
-            "chat_id": 10,
-            "user_id": 123,
-            "operation_id": "op-series",
-            "operation_revision": 7,
-            "media_metadata": contract,
-        })
+        job = service.enqueue_organized_event(event)
 
         self.assertEqual(len(self.jobs.list()), 1)
         self.assertEqual(
@@ -673,22 +820,15 @@ class LibrarySyncServiceTest(unittest.TestCase):
         )
 
     def test_one_organized_job_scans_once_then_locates_each_final_path(self):
-        completion = make_unresolved_standalone_series_completion()
-        contract = completion.result.metadata["media_metadata"]
-        contract["items"][0]["final_path"] = "/Series/Show/Season 01/Show S01E01.mkv"
-        contract["items"].append({
-            "item_id": "episode-2", "content_role": "main_episode",
-            "season_number": 1, "episode_number": 2,
-            "final_path": "/Series/Show/Season 01/Show S01E02.mkv",
-        })
+        paths = [
+            "/Series/Show/Season 01/Show S01E01.mkv",
+            "/Series/Show/Season 01/Show S01E02.mkv",
+        ]
         plex = FakePlex()
         service = self.make_service(plex=plex)
-        job = service.enqueue_organized_event({
-            "resource_name": "Show",
-            "final_path": "/Series/Show",
-            "selected_path": "/Series",
-            "media_metadata": contract,
-        })
+        job = service.enqueue_organized_event(
+            make_organized_series_payload(paths)
+        )
 
         result = service.run_job(job["id"])
 
@@ -704,33 +844,13 @@ class LibrarySyncServiceTest(unittest.TestCase):
         self.assertEqual(list(scanning["targets"]), ["episode-1", "episode-2"])
 
     def test_partial_location_warns_and_enhances_only_located_targets(self):
-        completion = make_unresolved_standalone_series_completion()
-        contract = completion.result.metadata["media_metadata"]
         first_path = "/Series/Show/Season 01/Show S01E01.mkv"
         second_path = "/Series/Show/Season 01/Show S01E02.mkv"
-        contract["items"] = [
-            {
-                "item_id": "episode-1",
-                "content_role": "main_episode",
-                "season_number": 1,
-                "episode_number": 1,
-                "final_path": first_path,
-            },
-            {
-                "item_id": "episode-2",
-                "content_role": "main_episode",
-                "season_number": 1,
-                "episode_number": 2,
-                "final_path": second_path,
-            },
-        ]
         plex = FakePlex(missing_paths={second_path})
         service = self.make_service(plex=plex)
-        job = service.enqueue_organized_event({
-            "resource_name": "Show",
-            "final_path": "/Series/Show",
-            "media_metadata": contract,
-        })
+        job = service.enqueue_organized_event(
+            make_organized_series_payload([first_path, second_path])
+        )
 
         result = service.run_job(job["id"])
 
@@ -748,33 +868,13 @@ class LibrarySyncServiceTest(unittest.TestCase):
         self.assertEqual(plex.stream_rating_keys, ["42", "42"])
 
     def test_retry_reuses_successful_library_and_located_target_progress(self):
-        completion = make_unresolved_standalone_series_completion()
-        contract = completion.result.metadata["media_metadata"]
         first_path = "/Series/Show/Season 01/Show S01E01.mkv"
         second_path = "/Series/Show/Season 01/Show S01E02.mkv"
-        contract["items"] = [
-            {
-                "item_id": "episode-1",
-                "content_role": "main_episode",
-                "season_number": 1,
-                "episode_number": 1,
-                "final_path": first_path,
-            },
-            {
-                "item_id": "episode-2",
-                "content_role": "main_episode",
-                "season_number": 1,
-                "episode_number": 2,
-                "final_path": second_path,
-            },
-        ]
         plex = FakePlex()
         service = self.make_service(plex=plex)
-        job = service.enqueue_organized_event({
-            "resource_name": "Show",
-            "final_path": "/Series/Show",
-            "media_metadata": contract,
-        })
+        job = service.enqueue_organized_event(
+            make_organized_series_payload([first_path, second_path])
+        )
         self.jobs.update(
             job["id"],
             state="interrupted",
@@ -817,26 +917,8 @@ class LibrarySyncServiceTest(unittest.TestCase):
         self.assertEqual(scanning["targets"]["episode-2"]["rating_key"], "43")
 
     def test_library_group_uses_one_deadline_and_one_batch_read_per_poll(self):
-        completion = make_unresolved_standalone_series_completion()
-        contract = completion.result.metadata["media_metadata"]
         first_path = "/Series/Show/Season 01/Show S01E01.mkv"
         second_path = "/Series/Show/Season 01/Show S01E02.mkv"
-        contract["items"] = [
-            {
-                "item_id": "episode-1",
-                "content_role": "main_episode",
-                "season_number": 1,
-                "episode_number": 1,
-                "final_path": first_path,
-            },
-            {
-                "item_id": "episode-2",
-                "content_role": "main_episode",
-                "season_number": 1,
-                "episode_number": 2,
-                "final_path": second_path,
-            },
-        ]
         now = [0.0]
         plex = FakePlex(missing_paths={first_path, second_path})
         service = self.make_service(
@@ -846,11 +928,9 @@ class LibrarySyncServiceTest(unittest.TestCase):
             clock=lambda: now[0],
             sleeper=lambda seconds: now.__setitem__(0, now[0] + seconds),
         )
-        job = service.enqueue_organized_event({
-            "resource_name": "Show",
-            "final_path": "/Series/Show",
-            "media_metadata": contract,
-        })
+        job = service.enqueue_organized_event(
+            make_organized_series_payload([first_path, second_path])
+        )
 
         result = service.run_job(job["id"])
 
@@ -862,41 +942,14 @@ class LibrarySyncServiceTest(unittest.TestCase):
         self.assertEqual(now[0], 1)
 
     def test_later_lookup_exception_preserves_earlier_target_and_continues(self):
-        completion = make_unresolved_standalone_series_completion()
-        contract = completion.result.metadata["media_metadata"]
         first_path = "/Series/Show/Season 01/Show S01E01.mkv"
         second_path = "/Series/Show/Season 01/Show S01E02.mkv"
         third_path = "/Series/Show/Season 01/Show S01E03.mkv"
-        contract["items"] = [
-            {
-                "item_id": "episode-1",
-                "content_role": "main_episode",
-                "season_number": 1,
-                "episode_number": 1,
-                "final_path": first_path,
-            },
-            {
-                "item_id": "episode-2",
-                "content_role": "main_episode",
-                "season_number": 1,
-                "episode_number": 2,
-                "final_path": second_path,
-            },
-            {
-                "item_id": "episode-3",
-                "content_role": "main_episode",
-                "season_number": 1,
-                "episode_number": 3,
-                "final_path": third_path,
-            },
-        ]
         plex = FakePlex()
         service = self.make_service(plex=plex)
-        job = service.enqueue_organized_event({
-            "resource_name": "Show",
-            "final_path": "/Series/Show",
-            "media_metadata": contract,
-        })
+        job = service.enqueue_organized_event(make_organized_series_payload([
+            first_path, second_path, third_path,
+        ]))
         def index_items_by_paths(_library_id, final_paths):
             plex.index_path_batches.append(list(final_paths))
             return {

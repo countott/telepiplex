@@ -700,6 +700,7 @@ class OperationReportSink:
         self.router = router
         self._listener = None
         self._pending: dict[str, OperationRecord] = {}
+        self._pending_segment_ids: dict[str, str] = {}
         self._workers: dict[str, asyncio.Task] = {}
         self._tasks: set[asyncio.Task] = set()
 
@@ -723,6 +724,7 @@ class OperationReportSink:
             current = self._workers.get(record.operation_id)
             if current is None or current.done():
                 self._pending[record.operation_id] = record
+                self._pending_segment_ids[record.operation_id] = segment.segment_id
                 current = self._ensure_worker(record.operation_id)
             worker = current
         if worker is not None:
@@ -780,6 +782,9 @@ class OperationReportSink:
             pending = self._pending.get(record.operation_id)
             if pending is None or record.revision >= pending.revision:
                 self._pending[record.operation_id] = record
+                self._pending_segment_ids[record.operation_id] = (
+                    segment.segment_id if segment is not None else ""
+                )
             self._ensure_worker(record.operation_id)
         response = {
             "accepted": accepted,
@@ -841,8 +846,17 @@ class OperationReportSink:
     async def _render_pending(self, operation_id: str):
         while True:
             record = self._pending.pop(operation_id, None)
+            segment_id = self._pending_segment_ids.pop(operation_id, "")
             if record is None:
                 return
+            if segment_id:
+                segment = self.coordinator.get_segment(segment_id)
+                if (
+                    segment is not None
+                    and segment.state == "sealed"
+                    and segment.rendered_revision >= record.revision
+                ):
+                    continue
             try:
                 result = self._listener(record)
                 if inspect.isawaitable(result):
@@ -894,6 +908,7 @@ class OperationReportSink:
                     pass
             if pending and deadline is not None:
                 self._pending.clear()
+                self._pending_segment_ids.clear()
                 for task in pending:
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)

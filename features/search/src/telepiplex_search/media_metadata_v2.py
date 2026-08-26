@@ -151,10 +151,14 @@ def project_confirmed_media_metadata_v2(
     refs, anchor_refs = _provider_refs(candidate, media_type)
     primary_ref = _primary_ref(refs, anchor_refs)
     title_zh = sanitize_contract_name(identity.get("chinese_title"))
+    title_en = sanitize_contract_name(
+        identity.get("official_english_title")
+        or identity.get("english_title")
+    )
     title_original = sanitize_contract_name(
         identity.get("original_title")
         or identity.get("official_original_title")
-        or identity.get("english_title")
+        or title_en
     )
     try:
         year = int(identity.get("year")) if identity.get("year") else None
@@ -173,6 +177,7 @@ def project_confirmed_media_metadata_v2(
             "provider_refs": refs,
             "media_type": media_type,
             "title_zh": title_zh,
+            "title_en": title_en,
             "title_original": title_original,
             "year": year,
         },

@@ -127,7 +127,7 @@ class DeploymentContractTest(unittest.TestCase):
             (ROOT / "sdk" / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(project["project"]["version"], "1.4.0")
+        self.assertEqual(project["project"]["version"], "2.0.0")
 
     def test_build_script_only_references_existing_dockerfiles(self):
         source = (ROOT / "build.sh").read_text(encoding="utf-8")

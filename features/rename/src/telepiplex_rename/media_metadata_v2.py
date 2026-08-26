@@ -23,7 +23,8 @@ def naming_identity_from_v2(contract: dict) -> dict:
     return {
         "media_type": identity["media_type"],
         "chinese_title": identity["title_zh"],
-        "english_title": identity["title_original"],
+        "english_title": identity["title_en"],
+        "original_title": identity["title_original"],
         "year": identity["year"],
         "category_kind": value["placement"]["category_kind"],
     }
@@ -101,73 +102,3 @@ def observed_episode_plan(contract: dict, file_tree: list[dict]) -> dict:
             "source": files[0],
         })
     return {"episode_map": episode_map, "unresolved": unresolved}
-
-
-def private_v1_adapter_from_v2(
-    contract: dict,
-    file_tree: list[dict] | None,
-) -> dict:
-    """Build temporary processor input; callers must never publish this value."""
-
-    value = validate_media_metadata_v2(contract)
-    if value is None:
-        raise ValueError("invalid media_metadata v2")
-    naming = naming_identity_from_v2(value)
-    scope = value["scope"]
-    items = []
-    unresolved = []
-    if naming["media_type"] == "series":
-        observed = observed_episode_plan(value, file_tree or [])
-        unresolved = observed["unresolved"]
-        items = [{
-            "item_id": f"observed:s{item['season_number']}e{item['episode_number']}",
-            "content_role": "main_episode",
-            "season_number": item["season_number"],
-            "episode_number": item["episode_number"],
-        } for item in observed["episode_map"]]
-    external_ids = {}
-    for key, provider_id in value["identity"]["provider_refs"].items():
-        if key == "wikidata":
-            external_ids["wikidata"] = provider_id
-        elif key == "douban_subject":
-            external_ids["douban_subject"] = provider_id
-        elif key.startswith("tmdb_"):
-            external_ids["tmdb"] = provider_id
-        elif key.startswith("tvdb_"):
-            external_ids["tvdb"] = provider_id
-        elif key == "anilist":
-            external_ids["anilist"] = provider_id
-    return {
-        "schema_version": 1,
-        "metadata_id": value["metadata_id"],
-        "confirmed": True,
-        "identity": {
-            "chinese_title": naming["chinese_title"],
-            "english_title": naming["english_title"],
-            "year": str(naming["year"] or ""),
-            "content_kind": "movie" if naming["media_type"] == "movie" else "series",
-            "external_ids": external_ids,
-        },
-        "retrieval": {
-            "media_type": naming["media_type"],
-            "scope": scope["kind"] if naming["media_type"] == "series" else "work",
-            "query": "",
-        },
-        "relation": {"target_series": None, "source": "media_metadata_v2"},
-        "placement": {
-            "category_kind": naming["category_kind"],
-            "library_type": naming["media_type"],
-            "mapping_kind": "standalone",
-            "season_number": None,
-            "episode_number": None,
-        },
-        "evidence": {"decision": {
-            "scope": scope["kind"],
-            "season_number": scope["season_number"],
-            "episode_number": scope["episode_number"],
-            "scope_source": "media_metadata_v2",
-        }},
-        "warnings": (["warning:observed_files_unresolved"] if unresolved else []),
-        "items": items,
-    }
-

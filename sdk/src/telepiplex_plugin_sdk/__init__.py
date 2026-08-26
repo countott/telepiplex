@@ -12,7 +12,6 @@ from .media_metadata import (
 from .media_metadata_v2 import (
     attach_media_metadata_v2,
     build_media_metadata_v2_id,
-    convert_media_metadata_v1_to_v2,
     extract_confirmed_media_metadata_v2,
     validate_media_metadata_v2,
     validate_media_metadata_v2_detailed,
@@ -28,7 +27,6 @@ __all__ = [
     "attach_media_metadata",
     "attach_media_metadata_v2",
     "build_media_metadata_v2_id",
-    "convert_media_metadata_v1_to_v2",
     "extract_confirmed_media_metadata",
     "extract_confirmed_media_metadata_v2",
     "merge_resolved_items",

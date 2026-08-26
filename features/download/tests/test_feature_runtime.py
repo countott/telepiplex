@@ -1302,7 +1302,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host.reports[-1]["next_plugin_id"], "rename")
         self.assertEqual(
             self.host.reports[-1]["status_text"],
-            "已下载，开始整理",
+            "下载完成，开始整理",
         )
         self.assertEqual(self.host.events[0][1]["operation_id"], "op-download-1")
         self.assertEqual(self.host.events[0][1]["chat_id"], 10)
@@ -2095,7 +2095,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
             "user_id": 1,
             "state": "handed_off",
             "stage": "handoff_rename",
-            "status_text": "已下载，开始整理",
+            "status_text": "下载完成，开始整理",
             "control": "cancel",
             "revision": 7,
             "details": {"downloaded_content": "preserved"},
@@ -3308,17 +3308,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.1.1")
+        self.assertEqual(manifest["version"], "2.0.0")
         self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.1.1")
+        self.assertEqual(project["project"]["version"], "2.0.0")
         self.assertEqual(
             project["project"]["dependencies"][0],
-            "telepiplex-plugin-sdk==1.4.0",
+            "telepiplex-plugin-sdk==2.0.0",
         )
-        self.assertIn("/tmp/download-1.1.1.tpx", readme)
-        self.assertNotIn("dist/download-1.1.1.tpx", readme)
+        self.assertIn("/tmp/download-2.0.0.tpx", readme)
+        self.assertNotIn("dist/download-2.0.0.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)
@@ -3359,6 +3359,7 @@ def media_metadata_v2():
             "provider_refs": {"wikidata": "Q1"},
             "media_type": "movie",
             "title_zh": "中文名",
+            "title_en": "English",
             "title_original": "English",
             "year": 2024,
         },

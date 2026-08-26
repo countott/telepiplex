@@ -238,22 +238,43 @@ def build_confirmed_rename_plan(
 ) -> dict | None:
     placement = media_metadata.get("placement") or {}
     identity = media_metadata.get("identity") or {}
+    is_v2 = media_metadata.get("schema_version") == 2
     if (
         media_metadata.get("confirmed") is not True
-        or placement.get("library_type") != "series"
+        or (
+            identity.get("media_type") != "series"
+            if is_v2
+            else placement.get("library_type") != "series"
+        )
     ):
         return None
 
     allowed_targets = set()
-    for item in media_metadata.get("items") or []:
-        if not isinstance(item, dict):
-            continue
-        if item.get("season_number") is None or str(item.get("season_number")).strip() == "":
-            continue
-        season = _safe_season_int(item.get("season_number"))
-        episode = _safe_episode_int(item.get("episode_number"))
-        if season is not None and episode is not None:
-            allowed_targets.add((season, episode))
+    if is_v2:
+        scope = media_metadata.get("scope") or {}
+        if scope.get("kind") == "episode":
+            allowed_targets.add((
+                int(scope["season_number"]),
+                int(scope["episode_number"]),
+            ))
+        else:
+            allowed_targets.update(
+                (int(item["season_number"]), int(item["episode_number"]))
+                for item in ai_plan.get("episode_map") or []
+                if isinstance(item, dict)
+                and item.get("season_number") is not None
+                and item.get("episode_number") is not None
+            )
+    else:
+        for item in media_metadata.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("season_number") is None or str(item.get("season_number")).strip() == "":
+                continue
+            season = _safe_season_int(item.get("season_number"))
+            episode = _safe_episode_int(item.get("episode_number"))
+            if season is not None and episode is not None:
+                allowed_targets.add((season, episode))
     bounded_season = None
     if (
         not allowed_targets
@@ -286,10 +307,14 @@ def build_confirmed_rename_plan(
 
     source_lookup = _source_index(file_tree)
     source_video_paths = {node["relative_path"] for node in _video_file_nodes(file_tree)}
-    chinese_title, english_title = (
-        sanitize_target_name(title)
-        for title in series_titles(media_metadata)
-    )
+    if is_v2:
+        chinese_title = sanitize_target_name(identity.get("title_zh"))
+        english_title = sanitize_target_name(identity.get("title_en"))
+    else:
+        chinese_title, english_title = (
+            sanitize_target_name(title)
+            for title in series_titles(media_metadata)
+        )
     series_name = english_title or chinese_title
     if not series_name:
         return None
@@ -336,7 +361,9 @@ def build_confirmed_rename_plan(
         source_parent = source_path.rsplit("/", 1)[0]
         operations.append({
             "media_kind": "video",
-            "content_role": item.get("content_role") or identity.get("content_kind"),
+            "content_role": item.get("content_role") or (
+                "main_episode" if is_v2 else identity.get("content_kind")
+            ),
             "season_number": season,
             "episode_number": episode,
             "source_relative_path": source_relative_path,
@@ -412,7 +439,7 @@ def build_confirmed_rename_plan(
         "discard_sources": discard_sources,
         "kept_sources": kept_sources,
         "unresolved_sources": subtitle_plan["unresolved_sources"],
-        "warnings": [
+        "warnings": [] if is_v2 else [
             str(item)
             for item in media_metadata.get("warnings") or []
             if str(item).strip()

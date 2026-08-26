@@ -202,6 +202,7 @@ class SearchPipelineLoggingTest(unittest.IsolatedAsyncioTestCase):
                 "canonical_search_title": "Backrooms",
                 "search_title_policy": "official_english",
                 "chinese_title": "后室",
+                "official_english_title": "Backrooms",
                 "original_title": "Backrooms",
                 "year": "2022",
                 "media_type": "movie",
