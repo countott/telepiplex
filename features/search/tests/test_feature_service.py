@@ -1,6 +1,7 @@
 import ast
 import asyncio
 from copy import deepcopy
+from datetime import date, timedelta
 import html
 import re
 import threading
@@ -5368,20 +5369,23 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
     def test_ongoing_series_uses_third_level_aired_episode_menu(self):
         plan = series_ranked_search_plan()
         contract = plan["media_metadata"]
+        today = date.today()
+        past_air_date = (today - timedelta(days=365)).isoformat()
+        future_air_date = (today + timedelta(days=365)).isoformat()
         contract["items"] = [
             *({
                 "item_id": f"s1e{number}",
                 "content_role": "main_episode",
                 "season_number": 1,
                 "episode_number": number,
-                "aired": "2024-12-11",
+                "aired": past_air_date,
             } for number in range(1, 9)),
             *({
                 "item_id": f"s2e{number}",
                 "content_role": "main_episode",
                 "season_number": 2,
                 "episode_number": number,
-                "aired": "2026-08-05" if number < 8 else "2026-08-26",
+                "aired": past_air_date if number < 8 else future_air_date,
             } for number in range(1, 9)),
         ]
         contract["evidence"]["series_inventory"] = {
@@ -6028,9 +6032,9 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "1.12.1")
+        self.assertEqual(manifest["version"], "1.12.2")
         self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
-        self.assertEqual(project["project"]["version"], "1.12.1")
+        self.assertEqual(project["project"]["version"], "1.12.2")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.4.0",
@@ -6064,14 +6068,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.12.1.tpx", source)
+        self.assertIn("/tmp/search-1.12.2.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-1.12.1.tpx", source)
+        self.assertNotIn("dist/search-1.12.2.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []
