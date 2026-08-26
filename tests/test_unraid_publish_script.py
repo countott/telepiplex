@@ -22,7 +22,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
         host_source=textwrap.dedent(
             '''\
             def get_version(md_format=False):
-                version = "v3.6.1-host"
+                version = "v3.6.2-host"
                 return version
             '''
         ),
@@ -179,7 +179,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
             changed_path="app/115bot.py",
             remote_tags="\n".join(
                 (
-                    "host refs/tags/telepiplex-v3.5.5",
+                    "host refs/tags/telepiplex-v3.6.1",
                     "a refs/tags/download-v1.0.18",
                     "b refs/tags/search-v1.11.5",
                     "c refs/tags/rename-v1.5.9",
@@ -198,7 +198,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
         self.assertEqual(
             tag_pushes,
             [
-                "push origin refs/tags/telepiplex-v3.6.1",
+                "push origin refs/tags/telepiplex-v3.6.2",
                 "push origin refs/tags/download-v1.1.0",
                 "push origin refs/tags/search-v1.12.2",
                 "push origin refs/tags/rename-v1.6.0",
@@ -221,7 +221,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
             changed_path="features/download/README.md",
             remote_tags="\n".join(
                 (
-                    "host refs/tags/telepiplex-v3.6.1",
+                    "host refs/tags/telepiplex-v3.6.2",
                     "a refs/tags/download-v1.1.0",
                     "b refs/tags/search-v1.12.2",
                     "c refs/tags/rename-v1.6.0",
@@ -241,7 +241,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
             changed_path="features/search/manifest.yaml",
             remote_tags="\n".join(
                 (
-                    "host refs/tags/telepiplex-v3.6.1",
+                    "host refs/tags/telepiplex-v3.6.2",
                     "a refs/tags/download-v1.1.0",
                     "b refs/tags/search-v1.12.1",
                     "c refs/tags/rename-v1.6.0",
@@ -267,7 +267,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
             changed_path="",
             remote_tags="\n".join(
                 (
-                    "host refs/tags/telepiplex-v3.6.1",
+                    "host refs/tags/telepiplex-v3.6.2",
                     "a refs/tags/download-v1.1.0",
                     "b refs/tags/search-v1.12.2",
                     "c refs/tags/rename-v1.6.0",
