@@ -74,6 +74,29 @@ class PosterGridTest(unittest.TestCase):
         self.assertEqual(first_image.format, "JPEG")
         self.assertEqual(first.name, "telepiplex-candidates.jpg")
 
+    def test_candidate_numbers_are_drawn_as_circled_labels(self):
+        drawn_text = []
+        original_text = poster_grid.ImageDraw.ImageDraw.text
+
+        def capture_text(draw, xy, text, *args, **kwargs):
+            drawn_text.append(text)
+            return original_text(draw, xy, text, *args, **kwargs)
+
+        with patch.object(
+            poster_grid.ImageDraw.ImageDraw,
+            "text",
+            new=capture_text,
+        ):
+            build_poster_grid([
+                {"number": 1, "title": "作品甲", "poster_url": ""},
+                {"number": 2, "title": "作品乙", "poster_url": ""},
+            ])
+
+        self.assertEqual(
+            [text for text in drawn_text if text in {"1", "2", "①", "②"}],
+            ["①", "②"],
+        )
+
     @patch("app.runtime.poster_grid.urlopen")
     def test_douban_poster_request_uses_provider_headers(self, urlopen):
         urlopen.return_value = ImageResponse(

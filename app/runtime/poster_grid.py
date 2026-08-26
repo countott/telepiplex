@@ -22,10 +22,17 @@ CARD_HEIGHT = 540
 LABEL_HEIGHT = 72
 GAP = 18
 MAX_IMAGE_BYTES = 6 * 1024 * 1024
+_CIRCLED_NUMBERS = tuple("①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳")
 
 
 class PosterGridUnavailable(RuntimeError):
     """No supplied remote poster could be decoded into the candidate grid."""
+
+
+def _number_label(number: int) -> str:
+    if 1 <= number <= len(_CIRCLED_NUMBERS):
+        return _CIRCLED_NUMBERS[number - 1]
+    return str(number)
 
 
 def _font(size: int):
@@ -234,7 +241,7 @@ def _card(
         fill="#111318",
     )
     font = _font(44)
-    label = str(number)
+    label = _number_label(number)
     box = draw.textbbox((0, 0), label, font=font)
     draw.text(
         (

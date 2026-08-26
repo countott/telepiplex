@@ -718,15 +718,23 @@ class OperationReportSink:
             role,
         )
         record = self.coordinator.get(operation_id)
+        worker = None
         if record is not None and self._listener is not None:
-            self._pending[record.operation_id] = record
-            self._ensure_worker(record.operation_id)
+            current = self._workers.get(record.operation_id)
+            if current is None or current.done():
+                self._pending[record.operation_id] = record
+                current = self._ensure_worker(record.operation_id)
+            worker = current
+        if worker is not None:
+            await asyncio.shield(worker)
+        sealed = self.coordinator.get_segment(segment.segment_id)
+        state = sealed.state if sealed is not None else ""
         return {
-            "accepted": True,
+            "accepted": state == "sealed",
             "segment": {
                 "segment_id": segment.segment_id,
                 "generation": segment.generation,
-                "state": segment.state,
+                "state": state,
             },
         }
 

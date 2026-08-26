@@ -105,7 +105,7 @@ from .prowlarr_waves import plan_prowlarr_waves
 from .source_schedule import SourceRequestKey, SourceScheduler
 from .release_gate import gate_releases
 from .release_identity import deduplicate_releases, stable_release_id
-from .release_report import format_release_report, release_keyboard
+from .release_report import circled_number, format_release_report, release_keyboard
 from .release_score import rank_releases
 from .search_plan import (
     TemporarySpecialAllocator,
@@ -2576,6 +2576,7 @@ class SearchFeature:
         plan_id = str((stored.get("plan") or {}).get("plan_id") or "")
         for local_index, candidate in enumerate(candidates, 1):
             index = start + local_index
+            number_label = circled_number(index)
             contract = candidate.get("media_metadata") or {}
             identity = contract.get("identity") or {}
             placement = contract.get("placement") or {}
@@ -2589,7 +2590,7 @@ class SearchFeature:
                 component_limit=36,
             )
             lines.append(
-                f"{index}. <b>{html.escape(title)}</b>"
+                f"{number_label} <b>{html.escape(title)}</b>"
             )
             lines.extend([
                 "类型："
@@ -2635,7 +2636,7 @@ class SearchFeature:
             })
             keyboard.append([{
                 "text": (
-                    f"{index}. "
+                    f"{number_label} "
                     + _candidate_display_title(
                         identity,
                         component_limit=18,

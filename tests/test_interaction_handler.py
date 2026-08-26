@@ -740,14 +740,89 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         await sink.drain()
 
         response = await sink.seal("search", "op-1", "search")
-        await sink.drain()
 
         self.assertTrue(response["accepted"])
-        self.assertEqual(response["segment"]["state"], "sealing")
+        self.assertEqual(response["segment"]["state"], "sealed")
         self.assertIsNone(self.coordinator.get_active_segment("op-1"))
         sealed = self.coordinator.get_segment(response["segment"]["segment_id"])
         self.assertEqual(sealed.state, "sealed")
         self.assertIsNotNone(sealed.sealed_at)
+
+    async def test_segment_seal_waits_for_inflight_render_without_duplicate_photo(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+
+        context = self.context()
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(lambda record: render_operation(
+            context.application,
+            Mock(),
+            record,
+        ))
+        await sink("search", self.report(
+            stage="candidate_selection",
+            status_text="请选择作品候选",
+            details={"photo_url": "https://image.example/candidate.jpg"},
+            segment={
+                "role": "identity",
+                "presentation_kind": "photo",
+            },
+        ))
+        await sink.drain()
+
+        edit_started = asyncio.Event()
+        release_edit = asyncio.Event()
+
+        async def blocked_edit(**_kwargs):
+            edit_started.set()
+            await release_edit.wait()
+
+        context.application.bot.edit_message_media.side_effect = blocked_edit
+        await sink("search", self.report(
+            revision=2,
+            stage="identity_confirmation",
+            status_text="已确认身份，开始搜索",
+            details={"photo_url": "https://image.example/confirmed.jpg"},
+            segment={
+                "role": "identity",
+                "presentation_kind": "photo",
+            },
+        ))
+        await edit_started.wait()
+
+        seal_task = asyncio.create_task(
+            sink.seal("search", "op-1", "identity")
+        )
+        await asyncio.sleep(0)
+        returned_before_render = seal_task.done()
+        release_edit.set()
+        response = await seal_task
+        await sink.drain()
+
+        self.assertFalse(returned_before_render)
+        self.assertTrue(response["accepted"])
+        self.assertEqual(response["segment"]["state"], "sealed")
+        self.assertEqual(context.application.bot.send_photo.await_count, 1)
+        self.assertEqual(
+            context.application.bot.edit_message_media.await_count,
+            1,
+        )
+
+        search_response = await sink("search", self.report(
+            revision=3,
+            stage="prowlarr_search",
+            status_text="正在搜索片源",
+            segment={
+                "role": "search",
+                "presentation_kind": "text",
+            },
+        ))
+        await sink.drain()
+
+        self.assertTrue(search_response["accepted"])
+        context.application.bot.send_message.assert_awaited_once()
 
     async def test_operation_sink_persists_silent_transition_without_rendering(self):
         from app.handlers.interaction_handler import OperationReportSink

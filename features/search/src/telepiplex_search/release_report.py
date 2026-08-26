@@ -7,7 +7,7 @@ import re
 from .release_identity import stable_release_id
 
 
-_CIRCLED = tuple("①②③④⑤⑥⑦⑧⑨⑩⑪⑫")
+_CIRCLED = tuple("①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳")
 _RESULT_LINE_LIMIT = 180
 _GROUP_TOKEN = re.compile(r"(?i)(?:-|[ ._])([a-z][a-z0-9]{1,19})$")
 _KNOWN_TRAILING_TOKENS = {
@@ -16,6 +16,12 @@ _KNOWN_TRAILING_TOKENS = {
     "h265", "hdr", "hdr10", "hevc", "remastered", "remux", "truehd",
     "uhd", "web", "webdl", "webrip", "x264", "x265",
 }
+
+
+def circled_number(number: int) -> str:
+    if 1 <= number <= len(_CIRCLED):
+        return _CIRCLED[number - 1]
+    return str(number)
 
 
 def _clip(value, limit: int) -> str:

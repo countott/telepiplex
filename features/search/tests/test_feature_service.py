@@ -3359,8 +3359,8 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         })
 
         visible = html.unescape(re.sub(r"<[^>]+>", "", action["text"]))
-        self.assertIn("1. 想见你 (想見你) 2019", visible)
-        self.assertIn("2. 让子弹飞 2010", visible)
+        self.assertIn("① 想见你 (想見你) 2019", visible)
+        self.assertIn("② 让子弹飞 2010", visible)
         self.assertNotIn("Someday or One Day", visible)
         self.assertNotIn("Let the Bullets Fly", visible)
         self.assertEqual(
@@ -3369,8 +3369,8 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 for row in action["data"]["keyboard"][:2]
             ],
             [
-                "1. 想见你 (想見你) 2019",
-                "2. 让子弹飞 2010",
+                "① 想见你 (想見你) 2019",
+                "② 让子弹飞 2010",
             ],
         )
         self.assertEqual(
@@ -3393,11 +3393,11 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         })
 
         visible = html.unescape(re.sub(r"<[^>]+>", "", action["text"]))
-        self.assertIn("1. 让子弹飞 2010", visible)
+        self.assertIn("① 让子弹飞 2010", visible)
         self.assertNotIn("让子弹飞 (", visible)
         self.assertEqual(
             action["data"]["keyboard"][0][0]["text"],
-            "1. 让子弹飞 2010",
+            "① 让子弹飞 2010",
         )
 
     def test_candidate_grid_omits_matching_original_before_title_clipping(self):
@@ -3489,7 +3489,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "plan": {"plan_id": "caption-limit"},
         }, page=1)
         self.assertEqual(len(second_page["data"]["poster_items"]), 1)
-        self.assertIn("6. <b>候选标题 6", second_page["text"])
+        self.assertIn("⑥ <b>候选标题 6", second_page["text"])
         self.assertEqual(
             second_page["data"]["keyboard"][-2][0]["text"],
             "上一页",
@@ -3644,7 +3644,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                 for row in report["details"]["keyboard"]
                 for button in row
             ],
-            ["1. 中文标题1 2024", "都不是"],
+            ["① 中文标题1 2024", "都不是"],
         )
 
     @patch("telepiplex_search.service.hydrate_frozen_candidate")
@@ -6032,9 +6032,9 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "1.12.2")
+        self.assertEqual(manifest["version"], "1.12.3")
         self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
-        self.assertEqual(project["project"]["version"], "1.12.2")
+        self.assertEqual(project["project"]["version"], "1.12.3")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.4.0",
@@ -6068,14 +6068,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-1.12.2.tpx", source)
+        self.assertIn("/tmp/search-1.12.3.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-1.12.2.tpx", source)
+        self.assertNotIn("dist/search-1.12.3.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []
