@@ -391,8 +391,12 @@ class FakeClient:
             "path": path,
             "is_dir": False,
             "file_id": "1",
-            "size": 1024,
+            "size": 200 * 1024 * 1024,
         }]
+
+    def delete_single_file(self, path):
+        self.deleted_files.append(path)
+        return True
 
     def set_tokens(self, access_token, refresh_token):
         self.tokens = (access_token, refresh_token)
@@ -418,6 +422,7 @@ class FakeConfigStore:
         self.config = dict(config)
         self.writes = []
         self.directory_writes = []
+        self.minimum_video_size_writes = []
         self.fail_writes = False
         self.fail_directory_writes = False
 
@@ -450,6 +455,11 @@ class FakeConfigStore:
         normalized = normalize_save_directories(directories)
         self.config["save_directories"] = normalized
         self.directory_writes.append(normalized)
+        return dict(self.config)
+
+    def write_minimum_video_size_mib(self, value):
+        self.config["minimum_video_size_mib"] = int(value)
+        self.minimum_video_size_writes.append(int(value))
         return dict(self.config)
 
 
@@ -514,6 +524,142 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.renamed, [])
         self.assertEqual(self.client.moved, [])
         self.assertEqual(self.client.deleted_tasks, [("hash-1", 0)])
+
+    async def test_download_cleanup_keeps_only_video_at_configured_size_threshold(self):
+        class CleanupClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                root = "/Downloads/Westworld.S03"
+                self.entries = [
+                    {
+                        "name": "Westworld.S03E01.mkv",
+                        "relative_path": "Westworld.S03E01.mkv",
+                        "path": f"{root}/Westworld.S03E01.mkv",
+                        "is_dir": False,
+                        "file_id": "video-large",
+                        "size": 300 * 1024 * 1024,
+                        "sha1": "large",
+                    },
+                    {
+                        "name": "sample.mp4",
+                        "relative_path": "sample.mp4",
+                        "path": f"{root}/sample.mp4",
+                        "is_dir": False,
+                        "file_id": "video-small",
+                        "size": 249 * 1024 * 1024,
+                        "sha1": "small",
+                    },
+                    {
+                        "name": "Westworld.S03E01.srt",
+                        "relative_path": "Westworld.S03E01.srt",
+                        "path": f"{root}/Westworld.S03E01.srt",
+                        "is_dir": False,
+                        "file_id": "subtitle",
+                        "size": 300 * 1024 * 1024,
+                        "sha1": "subtitle",
+                    },
+                    {
+                        "name": "RARBG.txt",
+                        "relative_path": "RARBG.txt",
+                        "path": f"{root}/RARBG.txt",
+                        "is_dir": False,
+                        "file_id": "text",
+                        "size": 31,
+                        "sha1": "text",
+                    },
+                ]
+
+            def wait_for_download(self, link, **kwargs):
+                return {
+                    "resource_name": "Westworld.S03",
+                    "info_hash": "westworld-hash",
+                    "progress": 100,
+                }
+
+            def get_file_tree(self, path):
+                return [
+                    dict(item) for item in self.entries
+                    if item["path"] not in self.deleted_files
+                ]
+
+        client = CleanupClient()
+        self.feature.client = client
+        self.feature.config["minimum_video_size_mib"] = 250
+
+        await self.feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "d" * 40,
+                "selected_path": "/Downloads",
+                "operation_id": "op-cleanup",
+                "chat_id": 10,
+                "user_id": 1,
+            },
+            "context": {"idempotency_key": "cleanup-job"},
+        })
+        await self.runtime.tasks.pop("cleanup-job")
+
+        event_type, payload, _kwargs = self.host.events[0]
+        self.assertEqual(event_type, "download.completed")
+        self.assertEqual(
+            [item["path"] for item in payload["file_tree"]],
+            ["/Downloads/Westworld.S03/Westworld.S03E01.mkv"],
+        )
+        self.assertEqual(client.deleted_files, [
+            "/Downloads/Westworld.S03/sample.mp4",
+            "/Downloads/Westworld.S03/Westworld.S03E01.srt",
+            "/Downloads/Westworld.S03/RARBG.txt",
+        ])
+
+    async def test_download_cleanup_with_no_eligible_video_fails_without_deleting(self):
+        class NoEligibleVideoClient(FakeClient):
+            def wait_for_download(self, link, **kwargs):
+                return {
+                    "resource_name": "Only.Extras",
+                    "info_hash": "extras-hash",
+                    "progress": 100,
+                }
+
+            def get_file_tree(self, path):
+                return [{
+                    "name": "sample.mkv",
+                    "relative_path": "sample.mkv",
+                    "path": f"{path}/sample.mkv",
+                    "is_dir": False,
+                    "file_id": "sample",
+                    "size": 50 * 1024 * 1024,
+                    "sha1": "sample",
+                }, {
+                    "name": "RARBG.txt",
+                    "relative_path": "RARBG.txt",
+                    "path": f"{path}/RARBG.txt",
+                    "is_dir": False,
+                    "file_id": "text",
+                    "size": 31,
+                    "sha1": "text",
+                }]
+
+        client = NoEligibleVideoClient()
+        self.feature.client = client
+        self.feature.config["minimum_video_size_mib"] = 100
+
+        await self.feature.download_capability({
+            "method": "submit",
+            "payload": {
+                "link": "magnet:?xt=urn:btih:" + "e" * 40,
+                "selected_path": "/Downloads",
+                "operation_id": "op-no-video",
+                "chat_id": 10,
+                "user_id": 1,
+            },
+            "context": {"idempotency_key": "no-video-job"},
+        })
+        await self.runtime.tasks.pop("no-video-job")
+
+        event_type, payload, _kwargs = self.host.events[0]
+        self.assertEqual(event_type, "download.failed")
+        self.assertEqual(payload["error_code"], "download_cleanup_failed")
+        self.assertEqual(client.deleted_files, [])
 
     async def test_v2_is_copied_before_background_work_and_malformed_v2_has_no_side_effect(self):
         metadata = media_metadata_v2()
@@ -602,15 +748,15 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.wait_kwargs["poll_backoff_factor"], 1.7)
         self.assertNotIn("poll_interval", self.client.wait_kwargs)
 
-    async def test_completion_event_preserves_subtitles_in_full_file_tree(self):
+    async def test_completion_event_excludes_deleted_non_video_files(self):
         def file_tree(path):
-            return [{
+            entries = [{
                 "name": "Show.S01E01.mkv",
                 "relative_path": "Show.S01E01.mkv",
                 "path": path,
                 "is_dir": False,
                 "file_id": "video-1",
-                "size": 1024,
+                "size": 200 * 1024 * 1024,
             }, {
                 "name": "subs/Show.S01E01.ass",
                 "relative_path": "subs/Show.S01E01.ass",
@@ -626,6 +772,10 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "file_id": "subtitle-2",
                 "size": 256,
             }]
+            return [
+                item for item in entries
+                if item["path"] not in self.client.deleted_files
+            ]
 
         self.client.get_file_tree = file_tree
         await self.feature.download_capability({
@@ -643,16 +793,12 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         _event_type, payload, _kwargs = self.host.events[0]
         self.assertEqual(
             [item["name"] for item in payload["file_tree"]],
-            [
-                "Show.S01E01.mkv",
-                "subs/Show.S01E01.ass",
-                "subs/Show.S01E01.ENG.forced.srt",
-            ],
+            ["Show.S01E01.mkv"],
         )
-        self.assertEqual(
-            payload["file_tree"][1]["file_id"],
-            "subtitle-1",
-        )
+        self.assertEqual(self.client.deleted_files, [
+            "/Downloads/Show.S01E01.mkv/subs/Show.S01E01.ass",
+            "/Downloads/Show.S01E01.mkv/subs/Show.S01E01.ENG.forced.srt",
+        ])
 
     def test_open115_error_preserves_provider_context(self):
         from telepiplex_download.client import Open115Error
@@ -2172,9 +2318,11 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config_buttons, [
             "download:config:auth",
             "download:config:directories",
+            "download:config:minimum_video_size",
             "download:exit",
         ])
         self.assertIn("保存目录：0 个", config["actions"][0]["text"])
+        self.assertIn("最小视频体积：100 MiB", config["actions"][0]["text"])
 
         from_config = await self.feature.callback({
             "payload": "config:auth", "user_id": 1, "chat_id": 10,
@@ -2195,6 +2343,40 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(auth_buttons, [
             "download:auth:direct", "download:auth:scan", "download:exit",
         ])
+
+    async def test_config_updates_minimum_video_size_and_rejects_out_of_range_input(self):
+        await self.feature.command({
+            "command": "config", "user_id": 1, "chat_id": 10,
+        })
+        prompt = await self.feature.callback({
+            "payload": "config:minimum_video_size",
+            "user_id": 1,
+            "chat_id": 10,
+        })
+
+        self.assertIn("0–10240", prompt["actions"][0]["text"])
+        self.assertEqual(
+            self.feature.sessions[(10, 1)]["stage"],
+            "minimum_video_size",
+        )
+
+        invalid = await self.feature.message({
+            "text": "10241", "user_id": 1, "chat_id": 10,
+        })
+        self.assertIn("0–10240", invalid["actions"][0]["text"])
+        self.assertEqual(self.feature.config_store.minimum_video_size_writes, [])
+
+        saved = await self.feature.message({
+            "text": "256", "user_id": 1, "chat_id": 10,
+        })
+
+        self.assertEqual(saved["session"]["state"], "close")
+        self.assertEqual(saved["operation"]["state"], "completed")
+        self.assertEqual(
+            self.feature.config_store.minimum_video_size_writes,
+            [256],
+        )
+        self.assertEqual(self.feature.config["minimum_video_size_mib"], 256)
 
     async def test_directory_list_is_paginated_with_bounded_keyboard(self):
         directories = [
@@ -2907,6 +3089,27 @@ class FeatureConfigStoreTest(unittest.TestCase):
             self.assertEqual(updated["custom"], "keep")
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_minimum_video_size_writeback_preserves_config_and_private_permissions(self):
+        from telepiplex_download.config_store import FeatureConfigStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.yaml"
+            path.write_text(
+                "access_token: access\n"
+                "save_directories: []\n",
+                encoding="utf-8",
+            )
+            store = FeatureConfigStore(path)
+
+            updated = store.write_minimum_video_size_mib(256)
+
+            self.assertEqual(updated["minimum_video_size_mib"], 256)
+            self.assertEqual(updated["access_token"], "access")
+            self.assertEqual(updated["save_directories"], [])
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            with self.assertRaises(ValueError):
+                store.write_minimum_video_size_mib(10241)
+
     def test_save_directory_writeback_rejects_invalid_and_duplicate_entries(self):
         from telepiplex_download.config_store import FeatureConfigStore
 
@@ -3084,11 +3287,17 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_schema_declares_custom_config_command_registered_by_manifest(self):
         schema = yaml.safe_load((ROOT / "config.schema.json").read_text(encoding="utf-8"))
+        default = yaml.safe_load((ROOT / "config.default.yaml").read_text(encoding="utf-8"))
         manifest = yaml.safe_load((ROOT / "manifest.yaml").read_text(encoding="utf-8"))
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertEqual(schema["x-telepiplex-config-command"], "config")
+        self.assertEqual(default["minimum_video_size_mib"], 100)
+        self.assertEqual(
+            schema["properties"]["minimum_video_size_mib"],
+            {"type": "integer", "minimum": 0, "maximum": 10240},
+        )
         path_pattern = schema["properties"]["save_directories"]["items"][
             "properties"
         ]["path"]["pattern"]
@@ -3099,17 +3308,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "1.1.0")
+        self.assertEqual(manifest["version"], "1.1.1")
         self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "1.1.0")
+        self.assertEqual(project["project"]["version"], "1.1.1")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==1.4.0",
         )
-        self.assertIn("/tmp/download-1.1.0.tpx", readme)
-        self.assertNotIn("dist/download-1.1.0.tpx", readme)
+        self.assertIn("/tmp/download-1.1.1.tpx", readme)
+        self.assertNotIn("dist/download-1.1.1.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)

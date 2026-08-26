@@ -13,6 +13,13 @@ from telepiplex_plugin_sdk.media_metadata_v2 import (
 )
 
 from .client import Open115Error
+from .cleanup import (
+    DownloadCleanupError,
+    configured_minimum_video_size_bytes,
+    configured_minimum_video_size_mib,
+    normalize_minimum_video_size_mib,
+    plan_download_cleanup,
+)
 from .context import logger
 from .directories import (
     normalize_save_directories,
@@ -323,6 +330,25 @@ class DownloadFeature:
         stage = session.get("stage")
         if stage.startswith("directory_"):
             return self._directory_message(request, key, session)
+        if stage == "minimum_video_size":
+            try:
+                value = normalize_minimum_video_size_mib(
+                    request.get("text")
+                )
+            except ValueError as exc:
+                operation = self._advance_operation(
+                    session["operation_id"],
+                    state="awaiting_input",
+                    stage="minimum_video_size",
+                    status_text="最小视频体积无效，请重新输入。",
+                    control="exit",
+                )
+                return self._interaction_message(
+                    key,
+                    f"⚠️ {exc}。请重新输入。",
+                    operation=operation,
+                )
+            return await self._save_minimum_video_size(key, value)
         if stage == "access_token":
             try:
                 access_token = _single_secret(request.get("text"))
@@ -506,6 +532,7 @@ class DownloadFeature:
             current.get("access_token") and current.get("refresh_token")
         )
         directory_count = len(current.get("save_directories") or [])
+        minimum_video_size_mib = configured_minimum_video_size_mib(current)
         if operation is None:
             session = self.sessions[key]
             operation = self._operation_view(
@@ -518,7 +545,8 @@ class DownloadFeature:
                     (f"{text_prefix}\n\n" if text_prefix else "") +
                     "115 配置\n\n"
                     f"授权：{'已配置' if configured else '未配置'}\n"
-                    f"保存目录：{directory_count} 个\n\n"
+                    f"保存目录：{directory_count} 个\n"
+                    f"最小视频体积：{minimum_video_size_mib} MiB\n\n"
                     "选择要修改的配置。"
                 ),
                 "data": {"keyboard": [
@@ -529,6 +557,12 @@ class DownloadFeature:
                     [{
                         "text": "保存目录",
                         "callback_data": "download:config:directories",
+                    }],
+                    [{
+                        "text": "最小视频体积",
+                        "callback_data": (
+                            "download:config:minimum_video_size"
+                        ),
                     }],
                     self._exit_row(),
                 ]},
@@ -570,6 +604,29 @@ class DownloadFeature:
             )
             return self._directory_list_message(
                 key, kind="edit_message", operation=operation
+            )
+        if (
+            payload == "config:minimum_video_size"
+            and stage == "config_home"
+        ):
+            session["stage"] = "minimum_video_size"
+            self._schedule_sensitive_expiry(key)
+            operation = self._advance_operation(
+                session["operation_id"],
+                state="awaiting_input",
+                stage="minimum_video_size",
+                status_text="输入最小视频体积。",
+                control="exit",
+            )
+            return self._interaction_message(
+                key,
+                (
+                    "请输入最小视频体积（MiB），范围 0–10240。\n"
+                    "低于该体积的视频会在下载完成后删除；输入 0 "
+                    "表示只过滤非视频文件。"
+                ),
+                kind="edit_message",
+                operation=operation,
             )
         if payload == "config:back" and str(stage).startswith("directory_"):
             return self._return_to_directory_list(
@@ -945,6 +1002,61 @@ class DownloadFeature:
         )
         result = self._message_with_session(
             "115 保存目录已更新。", "close"
+        )
+        result["operation"] = operation
+        return result
+
+    async def _save_minimum_video_size(self, key, value):
+        session = self.sessions[key]
+        operation_id = session["operation_id"]
+        await self._report_operation(
+            operation_id,
+            state="running",
+            stage="config_persistence",
+            status_text="正在保存最小视频体积。",
+            control="",
+        )
+        try:
+            if self.config_store:
+                updated = await asyncio.to_thread(
+                    self.config_store.write_minimum_video_size_mib,
+                    value,
+                )
+            else:
+                updated = dict(self.config)
+                updated["minimum_video_size_mib"] = value
+        except Exception as exc:
+            logger.error(
+                "download_minimum_video_size_write_failed "
+                f"error={type(exc).__name__}"
+            )
+            session["stage"] = "minimum_video_size"
+            self._schedule_sensitive_expiry(key)
+            operation = await self._report_operation(
+                operation_id,
+                state="awaiting_input",
+                stage="minimum_video_size",
+                status_text="保存失败，请重新输入。",
+                control="exit",
+            )
+            return self._interaction_message(
+                key,
+                "⚠️ 保存失败，请重新输入或退出。",
+                operation=operation,
+            )
+        self.config.clear()
+        self.config.update(updated)
+        self._clear_auth_session(key)
+        operation = await self._report_operation(
+            operation_id,
+            state="completed",
+            stage="completed",
+            status_text="最小视频体积已更新。",
+            control="",
+        )
+        result = self._message_with_session(
+            f"最小视频体积已更新为 {value} MiB。",
+            "close",
         )
         result["operation"] = operation
         return result
@@ -1668,6 +1780,52 @@ class DownloadFeature:
             file_tree = await asyncio.to_thread(
                 self.client.get_file_tree,
                 final_path,
+            )
+            self._raise_if_cancelled(operation)
+            minimum_video_size_bytes = configured_minimum_video_size_bytes(
+                self.config
+            )
+            await self._report_operation(
+                operation_id,
+                state="running",
+                stage="cleaning_files",
+                status_text="下载完成，清理文件",
+                control="cancel",
+                details=hidden_details,
+            )
+            cleanup_plan = plan_download_cleanup(
+                file_tree,
+                minimum_video_size_bytes=minimum_video_size_bytes,
+            )
+            for path in cleanup_plan.rejected_paths:
+                self._raise_if_cancelled(operation)
+                deleted = await asyncio.to_thread(
+                    self.client.delete_single_file,
+                    path,
+                )
+                if not deleted:
+                    raise DownloadCleanupError(
+                        f"115 未确认删除不合格文件：{path}"
+                    )
+            self._raise_if_cancelled(operation)
+            file_tree = await asyncio.to_thread(
+                self.client.get_file_tree,
+                final_path,
+            )
+            verified_plan = plan_download_cleanup(
+                file_tree,
+                minimum_video_size_bytes=minimum_video_size_bytes,
+            )
+            if verified_plan.rejected_paths:
+                raise DownloadCleanupError(
+                    "115 重新读取后仍存在不合格文件"
+                )
+            logger.info(
+                "download_cleanup_completed "
+                f"job_id={job_id} "
+                f"minimum_video_size_bytes={minimum_video_size_bytes} "
+                f"retained_video_count={len(verified_plan.retained_video_paths)} "
+                f"deleted_file_count={len(cleanup_plan.rejected_paths)}"
             )
             self._raise_if_cancelled(operation)
             event_payload = {

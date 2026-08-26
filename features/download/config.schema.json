@@ -13,6 +13,7 @@
     "auth_poll_interval": {"type": "number", "minimum": 0.5, "maximum": 30},
     "timeout": {"type": "number", "minimum": 1, "maximum": 300},
     "download_timeout": {"type": "number", "minimum": 10, "maximum": 86400},
+    "minimum_video_size_mib": {"type": "integer", "minimum": 0, "maximum": 10240},
     "poll_initial_interval": {"type": "number", "exclusiveMinimum": 0, "maximum": 300},
     "poll_max_interval": {"type": "number", "exclusiveMinimum": 0, "maximum": 300},
     "poll_backoff_factor": {"type": "number", "minimum": 1, "maximum": 10},

@@ -769,6 +769,13 @@ class OperationReportSink:
             isinstance(report.get("details"), dict)
             and report["details"].get("telegram_visibility") == "silent"
         )
+        if (
+            accepted
+            and segment is None
+            and record.state == "handed_off"
+            and self.coordinator.has_message_segments(record.operation_id)
+        ):
+            silent = True
         if accepted and not silent and self._listener is not None:
             pending = self._pending.get(record.operation_id)
             if pending is None or record.revision >= pending.revision:
@@ -1206,7 +1213,9 @@ def _normalize_control_result(record: OperationRecord, result: dict) -> dict:
 def operation_markup(record: OperationRecord, router=None, *, segment=None):
     if record.state in TERMINAL_STATES:
         return None
-    if segment is not None and segment.callback_state == "busy":
+    if segment is not None and (
+        segment.callback_state == "busy" or segment.state == "sealing"
+    ):
         return None
     rows = deduplicate_terminal_controls(
         _feature_status_rows(record, router, segment=segment)
@@ -1455,6 +1464,7 @@ async def _render_operation_segment_locked(
         and segment.message_id is not None
         and segment.rendered_revision >= segment.business_revision
     ):
+        await _clear_segment_controls(application, record, segment)
         sealed = coordinator.complete_segment_seal(
             segment.segment_id,
             owner_plugin_id=segment.owner_plugin_id,
@@ -1518,6 +1528,7 @@ async def _render_operation_segment_locked(
             return None
         if segment.rendered_revision >= segment.business_revision:
             if segment.state == "sealing":
+                await _clear_segment_controls(application, record, segment)
                 segment = coordinator.complete_segment_seal(
                     segment.segment_id,
                     owner_plugin_id=segment.owner_plugin_id,
@@ -1559,6 +1570,18 @@ async def _render_operation_segment_locked(
         )
         if rendered is None:
             continue
+
+
+async def _clear_segment_controls(application, record, segment):
+    try:
+        await application.bot.edit_message_reply_markup(
+            chat_id=record.chat_id,
+            message_id=segment.message_id,
+            reply_markup=None,
+        )
+    except Exception as exc:
+        if not _message_not_modified(exc):
+            raise
 
 
 async def _send_new_segment_message(application, router, record, segment):

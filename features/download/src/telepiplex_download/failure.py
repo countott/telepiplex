@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from telepiplex_plugin_sdk.log_sanitizer import sanitize_log_text
 
 from .client import Open115Error
+from .cleanup import DownloadCleanupError
 
 
 _AUTH_CODES = {"401", "40140125", "40140126"}
@@ -69,6 +70,17 @@ def classify_download_failure(exc: Exception, *, stage: str) -> DownloadFailure:
         ).strip()
 
     normalized = f"{provider_operation} {detail}".lower()
+    if isinstance(exc, DownloadCleanupError):
+        return DownloadFailure(
+            code="download_cleanup_failed",
+            summary="下载文件清理未完成，未交给 rename。",
+            detail=detail,
+            remedy=(
+                "请检查片源内容，或调整 download 配置中的最小视频体积后重试。"
+            ),
+            stage=safe_stage,
+        )
+
     if provider_code in _AUTH_CODES or any(
         marker in normalized for marker in _AUTH_MARKERS
     ):

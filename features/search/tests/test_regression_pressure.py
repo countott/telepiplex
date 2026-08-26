@@ -40,6 +40,40 @@ def _latin_candidate(index: int) -> dict:
 
 
 class CandidateLocalizationPressureTest(unittest.IsolatedAsyncioTestCase):
+    def test_verified_season_link_without_inventory_still_needs_enrichment(self):
+        candidate = _latin_candidate(3)
+        candidate.update({
+            "intended_scope": "season",
+            "requested_season_number": 3,
+            "source_links": [{
+                "provider": "wikipedia",
+                "fact_id": "wikipedia:Q17572811",
+                "url": "https://example.test/wikipedia/Q17572811",
+                "role": "season",
+                "season_number": 3,
+                "episode_number": None,
+                "verification": "selected_candidate",
+            }],
+        })
+        candidate["media_metadata"].update({
+            "retrieval": {
+                "media_type": "series",
+                "scope": "season",
+                "query": "西部世界第三季",
+            },
+            "evidence": {
+                "decision": {
+                    "scope": "season",
+                    "season_number": 3,
+                    "episode_number": None,
+                },
+                "series_inventory": {"season_totals": {}},
+            },
+            "items": [],
+        })
+
+        self.assertTrue(needs_authoritative_scope_enrichment(candidate))
+
     def test_enrichment_policy_preserves_frozen_contract_authority(self):
         movie = _latin_candidate(1)
         movie["media_metadata"].update({

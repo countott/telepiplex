@@ -8,6 +8,7 @@ auth_poll_timeout: 300
 auth_poll_interval: 2
 timeout: 30
 download_timeout: 1800
+minimum_video_size_mib: 100
 poll_initial_interval: 2
 poll_max_interval: 30
 poll_backoff_factor: 1.7

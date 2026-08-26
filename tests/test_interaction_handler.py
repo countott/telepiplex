@@ -747,6 +747,10 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         sealed = self.coordinator.get_segment(response["segment"]["segment_id"])
         self.assertEqual(sealed.state, "sealed")
         self.assertIsNotNone(sealed.sealed_at)
+        sealed_edit = (
+            context.application.bot.edit_message_reply_markup.await_args.kwargs
+        )
+        self.assertIsNone(sealed_edit["reply_markup"])
 
     async def test_segment_seal_waits_for_inflight_render_without_duplicate_photo(self):
         from app.handlers.interaction_handler import (
@@ -932,6 +936,69 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(edited["chat_id"], 10)
         self.assertEqual(edited["message_id"], 42)
         self.assertEqual(edited["text"], "正在重命名媒体文件。")
+
+    async def test_segmented_handoff_is_control_plane_only_and_next_owner_gets_one_message(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+
+        context = self.context()
+        context.application.bot.send_message.side_effect = [
+            SimpleNamespace(message_id=41),
+            SimpleNamespace(message_id=42),
+        ]
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(
+            lambda record: render_operation(
+                context.application,
+                Mock(),
+                record,
+            )
+        )
+
+        await sink("download", self.report(
+            stage="downloading",
+            status_text="115：下载中",
+            segment={
+                "role": "download",
+                "presentation_kind": "text",
+            },
+        ))
+        await sink.drain()
+        self.assertEqual(context.application.bot.send_message.await_count, 1)
+
+        sealed = await sink.seal("download", "op-1", "download")
+        self.assertTrue(sealed["accepted"])
+        handoff = await sink("download", self.report(
+            state="handed_off",
+            stage="handoff_rename",
+            status_text="已下载，开始整理",
+            revision=2,
+            next_plugin_id="rename",
+        ))
+        await sink.drain()
+
+        self.assertTrue(handoff["accepted"])
+        self.assertEqual(context.application.bot.send_message.await_count, 1)
+
+        rename = await sink("rename", self.report(
+            stage="organizing",
+            status_text="正在整理媒体文件",
+            revision=3,
+            segment={
+                "role": "rename",
+                "presentation_kind": "text",
+            },
+        ))
+        await sink.drain()
+
+        self.assertTrue(rename["accepted"])
+        self.assertEqual(context.application.bot.send_message.await_count, 2)
+        self.assertEqual(
+            context.application.bot.send_message.await_args.kwargs["text"],
+            "正在整理媒体文件",
+        )
 
     async def test_operation_milestone_is_idempotent_after_durable_enqueue(self):
         from app.handlers.interaction_handler import OperationMilestoneSink

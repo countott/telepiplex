@@ -852,6 +852,15 @@ class InteractionCoordinator:
             ).fetchone()
         return self._segment_from_row(row) if row is not None else None
 
+    def has_message_segments(self, operation_id: str) -> bool:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT 1 FROM operation_message_segments "
+                "WHERE operation_id = ? LIMIT 1",
+                (str(operation_id),),
+            ).fetchone()
+        return row is not None
+
     def get_segment(self, segment_id: str) -> OperationMessageSegment | None:
         with self._lock:
             row = self._connection.execute(

@@ -645,7 +645,7 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
                     "path": path,
                     "is_dir": False,
                     "file_id": "movie-1",
-                    "size": 1024,
+                    "size": 200 * 1024 * 1024,
                 }]
 
             def del_offline_task(self, _info_hash, _del_source_file=0):

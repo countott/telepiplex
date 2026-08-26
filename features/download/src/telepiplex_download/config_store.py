@@ -7,6 +7,7 @@ from pathlib import Path
 
 import yaml
 
+from .cleanup import normalize_minimum_video_size_mib
 from .directories import normalize_save_directories
 
 
@@ -77,6 +78,14 @@ class FeatureConfigStore:
         with self._lock:
             config = self._read_unlocked()
             config["save_directories"] = normalized
+            self._write_unlocked(config)
+            return dict(config)
+
+    def write_minimum_video_size_mib(self, value) -> dict:
+        normalized = normalize_minimum_video_size_mib(value)
+        with self._lock:
+            config = self._read_unlocked()
+            config["minimum_video_size_mib"] = normalized
             self._write_unlocked(config)
             return dict(config)
 

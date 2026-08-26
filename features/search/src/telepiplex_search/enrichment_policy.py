@@ -114,12 +114,11 @@ def needs_authoritative_scope_enrichment(candidate: dict) -> bool:
             for item_season, _item_episode in coordinates
         ):
             return False
-        return not _verified_scope_link(
-            candidate,
-            scope=scope,
-            season_number=season_number,
-            episode_number=None,
-        )
+        # A verified season page establishes identity, not episode inventory.
+        # Season-level selection still needs an authoritative source before the
+        # UI can decide whether individual episodes or a whole-season option
+        # are available.
+        return True
     return not bool(items or known_seasons)
 
 
