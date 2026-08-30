@@ -37,7 +37,7 @@ rename 会在写操作前按文件预检目标冲突。已有目标与相同 pro
 rename 在媒体文件全部被核验为已整理或规范 `no_op`、不存在原位保留/目标冲突/文件失败，并且源作品目录清理完成时写入 `completed`。若已验证文件至少一个、其余媒体文件仅为安全原位保留，且没有冲突、执行失败或意外清理失败，则写入 `partial_completed`；完全无法匹配仍失败关闭且不执行移动。Telegram 通知是尽力投递的旁路；通知失败不会把已经核验完成的 Job 改成失败，也不会触发重复文件操作。用户通知使用纯文本，文件名和路径不会依赖 Telegram Markdown 转义。
 
 ```bash
-python tools/build_feature.py features/rename /tmp/rename-2.0.0.tpx \
+python tools/build_feature.py features/rename /tmp/rename-2.0.1.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

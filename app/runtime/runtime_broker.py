@@ -41,6 +41,7 @@ class RuntimeBroker:
         notification_sink=None,
         milestone_sink=None,
         operation_sink=None,
+        projection_lifecycle=None,
         operation_coordinator=None,
         logger=None,
         max_frame_bytes: int = 1024 * 1024,
@@ -53,6 +54,7 @@ class RuntimeBroker:
         self.notification_sink = notification_sink
         self.milestone_sink = milestone_sink
         self.operation_sink = operation_sink
+        self.projection_lifecycle = projection_lifecycle
         self.operation_coordinator = operation_coordinator
         self.logger = logger
         self.max_frame_bytes = int(max_frame_bytes)

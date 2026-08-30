@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TimedOut
 from telegram.ext import ApplicationHandlerStop
 
 
@@ -59,6 +59,84 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             },
         )
         return SimpleNamespace(application=application, bot=bot)
+
+    def test_operation_render_lock_registry_drops_unused_operations(self):
+        from app.handlers.interaction_handler import (
+            OPERATION_RENDER_LOCKS_KEY,
+            operation_render_lock,
+        )
+
+        application = SimpleNamespace(bot_data={})
+        first = operation_render_lock(application, "op-finished")
+        second = operation_render_lock(application, "op-finished")
+        self.assertIs(first, second)
+        self.assertIn(
+            "op-finished",
+            application.bot_data[OPERATION_RENDER_LOCKS_KEY],
+        )
+
+        del first
+        del second
+
+        self.assertNotIn(
+            "op-finished",
+            application.bot_data[OPERATION_RENDER_LOCKS_KEY],
+        )
+
+    async def test_callback_feedback_drain_waits_for_inflight_delivery(self):
+        from app.handlers.interaction_handler import (
+            drain_callback_feedback,
+            schedule_callback_feedback,
+        )
+
+        record, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                state="awaiting_input",
+                stage="candidate_selection",
+                status_text="请选择作品",
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "text",
+                },
+            ),
+        )
+        segment = self.coordinator.bind_segment_message(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            chat_id=10,
+            message_id=55,
+            message_kind="text",
+        )
+        context = self.context()
+        delivery_started = asyncio.Event()
+        release_delivery = asyncio.Event()
+
+        async def blocked_edit(**_kwargs):
+            delivery_started.set()
+            await release_delivery.wait()
+
+        context.application.bot.edit_message_text.side_effect = blocked_edit
+        update = SimpleNamespace(
+            callback_query=SimpleNamespace(answer=AsyncMock()),
+        )
+        schedule_callback_feedback(
+            update,
+            context.application,
+            record,
+            segment,
+        )
+        await asyncio.wait_for(delivery_started.wait(), timeout=0.1)
+
+        draining = asyncio.create_task(
+            drain_callback_feedback(context.application, timeout=0.2)
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(draining.done())
+        release_delivery.set()
+
+        self.assertTrue(await draining)
 
     @staticmethod
     def message_update(text: str):
@@ -524,6 +602,80 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             message_id=91,
         )
 
+    @patch("app.handlers.interaction_handler.build_poster_grid")
+    async def test_photo_promotion_timeout_is_uncertain_and_never_resends(
+        self,
+        build_poster_grid,
+    ):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+
+        candidate_grid = BytesIO(b"candidate-grid")
+        candidate_grid.name = "telepiplex-candidates.jpg"
+        build_poster_grid.return_value = candidate_grid
+        context = self.context()
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(lambda record: render_operation(
+            context.application,
+            Mock(),
+            record,
+        ))
+        await sink("search", self.report(
+            status_text="正在识别媒体…",
+            details={"defer_photo_until_media": True},
+            segment={
+                "role": "identity",
+                "presentation_kind": "photo",
+            },
+        ))
+        await sink.drain()
+
+        async def timeout_after_send(**_kwargs):
+            current = self.coordinator.get_active_segment("op-1")
+            self.assertEqual(current.state, "open")
+            self.assertEqual(current.delivery_state, "delivering")
+            raise TimedOut()
+
+        context.application.bot.send_photo.side_effect = timeout_after_send
+        await sink("search", self.report(
+            revision=2,
+            state="awaiting_input",
+            stage="candidate_selection",
+            status_text="请选择作品",
+            control="exit",
+            details={
+                "defer_photo_until_media": True,
+                "poster_items": [{
+                    "number": 1,
+                    "title": "蜂蜜与四叶草",
+                    "poster_url": "https://image.example/poster.jpg",
+                }],
+            },
+            segment={
+                "role": "identity",
+                "presentation_kind": "photo",
+            },
+        ))
+        await sink.drain()
+
+        uncertain = self.coordinator.get_active_segment("op-1")
+        context.application.bot.send_photo.assert_awaited_once()
+        self.assertEqual(uncertain.state, "delivery_uncertain")
+        self.assertEqual(uncertain.delivery_state, "uncertain")
+        self.assertEqual(uncertain.message_id, 90)
+        self.assertEqual(uncertain.message_kind, "text")
+        self.assertEqual(uncertain.business_revision, 2)
+        self.assertEqual(uncertain.rendered_revision, 1)
+
+        await render_operation(
+            context.application,
+            Mock(),
+            self.coordinator.get("op-1"),
+        )
+        context.application.bot.send_photo.assert_awaited_once()
+
     async def test_segment_update_arriving_during_first_send_edits_the_same_message(self):
         from app.handlers.interaction_handler import (
             OperationReportSink,
@@ -751,6 +903,171 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             context.application.bot.edit_message_reply_markup.await_args.kwargs
         )
         self.assertIsNone(sealed_edit["reply_markup"])
+
+    async def test_latest_segment_report_and_seal_share_one_telegram_edit(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+
+        context = self.context()
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(lambda record: render_operation(
+            context.application,
+            Mock(),
+            record,
+        ))
+        await sink("search", self.report(
+            stage="prowlarr_search",
+            status_text="正在搜索片源",
+            segment={
+                "role": "search",
+                "presentation_kind": "text",
+            },
+        ))
+        await sink.drain()
+        context.application.bot.edit_message_text.reset_mock()
+        context.application.bot.edit_message_reply_markup.reset_mock()
+
+        await sink("search", self.report(
+            revision=2,
+            stage="release_selection",
+            status_text="片源搜索完成",
+            segment={
+                "role": "search",
+                "presentation_kind": "text",
+            },
+        ))
+        # Simulate a loaded Host where the Feature's seal RPC reaches the
+        # event loop after the old 10 ms fixed coalescing delay.
+        await asyncio.sleep(0.025)
+        seal_started = asyncio.get_running_loop().time()
+        response = await sink.seal("search", "op-1", "search")
+        seal_elapsed = asyncio.get_running_loop().time() - seal_started
+        await sink.drain()
+
+        self.assertTrue(response["accepted"])
+        self.assertLess(seal_elapsed, 0.1)
+        context.application.bot.edit_message_text.assert_awaited_once()
+        self.assertEqual(
+            context.application.bot.edit_message_text.await_args.kwargs[
+                "reply_markup"
+            ],
+            {"inline_keyboard": []},
+        )
+        context.application.bot.edit_message_reply_markup.assert_not_awaited()
+
+    async def test_segment_seal_waits_for_initial_send_to_open_segment(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+
+        context = self.context()
+        render_started = asyncio.Event()
+        release_render = asyncio.Event()
+
+        async def blocked_initial_render(record):
+            render_started.set()
+            await release_render.wait()
+            return await render_operation(
+                context.application,
+                Mock(),
+                record,
+            )
+
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(blocked_initial_render)
+        await sink("search", self.report(
+            stage="prowlarr_search",
+            status_text="搜索完成",
+            segment={
+                "role": "search",
+                "presentation_kind": "text",
+            },
+        ))
+        await render_started.wait()
+
+        seal_task = asyncio.create_task(
+            sink.seal("search", "op-1", "search")
+        )
+        await asyncio.sleep(0)
+        returned_before_initial_render = seal_task.done()
+        release_render.set()
+        result = (await asyncio.gather(
+            seal_task,
+            return_exceptions=True,
+        ))[0]
+        await sink.drain()
+
+        self.assertFalse(returned_before_initial_render)
+        if isinstance(result, BaseException):
+            raise result
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["segment"]["state"], "sealed")
+        context.application.bot.send_message.assert_awaited_once()
+
+    async def test_segment_seal_during_initial_send_renders_latest_revision_once(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+
+        context = self.context()
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        async def blocked_send(**_kwargs):
+            send_started.set()
+            await release_send.wait()
+            return SimpleNamespace(message_id=90)
+
+        context.application.bot.send_message.side_effect = blocked_send
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(lambda record: render_operation(
+            context.application,
+            Mock(),
+            record,
+        ))
+        await sink("search", self.report(
+            stage="prowlarr_search",
+            status_text="正在搜索片源…",
+            segment={
+                "role": "search",
+                "presentation_kind": "text",
+            },
+        ))
+        await send_started.wait()
+        await sink("search", self.report(
+            revision=2,
+            stage="release_selection",
+            state="awaiting_input",
+            status_text="请选择片源",
+            segment={
+                "role": "search",
+                "presentation_kind": "text",
+            },
+        ))
+
+        seal_task = asyncio.create_task(
+            sink.seal("search", "op-1", "search")
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(seal_task.done())
+        release_send.set()
+        response = await seal_task
+        await sink.drain()
+
+        self.assertTrue(response["accepted"])
+        context.application.bot.send_message.assert_awaited_once()
+        context.application.bot.edit_message_text.assert_awaited_once()
+        sealed = self.coordinator.get_segment(
+            response["segment"]["segment_id"]
+        )
+        self.assertEqual(sealed.state, "sealed")
+        self.assertEqual(sealed.business_revision, 2)
+        self.assertEqual(sealed.rendered_revision, 2)
+        self.assertIsNone(self.coordinator.get_active_segment("op-1"))
 
     async def test_segment_seal_waits_for_inflight_render_without_duplicate_photo(self):
         from app.handlers.interaction_handler import (
@@ -1957,6 +2274,368 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             await operation_gate(stale, self.context(router=router))
         stale.callback_query.answer.assert_awaited_once_with("当前任务进行中")
 
+    async def test_segment_callback_ack_and_dispatch_do_not_wait_for_busy_render(self):
+        from telegram import CallbackQuery, Chat, Message, User
+        from app.handlers import interaction_handler
+        from app.handlers.interaction_handler import operation_gate, operation_markup
+        from app.handlers.plugin_handler import dynamic_callback_gateway
+
+        operation, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                state="awaiting_input",
+                stage="candidate_selection",
+                status_text="请选择作品",
+                details={"keyboard": [[{
+                    "text": "死神：千年血战篇",
+                    "callback_data": "search:select:p1:0",
+                }]]},
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+            ),
+        )
+        segment = self.coordinator.bind_segment_message(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            chat_id=10,
+            message_id=92,
+        )
+        rpc_started = asyncio.Event()
+
+        async def dispatch_callback(*_args, **_kwargs):
+            rpc_started.set()
+            return {"actions": []}
+
+        client = SimpleNamespace(request=AsyncMock(side_effect=dispatch_callback))
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+            client=client,
+        )
+        router = Mock()
+        router.plugin_route.return_value = route
+        router.callback_route.return_value = route
+        encoded = operation_markup(
+            operation,
+            router,
+            segment=segment,
+        ).inline_keyboard[0][0].callback_data
+
+        context = self.context(router=router)
+        callback_query = CallbackQuery(
+            id="candidate-click-fast-ack",
+            from_user=User(id=1, first_name="Tester", is_bot=False),
+            chat_instance="candidate-chat",
+            message=Message(
+                message_id=92,
+                date=datetime.now(timezone.utc),
+                chat=Chat(id=10, type="private"),
+            ),
+            data=encoded,
+        )
+        callback_query.set_bot(context.application.bot)
+        update = SimpleNamespace(
+            update_id=12,
+            effective_chat=SimpleNamespace(id=10),
+            effective_user=SimpleNamespace(id=1),
+            effective_message=SimpleNamespace(text=None),
+            callback_query=callback_query,
+        )
+        busy_started = asyncio.Event()
+        release_busy = asyncio.Event()
+        busy_calls = 0
+
+        async def blocked_busy_caption(**_kwargs):
+            nonlocal busy_calls
+            busy_calls += 1
+            busy_started.set()
+            if busy_calls == 1:
+                await release_busy.wait()
+
+        context.application.bot.edit_message_caption.side_effect = (
+            blocked_busy_caption
+        )
+        async def process_update():
+            await operation_gate(update, context)
+            with patch(
+                "app.handlers.plugin_handler.init.check_user",
+                return_value=True,
+            ):
+                await dynamic_callback_gateway(update, context)
+
+        processing = asyncio.create_task(process_update())
+        try:
+            await asyncio.wait_for(busy_started.wait(), timeout=0.1)
+            await asyncio.wait_for(rpc_started.wait(), timeout=0.1)
+        finally:
+            release_busy.set()
+            await asyncio.wait_for(processing, timeout=0.3)
+
+        self.assertEqual(
+            context.application.bot.answer_callback_query.await_count,
+            1,
+        )
+        callback_ack = (
+            context.application.bot.answer_callback_query.await_args.kwargs
+        )
+        self.assertEqual(
+            callback_ack["callback_query_id"],
+            "candidate-click-fast-ack",
+        )
+        self.assertEqual(callback_ack["text"], "处理中...")
+        client.request.assert_awaited_once()
+        self.assertEqual(
+            self.coordinator.get_active_segment("op-1").callback_state,
+            "idle",
+        )
+
+    async def test_segment_busy_render_does_not_block_latest_projection(self):
+        from telegram import CallbackQuery, Chat, Message, User
+        from app.handlers.interaction_handler import (
+            CALLBACK_FEEDBACK_TASKS_KEY,
+            operation_gate,
+            operation_markup,
+            render_operation,
+        )
+
+        operation, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                state="awaiting_input",
+                stage="candidate_selection",
+                status_text="请选择作品",
+                details={"keyboard": [[{
+                    "text": "死神：千年血战篇",
+                    "callback_data": "search:select:p1:0",
+                }]]},
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+            ),
+        )
+        segment = self.coordinator.bind_segment_message(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            chat_id=10,
+            message_id=92,
+        )
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        router = Mock()
+        router.plugin_route.return_value = route
+        router.callback_route.return_value = route
+        encoded = operation_markup(
+            operation,
+            router,
+            segment=segment,
+        ).inline_keyboard[0][0].callback_data
+        context = self.context(router=router)
+        callback_query = CallbackQuery(
+            id="candidate-click-render-lock",
+            from_user=User(id=1, first_name="Tester", is_bot=False),
+            chat_instance="candidate-chat",
+            message=Message(
+                message_id=92,
+                date=datetime.now(timezone.utc),
+                chat=Chat(id=10, type="private"),
+            ),
+            data=encoded,
+        )
+        callback_query.set_bot(context.application.bot)
+        update = SimpleNamespace(
+            update_id=13,
+            effective_chat=SimpleNamespace(id=10),
+            effective_user=SimpleNamespace(id=1),
+            effective_message=SimpleNamespace(text=None),
+            callback_query=callback_query,
+        )
+        busy_started = asyncio.Event()
+        release_busy = asyncio.Event()
+        projection_started = asyncio.Event()
+        visible_captions = []
+        edit_calls = 0
+
+        async def record_caption_delivery(**kwargs):
+            nonlocal edit_calls
+            edit_calls += 1
+            if edit_calls == 1:
+                busy_started.set()
+                await release_busy.wait()
+            else:
+                projection_started.set()
+            visible_captions.append(kwargs["caption"])
+
+        context.application.bot.edit_message_caption.side_effect = (
+            record_caption_delivery
+        )
+        await operation_gate(update, context)
+        await asyncio.wait_for(busy_started.wait(), timeout=0.2)
+        refreshed, _segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                revision=2,
+                state="awaiting_input",
+                stage="candidate_selection",
+                status_text="候选证据已刷新",
+                details={"keyboard": [[{
+                    "text": "死神：千年血战篇",
+                    "callback_data": "search:select:p1:0",
+                }]]},
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+            ),
+        )
+        await asyncio.wait_for(
+            render_operation(context.application, router, refreshed),
+            timeout=0.2,
+        )
+        self.assertTrue(projection_started.is_set())
+        claimed = self.coordinator.get_active_segment("op-1")
+        self.coordinator.release_segment_callback(
+            "search",
+            "op-1",
+            message_id=92,
+            segment_generation=claimed.generation,
+            callback_generation=claimed.callback_generation,
+            callback_token="search:select:p1:0",
+        )
+
+        release_busy.set()
+        for _attempt in range(100):
+            if not context.application.bot_data.get(
+                CALLBACK_FEEDBACK_TASKS_KEY
+            ):
+                break
+            await asyncio.sleep(0)
+        else:
+            self.fail("callback feedback task did not finish")
+
+        self.assertEqual(visible_captions[-1], "候选证据已刷新")
+
+    async def test_late_busy_delivery_restores_sealed_segment_projection(self):
+        from telegram import CallbackQuery, Chat, Message, User
+        from app.handlers.interaction_handler import (
+            CALLBACK_FEEDBACK_TASKS_KEY,
+            operation_gate,
+            operation_markup,
+            render_operation,
+        )
+
+        operation, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                state="awaiting_input",
+                stage="candidate_selection",
+                status_text="请选择作品",
+                details={"keyboard": [[{
+                    "text": "死神：千年血战篇",
+                    "callback_data": "search:select:p1:0",
+                }]]},
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+            ),
+        )
+        segment = self.coordinator.bind_segment_message(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            chat_id=10,
+            message_id=92,
+            message_kind="photo",
+        )
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+        )
+        router = Mock()
+        router.plugin_route.return_value = route
+        encoded = operation_markup(
+            operation,
+            router,
+            segment=segment,
+        ).inline_keyboard[0][0].callback_data
+        context = self.context(router=router)
+        callback_query = CallbackQuery(
+            id="candidate-click-late-busy",
+            from_user=User(id=1, first_name="Tester", is_bot=False),
+            chat_instance="candidate-chat",
+            message=Message(
+                message_id=92,
+                date=datetime.now(timezone.utc),
+                chat=Chat(id=10, type="private"),
+            ),
+            data=encoded,
+        )
+        callback_query.set_bot(context.application.bot)
+        update = SimpleNamespace(
+            update_id=14,
+            effective_chat=SimpleNamespace(id=10),
+            effective_user=SimpleNamespace(id=1),
+            effective_message=SimpleNamespace(text=None),
+            callback_query=callback_query,
+        )
+        busy_started = asyncio.Event()
+        release_busy = asyncio.Event()
+        visible_captions = []
+
+        async def record_caption_delivery(**kwargs):
+            caption = kwargs["caption"]
+            if caption == "正在确认媒体身份…":
+                busy_started.set()
+                await release_busy.wait()
+            visible_captions.append(caption)
+
+        context.application.bot.edit_message_caption.side_effect = (
+            record_caption_delivery
+        )
+
+        await operation_gate(update, context)
+        await asyncio.wait_for(busy_started.wait(), timeout=0.1)
+        refreshed, refreshed_segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                revision=2,
+                state="running",
+                stage="identity_confirmed",
+                status_text="已确认作品",
+                details={},
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+            ),
+        )
+        await render_operation(context.application, router, refreshed)
+        self.coordinator.seal_segment("search", "op-1", "identity")
+        await render_operation(context.application, router, refreshed)
+        self.assertEqual(
+            self.coordinator.get_segment(refreshed_segment.segment_id).state,
+            "sealed",
+        )
+
+        release_busy.set()
+        for _attempt in range(100):
+            if not context.application.bot_data.get(
+                CALLBACK_FEEDBACK_TASKS_KEY
+            ):
+                break
+            await asyncio.sleep(0)
+        else:
+            self.fail("callback feedback task did not finish")
+
+        self.assertEqual(visible_captions[-1], "已确认作品")
+
     async def test_segment_keyboard_claim_disables_double_click_before_feature_dispatch(self):
         from telegram import CallbackQuery, Chat, Message, User
         from app.handlers.interaction_handler import operation_gate, operation_markup
@@ -2146,6 +2825,103 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         released = self.coordinator.get_active_segment("op-1")
         self.assertEqual(released.callback_state, "idle")
         self.assertEqual(released.state, "open")
+
+    async def test_cancelled_gateway_finishes_durable_callback_release(self):
+        from app.handlers.interaction_handler import (
+            operation_gate,
+            operation_markup,
+            operation_render_lock,
+        )
+        from app.handlers.plugin_handler import dynamic_callback_gateway
+
+        operation, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                state="awaiting_input",
+                stage="candidate_selection",
+                details={"keyboard": [[{
+                    "text": "蜂蜜与四叶草",
+                    "callback_data": "search:select:p1:0",
+                }]]},
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "text",
+                },
+            ),
+        )
+        segment = self.coordinator.bind_segment_message(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            chat_id=10,
+            message_id=55,
+        )
+        route = SimpleNamespace(
+            plugin_id="search",
+            manifest=SimpleNamespace(callbacks=("search",)),
+            client=SimpleNamespace(
+                request=AsyncMock(return_value={"actions": []}),
+            ),
+        )
+        router = Mock()
+        router.plugin_route.return_value = route
+        router.callback_route.return_value = route
+        encoded = operation_markup(
+            operation,
+            router,
+            segment=segment,
+        ).inline_keyboard[0][0].callback_data
+        update = self.callback_update(encoded, message_id=55)
+        context = self.context(router=router)
+
+        await operation_gate(update, context)
+        claimed = self.coordinator.get_active_segment("op-1")
+        self.assertEqual(claimed.callback_state, "busy")
+        self.assertEqual(claimed.callback_token, "search:select:p1:0")
+
+        lock = operation_render_lock(context.application, "op-1")
+        await lock.acquire()
+        gateway = None
+        try:
+            with patch(
+                "app.handlers.plugin_handler.init.check_user",
+                return_value=True,
+            ):
+                gateway = asyncio.create_task(
+                    dynamic_callback_gateway(update, context)
+                )
+                for _attempt in range(100):
+                    release_tasks = [
+                        task
+                        for task in asyncio.all_tasks()
+                        if task.get_name()
+                        == "telepiplex-callback-release-11"
+                    ]
+                    if release_tasks:
+                        break
+                    await asyncio.sleep(0)
+                else:
+                    self.fail("callback release task did not start")
+
+                gateway.cancel()
+                await asyncio.sleep(0)
+                self.assertFalse(gateway.done())
+        finally:
+            lock.release()
+
+        assert gateway is not None
+        with self.assertRaises(asyncio.CancelledError):
+            await gateway
+
+        released = self.coordinator.get_active_segment("op-1")
+        self.assertEqual(released.callback_state, "idle")
+        self.assertEqual(released.callback_token, "")
+        route.client.request.assert_awaited_once()
+        await asyncio.sleep(0)
+        self.assertFalse(any(
+            task.get_name() == "telepiplex-callback-release-11"
+            for task in asyncio.all_tasks()
+        ))
 
     async def test_button_only_operation_rejects_plain_text_and_allows_owned_callback(self):
         from app.handlers.interaction_handler import operation_gate

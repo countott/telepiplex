@@ -1386,7 +1386,7 @@ class RenameFeature:
             operation_id,
             state="running",
             stage="metadata_resolution",
-            status_text="已确认身份，正在整理。",
+            status_text="正在确认媒体身份",
             control="cancel",
             details={},
         )
@@ -2796,35 +2796,32 @@ class RenameFeature:
         presentation = payload.get("_metadata_presentation")
         if not isinstance(presentation, dict):
             return False
-        milestone_id = str(presentation.get("milestone_id") or "").strip()
         text = str(presentation.get("text") or "").strip()
-        if not milestone_id or not text:
+        if not text:
             return False
+        search_suffix = "已确认身份，开始搜索"
+        organize_suffix = "已确认身份，开始整理"
+        if text.endswith(search_suffix):
+            text = text[:-len(search_suffix)] + organize_suffix
+        elif not text.endswith(organize_suffix):
+            text = f"{text}\n{organize_suffix}"
         operation = self.operations.get(operation_id)
-        if operation is not None:
-            if operation.get("state") in {
-                "completed", "cancelled", "rolled_back",
-                "partially_rolled_back", "failed",
-            }:
-                return False
-            await self._report_operation(
-                operation_id,
-                state="running",
-                stage="identity_confirmation",
-                status_text="正在确认媒体身份。",
-                control="cancel",
-                details={"telegram_visibility": "silent"},
-            )
+        if operation is None or operation.get("state") in {
+            "completed", "cancelled", "rolled_back",
+            "partially_rolled_back", "failed",
+        }:
+            return False
+        report = self._advance_operation(
+            operation_id,
+            state="running",
+            stage="identity_confirmation",
+            status_text=text,
+            control="cancel",
+            details={},
+        )
         for attempt in range(3):
             try:
-                response = await self.host.publish_operation_milestone(
-                    operation_id,
-                    milestone_id,
-                    text,
-                    mode="identity",
-                    photo_url=str(presentation.get("photo_url") or ""),
-                    deadline=45,
-                )
+                response = await self.host.report_operation(report)
             except Exception as exc:
                 if (
                     _ambiguous_milestone_error(exc)
@@ -2835,9 +2832,14 @@ class RenameFeature:
                 raise
             if isinstance(response, dict) and (
                 response.get("accepted") is True
-                or response.get("duplicate") is True
             ):
                 break
+            operation.update({
+                "state": "interrupted",
+                "status_text": "Host 未接受当前 Feature 的任务所有权。",
+                "control": "",
+                "next_plugin_id": "",
+            })
             raise FeatureError(
                 "identity_delivery_failed",
                 "Host did not deliver the confirmed media identity",
@@ -2859,14 +2861,22 @@ class RenameFeature:
             revision = max(0, int(payload.get("operation_revision") or 0))
         except (TypeError, ValueError):
             revision = 0
+        has_valid_metadata = (
+            validate_media_metadata_v2(payload.get("media_metadata"))
+            is not None
+        )
         operation = {
             "operation_id": operation_id,
             "chat_id": chat_id,
             "user_id": user_id,
             "state": "running",
             "stage": "accepted",
-            "status_text": _organization_status_text(
-                _visible_video_file_count(payload.get("file_tree"))
+            "status_text": (
+                _organization_status_text(
+                    _visible_video_file_count(payload.get("file_tree"))
+                )
+                if has_valid_metadata
+                else "正在确认媒体身份"
             ),
             "control": "cancel",
             "revision": revision,
@@ -2890,10 +2900,14 @@ class RenameFeature:
             state="running",
             stage=(
                 "organizing"
-                if isinstance(payload.get("media_metadata"), dict)
+                if has_valid_metadata
                 else "metadata_resolution"
             ),
-            status_text=_organization_status_text(media_file_count),
+            status_text=(
+                _organization_status_text(media_file_count)
+                if has_valid_metadata
+                else "正在确认媒体身份"
+            ),
             control="cancel",
             details={},
         )

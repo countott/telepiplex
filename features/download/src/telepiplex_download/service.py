@@ -1962,7 +1962,7 @@ class DownloadFeature:
             operation_id,
             state="handed_off",
             stage="handoff_rename",
-            status_text="下载完成，开始整理",
+            status_text="下载完成",
             control="cancel",
             next_plugin_id="rename",
             details={
@@ -2024,7 +2024,7 @@ class DownloadFeature:
                     operation_id,
                     state="running",
                     stage="downloaded",
-                    status_text="下载完成，开始整理",
+                    status_text="下载完成",
                     control="cancel",
                     details={},
                 )
@@ -2468,7 +2468,7 @@ class DownloadFeature:
                 "user_id": user_id,
                 "state": "handed_off",
                 "stage": "handoff_rename",
-                "status_text": "下载完成，开始整理",
+                "status_text": "下载完成",
                 "control": "cancel",
                 "revision": revision,
                 "details": {"downloaded_content": "preserved"},

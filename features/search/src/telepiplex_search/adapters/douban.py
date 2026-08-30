@@ -395,12 +395,15 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
     ]
     for key in ("aka", "aka_titles", "aliases", "alias"):
         candidates.extend(_list_values(data.get(key)))
+    candidates.extend((
+        data.get("english_title"),
+        data.get("englishTitle"),
+        data.get("official_english_title"),
+        data.get("officialEnglishTitle"),
+    ))
     if title and not chinese_title:
         candidates.append(title)
-    english_title = next(
-        (_text(item) for item in candidates if _contains_latin(_text(item))),
-        "",
-    )
+    english_title = ""
     aliases = []
     for item in candidates:
         item, _unused_alias_year = _normalize_title_and_year(item, "")
@@ -413,12 +416,7 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
         or data.get("regions")
         or data.get("region")
     )
-    official_english_title, _unused_official_year = _normalize_title_and_year(
-        data.get("official_english_title")
-        or data.get("officialEnglishTitle")
-        or english_title,
-        "",
-    )
+    official_english_title = ""
     romanized_original_title, _unused_romanized_year = _normalize_title_and_year(
         data.get("romanized_original_title")
         or data.get("romanizedOriginalTitle")
@@ -439,7 +437,8 @@ def _normalize_payload(payload: dict, subject_url: str) -> dict | None:
         "chinese_title": chinese_title,
         "season_number": season_number,
         "english_title": english_title,
-        "original_title": original_title,
+        "original_title": "",
+        "source_original_title": original_title,
         "original_language": _language(data, original_title),
         "official_english_title": official_english_title,
         "romanized_original_title": romanized_original_title,
@@ -473,6 +472,7 @@ def _merge_subject_facts(facts: list[dict]) -> dict | None:
         "chinese_title",
         "english_title",
         "original_title",
+        "source_original_title",
         "original_language",
         "official_english_title",
         "romanized_original_title",
@@ -505,7 +505,10 @@ def _merge_subject_facts(facts: list[dict]) -> dict | None:
         merged["identity_conflicts"] = sorted(set(conflicts))
     merged_chinese_title = _chinese_title_part(
         _text(merged.get("chinese_title") or merged.get("title")),
-        _text(merged.get("original_title")),
+        _text(
+            merged.get("source_original_title")
+            or merged.get("original_title")
+        ),
     )
     if merged_chinese_title:
         merged["chinese_title"] = merged_chinese_title

@@ -45,6 +45,7 @@ class DoubanAdapterTest(unittest.TestCase):
                     "id": "35314632",
                     "title": "黑暗荣耀",
                     "original_title": "The Glory",
+                    "official_english_title": "The Glory",
                     "year": "2022",
                     "type": "tv",
                     "genres": ["剧情"],
@@ -55,6 +56,7 @@ class DoubanAdapterTest(unittest.TestCase):
                 "id": "35314632",
                 "title": "黑暗荣耀",
                 "original_title": "The Glory",
+                "official_english_title": "The Glory",
                 "year": "2022",
                 "type": "tv",
             }),
@@ -68,9 +70,11 @@ class DoubanAdapterTest(unittest.TestCase):
         self.assertEqual(fact["subject_id"], "35314632")
         self.assertEqual(fact["media_type"], "series")
         self.assertEqual(fact["chinese_title"], "黑暗荣耀")
-        self.assertEqual(fact["english_title"], "The Glory")
-        self.assertEqual(fact["original_title"], "The Glory")
-        self.assertEqual(fact["official_english_title"], "The Glory")
+        self.assertEqual(fact["english_title"], "")
+        self.assertEqual(fact["original_title"], "")
+        self.assertEqual(fact["source_original_title"], "The Glory")
+        self.assertEqual(fact["official_english_title"], "")
+        self.assertIn("The Glory", fact["aliases"])
         self.assertEqual(fact["year"], "2022")
         self.assertEqual(fact["genres"], ["剧情"])
         self.assertEqual(
@@ -88,6 +92,7 @@ class DoubanAdapterTest(unittest.TestCase):
                 "id": "1295644",
                 "title": "这个杀手不太冷",
                 "original_title": "Léon",
+                "official_english_title": "Léon",
                 "year": "1994",
                 "type": "movie",
             }),
@@ -96,7 +101,12 @@ class DoubanAdapterTest(unittest.TestCase):
         result = douban.lookup_douban_evidence(["这个杀手不太冷 1994"])
 
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["facts"][0]["english_title"], "Léon")
+        fact = result["facts"][0]
+        self.assertEqual(fact["english_title"], "")
+        self.assertEqual(fact["official_english_title"], "")
+        self.assertEqual(fact["original_title"], "")
+        self.assertEqual(fact["source_original_title"], "Léon")
+        self.assertIn("Léon", fact["aliases"])
 
     @patch("telepiplex_search.adapters.douban.requests.get")
     def test_subject_lookup_merges_rich_country_poster_and_aliases(self, get_mock):
@@ -113,6 +123,7 @@ class DoubanAdapterTest(unittest.TestCase):
                 "id": "35981510",
                 "title": "繁花",
                 "original_title": "Blossoms Shanghai",
+                "official_english_title": "Blossoms Shanghai",
                 "year": "2023",
                 "type": "tv",
                 "countries": ["中国大陆", "中国大陆"],
@@ -125,7 +136,10 @@ class DoubanAdapterTest(unittest.TestCase):
 
         self.assertEqual(fact["subject_id"], "35981510")
         self.assertEqual(fact["chinese_title"], "繁花")
-        self.assertEqual(fact["english_title"], "Blossoms Shanghai")
+        self.assertEqual(fact["english_title"], "")
+        self.assertEqual(fact["official_english_title"], "")
+        self.assertEqual(fact["original_title"], "")
+        self.assertEqual(fact["source_original_title"], "Blossoms Shanghai")
         self.assertEqual(fact["countries"], ["中国大陆"])
         self.assertEqual(fact["cover_url"], "https://img.example/blossoms.jpg")
         self.assertEqual(
@@ -152,6 +166,7 @@ class DoubanAdapterTest(unittest.TestCase):
                 "id": "30468961",
                 "title": "想见你 想見你",
                 "original_title": "想見你",
+                "official_english_title": "Someday or One Day",
                 "aka": ["Someday or One Day"],
                 "year": "2019",
                 "type": "tv",
@@ -160,13 +175,13 @@ class DoubanAdapterTest(unittest.TestCase):
 
         fact = douban.lookup_douban_subject("30468961", cache_ttl=0)
 
-        self.assertEqual(fact["title"], "Someday or One Day")
+        self.assertEqual(fact["title"], "想见你")
         self.assertEqual(fact["chinese_title"], "想见你")
-        self.assertEqual(fact["original_title"], "想見你")
-        self.assertEqual(
-            fact["official_english_title"],
-            "Someday or One Day",
-        )
+        self.assertEqual(fact["original_title"], "")
+        self.assertEqual(fact["source_original_title"], "想見你")
+        self.assertEqual(fact["english_title"], "")
+        self.assertEqual(fact["official_english_title"], "")
+        self.assertIn("Someday or One Day", fact["aliases"])
 
     @patch("telepiplex_search.adapters.douban.requests.get")
     def test_japanese_language_and_romaji_are_preserved_without_translation(self, get_mock):
@@ -187,9 +202,60 @@ class DoubanAdapterTest(unittest.TestCase):
         fact = douban.lookup_douban_evidence(["进击的巨人"])["facts"][0]
 
         self.assertEqual(fact["original_language"], "ja")
-        self.assertEqual(fact["original_title"], "進撃の巨人")
-        self.assertEqual(fact["official_english_title"], "Attack on Titan")
+        self.assertEqual(fact["original_title"], "")
+        self.assertEqual(fact["source_original_title"], "進撃の巨人")
+        self.assertEqual(fact["english_title"], "")
+        self.assertEqual(fact["official_english_title"], "")
+        self.assertIn("Attack on Titan", fact["aliases"])
         self.assertEqual(fact["romanized_original_title"], "Shingeki no Kyojin")
+
+    def test_explicit_provider_english_is_noncanonical_alias_only(self):
+        fact = douban._normalize_payload(
+            {
+                "id": "30482958",
+                "title": "百年孤独 第一季",
+                "original_title": "Cien años de soledad Season 1",
+                "original_language": "es",
+                "english_title": "100 Years of Solitude",
+                "official_english_title": "100 Years of Solitude",
+                "year": "2024",
+                "type": "tv",
+            },
+            "https://movie.douban.com/subject/30482958/",
+        )
+
+        self.assertEqual(fact["english_title"], "")
+        self.assertEqual(fact["official_english_title"], "")
+        self.assertEqual(fact["original_title"], "")
+        self.assertEqual(
+            fact["source_original_title"],
+            "Cien años de soledad Season 1",
+        )
+        self.assertIn("100 Years of Solitude", fact["aliases"])
+
+    def test_spanish_original_and_alias_do_not_become_english_titles(self):
+        fact = douban._normalize_payload(
+            {
+                "id": "30482958",
+                "title": "百年孤独 第一季",
+                "original_title": "Cien años de soledad Season 1",
+                "original_language": "es",
+                "aka": ["Cien años de soledad"],
+                "year": "2024",
+                "type": "tv",
+            },
+            "https://movie.douban.com/subject/30482958/",
+        )
+
+        self.assertEqual(fact["chinese_title"], "百年孤独")
+        self.assertEqual(fact["original_title"], "")
+        self.assertEqual(
+            fact["source_original_title"],
+            "Cien años de soledad Season 1",
+        )
+        self.assertIn("Cien años de soledad", fact["aliases"])
+        self.assertEqual(fact["english_title"], "")
+        self.assertEqual(fact["official_english_title"], "")
 
     def test_normalize_payload_splits_trailing_year_and_removes_format_controls(self):
         fact = douban._normalize_payload(
@@ -270,8 +336,11 @@ class DoubanAdapterTest(unittest.TestCase):
         )
 
         self.assertEqual(fact["chinese_title"], "后室")
-        self.assertEqual(fact["official_english_title"], "Backrooms")
-        self.assertEqual(fact["original_title"], "Backrooms")
+        self.assertEqual(fact["english_title"], "")
+        self.assertEqual(fact["official_english_title"], "")
+        self.assertIn("Backrooms", fact["aliases"])
+        self.assertEqual(fact["original_title"], "")
+        self.assertEqual(fact["source_original_title"], "Backrooms")
 
     def test_mixed_chinese_and_japanese_title_does_not_pollute_chinese_title(self):
         fact = douban._normalize_payload(
@@ -288,8 +357,14 @@ class DoubanAdapterTest(unittest.TestCase):
         )
 
         self.assertEqual(fact["chinese_title"], "蜂蜜与四叶草")
-        self.assertEqual(fact["original_title"], "ハチミツとクローバー")
-        self.assertEqual(fact["official_english_title"], "Honey and Clover")
+        self.assertEqual(fact["original_title"], "")
+        self.assertEqual(
+            fact["source_original_title"],
+            "ハチミツとクローバー",
+        )
+        self.assertEqual(fact["english_title"], "")
+        self.assertEqual(fact["official_english_title"], "")
+        self.assertIn("Honey and Clover", fact["aliases"])
 
     def test_original_title_suffix_is_removed_even_when_both_titles_use_han(self):
         fact = douban._normalize_payload(
@@ -306,7 +381,8 @@ class DoubanAdapterTest(unittest.TestCase):
         )
 
         self.assertEqual(fact["chinese_title"], "冰果")
-        self.assertEqual(fact["original_title"], "氷菓")
+        self.assertEqual(fact["original_title"], "")
+        self.assertEqual(fact["source_original_title"], "氷菓")
 
     @patch("telepiplex_search.adapters.douban.requests.get")
     def test_successful_empty_search_is_not_found(self, get_mock):

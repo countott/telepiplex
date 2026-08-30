@@ -135,6 +135,59 @@ class InteractionCoordinatorTest(unittest.TestCase):
         self.assertEqual(claimed.delivery_state, "delivering")
         self.assertIsNone(competing)
 
+    def test_only_one_replacement_can_claim_a_known_text_cursor(self):
+        _operation, created = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                }
+            ),
+        )
+        bound = self.coordinator.bind_segment_message(
+            created.segment_id,
+            owner_plugin_id="search",
+            generation=created.generation,
+            chat_id=10,
+            message_id=77,
+            message_kind="text",
+        )
+
+        claimed = self.coordinator.claim_segment_replacement_delivery(
+            bound.segment_id,
+            owner_plugin_id="search",
+            generation=bound.generation,
+            chat_id=10,
+            expected_message_id=77,
+            expected_message_kind="text",
+        )
+        competing = self.coordinator.claim_segment_replacement_delivery(
+            bound.segment_id,
+            owner_plugin_id="search",
+            generation=bound.generation,
+            chat_id=10,
+            expected_message_id=77,
+            expected_message_kind="text",
+        )
+        replaced = self.coordinator.replace_segment_message(
+            bound.segment_id,
+            owner_plugin_id="search",
+            generation=bound.generation,
+            chat_id=10,
+            expected_message_id=77,
+            expected_message_kind="text",
+            message_id=78,
+            message_kind="photo",
+        )
+
+        self.assertEqual(claimed.delivery_state, "delivering")
+        self.assertIsNone(competing)
+        self.assertEqual(replaced.state, "open")
+        self.assertEqual(replaced.delivery_state, "delivered")
+        self.assertEqual(replaced.message_id, 78)
+        self.assertEqual(replaced.message_kind, "photo")
+
     def test_same_segment_accepts_a_newer_business_revision_in_place(self):
         _operation, created = self.coordinator.accept_segment_report(
             "search",

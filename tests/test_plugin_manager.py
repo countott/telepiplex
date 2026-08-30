@@ -160,6 +160,52 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report_sink.assert_timeout, self.manager.drain_timeout)
         self.assertEqual(milestone_sink.assert_timeout, self.manager.drain_timeout)
 
+    async def test_close_drains_projection_lifecycle_once(self):
+        calls = []
+
+        async def stop_features():
+            calls.append("features")
+
+        async def stop_broker():
+            calls.append("broker")
+
+        class ProjectionLifecycle:
+            async def drain(self, *, timeout):
+                self.timeout = timeout
+                calls.append("projections")
+                return True
+
+        class LegacySink:
+            async def drain(self, *, timeout):
+                calls.append(f"legacy:{timeout}")
+                return True
+
+        lifecycle = ProjectionLifecycle()
+        self.manager.supervisor.close_all = stop_features
+        self.manager.broker = SimpleNamespace(
+            close=stop_broker,
+            projection_lifecycle=lifecycle,
+            operation_sink=LegacySink(),
+            milestone_sink=LegacySink(),
+        )
+        self.manager.journal = SimpleNamespace(
+            close=lambda: calls.append("journal")
+        )
+        self.manager.interaction_coordinator = SimpleNamespace(
+            close=lambda: calls.append("coordinator")
+        )
+
+        await self.manager.close()
+
+        self.assertEqual(calls, [
+            "features",
+            "broker",
+            "projections",
+            "journal",
+            "coordinator",
+        ])
+        self.assertEqual(lifecycle.timeout, self.manager.drain_timeout)
+
     def _artifact(
         self,
         plugin_id="echo",

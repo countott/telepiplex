@@ -1,5 +1,6 @@
 import unittest
 
+from telepiplex_search.adapters import douban
 from telepiplex_search.anchored_candidate import (
     AnchoredCandidate,
     PosterAsset,
@@ -292,6 +293,85 @@ class MediaMetadataV1Test(unittest.TestCase):
             contract["evidence"]["series_inventory"]["season_totals"],
             {1: 8, 2: 8},
         )
+
+    def test_wikipedia_identity_beats_conflicting_douban_titles(self):
+        douban_payload = douban._normalize_payload(
+            {
+                "id": "30482958",
+                "title": "百年孤独 第一季",
+                "original_title": "Cien soledad",
+                "original_language": "es",
+                "english_title": "100 Years of Solitude",
+                "official_english_title": "100 Years of Solitude",
+                "aka": ["Cien años de soledad"],
+                "year": "2024",
+                "type": "tv",
+            },
+            "https://movie.douban.com/subject/30482958/",
+        )
+        wikipedia = _fact(
+            "wikipedia:Q124175370",
+            "wikipedia",
+            titles=("百年孤独", "One Hundred Years of Solitude"),
+            year="2024",
+            media_type="series",
+            url="https://en.wikipedia.org/wiki/One_Hundred_Years_of_Solitude_(TV_series)",
+            external_ids={"wikidata": "Q124175370"},
+            english="One Hundred Years of Solitude",
+            original="Cien años de soledad",
+            language="es",
+        )
+        douban_fact = _fact(
+            "douban:30482958",
+            "douban",
+            titles=tuple(douban_payload["aliases"]),
+            year="2024",
+            media_type="series",
+            url="https://movie.douban.com/subject/30482958/",
+            external_ids={"douban_subject": "30482958"},
+            chinese=douban_payload["chinese_title"],
+            english=douban_payload["official_english_title"],
+            original=douban_payload["original_title"],
+            language="es",
+        )
+        candidate = AnchoredCandidate(
+            candidate_id="wikipedia:Q124175370",
+            anchor_fact_id=wikipedia.fact_id,
+            identity_role="series_root",
+            intended_scope="whole_series",
+            source_links=tuple(
+                SourceLink(
+                    provider=fact.provider,
+                    fact_id=fact.fact_id,
+                    url=fact.source_url,
+                    external_ids=fact.external_ids,
+                    role="series_root",
+                    season_number=None,
+                    episode_number=None,
+                    verification="fact_verified",
+                )
+                for fact in (wikipedia, douban_fact)
+            ),
+            poster_assets=(),
+            unresolved_sources=(),
+            ai_confidence=1,
+            ai_reason="Wikipedia English identity plus Douban localization.",
+            facts=(wikipedia, douban_fact),
+        )
+
+        contract = build_media_metadata_v1(
+            candidate,
+            metadata_id="one-hundred-years-titles",
+            raw_query="百年孤独",
+        )
+
+        identity = contract["identity"]
+        self.assertEqual(identity["chinese_title"], "百年孤独")
+        self.assertEqual(
+            identity["english_title"],
+            "One Hundred Years of Solitude",
+        )
+        self.assertEqual(identity["original_title"], "Cien años de soledad")
 
     def test_wikipedia_parse_error_remains_visible_after_tvdb_fallback(self):
         wikipedia = _fact(

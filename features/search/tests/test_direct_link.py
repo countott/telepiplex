@@ -479,6 +479,44 @@ class DirectLinkTest(unittest.TestCase):
         self.assertEqual(direct.query, "House of the Dragon S03")
         self.assertEqual(direct.evidence["root_lookup_year"], "")
 
+    @patch("telepiplex_search.direct_link.lookup_douban_subject")
+    def test_douban_spanish_original_is_search_fallback_not_english(self, lookup):
+        lookup.return_value = {
+            "subject_id": "30482958",
+            "title": "百年孤独",
+            "chinese_title": "百年孤独",
+            "douban_title_raw": "百年孤独 第一季",
+            "english_title": "",
+            "original_title": "",
+            "source_original_title": "Cien años de soledad Season 1",
+            "original_language": "es",
+            "official_english_title": "",
+            "year": "2024",
+            "media_type": "series",
+            "season_number": 1,
+            "external_ids": {"douban_subject": "30482958"},
+        }
+
+        direct = resolve_direct_link(MetadataLink(
+            provider="douban",
+            media_type="",
+            entity_id="30482958",
+            scope="work",
+            url="https://movie.douban.com/subject/30482958/",
+        ))
+
+        fact = direct.evidence["facts"][0]
+        self.assertEqual(direct.query, "Cien años de soledad S01")
+        self.assertEqual(direct.scope, "season")
+        self.assertEqual(direct.season_number, 1)
+        self.assertEqual(
+            fact["source_original_title"],
+            "Cien años de soledad",
+        )
+        self.assertEqual(fact["original_title"], "")
+        self.assertEqual(fact["english_title"], "")
+        self.assertEqual(fact["official_english_title"], "")
+
     @patch("telepiplex_search.direct_link.get_tvdb_episode")
     @patch("telepiplex_search.direct_link.get_tvdb_series")
     def test_tvdb_episode_locks_series_and_episode(self, series, episode):

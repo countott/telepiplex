@@ -6,6 +6,7 @@ import re
 import time
 from collections.abc import Mapping
 from dataclasses import replace
+from weakref import WeakValueDictionary
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.error import BadRequest
@@ -27,6 +28,7 @@ ROUTER_KEY = "telepiplex_plugin_router"
 OPERATION_RECOVERY_TASK_KEY = "telepiplex_operation_recovery_task"
 CONFIG_OPERATION_TASKS_KEY = "telepisync_config_operation_tasks"
 OPERATION_RENDER_LOCKS_KEY = "telepiplex_operation_render_locks"
+CALLBACK_FEEDBACK_TASKS_KEY = "telepiplex_callback_feedback_tasks"
 FEATURE_SESSION_KEY = "telepiplex_plugin_sessions"
 CONTROL_CALLBACK_PREFIX = "host-operation:"
 CONTROL_CALLBACK_PATTERN = r"^host-operation:"
@@ -51,6 +53,7 @@ _TERMINAL_CONTROL_LABELS = frozenset({
 })
 _CONTROL_IN_PROGRESS_STATES = {"cancelling", "rolling_back"}
 _SEGMENT_EDIT_MAX_ATTEMPTS = 3
+OPERATION_PROJECTION_COALESCE_SECONDS = 0.1
 
 
 def _log(level: str, message: str):
@@ -136,7 +139,13 @@ def operation_render_lock(application, operation_id: str) -> asyncio.Lock:
     bot_data = getattr(application, "bot_data", None)
     if not isinstance(bot_data, dict):
         raise RuntimeError("application bot_data is unavailable")
-    locks = bot_data.setdefault(OPERATION_RENDER_LOCKS_KEY, {})
+    locks = bot_data.get(OPERATION_RENDER_LOCKS_KEY)
+    if not isinstance(locks, WeakValueDictionary):
+        weak_locks = WeakValueDictionary()
+        if isinstance(locks, Mapping):
+            weak_locks.update(locks)
+        locks = weak_locks
+        bot_data[OPERATION_RENDER_LOCKS_KEY] = locks
     key = str(operation_id or "")
     lock = locks.get(key)
     if lock is None:
@@ -703,6 +712,7 @@ class OperationReportSink:
         self._pending_segment_ids: dict[str, str] = {}
         self._workers: dict[str, asyncio.Task] = {}
         self._tasks: set[asyncio.Task] = set()
+        self._coalesce_signals: dict[str, asyncio.Event] = {}
 
     def attach(self, listener):
         self._listener = listener
@@ -713,11 +723,30 @@ class OperationReportSink:
         operation_id: str,
         role: str,
     ) -> dict:
+        active = self.coordinator.get_active_segment(operation_id)
+        if (
+            active is not None
+            and active.state == "creating"
+            and active.owner_plugin_id == str(plugin_id)
+            and active.role == str(role)
+            and self._listener is not None
+        ):
+            current = self._workers.get(operation_id)
+            if (
+                (current is None or current.done())
+                and operation_id in self._pending
+            ):
+                current = self._ensure_worker(operation_id)
+            if current is not None:
+                await asyncio.shield(current)
         segment = self.coordinator.seal_segment(
             plugin_id,
             operation_id,
             role,
         )
+        signal = self._coalesce_signals.get(operation_id)
+        if signal is not None:
+            signal.set()
         record = self.coordinator.get(operation_id)
         worker = None
         if record is not None and self._listener is not None:
@@ -834,6 +863,7 @@ class OperationReportSink:
             self._render_pending(operation_id),
             name=f"telepiplex-operation-render-{operation_id}",
         )
+        self._coalesce_signals[operation_id] = asyncio.Event()
         self._workers[operation_id] = task
         self._tasks.add(task)
         task.add_done_callback(
@@ -844,6 +874,26 @@ class OperationReportSink:
         return task
 
     async def _render_pending(self, operation_id: str):
+        segment_id = self._pending_segment_ids.get(operation_id, "")
+        segment = (
+            self.coordinator.get_segment(segment_id)
+            if segment_id
+            else None
+        )
+        if (
+            segment is not None
+            and segment.state == "open"
+            and segment.message_id is not None
+        ):
+            signal = self._coalesce_signals.get(operation_id)
+            if signal is not None:
+                try:
+                    async with asyncio.timeout(
+                        OPERATION_PROJECTION_COALESCE_SECONDS
+                    ):
+                        await signal.wait()
+                except TimeoutError:
+                    pass
         while True:
             record = self._pending.pop(operation_id, None)
             segment_id = self._pending_segment_ids.pop(operation_id, "")
@@ -874,6 +924,7 @@ class OperationReportSink:
     def _worker_done(self, operation_id: str, task: asyncio.Task):
         if self._workers.get(operation_id) is task:
             self._workers.pop(operation_id, None)
+            self._coalesce_signals.pop(operation_id, None)
         self._tasks.discard(task)
         try:
             task.exception()
@@ -916,6 +967,33 @@ class OperationReportSink:
                 return False
             await asyncio.sleep(0)
         return True
+
+
+class OperationProjectionLifecycle:
+    """Own operation and milestone Telegram projections as one lifecycle."""
+
+    def __init__(self, operation_sink, milestone_sink):
+        self.operation_sink = operation_sink
+        self.milestone_sink = milestone_sink
+
+    def attach(
+        self,
+        operation_delivery,
+        milestone_delivery,
+        lock_factory=None,
+    ):
+        self.operation_sink.attach(operation_delivery)
+        self.milestone_sink.attach(milestone_delivery, lock_factory)
+
+    async def start(self):
+        await self.milestone_sink.start()
+
+    async def drain(self, timeout: float | None = None) -> bool:
+        results = await asyncio.gather(
+            self.operation_sink.drain(timeout=timeout),
+            self.milestone_sink.drain(timeout=timeout),
+        )
+        return all(results)
 
 
 async def operation_gate(update, context):
@@ -976,7 +1054,8 @@ async def operation_gate(update, context):
                     busy_text=busy_text,
                 )
             if claimed is not None:
-                await _render_claimed_segment_busy(
+                schedule_callback_feedback(
+                    update,
                     context.application,
                     record,
                     claimed,
@@ -1424,6 +1503,97 @@ async def _render_claimed_segment_busy(application, record, segment) -> None:
             )
 
 
+def schedule_callback_feedback(update, application, record, segment):
+    """Send callback feedback without delaying the claimed Feature dispatch."""
+    bot_data = getattr(application, "bot_data", None)
+    if not isinstance(bot_data, dict):
+        raise RuntimeError("application bot_data is unavailable")
+    tasks = bot_data.setdefault(CALLBACK_FEEDBACK_TASKS_KEY, set())
+    if not isinstance(tasks, set):
+        raise RuntimeError("callback feedback task registry is invalid")
+    task = asyncio.create_task(
+        _deliver_callback_feedback(update, application, record, segment),
+        name=(
+            "telepiplex-callback-feedback-"
+            f"{record.operation_id}-{segment.segment_id}"
+        ),
+    )
+    tasks.add(task)
+    task.add_done_callback(
+        lambda completed, owned=tasks: _callback_feedback_done(
+            owned,
+            completed,
+        )
+    )
+    return task
+
+
+def _callback_feedback_done(tasks, task):
+    tasks.discard(task)
+    try:
+        task.exception()
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+async def drain_callback_feedback(application, timeout: float | None = None) -> bool:
+    bot_data = getattr(application, "bot_data", None)
+    tasks = (
+        bot_data.get(CALLBACK_FEEDBACK_TASKS_KEY)
+        if isinstance(bot_data, dict)
+        else None
+    )
+    if not isinstance(tasks, set):
+        return True
+    deadline = (
+        asyncio.get_running_loop().time() + max(0, float(timeout))
+        if timeout is not None
+        else None
+    )
+    while tasks:
+        snapshot = tuple(tasks)
+        remaining = (
+            max(0, deadline - asyncio.get_running_loop().time())
+            if deadline is not None
+            else None
+        )
+        done, pending = await asyncio.wait(snapshot, timeout=remaining)
+        for task in done:
+            try:
+                task.result()
+            except (asyncio.CancelledError, Exception):
+                pass
+        if pending and deadline is not None:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.sleep(0)
+            return False
+        await asyncio.sleep(0)
+    return True
+
+
+async def _deliver_callback_feedback(update, application, record, segment):
+    query = getattr(update, "callback_query", None)
+    if query is None:
+        return
+    try:
+        await query.answer("处理中...")
+    except Exception:
+        pass
+    try:
+        await _render_claimed_segment_busy(application, record, segment)
+    finally:
+        await reconcile_segment_projection(
+            application,
+            application.bot_data.get(ROUTER_KEY),
+            record.operation_id,
+            segment.segment_id,
+            segment.generation,
+            segment.message_id,
+        )
+
+
 def _segment_callback_busy_text(segment) -> str:
     if segment.role == "identity":
         return "正在确认媒体身份…"
@@ -1454,6 +1624,95 @@ async def render_operation(application, _router, record: OperationRecord):
         return await _render_operation_locked(application, _router, record)
 
 
+async def reconcile_segment_projection(
+    application,
+    router,
+    operation_id: str,
+    segment_id: str,
+    generation: int,
+    message_id: int,
+):
+    """Restore the exact durable segment after an out-of-order busy edit."""
+    async with operation_render_lock(application, operation_id):
+        coordinator = application.bot_data.get(COORDINATOR_KEY)
+        if coordinator is None:
+            return None
+        segment = coordinator.get_segment(segment_id)
+        if (
+            segment is None
+            or segment.generation != int(generation)
+            or segment.message_id != int(message_id)
+        ):
+            return None
+        record = coordinator.get(operation_id)
+        is_active = bool(
+            record is not None
+            and record.active_segment_id == segment.segment_id
+            and record.plugin_id == segment.owner_plugin_id
+        )
+        if is_active and segment.callback_state == "busy":
+            return segment.message_id
+        if is_active:
+            return await _render_operation_segment_locked(
+                application,
+                router,
+                operation_id,
+                segment_id,
+            )
+        return await _restore_inactive_segment_projection(
+            application,
+            record,
+            segment,
+        )
+
+
+async def _restore_inactive_segment_projection(application, record, segment):
+    projection = segment.projection
+    text = str(
+        projection.get("status_text")
+        or projection.get("text")
+        or ""
+    )
+    if not text or segment.message_id is None or record is None:
+        return segment.message_id
+    details = projection.get("details")
+    if not isinstance(details, Mapping):
+        details = {}
+    try:
+        if segment.message_kind == "photo":
+            caption, parse_mode = bounded_photo_caption(
+                text,
+                details.get("parse_mode"),
+            )
+            kwargs = {
+                "chat_id": record.chat_id,
+                "message_id": segment.message_id,
+                "caption": caption,
+                "reply_markup": None,
+            }
+            if parse_mode:
+                kwargs["parse_mode"] = parse_mode
+            await application.bot.edit_message_caption(**kwargs)
+        else:
+            await application.bot.edit_message_text(
+                chat_id=record.chat_id,
+                message_id=segment.message_id,
+                text=text,
+                reply_markup=None,
+            )
+    except Exception as exc:
+        if not _message_not_modified(exc):
+            _log(
+                "warn",
+                "迟到的 Telegram 点击反馈完成后未能恢复任务消息："
+                f"operation_id={segment.operation_id}, "
+                f"segment_id={segment.segment_id}, "
+                f"message_id={segment.message_id}, "
+                f"error={_render_error(exc)}",
+            )
+    return segment.message_id
+
+
 async def _render_operation_segment_locked(
     application,
     router,
@@ -1473,6 +1732,13 @@ async def _render_operation_segment_locked(
     ):
         return None
     if segment.state == "delivery_uncertain":
+        return segment.message_id
+    if segment.delivery_state == "delivering":
+        coordinator.mark_segment_delivery_uncertain(
+            segment.segment_id,
+            owner_plugin_id=segment.owner_plugin_id,
+            generation=segment.generation,
+        )
         return segment.message_id
     if (
         segment.state == "sealing"
@@ -1541,7 +1807,19 @@ async def _render_operation_segment_locked(
         record = coordinator.get(operation_id)
         if segment is None or record is None or segment.message_id is None:
             return None
-        if segment.rendered_revision >= segment.business_revision:
+        if segment.state == "delivery_uncertain":
+            return segment.message_id
+        if segment.delivery_state == "delivering":
+            coordinator.mark_segment_delivery_uncertain(
+                segment.segment_id,
+                owner_plugin_id=segment.owner_plugin_id,
+                generation=segment.generation,
+            )
+            return segment.message_id
+        if (
+            segment.rendered_revision >= segment.business_revision
+            and segment.rendered_projection_hash == segment.projection_hash
+        ):
             if segment.state == "sealing":
                 await _clear_segment_controls(application, record, segment)
                 segment = coordinator.complete_segment_seal(
@@ -1585,6 +1863,13 @@ async def _render_operation_segment_locked(
         )
         if rendered is None:
             continue
+        if rendered.state == "sealing":
+            sealed = coordinator.complete_segment_seal(
+                rendered.segment_id,
+                owner_plugin_id=rendered.owner_plugin_id,
+                generation=rendered.generation,
+            )
+            return sealed.message_id
 
 
 async def _clear_segment_controls(application, record, segment):
@@ -1648,7 +1933,11 @@ async def _edit_segment_message(application, router, record, segment):
     text = record.status_text or (
         f"任务状态：{record.state}\n阶段：{record.stage or '-'}"
     )
-    markup = operation_markup(record, router, segment=segment)
+    markup = (
+        {"inline_keyboard": []}
+        if segment.state == "sealing"
+        else operation_markup(record, router, segment=segment)
+    )
     if segment.presentation_kind == "text":
         try:
             await application.bot.edit_message_text(
@@ -1737,25 +2026,60 @@ async def _promote_segment_text_to_photo(
     }
     if parse_mode:
         kwargs["parse_mode"] = parse_mode
-    message = await application.bot.send_photo(**kwargs)
+    coordinator = application.bot_data.get(COORDINATOR_KEY)
+    if coordinator is None:
+        raise RuntimeError("operation coordinator is unavailable")
+    claimed = coordinator.claim_segment_replacement_delivery(
+        segment.segment_id,
+        owner_plugin_id=segment.owner_plugin_id,
+        generation=segment.generation,
+        chat_id=record.chat_id,
+        expected_message_id=segment.message_id,
+        expected_message_kind="text",
+    )
+    if claimed is None:
+        current = coordinator.get_segment(segment.segment_id)
+        if current is not None and current.delivery_state == "delivering":
+            coordinator.mark_segment_delivery_uncertain(
+                current.segment_id,
+                owner_plugin_id=current.owner_plugin_id,
+                generation=current.generation,
+            )
+        raise RuntimeError("segment photo promotion lost its delivery claim")
+    try:
+        message = await application.bot.send_photo(**kwargs)
+    except asyncio.CancelledError:
+        coordinator.mark_segment_delivery_uncertain(
+            claimed.segment_id,
+            owner_plugin_id=claimed.owner_plugin_id,
+            generation=claimed.generation,
+        )
+        raise
+    except Exception:
+        coordinator.mark_segment_delivery_uncertain(
+            claimed.segment_id,
+            owner_plugin_id=claimed.owner_plugin_id,
+            generation=claimed.generation,
+        )
+        raise
     message_id = getattr(message, "message_id", None)
     if not isinstance(message_id, int) or message_id <= 0:
+        coordinator.mark_segment_delivery_uncertain(
+            claimed.segment_id,
+            owner_plugin_id=claimed.owner_plugin_id,
+            generation=claimed.generation,
+        )
         raise RuntimeError("promoted segment photo has no Telegram message id")
-    coordinator = application.bot_data.get(COORDINATOR_KEY)
     try:
-        promoted = (
-            coordinator.replace_segment_message(
-                segment.segment_id,
-                owner_plugin_id=segment.owner_plugin_id,
-                generation=segment.generation,
-                chat_id=record.chat_id,
-                expected_message_id=segment.message_id,
-                expected_message_kind="text",
-                message_id=message_id,
-                message_kind="photo",
-            )
-            if coordinator is not None
-            else None
+        promoted = coordinator.replace_segment_message(
+            claimed.segment_id,
+            owner_plugin_id=claimed.owner_plugin_id,
+            generation=claimed.generation,
+            chat_id=record.chat_id,
+            expected_message_id=segment.message_id,
+            expected_message_kind="text",
+            message_id=message_id,
+            message_kind="photo",
         )
     except Exception:
         await _discard_unbound_segment_message(
@@ -1763,12 +2087,25 @@ async def _promote_segment_text_to_photo(
             record.chat_id,
             message_id,
         )
+        try:
+            coordinator.mark_segment_delivery_uncertain(
+                claimed.segment_id,
+                owner_plugin_id=claimed.owner_plugin_id,
+                generation=claimed.generation,
+            )
+        except Exception:
+            pass
         raise
     if promoted is None:
         await _discard_unbound_segment_message(
             application,
             record.chat_id,
             message_id,
+        )
+        coordinator.mark_segment_delivery_uncertain(
+            claimed.segment_id,
+            owner_plugin_id=claimed.owner_plugin_id,
+            generation=claimed.generation,
         )
         raise RuntimeError("segment photo promotion lost its active cursor")
     await _discard_replaced_segment_message(

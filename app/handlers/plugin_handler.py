@@ -575,33 +575,30 @@ async def dynamic_command_gateway(update, context):
 
 async def dynamic_callback_gateway(update, context):
     query = update.callback_query
-    if not init.check_user(update.effective_user.id):
-        return
     coordinator = context.application.bot_data.get(COORDINATOR_KEY)
-    data = callback_dispatch_data(
-        update,
-        coordinator,
-    )
-    if data is None:
-        await query.answer(text="当前任务进行中")
-        return
-    try:
-        await query.answer(text="处理中...")
-    except Exception:
-        pass
-
-    release_attempted = False
+    encoded_data = str(getattr(query, "data", "") or "")
+    release_task = None
+    release_completed = False
     released_segment = None
 
     async def release_claim():
-        nonlocal release_attempted, released_segment
-        if not release_attempted:
-            release_attempted = True
-            released_segment = await release_callback_dispatch(
-                update,
-                context.application,
-                coordinator,
+        nonlocal release_task, release_completed, released_segment
+        if release_completed:
+            return released_segment
+        if release_task is None:
+            release_task = asyncio.create_task(
+                release_callback_dispatch(
+                    update,
+                    context.application,
+                    coordinator,
+                ),
+                name=(
+                    "telepiplex-callback-release-"
+                    f"{getattr(update, 'update_id', '')}"
+                ),
             )
+        released_segment = await asyncio.shield(release_task)
+        release_completed = True
         return released_segment
 
     async def rerender_released_segment():
@@ -619,41 +616,53 @@ async def dynamic_callback_gateway(update, context):
             current,
         )
 
-    namespace, separator, payload = data.partition(":")
-    if not separator:
-        await release_claim()
-        await rerender_released_segment()
-        return
-    router = context.application.bot_data.get(ROUTER_KEY)
-    route = router.callback_route(namespace) if router is not None else None
-    if route is None:
-        await release_claim()
-        await rerender_released_segment()
-        return
     try:
-        result = await route.client.request(
-            "callback.dispatch",
-            {
-                "namespace": namespace,
-                "payload": payload,
-                "user_id": update.effective_user.id,
-                "chat_id": update.effective_chat.id,
-                "update_id": getattr(update, "update_id", None),
-            },
-            deadline=30,
-            idempotency_key=f"telegram:{getattr(update, 'update_id', '')}",
-        )
-        await release_claim()
-        await handle_feature_result(update, context, route, result)
-    except Exception as exc:
-        await release_claim()
-        code = getattr(exc, "code", "feature_callback_failed")
-        await _feature_feedback(
+        if not init.check_user(update.effective_user.id):
+            return
+        data = callback_dispatch_data(
             update,
-            f"❌ {code}：{_safe_error(exc)}",
-            prefer_edit=True,
+            coordinator,
         )
+        if data is None:
+            return
+        if data == encoded_data:
+            try:
+                await query.answer(text="处理中...")
+            except Exception:
+                pass
+
+        namespace, separator, payload = data.partition(":")
+        if not separator:
+            return
+        router = context.application.bot_data.get(ROUTER_KEY)
+        route = router.callback_route(namespace) if router is not None else None
+        if route is None:
+            return
+        try:
+            result = await route.client.request(
+                "callback.dispatch",
+                {
+                    "namespace": namespace,
+                    "payload": payload,
+                    "user_id": update.effective_user.id,
+                    "chat_id": update.effective_chat.id,
+                    "update_id": getattr(update, "update_id", None),
+                },
+                deadline=30,
+                idempotency_key=f"telegram:{getattr(update, 'update_id', '')}",
+            )
+            await release_claim()
+            await handle_feature_result(update, context, route, result)
+        except Exception as exc:
+            await release_claim()
+            code = getattr(exc, "code", "feature_callback_failed")
+            await _feature_feedback(
+                update,
+                f"❌ {code}：{_safe_error(exc)}",
+                prefer_edit=True,
+            )
     finally:
+        await release_claim()
         await rerender_released_segment()
 
 

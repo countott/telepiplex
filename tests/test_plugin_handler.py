@@ -1780,6 +1780,179 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         )
         update.effective_message.edit_text.assert_awaited_once()
 
+    async def test_encoded_callback_cancellation_always_releases_claim(self):
+        from app.handlers.plugin_handler import dynamic_callback_gateway
+
+        client = SimpleNamespace(
+            request=AsyncMock(side_effect=asyncio.CancelledError()),
+        )
+        router = Mock()
+        router.callback_route.return_value = SimpleNamespace(
+            plugin_id="search",
+            client=client,
+        )
+        update = SimpleNamespace(
+            update_id=100,
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=10),
+            callback_query=SimpleNamespace(
+                data="~1.1~search:select:p1:0",
+                answer=AsyncMock(),
+            ),
+        )
+        context = SimpleNamespace(application=SimpleNamespace(bot_data={
+            "telepiplex_plugin_router": router,
+            "telepiplex_interaction_coordinator": Mock(),
+        }))
+        release = AsyncMock(return_value=None)
+
+        with (
+            patch(
+                "app.handlers.plugin_handler.init.check_user",
+                return_value=True,
+            ),
+            patch(
+                "app.handlers.plugin_handler.callback_dispatch_data",
+                return_value="search:select:p1:0",
+            ),
+            patch(
+                "app.handlers.plugin_handler.release_callback_dispatch",
+                release,
+            ),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await dynamic_callback_gateway(update, context)
+
+        release.assert_awaited_once()
+        update.callback_query.answer.assert_not_awaited()
+
+    async def test_callback_cancelled_while_release_waits_still_finishes_release(self):
+        from app.handlers.plugin_handler import dynamic_callback_gateway
+
+        client = SimpleNamespace(
+            request=AsyncMock(return_value={"actions": []}),
+        )
+        router = Mock()
+        router.callback_route.return_value = SimpleNamespace(
+            plugin_id="search",
+            client=client,
+        )
+        update = SimpleNamespace(
+            update_id=100,
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=10),
+            callback_query=SimpleNamespace(
+                data="~1.1~search:select:p1:0",
+                answer=AsyncMock(),
+            ),
+        )
+        context = SimpleNamespace(application=SimpleNamespace(bot_data={
+            "telepiplex_plugin_router": router,
+            "telepiplex_interaction_coordinator": Mock(),
+        }))
+        release_started = asyncio.Event()
+        release_allowed = asyncio.Event()
+        release_calls = 0
+
+        async def blocked_release(*_args):
+            nonlocal release_calls
+            release_calls += 1
+            release_started.set()
+            await release_allowed.wait()
+            return None
+
+        with (
+            patch(
+                "app.handlers.plugin_handler.init.check_user",
+                return_value=True,
+            ),
+            patch(
+                "app.handlers.plugin_handler.callback_dispatch_data",
+                return_value="search:select:p1:0",
+            ),
+            patch(
+                "app.handlers.plugin_handler.release_callback_dispatch",
+                side_effect=blocked_release,
+            ),
+        ):
+            gateway = asyncio.create_task(
+                dynamic_callback_gateway(update, context)
+            )
+            await release_started.wait()
+            gateway.cancel()
+            await asyncio.sleep(0)
+            cancelled_before_release = gateway.done()
+            release_allowed.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await gateway
+
+        self.assertFalse(cancelled_before_release)
+        self.assertEqual(release_calls, 1)
+
+    async def test_encoded_callback_auth_change_releases_claim(self):
+        from app.handlers.plugin_handler import dynamic_callback_gateway
+
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            callback_query=SimpleNamespace(
+                data="~1.1~search:select:p1:0",
+                answer=AsyncMock(),
+            ),
+        )
+        context = SimpleNamespace(application=SimpleNamespace(bot_data={
+            "telepiplex_interaction_coordinator": Mock(),
+        }))
+        release = AsyncMock(return_value=None)
+
+        with (
+            patch(
+                "app.handlers.plugin_handler.init.check_user",
+                return_value=False,
+            ),
+            patch(
+                "app.handlers.plugin_handler.release_callback_dispatch",
+                release,
+            ),
+        ):
+            await dynamic_callback_gateway(update, context)
+
+        release.assert_awaited_once()
+        update.callback_query.answer.assert_not_awaited()
+
+    async def test_encoded_callback_state_change_does_not_answer_twice(self):
+        from app.handlers.plugin_handler import dynamic_callback_gateway
+
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            callback_query=SimpleNamespace(
+                data="~1.1~search:select:p1:0",
+                answer=AsyncMock(),
+            ),
+        )
+        context = SimpleNamespace(application=SimpleNamespace(bot_data={
+            "telepiplex_interaction_coordinator": Mock(),
+        }))
+        release = AsyncMock(return_value=None)
+
+        with (
+            patch(
+                "app.handlers.plugin_handler.init.check_user",
+                return_value=True,
+            ),
+            patch(
+                "app.handlers.plugin_handler.callback_dispatch_data",
+                return_value=None,
+            ),
+            patch(
+                "app.handlers.plugin_handler.release_callback_dispatch",
+                release,
+            ),
+        ):
+            await dynamic_callback_gateway(update, context)
+
+        release.assert_awaited_once()
+        update.callback_query.answer.assert_not_awaited()
+
     async def test_manager_error_is_sanitized_and_does_not_escape_handler(self):
         from app.runtime.plugin_manager import PluginOperationError
         from app.handlers.plugin_handler import plugin_command

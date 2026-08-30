@@ -2881,7 +2881,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(host.storage.offsets, [0, 1000])
 
-    async def test_ambiguous_magnet_with_colon_job_id_resumes_same_job(self):
+    async def test_ambiguous_s02_magnet_confirms_same_scope_before_storage(self):
         from telepiplex_rename.jobs import RenameJobStore
 
         class AmbiguousHost(FakeHost):
@@ -2889,6 +2889,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 self, capability, method, payload, **kwargs
             ):
                 if capability == "media.search" and method == "resolve_metadata":
+                    self.metadata_payload = payload
                     return {
                         "status": "confirmation_required",
                         "resolution_id": "resolution-ambiguous-1",
@@ -2896,37 +2897,44 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                         "probe": payload["probe"],
                         "candidates": [{
                             "ref": "douban:1",
-                            "title": "中文电影甲",
-                            "original_title": "English Movie A",
-                            "year": "2024",
-                            "countries": ["美国"],
-                            "media_type": "movie",
+                            "title": "游戏人生",
+                            "original_title": "No Game, No Life",
+                            "year": "2014",
+                            "countries": ["日本"],
+                            "media_type": "series",
                             "poster_url": "https://img.example/a.jpg",
                         }, {
                             "ref": "douban:2",
-                            "title": "中文电影乙",
-                            "original_title": "English Movie B",
-                            "year": "2024",
-                            "countries": ["英国"],
-                            "media_type": "movie",
+                            "title": "游戏人生 ZERO",
+                            "original_title": "No Game, No Life Zero",
+                            "year": "2017",
+                            "countries": ["日本"],
+                            "media_type": "series",
                             "poster_url": "https://img.example/b.jpg",
                         }],
                     }
                 if capability == "media.search" and method == "confirm_metadata":
                     self.confirm_payload = payload
+                    confirmed = series_contract_v2()
+                    confirmed["scope"] = {
+                        "kind": "episode",
+                        "season_number": 2,
+                        "episode_number": 1,
+                    }
+                    confirmed["metadata_id"] = build_media_metadata_v2_id(
+                        confirmed
+                    )
                     return {
                         "status": "resolved",
-                        "media_metadata": movie_contract_v2(),
-                        "naming_metadata": {
-                            "source": "search",
-                            "media_type": "movie",
-                            "chinese_title": "中文电影乙",
-                            "english_title": "English Movie B",
-                            "year": "2024",
-                        },
+                        "media_metadata": confirmed,
                         "presentation": {
                             "milestone_id": "media-confirmed-b",
-                            "text": "🎬 中文电影乙 (English Movie B)",
+                            "text": (
+                                "游戏人生 (No Game, No Life)\n"
+                                "2014｜日本｜剧集｜S02E01\n"
+                                "来源：豆瓣\n"
+                                "已确认身份，开始搜索"
+                            ),
                             "photo_url": "https://img.example/b.jpg",
                         },
                     }
@@ -2935,7 +2943,12 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            host = AmbiguousHost()
+            host = AmbiguousHost(EmptyAfterMoveStorage([{
+                "fn": "No.Game.No.Life.S02E01.mkv",
+                "fid": "s02e01",
+                "fc": "1",
+                "fs": 1000,
+            }]))
             jobs_path = Path(tmpdir) / "jobs.db"
             jobs = RenameJobStore(jobs_path)
             feature = RenameFeature(
@@ -2953,18 +2966,18 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "event_id": "event-ambiguous",
                 "payload": {
                     "job_id": "telegram:219358366",
-                    "selected_path": "/Movies",
+                    "selected_path": "/Series",
                     "user_id": 123,
                     "chat_id": 10,
-                    "download_root": "/Downloads/Movie.2024.mkv",
-                    "final_path": "/Downloads/Movie.2024.mkv",
-                    "resource_name": "Movie.2024.mkv",
+                    "download_root": "/Downloads/No.Game.No.Life.S02E01.mkv",
+                    "final_path": "/Downloads/No.Game.No.Life.S02E01.mkv",
+                    "resource_name": "No.Game.No.Life.S02E01.mkv",
                     "operation_id": "op-ambiguous",
                     "operation_revision": 2,
                     "file_tree": [{
-                        "name": "Movie.2024.mkv",
-                        "relative_path": "Movie.2024.mkv",
-                        "path": "/Downloads/Movie.2024.mkv",
+                        "name": "No.Game.No.Life.S02E01.mkv",
+                        "relative_path": "No.Game.No.Life.S02E01.mkv",
+                        "path": "/Downloads/No.Game.No.Life.S02E01.mkv",
                         "is_dir": False,
                         "size": 1000,
                     }],
@@ -2974,7 +2987,17 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
 
             waiting = jobs.get("telegram:219358366")
             self.assertEqual(waiting["state"], "awaiting_metadata")
+            self.assertEqual(
+                host.metadata_payload["probe"]["observed_seasons"],
+                [2],
+            )
+            self.assertEqual(
+                host.metadata_payload["probe"]["observed_episodes"],
+                [{"season_number": 2, "episode_number": 1}],
+            )
             self.assertEqual(host.storage.renamed, [])
+            self.assertEqual(host.storage.moved, [])
+            self.assertEqual(host.storage.deleted, [])
             self.assertEqual(host.reports[-1]["state"], "awaiting_input")
             callback_data = host.reports[-1]["details"]["keyboard"][1][0][
                 "callback_data"
@@ -3010,6 +3033,10 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "user_id": 123,
             })
             self.assertEqual(resumed["operation"]["state"], "running")
+            self.assertEqual(
+                resumed["operation"]["status_text"],
+                "正在确认媒体身份",
+            )
             await restored_runtime.wait()
 
             self.assertEqual(host.confirm_payload["candidate_ref"], "douban:2")
@@ -3017,15 +3044,42 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 host.confirm_payload["resolution_id"],
                 "resolution-ambiguous-1",
             )
-            identity_milestones = [
-                item
-                for item in host.milestones
-                if item["mode"] == "identity"
-            ]
-            self.assertEqual(len(identity_milestones), 1)
+            self.assertEqual(
+                host.confirm_payload["probe"]["observed_seasons"],
+                [2],
+            )
+            self.assertEqual(host.milestones, [])
             self.assertEqual(
                 host.storage.renamed[0][0],
-                "/Downloads/Movie.2024.mkv",
+                "/Downloads/No.Game.No.Life.S02E01.mkv",
+            )
+            self.assertEqual(
+                host.storage.moved[0][1],
+                "/Series/游戏人生 (No Game, No Life)/No Game, No Life Season 02",
+            )
+            confirmed = restored.jobs.get(
+                "telegram:219358366"
+            )["result"]["event_payload"]["media_metadata"]
+            self.assertEqual(confirmed["scope"], {
+                "kind": "episode",
+                "season_number": 2,
+                "episode_number": 1,
+            })
+            self.assertTrue(any(
+                report["status_text"].endswith("已确认身份，开始整理")
+                for report in host.reports
+            ))
+            self.assertTrue(all(
+                report["segment"] == {
+                    "role": "rename",
+                    "presentation_kind": "text",
+                }
+                for report in host.reports
+                if report.get("operation_id") == "op-ambiguous"
+            ))
+            self.assertNotIn(
+                "provider_season_number",
+                repr(host.confirm_payload),
             )
             self.assertEqual(
                 restored.jobs.get("telegram:219358366")["state"],
@@ -3770,7 +3824,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             )
             feature.bind_runtime(runtime)
 
-            await feature.download_completed({
+            accepted = await feature.download_completed({
                 "event_id": "event-m-recovery-v2",
                 "payload": {
                     "job_id": "job-m-recovery-v2",
@@ -3787,6 +3841,10 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                     "operation_revision": 8,
                 },
             })
+            self.assertEqual(
+                accepted["operation"]["status_text"],
+                "正在确认媒体身份",
+            )
             await runtime.wait()
 
             saved = jobs.get("job-m-recovery-v2")
@@ -3808,6 +3866,20 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 terminal[0]["details"]["effect_receipt"]["receipt"]["final_path"],
                 "/Series/游戏人生 (No Game, No Life)",
             )
+            self.assertEqual(host.milestones, [])
+            identity_reports = [
+                report for report in host.reports
+                if report["status_text"].endswith("已确认身份，开始整理")
+            ]
+            self.assertEqual(len(identity_reports), 1, host.reports)
+            self.assertNotIn("开始搜索", identity_reports[0]["status_text"])
+            self.assertTrue(all(
+                report["segment"] == {
+                    "role": "rename",
+                    "presentation_kind": "text",
+                }
+                for report in host.reports
+            ))
 
     async def test_upstream_identity_starts_new_rename_message_without_repeat(self):
         host = FakeHost(EmptyAfterMoveStorage([
@@ -3845,7 +3917,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             ("report", "running", "organizing"),
         )
 
-    async def test_resolved_identity_seals_before_new_organization_message(self):
+    async def test_resolved_identity_edits_same_rename_segment_before_organization(self):
         host = FakeHost()
         runtime = FakeRuntime()
         feature = RenameFeature(
@@ -3879,18 +3951,25 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         identity_index = next(
             index for index, item in enumerate(host.timeline)
-            if item[:2] == ("milestone", "identity")
-        )
-        identity_stage_index = host.timeline.index(
-            ("report", "running", "identity_confirmation")
+            if item == ("report", "running", "identity_confirmation")
         )
         organizing_index = host.timeline.index(
             ("report", "running", "organizing")
         )
-        self.assertLess(identity_stage_index, identity_index)
         self.assertLess(identity_index, organizing_index)
+        self.assertEqual(host.milestones, [])
+        identity_report = next(
+            report for report in host.reports
+            if report["stage"] == "identity_confirmation"
+        )
+        self.assertTrue(
+            identity_report["status_text"].endswith(
+                "已确认身份，开始整理"
+            )
+        )
+        self.assertNotIn("开始搜索", identity_report["status_text"])
 
-    async def test_lost_rename_identity_response_retries_same_milestone(self):
+    async def test_lost_rename_identity_report_retries_same_revision(self):
         from telepiplex_plugin_sdk import FeatureError
 
         host = FakeHost()
@@ -3898,53 +3977,58 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             config={"unorganized_path": "/Unorganized"},
             host=host,
         )
-        original_publish = host.publish_operation_milestone
+        feature._new_operation(
+            {"chat_id": 10, "user_id": 123},
+            state="running",
+            stage="metadata_resolution",
+            status_text="正在确认媒体身份",
+            control="cancel",
+            kind="organization",
+        )
+        operation_id = next(iter(feature.operations))
+        original_report = host.report_operation
         attempts = []
 
-        async def accept_then_lose(
-            operation_id,
-            milestone_id,
-            text,
-            *,
-            photo_url="",
-            mode="identity",
-            deadline=10,
-        ):
-            attempts.append(milestone_id)
-            response = await original_publish(
-                operation_id,
-                milestone_id,
-                text,
-                photo_url=photo_url,
-                mode=mode,
-                deadline=deadline,
-            )
+        async def accept_then_lose(report):
+            attempts.append(dict(report))
+            response = await original_report(report)
             if len(attempts) == 1:
                 raise FeatureError(
                     "internal_error",
-                    "Host milestone bookkeeping was interrupted",
+                    "Host operation report bookkeeping was interrupted",
                 )
-            return {**response, "accepted": False, "duplicate": True}
+            return response
 
-        host.publish_operation_milestone = accept_then_lose
+        host.report_operation = accept_then_lose
         payload = {
             "_metadata_presentation": {
                 "milestone_id": "rename-identity-lost-response",
-                "text": "🎬 中文电影 (English Movie)",
+                "text": (
+                    "🎬 中文电影 (English Movie)\n"
+                    "2024｜美国｜电影｜电影\n"
+                    "来源：豆瓣\n"
+                    "已确认身份，开始搜索"
+                ),
                 "photo_url": "https://img.example/movie.jpg",
             },
         }
 
         published = await feature._publish_metadata_identity(
             payload,
-            "op-rename-identity-lost-response",
+            operation_id,
         )
 
         self.assertTrue(published)
-        self.assertEqual(attempts, [attempts[0], attempts[0]])
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0], attempts[1])
+        self.assertTrue(attempts[0]["status_text"].endswith(
+            "已确认身份，开始整理"
+        ))
+        self.assertNotIn("开始搜索", attempts[0]["status_text"])
+        self.assertEqual(host.milestones, [])
         self.assertTrue(payload["_metadata_identity_published"])
 
-    async def test_rejected_rename_identity_milestone_is_not_retried(self):
+    async def test_rejected_rename_identity_report_is_not_retried(self):
         from telepiplex_plugin_sdk import FeatureError
 
         host = FakeHost()
@@ -3952,6 +4036,15 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             config={"unorganized_path": "/Unorganized"},
             host=host,
         )
+        feature._new_operation(
+            {"chat_id": 10, "user_id": 123},
+            state="running",
+            stage="metadata_resolution",
+            status_text="正在确认媒体身份",
+            control="cancel",
+            kind="organization",
+        )
+        operation_id = next(iter(feature.operations))
         attempts = []
 
         async def reject_owner(*_args, **_kwargs):
@@ -3961,7 +4054,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "operation belongs to another Feature",
             )
 
-        host.publish_operation_milestone = reject_owner
+        host.report_operation = reject_owner
         payload = {
             "_metadata_presentation": {
                 "milestone_id": "rename-identity-rejected",
@@ -3973,11 +4066,12 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(FeatureError) as raised:
             await feature._publish_metadata_identity(
                 payload,
-                "op-rename-identity-rejected",
+                operation_id,
             )
 
         self.assertEqual(raised.exception.code, "owner_mismatch")
         self.assertEqual(attempts, ["owner_mismatch"])
+        self.assertEqual(host.milestones, [])
 
     async def test_rename_completes_without_sync_handoff_or_organized_event(self):
         storage = EmptyAfterMoveStorage([
@@ -4220,15 +4314,15 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("|", host.metadata_payload["query"])
         self.assertNotIn("1080p", host.metadata_payload["query"])
-        self.assertEqual(
-            len([
-                item
-                for item in host.milestones
-                if item["mode"] == "identity"
-            ]),
-            1,
+        self.assertEqual(host.milestones, [])
+        identity_report = next(
+            report for report in host.reports
+            if report["stage"] == "identity_confirmation"
         )
-        self.assertIn("中文电影 (English Movie)", host.milestones[0]["text"])
+        self.assertIn("中文电影 (English Movie)", identity_report["status_text"])
+        self.assertTrue(identity_report["status_text"].endswith(
+            "已确认身份，开始整理"
+        ))
         self.assertEqual(
             host.storage.renamed[0][0],
             "/Downloads/Movie.2024.mkv",
@@ -5657,9 +5751,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "2.0.0")
+        self.assertEqual(manifest["version"], "2.0.1")
         self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
-        self.assertIn('version = "2.0.0"', project)
+        self.assertIn('version = "2.0.1"', project)
         self.assertIn('telepiplex-plugin-sdk==2.0.0', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
@@ -5675,8 +5769,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-2.0.0.tpx", source)
-        self.assertNotIn("dist/rename-2.0.0.tpx", source)
+        self.assertIn("/tmp/rename-2.0.1.tpx", source)
+        self.assertNotIn("dist/rename-2.0.1.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

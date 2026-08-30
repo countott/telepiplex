@@ -59,8 +59,10 @@ from app.handlers.interaction_handler import (
     CONTROL_CALLBACK_PATTERN,
     OPERATION_RECOVERY_TASK_KEY,
     OperationMilestoneSink,
+    OperationProjectionLifecycle,
     OperationReportSink,
     deliver_operation_milestone,
+    drain_callback_feedback,
     operation_control_callback,
     operation_gate,
     operation_render_lock,
@@ -99,7 +101,7 @@ DEFAULT_PLUGIN_CATALOG_URL = (
 
 
 def get_version(md_format=False):
-    version = "v3.6.5-host"
+    version = "v3.6.6-host"
     if md_format:
         return escape_markdown(version, version=2)
     return version
@@ -173,6 +175,10 @@ def build_plugin_manager(config=None, host_database=None):
             message=text,
         ),
     )
+    projection_lifecycle = OperationProjectionLifecycle(
+        operation_sink,
+        milestone_sink,
+    )
     runtime_root = Path(str(plugin_config.get("runtime_root") or "/tmp/telepiplex"))
     dispatcher = EventDispatcher(
         router,
@@ -194,6 +200,7 @@ def build_plugin_manager(config=None, host_database=None):
         ),
         milestone_sink=milestone_sink,
         operation_sink=operation_sink,
+        projection_lifecycle=projection_lifecycle,
         operation_coordinator=coordinator,
         logger=init.logger,
     )
@@ -678,6 +685,14 @@ async def run_application_polling(application, after_start=None, stop_event=None
             except asyncio.CancelledError:
                 pass
         manager = bot_data.get("telepiplex_plugin_manager") if isinstance(bot_data, dict) else None
+        await drain_callback_feedback(
+            application,
+            timeout=(
+                float(getattr(manager, "drain_timeout", 120))
+                if manager is not None
+                else 120
+            ),
+        )
         if manager is not None:
             await manager.close()
         await application.shutdown()
@@ -689,30 +704,43 @@ def configure_application(application, manager):
     coordinator = getattr(manager, "interaction_coordinator", None)
     if coordinator is not None:
         application.bot_data[COORDINATOR_KEY] = coordinator
-        operation_sink = getattr(getattr(manager, "broker", None), "operation_sink", None)
-        if hasattr(operation_sink, "attach"):
-            operation_sink.attach(
-                lambda record: render_operation(application, manager.router, record)
+        broker = getattr(manager, "broker", None)
+        operation_delivery = lambda record: render_operation(
+            application,
+            manager.router,
+            record,
+        )
+        milestone_delivery = (
+            lambda record, mode, photo_url, text: deliver_operation_milestone(
+                application,
+                record,
+                mode,
+                photo_url,
+                text,
             )
-        milestone_sink = getattr(
-            getattr(manager, "broker", None),
-            "milestone_sink",
+        )
+        lock_factory = lambda operation_id: operation_render_lock(
+            application,
+            operation_id,
+        )
+        projection_lifecycle = getattr(
+            broker,
+            "projection_lifecycle",
             None,
         )
-        if hasattr(milestone_sink, "attach"):
-            milestone_sink.attach(
-                lambda record, mode, photo_url, text: deliver_operation_milestone(
-                    application,
-                    record,
-                    mode,
-                    photo_url,
-                    text,
-                ),
-                lambda operation_id: operation_render_lock(
-                    application,
-                    operation_id,
-                ),
+        if hasattr(projection_lifecycle, "attach"):
+            projection_lifecycle.attach(
+                operation_delivery,
+                milestone_delivery,
+                lock_factory,
             )
+        else:
+            operation_sink = getattr(broker, "operation_sink", None)
+            if hasattr(operation_sink, "attach"):
+                operation_sink.attach(operation_delivery)
+            milestone_sink = getattr(broker, "milestone_sink", None)
+            if hasattr(milestone_sink, "attach"):
+                milestone_sink.attach(milestone_delivery, lock_factory)
         async def reconcile_after_feature_restart(_process):
             recovery = await recover_active_operations(
                 application,
@@ -751,11 +779,14 @@ def configure_application(application, manager):
 
 
 async def start_host_runtime(application, manager):
-    milestone_sink = getattr(
-        getattr(manager, "broker", None), "milestone_sink", None
-    )
-    if hasattr(milestone_sink, "start"):
-        await milestone_sink.start()
+    broker = getattr(manager, "broker", None)
+    projection_lifecycle = getattr(broker, "projection_lifecycle", None)
+    if hasattr(projection_lifecycle, "start"):
+        await projection_lifecycle.start()
+    else:
+        milestone_sink = getattr(broker, "milestone_sink", None)
+        if hasattr(milestone_sink, "start"):
+            await milestone_sink.start()
     await manager.start()
     coordinator = getattr(manager, "interaction_coordinator", None)
     if coordinator is not None:

@@ -529,17 +529,33 @@ def resolve_direct_link(link: MetadataLink) -> DirectEntity:
             media_type,
         )
         english_title, english_season = clean_douban_series_title(
-            fact.get("english_title") or fact.get("original_title"),
+            fact.get("english_title"),
             media_type,
         )
-        season_number = season_number or chinese_season or english_season or 0
-        display_title = chinese_title or english_title
-        search_title = english_title or display_title
+        (
+            source_original_title,
+            source_original_season,
+        ) = clean_douban_series_title(
+            fact.get("source_original_title"),
+            media_type,
+        )
+        season_number = (
+            season_number
+            or chinese_season
+            or english_season
+            or source_original_season
+            or 0
+        )
+        display_title = chinese_title or english_title or source_original_title
+        search_title = english_title or source_original_title or display_title
         if not display_title:
             raise DirectLinkError("direct_link_invalid")
         normalized_fact = dict(fact)
         normalized_fact["chinese_title"] = chinese_title
         normalized_fact["title"] = display_title
+        normalized_fact["original_title"] = ""
+        if source_original_title:
+            normalized_fact["source_original_title"] = source_original_title
         if english_title:
             normalized_fact["english_title"] = english_title
             normalized_fact["official_english_title"] = english_title

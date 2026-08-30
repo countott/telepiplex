@@ -26,10 +26,10 @@ def load_bot_module():
 
 
 class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
-    async def test_core_runtime_version_is_v3_6_4_host(self):
+    async def test_core_runtime_version_is_v3_6_6_host(self):
         bot_module = await asyncio.to_thread(load_bot_module)
 
-        self.assertEqual(bot_module.get_version(), "v3.6.5-host")
+        self.assertEqual(bot_module.get_version(), "v3.6.6-host")
 
     async def test_uncaught_telegram_error_uses_the_same_sanitized_incident_in_frontend_and_machine_log(self):
         from app.utils.logger import Logger
@@ -171,6 +171,14 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(manager.broker.operation_sink)
             self.assertIsNotNone(manager.broker.milestone_sink)
             self.assertIs(
+                manager.broker.projection_lifecycle.operation_sink,
+                manager.broker.operation_sink,
+            )
+            self.assertIs(
+                manager.broker.projection_lifecycle.milestone_sink,
+                manager.broker.milestone_sink,
+            )
+            self.assertIs(
                 manager.broker.operation_coordinator,
                 manager.interaction_coordinator,
             )
@@ -201,8 +209,11 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
                 add_handler=Mock(),
                 add_error_handler=Mock(),
             )
+            attach = manager.broker.projection_lifecycle.attach
+            manager.broker.projection_lifecycle.attach = Mock(wraps=attach)
 
             bot_module.configure_application(application, manager)
+            manager.broker.projection_lifecycle.attach.assert_called_once()
             first_lock = manager.broker.milestone_sink.lock_factory("op-lock")
             second_lock = manager.broker.milestone_sink.lock_factory("op-lock")
 
@@ -211,16 +222,23 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(manager.broker.milestone_sink._started)
             self.assertEqual(manager.broker.milestone_sink._tasks, set())
 
-    async def test_start_host_runtime_starts_milestone_recovery_on_running_loop(self):
+    async def test_start_host_runtime_starts_projection_lifecycle_on_running_loop(self):
         bot_module = await asyncio.to_thread(load_bot_module)
         calls = []
 
+        class ProjectionLifecycle:
+            async def start(self):
+                calls.append(("projection", asyncio.get_running_loop()))
+
         class MilestoneSink:
             async def start(self):
-                calls.append(("milestone", asyncio.get_running_loop()))
+                calls.append(("legacy-milestone", asyncio.get_running_loop()))
 
         manager = SimpleNamespace(
-            broker=SimpleNamespace(milestone_sink=MilestoneSink()),
+            broker=SimpleNamespace(
+                projection_lifecycle=ProjectionLifecycle(),
+                milestone_sink=MilestoneSink(),
+            ),
             start=AsyncMock(side_effect=lambda: calls.append(("manager", None))),
             available_updates=AsyncMock(return_value=[]),
             interaction_coordinator=None,
@@ -246,7 +264,7 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await monitor
 
-        self.assertEqual([item[0] for item in calls], ["milestone", "manager"])
+        self.assertEqual([item[0] for item in calls], ["projection", "manager"])
         self.assertIs(calls[0][1], asyncio.get_running_loop())
 
     async def test_build_plugin_manager_preserves_remote_catalog_url(self):
@@ -284,6 +302,7 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
         monitor_task = asyncio.create_task(monitor())
         await asyncio.sleep(0)
         manager = Mock()
+        manager.drain_timeout = 13
         manager.close = AsyncMock(side_effect=lambda: events.append("manager.close"))
         updater = Mock(running=True)
         updater.start_polling = AsyncMock()
@@ -302,19 +321,32 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
         stop_event = asyncio.Event()
         stop_event.set()
 
-        await bot_module.run_application_polling(
-            application,
-            stop_event=stop_event,
-            initialize_retry_delay=0,
+        feedback_drain = AsyncMock(
+            side_effect=lambda *_args, **_kwargs: events.append(
+                "feedback.drain"
+            ) or True
         )
+        with patch.object(
+            bot_module,
+            "drain_callback_feedback",
+            feedback_drain,
+            create=True,
+        ):
+            await bot_module.run_application_polling(
+                application,
+                stop_event=stop_event,
+                initialize_retry_delay=0,
+            )
 
         self.assertEqual(events, [
             "updater.stop",
             "application.stop",
             "monitor.cancel",
+            "feedback.drain",
             "manager.close",
             "application.shutdown",
         ])
+        feedback_drain.assert_awaited_once_with(application, timeout=13)
 
     async def test_update_notification_contains_one_click_and_decline_buttons(self):
         bot_module = await asyncio.to_thread(load_bot_module)

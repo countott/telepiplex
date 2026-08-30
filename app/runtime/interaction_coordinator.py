@@ -970,10 +970,10 @@ class InteractionCoordinator:
         with self._lock, self._connection:
             cursor = self._connection.execute(
                 "UPDATE operation_message_segments SET message_id = ?, "
-                "message_kind = ?, updated_at = ? "
+                "message_kind = ?, delivery_state = 'delivered', updated_at = ? "
                 "WHERE segment_id = ? AND owner_plugin_id = ? "
                 "AND generation = ? AND state = 'open' "
-                "AND delivery_state = 'delivered' "
+                "AND delivery_state = 'delivering' "
                 "AND message_id = ? AND message_kind = ? "
                 "AND EXISTS (SELECT 1 FROM operations operation "
                 "WHERE operation.operation_id = "
@@ -990,6 +990,69 @@ class InteractionCoordinator:
                     normalized_generation,
                     normalized_expected_id,
                     normalized_expected_kind,
+                    normalized_chat_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = self._connection.execute(
+                "SELECT * FROM operation_message_segments "
+                "WHERE segment_id = ?",
+                (str(segment_id),),
+            ).fetchone()
+        return self._segment_from_row(row)
+
+    def claim_segment_replacement_delivery(
+        self,
+        segment_id: str,
+        *,
+        owner_plugin_id: str,
+        generation: int,
+        chat_id: int,
+        expected_message_id: int,
+        expected_message_kind: str,
+    ) -> OperationMessageSegment | None:
+        try:
+            normalized_generation = int(generation)
+            normalized_chat_id = int(chat_id)
+            normalized_message_id = int(expected_message_id)
+        except (TypeError, ValueError):
+            normalized_generation = normalized_chat_id = 0
+            normalized_message_id = 0
+        normalized_owner = str(owner_plugin_id or "").strip()
+        normalized_kind = str(expected_message_kind or "").strip().casefold()
+        if (
+            not normalized_owner
+            or normalized_generation <= 0
+            or normalized_chat_id == 0
+            or normalized_message_id <= 0
+            or normalized_kind not in {"text", "photo"}
+        ):
+            raise InteractionError(
+                "invalid_segment_delivery",
+                "replacement segment delivery identity is invalid",
+            )
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE operation_message_segments SET "
+                "delivery_state = 'delivering', updated_at = ? "
+                "WHERE segment_id = ? AND owner_plugin_id = ? "
+                "AND generation = ? AND state = 'open' "
+                "AND delivery_state = 'delivered' "
+                "AND message_id = ? AND message_kind = ? "
+                "AND EXISTS (SELECT 1 FROM operations operation "
+                "WHERE operation.operation_id = "
+                "operation_message_segments.operation_id "
+                "AND operation.chat_id = ? "
+                "AND operation.active_segment_id = "
+                "operation_message_segments.segment_id)",
+                (
+                    time.time(),
+                    str(segment_id),
+                    normalized_owner,
+                    normalized_generation,
+                    normalized_message_id,
+                    normalized_kind,
                     normalized_chat_id,
                 ),
             )
@@ -1077,7 +1140,8 @@ class InteractionCoordinator:
                 "updated_at = ? WHERE segment_id = ? AND owner_plugin_id = ? "
                 "AND generation = ? AND state IN ('open', 'sealing') "
                 "AND message_id IS NOT NULL AND business_revision >= ? "
-                "AND projection_hash = ? AND rendered_revision < ?",
+                "AND projection_hash = ? "
+                "AND (rendered_revision < ? OR rendered_projection_hash != ?)",
                 (
                     normalized_revision,
                     normalized_hash,
@@ -1088,6 +1152,7 @@ class InteractionCoordinator:
                     normalized_revision,
                     normalized_hash,
                     normalized_revision,
+                    normalized_hash,
                 ),
             )
             if cursor.rowcount != 1:
@@ -1193,14 +1258,18 @@ class InteractionCoordinator:
                 )
             if str(row["state"]) == "sealing":
                 return self._segment_from_row(row)
-            if str(row["state"]) != "open":
+            if (
+                str(row["state"]) != "open"
+                or str(row["delivery_state"]) != "delivered"
+            ):
                 raise InteractionError(
                     "segment_state_conflict",
                     "message segment is not ready to seal",
                 )
             self._connection.execute(
                 "UPDATE operation_message_segments SET state = 'sealing', "
-                "updated_at = ? WHERE segment_id = ? AND state = 'open'",
+                "updated_at = ? WHERE segment_id = ? AND state = 'open' "
+                "AND delivery_state = 'delivered'",
                 (time.time(), str(row["segment_id"])),
             )
             stored = self._connection.execute(
@@ -1320,6 +1389,7 @@ class InteractionCoordinator:
                 "WHERE operation_id = ? AND owner_plugin_id = ? "
                 "AND generation = ? AND callback_generation = ? "
                 "AND message_id = ? AND state = 'open' AND role != 'legacy' "
+                "AND delivery_state = 'delivered' "
                 "AND EXISTS (SELECT 1 FROM operations operation "
                 "WHERE operation.operation_id = operation_message_segments.operation_id "
                 "AND operation.active_segment_id = operation_message_segments.segment_id "

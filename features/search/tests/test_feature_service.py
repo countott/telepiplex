@@ -5893,6 +5893,143 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
                     expected,
                 )
 
+    async def test_metadata_capability_freezes_one_hundred_years_s02_titles(self):
+        from telepiplex_search.adapters import douban
+        from telepiplex_search.anchored_candidate import (
+            AnchoredCandidate,
+            SourceLink,
+        )
+        from telepiplex_search.entity_graph import EvidenceFact
+        from telepiplex_search.media_metadata_v1 import build_media_metadata_v1
+
+        douban_payload = douban._normalize_payload(
+            {
+                "id": "30482958",
+                "title": "百年孤独 第一季",
+                "original_title": "Cien soledad",
+                "original_language": "es",
+                "english_title": "100 Years of Solitude",
+                "official_english_title": "100 Years of Solitude",
+                "aka": ["Cien años de soledad"],
+                "year": "2024",
+                "type": "tv",
+            },
+            "https://movie.douban.com/subject/30482958/",
+        )
+        episodes = tuple(
+            {
+                "season_number": season,
+                "episode_number": episode,
+                "air_date": "2024-12-11",
+            }
+            for season in (1, 2)
+            for episode in range(1, 9)
+        )
+        wikipedia = EvidenceFact(
+            fact_id="wikipedia:Q124175370",
+            provider="wikipedia",
+            titles=("百年孤独", "One Hundred Years of Solitude"),
+            year="2024",
+            media_type="series",
+            external_ids={"wikidata": "Q124175370"},
+            source_url="https://en.wikipedia.org/wiki/One_Hundred_Years_of_Solitude_(TV_series)",
+            chinese_title="百年孤独",
+            original_title="Cien años de soledad",
+            original_language="es",
+            official_english_title="One Hundred Years of Solitude",
+            episodes=episodes,
+        )
+        douban_fact = EvidenceFact(
+            fact_id="douban:30482958",
+            provider="douban",
+            titles=tuple(douban_payload["aliases"]),
+            year="2024",
+            media_type="series",
+            external_ids={"douban_subject": "30482958"},
+            source_url="https://movie.douban.com/subject/30482958/",
+            chinese_title=douban_payload["chinese_title"],
+            original_title=douban_payload["original_title"],
+            original_language="es",
+            official_english_title=douban_payload["official_english_title"],
+        )
+        anchored = AnchoredCandidate(
+            candidate_id="wikipedia:Q124175370",
+            anchor_fact_id=wikipedia.fact_id,
+            identity_role="series_root",
+            intended_scope="whole_series",
+            source_links=tuple(
+                SourceLink(
+                    provider=fact.provider,
+                    fact_id=fact.fact_id,
+                    url=fact.source_url,
+                    external_ids=fact.external_ids,
+                    role="series_root",
+                    season_number=None,
+                    episode_number=None,
+                    verification="fact_verified",
+                )
+                for fact in (wikipedia, douban_fact)
+            ),
+            poster_assets=(),
+            unresolved_sources=(),
+            ai_confidence=1,
+            ai_reason="Wikipedia identity plus Douban localization.",
+            facts=(wikipedia, douban_fact),
+        )
+
+        async def live_planner(_raw_query, plan_id):
+            result = series_ranked_search_plan()
+            candidate = result["candidates"][0]
+            candidate.update({
+                "candidate_key": anchored.candidate_id,
+                "candidate_id": anchored.candidate_id,
+                "anchor_fact_id": anchored.anchor_fact_id,
+                "source_links": [
+                    link.to_dict() for link in anchored.source_links
+                ],
+                "media_metadata": build_media_metadata_v1(
+                    anchored,
+                    metadata_id=plan_id,
+                    raw_query="百年孤独",
+                ),
+            })
+            result["plan_id"] = plan_id
+            result["candidates"] = [candidate]
+            return result
+
+        self.feature.plan_builder = live_planner
+        resolved = await self.feature.metadata_capability({
+            "method": "resolve_metadata",
+            "payload": {
+                "query": "百年孤独",
+                "probe": {
+                    "content_shape": "single_season_episode_pack",
+                    "observed_seasons": [2],
+                    "observed_episodes": [
+                        {"season_number": 2, "episode_number": episode}
+                        for episode in range(1, 9)
+                    ],
+                    "video_count": 8,
+                },
+            },
+        })
+
+        contract = resolved["media_metadata"]
+        self.assertEqual(contract["identity"]["title_zh"], "百年孤独")
+        self.assertEqual(
+            contract["identity"]["title_en"],
+            "One Hundred Years of Solitude",
+        )
+        self.assertEqual(
+            contract["identity"]["title_original"],
+            "Cien años de soledad",
+        )
+        self.assertEqual(contract["scope"], {
+            "kind": "season",
+            "season_number": 2,
+            "episode_number": None,
+        })
+
     async def test_metadata_capability_returns_honey_canonical_subset_and_unresolved_evidence(self):
         async def live_planner(_raw_query, plan_id):
             result = series_ranked_search_plan()
@@ -6040,9 +6177,9 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "2.0.0")
+        self.assertEqual(manifest["version"], "2.0.1")
         self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
-        self.assertEqual(project["project"]["version"], "2.0.0")
+        self.assertEqual(project["project"]["version"], "2.0.1")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==2.0.0",
@@ -6076,14 +6213,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-2.0.0.tpx", source)
+        self.assertIn("/tmp/search-2.0.1.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-2.0.0.tpx", source)
+        self.assertNotIn("dist/search-2.0.1.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

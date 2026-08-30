@@ -1,6 +1,6 @@
 plugin_id: download
 name: download
-version: 2.0.0
+version: 2.0.1
 host_api: ">=1.7,<2.0"
 entry_point: telepiplex_download.runtime:main
 provides:
