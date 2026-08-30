@@ -46,6 +46,23 @@ def _aired(value, today: date) -> bool:
     return _airing_state(value, today) == "aired"
 
 
+def _item_airing_state(item: dict, today: date) -> str:
+    if item.get("air_date_conflict") is not True:
+        return _airing_state(
+            item.get("aired") or item.get("air_date"),
+            today,
+        )
+    states = {
+        _airing_state(value, today)
+        for value in item.get("air_date_candidates") or ()
+    }
+    if states == {"aired"}:
+        return "aired"
+    if states == {"scheduled"}:
+        return "scheduled"
+    return "unknown"
+
+
 def _season_totals(contract: dict) -> dict[int, int]:
     totals = {}
     evidence = contract.get("evidence") or {}
@@ -80,14 +97,7 @@ def series_inventory(contract: dict, *, today: date | None = None) -> SeriesInve
         if season is None or season < 1 or episode is None or episode < 1:
             continue
         all_by_season.setdefault(season, set()).add(episode)
-        airing_state = (
-            "unknown"
-            if item.get("air_date_conflict") is True
-            else _airing_state(
-                item.get("aired") or item.get("air_date"),
-                today,
-            )
-        )
+        airing_state = _item_airing_state(item, today)
         if airing_state == "aired":
             aired_by_season.setdefault(season, set()).add(episode)
         elif airing_state == "scheduled":

@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from telepiplex_search.input_contract import classify_search_input
+from telepiplex_search.errors import SearchPlanningError
 from telepiplex_search.service import SearchFeature
 from telepiplex_search.work_discovery import (
     build_root_work_search_plan,
@@ -76,6 +77,342 @@ def wikipedia_result():
 
 
 class WorkDiscoveryTest(unittest.TestCase):
+    def test_transient_wikipedia_failure_retries_the_same_language_once(self):
+        calls = []
+
+        def wikipedia(payload):
+            calls.append(payload)
+            if len(calls) == 1:
+                return {
+                    "source": "wikipedia",
+                    "status": "server_down",
+                    "facts": [],
+                    "error": "wikipedia_server_down",
+                }
+            return {
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [{
+                    "language": "zh",
+                    "search_rank": 1,
+                    "page_id": 1,
+                    "is_disambiguation": False,
+                    "title": "随心所欲",
+                    "url": "https://zh.wikipedia.org/wiki/随心所欲",
+                    "wikibase_item": "Q1148491",
+                }],
+            }
+
+        roots = discover_root_works(
+            classify_search_input("随心所欲"),
+            wikipedia,
+            lambda _qids: {
+                "Q1148491": {
+                    "wikibase_item": "Q1148491",
+                    "chinese_title": "随心所欲",
+                    "english_title": "Vivre sa vie",
+                    "aliases": [],
+                    "media_type": "movie",
+                    "year": "1962",
+                    "countries": [],
+                },
+            },
+        )
+
+        self.assertEqual([item["qid"] for item in roots], ["Q1148491"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1])
+
+    def test_persistent_wikipedia_failure_is_not_reported_as_no_match(self):
+        calls = []
+
+        with self.assertRaises(SearchPlanningError) as raised:
+            build_root_work_search_plan(
+                "随心所欲",
+                "wiki-source-failure",
+                lambda payload: calls.append(payload) or {
+                    "source": "wikipedia",
+                    "status": "server_down",
+                    "facts": [],
+                    "error": "wikipedia_server_down",
+                },
+                lambda _qids: {},
+            )
+
+        self.assertEqual(raised.exception.code, "source_failure")
+        self.assertEqual(
+            raised.exception.reason_codes,
+            ("wikipedia:wikipedia_server_down",),
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1])
+
+    def test_wikipedia_rate_limit_is_preserved_without_immediate_retry(self):
+        calls = []
+
+        with self.assertRaises(SearchPlanningError) as raised:
+            build_root_work_search_plan(
+                "随心所欲",
+                "wiki-rate-limit",
+                lambda payload: calls.append(payload) or {
+                    "source": "wikipedia",
+                    "status": "rate_limited",
+                    "facts": [],
+                    "error": "HTTP 429",
+                },
+                lambda _qids: {},
+            )
+
+        self.assertEqual(raised.exception.code, "source_rate_limited")
+        self.assertEqual(
+            raised.exception.reason_codes,
+            ("wikipedia:HTTP 429",),
+        )
+        self.assertEqual(len(calls), 1)
+
+    def test_transient_wikidata_failure_retries_once(self):
+        calls = []
+
+        def wikidata(qids):
+            calls.append(tuple(qids))
+            if len(calls) == 1:
+                raise RuntimeError("server_down")
+            return {
+                "Q1148491": {
+                    "wikibase_item": "Q1148491",
+                    "chinese_title": "随心所欲",
+                    "english_title": "Vivre sa vie",
+                    "aliases": [],
+                    "media_type": "movie",
+                    "year": "1962",
+                    "countries": [],
+                },
+            }
+
+        roots = discover_root_works(
+            classify_search_input("随心所欲"),
+            lambda _payload: {
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [{
+                    "language": "zh",
+                    "search_rank": 1,
+                    "page_id": 1,
+                    "is_disambiguation": False,
+                    "title": "随心所欲",
+                    "url": "https://zh.wikipedia.org/wiki/随心所欲",
+                    "wikibase_item": "Q1148491",
+                }],
+            },
+            wikidata,
+        )
+
+        self.assertEqual([item["qid"] for item in roots], ["Q1148491"])
+        self.assertEqual(calls, [("Q1148491",), ("Q1148491",)])
+
+    def test_transient_wikidata_search_failure_retries_once(self):
+        calls = []
+
+        def wikidata_search(_title):
+            calls.append(_title)
+            if len(calls) == 1:
+                raise RuntimeError("server_down")
+            return ["Q6151665"]
+
+        roots = discover_root_works(
+            classify_search_input("变形金刚4"),
+            lambda _payload: {
+                "source": "wikipedia",
+                "status": "not_found",
+                "facts": [],
+                "error": "",
+            },
+            lambda _qids: {
+                "Q6151665": {
+                    "wikibase_item": "Q6151665",
+                    "chinese_title": "变形金刚4：绝迹重生",
+                    "english_title": "Transformers: Age of Extinction",
+                    "aliases": ["变形金刚4"],
+                    "media_type": "movie",
+                    "year": "2014",
+                    "countries": [],
+                },
+            },
+            wikidata_search=wikidata_search,
+        )
+
+        self.assertEqual([item["qid"] for item in roots], ["Q6151665"])
+        self.assertEqual(calls, ["变形金刚4", "变形金刚4"])
+
+    def test_persistent_wikidata_search_failure_is_not_no_match(self):
+        calls = []
+
+        def wikidata_search(title):
+            calls.append(title)
+            raise RuntimeError("server_down")
+
+        with self.assertRaises(SearchPlanningError) as raised:
+            build_root_work_search_plan(
+                "变形金刚4",
+                "wikidata-search-failure",
+                lambda _payload: {
+                    "source": "wikipedia",
+                    "status": "not_found",
+                    "facts": [],
+                    "error": "",
+                },
+                lambda _qids: {},
+                wikidata_search=wikidata_search,
+            )
+
+        self.assertEqual(raised.exception.code, "source_failure")
+        self.assertEqual(
+            raised.exception.reason_codes,
+            ("wikidata:server_down",),
+        )
+        self.assertEqual(calls, ["变形金刚4", "变形金刚4"])
+
+    def test_later_lead_alias_admits_a_lower_rank_media_result(self):
+        roots = discover_root_works(
+            classify_search_input("新复仇者联盟"),
+            lambda _payload: {
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [{
+                    "language": "zh",
+                    "search_rank": 3,
+                    "page_id": 3,
+                    "is_disambiguation": False,
+                    "title": "雷霆特攻队*",
+                    "extract": (
+                        "《雷霆特攻队*》是一部美国超级英雄电影。"
+                        + "这是用于模拟较长导言的背景说明。" * 30
+                        + "本片在开发阶段也曾称为《新复仇者联盟》。"
+                    ),
+                    "url": "https://zh.wikipedia.org/wiki/雷霆特攻队*",
+                    "wikibase_item": "Q112322474",
+                }],
+            },
+            lambda _qids: {
+                "Q112322474": {
+                    "wikibase_item": "Q112322474",
+                    "chinese_title": "雷霆特攻队*",
+                    "english_title": "Thunderbolts*",
+                    "aliases": [],
+                    "media_type": "movie",
+                    "year": "2025",
+                    "countries": [],
+                },
+            },
+        )
+
+        self.assertEqual([item["qid"] for item in roots], ["Q112322474"])
+        self.assertIn("新复仇者联盟", roots[0]["aliases"])
+
+    def test_rank_one_single_cjk_substitution_is_structurally_validated(self):
+        roots = discover_root_works(
+            classify_search_input("雷霆特工队"),
+            lambda _payload: {
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [{
+                    "language": "zh",
+                    "search_rank": 1,
+                    "page_id": 1,
+                    "is_disambiguation": False,
+                    "title": "雷霆特攻队*",
+                    "extract": "《雷霆特攻队*》是一部美国超级英雄电影。",
+                    "url": "https://zh.wikipedia.org/wiki/雷霆特攻队*",
+                    "wikibase_item": "Q112322474",
+                }],
+            },
+            lambda _qids: {
+                "Q112322474": {
+                    "wikibase_item": "Q112322474",
+                    "chinese_title": "雷霆特攻队*",
+                    "english_title": "Thunderbolts*",
+                    "aliases": [],
+                    "media_type": "movie",
+                    "year": "2025",
+                    "countries": [],
+                },
+            },
+        )
+
+        self.assertEqual([item["qid"] for item in roots], ["Q112322474"])
+
+    def test_top_three_media_fallback_keeps_manual_choices_when_titles_miss(self):
+        entities = {
+            "Q113244839": {
+                "wikibase_item": "Q113244839",
+                "chinese_title": "复仇者联盟：末日崛起",
+                "english_title": "Avengers: Doomsday",
+                "aliases": [],
+                "media_type": "movie",
+                "year": "2026",
+                "countries": [],
+            },
+            "Q2264980": {
+                "wikibase_item": "Q2264980",
+                "chinese_title": "新复仇者",
+                "english_title": "New Avengers",
+                "aliases": [],
+                "media_type": "",
+                "year": "2005",
+                "countries": [],
+            },
+            "Q112322474": {
+                "wikibase_item": "Q112322474",
+                "chinese_title": "雷霆特攻队*",
+                "english_title": "Thunderbolts*",
+                "aliases": [],
+                "media_type": "movie",
+                "year": "2025",
+                "countries": [],
+            },
+        }
+
+        roots = discover_root_works(
+            classify_search_input("新复仇者联盟"),
+            lambda _payload: {
+                "source": "wikipedia",
+                "status": "ok",
+                "facts": [{
+                    "language": "zh",
+                    "search_rank": rank,
+                    "page_id": rank,
+                    "is_disambiguation": False,
+                    "title": title,
+                    "extract": extract,
+                    "url": f"https://zh.wikipedia.org/wiki/{title}",
+                    "wikibase_item": qid,
+                } for rank, qid, title, extract in (
+                    (
+                        1,
+                        "Q113244839",
+                        "复仇者联盟：末日崛起",
+                        "复仇者联盟、新复仇者联盟等团队共同对抗敌人。",
+                    ),
+                    (2, "Q2264980", "新复仇者", "一部漫画作品。"),
+                    (
+                        3,
+                        "Q112322474",
+                        "雷霆特攻队*",
+                        "一部2025年美国超级英雄电影。",
+                    ),
+                )],
+            },
+            lambda qids: {
+                qid: entities[qid] for qid in qids if qid in entities
+            },
+        )
+
+        self.assertEqual(
+            [item["qid"] for item in roots],
+            ["Q113244839", "Q112322474"],
+        )
+        self.assertTrue(all(item["media_type"] == "movie" for item in roots))
+
     def test_spaced_query_uses_ranked_wikipedia_result_without_exact_title_gate(self):
         calls = []
 

@@ -47,6 +47,27 @@ class SeriesTopologyTest(unittest.TestCase):
         self.assertTrue(all(item["tvdb_episode_id"] for item in selected.items))
         self.assertTrue(all(item["tmdb_episode_id"] for item in selected.items))
 
+    def test_conflicting_air_dates_preserve_both_provider_dates(self):
+        selected = select_series_topology({
+            "tvdb": ({
+                "season_number": 1,
+                "episode_number": 1,
+                "aired": "2005-04-14",
+            },),
+            "tmdb": ({
+                "season_number": 1,
+                "episode_number": 1,
+                "aired": "2005-04-15",
+            },),
+        })
+
+        self.assertEqual(selected.items[0]["aired"], "")
+        self.assertTrue(selected.items[0]["air_date_conflict"])
+        self.assertEqual(
+            selected.items[0]["air_date_candidates"],
+            ["2005-04-14", "2005-04-15"],
+        )
+
     def test_unscored_divergent_orders_fail_instead_of_truncating(self):
         with self.assertRaises(ProviderOrderConflict):
             select_series_topology({

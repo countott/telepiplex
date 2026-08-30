@@ -564,6 +564,12 @@ class InteractionCoordinator:
                 else:
                     current = previous
                     self._validate_existing_owner(current, values)
+                    if values["revision"] <= current.revision:
+                        self._connection.execute("COMMIT")
+                        return current
+                    if current.state in TERMINAL_STATES:
+                        self._connection.execute("COMMIT")
+                        return current
                     if (
                         values["state"] == "handed_off"
                         and current.active_segment_id
@@ -572,12 +578,6 @@ class InteractionCoordinator:
                             "segment_not_sealed",
                             "active message segment must be sealed before handoff",
                         )
-                    if current.state in TERMINAL_STATES:
-                        self._connection.execute("COMMIT")
-                        return current
-                    if values["revision"] <= current.revision:
-                        self._connection.execute("COMMIT")
-                        return current
                     owner_changed = current.plugin_id != values["plugin_id"]
                     next_plugin_id = "" if owner_changed else values["next_plugin_id"]
                     self._connection.execute(
@@ -625,31 +625,8 @@ class InteractionCoordinator:
         self,
         plugin_id: str,
         report: dict,
-    ) -> tuple[OperationRecord, OperationMessageSegment]:
+    ) -> tuple[OperationRecord, OperationMessageSegment | None]:
         values = self._validate_report(plugin_id, report)
-        try:
-            role, presentation_kind = validate_segment_declaration(
-                report.get("segment") if isinstance(report, dict) else None
-            )
-            projection = report.get("projection")
-            if projection is None:
-                projection = {
-                    "state": values["state"],
-                    "stage": values["stage"],
-                    "status_text": values["status_text"],
-                    "control": values["control"],
-                    "details": json.loads(values["details_json"]),
-                }
-            normalized_projection_hash = projection_hash(projection)
-            projection_json = json.dumps(
-                projection,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        except (TypeError, ValueError) as exc:
-            raise InteractionError("invalid_segment", str(exc)) from exc
-
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -663,6 +640,54 @@ class InteractionCoordinator:
                     if existing_row is not None
                     else None
                 )
+                if previous is not None:
+                    self._validate_existing_owner(previous, values)
+                    if values["revision"] <= previous.revision:
+                        active_row = self._connection.execute(
+                            "SELECT segment.* FROM operations operation "
+                            "JOIN operation_message_segments segment "
+                            "ON segment.segment_id = operation.active_segment_id "
+                            "WHERE operation.operation_id = ?",
+                            (values["operation_id"],),
+                        ).fetchone()
+                        self._connection.execute("COMMIT")
+                        return (
+                            previous,
+                            self._segment_from_row(active_row)
+                            if active_row is not None
+                            else None,
+                        )
+                    if previous.state in TERMINAL_STATES:
+                        raise InteractionError(
+                            "operation_terminal",
+                            "terminal operation cannot update a message segment",
+                        )
+
+                try:
+                    role, presentation_kind = validate_segment_declaration(
+                        report.get("segment")
+                        if isinstance(report, dict)
+                        else None
+                    )
+                    projection = report.get("projection")
+                    if projection is None:
+                        projection = {
+                            "state": values["state"],
+                            "stage": values["stage"],
+                            "status_text": values["status_text"],
+                            "control": values["control"],
+                            "details": json.loads(values["details_json"]),
+                        }
+                    normalized_projection_hash = projection_hash(projection)
+                    projection_json = json.dumps(
+                        projection,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise InteractionError("invalid_segment", str(exc)) from exc
+
                 if previous is None:
                     self._reject_active_conflict(values)
                     self._connection.execute(
@@ -688,35 +713,28 @@ class InteractionCoordinator:
                         ),
                     )
                 else:
-                    self._validate_existing_owner(previous, values)
-                    if previous.state in TERMINAL_STATES:
-                        raise InteractionError(
-                            "operation_terminal",
-                            "terminal operation cannot update a message segment",
-                        )
-                    if values["revision"] > previous.revision:
-                        owner_changed = previous.plugin_id != values["plugin_id"]
-                        next_plugin_id = (
-                            "" if owner_changed else values["next_plugin_id"]
-                        )
-                        self._connection.execute(
-                            "UPDATE operations SET plugin_id = ?, state = ?, "
-                            "stage = ?, status_text = ?, control = ?, revision = ?, "
-                            "next_plugin_id = ?, details_json = ?, updated_at = ? "
-                            "WHERE operation_id = ?",
-                            (
-                                values["plugin_id"],
-                                values["state"],
-                                values["stage"],
-                                values["status_text"],
-                                values["control"],
-                                values["revision"],
-                                next_plugin_id,
-                                values["details_json"],
-                                now,
-                                values["operation_id"],
-                            ),
-                        )
+                    owner_changed = previous.plugin_id != values["plugin_id"]
+                    next_plugin_id = (
+                        "" if owner_changed else values["next_plugin_id"]
+                    )
+                    self._connection.execute(
+                        "UPDATE operations SET plugin_id = ?, state = ?, "
+                        "stage = ?, status_text = ?, control = ?, revision = ?, "
+                        "next_plugin_id = ?, details_json = ?, updated_at = ? "
+                        "WHERE operation_id = ?",
+                        (
+                            values["plugin_id"],
+                            values["state"],
+                            values["stage"],
+                            values["status_text"],
+                            values["control"],
+                            values["revision"],
+                            next_plugin_id,
+                            values["details_json"],
+                            now,
+                            values["operation_id"],
+                        ),
+                    )
 
                 active_row = self._connection.execute(
                     "SELECT segment.* FROM operations operation "

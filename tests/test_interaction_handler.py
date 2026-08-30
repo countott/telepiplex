@@ -340,6 +340,39 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             "rename", "running", 1,
         ))
 
+    async def test_operation_sink_ignores_nonnewer_handoff_before_target_check(self):
+        from app.handlers.interaction_handler import OperationReportSink
+
+        router = Mock()
+        router.plugin_route.return_value = None
+        sink = OperationReportSink(self.coordinator, router=router)
+        current = self.coordinator.report(
+            "search",
+            self.report(
+                revision=2,
+                stage="prowlarr",
+                status_text="正在搜索片源",
+            ),
+        )
+
+        for revision in (1, 2):
+            with self.subTest(revision=revision):
+                response = await sink(
+                    "search",
+                    self.report(
+                        revision=revision,
+                        state="handed_off",
+                        stage="handoff_download",
+                        next_plugin_id="download",
+                    ),
+                )
+                self.assertFalse(response["accepted"])
+                self.assertEqual(response["state"], current.state)
+                self.assertEqual(response["revision"], current.revision)
+                self.assertNotIn("error_code", response)
+
+        router.plugin_route.assert_not_called()
+
     async def test_operation_sink_handoff_returns_before_attached_renderer(self):
         from app.handlers.interaction_handler import OperationReportSink
 

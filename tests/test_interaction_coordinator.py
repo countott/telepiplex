@@ -276,6 +276,109 @@ class InteractionCoordinatorTest(unittest.TestCase):
         self.assertEqual(replay_operation, first_operation)
         self.assertEqual(replay_segment, first_segment)
 
+    def test_equal_revision_segment_report_cannot_replace_current_projection(self):
+        first_operation, first_segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                revision=2,
+                stage="candidates",
+                status_text="请选择作品",
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+                projection={"text": "请选择作品", "buttons": [["死神"]]},
+            ),
+        )
+
+        replay_operation, replay_segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                revision=2,
+                stage="prowlarr",
+                status_text="正在搜索片源",
+                segment={
+                    "role": "search",
+                    "presentation_kind": "text",
+                },
+                projection={"text": "过时的同序号投影"},
+            ),
+        )
+
+        self.assertEqual(replay_operation, first_operation)
+        self.assertEqual(replay_segment, first_segment)
+        self.assertEqual(
+            self.coordinator.get_active_segment("op-1"),
+            first_segment,
+        )
+
+    def test_stale_segment_report_cannot_recreate_a_sealed_segment(self):
+        _operation, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                segment={
+                    "role": "search",
+                    "presentation_kind": "text",
+                },
+                projection={"text": "正在搜索片源"},
+            ),
+        )
+        segment = self.coordinator.bind_segment_message(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            chat_id=10,
+            message_id=94,
+        )
+        segment = self.coordinator.record_segment_rendered(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            business_revision=1,
+            projection_hash=segment.projection_hash,
+        )
+        self.coordinator.seal_segment("search", "op-1", "search")
+        self.coordinator.complete_segment_seal(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+        )
+        current = self.coordinator.report(
+            "search",
+            self.report(
+                revision=2,
+                stage="handoff",
+                status_text="准备推送下载",
+            ),
+        )
+
+        stale_operation, stale_segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                revision=1,
+                segment={
+                    "role": "search",
+                    "presentation_kind": "text",
+                },
+                projection={"text": "晚到的旧搜索结果"},
+            ),
+        )
+
+        self.assertEqual(stale_operation, current)
+        self.assertIsNone(stale_segment)
+        self.assertIsNone(self.coordinator.get_active_segment("op-1"))
+
+        handed_off = self.coordinator.report(
+            "search",
+            self.report(
+                revision=3,
+                state="handed_off",
+                next_plugin_id="download",
+            ),
+        )
+        self.assertEqual(handed_off.state, "handed_off")
+        self.assertEqual(handed_off.revision, 3)
+
     def test_legacy_message_cursor_migrates_once_to_read_only_open_segment(self):
         created = self.coordinator.report("search", self.report())
         self.coordinator.set_message_id(created.operation_id, 88, "photo")
@@ -442,6 +545,34 @@ class InteractionCoordinatorTest(unittest.TestCase):
         self.assertEqual(operation.plugin_id, "download")
         self.assertEqual(download.sequence, 2)
         self.assertNotEqual(download.segment_id, segment.segment_id)
+
+    def test_nonnewer_handoff_report_does_not_hit_the_segment_seal_gate(self):
+        current, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                revision=2,
+                segment={
+                    "role": "search",
+                    "presentation_kind": "text",
+                },
+            ),
+        )
+
+        for revision in (1, 2):
+            with self.subTest(revision=revision):
+                replay = self.coordinator.report(
+                    "search",
+                    self.report(
+                        revision=revision,
+                        state="handed_off",
+                        next_plugin_id="download",
+                    ),
+                )
+                self.assertEqual(replay, current)
+                self.assertEqual(
+                    self.coordinator.get_active_segment("op-1"),
+                    segment,
+                )
 
     def test_segment_callback_claim_accepts_only_the_first_keyboard_generation(self):
         _operation, segment = self.coordinator.accept_segment_report(

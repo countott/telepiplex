@@ -230,6 +230,70 @@ class SeriesScopeTest(unittest.TestCase):
         self.assertEqual(inventory.aired_by_season, {})
         self.assertEqual(inventory.state_by_season, {1: "unknown"})
 
+    def test_historical_date_conflict_is_still_aired(self):
+        value = contract(seasons=())
+        value["items"] = [{
+            "item_id": "s1e1",
+            "content_role": "main_episode",
+            "season_number": 1,
+            "episode_number": 1,
+            "aired": "",
+            "air_date_conflict": True,
+            "air_date_candidates": ["2005-04-14", "2005-04-15"],
+        }]
+        value["evidence"]["series_inventory"] = {
+            "season_totals": {1: 1},
+        }
+
+        inventory = series_inventory(value, today=date(2026, 8, 30))
+
+        self.assertEqual(inventory.aired_by_season, {1: (1,)})
+        self.assertEqual(inventory.unknown_by_season, {})
+        self.assertEqual(inventory.state_by_season, {1: "completed"})
+
+    def test_future_date_conflict_is_still_scheduled(self):
+        value = contract(seasons=())
+        value["items"] = [{
+            "item_id": "s1e1",
+            "content_role": "main_episode",
+            "season_number": 1,
+            "episode_number": 1,
+            "aired": "",
+            "air_date_conflict": True,
+            "air_date_candidates": ["2026-09-01", "2026-09-02"],
+        }]
+        value["evidence"]["series_inventory"] = {
+            "season_totals": {1: 1},
+        }
+
+        inventory = series_inventory(value, today=date(2026, 8, 30))
+
+        self.assertEqual(inventory.scheduled_by_season, {1: (1,)})
+        self.assertEqual(inventory.unknown_by_season, {})
+        self.assertEqual(inventory.state_by_season, {1: "incomplete"})
+
+    def test_past_future_date_conflict_remains_unknown(self):
+        value = contract(seasons=())
+        value["items"] = [{
+            "item_id": "s1e1",
+            "content_role": "main_episode",
+            "season_number": 1,
+            "episode_number": 1,
+            "aired": "",
+            "air_date_conflict": True,
+            "air_date_candidates": ["2026-08-29", "2026-09-01"],
+        }]
+        value["evidence"]["series_inventory"] = {
+            "season_totals": {1: 1},
+        }
+
+        inventory = series_inventory(value, today=date(2026, 8, 30))
+
+        self.assertEqual(inventory.aired_by_season, {})
+        self.assertEqual(inventory.scheduled_by_season, {})
+        self.assertEqual(inventory.unknown_by_season, {1: (1,)})
+        self.assertEqual(inventory.state_by_season, {1: "unknown"})
+
     def test_one_hundred_years_is_completed_then_incomplete(self):
         value = contract(seasons=())
         value["items"] = [

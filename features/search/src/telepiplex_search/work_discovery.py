@@ -34,11 +34,119 @@ def _unique(values) -> list[str]:
 
 
 def _lead_title_aliases(page: dict) -> list[str]:
-    lead = _text(page.get("extract"))[:240]
+    lead = _text(page.get("extract"))[:800]
     return _unique(
         match.group(1)
         for match in _LEAD_QUOTED_TITLE.finditer(lead)
     )
+
+
+def _single_cjk_substitution(left: str, right: str) -> bool:
+    return bool(
+        len(left) == len(right)
+        and len(left) >= 4
+        and all(_CJK.fullmatch(character) for character in left + right)
+        and sum(a != b for a, b in zip(left, right)) == 1
+    )
+
+
+def _source_reason(exc: Exception) -> str:
+    return _text(getattr(exc, "code", "") or str(exc)) or type(exc).__name__
+
+
+def _rate_limited(reason: str) -> bool:
+    normalized = _text(reason).casefold()
+    return any(
+        marker in normalized
+        for marker in ("rate_limit", "rate-limit", "rate limit")
+    )
+
+
+def _raise_source_error(
+    provider: str,
+    reason: str,
+    *,
+    rate_limited: bool = False,
+) -> None:
+    code = (
+        "source_rate_limited"
+        if rate_limited or _rate_limited(reason)
+        else "source_failure"
+    )
+    raise SearchPlanningError(code, (f"{provider}:{reason}",))
+
+
+def _wikipedia_lookup_with_retry(
+    wikipedia_lookup: Callable[[dict], dict],
+    payload: dict,
+) -> dict:
+    last_reason = "server_down"
+    for attempt in range(2):
+        try:
+            result = wikipedia_lookup(payload)
+        except Exception as exc:
+            last_reason = _source_reason(exc)
+            if _rate_limited(last_reason):
+                break
+            if attempt == 0:
+                continue
+            break
+        if not isinstance(result, dict):
+            last_reason = "invalid_response"
+        else:
+            status = _text(result.get("status")).casefold()
+            if status in {"ok", "not_found"}:
+                return result
+            last_reason = _text(result.get("error")) or status or "server_down"
+            if status == "rate_limited":
+                _raise_source_error(
+                    "wikipedia",
+                    last_reason,
+                    rate_limited=True,
+                )
+        if attempt == 0:
+            continue
+    _raise_source_error("wikipedia", last_reason)
+
+
+def _wikidata_lookup_with_retry(
+    wikidata_lookup: Callable[[list[str]], dict[str, dict]],
+    qids: list[str],
+) -> dict[str, dict]:
+    if not qids:
+        return {}
+    last_reason = "server_down"
+    for attempt in range(2):
+        try:
+            result = wikidata_lookup(qids)
+        except Exception as exc:
+            last_reason = _source_reason(exc)
+            if _rate_limited(last_reason):
+                break
+            if attempt == 0:
+                continue
+            break
+        if isinstance(result, dict):
+            return result
+        last_reason = "invalid_response"
+        if attempt == 0:
+            continue
+    _raise_source_error("wikidata", last_reason)
+
+
+def _wikidata_search_with_retry(wikidata_search, title: str):
+    last_reason = "server_down"
+    for attempt in range(2):
+        try:
+            return wikidata_search(title)
+        except Exception as exc:
+            last_reason = _source_reason(exc)
+            if _rate_limited(last_reason):
+                break
+            if attempt == 0:
+                continue
+            break
+    _raise_source_error("wikidata", last_reason)
 
 
 def _entity_title_relevant(entity: dict, expected_title: str) -> bool:
@@ -136,12 +244,10 @@ def discover_root_works(
 
     def collect_wikipedia(language: str) -> list[str]:
         nonlocal next_order
-        try:
-            result = wikipedia_lookup(
-                _query_payload(parsed, languages=(language,))
-            )
-        except Exception:
-            result = {}
+        result = _wikipedia_lookup_with_retry(
+            wikipedia_lookup,
+            _query_payload(parsed, languages=(language,)),
+        )
         facts = (
             result.get("facts") or ()
             if isinstance(result, dict) and result.get("status") == "ok"
@@ -168,7 +274,7 @@ def discover_root_works(
         return collected
 
     zh_qids = collect_wikipedia("zh")
-    looked_up = wikidata_lookup(zh_qids) if zh_qids else {}
+    looked_up = _wikidata_lookup_with_retry(wikidata_lookup, zh_qids)
     entities = dict(looked_up) if isinstance(looked_up, dict) else {}
     expected_title = normalize_title(parsed.title)
 
@@ -192,19 +298,27 @@ def discover_root_works(
             if normalize_title(value)
         }
 
+    def wikipedia_best_rank(qid: str) -> int:
+        return min(
+            (
+                int(page.get("search_rank") or 1_000_000)
+                for page in pages_by_qid.get(qid) or ()
+            ),
+            default=1_000_000,
+        )
+
     def ranked_wikipedia_admitted(qid: str) -> bool:
         titles = normalized_titles(qid, entities.get(qid) or {})
         if expected_title in titles:
             return True
-        pages = pages_by_qid.get(qid) or ()
-        best_rank = min(
-            (int(page.get("search_rank") or 1_000_000) for page in pages),
-            default=1_000_000,
-        )
         return bool(
-            best_rank == 1
+            wikipedia_best_rank(qid) == 1
             and expected_title
-            and any(title.startswith(expected_title) for title in titles)
+            and any(
+                title.startswith(expected_title)
+                or _single_cjk_substitution(expected_title, title)
+                for title in titles
+            )
         )
 
     if not any(
@@ -215,15 +329,25 @@ def discover_root_works(
         en_qids = collect_wikipedia("en")
         missing = [qid for qid in en_qids if qid not in entities]
         if missing:
-            looked_up = wikidata_lookup(missing)
-            if isinstance(looked_up, dict):
-                entities.update(looked_up)
+            entities.update(
+                _wikidata_lookup_with_retry(wikidata_lookup, missing)
+            )
 
     search_qids: list[str] = []
     if wikidata_search is not None:
+        admitted_wikipedia = any(
+            _structurally_eligible(parsed, entities.get(qid) or {})
+            and ranked_wikipedia_admitted(qid)
+            for qid in pages_by_qid
+        )
         try:
-            found = wikidata_search(parsed.title)
-        except Exception:
+            found = _wikidata_search_with_retry(
+                wikidata_search,
+                parsed.title,
+            )
+        except SearchPlanningError:
+            if not admitted_wikipedia:
+                raise
             found = ()
         for raw_qid in found or ():
             qid = _text(raw_qid).upper()
@@ -240,9 +364,9 @@ def discover_root_works(
         return []
     missing = [qid for qid in seed_qids if qid not in entities]
     if missing:
-        looked_up = wikidata_lookup(missing)
-        if isinstance(looked_up, dict):
-            entities.update(looked_up)
+        entities.update(
+            _wikidata_lookup_with_retry(wikidata_lookup, missing)
+        )
     exact_seed_qids = [
         qid for qid in seed_qids
         if isinstance(entities.get(qid), dict)
@@ -292,13 +416,31 @@ def discover_root_works(
                 break
         missing = [target for target in targets if target not in entities]
         if missing:
-            related = wikidata_lookup(missing)
-            if isinstance(related, dict):
-                entities.update(related)
+            entities.update(
+                _wikidata_lookup_with_retry(wikidata_lookup, missing)
+            )
         for edge in edges:
             if isinstance(entities.get(edge["to_qid"]), dict):
                 queue.append((edge["to_qid"], depth + 1))
 
+    title_admitted = {
+        qid
+        for qid in seed_qids
+        if isinstance(entities.get(qid), dict)
+        and _structurally_eligible(parsed, entities[qid])
+        and (
+            qid in exact_seed_qids
+            or ranked_wikipedia_admitted(qid)
+        )
+    }
+    use_ranked_media_fallback = bool(
+        not title_admitted
+        and not exact_seed_qids
+        and not parsed.year
+        and not parsed.media_type
+        and parsed.scope == "work"
+    )
+    ranked_media_fallback_qids = set()
     selectable_qids = []
     for qid in [*seed_qids, *relation_paths]:
         entity = entities.get(qid)
@@ -307,10 +449,22 @@ def discover_root_works(
         is_exact = qid in exact_seed_qids
         is_ranked_wikipedia_result = ranked_wikipedia_admitted(qid)
         is_related = qid in relation_paths
-        if not (is_ranked_wikipedia_result or is_exact or is_related):
+        is_ranked_media_fallback = bool(
+            use_ranked_media_fallback
+            and qid in pages_by_qid
+            and wikipedia_best_rank(qid) <= 3
+        )
+        if not (
+            is_ranked_wikipedia_result
+            or is_exact
+            or is_related
+            or is_ranked_media_fallback
+        ):
             continue
         if not _structurally_eligible(parsed, entity):
             continue
+        if is_ranked_media_fallback:
+            ranked_media_fallback_qids.add(qid)
         if qid not in selectable_qids:
             selectable_qids.append(qid)
 
@@ -319,7 +473,10 @@ def discover_root_works(
         for qid in selectable_qids
         for country in (entities[qid].get("countries") or ())
     )
-    country_labels = _country_labels(country_ids, wikidata_lookup)
+    country_labels = _country_labels(
+        country_ids,
+        lambda qids: _wikidata_lookup_with_retry(wikidata_lookup, qids),
+    )
     candidates = []
     for qid in selectable_qids:
         entity = entities[qid]
@@ -338,6 +495,11 @@ def discover_root_works(
         aliases = _unique((
             *(entity.get("aliases") or ()),
             *(page.get("aliases") or ()),
+            *(
+                alias
+                for page in pages
+                for alias in _lead_title_aliases(page)
+            ),
         ))
         countries = [
             country_labels.get(value, value)
@@ -399,7 +561,11 @@ def discover_root_works(
             "exact_title": exact,
             "relation_path": path,
             "score_reasons": _unique((
-                "exact_title" if exact else "verified_relation",
+                "exact_title"
+                if exact
+                else "verified_ranked_search"
+                if qid in ranked_media_fallback_qids
+                else "verified_relation",
                 "explicit_year" if parsed.year else "",
                 "explicit_media_type" if parsed.media_type else "",
                 "chinese_page"

@@ -90,6 +90,7 @@ def _merge_matching(
         elif len(dates) > 1:
             value["aired"] = ""
             value["air_date_conflict"] = True
+            value["air_date_candidates"] = sorted(dates)
         merged.append(value)
     provider = "_".join(providers)
     return SeriesTopology(

@@ -842,8 +842,16 @@ class OperationReportSink:
         current = self.coordinator.get(
             str(report.get("operation_id") or "")
         )
-        if current is not None and current.state in TERMINAL_STATES:
-            return None
+        if current is not None:
+            try:
+                submitted_revision = int(report.get("revision"))
+            except (TypeError, ValueError):
+                submitted_revision = 0
+            if (
+                submitted_revision <= current.revision
+                or current.state in TERMINAL_STATES
+            ):
+                return None
         if self.router.plugin_route(target) is not None:
             return None
         return {
