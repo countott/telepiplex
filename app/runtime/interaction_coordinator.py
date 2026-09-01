@@ -240,9 +240,6 @@ class InteractionCoordinator:
                 UNIQUE(operation_id, sequence),
                 FOREIGN KEY(operation_id) REFERENCES operations(operation_id)
             );
-            CREATE UNIQUE INDEX IF NOT EXISTS operation_segments_one_active
-            ON operation_message_segments(operation_id)
-            WHERE state IN ({active_segment_states});
             CREATE INDEX IF NOT EXISTS operation_segments_owner
             ON operation_message_segments(operation_id, owner_plugin_id, sequence);
             CREATE TABLE IF NOT EXISTS operation_milestones (
@@ -437,19 +434,131 @@ class InteractionCoordinator:
             "ELSE updated_at END",
             (MILESTONE_MAX_ATTEMPTS, MILESTONE_MAX_ATTEMPTS),
         )
+        self._retire_conflicting_legacy_message_cursors()
         self._migrate_legacy_message_cursors()
+        self._connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS operation_segments_one_active "
+            "ON operation_message_segments(operation_id) "
+            f"WHERE state IN ({active_segment_states})"
+        )
+
+    def _retire_conflicting_legacy_message_cursors(self) -> None:
+        active_states = tuple(sorted(ACTIVE_SEGMENT_STATES))
+        placeholders = ",".join("?" for _ in active_states)
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self._connection.execute(
+                "SELECT legacy.segment_id, legacy.operation_id "
+                "FROM operation_message_segments legacy "
+                "WHERE legacy.role = 'legacy' "
+                f"AND legacy.state IN ({placeholders}) "
+                "AND EXISTS (SELECT 1 FROM operation_message_segments native "
+                "WHERE native.operation_id = legacy.operation_id "
+                "AND native.role != 'legacy')",
+                active_states,
+            ).fetchall()
+            now = time.time()
+            for row in rows:
+                segment_id = str(row["segment_id"])
+                operation_id = str(row["operation_id"])
+                native_rows = self._connection.execute(
+                    "SELECT segment_id FROM operation_message_segments "
+                    "WHERE operation_id = ? AND role != 'legacy' "
+                    f"AND state IN ({placeholders}) "
+                    "ORDER BY sequence DESC, generation DESC",
+                    (operation_id, *active_states),
+                ).fetchall()
+                replacement_id = (
+                    str(native_rows[0]["segment_id"])
+                    if native_rows
+                    else ""
+                )
+                for redundant in native_rows[1:]:
+                    self._connection.execute(
+                        "UPDATE operation_message_segments SET state = 'sealed', "
+                        "sealed_at = COALESCE(sealed_at, ?), updated_at = ? "
+                        "WHERE segment_id = ?",
+                        (now, now, str(redundant["segment_id"])),
+                    )
+                self._connection.execute(
+                    "UPDATE operation_message_segments SET state = 'sealed', "
+                    "sealed_at = COALESCE(sealed_at, ?), updated_at = ? "
+                    "WHERE segment_id = ? AND role = 'legacy'",
+                    (now, now, segment_id),
+                )
+                self._connection.execute(
+                    "UPDATE operations SET active_segment_id = ?, "
+                    "message_id = NULL, message_kind = 'text', updated_at = ? "
+                    "WHERE operation_id = ?",
+                    (replacement_id, now, operation_id),
+                )
+            self._connection.execute(
+                "UPDATE operations SET message_id = NULL, "
+                "message_kind = 'text', updated_at = ? "
+                "WHERE message_id IS NOT NULL AND EXISTS (SELECT 1 "
+                "FROM operation_message_segments native "
+                "WHERE native.operation_id = operations.operation_id "
+                "AND native.role != 'legacy')",
+                (now,),
+            )
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
 
     def _migrate_legacy_message_cursors(self) -> None:
         placeholders = ",".join("?" for _ in ACTIVE_STATES)
-        rows = self._connection.execute(
-            f"SELECT * FROM operations WHERE active_segment_id = '' "
-            f"AND message_id IS NOT NULL AND message_id > 0 "
-            f"AND state IN ({placeholders}) ORDER BY created_at, operation_id",
-            tuple(sorted(ACTIVE_STATES)),
-        ).fetchall()
-        if not rows:
-            return
-        with self._connection:
+        operation_states = tuple(sorted(ACTIVE_STATES))
+        segment_states = tuple(sorted(ACTIVE_SEGMENT_STATES))
+        segment_placeholders = ",".join("?" for _ in segment_states)
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            orphaned = self._connection.execute(
+                "SELECT operation.operation_id, legacy.segment_id "
+                "FROM operations operation "
+                "JOIN operation_message_segments legacy "
+                "ON legacy.operation_id = operation.operation_id "
+                "WHERE operation.active_segment_id = '' "
+                "AND operation.message_id IS NOT NULL "
+                "AND operation.message_id > 0 AND legacy.role = 'legacy' "
+                f"AND legacy.state IN ({segment_placeholders}) "
+                "AND NOT EXISTS (SELECT 1 "
+                "FROM operation_message_segments native "
+                "WHERE native.operation_id = operation.operation_id "
+                "AND native.role != 'legacy') "
+                "ORDER BY operation.operation_id, legacy.sequence DESC",
+                segment_states,
+            ).fetchall()
+            rebound_operations: set[str] = set()
+            now = time.time()
+            for orphan in orphaned:
+                operation_id = str(orphan["operation_id"])
+                segment_id = str(orphan["segment_id"])
+                if operation_id in rebound_operations:
+                    self._connection.execute(
+                        "UPDATE operation_message_segments SET state = 'sealed', "
+                        "sealed_at = COALESCE(sealed_at, ?), updated_at = ? "
+                        "WHERE segment_id = ?",
+                        (now, now, segment_id),
+                    )
+                    continue
+                self._connection.execute(
+                    "UPDATE operations SET active_segment_id = ?, updated_at = ? "
+                    "WHERE operation_id = ? AND active_segment_id = ''",
+                    (segment_id, now, operation_id),
+                )
+                rebound_operations.add(operation_id)
+
+            rows = self._connection.execute(
+                f"SELECT * FROM operations WHERE active_segment_id = '' "
+                f"AND message_id IS NOT NULL AND message_id > 0 "
+                f"AND NOT EXISTS (SELECT 1 "
+                f"FROM operation_message_segments segment "
+                f"WHERE segment.operation_id = operations.operation_id) "
+                f"AND state IN ({placeholders}) "
+                f"ORDER BY created_at, operation_id",
+                operation_states,
+            ).fetchall()
             for row in rows:
                 operation_id = str(row["operation_id"])
                 current = self._connection.execute(
@@ -483,13 +592,12 @@ class InteractionCoordinator:
                     sort_keys=True,
                     separators=(",", ":"),
                 )
-                now = time.time()
                 segment_id = "legacy-" + uuid.uuid5(
                     uuid.NAMESPACE_URL,
                     f"telepiplex:operation-segment:{operation_id}:{sequence}",
                 ).hex
                 self._connection.execute(
-                    "INSERT OR IGNORE INTO operation_message_segments("
+                    "INSERT INTO operation_message_segments("
                     "segment_id, operation_id, sequence, owner_plugin_id, role, "
                     "generation, presentation_kind, state, message_id, message_kind, "
                     "business_revision, rendered_revision, projection_hash, "
@@ -516,11 +624,20 @@ class InteractionCoordinator:
                         now,
                     ),
                 )
-                self._connection.execute(
+                cursor = self._connection.execute(
                     "UPDATE operations SET active_segment_id = ? "
                     "WHERE operation_id = ? AND active_segment_id = ''",
                     (segment_id, operation_id),
                 )
+                if cursor.rowcount != 1:
+                    raise InteractionError(
+                        "legacy_cursor_conflict",
+                        "legacy message cursor could not be bound",
+                    )
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
 
     def close(self):
         with self._lock:
@@ -642,7 +759,10 @@ class InteractionCoordinator:
                 )
                 if previous is not None:
                     self._validate_existing_owner(previous, values)
-                    if values["revision"] <= previous.revision:
+                    if values["revision"] < previous.revision:
+                        self._connection.execute("COMMIT")
+                        return previous, None
+                    if values["revision"] == previous.revision:
                         active_row = self._connection.execute(
                             "SELECT segment.* FROM operations operation "
                             "JOIN operation_message_segments segment "
@@ -753,6 +873,27 @@ class InteractionCoordinator:
                     sequence = int(counters["sequence"]) + 1
                     generation = int(counters["generation"]) + 1
                     segment_id = uuid.uuid4().hex
+                    adopted_message_id = (
+                        previous.message_id
+                        if previous is not None
+                        else None
+                    )
+                    adopted_message_kind = (
+                        previous.message_kind
+                        if adopted_message_id is not None
+                        and previous.message_kind in {"text", "photo"}
+                        else ""
+                    )
+                    initial_state = (
+                        "open"
+                        if adopted_message_id is not None
+                        else "creating"
+                    )
+                    initial_delivery_state = (
+                        "delivered"
+                        if adopted_message_id is not None
+                        else "reserved"
+                    )
                     self._connection.execute(
                         "INSERT INTO operation_message_segments("
                         "segment_id, operation_id, sequence, owner_plugin_id, role, "
@@ -761,8 +902,8 @@ class InteractionCoordinator:
                         "projection_hash, rendered_projection_hash, projection_json, "
                         "callback_generation, "
                         "delivery_state, created_at, updated_at, sealed_at"
-                        ") VALUES (?, ?, ?, ?, ?, ?, ?, 'creating', NULL, '', ?, 0, "
-                        "?, '', ?, 1, 'reserved', ?, ?, NULL)",
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, "
+                        "?, '', ?, 1, ?, ?, ?, NULL)",
                         (
                             segment_id,
                             values["operation_id"],
@@ -771,9 +912,13 @@ class InteractionCoordinator:
                             role,
                             generation,
                             presentation_kind,
+                            initial_state,
+                            adopted_message_id,
+                            adopted_message_kind,
                             values["revision"],
                             normalized_projection_hash,
                             projection_json,
+                            initial_delivery_state,
                             now,
                             now,
                         ),
@@ -832,6 +977,11 @@ class InteractionCoordinator:
                             "invalid_revision",
                             "segment business revision cannot decrease",
                         )
+                self._connection.execute(
+                    "UPDATE operations SET message_id = NULL, "
+                    "message_kind = 'text' WHERE operation_id = ?",
+                    (values["operation_id"],),
+                )
                 if previous is None or values["revision"] > previous.revision:
                     self._apply_receipt_transitions(previous, values)
                 operation_row = self._connection.execute(
@@ -875,6 +1025,15 @@ class InteractionCoordinator:
             row = self._connection.execute(
                 "SELECT 1 FROM operation_message_segments "
                 "WHERE operation_id = ? LIMIT 1",
+                (str(operation_id),),
+            ).fetchone()
+        return row is not None
+
+    def has_nonlegacy_message_segments(self, operation_id: str) -> bool:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT 1 FROM operation_message_segments "
+                "WHERE operation_id = ? AND role != 'legacy' LIMIT 1",
                 (str(operation_id),),
             ).fetchone()
         return row is not None
@@ -2578,7 +2737,11 @@ class InteractionCoordinator:
             if normalized_kind:
                 cursor = self._connection.execute(
                     "UPDATE operations SET message_id = ?, message_kind = ?, "
-                    "updated_at = ? WHERE operation_id = ?",
+                    "updated_at = ? WHERE operation_id = ? "
+                    "AND NOT EXISTS (SELECT 1 "
+                    "FROM operation_message_segments segment "
+                    "WHERE segment.operation_id = operations.operation_id "
+                    "AND segment.role != 'legacy')",
                     (
                         normalized,
                         normalized_kind,
@@ -2589,11 +2752,23 @@ class InteractionCoordinator:
             else:
                 cursor = self._connection.execute(
                     "UPDATE operations SET message_id = ?, updated_at = ? "
-                    "WHERE operation_id = ?",
+                    "WHERE operation_id = ? AND NOT EXISTS (SELECT 1 "
+                    "FROM operation_message_segments segment "
+                    "WHERE segment.operation_id = operations.operation_id "
+                    "AND segment.role != 'legacy')",
                     (normalized, time.time(), str(operation_id)),
                 )
             if cursor.rowcount != 1:
-                raise InteractionError("not_found", "operation was not found")
+                row = self._connection.execute(
+                    "SELECT 1 FROM operations WHERE operation_id = ?",
+                    (str(operation_id),),
+                ).fetchone()
+                if row is None:
+                    raise InteractionError("not_found", "operation was not found")
+                raise InteractionError(
+                    "legacy_cursor_forbidden",
+                    "native message segment history owns the operation cursor",
+                )
             row = self._connection.execute(
                 "SELECT * FROM operations WHERE operation_id = ?",
                 (str(operation_id),),
@@ -2624,7 +2799,10 @@ class InteractionCoordinator:
             cursor = self._connection.execute(
                 "UPDATE operations SET message_id = ?, message_kind = ?, "
                 "updated_at = ? WHERE operation_id = ? AND plugin_id = ? "
-                "AND revision = ?",
+                "AND revision = ? AND NOT EXISTS (SELECT 1 "
+                "FROM operation_message_segments segment "
+                "WHERE segment.operation_id = operations.operation_id "
+                "AND segment.role != 'legacy')",
                 (
                     normalized_message_id,
                     normalized_kind,

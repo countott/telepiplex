@@ -764,6 +764,7 @@ async def handle_feature_result(update, context, route, result: dict):
     operation_record = None
     operation_segment = None
     stale_operation_snapshot = False
+    suppress_operation_projection = False
     operation = result.get("operation") if isinstance(result, dict) else None
     if operation is not None:
         if coordinator is None or not isinstance(operation, dict):
@@ -784,7 +785,28 @@ async def handle_feature_result(update, context, route, result: dict):
                 result,
                 operation,
             )
-            if normalized_operation.get("segment") is not None:
+            operation_id = str(
+                normalized_operation.get("operation_id") or ""
+            )
+            has_segment = normalized_operation.get("segment") is not None
+            needs_adoption_lock = (
+                has_segment
+                and not coordinator.has_nonlegacy_message_segments(
+                    operation_id
+                )
+            )
+            if needs_adoption_lock:
+                async with operation_render_lock(
+                    context.application,
+                    operation_id,
+                ):
+                    operation_record, operation_segment = (
+                        coordinator.accept_segment_report(
+                            route.plugin_id,
+                            normalized_operation,
+                        )
+                    )
+            elif has_segment:
                 operation_record, operation_segment = (
                     coordinator.accept_segment_report(
                         route.plugin_id,
@@ -847,7 +869,27 @@ async def handle_feature_result(update, context, route, result: dict):
     if isinstance(result, dict) and "config_patch" in result:
         await _apply_feature_config_patch(update, context, route, result)
         return
-    if operation_record is not None and operation_segment is not None:
+    if (
+        operation_record is not None
+        and stale_operation_snapshot
+        and coordinator.has_nonlegacy_message_segments(
+            operation_record.operation_id
+        )
+    ):
+        return
+    if operation_record is not None and stale_operation_snapshot:
+        message_id = await render_operation(
+            context.application,
+            context.application.bot_data.get(ROUTER_KEY),
+            operation_record,
+        )
+        message_kind = (
+            operation_record.message_kind
+            if message_id is not None
+            else None
+        )
+        rendered = True
+    elif operation_record is not None and operation_segment is not None:
         message_id = await render_operation(
             context.application,
             context.application.bot_data.get(ROUTER_KEY),
@@ -859,32 +901,35 @@ async def handle_feature_result(update, context, route, result: dict):
             else None
         )
         rendered = True
-    elif operation_record is not None and stale_operation_snapshot:
-        message_id = await render_operation(
-            context.application,
-            context.application.bot_data.get(ROUTER_KEY),
-            operation_record,
-        )
-        message_kind = operation_record.message_kind if message_id is not None else None
-        rendered = True
     elif operation_record is not None:
         async with operation_render_lock(
             context.application,
             operation_record.operation_id,
         ):
-            rendered, message_id, message_kind = await _render_actions(
-                update,
-                context,
-                route,
-                result,
-                operation_record=operation_record,
-            )
-            if rendered and message_id is not None:
-                operation_record = coordinator.set_message_id(
-                    operation_record.operation_id,
-                    message_id,
-                    message_kind,
+            current = coordinator.get(operation_record.operation_id)
+            if current is not None:
+                operation_record = current
+            if coordinator.has_nonlegacy_message_segments(
+                operation_record.operation_id
+            ):
+                message_id = None
+                message_kind = None
+                rendered = True
+                suppress_operation_projection = True
+            else:
+                rendered, message_id, message_kind = await _render_actions(
+                    update,
+                    context,
+                    route,
+                    result,
+                    operation_record=operation_record,
                 )
+                if rendered and message_id is not None:
+                    operation_record = coordinator.set_message_id(
+                        operation_record.operation_id,
+                        message_id,
+                        message_kind,
+                    )
     else:
         rendered, message_id, message_kind = await _render_actions(
             update,
@@ -896,7 +941,11 @@ async def handle_feature_result(update, context, route, result: dict):
         return
     session = result.get("session") if isinstance(result, dict) else None
     if session is None:
-        if operation_record is not None and message_id is None:
+        if (
+            operation_record is not None
+            and message_id is None
+            and not suppress_operation_projection
+        ):
             await render_operation(context.application, None, operation_record)
         return
     if not isinstance(session, dict) or session.get("state") not in {"open", "close"}:

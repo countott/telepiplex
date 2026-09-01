@@ -101,7 +101,7 @@ DEFAULT_PLUGIN_CATALOG_URL = (
 
 
 def get_version(md_format=False):
-    version = "v3.6.7-host"
+    version = "v3.6.8-host"
     if md_format:
         return escape_markdown(version, version=2)
     return version
@@ -737,7 +737,7 @@ def configure_application(application, manager):
         else:
             operation_sink = getattr(broker, "operation_sink", None)
             if hasattr(operation_sink, "attach"):
-                operation_sink.attach(operation_delivery)
+                operation_sink.attach(operation_delivery, lock_factory)
             milestone_sink = getattr(broker, "milestone_sink", None)
             if hasattr(milestone_sink, "attach"):
                 milestone_sink.attach(milestone_delivery, lock_factory)

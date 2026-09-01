@@ -1037,6 +1037,486 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             context.application.bot.edit_message_media.assert_awaited_once()
             update.effective_message.edit_media.assert_not_awaited()
 
+    async def test_stale_segment_result_never_renders_the_current_segment(self):
+        from app.handlers.interaction_handler import COORDINATOR_KEY, ROUTER_KEY
+        from app.handlers.plugin_handler import handle_feature_result
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "host.db")
+            self.addCleanup(coordinator.close)
+            _record, first = coordinator.accept_segment_report(
+                "search",
+                {
+                    "operation_id": "op-stale-segment-result",
+                    "chat_id": 10,
+                    "user_id": 1,
+                    "state": "running",
+                    "stage": "identity_confirmation",
+                    "status_text": "已确认媒体身份",
+                    "control": "cancel",
+                    "revision": 1,
+                    "segment": {
+                        "role": "identity",
+                        "presentation_kind": "text",
+                    },
+                },
+            )
+            first = coordinator.bind_segment_message(
+                first.segment_id,
+                owner_plugin_id="search",
+                generation=first.generation,
+                chat_id=10,
+                message_id=55,
+                message_kind="text",
+            )
+            first = coordinator.record_segment_rendered(
+                first.segment_id,
+                owner_plugin_id="search",
+                generation=first.generation,
+                business_revision=1,
+                projection_hash=first.projection_hash,
+            )
+            coordinator.seal_segment(
+                "search",
+                "op-stale-segment-result",
+                "identity",
+            )
+            coordinator.complete_segment_seal(
+                first.segment_id,
+                owner_plugin_id="search",
+                generation=first.generation,
+            )
+            _current, current_segment = coordinator.accept_segment_report(
+                "search",
+                {
+                    "operation_id": "op-stale-segment-result",
+                    "chat_id": 10,
+                    "user_id": 1,
+                    "state": "running",
+                    "stage": "prowlarr_search",
+                    "status_text": "正在搜索片源",
+                    "control": "cancel",
+                    "revision": 2,
+                    "segment": {
+                        "role": "search",
+                        "presentation_kind": "text",
+                    },
+                },
+            )
+            update, context, _manager = self._request([], user_id=1)
+            route = SimpleNamespace(
+                plugin_id="search",
+                manifest=SimpleNamespace(callbacks=("search",)),
+            )
+            router = Mock()
+            router.plugin_route.return_value = route
+            context.application.bot_data.update({
+                COORDINATOR_KEY: coordinator,
+                ROUTER_KEY: router,
+            })
+            context.application.bot = SimpleNamespace(
+                send_message=AsyncMock(
+                    return_value=SimpleNamespace(message_id=90)
+                ),
+                send_photo=AsyncMock(),
+                edit_message_text=AsyncMock(),
+                edit_message_media=AsyncMock(),
+                edit_message_caption=AsyncMock(),
+                edit_message_reply_markup=AsyncMock(),
+                delete_message=AsyncMock(),
+            )
+
+            await handle_feature_result(update, context, route, {
+                "actions": [],
+                "operation": {
+                    "operation_id": "op-stale-segment-result",
+                    "chat_id": 10,
+                    "user_id": 1,
+                    "state": "running",
+                    "stage": "identity_confirmation",
+                    "status_text": "迟到的身份结果",
+                    "control": "cancel",
+                    "revision": 1,
+                    "segment": {
+                        "role": "identity",
+                        "presentation_kind": "text",
+                    },
+                },
+            })
+
+            context.application.bot.send_message.assert_not_awaited()
+            update.effective_message.reply_text.assert_not_awaited()
+            self.assertIsNone(
+                coordinator.get_segment(current_segment.segment_id).message_id
+            )
+
+    async def test_segmentless_result_cannot_reopen_legacy_cursor_after_native_segment(self):
+        from app.handlers.interaction_handler import COORDINATOR_KEY, ROUTER_KEY
+        from app.handlers.plugin_handler import handle_feature_result
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "host.db")
+            self.addCleanup(coordinator.close)
+            _record, segment = coordinator.accept_segment_report(
+                "rename",
+                {
+                    "operation_id": "op-native-history",
+                    "chat_id": 10,
+                    "user_id": 1,
+                    "state": "running",
+                    "stage": "organizing",
+                    "status_text": "正在整理",
+                    "control": "cancel",
+                    "revision": 1,
+                    "segment": {
+                        "role": "rename",
+                        "presentation_kind": "text",
+                    },
+                },
+            )
+            segment = coordinator.bind_segment_message(
+                segment.segment_id,
+                owner_plugin_id="rename",
+                generation=segment.generation,
+                chat_id=10,
+                message_id=55,
+                message_kind="text",
+            )
+            segment = coordinator.record_segment_rendered(
+                segment.segment_id,
+                owner_plugin_id="rename",
+                generation=segment.generation,
+                business_revision=1,
+                projection_hash=segment.projection_hash,
+            )
+            coordinator.seal_segment("rename", "op-native-history", "rename")
+            coordinator.complete_segment_seal(
+                segment.segment_id,
+                owner_plugin_id="rename",
+                generation=segment.generation,
+            )
+            update, context, _manager = self._request([], user_id=1)
+            update.effective_message.reply_text = AsyncMock(
+                return_value=SimpleNamespace(message_id=77)
+            )
+            route = SimpleNamespace(
+                plugin_id="rename",
+                manifest=SimpleNamespace(callbacks=("rename",)),
+            )
+            context.application.bot_data.update({
+                COORDINATOR_KEY: coordinator,
+                ROUTER_KEY: Mock(),
+            })
+
+            await handle_feature_result(update, context, route, {
+                "actions": [{
+                    "kind": "send_message",
+                    "text": "迟到的旧通道消息",
+                }],
+                "operation": {
+                    "operation_id": "op-native-history",
+                    "chat_id": 10,
+                    "user_id": 1,
+                    "state": "running",
+                    "stage": "organizing",
+                    "status_text": "迟到的旧通道状态",
+                    "control": "cancel",
+                    "revision": 2,
+                },
+            })
+
+            update.effective_message.reply_text.assert_not_awaited()
+            self.assertIsNone(coordinator.get("op-native-history").message_id)
+
+    async def test_native_segment_adoption_cannot_race_legacy_action_delivery(self):
+        from app.handlers.interaction_handler import (
+            COORDINATOR_KEY,
+            ROUTER_KEY,
+            OperationMilestoneSink,
+            OperationProjectionLifecycle,
+            OperationReportSink,
+            operation_render_lock,
+            render_operation,
+        )
+        from app.handlers.plugin_handler import handle_feature_result
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "host.db")
+            self.addCleanup(coordinator.close)
+            update, context, _manager = self._request([], user_id=1)
+            legacy_delivery_started = asyncio.Event()
+            release_legacy_delivery = asyncio.Event()
+            native_adoption_started = asyncio.Event()
+
+            async def send_legacy_message(*_args, **_kwargs):
+                legacy_delivery_started.set()
+                await release_legacy_delivery.wait()
+                return SimpleNamespace(message_id=70)
+
+            update.effective_message.reply_text = AsyncMock(
+                side_effect=send_legacy_message
+            )
+            route = SimpleNamespace(
+                plugin_id="rename",
+                manifest=SimpleNamespace(callbacks=("rename",)),
+            )
+            router = Mock()
+            router.plugin_route.return_value = route
+            context.application.bot_data.update({
+                COORDINATOR_KEY: coordinator,
+                ROUTER_KEY: router,
+            })
+            context.application.bot = SimpleNamespace(
+                send_message=AsyncMock(
+                    return_value=SimpleNamespace(message_id=90)
+                ),
+                send_photo=AsyncMock(),
+                edit_message_text=AsyncMock(),
+                edit_message_media=AsyncMock(),
+                edit_message_caption=AsyncMock(),
+                edit_message_reply_markup=AsyncMock(),
+                delete_message=AsyncMock(),
+            )
+            operation_sink = OperationReportSink(
+                coordinator,
+                router=router,
+            )
+            lifecycle = OperationProjectionLifecycle(
+                operation_sink,
+                OperationMilestoneSink(coordinator, AsyncMock()),
+            )
+            lifecycle.attach(
+                lambda record: render_operation(
+                    context.application,
+                    router,
+                    record,
+                ),
+                AsyncMock(),
+                lambda operation_id: operation_render_lock(
+                    context.application,
+                    operation_id,
+                ),
+            )
+
+            async def adopt_native_segment():
+                native_adoption_started.set()
+                return await operation_sink(
+                    "rename",
+                    {
+                        "operation_id": "op-adopt-legacy-cursor",
+                        "chat_id": 10,
+                        "user_id": 1,
+                        "state": "running",
+                        "stage": "organizing",
+                        "status_text": "正在整理",
+                        "control": "cancel",
+                        "revision": 2,
+                        "segment": {
+                            "role": "rename",
+                            "presentation_kind": "text",
+                        },
+                    },
+                )
+
+            legacy_task = asyncio.create_task(handle_feature_result(
+                update,
+                context,
+                route,
+                {
+                    "actions": [{
+                        "kind": "send_message",
+                        "text": "正在整理",
+                    }],
+                    "operation": {
+                        "operation_id": "op-adopt-legacy-cursor",
+                        "chat_id": 10,
+                        "user_id": 1,
+                        "state": "running",
+                        "stage": "organizing",
+                        "status_text": "正在整理",
+                        "control": "cancel",
+                        "revision": 1,
+                    },
+                },
+            ))
+            await legacy_delivery_started.wait()
+            native_task = asyncio.create_task(adopt_native_segment())
+            await native_adoption_started.wait()
+            await asyncio.sleep(0)
+            native_waited_for_legacy_claim = not native_task.done()
+            self.assertFalse(coordinator.has_nonlegacy_message_segments(
+                "op-adopt-legacy-cursor"
+            ))
+            release_legacy_delivery.set()
+            legacy_result, native_result = await asyncio.gather(
+                legacy_task,
+                native_task,
+                return_exceptions=True,
+            )
+            await operation_sink.drain()
+
+            self.assertTrue(native_waited_for_legacy_claim)
+            self.assertNotIsInstance(legacy_result, Exception)
+            self.assertNotIsInstance(native_result, Exception)
+            self.assertTrue(native_result["accepted"])
+            segment = coordinator.get_active_segment(
+                "op-adopt-legacy-cursor"
+            )
+            self.assertIsNotNone(segment)
+            self.assertEqual(segment.message_id, 70)
+            self.assertIsNone(
+                coordinator.get("op-adopt-legacy-cursor").message_id
+            )
+            update.effective_message.reply_text.assert_awaited_once()
+            context.application.bot.send_message.assert_not_awaited()
+            context.application.bot.edit_message_text.assert_awaited()
+            self.assertEqual(
+                context.application.bot.edit_message_text.await_args.kwargs[
+                    "message_id"
+                ],
+                70,
+            )
+
+    async def test_direct_native_result_waits_for_legacy_action_claim(self):
+        from app.handlers.interaction_handler import (
+            COORDINATOR_KEY,
+            ROUTER_KEY,
+        )
+        from app.handlers.plugin_handler import handle_feature_result
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "host.db")
+            self.addCleanup(coordinator.close)
+            legacy_update, context, _manager = self._request([], user_id=1)
+            native_update, native_context, _manager = self._request(
+                [],
+                user_id=1,
+            )
+            native_context.application = context.application
+            legacy_delivery_started = asyncio.Event()
+            release_legacy_delivery = asyncio.Event()
+            native_adoption_started = asyncio.Event()
+
+            async def send_legacy_message(*_args, **_kwargs):
+                legacy_delivery_started.set()
+                await release_legacy_delivery.wait()
+                return SimpleNamespace(message_id=71)
+
+            legacy_update.effective_message.reply_text = AsyncMock(
+                side_effect=send_legacy_message
+            )
+            native_update.effective_message.reply_text = AsyncMock()
+            route = SimpleNamespace(
+                plugin_id="rename",
+                manifest=SimpleNamespace(callbacks=("rename",)),
+            )
+            router = Mock()
+            router.plugin_route.return_value = route
+            context.application.bot_data.update({
+                COORDINATOR_KEY: coordinator,
+                ROUTER_KEY: router,
+            })
+            context.application.bot = SimpleNamespace(
+                send_message=AsyncMock(
+                    return_value=SimpleNamespace(message_id=91)
+                ),
+                send_photo=AsyncMock(),
+                edit_message_text=AsyncMock(),
+                edit_message_media=AsyncMock(),
+                edit_message_caption=AsyncMock(),
+                edit_message_reply_markup=AsyncMock(),
+                delete_message=AsyncMock(),
+            )
+            legacy_result = {
+                "actions": [{
+                    "kind": "send_message",
+                    "text": "正在整理",
+                }],
+                "operation": {
+                    "operation_id": "op-direct-adoption",
+                    "chat_id": 10,
+                    "user_id": 1,
+                    "state": "running",
+                    "stage": "organizing",
+                    "status_text": "正在整理",
+                    "control": "cancel",
+                    "revision": 1,
+                },
+            }
+            native_result = {
+                "actions": [],
+                "operation": {
+                    "operation_id": "op-direct-adoption",
+                    "chat_id": 10,
+                    "user_id": 1,
+                    "state": "running",
+                    "stage": "organizing",
+                    "status_text": "正在整理",
+                    "control": "cancel",
+                    "revision": 2,
+                    "segment": {
+                        "role": "rename",
+                        "presentation_kind": "text",
+                    },
+                },
+            }
+
+            async def deliver_native_result():
+                native_adoption_started.set()
+                return await handle_feature_result(
+                    native_update,
+                    native_context,
+                    route,
+                    native_result,
+                )
+
+            legacy_task = asyncio.create_task(handle_feature_result(
+                legacy_update,
+                context,
+                route,
+                legacy_result,
+            ))
+            await legacy_delivery_started.wait()
+            native_task = asyncio.create_task(deliver_native_result())
+            await native_adoption_started.wait()
+            await asyncio.sleep(0)
+            native_waited_for_legacy_claim = not native_task.done()
+            self.assertFalse(coordinator.has_nonlegacy_message_segments(
+                "op-direct-adoption"
+            ))
+            release_legacy_delivery.set()
+            legacy_outcome, native_outcome = await asyncio.gather(
+                legacy_task,
+                native_task,
+                return_exceptions=True,
+            )
+
+            self.assertTrue(native_waited_for_legacy_claim)
+            self.assertNotIsInstance(legacy_outcome, Exception)
+            self.assertNotIsInstance(native_outcome, Exception)
+            segment = coordinator.get_active_segment(
+                "op-direct-adoption"
+            )
+            self.assertIsNotNone(segment)
+            self.assertEqual(segment.message_id, 71)
+            self.assertIsNone(
+                coordinator.get("op-direct-adoption").message_id
+            )
+            legacy_update.effective_message.reply_text.assert_awaited_once()
+            native_update.effective_message.reply_text.assert_not_awaited()
+            context.application.bot.send_message.assert_not_awaited()
+            context.application.bot.edit_message_text.assert_awaited()
+            self.assertEqual(
+                context.application.bot.edit_message_text.await_args.kwargs[
+                    "message_id"
+                ],
+                71,
+            )
+
     async def test_feature_config_patch_from_callback_updates_original_message(self):
         from app.handlers.plugin_handler import handle_feature_result
 

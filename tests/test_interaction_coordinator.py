@@ -417,6 +417,311 @@ class InteractionCoordinatorTest(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "segment_role_conflict")
 
+    def test_legacy_cursor_migration_rolls_back_if_pointer_binding_fails(self):
+        created = self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id(created.operation_id, 88, "text")
+        self.coordinator.close()
+
+        connection = sqlite3.connect(self.database_path)
+        with connection:
+            connection.execute(
+                "CREATE TRIGGER fail_legacy_pointer_binding "
+                "BEFORE UPDATE OF active_segment_id ON operations "
+                "WHEN NEW.active_segment_id != '' "
+                "BEGIN SELECT RAISE(ABORT, 'forced pointer failure'); END"
+            )
+        connection.close()
+
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            InteractionCoordinator(self.database_path)
+
+        connection = sqlite3.connect(self.database_path)
+        segment_count = connection.execute(
+            "SELECT COUNT(*) FROM operation_message_segments"
+        ).fetchone()[0]
+        with connection:
+            connection.execute("DROP TRIGGER fail_legacy_pointer_binding")
+        connection.close()
+
+        self.coordinator = InteractionCoordinator(self.database_path)
+
+        self.assertEqual(segment_count, 0)
+        self.assertEqual(
+            self.coordinator.get_active_segment("op-1").role,
+            "legacy",
+        )
+
+    def test_restart_rebinds_orphaned_legacy_segment_from_old_partial_migration(self):
+        created = self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id(created.operation_id, 88, "text")
+        self.coordinator.close()
+
+        legacy_segment_id = "legacy-old-partial"
+        connection = sqlite3.connect(self.database_path)
+        with connection:
+            connection.execute(
+                "INSERT INTO operation_message_segments("
+                "segment_id, operation_id, sequence, owner_plugin_id, role, "
+                "generation, presentation_kind, state, message_id, message_kind, "
+                "business_revision, rendered_revision, projection_hash, "
+                "rendered_projection_hash, projection_json, callback_generation, "
+                "delivery_state, created_at, updated_at, sealed_at"
+                ") VALUES (?, 'op-1', 1, 'search', 'legacy', 1, 'text', "
+                "'open', 88, 'text', 1, 1, 'legacy-hash', 'legacy-hash', "
+                "'{}', 1, 'delivered', 1, 1, NULL)",
+                (legacy_segment_id,),
+            )
+        connection.close()
+
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        self.coordinator = InteractionCoordinator(self.database_path)
+
+        self.assertEqual(
+            self.coordinator.get_active_segment("op-1").segment_id,
+            legacy_segment_id,
+        )
+
+    def test_restart_never_migrates_legacy_cursor_over_native_segment_history(self):
+        _operation, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                segment={
+                    "role": "search",
+                    "presentation_kind": "text",
+                },
+                projection={"text": "搜索完成"},
+            ),
+        )
+        segment = self.coordinator.bind_segment_message(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            chat_id=10,
+            message_id=88,
+            message_kind="text",
+        )
+        segment = self.coordinator.record_segment_rendered(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            business_revision=1,
+            projection_hash=segment.projection_hash,
+        )
+        self.coordinator.seal_segment("search", "op-1", "search")
+        self.coordinator.complete_segment_seal(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+        )
+        self.coordinator.close()
+
+        connection = sqlite3.connect(self.database_path)
+        with connection:
+            connection.execute(
+                "UPDATE operations SET message_id = 89, message_kind = 'text' "
+                "WHERE operation_id = 'op-1'"
+            )
+        connection.close()
+
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        self.coordinator = InteractionCoordinator(self.database_path)
+
+        self.assertIsNone(self.coordinator.get_active_segment("op-1"))
+        self.assertIsNone(self.coordinator.get("op-1").message_id)
+        self.assertEqual(
+            self.coordinator.get_segment(segment.segment_id).state,
+            "sealed",
+        )
+
+    def test_native_segment_history_rejects_both_legacy_cursor_setters(self):
+        from app.runtime.interaction_coordinator import InteractionError
+
+        record, _segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                segment={
+                    "role": "search",
+                    "presentation_kind": "text",
+                },
+            ),
+        )
+
+        with self.assertRaises(InteractionError) as raised:
+            self.coordinator.set_message_id("op-1", 89, "text")
+
+        self.assertEqual(raised.exception.code, "legacy_cursor_forbidden")
+        self.assertIsNone(
+            self.coordinator.set_message_id_if_current(
+                "op-1",
+                "search",
+                record.revision,
+                89,
+                "text",
+            )
+        )
+        self.assertIsNone(self.coordinator.get("op-1").message_id)
+
+    def test_first_native_segment_atomically_adopts_the_legacy_cursor(self):
+        created = self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id(created.operation_id, 89, "text")
+
+        operation, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                revision=2,
+                segment={
+                    "role": "search",
+                    "presentation_kind": "text",
+                },
+                projection={"text": "搜索完成"},
+            ),
+        )
+
+        self.assertIsNone(operation.message_id)
+        self.assertEqual(segment.message_id, 89)
+        self.assertEqual(segment.message_kind, "text")
+        self.assertEqual(segment.state, "open")
+        self.assertEqual(segment.delivery_state, "delivered")
+        self.assertEqual(segment.rendered_revision, 0)
+
+    def test_restart_retires_legacy_cursor_that_conflicts_with_native_history(self):
+        _operation, native = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                segment={
+                    "role": "search",
+                    "presentation_kind": "text",
+                },
+                projection={"text": "搜索完成"},
+            ),
+        )
+        native = self.coordinator.bind_segment_message(
+            native.segment_id,
+            owner_plugin_id="search",
+            generation=native.generation,
+            chat_id=10,
+            message_id=88,
+            message_kind="text",
+        )
+        native = self.coordinator.record_segment_rendered(
+            native.segment_id,
+            owner_plugin_id="search",
+            generation=native.generation,
+            business_revision=1,
+            projection_hash=native.projection_hash,
+        )
+        self.coordinator.seal_segment("search", "op-1", "search")
+        self.coordinator.complete_segment_seal(
+            native.segment_id,
+            owner_plugin_id="search",
+            generation=native.generation,
+        )
+        self.coordinator.close()
+
+        legacy_segment_id = "legacy-poisoned-cursor"
+        connection = sqlite3.connect(self.database_path)
+        with connection:
+            connection.execute(
+                "INSERT INTO operation_message_segments("
+                "segment_id, operation_id, sequence, owner_plugin_id, role, "
+                "generation, presentation_kind, state, message_id, message_kind, "
+                "business_revision, rendered_revision, projection_hash, "
+                "rendered_projection_hash, projection_json, callback_generation, "
+                "delivery_state, created_at, updated_at, sealed_at"
+                ") SELECT ?, operation_id, sequence + 1, owner_plugin_id, "
+                "'legacy', generation + 1, 'text', 'open', 89, 'text', "
+                "business_revision, rendered_revision, projection_hash, "
+                "rendered_projection_hash, projection_json, 1, 'delivered', "
+                "created_at, updated_at, NULL "
+                "FROM operation_message_segments WHERE segment_id = ?",
+                (legacy_segment_id, native.segment_id),
+            )
+            connection.execute(
+                "UPDATE operations SET active_segment_id = ?, message_id = 89, "
+                "message_kind = 'text' WHERE operation_id = 'op-1'",
+                (legacy_segment_id,),
+            )
+        connection.close()
+
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        self.coordinator = InteractionCoordinator(self.database_path)
+
+        self.assertIsNone(self.coordinator.get_active_segment("op-1"))
+        self.assertIsNone(self.coordinator.get("op-1").message_id)
+        self.assertEqual(
+            self.coordinator.get_segment(legacy_segment_id).state,
+            "sealed",
+        )
+        self.assertEqual(
+            self.coordinator.get_segment(native.segment_id).state,
+            "sealed",
+        )
+
+    def test_upgrade_repairs_double_active_native_and_legacy_before_unique_index(self):
+        _operation, native = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                segment={
+                    "role": "search",
+                    "presentation_kind": "text",
+                },
+                projection={"text": "正在搜索"},
+            ),
+        )
+        self.coordinator.close()
+
+        legacy_segment_id = "legacy-double-active"
+        connection = sqlite3.connect(self.database_path)
+        with connection:
+            connection.execute("DROP INDEX operation_segments_one_active")
+            connection.execute(
+                "INSERT INTO operation_message_segments("
+                "segment_id, operation_id, sequence, owner_plugin_id, role, "
+                "generation, presentation_kind, state, message_id, message_kind, "
+                "business_revision, rendered_revision, projection_hash, "
+                "rendered_projection_hash, projection_json, callback_generation, "
+                "delivery_state, created_at, updated_at, sealed_at"
+                ") SELECT ?, operation_id, sequence + 1, owner_plugin_id, "
+                "'legacy', generation + 1, 'text', 'open', 89, 'text', "
+                "business_revision, business_revision, projection_hash, "
+                "projection_hash, projection_json, 1, 'delivered', "
+                "created_at, updated_at, NULL "
+                "FROM operation_message_segments WHERE segment_id = ?",
+                (legacy_segment_id, native.segment_id),
+            )
+            connection.execute(
+                "UPDATE operations SET active_segment_id = ?, message_id = 89, "
+                "message_kind = 'text' WHERE operation_id = 'op-1'",
+                (legacy_segment_id,),
+            )
+        connection.close()
+
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        self.coordinator = InteractionCoordinator(self.database_path)
+
+        self.assertEqual(
+            self.coordinator.get_active_segment("op-1").segment_id,
+            native.segment_id,
+        )
+        self.assertEqual(
+            self.coordinator.get_segment(legacy_segment_id).state,
+            "sealed",
+        )
+        self.assertIsNone(self.coordinator.get("op-1").message_id)
+        indexes = {
+            row[1]
+            for row in self.coordinator._connection.execute(
+                "PRAGMA index_list(operation_message_segments)"
+            ).fetchall()
+        }
+        self.assertIn("operation_segments_one_active", indexes)
+
     def test_rendered_segment_seals_before_the_next_role_opens(self):
         _operation, identity = self.coordinator.accept_segment_report(
             "search",

@@ -774,6 +774,70 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(segment.business_revision, 2)
         self.assertEqual(segment.rendered_revision, 2)
 
+    async def test_text_segment_adopting_photo_cursor_edits_caption_and_seals(self):
+        from app.handlers.interaction_handler import render_operation
+
+        legacy = self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id(
+            legacy.operation_id,
+            88,
+            "photo",
+        )
+        record, segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                revision=2,
+                stage="prowlarr_search",
+                status_text="正在搜索片源",
+                segment={
+                    "role": "search",
+                    "presentation_kind": "text",
+                },
+            ),
+        )
+        context = self.context()
+        context.application.bot.edit_message_text.side_effect = BadRequest(
+            "There is no text in the message to edit"
+        )
+
+        message_id = await render_operation(
+            context.application,
+            Mock(),
+            record,
+        )
+
+        self.assertEqual(message_id, 88)
+        context.application.bot.edit_message_text.assert_not_awaited()
+        context.application.bot.edit_message_caption.assert_awaited_once()
+        self.assertEqual(
+            context.application.bot.edit_message_caption.await_args.kwargs[
+                "message_id"
+            ],
+            88,
+        )
+        self.assertEqual(
+            context.application.bot.edit_message_caption.await_args.kwargs[
+                "caption"
+            ],
+            "正在搜索片源",
+        )
+        context.application.bot.send_message.assert_not_awaited()
+        context.application.bot.send_photo.assert_not_awaited()
+        rendered = self.coordinator.get_segment(segment.segment_id)
+        self.assertEqual(rendered.rendered_revision, 2)
+
+        self.coordinator.seal_segment("search", "op-1", "search")
+        await render_operation(
+            context.application,
+            Mock(),
+            self.coordinator.get("op-1"),
+        )
+
+        self.assertEqual(
+            self.coordinator.get_segment(segment.segment_id).state,
+            "sealed",
+        )
+
     async def test_segment_edit_failure_retries_same_known_message_without_replacement(self):
         from app.handlers.interaction_handler import (
             OperationReportSink,
@@ -1251,6 +1315,180 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             "无法确定整理规则，文件保留在原目录。",
         )
 
+    async def test_terminal_segment_popped_before_foreground_seal_never_falls_back_to_legacy(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+        from app.handlers.plugin_handler import handle_feature_result
+
+        route = SimpleNamespace(
+            plugin_id="rename",
+            manifest=SimpleNamespace(callbacks=("rename",)),
+        )
+        router = Mock()
+        router.plugin_route.return_value = route
+        context = self.context(router=router)
+        update = self.message_update("")
+        sink = OperationReportSink(self.coordinator)
+        queued_terminal = asyncio.Event()
+        release_background = asyncio.Event()
+
+        async def delayed_background_render(record):
+            if record.revision == 2:
+                queued_terminal.set()
+                await release_background.wait()
+            return await render_operation(
+                context.application,
+                router,
+                record,
+            )
+
+        sink.attach(delayed_background_render)
+        await sink("rename", self.report(
+            stage="organizing",
+            status_text="正在整理",
+            segment={
+                "role": "rename",
+                "presentation_kind": "text",
+            },
+        ))
+        await sink.drain()
+
+        terminal_report = self.report(
+            revision=2,
+            state="failed",
+            stage="organizing",
+            status_text="无法确定整理规则，文件保留在原目录。",
+            control="",
+            segment={
+                "role": "rename",
+                "presentation_kind": "text",
+            },
+        )
+        await sink("rename", terminal_report)
+        await asyncio.wait_for(queued_terminal.wait(), timeout=1)
+        seal_started = asyncio.Event()
+        seal_segment = self.coordinator.seal_segment
+
+        def signal_seal(*args, **kwargs):
+            segment = seal_segment(*args, **kwargs)
+            seal_started.set()
+            return segment
+
+        with patch.object(
+            self.coordinator,
+            "seal_segment",
+            side_effect=signal_seal,
+        ):
+            seal_task = asyncio.create_task(
+                sink.seal("rename", "op-1", "rename")
+            )
+            await asyncio.wait_for(seal_started.wait(), timeout=1)
+            await handle_feature_result(
+                update,
+                context,
+                route,
+                {"actions": [], "operation": terminal_report},
+            )
+            self.assertIsNone(self.coordinator.get_active_segment("op-1"))
+            release_background.set()
+            response = await seal_task
+        await sink.drain()
+
+        self.assertTrue(response["accepted"])
+        self.assertEqual(response["segment"]["state"], "sealed")
+        context.application.bot.send_message.assert_awaited_once()
+        context.application.bot.edit_message_text.assert_awaited_once()
+        self.assertIsNone(self.coordinator.get("op-1").message_id)
+        self.assertEqual(
+            context.application.bot.edit_message_text.await_args.kwargs["text"],
+            "无法确定整理规则，文件保留在原目录。",
+        )
+
+    async def test_sealed_segment_operation_never_reopens_a_legacy_cursor(self):
+        from app.handlers.interaction_handler import render_operation
+
+        context = self.context()
+        record, segment = self.coordinator.accept_segment_report(
+            "rename",
+            self.report(
+                stage="organizing",
+                status_text="正在整理",
+                segment={
+                    "role": "rename",
+                    "presentation_kind": "text",
+                },
+            ),
+        )
+        await render_operation(context.application, Mock(), record)
+        self.coordinator.seal_segment("rename", "op-1", "rename")
+        await render_operation(
+            context.application,
+            Mock(),
+            self.coordinator.get("op-1"),
+        )
+        sealed_record = self.coordinator.get("op-1")
+        self.assertEqual(sealed_record.active_segment_id, "")
+        self.assertEqual(
+            self.coordinator.get_segment(segment.segment_id).state,
+            "sealed",
+        )
+        context.application.bot.send_message.reset_mock()
+        context.application.bot.edit_message_text.reset_mock()
+
+        await render_operation(context.application, Mock(), sealed_record)
+
+        context.application.bot.send_message.assert_not_awaited()
+        context.application.bot.edit_message_text.assert_not_awaited()
+
+    async def test_stale_segment_snapshot_never_renders_a_newer_active_segment(self):
+        from app.handlers.interaction_handler import render_operation
+
+        context = self.context()
+        stale_record, first_segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                stage="identity_confirmation",
+                status_text="已确认媒体身份",
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "text",
+                },
+            ),
+        )
+        await render_operation(context.application, Mock(), stale_record)
+        self.coordinator.seal_segment("search", "op-1", "identity")
+        await render_operation(
+            context.application,
+            Mock(),
+            self.coordinator.get("op-1"),
+        )
+        self.assertEqual(
+            self.coordinator.get_segment(first_segment.segment_id).state,
+            "sealed",
+        )
+        _new_record, new_segment = self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                revision=2,
+                stage="prowlarr_search",
+                status_text="正在搜索片源",
+                segment={
+                    "role": "search",
+                    "presentation_kind": "text",
+                },
+            ),
+        )
+        context.application.bot.send_message.reset_mock()
+
+        await render_operation(context.application, Mock(), stale_record)
+
+        context.application.bot.send_message.assert_not_awaited()
+        self.assertIsNone(
+            self.coordinator.get_segment(new_segment.segment_id).message_id
+        )
+
     async def test_operation_sink_persists_silent_transition_without_rendering(self):
         from app.handlers.interaction_handler import OperationReportSink
 
@@ -1292,6 +1530,56 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await task)["accepted"])
         release.set()
         await asyncio.gather(*sink._tasks)
+
+    async def test_operation_sink_does_not_lock_later_native_reports(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            operation_render_lock,
+        )
+
+        self.coordinator.accept_segment_report(
+            "search",
+            self.report(
+                segment={
+                    "role": "search",
+                    "presentation_kind": "text",
+                },
+            ),
+        )
+        context = self.context()
+        rendered = AsyncMock()
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(
+            rendered,
+            lambda operation_id: operation_render_lock(
+                context.application,
+                operation_id,
+            ),
+        )
+        lock = operation_render_lock(context.application, "op-1")
+
+        async with lock:
+            report_task = asyncio.create_task(sink(
+                "search",
+                self.report(
+                    revision=2,
+                    stage="release_selection",
+                    status_text="请选择片源",
+                    segment={
+                        "role": "search",
+                        "presentation_kind": "text",
+                    },
+                ),
+            ))
+            await asyncio.sleep(0)
+            completed_without_render_lock = report_task.done()
+
+        response = await report_task
+        await sink.drain()
+
+        self.assertTrue(completed_without_render_lock)
+        self.assertTrue(response["accepted"])
+        self.assertEqual(self.coordinator.get("op-1").revision, 2)
 
     async def test_download_handoff_freezes_before_rename_uses_new_message(self):
         from app.handlers.interaction_handler import (

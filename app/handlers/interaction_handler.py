@@ -708,14 +708,16 @@ class OperationReportSink:
         self.coordinator = coordinator
         self.router = router
         self._listener = None
+        self._lock_factory = None
         self._pending: dict[str, OperationRecord] = {}
         self._pending_segment_ids: dict[str, str] = {}
         self._workers: dict[str, asyncio.Task] = {}
         self._tasks: set[asyncio.Task] = set()
         self._coalesce_signals: dict[str, asyncio.Event] = {}
 
-    def attach(self, listener):
+    def attach(self, listener, lock_factory=None):
         self._listener = listener
+        self._lock_factory = lock_factory
 
     async def seal(
         self,
@@ -773,6 +775,32 @@ class OperationReportSink:
         unavailable = self._unavailable_handoff(report)
         if unavailable is not None:
             return unavailable
+        operation_id = (
+            str(report.get("operation_id") or "")
+            if isinstance(report, dict)
+            else ""
+        )
+        operation_lock = (
+            self._lock_factory(operation_id)
+            if (
+                self._lock_factory is not None
+                and isinstance(report, dict)
+                and report.get("segment") is not None
+                and not self.coordinator.has_nonlegacy_message_segments(
+                    operation_id
+                )
+            )
+            else None
+        )
+        if operation_lock is None:
+            return self._accept_report(plugin_id, report)
+        # First native-segment adoption and legacy Telegram delivery share one
+        # per-operation boundary. Later reports retain the coalesced,
+        # non-blocking update path once native ownership is durable.
+        async with operation_lock:
+            return self._accept_report(plugin_id, report)
+
+    def _accept_report(self, plugin_id: str, report: dict) -> dict:
         segment = None
         if isinstance(report, dict) and report.get("segment") is not None:
             record, segment = self.coordinator.accept_segment_report(
@@ -907,6 +935,10 @@ class OperationReportSink:
             segment_id = self._pending_segment_ids.pop(operation_id, "")
             if record is None:
                 return
+            # The queued segment is the delivery address.  Do not let a
+            # delayed listener resolve whichever segment happens to be active.
+            if record.active_segment_id != segment_id:
+                record = replace(record, active_segment_id=segment_id)
             if segment_id:
                 segment = self.coordinator.get_segment(segment_id)
                 if (
@@ -990,7 +1022,7 @@ class OperationProjectionLifecycle:
         milestone_delivery,
         lock_factory=None,
     ):
-        self.operation_sink.attach(operation_delivery)
+        self.operation_sink.attach(operation_delivery, lock_factory)
         self.milestone_sink.attach(milestone_delivery, lock_factory)
 
     async def start(self):
@@ -1613,22 +1645,40 @@ def _segment_callback_busy_text(segment) -> str:
 async def render_operation(application, _router, record: OperationRecord):
     async with operation_render_lock(application, record.operation_id):
         coordinator = application.bot_data.get(COORDINATOR_KEY)
+        if coordinator is None:
+            return None
+        segment_id = str(record.active_segment_id or "")
         segment = (
-            coordinator.get_active_segment(record.operation_id)
-            if coordinator is not None
+            coordinator.get_segment(segment_id)
+            if segment_id
             else None
         )
-        if (
-            segment is not None
-            and segment.role != "legacy"
-            and segment.owner_plugin_id == record.plugin_id
-        ):
-            return await _render_operation_segment_locked(
-                application,
-                _router,
-                record.operation_id,
-                segment.segment_id,
-            )
+        # Native segment snapshots fail closed.  Falling through to the global
+        # cursor can resend a sealed projection or render a later segment.
+        if segment_id:
+            if segment is None:
+                return None
+            if segment.role != "legacy":
+                if segment.owner_plugin_id != record.plugin_id:
+                    return None
+                return await _render_operation_segment_locked(
+                    application,
+                    _router,
+                    record.operation_id,
+                    segment.segment_id,
+                )
+            if coordinator.has_nonlegacy_message_segments(record.operation_id):
+                return None
+            current = coordinator.get(record.operation_id)
+            if (
+                current is None
+                or current.active_segment_id != segment.segment_id
+                or current.plugin_id != segment.owner_plugin_id
+                or record.plugin_id != segment.owner_plugin_id
+            ):
+                return None
+        elif coordinator.has_nonlegacy_message_segments(record.operation_id):
+            return None
         return await _render_operation_locked(application, _router, record)
 
 
@@ -1947,6 +1997,27 @@ async def _edit_segment_message(application, router, record, segment):
         else operation_markup(record, router, segment=segment)
     )
     if segment.presentation_kind == "text":
+        if segment.message_kind == "photo":
+            caption, parse_mode = bounded_photo_caption(
+                text,
+                record.details.get("parse_mode"),
+            )
+            caption_kwargs = {
+                "chat_id": record.chat_id,
+                "message_id": segment.message_id,
+                "caption": caption,
+                "reply_markup": markup,
+            }
+            if parse_mode:
+                caption_kwargs["parse_mode"] = parse_mode
+            try:
+                await application.bot.edit_message_caption(
+                    **caption_kwargs
+                )
+            except Exception as exc:
+                if not _message_not_modified(exc):
+                    raise
+            return
         try:
             await application.bot.edit_message_text(
                 chat_id=record.chat_id,

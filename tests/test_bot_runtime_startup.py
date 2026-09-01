@@ -26,10 +26,10 @@ def load_bot_module():
 
 
 class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
-    async def test_core_runtime_version_is_v3_6_7_host(self):
+    async def test_core_runtime_version_is_v3_6_8_host(self):
         bot_module = await asyncio.to_thread(load_bot_module)
 
-        self.assertEqual(bot_module.get_version(), "v3.6.7-host")
+        self.assertEqual(bot_module.get_version(), "v3.6.8-host")
 
     async def test_uncaught_telegram_error_uses_the_same_sanitized_incident_in_frontend_and_machine_log(self):
         from app.utils.logger import Logger
@@ -216,9 +216,13 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             manager.broker.projection_lifecycle.attach.assert_called_once()
             first_lock = manager.broker.milestone_sink.lock_factory("op-lock")
             second_lock = manager.broker.milestone_sink.lock_factory("op-lock")
+            operation_lock = manager.broker.operation_sink._lock_factory(
+                "op-lock"
+            )
 
             self.assertIsInstance(first_lock, asyncio.Lock)
             self.assertIs(first_lock, second_lock)
+            self.assertIs(first_lock, operation_lock)
             self.assertFalse(manager.broker.milestone_sink._started)
             self.assertEqual(manager.broker.milestone_sink._tasks, set())
 
