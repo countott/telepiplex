@@ -25,6 +25,7 @@ from .adapters.anilist import (
     AniListConfigError,
     AniListRequestError,
     get_anilist_media,
+    get_anilist_media_by_mal_id,
     search_anilist,
 )
 from .adapters.prowlarr import (
@@ -63,6 +64,7 @@ from .confirmed_enrichment import (
     build_tmdb_query,
     build_tvdb_query,
     build_wikipedia_queries,
+    is_confirmed_japanese_animation,
     select_unique_anilist_fact,
     select_unique_douban_fact,
     select_unique_tmdb_fact,
@@ -95,6 +97,7 @@ from .media_metadata_v2 import project_confirmed_media_metadata_v2
 from .errors import SearchPlanningError
 from .enrichment_policy import (
     apply_deferred_presentation,
+    needs_anime_entry_enrichment,
     needs_authoritative_scope_enrichment,
 )
 from .prowlarr_query import (
@@ -222,6 +225,32 @@ def _cacheable_anilist_raw(value, identity: ConfirmedIdentity) -> bool:
     except Exception:
         return False
     return isinstance(selected, dict)
+
+
+def _cacheable_anilist_exact_raw(
+    value,
+    *,
+    id_key: str,
+    expected_id: str,
+    media_type: str,
+) -> bool:
+    if not isinstance(value, dict):
+        return False
+    external_ids = (
+        value.get("external_ids")
+        if isinstance(value.get("external_ids"), dict)
+        else {}
+    )
+    actual_id = _text(
+        value.get("anilist_id")
+        if id_key == "anilist"
+        else external_ids.get(id_key)
+    )
+    actual_type = _text(value.get("media_type")).casefold()
+    return bool(
+        actual_id == _text(expected_id)
+        and (not actual_type or actual_type == _text(media_type).casefold())
+    )
 
 
 def _cacheable_wikipedia_raw(value, identity: ConfirmedIdentity) -> bool:
@@ -1013,9 +1042,14 @@ class SearchFeature:
                 require_anchor=require_anchor,
                 resolver=anchor_resolver,
             )
+            needs_scope_enrichment = (
+                needs_authoritative_scope_enrichment(hydrated)
+            )
+            needs_entry_enrichment = needs_anime_entry_enrichment(hydrated)
             if (
                 hydrated.get("metadata_hydrated")
-                and not needs_authoritative_scope_enrichment(hydrated)
+                and not needs_scope_enrichment
+                and not needs_entry_enrichment
             ):
                 self._log_measurement(
                     "search.hydration.completed",
@@ -1029,10 +1063,17 @@ class SearchFeature:
                 return hydrated
             try:
                 if self._uses_default_selected_candidate_supplementer:
+                    enrichment_purpose = (
+                        "confirmation"
+                        if needs_scope_enrichment and needs_entry_enrichment
+                        else "authoritative_scope"
+                        if needs_scope_enrichment
+                        else "anime_entry"
+                    )
                     enriched = await self._supplement_selected_candidate(
                         hydrated,
                         raw_query,
-                        purpose="authoritative_scope",
+                        purpose=enrichment_purpose,
                     )
                 else:
                     enriched = await self.selected_candidate_supplementer(
@@ -1043,12 +1084,16 @@ class SearchFeature:
                 if runtime_context.logger:
                     runtime_context.logger.warning(
                         "search_supplement status=failed "
-                        "purpose=authoritative_scope "
+                        "purpose=confirmation "
                         f"error={type(exc).__name__}"
                     )
                 raise CandidateHydrationError(
                     "metadata_incomplete",
-                    ("verified_scope",),
+                    (
+                        "verified_scope"
+                        if needs_scope_enrichment
+                        else "anime_entry",
+                    ),
                 ) from exc
             strict_resolver = await self._prefetch_exact_resolver(enriched)
             result = await asyncio.to_thread(
@@ -5067,9 +5112,9 @@ class SearchFeature:
         source_scheduler: SourceScheduler | None = None,
         purpose: str = "optional_peer",
     ) -> tuple[dict | None, str]:
-        query = build_anilist_query(identity)
-        if query is None:
+        if not is_confirmed_japanese_animation(identity):
             return None, "not_applicable"
+        query = build_anilist_query(identity)
 
         async def fetch_raw(request_identity: str, fetch, cacheable):
             if source_scheduler is None:
@@ -5089,6 +5134,70 @@ class SearchFeature:
             )
 
         try:
+            anilist_id = _text(identity.external_ids.get("anilist"))
+            mal_id = _text(identity.external_ids.get("myanimelist"))
+            exact_lookups = []
+            if anilist_id:
+                exact_lookups.append((
+                    "anilist",
+                    anilist_id,
+                    get_anilist_media,
+                ))
+            if mal_id:
+                exact_lookups.append((
+                    "myanimelist",
+                    mal_id,
+                    get_anilist_media_by_mal_id,
+                ))
+            for id_key, expected_id, lookup in exact_lookups:
+                detail = await fetch_raw(
+                    f"detail:{id_key}:{expected_id}",
+                    lambda lookup=lookup, expected_id=expected_id: (
+                        asyncio.to_thread(lookup, expected_id)
+                    ),
+                    lambda value, id_key=id_key, expected_id=expected_id: (
+                        _cacheable_anilist_exact_raw(
+                            value,
+                            id_key=id_key,
+                            expected_id=expected_id,
+                            media_type=identity.media_type,
+                        )
+                    ),
+                )
+                if not isinstance(detail, dict):
+                    continue
+                if not _cacheable_anilist_exact_raw(
+                    detail,
+                    id_key=id_key,
+                    expected_id=expected_id,
+                    media_type=identity.media_type,
+                ):
+                    return None, "identity_conflict"
+                selected = dict(detail)
+                binding_source = (
+                    "wikidata"
+                    if _text(identity.external_ids.get("wikidata"))
+                    else _text(identity.provider).casefold() or "confirmed"
+                )
+                selected["binding_method"] = (
+                    f"{binding_source}_"
+                    f"{'anilist_id' if id_key == 'anilist' else 'mal_id'}"
+                )
+                selected["binding_kind"] = (
+                    "same_entity"
+                    if (
+                        _text(identity.provider).casefold() == "anilist"
+                        and _text(identity.stable_id)
+                        == _text(selected.get("anilist_id"))
+                    )
+                    else "root_to_entry"
+                )
+                return selected, "ok"
+            if exact_lookups:
+                return None, "not_found"
+
+            if query is None:
+                return None, "unavailable"
             candidates = await fetch_raw(
                 f"search:{query['title']}:{query['year']}",
                 lambda: asyncio.to_thread(
@@ -5126,7 +5235,11 @@ class SearchFeature:
                 "status": "ok" if detail else "not_found",
                 "facts": [detail] if isinstance(detail, dict) else [],
             }, identity)
-            return (verified, "ok") if verified else (None, "not_found")
+            if verified is None:
+                return None, "not_found"
+            verified["binding_method"] = "title_year_media_type"
+            verified["binding_kind"] = "root_to_entry"
+            return verified, "ok"
         except AniListConfigError as exc:
             return None, exc.code
         except AniListRequestError as exc:
@@ -5588,10 +5701,25 @@ class SearchFeature:
         purpose: str = "all",
     ) -> dict:
         del raw_query
-        if purpose not in {"all", "authoritative_scope", "presentation"}:
+        if purpose not in {
+            "all",
+            "authoritative_scope",
+            "presentation",
+            "anime_entry",
+            "confirmation",
+        }:
             raise ValueError("unsupported enrichment purpose")
-        include_authoritative = purpose in {"all", "authoritative_scope"}
+        include_authoritative = purpose in {
+            "all",
+            "authoritative_scope",
+            "confirmation",
+        }
         include_presentation = purpose in {"all", "presentation"}
+        include_anime_entry = purpose in {
+            "all",
+            "anime_entry",
+            "confirmation",
+        }
         result = deepcopy(candidate)
         contract = result.get("media_metadata") or {}
         identity_value = contract.get("identity") or {}
@@ -5633,6 +5761,21 @@ class SearchFeature:
                 return _text(intent["title"])
             return value
 
+        confirmed_external_ids = {
+            _text(key): _text(value)
+            for key, value in (
+                identity_value.get("external_ids") or {}
+            ).items()
+            if _text(key) and _text(value)
+        }
+        for link in source_links:
+            for key, value in (link.get("external_ids") or {}).items():
+                if _text(key) and _text(value):
+                    confirmed_external_ids.setdefault(
+                        _text(key),
+                        _text(value),
+                    )
+
         confirmed = ConfirmedIdentity(
             provider=_text(anchor_link.get("provider")).casefold(),
             stable_id=_text(next(iter(anchor_ids.values()), "")),
@@ -5662,13 +5805,7 @@ class SearchFeature:
                 for item in identity_value.get("genres") or ()
                 if _text(item)
             ),
-            external_ids={
-                _text(key): _text(value)
-                for key, value in (
-                    identity_value.get("external_ids") or {}
-                ).items()
-                if _text(key) and _text(value)
-            },
+            external_ids=confirmed_external_ids,
             countries=tuple(
                 _text(item)
                 for item in identity_value.get("countries") or ()
@@ -6321,23 +6458,68 @@ class SearchFeature:
             if "douban" not in providers:
                 unresolved.append(f"douban:{douban_status}")
 
+        confirmed_anime = is_confirmed_japanese_animation(confirmed)
+        anilist_links = [
+            link for link in source_links
+            if _text(link.get("provider")).casefold() == "anilist"
+        ]
+        anime_entry_links = [
+            link for link in anilist_links
+            if _text(link.get("role")).casefold() == "anime_entry"
+        ]
+        if (
+            include_anime_entry
+            and confirmed_anime
+            and not anime_entry_links
+            and len(anilist_links) == 1
+        ):
+            legacy_link = anilist_links[0]
+            same_entity = bool(
+                _text(legacy_link.get("fact_id")) == anchor_fact_id
+                and _text(anchor_link.get("provider")).casefold()
+                == "anilist"
+            )
+            legacy_link["role"] = "anime_entry"
+            legacy_link["binding_kind"] = (
+                "same_entity" if same_entity else "root_to_entry"
+            )
+            legacy_link["binding_method"] = (
+                "direct_anilist"
+                if same_entity
+                else _text(legacy_link.get("binding_method"))
+                or "title_year_media_type"
+            )
+            anime_entry_links = [legacy_link]
+        has_anime_entry = len(anime_entry_links) == 1
+        ambiguous_anime_entry = bool(
+            len(anime_entry_links) > 1
+            or (anilist_links and not anime_entry_links)
+        )
         anilist_query = build_anilist_query(confirmed)
         if (
-            include_presentation
-            and anilist_query is not None
-            and "anilist" not in providers
+            include_anime_entry
+            and confirmed_anime
+            and not has_anime_entry
+            and not ambiguous_anime_entry
         ):
             log_search_event(
                 runtime_context.logger,
                 "search.anilist_started",
                 search_session_id=search_session_id,
-                query=anilist_query,
+                query=anilist_query or {
+                    "anilist_id": _text(
+                        confirmed.external_ids.get("anilist")
+                    ),
+                    "myanimelist_id": _text(
+                        confirmed.external_ids.get("myanimelist")
+                    ),
+                },
             )
             anilist_fact, anilist_status = (
                 await self._resolve_confirmed_anilist(
                     confirmed,
                     source_scheduler=self.source_scheduler,
-                    purpose="optional_peer",
+                    purpose="anime_entry",
                 )
             )
             if anilist_fact is not None:
@@ -6348,47 +6530,62 @@ class SearchFeature:
                         "anilist"
                     )
                 )
+                anilist_external_ids = {
+                    _text(key): _text(value)
+                    for key, value in (
+                        anilist_fact.get("external_ids") or {}
+                    ).items()
+                    if _text(key) and _text(value)
+                }
+                anilist_external_ids["anilist"] = anilist_id
                 source_links.append({
                     "provider": "anilist",
                     "fact_id": f"anilist:{anilist_id}",
                     "url": _text(anilist_fact.get("url"))
                     or f"https://anilist.co/anime/{anilist_id}",
-                    "external_ids": {"anilist": anilist_id},
-                    "role": (
-                        "movie"
-                        if confirmed.media_type == "movie"
-                        else "series_root"
-                    ),
+                    "external_ids": anilist_external_ids,
+                    "role": "anime_entry",
                     "season_number": None,
                     "episode_number": None,
                     "verification": "fact_verified",
+                    "binding_kind": _text(
+                        anilist_fact.get("binding_kind")
+                    ) or "root_to_entry",
+                    "binding_method": _text(
+                        anilist_fact.get("binding_method")
+                    ) or "title_year_media_type",
                     "proposed_season_number": None,
                     "proposed_episode_number": None,
                 })
                 providers.add("anilist")
-            if "anilist" not in providers:
+                has_anime_entry = True
+            if not has_anime_entry:
                 unresolved.append(f"anilist:{anilist_status}")
             log_search_event(
                 runtime_context.logger,
                 "search.anilist_completed",
                 search_session_id=search_session_id,
-                level="info" if "anilist" in providers else "warning",
+                level="info" if has_anime_entry else "warning",
                 status=(
-                    "ok" if "anilist" in providers else anilist_status
+                    "ok" if has_anime_entry else anilist_status
                 ),
-                matched=bool("anilist" in providers),
+                matched=has_anime_entry,
             )
         else:
+            if ambiguous_anime_entry:
+                unresolved.append("anilist:not_unique")
             log_search_event(
                 runtime_context.logger,
                 "search.anilist_skipped",
                 search_session_id=search_session_id,
                 reason=(
                     "not_japanese_animation"
-                    if anilist_query is None
+                    if not confirmed_anime
                     else (
                         "already_confirmed_source"
-                        if "anilist" in providers
+                        if has_anime_entry
+                        else "ambiguous_existing_source"
+                        if ambiguous_anime_entry
                         else "purpose_excluded"
                     )
                 ),

@@ -68,7 +68,7 @@ def _first_text(root: EvidenceFact, facts, field: str) -> str:
     )
 
 
-def _first_integer(root: EvidenceFact, facts, field: str) -> int | None:
+def _first_integer(root: EvidenceFact | None, facts, field: str) -> int | None:
     values = (getattr(root, field, None), *(
         getattr(fact, field, None) for fact in facts
     ))
@@ -105,6 +105,146 @@ def _root_fact(candidate: AnchoredCandidate) -> EvidenceFact:
         if link.role == "series_root" and link.fact_id in facts:
             return facts[link.fact_id]
     return facts.get(candidate.anchor_fact_id) or candidate.facts[0]
+
+
+def _anime_work_root_fact(candidate: AnchoredCandidate) -> EvidenceFact:
+    facts = {fact.fact_id: fact for fact in candidate.facts}
+    links = [
+        link
+        for link in candidate.source_links
+        if link.role in {"series_root", "movie"}
+        and link.fact_id in facts
+        and link.provider != "anilist"
+    ]
+    if not links:
+        return facts.get(candidate.anchor_fact_id) or candidate.facts[0]
+
+    def priority(link):
+        external_ids = dict(link.external_ids or {})
+        provider = _text(link.provider).casefold()
+        return (
+            0 if provider == "wikidata" else
+            1 if _text(external_ids.get("wikidata")) else
+            2 if provider == "wikipedia" else
+            3 if link.fact_id == candidate.anchor_fact_id else
+            4,
+            link.fact_id,
+        )
+
+    return facts[min(links, key=priority).fact_id]
+
+
+def _anime_entry(
+    candidate: AnchoredCandidate,
+) -> tuple[object | None, EvidenceFact | None]:
+    facts = {fact.fact_id: fact for fact in candidate.facts}
+    entries = [
+        (link, facts.get(link.fact_id))
+        for link in candidate.source_links
+        if link.role == "anime_entry" and link.provider == "anilist"
+    ]
+    entries = [value for value in entries if value[1] is not None]
+    return entries[0] if len(entries) == 1 else (None, None)
+
+
+def _link_ref(link) -> dict:
+    if link is None:
+        return {}
+    external_ids = dict(getattr(link, "external_ids", {}) or {})
+    provider = _text(getattr(link, "provider", "")).casefold()
+    preferred = {
+        "wikidata": ("wikidata",),
+        "wikipedia": ("wikidata", "wikipedia"),
+        "anilist": ("anilist",),
+        "douban": ("douban_subject", "douban"),
+        "tvdb": ("tvdb",),
+        "tmdb": ("tmdb",),
+    }.get(provider, (provider,))
+    for key in (*preferred, *external_ids):
+        value = _text(external_ids.get(key))
+        if value:
+            return {
+                "provider": (
+                    "douban" if key == "douban_subject" else key
+                ),
+                "id": value,
+            }
+    fact_id = _text(getattr(link, "fact_id", ""))
+    value = fact_id.split(":", 1)[1] if ":" in fact_id else ""
+    return {"provider": provider, "id": value} if provider and value else {}
+
+
+def _anime_binding(
+    candidate: AnchoredCandidate,
+    root_link,
+    entry_link,
+) -> tuple[dict, dict, str, str]:
+    work_root_ref = _link_ref(root_link)
+    anime_entry_ref = _link_ref(entry_link)
+    if not anime_entry_ref:
+        return work_root_ref, {}, "", ""
+    frozen_binding_kind = _text(
+        getattr(entry_link, "binding_kind", "")
+    ).casefold()
+    frozen_binding_method = _text(
+        getattr(entry_link, "binding_method", "")
+    ).casefold()
+    if frozen_binding_kind and frozen_binding_method:
+        valid_binding = bool(
+            (
+                frozen_binding_kind == "same_entity"
+                and work_root_ref == anime_entry_ref
+            )
+            or (
+                frozen_binding_kind == "root_to_entry"
+                and work_root_ref != anime_entry_ref
+            )
+        )
+        if not valid_binding:
+            raise MetadataV1Error(
+                "metadata_conflict",
+                ("anime_entry_binding",),
+            )
+        return (
+            work_root_ref,
+            anime_entry_ref,
+            frozen_binding_kind,
+            frozen_binding_method,
+        )
+    if work_root_ref == anime_entry_ref:
+        return work_root_ref, anime_entry_ref, "same_entity", "direct_anilist"
+    entry_ids = dict(getattr(entry_link, "external_ids", {}) or {})
+    anilist_id = _text(entry_ids.get("anilist"))
+    mal_id = _text(entry_ids.get("myanimelist"))
+    for link in candidate.source_links:
+        if link.role == "anime_entry":
+            continue
+        external_ids = dict(link.external_ids or {})
+        source = (
+            "wikidata"
+            if _text(external_ids.get("wikidata"))
+            else _text(link.provider).casefold() or "confirmed"
+        )
+        if anilist_id and _text(external_ids.get("anilist")) == anilist_id:
+            return (
+                work_root_ref,
+                anime_entry_ref,
+                "root_to_entry",
+                f"{source}_anilist_id",
+            )
+        if mal_id and _text(external_ids.get("myanimelist")) == mal_id:
+            return (
+                work_root_ref,
+                anime_entry_ref,
+                "root_to_entry",
+                f"{source}_mal_id",
+            )
+    return (
+        work_root_ref,
+        anime_entry_ref,
+        "root_to_entry",
+        "title_year_media_type",
+    )
 
 
 def _field_sources(
@@ -496,7 +636,23 @@ def build_media_metadata_v1(
     if not media_types or next(iter(media_types)) not in {"movie", "series"}:
         raise MetadataV1Error("metadata_incomplete", ("media_type",))
     media_type = next(iter(media_types))
-    entity = CandidateEntity(candidate.candidate_id, primary_facts)
+    entry_link, entry_fact = _anime_entry(candidate)
+    if entry_fact is not None:
+        title_facts = tuple(
+            fact
+            for fact in primary_facts
+            if fact.fact_id == entry_fact.fact_id
+            or fact.provider == "douban"
+        )
+        topology_facts = tuple(
+            fact
+            for fact in primary_facts
+            if fact.fact_id != entry_fact.fact_id
+        )
+    else:
+        title_facts = primary_facts
+        topology_facts = primary_facts
+    entity = CandidateEntity(candidate.candidate_id, title_facts)
     degraded_series_candidate = bool(
         media_type == "series"
         and candidate.intended_scope in {"work", "whole_series"}
@@ -520,13 +676,13 @@ def build_media_metadata_v1(
         chinese_title = next(
             (
                 fact.chinese_title
-                for fact in primary_facts
+                for fact in title_facts
                 if fact.chinese_title
             ),
             next(
                 (
                     title
-                    for fact in primary_facts
+                    for fact in title_facts
                     for title in fact.titles
                     if _text(title)
                 ),
@@ -547,7 +703,7 @@ def build_media_metadata_v1(
             original_language=next(
                 (
                     fact.original_language
-                    for fact in primary_facts
+                    for fact in title_facts
                     if fact.original_language
                 ),
                 "",
@@ -559,13 +715,33 @@ def build_media_metadata_v1(
             search_title_policy="",
         )
 
-    root = _root_fact(candidate)
-    year = root.year or next(
+    root = (
+        _anime_work_root_fact(candidate)
+        if entry_fact is not None
+        else _root_fact(candidate)
+    )
+    root_year = root.year or next(
         (fact.year for fact in primary_facts if fact.year),
         "",
     )
+    year = (
+        entry_fact.year
+        if entry_fact is not None and entry_fact.year
+        else root_year
+    )
     if not year:
         raise MetadataV1Error("metadata_incomplete", ("year",))
+    root_link = next(
+        (
+            link
+            for link in candidate.source_links
+            if link.fact_id == root.fact_id
+        ),
+        None,
+    )
+    work_root_ref, anime_entry_ref, binding_kind, binding_method = (
+        _anime_binding(candidate, root_link, entry_link)
+    )
     scope, season_number, episode_number = _scope(
         candidate,
         media_type,
@@ -581,24 +757,29 @@ def build_media_metadata_v1(
         ),
         "",
     ) if scope in {"season", "episode"} else ""
+    topology_root = (
+        root
+        if entry_fact is None or root.fact_id != entry_fact.fact_id
+        else None
+    )
     trusted_season_count = _first_integer(
-        root,
-        primary_facts,
+        topology_root,
+        topology_facts,
         "season_count",
     )
     trusted_episode_count = _first_integer(
-        root,
-        primary_facts,
+        topology_root,
+        topology_facts,
         "episode_count",
     )
     inventory, topology_evidence = _inventory(
-        primary_facts,
+        topology_facts,
         trusted_episode_count=trusted_episode_count,
         trusted_season_count=trusted_season_count,
         requested_season_number=season_number,
     )
     series_inventory_evidence = _series_inventory_evidence(
-        primary_facts,
+        topology_facts,
         inventory,
         topology_evidence,
     ) if media_type == "series" else {}
@@ -638,9 +819,11 @@ def build_media_metadata_v1(
             ("verified_scope",),
         )
 
-    aliases = _unique(
-        title for fact in primary_facts for title in fact.titles
-    )
+    alias_facts = (entry_fact,) if entry_fact is not None else primary_facts
+    aliases = _unique((
+        *(title for fact in alias_facts for title in fact.titles),
+        titles.chinese_title,
+    ))
     countries = _unique(
         country for fact in primary_facts for country in fact.countries
     )
@@ -688,32 +871,54 @@ def build_media_metadata_v1(
     )
     category = f"{'animated' if animation else 'live_action'}_{media_type}"
     chinese_title = titles.chinese_title
-    original_release_date = _first_text(
-        root,
-        primary_facts,
-        "original_release_date",
+    original_release_date = (
+        _text(entry_fact.original_release_date)
+        if entry_fact is not None and entry_fact.original_release_date
+        else _first_text(root, topology_facts, "original_release_date")
     )
-    runtime_minutes = _first_integer(
-        root,
-        primary_facts,
-        "runtime_minutes",
+    runtime_minutes = (
+        entry_fact.runtime_minutes
+        if entry_fact is not None and entry_fact.runtime_minutes is not None
+        else _first_integer(root, topology_facts, "runtime_minutes")
     )
-    status = _first_text(root, primary_facts, "status")
+    status = (
+        _text(entry_fact.status)
+        if entry_fact is not None and entry_fact.status
+        else _first_text(root, topology_facts, "status")
+    )
     season_count = trusted_season_count
     episode_count = trusted_episode_count
+    query_facts = (entry_fact,) if entry_fact is not None else primary_facts
     query_titles = _unique((
         titles.canonical_search_title,
         titles.canonical_latin_title,
         *(
             fact.official_english_title
-            for fact in primary_facts
+            for fact in query_facts
         ),
         *(
             fact.romanized_original_title
-            for fact in primary_facts
+            for fact in query_facts
         ),
     ))
     poster, poster_source = _poster_selection(candidate)
+    anime_entry_value = (
+        {
+            "release_format": entry_fact.release_format,
+            "status": entry_fact.status,
+            "year": entry_fact.year,
+            "episode_count": entry_fact.episode_count,
+            "runtime_minutes": entry_fact.runtime_minutes,
+            "titles": {
+                "native": entry_fact.original_title,
+                "romaji": entry_fact.romanized_original_title,
+                "english": entry_fact.official_english_title,
+            },
+            "relations": [dict(value) for value in entry_fact.relations],
+        }
+        if entry_fact is not None
+        else {}
+    )
     identity = {
         **titles.identity_fields(),
         "chinese_title": chinese_title,
@@ -722,7 +927,7 @@ def build_media_metadata_v1(
         "countries": countries,
         "genres": genres,
         "year": year,
-        "root_year": year,
+        "root_year": root_year,
         "scope_year": scope_year,
         "content_kind": media_type,
         "summary": candidate.primary_summary,
@@ -742,6 +947,14 @@ def build_media_metadata_v1(
         "external_ids": external_ids,
         "external_id_records": external_id_records,
         "root_fact_id": root.fact_id,
+        **({
+            "work_root_ref": work_root_ref,
+            "anime_entry_ref": anime_entry_ref,
+            "binding_kind": binding_kind,
+            "binding_method": binding_method,
+            "anime_entry": anime_entry_value,
+            "anime_entry_fact_id": entry_fact.fact_id,
+        } if entry_fact is not None else {}),
     }
     years = sorted({
         fact.year for fact in primary_facts if fact.year
@@ -832,6 +1045,8 @@ def build_media_metadata_v1(
                 "original_release_date": fact.original_release_date,
                 "runtime_minutes": fact.runtime_minutes,
                 "status": fact.status,
+                "release_format": fact.release_format,
+                "relations": [dict(value) for value in fact.relations],
                 "studios": list(fact.studios),
                 "networks": list(fact.networks),
                 "certifications": list(fact.certifications),

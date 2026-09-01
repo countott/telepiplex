@@ -105,13 +105,14 @@ def build_direct_entity_plan(
         raise SearchPlanningError("direct_link_invalid")
     fact = matching[0]
     media_type = direct.media_type
-    role = (
+    identity_role = (
         "movie"
         if media_type == "movie"
         else direct.scope
         if direct.scope in {"season", "episode"}
         else "series_root"
     )
+    role = "anime_entry" if direct.provider == "anilist" else identity_role
     intended_scope = (
         "movie"
         if media_type == "movie"
@@ -129,7 +130,7 @@ def build_direct_entity_plan(
                     f"{direct.stable_identity[1]}"
                 ),
                 "anchor_fact_id": fact.fact_id,
-                "identity_role": role,
+                "identity_role": identity_role,
                 "intended_scope": intended_scope,
                 "fact_bindings": [{
                     "fact_id": fact.fact_id,

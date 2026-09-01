@@ -157,6 +157,17 @@ def _normalize(entity: dict) -> dict:
     ), "")
     if douban_subject:
         external_ids["douban_subject"] = douban_subject
+    for property_id, key in (
+        ("P8729", "anilist"),
+        ("P4086", "myanimelist"),
+    ):
+        external_id = next((
+            value
+            for raw in _claim_values(entity, property_id)
+            if (value := _text(raw)).isdigit() and int(value) > 0
+        ), "")
+        if external_id:
+            external_ids[key] = external_id
     result = {
         "wikibase_item": qid,
         "external_ids": external_ids,

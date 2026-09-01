@@ -200,7 +200,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
             [
                 "push origin refs/tags/telepiplex-v3.6.7",
                 "push origin refs/tags/download-v2.0.1",
-                "push origin refs/tags/search-v2.0.2",
+                "push origin refs/tags/search-v2.1.0",
                 "push origin refs/tags/rename-v2.0.1",
                 "push origin refs/tags/sync-v2.0.0",
             ],
@@ -223,7 +223,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
                 (
                     "host refs/tags/telepiplex-v3.6.7",
                     "a refs/tags/download-v2.0.1",
-                    "b refs/tags/search-v2.0.2",
+                    "b refs/tags/search-v2.1.0",
                     "c refs/tags/rename-v2.0.1",
                     "d refs/tags/sync-v2.0.0",
                     "e refs/tags/caption-v0.1.4",
@@ -252,9 +252,9 @@ class UnraidPublishScriptTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("search-v2.0.2", result.stdout)
+        self.assertIn("search-v2.1.0", result.stdout)
         self.assertIn(
-            "push origin refs/tags/search-v2.0.2",
+            "push origin refs/tags/search-v2.1.0",
             git_log.read_text(encoding="utf-8"),
         )
 
@@ -269,7 +269,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
                 (
                     "host refs/tags/telepiplex-v3.6.7",
                     "a refs/tags/download-v2.0.1",
-                    "b refs/tags/search-v2.0.2",
+                    "b refs/tags/search-v2.1.0",
                     "c refs/tags/rename-v2.0.1",
                     "d refs/tags/sync-v2.0.0",
                     "e refs/tags/caption-v0.1.4",

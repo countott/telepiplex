@@ -697,10 +697,15 @@ class SearchEntityGraphTest(unittest.TestCase):
                 "year": "2005",
                 "media_type": "series",
                 "external_ids": {"anilist": "1142"},
+                "release_format": "TV",
                 "status": "FINISHED",
                 "season_count": 1,
                 "episode_count": 24,
                 "studios": ["J.C.STAFF"],
+                "relations": [{
+                    "relation_type": "SEQUEL",
+                    "anilist_id": "1143",
+                }],
             }],
         }])
 
@@ -710,6 +715,11 @@ class SearchEntityGraphTest(unittest.TestCase):
         self.assertEqual(fact.season_count, 1)
         self.assertEqual(fact.episode_count, 24)
         self.assertEqual(fact.studios, ("J.C.STAFF",))
+        self.assertEqual(getattr(fact, "release_format", ""), "TV")
+        self.assertEqual(getattr(fact, "relations", ()), ({
+            "relation_type": "SEQUEL",
+            "anilist_id": "1143",
+        },))
 
 
 if __name__ == "__main__":

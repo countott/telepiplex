@@ -65,11 +65,20 @@ def _anilist_post(query: str, variables: dict) -> dict:
 
 
 _FIELDS = """
-id type format status seasonYear episodes duration countryOfOrigin siteUrl
+id idMal type format status seasonYear episodes duration countryOfOrigin siteUrl
 title { native romaji english }
 synonyms genres
 coverImage { extraLarge large }
 startDate { year month day }
+relations {
+  edges {
+    relationType
+    node {
+      id type format status seasonYear episodes siteUrl
+      title { native romaji english }
+    }
+  }
+}
 """
 
 
@@ -96,6 +105,48 @@ def _date(item: dict) -> str:
     return result
 
 
+def _positive_integer(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _relations(item: dict) -> list[dict]:
+    relation_value = (
+        item.get("relations")
+        if isinstance(item.get("relations"), dict)
+        else {}
+    )
+    result = []
+    for edge in (relation_value.get("edges") or ())[:50]:
+        if not isinstance(edge, dict):
+            continue
+        node = edge.get("node") if isinstance(edge.get("node"), dict) else {}
+        node_id = _text(node.get("id"))
+        relation_type = _text(edge.get("relationType")).upper()
+        if not node_id or not relation_type:
+            continue
+        titles = node.get("title") if isinstance(node.get("title"), dict) else {}
+        result.append({
+            "relation_type": relation_type,
+            "anilist_id": node_id,
+            "release_format": _text(node.get("format")).upper(),
+            "status": _text(node.get("status")).upper(),
+            "year": _text(node.get("seasonYear"))[:4],
+            "episode_count": _positive_integer(node.get("episodes")),
+            "url": _text(node.get("siteUrl"))
+            or f"https://anilist.co/anime/{node_id}",
+            "title_native": _text(titles.get("native")),
+            "title_romaji": _text(titles.get("romaji")),
+            "title_english": _text(titles.get("english")),
+        })
+    return result
+
+
 def _normalize_media(item: dict) -> dict | None:
     entity_id = _text(item.get("id"))
     titles = item.get("title") if isinstance(item.get("title"), dict) else {}
@@ -106,9 +157,13 @@ def _normalize_media(item: dict) -> dict | None:
         return None
     media_type = "movie" if _text(item.get("format")).casefold() == "movie" else "series"
     release_date = _date(item)
+    external_ids = {"anilist": entity_id}
+    if mal_id := _positive_integer(item.get("idMal")):
+        external_ids["myanimelist"] = str(mal_id)
+    cover = item.get("coverImage") if isinstance(item.get("coverImage"), dict) else {}
     return {
         "anilist_id": entity_id,
-        "external_ids": {"anilist": entity_id},
+        "external_ids": external_ids,
         "url": _text(item.get("siteUrl")) or f"https://anilist.co/anime/{entity_id}",
         "title": romaji or english or native,
         "name": romaji or english or native,
@@ -120,6 +175,13 @@ def _normalize_media(item: dict) -> dict | None:
         "romanized_original_title": romaji,
         "year": release_date[:4],
         "media_type": media_type,
+        "release_format": _text(item.get("format")).upper(),
+        "status": _text(item.get("status")).upper(),
+        "episode_count": _positive_integer(item.get("episodes")),
+        "runtime_minutes": _positive_integer(item.get("duration")),
+        "cover_url": _text(cover.get("extraLarge") or cover.get("large")),
+        "genres": _unique(item.get("genres") or []),
+        "relations": _relations(item),
         "aliases": _unique((native, romaji, english, *(item.get("synonyms") or []))),
         "summary": "",
     }
@@ -143,9 +205,19 @@ def search_anilist(query: str, year: str = "") -> list[dict]:
 
 def get_anilist_media(entity_id: str) -> dict | None:
     entity_id = _text(entity_id)
-    if not entity_id:
+    if not entity_id.isdigit() or int(entity_id) < 1:
         return None
     document = f"query ($id: Int) {{ Media(id: $id, type: ANIME) {{ {_FIELDS} }} }}"
     payload = _anilist_post(document, {"id": int(entity_id)})
+    row = (payload.get("data") or {}).get("Media")
+    return _normalize_media(row) if isinstance(row, dict) else None
+
+
+def get_anilist_media_by_mal_id(entity_id: str) -> dict | None:
+    entity_id = _text(entity_id)
+    if not entity_id.isdigit() or int(entity_id) < 1:
+        return None
+    document = f"query ($idMal: Int) {{ Media(idMal: $idMal, type: ANIME) {{ {_FIELDS} }} }}"
+    payload = _anilist_post(document, {"idMal": int(entity_id)})
     row = (payload.get("data") or {}).get("Media")
     return _normalize_media(row) if isinstance(row, dict) else None

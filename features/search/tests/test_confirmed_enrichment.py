@@ -16,6 +16,9 @@ from telepiplex_search.confirmed_enrichment import (
 )
 from telepiplex_search.direct_link import DirectEntity
 from telepiplex_search.direct_plan import build_direct_entity_plan
+from telepiplex_search.media_metadata_v2 import (
+    project_confirmed_media_metadata_v2,
+)
 from telepiplex_search.service import SearchFeature
 from telepiplex_search.work_discovery import build_root_work_search_plan
 
@@ -407,6 +410,63 @@ class ConfirmedEnrichmentTest(unittest.TestCase):
 
 
 class ConfirmedEnrichmentIntegrationTest(unittest.IsolatedAsyncioTestCase):
+    def test_direct_anilist_link_projects_same_entity_binding(self):
+        plan = build_direct_entity_plan(
+            DirectEntity(
+                provider="anilist",
+                evidence={
+                    "source": "anilist",
+                    "status": "ok",
+                    "facts": [{
+                        "anilist_id": "1142",
+                        "title": "Hachimitsu to Clover II",
+                        "original_title": "ハチミツとクローバーII",
+                        "romanized_original_title": "Hachimitsu to Clover II",
+                        "official_english_title": "Honey and Clover II",
+                        "original_language": "ja",
+                        "year": "2006",
+                        "media_type": "series",
+                        "genres": ["Anime"],
+                        "url": "https://anilist.co/anime/1142",
+                        "external_ids": {"anilist": "1142"},
+                    }],
+                },
+                stable_identity=("anilist", "1142"),
+                title="Hachimitsu to Clover II",
+                year="2006",
+                media_type="series",
+                scope="work",
+            ),
+            raw_query="蜂蜜与四叶草II",
+            plan_id="direct-anilist-entry",
+        )
+        candidate = plan["candidates"][0]
+
+        self.assertEqual(candidate["source_links"][0]["role"], "anime_entry")
+        identity_value = candidate["media_metadata"]["identity"]
+        self.assertEqual(identity_value["work_root_ref"], {
+            "provider": "anilist",
+            "id": "1142",
+        })
+        self.assertEqual(identity_value["anime_entry_ref"], {
+            "provider": "anilist",
+            "id": "1142",
+        })
+        self.assertEqual(identity_value["binding_kind"], "same_entity")
+        projected = project_confirmed_media_metadata_v2(
+            candidate,
+            requested_scope={
+                "kind": "whole_series",
+                "season_number": None,
+                "episode_number": None,
+            },
+        )
+        self.assertEqual(projected["identity"]["primary_ref"], {
+            "provider": "anilist",
+            "id": "1142",
+        })
+        self.assertNotIn("relation_group", candidate["media_metadata"])
+
     @patch(
         "telepiplex_search.service.search_tmdb",
         side_effect=AssertionError("title search must not run"),
@@ -535,6 +595,9 @@ class ConfirmedEnrichmentIntegrationTest(unittest.IsolatedAsyncioTestCase):
             "original_language": "ja",
             "year": "2005",
             "media_type": "series",
+            "release_format": "TV",
+            "status": "FINISHED",
+            "episode_count": 24,
             "url": "https://anilist.co/anime/1142",
             "external_ids": {"anilist": "1142"},
         }
@@ -560,12 +623,206 @@ class ConfirmedEnrichmentIntegrationTest(unittest.IsolatedAsyncioTestCase):
         enriched = await feature._supplement_selected_candidate(
             candidate,
             "蜂蜜与四叶草",
+            purpose="anime_entry",
         )
 
-        self.assertIn(
-            "anilist",
-            {item["provider"] for item in enriched["source_links"]},
+        link = next(
+            item for item in enriched["source_links"]
+            if item["provider"] == "anilist"
         )
+        self.assertEqual(link["role"], "anime_entry")
+        self.assertEqual(link["external_ids"], {"anilist": "1142"})
+        self.assertNotIn("relation_group", enriched)
+
+    @patch("telepiplex_search.service.search_anilist")
+    @patch("telepiplex_search.service.get_anilist_media")
+    async def test_anilist_exact_id_binding_bypasses_title_search(
+        self,
+        get_anilist_mock,
+        search_anilist_mock,
+    ):
+        fact = {
+            "anilist_id": "116674",
+            "title": "BLEACH: Sennen Kessen-hen",
+            "official_english_title": "BLEACH: Thousand-Year Blood War",
+            "original_title": "BLEACH 千年血戦篇",
+            "year": "2022",
+            "media_type": "series",
+            "external_ids": {"anilist": "116674", "myanimelist": "41467"},
+        }
+        get_anilist_mock.return_value = fact
+
+        selected, status = await SearchFeature._resolve_confirmed_anilist(
+            identity(
+                provider="wikidata",
+                stable_id="Q112631839",
+                chinese_title="死神 千年血战篇",
+                english_title="",
+                original_title="",
+                year="2022",
+                original_language="ja",
+                genres=("Anime",),
+                external_ids={
+                    "wikidata": "Q112631839",
+                    "anilist": "116674",
+                },
+            ),
+        )
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(selected["binding_method"], "wikidata_anilist_id")
+        self.assertEqual(selected["binding_kind"], "root_to_entry")
+        get_anilist_mock.assert_called_once_with("116674")
+        search_anilist_mock.assert_not_called()
+
+    @patch("telepiplex_search.service.search_anilist")
+    async def test_anilist_mal_binding_bypasses_title_search(
+        self,
+        search_anilist_mock,
+    ):
+        fact = {
+            "anilist_id": "16498",
+            "title": "Shingeki no Kyojin",
+            "official_english_title": "Attack on Titan",
+            "original_title": "進撃の巨人",
+            "year": "2013",
+            "media_type": "series",
+            "external_ids": {"anilist": "16498", "myanimelist": "16498"},
+        }
+        with patch(
+            "telepiplex_search.service.get_anilist_media_by_mal_id",
+            create=True,
+            return_value=fact,
+        ) as get_by_mal:
+            selected, status = await SearchFeature._resolve_confirmed_anilist(
+                identity(
+                    provider="wikidata",
+                    stable_id="Q22126305",
+                    chinese_title="进击的巨人",
+                    english_title="Attack on Titan",
+                    original_title="進撃の巨人",
+                    year="2013",
+                    original_language="ja",
+                    genres=("Anime",),
+                    external_ids={
+                        "wikidata": "Q22126305",
+                        "myanimelist": "16498",
+                    },
+                ),
+            )
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(selected["binding_method"], "wikidata_mal_id")
+        self.assertEqual(selected["binding_kind"], "root_to_entry")
+        get_by_mal.assert_called_once_with("16498")
+        search_anilist_mock.assert_not_called()
+
+    @patch("telepiplex_search.service.search_anilist")
+    @patch("telepiplex_search.service.get_anilist_media_by_mal_id")
+    @patch("telepiplex_search.service.get_anilist_media", return_value=None)
+    async def test_stale_anilist_id_falls_back_to_exact_mal_id_only(
+        self,
+        get_anilist_mock,
+        get_by_mal_mock,
+        search_anilist_mock,
+    ):
+        get_by_mal_mock.return_value = {
+            "anilist_id": "16498",
+            "title": "Shingeki no Kyojin",
+            "official_english_title": "Attack on Titan",
+            "original_title": "進撃の巨人",
+            "year": "2013",
+            "media_type": "series",
+            "external_ids": {
+                "anilist": "16498",
+                "myanimelist": "16498",
+            },
+        }
+
+        selected, status = await SearchFeature._resolve_confirmed_anilist(
+            identity(
+                provider="wikidata",
+                stable_id="Q22126305",
+                chinese_title="进击的巨人",
+                english_title="Attack on Titan",
+                original_title="進撃の巨人",
+                year="2013",
+                original_language="ja",
+                genres=("Anime",),
+                external_ids={
+                    "wikidata": "Q22126305",
+                    "anilist": "999999",
+                    "myanimelist": "16498",
+                },
+            ),
+        )
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(selected["binding_method"], "wikidata_mal_id")
+        get_anilist_mock.assert_called_once_with("999999")
+        get_by_mal_mock.assert_called_once_with("16498")
+        search_anilist_mock.assert_not_called()
+
+    @patch("telepiplex_search.service.search_anilist")
+    @patch(
+        "telepiplex_search.service.get_anilist_media_by_mal_id",
+        return_value=None,
+    )
+    @patch("telepiplex_search.service.get_anilist_media", return_value=None)
+    async def test_failed_explicit_ids_never_fall_back_to_title_search(
+        self,
+        _get_anilist_mock,
+        _get_by_mal_mock,
+        search_anilist_mock,
+    ):
+        selected, status = await SearchFeature._resolve_confirmed_anilist(
+            identity(
+                original_language="ja",
+                genres=("Anime",),
+                external_ids={
+                    "wikidata": "Q1",
+                    "anilist": "999998",
+                    "myanimelist": "999999",
+                },
+            ),
+        )
+
+        self.assertIsNone(selected)
+        self.assertEqual(status, "not_found")
+        search_anilist_mock.assert_not_called()
+
+    async def test_legacy_anilist_root_link_is_reclassified_as_entry(self):
+        candidate = await self._candidate()
+        candidate["media_metadata"]["identity"].update({
+            "original_language": "ja",
+            "genres": ["Anime"],
+        })
+        candidate["source_links"].append({
+            "provider": "anilist",
+            "fact_id": "anilist:1142",
+            "url": "https://anilist.co/anime/1142",
+            "external_ids": {"anilist": "1142"},
+            "role": "series_root",
+            "season_number": None,
+            "episode_number": None,
+            "verification": "fact_verified",
+            "proposed_season_number": None,
+            "proposed_episode_number": None,
+        })
+        feature = SearchFeature(config={}, host=None)
+
+        enriched = await feature._supplement_selected_candidate(
+            candidate,
+            "蜂蜜与四叶草",
+            purpose="anime_entry",
+        )
+
+        links = [
+            link for link in enriched["source_links"]
+            if link["provider"] == "anilist"
+        ]
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["role"], "anime_entry")
 
     @patch(
         "telepiplex_search.service.search_tvdb_series",

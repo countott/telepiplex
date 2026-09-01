@@ -27,6 +27,7 @@ _BINDING_KEYS = {
 _SOURCE_ROLES = {
     "movie",
     "series_root",
+    "anime_entry",
     "season",
     "episode",
     "related_work",
@@ -74,9 +75,11 @@ class SourceLink:
     verification: str
     proposed_season_number: int | None = None
     proposed_episode_number: int | None = None
+    binding_kind: str = ""
+    binding_method: str = ""
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "provider": self.provider,
             "fact_id": self.fact_id,
             "url": self.url,
@@ -88,6 +91,11 @@ class SourceLink:
             "proposed_season_number": self.proposed_season_number,
             "proposed_episode_number": self.proposed_episode_number,
         }
+        if self.binding_kind:
+            result["binding_kind"] = self.binding_kind
+        if self.binding_method:
+            result["binding_method"] = self.binding_method
+        return result
 
 
 @dataclass(frozen=True)
@@ -284,6 +292,11 @@ def _validate_role_against_fact(role: str, fact: EvidenceFact) -> None:
         raise CandidateBindingError("media_type_conflict")
     if role in {"series_root", "season", "episode"} and (
         fact.media_type and fact.media_type != "series"
+    ):
+        raise CandidateBindingError("media_type_conflict")
+    if role == "anime_entry" and (
+        fact.provider != "anilist"
+        or fact.media_type not in {"movie", "series"}
     ):
         raise CandidateBindingError("media_type_conflict")
 

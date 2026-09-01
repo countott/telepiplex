@@ -155,6 +155,63 @@ class TitlePolicyTest(unittest.TestCase):
         self.assertEqual(titles.romanized_original_title, "Hachimitsu to Clover")
         self.assertEqual(titles.canonical_search_title, "Hachimitsu to Clover")
 
+    def test_anilist_owns_native_romaji_and_english_entry_titles(self):
+        candidate = CandidateEntity("wikipedia:Q112631839", (
+            fact(
+                fact_id="wikipedia:Q112631839",
+                provider="wikipedia",
+                titles=("BLEACH 千年血战篇", "Bleach"),
+                original_title="BLEACH",
+                original_language="ja",
+                official_english_title="Bleach",
+                romanized_original_title="Bleach",
+                media_type="series",
+                genres=("Anime",),
+            ),
+            fact(
+                fact_id="anilist:116674",
+                provider="anilist",
+                titles=(
+                    "BLEACH 千年血戦篇",
+                    "BLEACH: Sennen Kessen-hen",
+                    "BLEACH: Thousand-Year Blood War",
+                ),
+                original_title="BLEACH 千年血戦篇",
+                original_language="ja",
+                official_english_title="BLEACH: Thousand-Year Blood War",
+                romanized_original_title="BLEACH: Sennen Kessen-hen",
+                media_type="series",
+                external_ids={"anilist": "116674"},
+                genres=("Anime",),
+            ),
+            fact(
+                fact_id="douban:36093351",
+                provider="douban",
+                titles=("死神 千年血战篇",),
+                chinese_title="死神 千年血战篇",
+                original_title="",
+                original_language="ja",
+                official_english_title="",
+                romanized_original_title="",
+                media_type="series",
+                external_ids={"douban_subject": "36093351"},
+                genres=("Anime",),
+            ),
+        ))
+
+        titles = resolve_title_policy(candidate)
+
+        self.assertEqual(titles.chinese_title, "死神 千年血战篇")
+        self.assertEqual(titles.original_title, "BLEACH 千年血戦篇")
+        self.assertEqual(
+            titles.official_english_title,
+            "BLEACH: Thousand-Year Blood War",
+        )
+        self.assertEqual(
+            titles.romanized_original_title,
+            "BLEACH: Sennen Kessen-hen",
+        )
+
     def test_explicit_japanese_romaji_precedes_derived_value(self):
         candidate = CandidateEntity("tvdb:series:4", (fact(
             fact_id="tvdb:series:4",

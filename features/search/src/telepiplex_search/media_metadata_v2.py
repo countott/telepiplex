@@ -40,9 +40,10 @@ def _media_type(contract: dict) -> str:
     return value
 
 
-def _provider_refs(candidate: dict, media_type: str) -> tuple[dict, dict]:
+def _provider_refs(candidate: dict, media_type: str) -> tuple[dict, dict, dict]:
     refs: dict[str, str] = {}
     anchor_refs: dict[str, str] = {}
+    anime_entry_refs: dict[str, str] = {}
     anchor_fact_id = _text(candidate.get("anchor_fact_id"))
     for link in candidate.get("source_links") or ():
         if not isinstance(link, dict):
@@ -88,6 +89,16 @@ def _provider_refs(candidate: dict, media_type: str) -> tuple[dict, dict]:
         refs.update(mapped)
         if anchor_fact_id and _text(link.get("fact_id")) == anchor_fact_id:
             anchor_refs.update(mapped)
+        if _text(link.get("role")).casefold() == "anime_entry":
+            current_anilist = _text(anime_entry_refs.get("anilist"))
+            incoming_anilist = _text(mapped.get("anilist"))
+            if (
+                current_anilist
+                and incoming_anilist
+                and current_anilist != incoming_anilist
+            ):
+                raise ValueError("anime_entry_ref_conflict")
+            anime_entry_refs.update(mapped)
     contract = candidate.get("media_metadata") or {}
     identity = contract.get("identity") or {}
     legacy_refs = identity.get("external_ids") or {}
@@ -110,10 +121,19 @@ def _provider_refs(candidate: dict, media_type: str) -> tuple[dict, dict]:
         ):
             if _text(legacy_refs.get(source_key)):
                 refs.setdefault(target_key, _text(legacy_refs[source_key]))
-    return refs, anchor_refs
+    return refs, anchor_refs, anime_entry_refs
 
 
-def _primary_ref(refs: dict, anchor_refs: dict) -> dict:
+def _primary_ref(
+    refs: dict,
+    anchor_refs: dict,
+    anime_entry_refs: dict,
+) -> dict:
+    if _text(anime_entry_refs.get("anilist")):
+        return {
+            "provider": "anilist",
+            "id": _text(anime_entry_refs["anilist"]),
+        }
     preferred = (
         "wikidata",
         "tvdb_series",
@@ -148,8 +168,29 @@ def project_confirmed_media_metadata_v2(
     identity = contract.get("identity") or {}
     placement = contract.get("placement") or {}
     media_type = _media_type(contract)
-    refs, anchor_refs = _provider_refs(candidate, media_type)
-    primary_ref = _primary_ref(refs, anchor_refs)
+    refs, anchor_refs, anime_entry_refs = _provider_refs(
+        candidate,
+        media_type,
+    )
+    private_entry_ref = identity.get("anime_entry_ref")
+    if isinstance(private_entry_ref, dict) and private_entry_ref:
+        expected_entry_ref = {
+            "provider": "anilist",
+            "id": _text(anime_entry_refs.get("anilist")),
+        }
+        normalized_private_ref = {
+            "provider": _text(private_entry_ref.get("provider")).casefold(),
+            "id": _text(private_entry_ref.get("id")),
+        }
+        if normalized_private_ref != expected_entry_ref:
+            raise ValueError("anime_entry_ref_conflict")
+        binding_kind = _text(identity.get("binding_kind")).casefold()
+        work_root_ref = identity.get("work_root_ref")
+        if binding_kind == "same_entity" and work_root_ref != private_entry_ref:
+            raise ValueError("anime_entry_binding_conflict")
+        if binding_kind == "root_to_entry" and work_root_ref == private_entry_ref:
+            raise ValueError("anime_entry_binding_conflict")
+    primary_ref = _primary_ref(refs, anchor_refs, anime_entry_refs)
     title_zh = sanitize_contract_name(identity.get("chinese_title"))
     title_en = sanitize_contract_name(
         identity.get("official_english_title")

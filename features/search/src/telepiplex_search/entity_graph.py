@@ -121,6 +121,8 @@ class EvidenceFact:
     original_release_date: str = ""
     runtime_minutes: int | None = None
     status: str = ""
+    release_format: str = ""
+    relations: tuple[dict, ...] = ()
     studios: tuple[str, ...] = ()
     networks: tuple[str, ...] = ()
     cast: tuple[dict, ...] = ()
@@ -427,6 +429,8 @@ def _fact(
         original_release_date=_text(raw.get("original_release_date") or raw.get("release_date")),
         runtime_minutes=_optional_integer(raw.get("runtime_minutes")),
         status=_text(raw.get("status")),
+        release_format=_text(raw.get("release_format")),
+        relations=_unique_records(raw.get("relations") or []),
         studios=_unique_text(raw.get("studios") or []),
         networks=_unique_text(raw.get("networks") or []),
         cast=_unique_records(raw.get("cast") or []),
@@ -778,6 +782,8 @@ def _merge_fact_group(facts: list[EvidenceFact]) -> EvidenceFact:
                 "original_release_date": fact.original_release_date,
                 "runtime_minutes": fact.runtime_minutes,
                 "status": fact.status,
+                "release_format": fact.release_format,
+                "relations": fact.relations,
                 "studios": fact.studios,
                 "networks": fact.networks,
                 "cast": fact.cast,
@@ -873,6 +879,12 @@ def _merge_fact_group(facts: list[EvidenceFact]) -> EvidenceFact:
             fact.runtime_minutes for fact in facts
         ),
         status=_preferred_text(fact.status for fact in facts),
+        release_format=_preferred_text(
+            fact.release_format for fact in facts
+        ),
+        relations=_unique_records(
+            value for fact in facts for value in fact.relations
+        ),
         studios=_sorted_unique_text(
             value for fact in facts for value in fact.studios
         ),
@@ -976,6 +988,8 @@ def _occurrence_fact(fact: EvidenceFact) -> EvidenceFact:
             "original_release_date": fact.original_release_date,
             "runtime_minutes": fact.runtime_minutes,
             "status": fact.status,
+            "release_format": fact.release_format,
+            "relations": fact.relations,
             "studios": fact.studios,
             "networks": fact.networks,
             "cast": fact.cast,

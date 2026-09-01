@@ -36,6 +36,8 @@ def _fact(
     release_date="",
     runtime=None,
     status="",
+    release_format="",
+    relations=(),
     studios=(),
     networks=(),
     cast=(),
@@ -67,6 +69,8 @@ def _fact(
         original_release_date=release_date,
         runtime_minutes=runtime,
         status=status,
+        release_format=release_format,
+        relations=tuple(relations),
         studios=tuple(studios),
         networks=tuple(networks),
         cast=tuple(cast),
@@ -151,6 +155,254 @@ def _candidate(*, intended_scope="movie", facts=None, unresolved=()):
 
 
 class MediaMetadataV1Test(unittest.TestCase):
+    def test_anilist_entry_owns_release_identity_without_replacing_work_root(self):
+        root = _fact(
+            "wikidata:Q112631839",
+            "wikidata",
+            titles=("BLEACH", "Bleach"),
+            year="2004",
+            media_type="series",
+            url="https://www.wikidata.org/wiki/Q112631839",
+            external_ids={
+                "wikidata": "Q112631839",
+                "anilist": "116674",
+            },
+            original="BLEACH",
+            language="ja",
+            english="Bleach",
+            genres=("Anime",),
+        )
+        douban_fact = _fact(
+            "douban:36093351",
+            "douban",
+            titles=("死神 千年血战篇",),
+            year="2022",
+            media_type="series",
+            url="https://movie.douban.com/subject/36093351/",
+            external_ids={"douban_subject": "36093351"},
+            chinese="死神 千年血战篇",
+            language="ja",
+            genres=("Anime",),
+        )
+        relation = {
+            "relation_type": "SEQUEL",
+            "anilist_id": "159322",
+        }
+        entry = _fact(
+            "anilist:116674",
+            "anilist",
+            titles=(
+                "BLEACH 千年血戦篇",
+                "BLEACH: Sennen Kessen-hen",
+                "BLEACH: Thousand-Year Blood War",
+            ),
+            year="2022",
+            media_type="series",
+            url="https://anilist.co/anime/116674",
+            external_ids={
+                "anilist": "116674",
+                "myanimelist": "41467",
+            },
+            original="BLEACH 千年血戦篇",
+            language="ja",
+            english="BLEACH: Thousand-Year Blood War",
+            romanized="BLEACH: Sennen Kessen-hen",
+            genres=("Anime",),
+            runtime=24,
+            status="FINISHED",
+            release_format="TV",
+            episode_count=13,
+            relations=(relation,),
+        )
+        links = (
+            SourceLink(
+                provider=douban_fact.provider,
+                fact_id=douban_fact.fact_id,
+                url=douban_fact.source_url,
+                external_ids=douban_fact.external_ids,
+                role="series_root",
+                season_number=None,
+                episode_number=None,
+                verification="fact_verified",
+            ),
+            SourceLink(
+                provider=root.provider,
+                fact_id=root.fact_id,
+                url=root.source_url,
+                external_ids=root.external_ids,
+                role="series_root",
+                season_number=None,
+                episode_number=None,
+                verification="fact_verified",
+            ),
+            SourceLink(
+                provider=entry.provider,
+                fact_id=entry.fact_id,
+                url=entry.source_url,
+                external_ids=entry.external_ids,
+                role="anime_entry",
+                season_number=None,
+                episode_number=None,
+                verification="fact_verified",
+            ),
+        )
+        candidate = AnchoredCandidate(
+            candidate_id="wikidata:Q112631839",
+            anchor_fact_id=douban_fact.fact_id,
+            identity_role="series_root",
+            intended_scope="whole_series",
+            source_links=links,
+            poster_assets=(),
+            unresolved_sources=("tvdb:unavailable",),
+            ai_confidence=1,
+            ai_reason="AniList entry is bound to the verified work root.",
+            facts=(douban_fact, root, entry),
+        )
+
+        contract = build_media_metadata_v1(
+            candidate,
+            metadata_id="bleach-tybw",
+            raw_query="死神 千年血战篇",
+        )
+
+        identity = contract["identity"]
+        self.assertEqual(identity["work_root_ref"], {
+            "provider": "wikidata",
+            "id": "Q112631839",
+        })
+        self.assertEqual(identity["anime_entry_ref"], {
+            "provider": "anilist",
+            "id": "116674",
+        })
+        self.assertEqual(identity["binding_kind"], "root_to_entry")
+        self.assertEqual(identity["binding_method"], "wikidata_anilist_id")
+        self.assertEqual(identity["year"], "2022")
+        self.assertEqual(identity["root_year"], "2004")
+        self.assertEqual(identity["chinese_title"], "死神 千年血战篇")
+        self.assertEqual(identity["original_title"], "BLEACH 千年血戦篇")
+        self.assertEqual(
+            identity["official_english_title"],
+            "BLEACH: Thousand-Year Blood War",
+        )
+        self.assertEqual(
+            identity["romanized_original_title"],
+            "BLEACH: Sennen Kessen-hen",
+        )
+        self.assertNotIn("BLEACH", identity["aliases"])
+        self.assertNotIn("BLEACH", identity["query_titles"])
+        self.assertIsNone(identity["episode_count"])
+        self.assertEqual(identity["anime_entry"], {
+            "release_format": "TV",
+            "status": "FINISHED",
+            "year": "2022",
+            "episode_count": 13,
+            "runtime_minutes": 24,
+            "titles": {
+                "native": "BLEACH 千年血戦篇",
+                "romaji": "BLEACH: Sennen Kessen-hen",
+                "english": "BLEACH: Thousand-Year Blood War",
+            },
+            "relations": [relation],
+        })
+        self.assertEqual(contract["relation"]["type"], "standalone")
+        self.assertNotIn("relation_group", contract)
+
+    def test_anilist_episode_count_never_breaks_topology_tie(self):
+        def episodes(provider, count):
+            id_key = f"{provider}_episode_id"
+            return tuple({
+                id_key: f"{provider}-{number}",
+                "season_number": 1,
+                "episode_number": number,
+            } for number in range(1, count + 1))
+
+        root = _fact(
+            "wikidata:Q1",
+            "wikidata",
+            titles=("Example Anime",),
+            year="2022",
+            media_type="series",
+            url="https://www.wikidata.org/wiki/Q1",
+            external_ids={"wikidata": "Q1", "anilist": "100"},
+            language="ja",
+            english="Example Anime",
+            genres=("Anime",),
+        )
+        entry = _fact(
+            "anilist:100",
+            "anilist",
+            titles=("Example Anime",),
+            year="2022",
+            media_type="series",
+            url="https://anilist.co/anime/100",
+            external_ids={"anilist": "100"},
+            language="ja",
+            english="Example Anime",
+            romanized="Example Anime",
+            genres=("Anime",),
+            episode_count=12,
+        )
+        tvdb = _fact(
+            "tvdb:series:200",
+            "tvdb",
+            titles=("Example Anime",),
+            year="2022",
+            media_type="series",
+            url="https://thetvdb.com/series/200",
+            external_ids={"tvdb": "200"},
+            language="ja",
+            english="Example Anime",
+            episodes=episodes("tvdb", 25),
+        )
+        tmdb = _fact(
+            "tmdb:300",
+            "tmdb",
+            titles=("Example Anime",),
+            year="2022",
+            media_type="series",
+            url="https://www.themoviedb.org/tv/300",
+            external_ids={"tmdb": "300"},
+            language="ja",
+            english="Example Anime",
+            episodes=episodes("tmdb", 12),
+        )
+        facts = (root, entry, tvdb, tmdb)
+        roles = ("series_root", "anime_entry", "series_root", "series_root")
+        candidate = AnchoredCandidate(
+            candidate_id="wikidata:Q1",
+            anchor_fact_id=root.fact_id,
+            identity_role="series_root",
+            intended_scope="whole_series",
+            source_links=tuple(
+                SourceLink(
+                    provider=fact.provider,
+                    fact_id=fact.fact_id,
+                    url=fact.source_url,
+                    external_ids=fact.external_ids,
+                    role=role,
+                    season_number=None,
+                    episode_number=None,
+                    verification="fact_verified",
+                )
+                for fact, role in zip(facts, roles)
+            ),
+            poster_assets=(),
+            unresolved_sources=(),
+            ai_confidence=1,
+            ai_reason="Divergent inventory profiles need topology evidence.",
+            facts=facts,
+        )
+
+        with self.assertRaisesRegex(
+            MetadataV1Error,
+            "provider_order_conflict",
+        ):
+            build_media_metadata_v1(
+                candidate,
+                metadata_id="anime-topology-tie",
+                raw_query="Example Anime",
+            )
+
     def test_latin_fallback_never_populates_semantic_chinese_title(self):
         fact = _fact(
             "wikipedia:Q3786532",

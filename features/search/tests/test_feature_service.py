@@ -483,6 +483,73 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("movie.douban.com", repr(observations[0]))
         self.assertNotIn("private query", repr(observations[0]))
 
+    async def test_ready_anime_scope_is_enriched_before_hydration_returns(self):
+        from telepiplex_search.service import SearchFeature
+
+        feature = SearchFeature(config={}, host=None)
+        candidate = frozen_douban_movie_candidate()
+        hydrated = deepcopy(candidate)
+        hydrated["metadata_hydrated"] = True
+        hydrated["media_metadata"]["identity"].update({
+            "content_kind": "series",
+            "original_language": "ja",
+            "genres": ["Anime"],
+        })
+        hydrated["media_metadata"]["retrieval"].update({
+            "media_type": "series",
+            "scope": "whole_series",
+        })
+        enriched = deepcopy(hydrated)
+        enriched["source_links"].append({
+            "provider": "anilist",
+            "fact_id": "anilist:1142",
+            "url": "https://anilist.co/anime/1142",
+            "external_ids": {"anilist": "1142"},
+            "role": "anime_entry",
+            "season_number": None,
+            "episode_number": None,
+            "verification": "fact_verified",
+            "proposed_season_number": None,
+            "proposed_episode_number": None,
+        })
+        final = {"metadata_hydrated": True, "anime_entry_bound": True}
+
+        with patch.object(
+            feature,
+            "_prefetch_exact_resolver",
+            new=AsyncMock(side_effect=[lambda _link: {}, lambda _link: {}]),
+        ), patch(
+            "telepiplex_search.service.hydrate_frozen_candidate_anchor",
+            return_value=hydrated,
+        ), patch(
+            "telepiplex_search.service.needs_authoritative_scope_enrichment",
+            return_value=False,
+        ), patch(
+            "telepiplex_search.service.needs_anime_entry_enrichment",
+            return_value=True,
+            create=True,
+        ), patch.object(
+            feature,
+            "_supplement_selected_candidate",
+            new=AsyncMock(return_value=enriched),
+        ) as supplement, patch(
+            "telepiplex_search.service.hydrate_frozen_candidate",
+            return_value=final,
+        ):
+            result = await feature._hydrate_selected_candidate(
+                candidate,
+                metadata_id="anime-entry-hydration",
+                raw_query="蜂蜜与四叶草",
+                require_anchor=True,
+            )
+
+        self.assertEqual(result, final)
+        supplement.assert_awaited_once_with(
+            hydrated,
+            "蜂蜜与四叶草",
+            purpose="anime_entry",
+        )
+
     async def test_first_and_tail_prowlarr_waves_are_observed_without_query(self):
         from telepiplex_search.context import runtime_context
 
@@ -6177,9 +6244,9 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "2.0.2")
+        self.assertEqual(manifest["version"], "2.1.0")
         self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
-        self.assertEqual(project["project"]["version"], "2.0.2")
+        self.assertEqual(project["project"]["version"], "2.1.0")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==2.0.0",
@@ -6213,14 +6280,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-2.0.2.tpx", source)
+        self.assertIn("/tmp/search-2.1.0.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-2.0.2.tpx", source)
+        self.assertNotIn("dist/search-2.1.0.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

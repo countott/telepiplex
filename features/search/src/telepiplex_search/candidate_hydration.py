@@ -315,6 +315,37 @@ def _materialize_exact_candidate(
             "candidate_binding_failed",
             (exc.code,),
         ) from exc
+    frozen_binding_by_fact_id = {}
+    for frozen in frozen_links:
+        if not isinstance(frozen, dict):
+            continue
+        resolved_fact_id = resolved_fact_ids.get(
+            _text(frozen.get("fact_id")),
+            "",
+        )
+        if not resolved_fact_id:
+            continue
+        frozen_binding_by_fact_id[resolved_fact_id] = (
+            _text(frozen.get("binding_kind")).casefold(),
+            _text(frozen.get("binding_method")).casefold(),
+        )
+    anchored = replace(
+        anchored,
+        source_links=tuple(
+            replace(
+                link,
+                binding_kind=frozen_binding_by_fact_id.get(
+                    link.fact_id,
+                    ("", ""),
+                )[0],
+                binding_method=frozen_binding_by_fact_id.get(
+                    link.fact_id,
+                    ("", ""),
+                )[1],
+            )
+            for link in anchored.source_links
+        ),
+    )
     verified_scope_fact_ids = {
         link.fact_id
         for link in anchored.source_links

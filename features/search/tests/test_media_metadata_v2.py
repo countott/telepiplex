@@ -127,6 +127,98 @@ class SearchMediaMetadataV2ProjectionTest(unittest.TestCase):
             "ノーゲーム・ノーライフ",
         )
 
+    def test_anilist_entry_is_primary_ref_without_expanding_public_schema(self):
+        candidate = self._candidate()
+        candidate["source_links"].append({
+            "provider": "anilist",
+            "fact_id": "anilist:116674",
+            "external_ids": {
+                "anilist": "116674",
+                "myanimelist": "41467",
+            },
+            "verification": "fact_verified",
+            "role": "anime_entry",
+        })
+        candidate["media_metadata"]["identity"].update({
+            "work_root_ref": {
+                "provider": "wikidata",
+                "id": "Q114103300",
+            },
+            "anime_entry_ref": {
+                "provider": "anilist",
+                "id": "116674",
+            },
+            "binding_kind": "root_to_entry",
+        })
+
+        projected = project_confirmed_media_metadata_v2(
+            candidate,
+            requested_scope={
+                "kind": "whole_series",
+                "season_number": None,
+                "episode_number": None,
+            },
+        )
+
+        self.assertEqual(projected["identity"]["primary_ref"], {
+            "provider": "anilist",
+            "id": "116674",
+        })
+        self.assertEqual(projected["identity"]["provider_refs"], {
+            "tmdb_tv": "456",
+            "wikidata": "Q114103300",
+            "anilist": "116674",
+        })
+        self.assertEqual(set(projected["identity"]), {
+            "primary_ref",
+            "provider_refs",
+            "media_type",
+            "title_zh",
+            "title_en",
+            "title_original",
+            "year",
+        })
+        changed_root = copy.deepcopy(candidate)
+        changed_root["source_links"][1]["external_ids"]["wikidata"] = "Q999"
+        root_projection = project_confirmed_media_metadata_v2(
+            changed_root,
+            requested_scope={
+                "kind": "whole_series",
+                "season_number": None,
+                "episode_number": None,
+            },
+        )
+        self.assertEqual(root_projection["metadata_id"], projected["metadata_id"])
+        changed_entry = copy.deepcopy(candidate)
+        changed_entry["source_links"][-1]["external_ids"]["anilist"] = "159322"
+        changed_entry["media_metadata"]["identity"]["anime_entry_ref"]["id"] = (
+            "159322"
+        )
+        entry_projection = project_confirmed_media_metadata_v2(
+            changed_entry,
+            requested_scope={
+                "kind": "whole_series",
+                "season_number": None,
+                "episode_number": None,
+            },
+        )
+        self.assertNotEqual(entry_projection["metadata_id"], projected["metadata_id"])
+
+        mismatched = copy.deepcopy(candidate)
+        mismatched["media_metadata"]["identity"]["anime_entry_ref"] = {
+            "provider": "anilist",
+            "id": "999999",
+        }
+        with self.assertRaisesRegex(ValueError, "anime_entry_ref_conflict"):
+            project_confirmed_media_metadata_v2(
+                mismatched,
+                requested_scope={
+                    "kind": "whole_series",
+                    "season_number": None,
+                    "episode_number": None,
+                },
+            )
+
     def test_fails_when_no_verified_stable_provider_ref_exists(self):
         candidate = self._candidate()
         candidate["source_links"] = [candidate["source_links"][-1]]

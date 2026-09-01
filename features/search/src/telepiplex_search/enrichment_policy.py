@@ -122,6 +122,47 @@ def needs_authoritative_scope_enrichment(candidate: dict) -> bool:
     return not bool(items or known_seasons)
 
 
+def needs_anime_entry_enrichment(candidate: dict) -> bool:
+    """Return whether a confirmed Japanese animation lacks an AniList entry."""
+
+    if not isinstance(candidate, dict):
+        return False
+    contract = candidate.get("media_metadata") or candidate
+    if not isinstance(contract, dict):
+        return False
+    identity = contract.get("identity") or {}
+    retrieval = contract.get("retrieval") or {}
+    placement = contract.get("placement") or {}
+    media_type = str(
+        retrieval.get("media_type")
+        or identity.get("content_kind")
+        or placement.get("library_type")
+        or ""
+    ).casefold()
+    if media_type not in {"movie", "series"}:
+        return False
+    if str(identity.get("original_language") or "").casefold() != "ja":
+        return False
+    genres = identity.get("genres") or ()
+    if not any(
+        signal in str(genre or "").casefold()
+        for genre in genres
+        for signal in ("animation", "animated", "anime", "动画", "動畫")
+    ):
+        return False
+    for link in candidate.get("source_links") or ():
+        if not isinstance(link, dict):
+            continue
+        if str(link.get("provider") or "").casefold() != "anilist":
+            continue
+        if str(link.get("role") or "").casefold() != "anime_entry":
+            continue
+        verification = str(link.get("verification") or "").casefold()
+        if verification and verification != "unresolved_scope_link":
+            return False
+    return True
+
+
 def apply_deferred_presentation(contract: dict, enrichment: dict) -> dict:
     """Fill optional presentation blanks without changing business authority."""
     result = deepcopy(contract)

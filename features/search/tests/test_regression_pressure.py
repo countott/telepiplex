@@ -1,7 +1,7 @@
 from copy import deepcopy
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from telepiplex_plugin_sdk.diagnostics import bounded_diagnostic_value
 from telepiplex_search.candidate_locale import (
@@ -14,6 +14,7 @@ from telepiplex_search.confirmed_enrichment import (
 )
 from telepiplex_search.enrichment_policy import (
     apply_deferred_presentation,
+    needs_anime_entry_enrichment,
     needs_authoritative_scope_enrichment,
 )
 from telepiplex_search.service import SearchFeature
@@ -40,6 +41,32 @@ def _latin_candidate(index: int) -> dict:
 
 
 class CandidateLocalizationPressureTest(unittest.IsolatedAsyncioTestCase):
+    def test_anime_entry_enrichment_is_required_once_per_confirmed_anime(self):
+        candidate = _latin_candidate(4)
+        candidate["media_metadata"].update({
+            "retrieval": {"media_type": "series", "scope": "whole_series"},
+            "evidence": {},
+            "items": [],
+        })
+
+        self.assertTrue(needs_anime_entry_enrichment(candidate))
+
+        candidate["source_links"].append({
+            "provider": "anilist",
+            "fact_id": "anilist:1142",
+            "external_ids": {"anilist": "1142"},
+            "role": "anime_entry",
+            "verification": "fact_verified",
+        })
+        self.assertFalse(needs_anime_entry_enrichment(candidate))
+
+        candidate["source_links"][0]["role"] = "series_root"
+        self.assertTrue(needs_anime_entry_enrichment(candidate))
+
+        live_action = _latin_candidate(5)
+        live_action["media_metadata"]["identity"]["genres"] = ["Drama"]
+        self.assertFalse(needs_anime_entry_enrichment(live_action))
+
     def test_verified_season_link_without_inventory_still_needs_enrichment(self):
         candidate = _latin_candidate(3)
         candidate.update({
@@ -404,6 +431,25 @@ class CandidateLocalizationPressureTest(unittest.IsolatedAsyncioTestCase):
             {item["provider"] for item in supplemented["source_links"]},
             {"wikipedia", "tmdb", "tvdb"},
         )
+
+    async def test_presentation_enrichment_never_requests_anilist_entry(self):
+        candidate = _latin_candidate(44)
+        feature = SearchFeature(config={}, host=None)
+        feature._douban_provider = lambda _payload: {
+            "source": "douban",
+            "status": "not_found",
+            "facts": [],
+        }
+        anilist = AsyncMock(return_value=(None, "not_found"))
+        feature._resolve_confirmed_anilist = anilist
+
+        await feature._supplement_selected_candidate(
+            candidate,
+            "蜂蜜与四叶草",
+            purpose="presentation",
+        )
+
+        anilist.assert_not_awaited()
 
     async def test_preview_strong_field_lookup_is_bounded_to_five_candidates(self):
         calls = []

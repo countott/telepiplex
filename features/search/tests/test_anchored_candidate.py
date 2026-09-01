@@ -124,6 +124,74 @@ def _series_binding_payload(*, season_two=2):
 
 
 class AnchoredCandidateTest(unittest.TestCase):
+    def test_materializes_anilist_as_release_entry_not_series_root(self):
+        graph = build_search_graph([
+            {
+                "source": "wikidata",
+                "status": "ok",
+                "facts": [{
+                    "wikibase_item": "Q112631839",
+                    "title": "BLEACH",
+                    "year": "2004",
+                    "media_type": "series",
+                    "url": "https://www.wikidata.org/wiki/Q112631839",
+                    "external_ids": {
+                        "wikidata": "Q112631839",
+                        "anilist": "116674",
+                    },
+                }],
+            },
+            {
+                "source": "anilist",
+                "status": "ok",
+                "facts": [{
+                    "anilist_id": "116674",
+                    "title": "BLEACH: Sennen Kessen-hen",
+                    "year": "2022",
+                    "media_type": "series",
+                    "url": "https://anilist.co/anime/116674",
+                    "external_ids": {"anilist": "116674"},
+                }],
+            },
+        ])
+
+        candidate = materialize_anchored_candidates(
+            graph,
+            {
+                "status": "resolved",
+                "candidates": [{
+                    "candidate_id": "wikidata:Q112631839",
+                    "anchor_fact_id": "wikidata:Q112631839",
+                    "identity_role": "series_root",
+                    "intended_scope": "whole_series",
+                    "fact_bindings": [
+                        {
+                            "fact_id": "wikidata:Q112631839",
+                            "role": "series_root",
+                            "season_number": None,
+                            "episode_number": None,
+                        },
+                        {
+                            "fact_id": "anilist:116674",
+                            "role": "anime_entry",
+                            "season_number": None,
+                            "episode_number": None,
+                        },
+                    ],
+                    "ai_confidence": 1,
+                    "ai_reason": "AniList is the bound release entry.",
+                }],
+            },
+            provider_statuses={"wikidata": "ok", "anilist": "ok"},
+        )[0]
+
+        entry = next(
+            link for link in candidate.source_links
+            if link.provider == "anilist"
+        )
+        self.assertEqual(entry.role, "anime_entry")
+        self.assertEqual(entry.verification, "fact_verified")
+
     def test_materializes_all_verified_links_posters_and_season_roles(self):
         candidates = materialize_anchored_candidates(
             _honey_and_clover_graph(),

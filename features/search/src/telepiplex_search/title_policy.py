@@ -59,7 +59,11 @@ def _preferred_fact_values(candidate: CandidateEntity, field: str) -> list[str]:
         ):
             values[key] = (fact.provider, value)
     ranked = list(values.values())
-    if field == "romanized_original_title":
+    if field in {
+        "original_title",
+        "official_english_title",
+        "romanized_original_title",
+    }:
         ranked.sort(key=lambda item: (item[0] != "anilist", len(item[1]), item[1].casefold()))
     else:
         ranked.sort(key=lambda item: (len(item[1]), item[1].casefold()))

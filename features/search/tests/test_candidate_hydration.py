@@ -131,6 +131,117 @@ def _resolver(calls, *, fail=()):
 
 
 class CandidateHydrationTest(unittest.TestCase):
+    def test_hydration_preserves_anilist_entry_binding_and_topology_boundary(self):
+        candidate = {
+            "candidate_key": "douban:1",
+            "candidate_id": "douban:1",
+            "anchor_fact_id": "douban:1",
+            "identity_role": "series_root",
+            "intended_scope": "whole_series",
+            "links_frozen": True,
+            "ai_confidence": 1,
+            "ai_reason": "Verified anime root and release entry.",
+            "unresolved_sources": ["tvdb:unavailable"],
+            "source_links": [{
+                "provider": "douban",
+                "fact_id": "douban:1",
+                "url": "https://movie.douban.com/subject/1/",
+                "external_ids": {
+                    "douban_subject": "1",
+                },
+                "role": "series_root",
+                "season_number": None,
+                "episode_number": None,
+                "verification": "fact_verified",
+            }, {
+                "provider": "anilist",
+                "fact_id": "anilist:1142",
+                "url": "https://anilist.co/anime/1142",
+                "external_ids": {"anilist": "1142"},
+                "role": "anime_entry",
+                "season_number": None,
+                "episode_number": None,
+                "verification": "fact_verified",
+                "binding_kind": "root_to_entry",
+                "binding_method": "wikidata_anilist_id",
+            }],
+        }
+
+        def resolver(link):
+            if link.provider == "douban":
+                fact = {
+                    "subject_id": "1",
+                    "title": "蜂蜜与四叶草II",
+                    "chinese_title": "蜂蜜与四叶草II",
+                    "year": "2005",
+                    "media_type": "series",
+                    "original_language": "ja",
+                    "genres": ["Anime"],
+                    "url": link.url,
+                    "external_ids": {
+                        "douban_subject": "1",
+                    },
+                }
+                stable = ("douban_subject", "1")
+            else:
+                fact = {
+                    "anilist_id": "1142",
+                    "title": "Hachimitsu to Clover II",
+                    "original_title": "ハチミツとクローバーII",
+                    "romanized_original_title": "Hachimitsu to Clover II",
+                    "official_english_title": "Honey and Clover II",
+                    "original_language": "ja",
+                    "year": "2006",
+                    "media_type": "series",
+                    "release_format": "TV",
+                    "episode_count": 12,
+                    "genres": ["Anime"],
+                    "url": link.url,
+                    "external_ids": {"anilist": "1142"},
+                }
+                stable = ("anilist", "1142")
+            return DirectEntity(
+                provider=link.provider,
+                evidence={
+                    "source": link.provider,
+                    "status": "ok",
+                    "facts": [fact],
+                    "source_urls": [link.url],
+                },
+                stable_identity=stable,
+                title=fact["title"],
+                year=fact["year"],
+                media_type="series",
+                scope="work",
+            )
+
+        hydrated = hydrate_frozen_candidate(
+            candidate,
+            metadata_id="anime-entry-hydrated",
+            raw_query="蜂蜜与四叶草II",
+            resolver=resolver,
+        )
+
+        roles = {
+            link["provider"]: link["role"]
+            for link in hydrated["source_links"]
+        }
+        self.assertEqual(roles, {
+            "douban": "series_root",
+            "anilist": "anime_entry",
+        })
+        identity = hydrated["media_metadata"]["identity"]
+        self.assertEqual(identity["binding_kind"], "root_to_entry")
+        self.assertEqual(identity["binding_method"], "wikidata_anilist_id")
+        self.assertEqual(identity["anime_entry_ref"], {
+            "provider": "anilist",
+            "id": "1142",
+        })
+        self.assertEqual(identity["year"], "2006")
+        self.assertIsNone(identity["episode_count"])
+        self.assertEqual(identity["anime_entry"]["episode_count"], 12)
+        self.assertEqual(hydrated["media_metadata"]["items"], [])
+
     def test_exact_reads_only_saved_urls_and_rebuilds_v1(self):
         calls = []
         candidate = _candidate()
