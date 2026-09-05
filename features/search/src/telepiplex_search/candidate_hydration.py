@@ -352,6 +352,7 @@ def _materialize_exact_candidate(
         if link.verification in {
             "tvdb_inventory_verified",
             "tmdb_inventory_verified",
+            "wikipedia_inventory_verified",
             "wikipedia_season_count_verified",
         }
     }

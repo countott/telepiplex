@@ -258,6 +258,142 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_waiting_notification_points_to_registered_command(self):
+        await asyncio.to_thread(self.feature._notify_sync, 1, "需要确认", {"job_id": 7})
+        text = self.feature.host.notifications[-1][1]
+        commands = {item["name"] for item in yaml.safe_load((ROOT / "manifest.yaml").read_text())["commands"]}
+        mentioned = next(word[1:] for word in text.split() if word.startswith("/"))
+        self.assertIn(mentioned, commands)
+
+    async def test_real_service_cancellation_preserves_first_write_and_cancels_job(self):
+        from tests.test_sync_service import FakePlex, FakeTmdb, make_completion
+        plex = FakePlex()
+        service = LibrarySyncService(self.jobs, plex, tmdb=FakeTmdb())
+        self.feature.service = service
+        job = service.enqueue_completion(make_completion())
+        self.jobs.update(job["id"], step_results={
+            "scanning": {"status": "success", "targets": {
+                "first": {"status": "success", "rating_key": "42"},
+                "second": {"status": "success", "rating_key": "43"},
+            }}, "artwork": {"status": "success"}, "audio": {"status": "success"},
+        })
+        operation = self.feature._new_operation(
+            {"chat_id": 10, "user_id": 1}, state="running", stage="subtitle",
+            status_text="working", control="cancel", kind="management",
+        )
+        operation_id = operation["operation_id"]
+        entered, release = threading.Event(), threading.Event()
+        original = plex.select_subtitle
+        def write(*args):
+            original(*args)
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("test did not release write")
+        plex.select_subtitle = write
+        task = asyncio.create_task(self.feature._run_job(job["id"], operation_id))
+        self.feature.operations[operation_id]["task"] = task
+        try:
+            self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+            current = self.feature.operations[operation_id]
+            result = await self.feature.operation_control({
+                "operation_id": operation_id, "chat_id": 10, "user_id": 1,
+                "action": "cancel", "revision": current["revision"],
+            })
+            self.assertEqual(result["operation"]["state"], "cancelling")
+        finally:
+            release.set()
+            await task
+        self.assertEqual(plex.subtitle_selections, [("42", 11, 31)])
+        persisted = self.jobs.get(job["id"])
+        self.assertEqual(persisted["state"], "cancelled")
+        first = persisted["step_results"]["subtitle"]["targets"]["first"]
+        self.assertTrue((first.get("parts") or [first])[0]["changed"])
+        self.assertEqual(self.feature.operations[operation_id]["state"], "cancelled")
+        self.assertIn("已完成变更保留", self.feature.operations[operation_id]["status_text"])
+
+    async def test_cancellation_at_waiting_transition_finalizes_job_and_keeps_completed_jobs(self):
+        from copy import deepcopy
+        for phase in ("on_entry", "during_pending_read"):
+            with self.subTest(phase=phase):
+                # Use real service/repository cancellation, including nonce invalidation.
+                service = LibrarySyncService(self.jobs, object())
+                self.feature.service = service
+                job = self.make_waiting_job("subtitle", [{"id": 31}])
+                steps = deepcopy(job["step_results"])
+                steps["audio"] = {"status": "success", "targets": {
+                    "target-1": {"status": "success", "parts": [{"part_id": 11, "stream_id": 21, "changed": True}]},
+                }}
+                steps["subtitle"]["targets"] = {"target-1": {
+                    "status": "awaiting_selection", "waiting": deepcopy(steps["subtitle"]["waiting"]),
+                }}
+                job = self.jobs.update(job["id"], step_results=steps)
+                nonce = steps["subtitle"]["waiting"]["selection_nonce"]
+                completed = self.make_waiting_job("artwork", [{"url": "https://example.com/poster.jpg"}])
+                stale_completed = deepcopy(completed)
+                completed = self.jobs.update(completed["id"], state="completed", step_results={
+                    "artwork": {"status": "success", "selected": {"url": "https://example.com/poster.jpg"}},
+                })
+                operation = self.feature._new_operation(
+                    {"chat_id": 10, "user_id": 1}, state="running", stage="subtitle",
+                    status_text="working", control="cancel", kind="management",
+                )
+                operation_id = operation["operation_id"]
+                entered, release = threading.Event(), threading.Event()
+                pending_selection = service.pending_selection
+                def blocked(*args, **kwargs):
+                    entered.set()
+                    if not release.wait(5):
+                        raise TimeoutError("test did not release pending selection")
+                    return pending_selection(*args, **kwargs)
+                if phase == "during_pending_read":
+                    service.pending_selection = blocked
+                task = asyncio.create_task(self.feature._complete_batch_operation(
+                    operation_id, [job, completed, stale_completed]
+                ))
+                self.feature.operations[operation_id]["task"] = task
+                try:
+                    if phase == "during_pending_read":
+                        self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                    current = self.feature.operations[operation_id]
+                    response = await self.feature.operation_control({
+                        "operation_id": operation_id, "chat_id": 10, "user_id": 1,
+                        "action": "cancel", "revision": current["revision"],
+                    })
+                    self.assertEqual(response["operation"]["state"], "cancelling")
+                finally:
+                    release.set()
+                    await task
+                persisted = self.jobs.get(job["id"])
+                self.assertEqual(persisted["state"], "cancelled")
+                self.assertEqual(persisted["step_results"]["audio"], steps["audio"])
+                self.assertNotIn("waiting", persisted["step_results"]["subtitle"])
+                self.assertNotIn("waiting", persisted["step_results"]["subtitle"]["targets"]["target-1"])
+                self.assertIsNone(pending_selection(job["id"]))
+                with self.assertRaises(ValueError):
+                    service.confirm_selection(job["id"], 0, selection_nonce=nonce)
+                self.assertEqual(self.jobs.get(completed["id"]), completed)
+                self.assertEqual(self.feature.operations[operation_id]["state"], "cancelled")
+                reopened = await self.feature.command({
+                    "command": "sync", "args": [str(job["id"])], "chat_id": 10, "user_id": 1,
+                })
+                self.assertNotIn("operation", reopened)
+                self.assertFalse(any((action.get("data") or {}).get("keyboard") for action in reopened["actions"]))
+
+    async def test_cancelling_operation_rejects_late_completed_result(self):
+        operation = self.feature._new_operation(
+            {"chat_id": 10, "user_id": 1}, state="running", stage="subtitle",
+            status_text="working", control="cancel", kind="management",
+        )
+        operation_id = operation["operation_id"]
+        current = self.feature.operations[operation_id]
+        current["state"] = "cancelling"
+        current["cancel_event"].set()
+        await self.feature._complete_batch_operation(
+            operation_id, [{"id": 1, "state": "completed"}]
+        )
+        self.assertEqual(self.feature.operations[operation_id]["state"], "cancelled")
+        self.assertNotIn("已回滚", self.feature.operations[operation_id]["status_text"])
+
     async def test_duplicate_media_event_executes_job_once_and_completed_is_terminal(self):
         request = {"payload": {
             "job_id": "job-1",
@@ -406,7 +542,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "user_id": 1,
         })
 
-        self.assertEqual(result["actions"][0]["text"], "用法：/plex [Job ID]")
+        self.assertEqual(result["actions"][0]["text"], "用法：/sync [Job ID]")
         self.assertEqual(self.runtime.tasks, {})
 
     async def test_scan_menu_lists_live_libraries_and_scan_all(self):
@@ -420,23 +556,23 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         keyboard = result["actions"][0]["data"]["keyboard"]
         self.assertEqual(keyboard[0], [{
             "text": "扫描全部媒体库",
-            "callback_data": "plex:scan:all",
+            "callback_data": "sync:scan:all",
         }])
         self.assertIn(
-            {"text": "退出", "callback_data": "plex:scan:cancel"},
+            {"text": "退出", "callback_data": "sync:scan:cancel"},
             keyboard[-1],
         )
         buttons = [button for row in keyboard for button in row]
         self.assertIn(
-            {"text": "扫描全部媒体库", "callback_data": "plex:scan:all"},
+            {"text": "扫描全部媒体库", "callback_data": "sync:scan:all"},
             buttons,
         )
         self.assertIn(
-            {"text": "电影", "callback_data": "plex:scan:12"},
+            {"text": "电影", "callback_data": "sync:scan:12"},
             buttons,
         )
         self.assertIn(
-            {"text": "剧集", "callback_data": "plex:scan:13"},
+            {"text": "剧集", "callback_data": "sync:scan:13"},
             buttons,
         )
         self.assertEqual(self.service.list_library_calls, 1)
@@ -477,18 +613,18 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             len([
                 button for button in first_buttons
-                if button["callback_data"].startswith("plex:scan:")
+                if button["callback_data"].startswith("sync:scan:")
                 and button["callback_data"].count(":") == 2
                 and button["callback_data"].rsplit(":", 1)[-1].isdigit()
             ]),
             8,
         )
         self.assertIn(
-            {"text": "下一页", "callback_data": "plex:scan:page:1"},
+            {"text": "下一页", "callback_data": "sync:scan:page:1"},
             first_buttons,
         )
         self.assertIn(
-            {"text": "退出", "callback_data": "plex:scan:cancel"},
+            {"text": "退出", "callback_data": "sync:scan:cancel"},
             first["actions"][0]["data"]["keyboard"][-1],
         )
         self.assertLessEqual(
@@ -507,11 +643,11 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
             for button in row
         ]
         self.assertIn(
-            {"text": "媒体库 9", "callback_data": "plex:scan:9"},
+            {"text": "媒体库 9", "callback_data": "sync:scan:9"},
             second_buttons,
         )
         self.assertIn(
-            {"text": "退出", "callback_data": "plex:scan:cancel"},
+            {"text": "退出", "callback_data": "sync:scan:cancel"},
             second["actions"][0]["data"]["keyboard"][-1],
         )
         self.assertEqual(self.service.list_library_calls, 2)
@@ -679,7 +815,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 ))
                 self.assertTrue(all(
                     button["callback_data"].startswith(
-                        f"plex:choice:{job['id']}:"
+                        f"sync:choice:{job['id']}:"
                         f"{job['step_results'][kind]['waiting']['selection_nonce']}:"
                         "pick:"
                     )
@@ -689,7 +825,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     if ":pick:" in button["callback_data"]
                 ))
                 self.assertIn(
-                    {"text": "取消任务", "callback_data": "plex:cancel"},
+                    {"text": "取消任务", "callback_data": "sync:cancel"},
                     action["data"]["keyboard"][-1],
                 )
 
@@ -779,14 +915,14 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertIn(
                     {"text": "下一页", "callback_data": (
-                        f"plex:choice:{job['id']}:"
+                        f"sync:choice:{job['id']}:"
                         f"{job['step_results'][kind]['waiting']['selection_nonce']}:"
                         "next"
                     )},
                     first_keyboard[-1],
                 )
                 self.assertIn(
-                    {"text": "取消任务", "callback_data": "plex:cancel"},
+                    {"text": "取消任务", "callback_data": "sync:cancel"},
                     first_keyboard[-1],
                 )
                 if kind == "audio":
@@ -864,7 +1000,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(opened["operation"]["control"], "cancel")
         self.assertIn(
-            {"text": "取消任务", "callback_data": "plex:cancel"},
+            {"text": "取消任务", "callback_data": "sync:cancel"},
             opened["actions"][0]["data"]["keyboard"][-1],
         )
 
@@ -1002,7 +1138,7 @@ class SyncFeatureRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f":{nonce}:pick:0", callback_data)
 
         accepted = await self.feature.callback({
-            "payload": callback_data.removeprefix("plex:"),
+            "payload": callback_data.removeprefix("sync:"),
             "chat_id": 10,
             "user_id": 1,
         })
@@ -1615,7 +1751,7 @@ class FeatureSourceContractTest(unittest.TestCase):
         }
 
         self.assertEqual(commands["scan"], "扫描 Plex 媒体库")
-        self.assertEqual(manifest["version"], "2.0.0")
+        self.assertEqual(manifest["version"], "2.0.1")
         self.assertEqual(manifest["host_api"], ">=1.2,<2.0")
         self.assertEqual(manifest["state_schema_version"], 2)
 
@@ -1625,13 +1761,13 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         source = (ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertEqual(package["project"]["version"], "2.0.0")
+        self.assertEqual(package["project"]["version"], "2.0.1")
         self.assertEqual(
             package["project"]["dependencies"][0],
-            "telepiplex-plugin-sdk==2.0.0",
+            "telepiplex-plugin-sdk==2.1.0",
         )
-        self.assertIn("/tmp/sync-2.0.0.tpx", source)
-        self.assertNotIn("dist/sync-2.0.0.tpx", source)
+        self.assertIn("/tmp/sync-2.0.1.tpx", source)
+        self.assertNotIn("dist/sync-2.0.1.tpx", source)
         self.assertIn("独立手动", source)
         self.assertNotIn("media.organized", source)
         self.assertIn("`/scan`", source)

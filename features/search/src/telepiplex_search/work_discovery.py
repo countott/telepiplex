@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from typing import Callable
 
@@ -233,6 +234,27 @@ def discover_root_works(
     *,
     wikidata_search=None,
 ) -> list[dict]:
+    """Overlap title search with root enrichment; merge in discovery order."""
+    if wikidata_search is None:
+        return _discover_root_works(parsed, wikipedia_lookup, wikidata_lookup)
+    # A single auxiliary worker keeps each provider's own sequential HTTP and
+    # retry limits intact. Join on exit: a failed root never leaves an unowned
+    # search behind (network calls still rely on their adapter timeouts).
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="search-title") as executor:
+        return _discover_root_works(
+            parsed, wikipedia_lookup, wikidata_lookup,
+            wikidata_search=wikidata_search, title_executor=executor,
+        )
+
+
+def _discover_root_works(
+    parsed: ParsedInput,
+    wikipedia_lookup: Callable[[dict], dict],
+    wikidata_lookup: Callable[[list[str]], dict[str, dict]],
+    *,
+    wikidata_search=None,
+    title_executor=None,
+) -> list[dict]:
     """Return structurally valid roots in Wikipedia search-rank order."""
 
     if parsed.kind != "text" or not _text(parsed.title):
@@ -274,6 +296,13 @@ def discover_root_works(
         return collected
 
     zh_qids = collect_wikipedia("zh")
+    # Do not speculate if the first mandatory Wikipedia read fails. Once it
+    # succeeds, the title lookup is independent of entity/English-root reads.
+    # Later root failures may therefore include this already-started lookup.
+    title_future = (
+        title_executor.submit(_wikidata_search_with_retry, wikidata_search, parsed.title)
+        if wikidata_search is not None else None
+    )
     looked_up = _wikidata_lookup_with_retry(wikidata_lookup, zh_qids)
     entities = dict(looked_up) if isinstance(looked_up, dict) else {}
     expected_title = normalize_title(parsed.title)
@@ -341,10 +370,7 @@ def discover_root_works(
             for qid in pages_by_qid
         )
         try:
-            found = _wikidata_search_with_retry(
-                wikidata_search,
-                parsed.title,
-            )
+            found = title_future.result()
         except SearchPlanningError:
             if not admitted_wikipedia:
                 raise

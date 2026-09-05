@@ -331,8 +331,10 @@ class DirectLinkTest(unittest.TestCase):
         self.assertEqual(failed.exception.code, "fixed_link_read_failed")
         self.assertEqual(failed.exception.details, ("http_status:418",))
 
+    @patch("telepiplex_search.direct_link.enrich_wikidata_entities")
     @patch("telepiplex_search.direct_link.lookup_wikipedia_page")
-    def test_wikipedia_article_locks_wikibase_identity(self, lookup):
+    def test_wikipedia_article_locks_wikibase_identity(self, lookup, enrich):
+        enrich.return_value = {}
         lookup.return_value = {
             "wikibase_item": "Q123",
             "title": "The Grand Budapest Hotel",

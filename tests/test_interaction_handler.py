@@ -1054,6 +1054,105 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         )
         context.application.bot.edit_message_reply_markup.assert_not_awaited()
 
+    async def test_inflight_edit_seal_clears_controls_before_durable_success(self):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            render_operation,
+        )
+
+        cases = (
+            ("text", "text", "edit_message_text", False, True),
+            ("text", "photo", "edit_message_caption", False, True),
+            ("photo", "photo", "edit_message_media", False, True),
+            ("text", "text", "edit_message_text", True, True),
+            ("text", "text", "edit_message_text", False, False),
+        )
+        for index, (presentation, kind, edit_method, fail_clear, controls) in enumerate(cases):
+            with self.subTest(kind=kind, method=edit_method, fail_clear=fail_clear, controls=controls):
+                operation_id = f"op-inflight-seal-{index}"
+                message_id = 190 + index
+                initial = self.report(
+                    operation_id=operation_id,
+                    user_id=20 + index,
+                    chat_id=20 + index,
+                    status_text="正在确认作品",
+                    control="cancel" if controls else None,
+                    details={"photo_url": "https://image.example/confirmed.jpg"},
+                    segment={"role": "identity", "presentation_kind": presentation},
+                )
+                _, segment = self.coordinator.accept_segment_report("search", initial)
+                segment = self.coordinator.bind_segment_message(
+                    segment.segment_id,
+                    owner_plugin_id="search",
+                    generation=segment.generation,
+                    chat_id=initial["chat_id"],
+                    message_id=message_id,
+                    message_kind=kind,
+                )
+                self.coordinator.record_segment_rendered(
+                    segment.segment_id,
+                    owner_plugin_id="search",
+                    generation=segment.generation,
+                    business_revision=1,
+                    projection_hash=segment.projection_hash,
+                )
+                context = self.context()
+                started = asyncio.Event()
+                release = asyncio.Event()
+                visible = {}
+                clear_attempts = []
+
+                async def blocked_edit(**kwargs):
+                    started.set()
+                    await release.wait()
+                    visible.update(kwargs)
+
+                async def clear_controls(**kwargs):
+                    clear_attempts.append(kwargs["message_id"])
+                    if fail_clear and len(clear_attempts) == 1:
+                        raise TimedOut("injected control cleanup timeout")
+                    visible["reply_markup"] = kwargs["reply_markup"]
+
+                getattr(context.bot, edit_method).side_effect = blocked_edit
+                context.bot.edit_message_reply_markup.side_effect = clear_controls
+                sink = OperationReportSink(self.coordinator)
+                sink.attach(lambda record: render_operation(
+                    context.application, Mock(), record,
+                ))
+                try:
+                    await sink("search", {
+                        **initial, "revision": 2, "status_text": "作品已确认",
+                    })
+                    await asyncio.wait_for(started.wait(), timeout=2)
+                    sealing = asyncio.create_task(sink.seal(
+                        "search", operation_id, "identity",
+                    ))
+                    await asyncio.sleep(0)
+                    release.set()
+                    result = await asyncio.wait_for(sealing, timeout=2)
+                    await sink.drain()
+                    if fail_clear:
+                        self.assertFalse(result["accepted"])
+                        self.assertEqual(
+                            self.coordinator.get_segment(segment.segment_id).state,
+                            "sealing",
+                        )
+                        result = await sink.seal("search", operation_id, "identity")
+                    self.assertTrue(result["accepted"])
+                    self.assertEqual(result["segment"]["state"], "sealed")
+                    if controls:
+                        self.assertIsNone(visible["reply_markup"])
+                        self.assertEqual(clear_attempts, [message_id] * (2 if fail_clear else 1))
+                    else:
+                        self.assertEqual(visible["reply_markup"], {"inline_keyboard": []})
+                        self.assertEqual(clear_attempts, [])
+                    self.assertEqual(visible["message_id"], message_id)
+                    context.bot.send_message.assert_not_awaited()
+                    context.bot.send_photo.assert_not_awaited()
+                finally:
+                    release.set()
+                    await sink.drain()
+
     async def test_segment_seal_waits_for_initial_send_to_open_segment(self):
         from app.handlers.interaction_handler import (
             OperationReportSink,

@@ -10,7 +10,7 @@ telepiplex 对删除或改名的配置字段采用 fail-closed 策略；如果�
 
 ## 独立手动管理
 
-sync 2.0.0 不订阅 rename 事件，也不会在 rename 完成后自动扫描 Plex。Plex 扫描与增强只能由用户通过 Telegram 命令或带确认令牌的 MCP 写工具独立发起；rename 的成功或失败不依赖 sync 是否安装、启用或可用。
+sync 2.0.1 不订阅 rename 事件，也不会在 rename 完成后自动扫描 Plex。Plex 扫描与增强只能由用户通过 Telegram 命令或带确认令牌的 MCP 写工具独立发起；rename 的成功或失败不依赖 sync 是否安装、启用或可用。
 
 用户明确发起增强 Job 后，Plex 自己负责识别、匹配和基础元数据，插件执行：
 
@@ -24,7 +24,7 @@ scanning -> artwork -> audio -> subtitle -> completed
 
 ## Telegram 命令
 
-- `/plex`：查看最近 Job；传入 Job ID 可查看单个任务和待处理选择。
+- `/sync`：查看最近 Job；传入 Job ID 可查看单个任务和待处理选择。
 - `/scan`：实时列出 Plex 媒体库，扫描一个库或全部库。它是独立手动操作，不创建增强 Job，也不执行 artwork、audio、subtitle。
 - `/sync_config`：交互配置 Plex、TMDB 和 Fanart.tv。MCP 仅通过 YAML 配置。
 
@@ -34,14 +34,20 @@ scanning -> artwork -> audio -> subtitle -> completed
 
 运行时配置位于 `/config/plugins/sync/config.yaml`；仓库中的默认值和 schema 分别是 `config.default.yaml` 与 `config.schema.json`。状态库由 telepiplex 放在该 Feature 的私有 state 目录。
 
-Plex 客户端和 MCP 都延迟初始化。Plex 配置缺失或 MCP 启动失败不会阻止 Feature 进程，更不会阻止 telepiplex/Bot 启动。提供只读 `library.sync` capability（`get_job`、`list_jobs`）。
+Plex 客户端和 MCP 都延迟初始化。Plex 配置缺失或 MCP 启动失败不会阻止 Feature 进程，更不会阻止 telepiplex/Bot 启动。提供只读 `library.sync` capability（`get_job`、`list_jobs`），直接查询本地任务库，无需 Plex 凭据或连接。其他 capability 方法在初始化外部服务前拒绝。
 
 MCP 对外地址由 `mcp.host`、`mcp.port`、`mcp.path` 控制；非本机监听必须配置 `mcp.auth_token`。MCP 只读工具直接执行；扫描、海报、音轨、字幕和 Job 重试等写工具先返回十分钟有效的一次性确认令牌，调用方再次提交该令牌后才执行。
 
 纯本地验证构建（不读取 Git 元数据）：
 
 ```bash
-python tools/build_feature.py features/sync /tmp/sync-2.0.0.tpx \
+python tools/build_feature.py features/sync /tmp/sync-2.0.1.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```
+
+现役扫描、选择和配置按钮使用 `sync:` 回调；旧 `plex:` 按钮已过期，请重新发送对应命令。取消会在当前 Plex 调用结束并记录结果后停止后续写入，已完成变更保留。
+
+旧增强 Job 恢复时，同一次执行内复用作品的 TMDB details 和 Plex show 描述元数据；24 集同作品只读取各一次，缓存不落库、不跨 Job 或重试。音轨、字幕选择状态不进入缓存，后续读取会重新请求 Plex；海报写入保留 adapter 的刷新行为。
+
+旧 Job 的文件定位每轮只读取一次媒体库并批量匹配路径，目录与多 part 的规则保持不变，重复候选仍拒绝。默认立即定位，再按 5、10、20、30、30…秒退避；`plex.scan_poll_interval` 是初始间隔，上限 30 秒，`plex.scan_timeout` 是每库总预算。默认 300 秒预算最多读取 13 轮（包含第 300 秒最后一次定位）。相较固定 5 秒轮询，后段新媒体可能最多约 30 秒后才被发现，日志会显示下一次等待。等待以最长 1 秒的小段检查取消；当前远端调用仍需先返回。独立 `/scan` 只提交扫描，不执行这些定位轮询。

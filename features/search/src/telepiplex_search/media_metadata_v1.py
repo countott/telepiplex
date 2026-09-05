@@ -536,6 +536,7 @@ def _scope(candidate: AnchoredCandidate, media_type: str) -> tuple[
         verified_inventory = {
             "tvdb_inventory_verified",
             "tmdb_inventory_verified",
+            "wikipedia_inventory_verified",
         }
         if scope == "season":
             verified_inventory.add("wikipedia_season_count_verified")

@@ -69,10 +69,10 @@ class SyncConfigWizard:
                     "请选择要修改的配置。内部参数请直接编辑 YAML。"
                 ),
                 "data": {"keyboard": [
-                    [{"text": "Plex", "callback_data": "plex:config:plex"}],
-                    [{"text": "TMDB", "callback_data": "plex:config:tmdb"}],
-                    [{"text": "Fanart", "callback_data": "plex:config:fanart"}],
-                    [{"text": "退出", "callback_data": "plex:config:cancel"}],
+                    [{"text": "Plex", "callback_data": "sync:config:plex"}],
+                    [{"text": "TMDB", "callback_data": "sync:config:tmdb"}],
+                    [{"text": "Fanart", "callback_data": "sync:config:fanart"}],
+                    [{"text": "退出", "callback_data": "sync:config:cancel"}],
                 ]},
             }],
             "session": {"state": "open"},
@@ -151,8 +151,8 @@ class SyncConfigWizard:
                 "kind": "send_message",
                 "text": "配置已收集，敏感值不会回显。确认保存并重新加载 Feature？",
                 "data": {"keyboard": [[
-                    {"text": "确认保存", "callback_data": "plex:config:confirm"},
-                    {"text": "退出", "callback_data": "plex:config:cancel"},
+                    {"text": "确认保存", "callback_data": "sync:config:confirm"},
+                    {"text": "退出", "callback_data": "sync:config:cancel"},
                 ]]},
             }],
             "session": {"state": "open"},
@@ -167,7 +167,7 @@ class SyncConfigWizard:
         if state == "open":
             action["data"] = {"keyboard": [[{
                 "text": "退出",
-                "callback_data": "plex:config:cancel",
+                "callback_data": "sync:config:cancel",
             }]]}
         return {
             "actions": [action],

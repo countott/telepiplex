@@ -157,11 +157,90 @@ class TelegramPipelinePressureTest(unittest.IsolatedAsyncioTestCase):
     async def test_sequential_single_task_drains_feedback_and_stays_within_call_budget(self):
         from tools.pressure_telegram_pipeline import _run
 
+        for latency, call_budget in ((0, 9), (50, 10)):
+            with self.subTest(telegram_latency_ms=latency):
+                result = await _run(
+                    pipelines=1,
+                    concurrency=1,
+                    telegram_latency_ms=latency,
+                    busy_latency_ms=latency,
+                    search_latency_ms=latency,
+                    download_latency_ms=latency * 2,
+                    rename_latency_ms=latency,
+                    duplicate_clicks=1,
+                    frontend_mode="queue",
+                )
+
+                self.assertTrue(
+                    result["correctness"]["callback_feedback_drain_completed"]
+                )
+                self.assertLessEqual(
+                    result["telegram"][
+                        "api_calls_per_pipeline" if latency == 0
+                        else "normal_api_calls_per_pipeline"
+                    ],
+                    call_budget,
+                )
+                self.assertEqual(
+                    sum(result["telegram"]["calls_by_reason"].values()),
+                    result["telegram"]["api_calls_per_pipeline"],
+                )
+                self.assertLessEqual(
+                    result["telegram"]["calls_by_reason"].get(
+                        "inactive_projection_recovery", 0
+                    ),
+                    1,
+                )
+                self.assertTrue(result["correctness"]["passed"])
+
+    async def test_forced_inflight_seal_compensation_is_counted_separately(self):
+        from tools.pressure_telegram_pipeline import _run
+
+        result = await _run(
+            pipelines=1,
+            concurrency=1,
+            telegram_latency_ms=50,
+            busy_latency_ms=0,
+            search_latency_ms=0,
+            download_latency_ms=0,
+            rename_latency_ms=0,
+            duplicate_clicks=1,
+            frontend_mode="queue",
+            force_inflight_seal_race=True,
+        )
+
+        self.assertEqual(
+            result["telegram"]["calls_by_reason"].get(
+                "inflight_seal_compensation", 0
+            ),
+            1,
+        )
+        self.assertEqual(
+            result["telegram"]["actions"].get(
+                "editMessageReplyMarkup", 0
+            ),
+            2,
+        )
+        self.assertEqual(
+            sum(result["telegram"]["calls_by_reason"].values()),
+            result["telegram"]["api_calls_per_pipeline"],
+        )
+        self.assertLessEqual(
+            result["telegram"]["normal_api_calls_per_pipeline"],
+            10,
+        )
+        self.assertEqual(result["correctness"]["final_segment_failures"], [])
+        self.assertEqual(result["correctness"]["final_terminal_failures"], [])
+        self.assertTrue(result["correctness"]["passed"])
+
+    async def test_500ms_busy_delivery_does_not_block_or_leak(self):
+        from tools.pressure_telegram_pipeline import _run
+
         result = await _run(
             pipelines=1,
             concurrency=1,
             telegram_latency_ms=0,
-            busy_latency_ms=0,
+            busy_latency_ms=500,
             search_latency_ms=0,
             download_latency_ms=0,
             rename_latency_ms=0,
@@ -169,13 +248,50 @@ class TelegramPipelinePressureTest(unittest.IsolatedAsyncioTestCase):
             frontend_mode="queue",
         )
 
-        self.assertTrue(
-            result["correctness"]["callback_feedback_drain_completed"]
+        self.assertEqual(result["correctness"]["completed_operations"], 1)
+        self.assertEqual(result["correctness"]["callback_dispatches"], 1)
+        self.assertEqual(result["correctness"]["final_segment_visible"], 3)
+        self.assertEqual(result["correctness"]["final_segment_failures"], [])
+        self.assertEqual(result["correctness"]["final_terminal_visible"], 1)
+        self.assertEqual(result["correctness"]["final_terminal_failures"], [])
+        self.assertEqual(
+            result["correctness"]["operations_without_active_segment"], 1
+        )
+        self.assertLess(
+            result["latency_ms"]["callback_to_feature_rpc_ms"]["max"],
+            100,
+        )
+        self.assertGreaterEqual(result["telegram"]["busy"]["calls"], 1)
+        self.assertEqual(
+            result["telegram"]["busy"]["intended_wait_ms"]["min"],
+            500.0,
+        )
+        self.assertEqual(
+            result["telegram"]["busy"]["intended_wait_ms"]["max"],
+            500.0,
+        )
+        self.assertEqual(
+            sum(result["telegram"]["busy"]["outcomes"].values()),
+            result["telegram"]["busy"]["calls"],
+        )
+        self.assertEqual(
+            sum(result["telegram"]["calls_by_reason"].values()),
+            result["telegram"]["api_calls_per_pipeline"],
         )
         self.assertLessEqual(
-            result["telegram"]["api_calls_per_pipeline"],
-            9,
+            result["telegram"]["normal_api_calls_per_pipeline"],
+            10,
         )
+        self.assertEqual(result["resources"]["tasks"]["final_delta"], 0)
+        self.assertEqual(
+            result["resources"]["lifecycle"]["tasks"]["final_delta"], 0
+        )
+        if result["resources"]["fds"]["final_delta"] is not None:
+            self.assertEqual(result["resources"]["fds"]["final_delta"], 0)
+        if result["resources"]["lifecycle"]["fds"]["final_delta"] is not None:
+            self.assertEqual(
+                result["resources"]["lifecycle"]["fds"]["final_delta"], 0
+            )
         self.assertTrue(result["correctness"]["passed"])
 
     async def test_queue_teardown_leak_fails_lifecycle_resource_gate(self):

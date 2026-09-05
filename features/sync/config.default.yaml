@@ -3,7 +3,9 @@ plex:
   base_url: ""
   token: ""
   timeout: 15
+  # 旧增强 Job 定位：立即读取，随后 5/10/20/30 秒退避；最长 30 秒才发现新媒体。
   scan_poll_interval: 5
+  # 每个媒体库共用的定位预算；独立 /scan 仅提交扫描，不等待入库。
   scan_timeout: 300
 tmdb:
   api_key: ""

@@ -212,6 +212,40 @@ def _regular_inventories(
     return result
 
 
+def _wikipedia_inventories(
+    facts: tuple[EvidenceFact, ...],
+) -> dict[str, set[tuple[int, int]]]:
+    """Keep explicit episode coordinates bound to their verified work QID."""
+    result = {}
+    for fact in facts:
+        if fact.provider != "wikipedia" or fact.media_type != "series":
+            continue
+        inventory = fact.episode_inventory
+        identity = fact.external_ids.get("wikidata") or fact.external_ids.get("wikipedia")
+        if (
+            inventory.get("status") != "complete"
+            or not identity
+            or inventory.get("wikibase_item") != identity
+            or inventory.get("fact_conflicts")
+        ):
+            continue
+        for raw in fact.episodes:
+            if not isinstance(raw, dict) or (
+                raw.get("air_date_conflict")
+                or raw.get("inventory_conflict")
+                or raw.get("inventory_status") != "complete"
+            ):
+                continue
+            try:
+                season = int(raw.get("season_number"))
+                episode = int(raw.get("episode_number"))
+            except (TypeError, ValueError):
+                continue
+            if season > 0 and episode > 0:
+                result.setdefault(identity, set()).add((season, episode))
+    return result
+
+
 def _wikipedia_season_counts(
     facts: tuple[EvidenceFact, ...],
 ) -> tuple[int, ...]:
@@ -250,6 +284,7 @@ def _verified_scope(
     episode_number: int | None,
     inventories: dict[str, set[tuple[int, int]]],
     wikipedia_season_counts: tuple[int, ...],
+    wikipedia_inventory: set[tuple[int, int]],
 ) -> tuple[int | None, int | None, str]:
     if role == "season":
         for provider in ("tvdb", "tmdb"):
@@ -281,6 +316,8 @@ def _verified_scope(
                     episode_number,
                     f"{provider}_inventory_verified",
                 )
+        if (season_number, episode_number) in wikipedia_inventory:
+            return season_number, episode_number, "wikipedia_inventory_verified"
         return None, None, "unresolved_scope_link"
     return season_number, episode_number, (
         "ai_related_fact" if role == "related_work" else "fact_verified"
@@ -358,6 +395,10 @@ def _candidate_from_payload(
 
     selected_facts = tuple(value[0] for value in binding_values)
     inventories = _regular_inventories(selected_facts)
+    wikipedia_inventories = _wikipedia_inventories(tuple(
+        fact for fact, role, _season, _episode in binding_values
+        if role != "related_work"
+    ))
     wikipedia_season_counts = _wikipedia_season_counts(selected_facts)
     source_links = []
     posters = []
@@ -371,6 +412,10 @@ def _candidate_from_payload(
             episode_number,
             inventories,
             wikipedia_season_counts,
+            wikipedia_inventories.get(
+                fact.external_ids.get("wikidata") or fact.external_ids.get("wikipedia"),
+                set(),
+            ),
         )
         if verification == "unresolved_scope_link":
             unresolved.append(f"{fact.fact_id}:unresolved_scope_link")

@@ -7,7 +7,7 @@ name = "telepiplex-echo"
 version = "1.0.0"
 description = "Reference telepiplex runtime Feature"
 requires-python = ">=3.12"
-dependencies = ["telepiplex-plugin-sdk==2.0.0"]
+dependencies = ["telepiplex-plugin-sdk==2.1.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

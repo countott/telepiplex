@@ -78,6 +78,7 @@ from .candidate_hydration import (
     hydrate_frozen_candidate_anchor,
 )
 from .candidate_locale import (
+    commit_candidate_localization,
     localize_candidate_from_exact_douban,
     localize_candidate_from_verified_douban,
 )
@@ -780,6 +781,7 @@ class SearchFeature:
             candidate_poster_lookup or self._lookup_candidate_poster
         )
         self.candidate_poster_timeout = 12.0
+        self.candidate_locale_timeout = 2.0
         self.metadata_resolution_store = (
             metadata_resolution_store or MetadataResolutionStore()
         )
@@ -4685,6 +4687,36 @@ class SearchFeature:
             )
 
     async def _localize_exact_douban_candidates(
+        self,
+        plan: dict,
+        *,
+        plan_id: str,
+    ) -> dict:
+        if not isinstance(plan, dict):
+            return plan
+        snapshot = deepcopy(plan)
+        try:
+            localized = await asyncio.wait_for(
+                self._collect_douban_candidate_localizations(
+                    deepcopy(snapshot), plan_id=plan_id,
+                ),
+                timeout=self.candidate_locale_timeout,
+            )
+        except asyncio.TimeoutError:
+            # Cancel only our locale consumer. SourceScheduler shields shared
+            # reads, whose bounded HTTP calls may still finish in their thread.
+            # Discard the whole transaction: no late title/source binding may
+            # reach a selected candidate or its confirmed metadata contract.
+            log_search_event(
+                runtime_context.logger,
+                "search.candidate_locale_budget_exhausted",
+                search_session_id=plan_id,
+                budget_seconds=self.candidate_locale_timeout,
+            )
+            return deepcopy(plan)
+        return commit_candidate_localization(plan, snapshot, localized)
+
+    async def _collect_douban_candidate_localizations(
         self,
         plan: dict,
         *,

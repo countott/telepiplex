@@ -26,6 +26,9 @@ from .directories import (
     normalize_save_directory_path,
 )
 from .failure import classify_download_failure
+from .transport_capacity import check_completion_capacity
+from .snapshot_store import scan_snapshot, store_for
+from telepiplex_plugin_sdk.storage_snapshot import build_snapshot, SnapshotError, TRANSPORT
 
 
 _MAGNET = re.compile(r"^magnet:\?xt=urn:btih:(?:[A-Fa-f0-9]{40}|[A-Za-z2-7]{32})(?:&.*)?$")
@@ -51,6 +54,7 @@ _STORAGE_METHODS = {
     "is_directory",
     "get_files_from_dir",
     "get_file_tree",
+    "get_tree_snapshot_page", "acknowledge_tree_snapshot",
 }
 
 
@@ -149,6 +153,15 @@ class DownloadFeature:
         kwargs = payload.get("kwargs") or {}
         if not isinstance(args, list) or not isinstance(kwargs, dict):
             raise FeatureError("invalid_request", "storage args/kwargs are invalid")
+        if method in {"get_tree_snapshot_page", "acknowledge_tree_snapshot"}:
+            try:
+                store = store_for(self.jobs)
+                if kwargs or not args or len(args) > (2 if method == "get_tree_snapshot_page" else 1):
+                    raise SnapshotError("invalid snapshot arguments")
+                target = store.page if method == "get_tree_snapshot_page" else store.acknowledge
+                return {"value": await asyncio.to_thread(target, *args)}
+            except SnapshotError as exc:
+                raise FeatureError("download_tree_incomplete", str(exc)) from exc
         if method == "get_file_info_batch":
             paths = args[0] if len(args) == 1 else None
             if not isinstance(paths, list) or not all(
@@ -1777,10 +1790,12 @@ class DownloadFeature:
                 details=hidden_details,
             )
             self._raise_if_cancelled(operation)
-            file_tree = await asyncio.to_thread(
-                self.client.get_file_tree,
-                final_path,
-            )
+            snapshot_enabled = self.config.get("enable_tree_snapshot_references") is True
+            root_identity = ""
+            if snapshot_enabled:
+                file_tree, root_identity = await asyncio.to_thread(scan_snapshot, self.client, final_path)
+            else:
+                file_tree = await asyncio.to_thread(self.client.get_file_tree, final_path)
             self._raise_if_cancelled(operation)
             minimum_video_size_bytes = configured_minimum_video_size_bytes(
                 self.config
@@ -1797,6 +1812,45 @@ class DownloadFeature:
                 file_tree,
                 minimum_video_size_bytes=minimum_video_size_bytes,
             )
+            event_payload = {
+                "job_id": job_id,
+                "provider": "download",
+                "link": link,
+                "selected_path": selected_path,
+                "chat_id": int(operation.get("chat_id") or user_id or 0),
+                "user_id": user_id,
+                "resource_name": resource_name,
+                "download_root": final_path,
+                "final_path": final_path,
+                "file_tree": file_tree,
+                "snapshot_complete": True,
+                "file_tree_transport": "inline_v1",
+                # Planned here for capacity measurement; this payload is only
+                # persisted/published after all deletions are confirmed.
+                "cleanup_deleted_paths": list(cleanup_plan.rejected_paths),
+                "media_metadata": payload.get("media_metadata"),
+                "release": payload.get("release"),
+                "operation_id": operation_id,
+            }
+            uses_reference = snapshot_enabled and len(file_tree) > 1000
+            snapshot_store = None
+            if uses_reference:
+                # Validate every pre-cleanup node fits a bounded page before
+                # deleting even rejected files, and require durable storage.
+                snapshot_store = store_for(self.jobs)
+                reference, _ = build_snapshot(file_tree, job_id=job_id,
+                    root_path=final_path, root_id=root_identity)
+                event_payload.update(file_tree=[], file_tree_transport=TRANSPORT,
+                                     file_tree_snapshot=reference)
+            # Measure the complete pre-cleanup tree as a storage response and the
+            # full anticipated event before deleting even one cloud object.
+            check_completion_capacity(
+                event_payload, token=getattr(self.host, "token", ""),
+                frame_limit=getattr(self.host, "max_frame_bytes", 1_048_576),
+            )
+            rejected_paths = set(cleanup_plan.rejected_paths)
+            expected_tree = [node for node in file_tree if node.get("path") not in rejected_paths]
+            operation["cleanup_deleted_paths"] = []
             for path in cleanup_plan.rejected_paths:
                 self._raise_if_cancelled(operation)
                 deleted = await asyncio.to_thread(
@@ -1807,11 +1861,23 @@ class DownloadFeature:
                     raise DownloadCleanupError(
                         f"115 未确认删除不合格文件：{path}"
                     )
+                operation["cleanup_deleted_paths"].append(path)
             self._raise_if_cancelled(operation)
-            file_tree = await asyncio.to_thread(
-                self.client.get_file_tree,
-                final_path,
-            )
+            if snapshot_enabled:
+                file_tree, verified_root = await asyncio.to_thread(scan_snapshot, self.client, final_path)
+                if verified_root != root_identity:
+                    raise SnapshotError("snapshot root changed during cleanup")
+            else:
+                file_tree = await asyncio.to_thread(self.client.get_file_tree, final_path)
+            def tree_identity(nodes):
+                return sorted((str(node.get("file_id") or ""), str(node.get("path") or ""),
+                               bool(node.get("is_dir")), str(node.get("size") or 0),
+                               str(node.get("sha1") or "")) for node in nodes)
+            if tree_identity(file_tree) != tree_identity(expected_tree):
+                raise Open115Error(
+                    "download tree changed during cleanup verification",
+                    code="file_tree_incomplete", operation="get_file_tree",
+                )
             verified_plan = plan_download_cleanup(
                 file_tree,
                 minimum_video_size_bytes=minimum_video_size_bytes,
@@ -1828,21 +1894,18 @@ class DownloadFeature:
                 f"deleted_file_count={len(cleanup_plan.rejected_paths)}"
             )
             self._raise_if_cancelled(operation)
-            event_payload = {
-                "job_id": job_id,
-                "provider": "download",
-                "link": link,
-                "selected_path": selected_path,
-                "chat_id": int(operation.get("chat_id") or user_id or 0),
-                "user_id": user_id,
-                "resource_name": resource_name,
-                "download_root": final_path,
-                "final_path": final_path,
-                "file_tree": file_tree,
-                "media_metadata": payload.get("media_metadata"),
-                "release": payload.get("release"),
-                "operation_id": operation_id,
-            }
+            if uses_reference:
+                reference, pages = build_snapshot(file_tree, job_id=job_id,
+                    root_path=final_path, root_id=root_identity)
+                await asyncio.to_thread(snapshot_store.put, reference, pages)
+                self._raise_if_cancelled(operation)
+                event_payload.update(file_tree=[], file_tree_snapshot=reference)
+            else:
+                event_payload["file_tree"] = file_tree
+            check_completion_capacity(
+                event_payload, token=getattr(self.host, "token", ""),
+                frame_limit=getattr(self.host, "max_frame_bytes", 1_048_576),
+            )
             if self.jobs:
                 self.jobs.update(job_id, "downloaded", result=event_payload)
             logger.info(
@@ -1859,8 +1922,6 @@ class DownloadFeature:
         except Exception as exc:
             if cancel_event.is_set():
                 await self._finish_cancelled(operation_id)
-                if self.jobs:
-                    self.jobs.update(job_id, "cancelled", error="cancelled")
                 return
             if self.jobs and (self.jobs.get(job_id) or {}).get("state") == "downloaded":
                 return
@@ -1871,6 +1932,7 @@ class DownloadFeature:
                     job_id,
                     "failed",
                     error=failure_detail.code,
+                    result={"cleanup_deleted_paths": list(operation.get("cleanup_deleted_paths") or [])},
                 )
             logger.error(
                 "download_download_failed "
@@ -1888,6 +1950,7 @@ class DownloadFeature:
                 "provider": "download",
                 "user_id": user_id,
                 "link": link,
+                "cleanup_deleted_paths": list(operation.get("cleanup_deleted_paths") or []),
                 "error": failure_detail.code,
                 "error_code": failure_detail.code,
                 "error_message": failure_detail.detail,
@@ -1908,7 +1971,7 @@ class DownloadFeature:
                 stage=failure_detail.stage,
                 status_text=failure_detail.user_text(),
                 control="",
-                details=failure_detail.details(),
+                details={**failure_detail.details(), "cleanup_deleted_paths": list(operation.get("cleanup_deleted_paths") or [])},
             )
         finally:
             if info_hash and not cancel_event.is_set():
@@ -2070,6 +2133,7 @@ class DownloadFeature:
                 }
                 self.operations[operation_id] = current
             current.update(deepcopy(handoff))
+            current["cleanup_deleted_paths"] = list(payload.get("cleanup_deleted_paths") or [])
             try:
                 if payload.get("download_handoff_accepted") is not True:
                     await self._confirm_download_handoff(handoff)
@@ -2237,7 +2301,7 @@ class DownloadFeature:
         details = dict(operation.get("details") or {})
         details.update({
             "offline_task_record": operation.get("offline_task_record", "retained"),
-            "downloaded_content": "preserved",
+            **self._cleanup_accounting(operation),
             "stopped_at": operation.get("stage") or "download",
         })
         cancelling = self._advance_operation(
@@ -2261,7 +2325,7 @@ class DownloadFeature:
                 "offline_task_record": operation.get(
                     "offline_task_record", "retained"
                 ),
-                "downloaded_content": "preserved",
+                **self._cleanup_accounting(operation),
                 "stopped_at": operation.get("stage") or "download",
             })
             operation["details"] = details
@@ -2420,6 +2484,14 @@ class DownloadFeature:
         if not deleted:
             operation["offline_delete_reason"] = "delete_failed"
 
+    @staticmethod
+    def _cleanup_accounting(operation):
+        deleted_paths = list(operation.get("cleanup_deleted_paths") or [])
+        return {
+            "cleanup_deleted_paths": deleted_paths,
+            "downloaded_content": "remaining_preserved" if deleted_paths else "preserved",
+        }
+
     async def _finish_cancelled(self, operation_id: str):
         operation = self.operations[operation_id]
         cleanup_done = operation.get("cancel_cleanup_done")
@@ -2435,14 +2507,28 @@ class DownloadFeature:
         details = dict(operation.get("details") or {})
         details.update({
             "offline_task_record": record_state,
-            "downloaded_content": "preserved",
+            **self._cleanup_accounting(operation),
             "stopped_at": operation.get("stage") or "download",
         })
+        accounting = self._cleanup_accounting(operation)
+        job_id = str(operation.get("job_id") or "")
+        if self.jobs and job_id:
+            job = self.jobs.get(job_id)
+            if job is not None:
+                self.jobs.update(
+                    job_id, "cancelled", error="cancelled",
+                    result={**(job.get("result") or {}), **accounting},
+                )
+        deleted_count = len(accounting["cleanup_deleted_paths"])
+        status_text = (
+            f"下载已停止；已清理 {deleted_count} 个文件，其余已下载内容保留。"
+            if deleted_count else "下载已停止；已下载内容保留。"
+        )
         return await self._report_operation(
             operation_id,
             state="cancelled",
             stage=operation.get("stage") or "download",
-            status_text="下载已停止；已下载内容保留。",
+            status_text=status_text,
             control="",
             details=details,
         )
@@ -2503,6 +2589,7 @@ class DownloadFeature:
         operation.update({
             "kind": "download",
             "job_id": str(job.get("job_id") or ""),
+            "cleanup_deleted_paths": list(payload.get("cleanup_deleted_paths") or []),
             "cancel_event": threading.Event(),
             "info_hash": "",
             "offline_delete_attempted": False,

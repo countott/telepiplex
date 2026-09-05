@@ -3,6 +3,7 @@
   "type": "object",
   "x-telepiplex-config-command": "config",
   "properties": {
+    "enable_tree_snapshot_references": {"type": "boolean", "default": false},
     "base_url": {"type": "string", "pattern": "^https://"},
     "passport_url": {"type": "string", "pattern": "^https://"},
     "auth_mode": {"enum": ["direct", "scan"]},

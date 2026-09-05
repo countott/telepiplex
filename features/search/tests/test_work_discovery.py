@@ -1162,6 +1162,10 @@ class WorkDiscoveryServiceTest(unittest.IsolatedAsyncioTestCase):
                     if qid in entities
                 },
             ),
+            patch(
+                "telepiplex_search.service.search_wikidata_entities",
+                return_value=["Q74801"],
+            ),
         ):
             plan = await feature._build_plan("副总统", "service-root")
 
@@ -1409,6 +1413,15 @@ class WorkDiscoveryServiceTest(unittest.IsolatedAsyncioTestCase):
                 "_wikipedia_provider",
                 return_value=wikipedia_result(),
             ),
+            patch.object(
+                feature,
+                "_douban_provider",
+                return_value={
+                    "source": "douban",
+                    "status": "not_found",
+                    "facts": [],
+                },
+            ),
             patch(
                 "telepiplex_search.service.enrich_wikidata_entities",
                 side_effect=lambda qids: {
@@ -1416,6 +1429,10 @@ class WorkDiscoveryServiceTest(unittest.IsolatedAsyncioTestCase):
                     for qid in qids
                     if qid in entities
                 },
+            ),
+            patch(
+                "telepiplex_search.service.search_wikidata_entities",
+                return_value=["Q74801"],
             ),
         ):
             plan = await feature._build_plan(

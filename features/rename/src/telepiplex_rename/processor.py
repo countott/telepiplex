@@ -9,6 +9,7 @@ import re
 
 from telepiplex_plugin_sdk import FeatureError
 from .context import runtime_context
+from telepiplex_plugin_sdk.storage_tree import TreeIntegrityError, collect_complete_tree
 from telepiplex_plugin_sdk.media_metadata import (
     extract_confirmed_media_metadata as extract_confirmed_media_metadata_v1,
 )
@@ -87,56 +88,66 @@ def _is_dir_115_item(item):
     return False
 
 
-def collect_storage_file_tree(storage, root_path, max_depth=4, limit=1000):
-    root_info = storage.get_file_info(root_path)
-    if not root_info:
-        runtime_context.logger.warn(f"TVDB整理跳过：无法读取目录 {root_path}")
-        return []
-
-    root_id = str(root_info.get("file_id") or root_info.get("cid") or root_info.get("fid") or "").strip()
-    if not root_id:
-        runtime_context.logger.warn(f"TVDB整理跳过：目录缺少ID {root_path}")
-        return []
-
-    tree = []
-
-    def walk(parent_id, prefix="", depth=0):
-        if depth > max_depth:
-            return
-        items = _list_response_items(storage.get_file_list({"cid": parent_id, "limit": limit, "show_dir": 1}))
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            name = _file_name_from_115_item(item)
-            if not name:
-                continue
-            relative_path = f"{prefix}/{name}".strip("/")
-            is_dir = _is_dir_115_item(item)
-            node = {
-                "name": name,
-                "relative_path": relative_path,
-                "is_dir": is_dir,
-                "file_id": _file_id_from_115_item(item),
-                "size": item.get("fs") or item.get("size") or item.get("size_byte") or 0,
-            }
-            if is_dir:
-                tree.append(node)
-                child_id = node["file_id"]
-                if child_id:
-                    walk(child_id, relative_path, depth + 1)
-            elif Path(name).suffix.lower() in (
-                VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
-            ):
-                tree.append(node)
-
-    walk(root_id)
-    return tree
+def collect_storage_file_tree(storage, root_path, max_depth=8, limit=1000):
+    try:
+        tree = collect_complete_tree(storage, root_path, max_depth=max_depth, limit=limit)
+        # Preserve the legacy planner's media view, but count and validate ALL
+        # objects before filtering; ancillary files remain untouched.
+        return [node for node in tree if node["is_dir"] or Path(node["name"]).suffix.lower() in (VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS)]
+    except TreeIntegrityError as exc:
+        raise FeatureError("download_tree_incomplete", str(exc)) from exc
 
 
 def _event_file_tree(event: DownloadCompletedEvent):
-    if isinstance(event.file_tree, list) and event.file_tree:
+    transport = getattr(event, "file_tree_transport", "")
+    if transport not in ("", "inline_v1", "snapshot_ref_v1"):
+        raise FeatureError("unsupported_file_tree_transport", "unsupported file tree transport")
+    if transport == "snapshot_ref_v1":
+        if not event.snapshot_verified or event.snapshot_complete is not True or not isinstance(event.file_tree, list):
+            raise FeatureError("download_tree_incomplete", "snapshot has no verified durable copy")
+        return [dict(node) for node in event.file_tree]
+    if event.snapshot_complete is False:
+        raise FeatureError("download_tree_incomplete", "file tree snapshot is incomplete")
+    if event.snapshot_complete is not True:
+        # Legacy events may contain a silently truncated inline tree. Re-enumerate
+        # every object with verified offset pages before any mutation.
+        event.file_tree = collect_storage_file_tree(_storage(event), event.final_path)
+        event.snapshot_complete = True
+    if transport == "inline_v1":
+        validate_inline_tree(event.file_tree, root_path=event.final_path)
+    if isinstance(event.file_tree, list):
         return [dict(item) for item in event.file_tree if isinstance(item, dict)]
     return collect_storage_file_tree(_storage(event), event.final_path)
+
+
+def validate_inline_tree(tree, *, root_path=""):
+    if not isinstance(tree, list) or len(tree) > 1000:
+        raise FeatureError("download_tree_incomplete", "inline file tree must contain at most 1000 nodes")
+    identities, paths = set(), set()
+    for node in tree:
+        if not isinstance(node, dict):
+            raise FeatureError("download_tree_incomplete", "inline file tree contains a malformed node")
+        identity = str(node.get("file_id") or "").strip()
+        relative = str(node.get("relative_path") or "")
+        parts = relative.split("/")
+        if (not identity or identity in identities or not relative or relative in paths
+                or any(part in {"", ".", ".."} for part in parts) or len(parts) > 9
+                or (node.get("is_dir") is True and len(parts) > 8)
+                or type(node.get("is_dir")) is not bool):
+            raise FeatureError("download_tree_incomplete", "inline file tree contains an invalid identity, path or depth")
+        absolute = str(node.get("path") or "")
+        root = str(root_path).rstrip("/")
+        single_file = (len(tree) == 1 and not node["is_dir"]
+                       and relative == root.rsplit("/", 1)[-1] and absolute == root)
+        if absolute and root and absolute != f"{root}/{relative}" and not single_file:
+            raise FeatureError("download_tree_incomplete", "inline file tree path is outside its declared root")
+        identities.add(identity)
+        paths.add(relative)
+    directories = {str(node["relative_path"]) for node in tree if node["is_dir"]}
+    for relative in paths:
+        parts = relative.split("/")
+        if any("/".join(parts[:i]) not in directories for i in range(1, len(parts))):
+            raise FeatureError("download_tree_incomplete", "inline file tree has an unlisted parent directory")
 
 
 def _source_path(event: DownloadCompletedEvent, node: dict) -> str:

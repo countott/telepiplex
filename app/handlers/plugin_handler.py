@@ -625,19 +625,26 @@ async def dynamic_callback_gateway(update, context):
         )
         if data is None:
             return
-        if data == encoded_data:
-            try:
-                await query.answer(text="处理中...")
-            except Exception:
-                pass
-
         namespace, separator, payload = data.partition(":")
         if not separator:
             return
         router = context.application.bot_data.get(ROUTER_KEY)
         route = router.callback_route(namespace) if router is not None else None
         if route is None:
+            try:
+                await query.answer(text="按钮已失效，请重新打开命令。")
+            except Exception:
+                pass
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
             return
+        if data == encoded_data:
+            try:
+                await query.answer(text="处理中...")
+            except Exception:
+                pass
         try:
             result = await route.client.request(
                 "callback.dispatch",

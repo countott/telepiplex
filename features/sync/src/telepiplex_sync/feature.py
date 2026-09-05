@@ -238,7 +238,7 @@ class SyncFeature:
             )
             return self._message("\n".join(lines))
         if not text.isdecimal():
-            return self._message("用法：/plex [Job ID]")
+            return self._message("用法：/sync [Job ID]")
         job = await asyncio.to_thread(service.get_job, int(text))
         if not job or not self._job_owned_by_request(job, request):
             return self._message(f"⚠️ Plex 任务不存在：#{text}")
@@ -289,11 +289,11 @@ class SyncFeature:
         if libraries:
             keyboard.append([{
                 "text": "扫描全部媒体库",
-                "callback_data": "plex:scan:all",
+                "callback_data": "sync:scan:all",
             }])
         for library in visible:
             library_id = str(library["id"])
-            callback_data = f"plex:scan:{library_id}"
+            callback_data = f"sync:scan:{library_id}"
             if len(callback_data.encode("utf-8")) > 64:
                 continue
             keyboard.append([{
@@ -304,16 +304,16 @@ class SyncFeature:
         if page > 0:
             navigation.append({
                 "text": "上一页",
-                "callback_data": f"plex:scan:page:{page - 1}",
+                "callback_data": f"sync:scan:page:{page - 1}",
             })
         if page + 1 < page_count:
             navigation.append({
                 "text": "下一页",
-                "callback_data": f"plex:scan:page:{page + 1}",
+                "callback_data": f"sync:scan:page:{page + 1}",
             })
         navigation.append({
             "text": "退出",
-            "callback_data": "plex:scan:cancel",
+            "callback_data": "sync:scan:cancel",
         })
         keyboard.append(navigation)
         text = (
@@ -649,21 +649,21 @@ class SyncFeature:
                 {
                     "text": "上一张",
                     "callback_data": (
-                        f"plex:choice:{job['id']}:"
+                        f"sync:choice:{job['id']}:"
                         f"{selection_nonce}:prev"
                     ),
                 },
                 {
                     "text": "选择此海报",
                     "callback_data": (
-                        f"plex:choice:{job['id']}:"
+                        f"sync:choice:{job['id']}:"
                         f"{selection_nonce}:pick:{index}"
                     ),
                 },
                 {
                     "text": "下一张",
                     "callback_data": (
-                        f"plex:choice:{job['id']}:"
+                        f"sync:choice:{job['id']}:"
                         f"{selection_nonce}:next"
                     ),
                 },
@@ -675,7 +675,7 @@ class SyncFeature:
                     "photo_url": str(candidates[index].get("url") or ""),
                     "keyboard": keyboard + [[{
                         "text": "取消任务",
-                        "callback_data": "plex:cancel",
+                        "callback_data": "sync:cancel",
                     }]],
                 },
             }
@@ -687,7 +687,7 @@ class SyncFeature:
             [{
                 "text": self._candidate_label(kind, candidate),
                 "callback_data": (
-                    f"plex:choice:{job['id']}:"
+                    f"sync:choice:{job['id']}:"
                     f"{selection_nonce}:pick:{candidate_index}"
                 ),
             }]
@@ -701,7 +701,7 @@ class SyncFeature:
             controls.append({
                 "text": "上一页",
                 "callback_data": (
-                    f"plex:choice:{job['id']}:"
+                    f"sync:choice:{job['id']}:"
                     f"{selection_nonce}:prev"
                 ),
             })
@@ -709,13 +709,13 @@ class SyncFeature:
             controls.append({
                 "text": "下一页",
                 "callback_data": (
-                    f"plex:choice:{job['id']}:"
+                    f"sync:choice:{job['id']}:"
                     f"{selection_nonce}:next"
                 ),
             })
         controls.append({
             "text": "取消任务",
-            "callback_data": "plex:cancel",
+            "callback_data": "sync:cancel",
         })
         return {
             "kind": "edit_message" if edit else "send_message",
@@ -799,19 +799,19 @@ class SyncFeature:
 
     async def management_capability(self, request: dict) -> dict:
         """Expose stable read-only job inspection to other Features."""
-        service = await self._ensure_service()
         method = str(request.get("method") or "")
+        if method not in {"get_job", "list_jobs"}:
+            raise ValueError(f"unsupported library.sync method: {method}")
         params = request.get("payload") or {}
         if method == "get_job":
             return {
                 "job": await asyncio.to_thread(
-                    service.get_job, int(params.get("job_id") or 0)
+                    self.jobs.get, int(params.get("job_id") or 0)
                 )
             }
         if method == "list_jobs":
             limit = min(max(int(params.get("limit") or 20), 1), 100)
-            return {"jobs": await asyncio.to_thread(service.list_jobs, limit)}
-        raise ValueError(f"unsupported library.sync method: {method}")
+            return {"jobs": await asyncio.to_thread(self.jobs.list, limit)}
 
     async def _ensure_service(self):
         if self.service is not None:
@@ -1021,6 +1021,11 @@ class SyncFeature:
         if not operation_id or operation_id not in self.operations:
             return None
         results = [job for job in (results or []) if isinstance(job, dict)]
+        if (
+            self._is_cancelled(operation_id)
+            or self.operations[operation_id].get("state") == "cancelling"
+        ):
+            return await self._finish_cancelled_batch(operation_id, results)
         waiting = next((
             job for job in results
             if job.get("state") == "awaiting_selection"
@@ -1030,6 +1035,8 @@ class SyncFeature:
             selection = await asyncio.to_thread(
                 service.pending_selection, waiting["id"]
             )
+            if self._is_cancelled(operation_id):
+                return await self._finish_cancelled_batch(operation_id, results)
             if selection:
                 return await self._report_operation(
                     operation_id,
@@ -1056,6 +1063,15 @@ class SyncFeature:
             control="",
             details={"completed_effects": list(_PLEX_STAGE_TEXT)},
         )
+
+    async def _finish_cancelled_batch(self, operation_id, results):
+        for result in results:
+            # A returned snapshot may be stale; never downgrade a completed job.
+            job = self.jobs.get(int(result.get("id") or 0))
+            if job and job["state"] == "awaiting_selection":
+                service = await self._ensure_service()
+                await asyncio.to_thread(service.cancel_pending_selection, job["id"])
+        return await self._finish_cancelled(operation_id)
 
     async def _finish_cancelled(self, operation_id):
         operation = self.operations.get(operation_id)
@@ -1385,7 +1401,7 @@ class SyncFeature:
         if not user_id or self.loop is None:
             return False
         if confirmation:
-            message += f"\n请使用 /plex 查看任务 #{confirmation.get('job_id')} 并人工确认。"
+            message += f"\n请使用 /sync 查看任务 #{confirmation.get('job_id')} 并人工确认。"
         future = asyncio.run_coroutine_threadsafe(
             self.host.notify_user(int(user_id), str(message)),
             self.loop,

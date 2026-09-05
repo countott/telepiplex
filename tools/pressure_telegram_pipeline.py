@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter, defaultdict
+from contextvars import ContextVar
 import json
 import math
 import os
@@ -18,6 +19,8 @@ from unittest.mock import patch
 
 from telegram.request import BaseRequest
 
+
+_CALL_REASON = ContextVar("telegram_pressure_call_reason", default="normal")
 
 ROOT = Path(__file__).resolve().parents[1]
 SDK_SOURCE = ROOT / "sdk/src"
@@ -99,6 +102,7 @@ class SimulatedTelegramRequest(BaseRequest):
         chat_operations: dict[int, str],
         callback_operations: dict[str, str],
         cancelled_busy_late_apply_ms: float | None = None,
+        force_inflight_seal_race: bool = False,
     ):
         self.telegram_latency_ms = max(0.0, float(telegram_latency_ms))
         self.busy_latency_ms = max(0.0, float(busy_latency_ms))
@@ -110,11 +114,14 @@ class SimulatedTelegramRequest(BaseRequest):
             if cancelled_busy_late_apply_ms is None
             else max(0.0, float(cancelled_busy_late_apply_ms))
         )
+        self.force_inflight_seal_race = bool(force_inflight_seal_race)
         self.calls: list[dict] = []
         self.messages: dict[tuple[int, int], dict] = {}
         self.identity_milestone_deliveries: Counter[str] = Counter()
         self._terminal_visible = defaultdict(asyncio.Event)
         self._late_delivery_tasks: set[asyncio.Task] = set()
+        self._download_segment_visible = asyncio.Event()
+        self._forced_seal_edit_started = asyncio.Event()
         self._message_id = 10_000
 
     @property
@@ -146,6 +153,12 @@ class SimulatedTelegramRequest(BaseRequest):
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._late_delivery_tasks.clear()
+
+    async def wait_for_download_segment_visibility(self) -> None:
+        await self._download_segment_visible.wait()
+
+    async def wait_for_forced_seal_edit(self) -> None:
+        await self._forced_seal_edit_started.wait()
 
     async def do_request(
         self,
@@ -180,12 +193,20 @@ class SimulatedTelegramRequest(BaseRequest):
         )
         action = {
             "endpoint": endpoint,
+            "reason": _CALL_REASON.get(),
+            "is_busy_edit": is_busy_edit,
             "operation_id": operation_id,
             "started_ns": started_ns,
             "intended_wait_ms": intended_wait_ms,
             "outcome": "started",
         }
         self.calls.append(action)
+        if (
+            self.force_inflight_seal_race
+            and endpoint in {"editMessageText", "editMessageCaption"}
+            and text == "下载完成，开始整理"
+        ):
+            self._forced_seal_edit_started.set()
         try:
             if intended_wait_ms:
                 await asyncio.sleep(intended_wait_ms / 1000)
@@ -302,6 +323,8 @@ class SimulatedTelegramRequest(BaseRequest):
             if text == "整理完成。":
                 timeline["terminal_projection_ns"] = completed_ns
                 self._terminal_visible[operation_id].set()
+            if text == "正在下载…":
+                self._download_segment_visible.set()
             if text.startswith("🎬 压测媒体身份"):
                 timeline.setdefault("identity_milestone_ns", completed_ns)
                 timeline["identity_milestone_last_ns"] = completed_ns
@@ -508,6 +531,7 @@ async def _run(
     timeout_seconds: float = 30,
     frontend_mode: str = "direct",
     cancelled_busy_late_apply_ms: float | None = None,
+    force_inflight_seal_race: bool = False,
 ) -> dict:
     from telegram import Update
     from telegram.ext import (
@@ -527,6 +551,7 @@ async def _run(
         operation_render_lock,
         render_operation,
     )
+    from app.handlers import interaction_handler
     from app.handlers.plugin_handler import (
         dynamic_callback_gateway,
         dynamic_command_gateway,
@@ -583,6 +608,7 @@ async def _run(
         chat_operations=chat_operations,
         callback_operations=callback_operations,
         cancelled_busy_late_apply_ms=cancelled_busy_late_apply_ms,
+        force_inflight_seal_race=force_inflight_seal_race,
     )
     lifecycle_baseline_tasks = set(asyncio.all_tasks())
     lifecycle_task_baseline = len(lifecycle_baseline_tasks)
@@ -690,6 +716,38 @@ async def _run(
         ):
             raise AssertionError(f"{role} segment did not seal")
         reported_segment_seals[operation_id][role] = segment_id
+
+    restore_projection = interaction_handler._restore_inactive_segment_projection
+    clear_inflight_seal_controls = (
+        interaction_handler._clear_inflight_seal_controls
+    )
+
+    async def measured_projection_recovery(*args, **kwargs):
+        token = _CALL_REASON.set("inactive_projection_recovery")
+        try:
+            return await restore_projection(*args, **kwargs)
+        finally:
+            _CALL_REASON.reset(token)
+
+    recovery_measurement = patch.object(
+        interaction_handler, "_restore_inactive_segment_projection",
+        measured_projection_recovery,
+    )
+
+    async def measured_inflight_seal_compensation(*args, **kwargs):
+        token = _CALL_REASON.set("inflight_seal_compensation")
+        try:
+            return await clear_inflight_seal_controls(*args, **kwargs)
+        finally:
+            _CALL_REASON.reset(token)
+
+    seal_compensation_measurement = patch.object(
+        interaction_handler,
+        "_clear_inflight_seal_controls",
+        measured_inflight_seal_compensation,
+    )
+    recovery_measurement.start()
+    seal_compensation_measurement.start()
 
     try:
         search_manifest = harness._manifest(
@@ -825,6 +883,24 @@ async def _run(
                     "presentation_kind": "text",
                 },
             })
+            if force_inflight_seal_race:
+                async with asyncio.timeout(timeout_seconds):
+                    await transport.wait_for_download_segment_visibility()
+                    while True:
+                        active = harness.coordinator.get_active_segment(
+                            operation_id
+                        )
+                        if (
+                            active is not None
+                            and active.owner_plugin_id == "download"
+                            and active.role == "download"
+                            and active.state == "open"
+                            and active.message_id is not None
+                            and active.rendered_revision
+                            >= active.business_revision
+                        ):
+                            break
+                        await asyncio.sleep(0)
             await sleep_ms(download_latency_ms)
             await download_host.report_operation({
                 "operation_id": operation_id,
@@ -842,6 +918,9 @@ async def _run(
                     "presentation_kind": "text",
                 },
             })
+            if force_inflight_seal_race:
+                async with asyncio.timeout(timeout_seconds):
+                    await transport.wait_for_forced_seal_edit()
             sealed = await download_host.seal_operation_segment(
                 operation_id,
                 "download",
@@ -1345,6 +1424,8 @@ async def _run(
         )
         memory_current, memory_peak = tracemalloc.get_traced_memory()
     finally:
+        seal_compensation_measurement.stop()
+        recovery_measurement.stop()
         resource_stop.set()
         if resource_task is not None:
             await asyncio.gather(resource_task, return_exceptions=True)
@@ -1525,11 +1606,29 @@ async def _run(
         samples.append(sample)
 
     telegram_actions = Counter(call["endpoint"] for call in transport.calls)
+    telegram_call_reasons = Counter(
+        call["reason"] for call in transport.calls if call["endpoint"] != "getMe"
+    )
     telegram_outcomes = Counter(call["outcome"] for call in transport.calls)
     telegram_durations = [
         float(call["duration_ms"])
         for call in transport.calls
         if call.get("outcome") == "delivered" and "duration_ms" in call
+    ]
+    telegram_busy_calls = [
+        call for call in transport.calls if call.get("is_busy_edit") is True
+    ]
+    telegram_busy_outcomes = Counter(
+        call["outcome"] for call in telegram_busy_calls
+    )
+    telegram_busy_intended_waits = [
+        float(call["intended_wait_ms"])
+        for call in telegram_busy_calls
+    ]
+    telegram_busy_durations = [
+        float(call["duration_ms"])
+        for call in telegram_busy_calls
+        if "duration_ms" in call
     ]
     elapsed_seconds = (run_finished_ns - run_started_ns) / 1_000_000_000
     task_api_calls = max(
@@ -1560,6 +1659,7 @@ async def _run(
                 if cancelled_busy_late_apply_ms is not None
                 else None
             ),
+            "force_inflight_seal_race": bool(force_inflight_seal_race),
             "update_processor_concurrency": update_processor_concurrency,
         },
         "correctness": {
@@ -1610,7 +1710,19 @@ async def _run(
         },
         "telegram": {
             "actions": dict(sorted(telegram_actions.items())),
+            "calls_by_reason": dict(sorted(telegram_call_reasons.items())),
+            "normal_api_calls_per_pipeline": round(
+                telegram_call_reasons.get("normal", 0) / pipelines, 2
+            ),
             "outcomes": dict(sorted(telegram_outcomes.items())),
+            "busy": {
+                "calls": len(telegram_busy_calls),
+                "outcomes": dict(sorted(telegram_busy_outcomes.items())),
+                "intended_wait_ms": percentile_summary(
+                    telegram_busy_intended_waits
+                ),
+                "duration_ms": percentile_summary(telegram_busy_durations),
+            },
             "api_duration_ms": percentile_summary(telegram_durations),
             "api_calls_per_pipeline": round(task_api_calls / pipelines, 2),
         },

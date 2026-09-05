@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 
@@ -10,6 +11,57 @@ sys.path.insert(0, str(ROOT / "app"))
 
 
 class PlexAdapterTest(unittest.TestCase):
+    @staticmethod
+    def path_item(key, *paths):
+        return SimpleNamespace(
+            ratingKey=str(key), type="movie", title=str(key), year=2024,
+            guids=[], media=[SimpleNamespace(parts=[SimpleNamespace(
+                id=index, file=path, audioStreams=lambda: [], subtitleStreams=lambda: [],
+            ) for index, path in enumerate(paths, 1)])],
+        )
+
+    @patch("telepiplex_sync.adapters.plex.PlexServer")
+    def test_5000_items_50_exact_paths_avoid_pairwise_matching(self, server):
+        from telepiplex_sync.adapters.plex import PlexAdapter
+        section = server.return_value.library.sectionByID.return_value
+        section.type = "movie"
+        section.search.return_value = [self.path_item(i, f"/media/{i}/Film.mkv") for i in range(5000)]
+        paths = [f"/media/{i}/Film.mkv" for i in range(0, 5000, 100)]
+        adapter = PlexAdapter("http://plex", "token")
+        with patch.object(adapter, "_media_path_matches", wraps=adapter._media_path_matches) as compare, patch.object(
+            adapter, "_normalize_media_path", wraps=adapter._normalize_media_path
+        ) as normalize:
+            result = adapter.index_items_by_paths("12", paths)
+        self.assertEqual([result[path]["rating_key"] for path in paths], [str(i) for i in range(0, 5000, 100)])
+        self.assertEqual(compare.call_count, 0)
+        self.assertEqual(normalize.call_count, 5050)
+        section.search.assert_called_once_with(libtype="movie")
+
+    @patch("telepiplex_sync.adapters.plex.PlexServer")
+    def test_path_index_preserves_suffix_directory_multipart_duplicates_and_refresh(self, server):
+        from telepiplex_sync.adapters.plex import PlexAdapter
+        section = server.return_value.library.sectionByID.return_value
+        section.type = "movie"
+        section.search.return_value = [
+            self.path_item(1, "/mnt/Movies/Single/a.mkv", "/mnt/Movies/Single/b.mkv"),
+            self.path_item(2, "/mnt/Movies/Duplicate/a.mkv"),
+            self.path_item(3, "/mnt/Movies/Duplicate/a.mkv"),
+            self.path_item(4, "C:\\Movies\\Other\\clip.mp4"),
+            self.path_item(5, None),
+        ]
+        paths = ["/Movies/Single/", "a.mkv", "Single/a.mkv", "/Movies/Duplicate/a.mkv", "/Movies/Missing", "Other/clip.mp4", "lip.mp4", "/", ""]
+        adapter = PlexAdapter("http://plex", "token")
+        result = adapter.index_items_by_paths("12", paths)
+        self.assertEqual(result["/Movies/Single/"]["rating_key"], "1")
+        self.assertEqual(result["Single/a.mkv"]["rating_key"], "1")
+        self.assertEqual(result["Other/clip.mp4"]["rating_key"], "4")
+        self.assertEqual(result["lip.mp4"]["rating_key"], "4")
+        for path in ("a.mkv", "/Movies/Duplicate/a.mkv", "/Movies/Missing", "/"):
+            self.assertIsNone(result[path])
+        self.assertNotIn("", result)
+        section.search.return_value = [self.path_item(6, "/Movies/Missing/new.mkv")]
+        self.assertEqual(adapter.index_items_by_paths("12", ["/Movies/Missing"])["/Movies/Missing"]["rating_key"], "6")
+
     @patch("telepiplex_sync.adapters.plex.PlexServer")
     def test_server_status_returns_plain_identity(self, plex_server):
         from telepiplex_sync.adapters.plex import PlexAdapter
@@ -256,10 +308,17 @@ class PlexAdapterTest(unittest.TestCase):
         plex_server.return_value.fetchItem.return_value = item
         adapter = PlexAdapter("http://plex:32400", "token")
 
+        part.setSelectedAudioStream.side_effect = lambda stream: setattr(stream, "selected", True)
+        part.setSelectedSubtitleStream.side_effect = lambda stream: setattr(stream, "selected", True)
         streams = adapter.list_streams("42")
         adapter.select_audio("42", "11", "21")
         adapter.select_subtitle("42", "11", "31")
 
+        refreshed = adapter.list_streams("42")
+        self.assertFalse(streams[0]["audio_streams"][0]["selected"])
+        self.assertFalse(streams[0]["subtitle_streams"][0]["selected"])
+        self.assertTrue(refreshed[0]["audio_streams"][0]["selected"])
+        self.assertTrue(refreshed[0]["subtitle_streams"][0]["selected"])
         self.assertEqual(streams[0]["id"], 11)
         part.setSelectedAudioStream.assert_called_once_with(audio)
         part.setSelectedSubtitleStream.assert_called_once_with(subtitle)

@@ -1,7 +1,5 @@
 import json
 import unittest
-from types import SimpleNamespace
-from unittest.mock import patch
 from pathlib import Path
 
 from telepiplex_search.live_pipeline_audit import (
@@ -246,57 +244,13 @@ class RealMediaCorpusContractTest(unittest.TestCase):
 
 
 class LiveFullAuditSafetyContractTest(unittest.IsolatedAsyncioTestCase):
-    async def test_missing_episode_inventory_is_an_expected_safe_rejection(self):
-        case = {
-            "case_id": "office-episode",
-            "query": "The Office S02E03",
-            "expected_titles": ["The Office"],
-            "year": "2005",
-            "media_type": "series",
-            "scope": "episode",
-            "season_number": 2,
-            "episode_number": 3,
-        }
-        candidate = {
-            "candidate_id": "wikipedia:Q23831",
-            "media_metadata": {
-                "identity": {
-                    "content_kind": "series",
-                    "english_title": "The Office",
-                    "year": "2005",
-                },
-            },
-        }
-        plan = {"candidates": [candidate]}
-        feature = SimpleNamespace(
-            _wikipedia_provider=lambda _payload: {},
-            _supplement_selected_candidate=lambda selected, _query: selected,
-        )
-
-        async def supplement(selected, _query):
-            return selected
-
-        feature._supplement_selected_candidate = supplement
-        with (
-            patch(
-                "telepiplex_search.live_pipeline_audit.build_root_work_search_plan",
-                return_value=plan,
-            ),
-            patch(
-                "telepiplex_search.live_pipeline_audit.hydrate_frozen_candidate",
-                side_effect=Exception("metadata_incomplete:verified_scope"),
-            ),
-        ):
-            report = await audit_live_full_case(
-                case,
-                feature,
-                wikipedia_lookup=lambda _payload: {},
-                wikidata_lookup=lambda _qids: {},
-            )
-
-        self.assertTrue(report["passed"])
-        self.assertEqual(report["outcome"], "safe_rejection")
-        self.assertEqual(report["stages"]["exact_read"], "safe_rejected")
+    async def test_unbound_feature_cannot_claim_handoff_or_run_real_downloads(self):
+        from telepiplex_search.service import SearchFeature
+        feature = SearchFeature(config={}, host=None)
+        report = await audit_live_full_case({"case_id": "unbound"}, feature)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["outcome"], "skipped")
+        self.assertEqual(report["reason_code"], "capture_host_required")
 
 
 if __name__ == "__main__":

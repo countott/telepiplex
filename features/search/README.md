@@ -1,6 +1,6 @@
 # search Feature
 
-search 2.1.0 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，并把人工确认候选冻结到持久状态。search 不调用 AI。用户原始片名只做空白归一化，不在 query 侧补写冒号、“篇”或别名；例如 `死神 千年血战` 由 Wikipedia 的排序结果承担匹配。规划期间先显示文字状态，候选海报数据就绪后 Host 才把有效消息游标迁移到图片候选并移除旧文字状态，不再提前展示海报占位图；新图片在成为权威游标并清理旧消息前不带按钮。候选按钮第一次点击即进入不可重复消费的确认状态，Host 不改写 Telegram 的只读 callback 对象，而是从已持久化的 claim 恢复原始 payload；后台进度 revision 不会清除 claim，只有对应 Feature RPC 完成后才按 generation、token 和 message ID 原子释放。重复 callback 只返回同一冻结结果。候选、正在确认和最终作品身份都属于 Host API 1.7 的同一条 `identity` 消息段；身份段封存后，Prowlarr 搜索结果才开启新的 `search` 消息，因此不会再出现两条有效身份卡片或两条仅后一条可点击的搜索结果。SDK 2.0.0 提供 v2-only 的最小 `media_metadata` 下游合同和 operation segment API。
+search 2.1.1 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，并把人工确认候选冻结到持久状态。search 不调用 AI。用户原始片名只做空白归一化，不在 query 侧补写冒号、“篇”或别名；例如 `死神 千年血战` 由 Wikipedia 的排序结果承担匹配。规划期间先显示文字状态，候选海报数据就绪后 Host 才把有效消息游标迁移到图片候选并移除旧文字状态，不再提前展示海报占位图；新图片在成为权威游标并清理旧消息前不带按钮。候选按钮第一次点击即进入不可重复消费的确认状态，Host 不改写 Telegram 的只读 callback 对象，而是从已持久化的 claim 恢复原始 payload；后台进度 revision 不会清除 claim，只有对应 Feature RPC 完成后才按 generation、token 和 message ID 原子释放。重复 callback 只返回同一冻结结果。候选、正在确认和最终作品身份都属于 Host API 1.7 的同一条 `identity` 消息段；身份段封存后，Prowlarr 搜索结果才开启新的 `search` 消息，因此不会再出现两条有效身份卡片或两条仅后一条可点击的搜索结果。SDK 2.1.0 提供 v2-only 的最小 `media_metadata` 下游合同和 operation segment API。
 
 ## 发起搜索
 
@@ -64,21 +64,33 @@ search 提供 `media.search.resolve_metadata` 与持久冻结的 `media.search.c
 
 ## 配置与日志
 
-运行配置位于 `/config/plugins/search/config.yaml`。Wikipedia、Wikidata、豆瓣和 AniList 无需 API Key；P4529、P8729、P4086 与 IMDb ID 都直接来自 Wikidata/来源事实，不接入 IMDb 或 MyAnimeList API。TMDB 使用 API Read Access Token，TVDB 使用自身凭据，均可通过 `/search_config` 配置。search 不再包含 AI 配置项。2.1.0 沿用配置 schema v2，并继续通过包内声明安全删除 1.8.0 遗留的顶层 `ai` 配置段，其余用户配置保持不变；回滚时 Host 会恢复升级前的完整配置。
+运行配置位于 `/config/plugins/search/config.yaml`。Wikipedia、Wikidata、豆瓣和 AniList 无需 API Key；P4529、P8729、P4086 与 IMDb ID 都直接来自 Wikidata/来源事实，不接入 IMDb 或 MyAnimeList API。TMDB 使用 API Read Access Token，TVDB 使用自身凭据，均可通过 `/search_config` 配置。search 不再包含 AI 配置项。2.1.1 沿用配置 schema v2，并继续通过包内声明安全删除 1.8.0 遗留的顶层 `ai` 配置段，其余用户配置保持不变；回滚时 Host 会恢复升级前的完整配置。
 
 每个搜索会话使用稳定的 `search_session_id`。日志记录输入分类、直链解析、候选确认、元数据来源状态、最终 query 变体、片源门禁结果和唯一终态；不记录 API Key、Token、Cookie、Authorization、magnet 或完整来源 payload。
 
 ## 测试与构建
 
-大范围真实来源审计（默认只对精选样本跑完整链；加 `--all-full` 可让全部样本进入下游 dry-run，仍不会调用 Prowlarr 或提交下载）：
+业务审计默认离线运行，实际驱动 `SearchFeature.command/callback`：作品确认、季集选择、片源硬校验、重复回调及 `download.provider.submit` 捕获。只替换外部 provider 和 Host 传输，不替换 Search 业务方法。输出分别统计 `business_success`、`safe_rejection`、`source_failure`、`unexpected_failure` 和 `skipped`；合理拒绝即使符合用例预期，也不计入业务完成率。没有执行任何样本时退出码为 2，业务预期不符为 1，其余为 0。
+
+离线 fixture 覆盖想见你 2019/2022、Fargo 1996/2014、Westworld 1973/2016、The Office 单集及 Sherlock 单季。fixture 的 `Q910000xx` 身份和有限集表为模拟数据，只验证合同和状态流，不能当作真实来源查证；70 条真实作品语料中没有 fixture 的样本明确 skipped。大树和最终 rename 状态由 Host/Download/Rename 集成测试另行验收，Search 审计止于捕获投递。
 
 ```bash
 PY=/Users/young/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=features/search/src:sdk/src \
   "$PY" features/search/tools/run_live_pipeline_audit.py \
-  --output /tmp/search-live-audit.json --all-full
+  --output /tmp/search-offline-audit.json
 ```
+
+使用 `--case-id us-fargo-series --scenario cancel` 可运行取消；另支持 `missing_directory`、`missing_inventory`、`missing_episode`、`conflicting_inventory`、`wrong_exact_identity`、`partial_releases`、`source_failure`、`prowlarr_failure`、`submit_response_loss`、`restart`、`ongoing_season`。应选适用的作品/范围，例如缺集用 `us-office-e203`，部分片源用 `us-fargo-series`。命令会保留实际结果，场景未达到预期时失败，不会强制把结果改成预期类型。更多范围组合在 `tests/test_business_pipeline_audit.py` 中通过真实命令和回调验收。
+
+联网模式必须显式指定 `--allow-network`：
+
+- `--mode public --allow-network`：真实公共元数据只读查询，片源与投递仍为模拟捕获。缺少对应片源 fixture 的语料 skipped。
+- `--mode prowlarr --allow-network --config /path/to/search-config.yaml`：真实元数据和 Prowlarr Indexer/search 只读查询，需要 `search.prowlarr.base_url`、`api_key`；不再要求 AI 或 TVDB 配置。其他来源凭据按实际启用项提供。
+
+三种模式都不提交真实下载、不访问 Prowlarr grab/download URL、不调用文件操作。仅选择查询响应中已有的 magnet 并由 capture Host 接收；没有 magnet 的片源合理拒绝。默认离线模式还阻断意外网络尝试，即使 provider 吞掉异常也会报告失败。在线结果单独列在 `online_results`，未开启、缺配置或未执行均不会冒充通过。`--all-full` 保留为兼容参数，所有选中样本现在都走真实业务流程。
+
 
 ```bash
 PY=/Users/young/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
@@ -90,7 +102,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
 构建示例：
 
 ```bash
-python tools/build_feature.py features/search /tmp/search-2.1.0.tpx \
+python tools/build_feature.py features/search /tmp/search-2.1.1.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

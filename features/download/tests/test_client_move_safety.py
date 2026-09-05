@@ -104,7 +104,7 @@ def test_file_tree_preserves_provider_sha1_for_identity_recovery():
         "file_id": "root",
         "file_category": "0",
     }
-    client.get_file_list = lambda _params: {"list": [{
+    client.get_file_list = lambda _params: {"list": []} if _params.get("offset", 0) else {"list": [{
         "fn": "Veep.S07E01.mkv",
         "fid": "episode-1",
         "fc": "1",

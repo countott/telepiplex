@@ -181,6 +181,7 @@ class FakeStorage:
             "/Downloads",
             "/Downloads/Release",
             "/Downloads/Series.Release",
+            "/Downloads/Unknown.Release",
         }:
             return {"file_id": "root", "file_category": "0"}
         if path in self.renamed_info:
@@ -195,12 +196,13 @@ class FakeStorage:
                 return {
                     "file_id": item_id,
                     "file_category": str(item.get("fc") or "1"),
+                    **{key: item[key] for key in ("fs", "size", "size_byte") if key in item},
                     "sha1": item.get("sha1") or item.get("sha") or "",
                 }
         return None
 
     def get_file_list(self, params):
-        return self.items if params.get("cid") == "root" else []
+        return self.items[int(params.get("offset", 0)):] if params.get("cid") == "root" else []
 
     def fresh_listing_item(self, item):
         provider_id = str(item.get("fid") or item.get("file_id") or "")
@@ -5751,10 +5753,10 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "2.0.1")
+        self.assertEqual(manifest["version"], "2.1.0")
         self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
-        self.assertIn('version = "2.0.1"', project)
-        self.assertIn('telepiplex-plugin-sdk==2.0.0', project)
+        self.assertIn('version = "2.1.0"', project)
+        self.assertIn('telepiplex-plugin-sdk==2.1.0', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
         manifest = yaml.safe_load(
@@ -5769,8 +5771,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-2.0.1.tpx", source)
-        self.assertNotIn("dist/rename-2.0.1.tpx", source)
+        self.assertIn("/tmp/rename-2.1.0.tpx", source)
+        self.assertNotIn("dist/rename-2.1.0.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

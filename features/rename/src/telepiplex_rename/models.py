@@ -16,7 +16,9 @@ class DownloadCompletedEvent:
     download_root: str | None = None
     provider: str = "download"
     snapshot_id: str = ""
-    snapshot_complete: bool = True
+    snapshot_complete: bool | None = True
+    file_tree_transport: str = ""
+    snapshot_verified: bool = False
     storage: Any = None
 
 

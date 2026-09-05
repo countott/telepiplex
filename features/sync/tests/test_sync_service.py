@@ -512,6 +512,164 @@ class LibrarySyncServiceTest(unittest.TestCase):
             notifier=notifier,
         )
 
+    def test_cancel_during_first_enhancement_write_stops_next_target_and_persists(self):
+        from telepiplex_sync.sync_service import PlexOperationCancelled
+        for kind, method, recorded in (
+            ("artwork", "set_poster_url", "poster_updates"),
+            ("audio", "select_audio", "audio_selections"),
+            ("subtitle", "select_subtitle", "subtitle_selections"),
+        ):
+            with self.subTest(kind=kind):
+                plex = FakePlex()
+                service = self.make_service(plex=plex)
+                job = service.enqueue_completion(make_completion())
+                steps = {name: {"status": "success"} for name in ("artwork", "audio", "subtitle") if name != kind}
+                steps["scanning"] = {"status": "success", "targets": {
+                    "first": {"status": "success", "rating_key": "42"},
+                    "second": {"status": "success", "rating_key": "43"},
+                }}
+                self.jobs.update(job["id"], state=kind, step_results=steps)
+                cancelled = False
+                original = getattr(plex, method)
+                def write(*args):
+                    nonlocal cancelled
+                    original(*args)
+                    cancelled = True
+                setattr(plex, method, write)
+                with self.assertRaises(PlexOperationCancelled):
+                    service.run_job(job["id"], should_cancel=lambda: cancelled)
+                self.assertEqual(len(getattr(plex, recorded)), 1)
+                persisted = self.jobs.get(job["id"])["step_results"][kind]["targets"]["first"]
+                if kind == "artwork":
+                    self.assertEqual(persisted["selected"]["url"], "https://tmdb/poster.jpg")
+                else:
+                    self.assertTrue((persisted.get("parts") or [persisted])[0]["changed"])
+                self.assertNotEqual(self.jobs.get(job["id"])["state"], "completed")
+
+    def test_cancel_during_first_part_write_stops_next_part(self):
+        from telepiplex_sync.sync_service import PlexOperationCancelled
+        for kind, method, recorded in (
+            ("audio", "select_audio", "audio_selections"),
+            ("subtitle", "select_subtitle", "subtitle_selections"),
+        ):
+            with self.subTest(kind=kind):
+                plex = FakePlex()
+                parts = plex.list_streams("42")
+                plex.list_streams = lambda _: [parts[0], {**parts[0], "id": 12}]
+                service = self.make_service(plex=plex)
+                job = service.enqueue_completion(make_completion())
+                steps = {name: {"status": "success"} for name in ("artwork", "audio", "subtitle") if name != kind}
+                steps["scanning"] = {"status": "success", "targets": {"legacy": {"status": "success", "rating_key": "42"}}}
+                self.jobs.update(job["id"], state=kind, step_results=steps)
+                cancelled = False
+                original = getattr(plex, method)
+                def write(*args):
+                    nonlocal cancelled
+                    original(*args)
+                    cancelled = True
+                setattr(plex, method, write)
+                with self.assertRaises(PlexOperationCancelled):
+                    service.run_job(job["id"], should_cancel=lambda: cancelled)
+                self.assertEqual(len(getattr(plex, recorded)), 1)
+                persisted = self.jobs.get(job["id"])["step_results"][kind]["targets"]["legacy"]["parts"]
+                self.assertEqual([part["part_id"] for part in persisted], [11])
+                self.assertTrue(persisted[0]["changed"])
+
+    def test_cancellation_during_candidate_read_prevents_waiting_state(self):
+        from telepiplex_sync.sync_service import PlexOperationCancelled
+        plex = FakePlex()
+        service = self.make_service(plex=plex)
+        job = service.enqueue_completion(make_completion())
+        cancelled = False
+        def candidates(*args):
+            nonlocal cancelled
+            cancelled = True
+            return [{"id": 11, "audio_streams": [], "subtitle_streams": [
+                {"id": 31, "language_code": "chi", "external": True},
+                {"id": 32, "language_code": "chi", "external": True},
+            ]}]
+        plex.list_streams = candidates
+        self.jobs.update(job["id"], step_results={
+            "scanning": {"status": "success", "targets": {"legacy": {"status": "success", "rating_key": "42"}}},
+            "artwork": {"status": "success"}, "audio": {"status": "success"},
+        })
+        with self.assertRaises(PlexOperationCancelled):
+            service.run_job(job["id"], should_cancel=lambda: cancelled)
+        self.assertNotEqual(self.jobs.get(job["id"])["state"], "awaiting_selection")
+        self.assertEqual(plex.subtitle_selections, [])
+
+    def test_selection_cancellation_persists_confirmed_write_before_stopping(self):
+        from telepiplex_sync.sync_service import PlexOperationCancelled
+        for kind, method, recorded in (
+            ("artwork", "set_poster_url", "poster_updates"),
+            ("audio", "select_audio", "audio_selections"),
+            ("subtitle", "select_subtitle", "subtitle_selections"),
+        ):
+            with self.subTest(kind=kind):
+                plex = FakePlex()
+                service = self.make_service(plex=plex)
+                job = service.enqueue_completion(make_completion())
+                candidate = {"id": 31, "url": "https://example.com/poster.jpg"}
+                waiting = {"kind": kind, "target_id": "legacy", "rating_key": "42", "part_id": 11,
+                           "candidates": [candidate], "candidate_index": 0, "selection_nonce": "nonce"}
+                self.jobs.update(job["id"], state="awaiting_selection", step_results={kind: {
+                    "status": "awaiting_selection", "waiting": waiting,
+                }})
+                cancelled = False
+                original = getattr(plex, method)
+                def write(*args):
+                    nonlocal cancelled
+                    original(*args)
+                    cancelled = True
+                setattr(plex, method, write)
+                with self.assertRaises(PlexOperationCancelled):
+                    service.confirm_selection(job["id"], 0, selection_nonce="nonce", should_cancel=lambda: cancelled)
+                self.assertEqual(len(getattr(plex, recorded)), 1)
+                step = self.jobs.get(job["id"])["step_results"][kind]
+                self.assertEqual(step["confirmed_selections"][0]["candidate"], candidate)
+                self.assertNotIn("waiting", step)
+                self.assertNotIn("scan_library", plex.calls)
+
+    def test_cancel_during_batch_snapshot_prevents_scan_write(self):
+        from telepiplex_sync.sync_service import PlexOperationCancelled
+        plex = FakePlex()
+        service = self.make_service(plex=plex)
+        job = service.enqueue_completion(make_completion())
+        cancelled = False
+        def snapshot(library_id):
+            nonlocal cancelled
+            cancelled = True
+            return set()
+        plex.snapshot_recent = snapshot
+        with self.assertRaises(PlexOperationCancelled):
+            service.run_batch([job["id"]], should_cancel=lambda: cancelled)
+        self.assertNotIn("scan_library", plex.calls)
+
+    def test_cancel_checkpoint_preserves_other_targets_completed_before_resume(self):
+        from telepiplex_sync.sync_service import PlexOperationCancelled
+        plex = FakePlex()
+        service = self.make_service(plex=plex)
+        job = service.enqueue_completion(make_completion())
+        previous = {"status": "success", "selected": {"url": "https://example.com/kept.jpg"}, "rating_key": "43"}
+        self.jobs.update(job["id"], step_results={
+            "scanning": {"status": "success", "targets": {
+                "first": {"status": "success", "rating_key": "42"},
+                "second": {"status": "success", "rating_key": "43"},
+            }}, "artwork": {"status": "started", "targets": {"second": previous}},
+        })
+        cancelled = False
+        original = plex.set_poster_url
+        def write(*args):
+            nonlocal cancelled
+            original(*args)
+            cancelled = True
+        plex.set_poster_url = write
+        with self.assertRaises(PlexOperationCancelled):
+            service.run_job(job["id"], should_cancel=lambda: cancelled)
+        targets = self.jobs.get(job["id"])["step_results"]["artwork"]["targets"]
+        self.assertEqual(targets.get("second"), previous)
+        self.assertEqual(len(plex.poster_updates), 1)
+
     def test_organized_movie_consumes_v2_identity_and_final_path(self):
         contract = make_media_metadata_v2()
         service = self.make_service()
@@ -915,6 +1073,72 @@ class LibrarySyncServiceTest(unittest.TestCase):
         scanning = result["step_results"]["scanning"]
         self.assertEqual(scanning["targets"]["episode-1"]["rating_key"], "42")
         self.assertEqual(scanning["targets"]["episode-2"]["rating_key"], "43")
+
+    def test_poll_backoff_bounds_library_reads_and_cancels_during_long_wait(self):
+        from telepiplex_sync.sync_service import PlexOperationCancelled
+        for cancel_at in (None, 36):
+            with self.subTest(cancel_at=cancel_at):
+                now = [0.0]
+                reads, sleeps = [], []
+                plex = FakePlex()
+                def index(_library_id, paths):
+                    reads.append(now[0])
+                    return {path: None for path in paths}
+                plex.index_items_by_paths = index
+                def sleep(seconds):
+                    sleeps.append(seconds)
+                    now[0] += seconds
+                service = self.make_service(plex=plex, scan_poll_interval=5, scan_timeout=300,
+                                            clock=lambda: now[0], sleeper=sleep)
+                job = service.enqueue_completion(make_completion())
+                if cancel_at is not None:
+                    with self.assertRaises(PlexOperationCancelled):
+                        service.run_job(job["id"], should_cancel=lambda: now[0] >= cancel_at)
+                    self.assertEqual(now[0], 36)
+                    self.assertEqual(reads, [0, 5, 15, 35])
+                    self.assertEqual(plex.audio_selections, [])
+                else:
+                    result = service.run_job(job["id"])
+                    self.assertEqual(result["state"], "failed")
+                    self.assertEqual(reads, [0, 5, 15, 35, 65, 95, 125, 155, 185, 215, 245, 275, 300])
+                    self.assertEqual(now[0], 300)
+                self.assertLessEqual(max(sleeps), 1)
+                self.assertEqual(plex.calls.count("scan_library"), 1)
+                self.jobs.update(job["id"], state="pending", step_results={})
+
+    def test_poll_backoff_does_not_start_read_after_scheduler_exceeds_deadline(self):
+        now = [0.0]
+        reads, sleeps = [], []
+        plex = FakePlex()
+        def index(_library_id, paths):
+            reads.append(now[0])
+            return {path: None for path in paths}
+        plex.index_items_by_paths = index
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += 400
+        service = self.make_service(plex=plex, scan_poll_interval=5, scan_timeout=300,
+                                    clock=lambda: now[0], sleeper=sleep)
+        result = service.run_job(service.enqueue_completion(make_completion())["id"])
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(reads, [0])
+        self.assertEqual(len(sleeps), 1)
+
+    def test_poll_backoff_finds_eventually_visible_media_at_last_budget_boundary(self):
+        now = [0.0]
+        reads = []
+        plex = FakePlex()
+        def index(_library_id, paths):
+            reads.append(now[0])
+            return {path: {"rating_key": "42"} if now[0] >= 290 else None for path in paths}
+        plex.index_items_by_paths = index
+        service = self.make_service(plex=plex, scan_poll_interval=5, scan_timeout=300,
+                                    clock=lambda: now[0], sleeper=lambda seconds: now.__setitem__(0, now[0]+seconds))
+        result = service.run_job(service.enqueue_completion(make_completion())["id"])
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(reads[-1], 300)
+        self.assertLessEqual(len(reads), 13)
+        self.assertEqual(len(plex.audio_selections), 1)
 
     def test_library_group_uses_one_deadline_and_one_batch_read_per_poll(self):
         first_path = "/Series/Show/Season 01/Show S01E01.mkv"
@@ -1489,6 +1713,39 @@ class LibrarySyncServiceTest(unittest.TestCase):
             [("42", 11, 41)],
         )
         self.assertIn(("42", 12, 52), plex.subtitle_selections)
+
+    def test_job_local_metadata_cache_for_24_episodes_and_fresh_next_job(self):
+        plex = FakePlex()
+        tmdb = FakeTmdb()
+        details = tmdb.details
+        tmdb.details = Mock(side_effect=details)
+        def get_item(key):
+            plex.get_item_keys.append(str(key))
+            return {
+                "rating_key": str(key), "media_type": "show" if key == "99" else "episode",
+                "grandparent_rating_key": "99" if key != "99" else "",
+                "guids": ["tmdb://20"], "title": "Show",
+            }
+        plex.get_item = get_item
+        service = self.make_service(plex=plex, tmdb=tmdb)
+        for iteration in range(2):
+            paths = [f"/Series/Show-{iteration}/Season 01/Show S01E{i:02d}.mkv" for i in range(1, 25)]
+            job = service.enqueue_organized_event(make_organized_series_payload(paths, resource_name=f"Show-{iteration}", final_path=f"/Series/Show-{iteration}"))
+            job = self.jobs.create_or_get(f"cache-job-{iteration}", job["payload"])
+            self.jobs.update(job["id"], step_results={"scanning": {"status": "success", "targets": {
+                f"episode-{i}": {"status": "success", "rating_key": str(100+i), "final_path": path}
+                for i, path in enumerate(paths, 1)
+            }}})
+            result = service.run_job(job["id"])
+            self.assertEqual(result["state"], "completed")
+            with self.subTest(read="tmdb", job=iteration):
+                self.assertEqual(tmdb.details.call_count, iteration + 1)
+            with self.subTest(read="show", job=iteration):
+                self.assertEqual(plex.get_item_keys.count("99"), iteration + 1)
+            self.assertEqual(len(plex.audio_selections), (iteration + 1) * 24)
+            self.assertEqual(len(plex.subtitle_selections), (iteration + 1) * 24)
+            self.assertNotIn("_metadata_cache", str(self.jobs.get(job["id"])))
+        self.assertEqual(len(plex.poster_updates), 2)
 
     def test_series_artwork_targets_show_once_for_multiple_episodes(self):
         completion = make_unresolved_standalone_series_completion()

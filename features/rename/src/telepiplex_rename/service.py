@@ -25,6 +25,7 @@ from .media_metadata_v2 import (
 from .operations import OperationCancelled, RenameOperationJournal
 from .processor import process_generic_media, process_tvdb_episode
 from .query_recovery import recover_metadata_probe
+from .snapshot_reader import read_snapshot
 
 
 _STORAGE_METHODS = {
@@ -1957,6 +1958,22 @@ class RenameFeature:
             self._raise_if_cancelled(operation_id)
             await self._confirm_operation_ownership(operation_id)
             self._raise_if_cancelled(operation_id)
+            if payload.get("file_tree_transport", "") not in ("", "inline_v1", "snapshot_ref_v1"):
+                raise FeatureError("unsupported_file_tree_transport", "unsupported file tree transport")
+            if payload.get("snapshot_complete") is False:
+                raise FeatureError("download_tree_incomplete", "file tree snapshot is incomplete")
+            verified_reference = payload.get("file_tree_transport") == "snapshot_ref_v1"
+            if verified_reference:
+                if payload.get("snapshot_complete") is not True:
+                    raise FeatureError("download_tree_incomplete", "snapshot reference is not complete")
+                payload["file_tree"] = await read_snapshot(
+                    self.host, self.jobs, payload.get("file_tree_snapshot"),
+                    job_id=job_id,
+                    root_path=str(payload.get("download_root") or payload.get("final_path") or ""),
+                    check_cancelled=lambda: self._raise_if_cancelled(operation_id),
+                    timeout=float(self.config.get("storage_timeout") or 120),
+                )
+                payload["snapshot_id"] = payload["file_tree_snapshot"]["snapshot_id"]
             metadata = {}
             metadata_recovered = False
             public_contract = validate_media_metadata_v2(
@@ -2117,11 +2134,17 @@ class RenameFeature:
                 download_root=str(payload.get("download_root") or ""),
                 provider=str(payload.get("provider") or "download"),
                 snapshot_id=str(payload.get("snapshot_id") or ""),
-                snapshot_complete=(
-                    payload.get("snapshot_complete") is not False
-                ),
+                snapshot_complete=payload.get("snapshot_complete"),
+                file_tree_transport=payload.get("file_tree_transport", ""),
+                snapshot_verified=verified_reference,
                 storage=storage,
             )
+            # Validate and, for old events, strictly rescan before any processor
+            # (including fallback placement) can rename, delete, or move files.
+            from .processor import _event_file_tree
+            event.file_tree = await asyncio.to_thread(_event_file_tree, event)
+            payload["file_tree"] = event.file_tree
+            payload["snapshot_complete"] = True
             if operation_id:
                 operation_state["thread_started"] = True
             if metadata:
@@ -2374,7 +2397,9 @@ class RenameFeature:
                 "retryable": retryable,
                 "stopped_at": stopped_at,
             }
-            if stopped_at == "metadata_resolution":
+            if error_code in {"download_tree_incomplete", "unsupported_file_tree_transport"}:
+                error_message = "文件树完整性或传输格式检查未通过，未改名或移动文件。"
+            elif stopped_at == "metadata_resolution":
                 error_message = "无法确认媒体身份，未移动文件。"
             else:
                 error_message = "整理失败，部分变更可能已完成，请检查目录。"

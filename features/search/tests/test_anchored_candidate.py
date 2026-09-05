@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from types import MappingProxyType
 
 from telepiplex_search.anchored_candidate import (
@@ -439,6 +440,104 @@ class AnchoredCandidateTest(unittest.TestCase):
             outside.source_links[0].verification,
             "unresolved_scope_link",
         )
+
+    def test_wikipedia_episode_inventory_must_belong_to_the_scoped_work(self):
+        for scoped_provider, inventory_qid, inventory_role, expected in (
+            ("wikipedia", "Q2", "related_work", "unresolved_scope_link"),
+            ("wikipedia", "Q2", "series_root", "unresolved_scope_link"),
+            ("wikidata", "Q2", "related_work", "unresolved_scope_link"),
+            ("wikidata", "Q2", "series_root", "unresolved_scope_link"),
+            ("wikidata", "Q1", "related_work", "unresolved_scope_link"),
+            ("wikidata", "Q1", "series_root", "wikipedia_inventory_verified"),
+        ):
+            with self.subTest(provider=scoped_provider, qid=inventory_qid, role=inventory_role):
+                scoped = EvidenceFact(
+                    fact_id=f"{scoped_provider}:Q1", provider=scoped_provider,
+                    titles=("Scoped work",), year="2014", media_type="series",
+                    external_ids=MappingProxyType({scoped_provider: "Q1"}),
+                    source_url=f"https://www.{scoped_provider}.org/wiki/Q1",
+                )
+                inventory = EvidenceFact(
+                    fact_id=f"wikipedia:{inventory_qid}", provider="wikipedia",
+                    titles=("Inventory work",), year="2014", media_type="series",
+                    external_ids=MappingProxyType({"wikipedia": inventory_qid}),
+                    source_url="https://en.wikipedia.org/wiki/Inventory_work",
+                    episode_inventory=MappingProxyType({
+                        "status": "complete", "wikibase_item": inventory_qid,
+                    }),
+                    episodes=({
+                        "season_number": 2, "episode_number": 3,
+                        "inventory_status": "complete", "air_date": "2015-10-26",
+                    },),
+                )
+                graph = SearchGraph((CandidateEntity("scoped", (scoped, inventory)),))
+                candidate = materialize_anchored_candidates(graph, {
+                    "status": "resolved",
+                    "candidates": [{
+                        "candidate_id": "scoped-episode",
+                        "anchor_fact_id": scoped.fact_id,
+                        "identity_role": "episode", "intended_scope": "episode",
+                        "fact_bindings": [
+                            {"fact_id": scoped.fact_id, "role": "episode",
+                             "season_number": 2, "episode_number": 3},
+                            {"fact_id": inventory.fact_id, "role": inventory_role,
+                             "season_number": None, "episode_number": None},
+                        ],
+                        "ai_confidence": 1.0, "ai_reason": "Scoped episode evidence",
+                    }],
+                })[0]
+                link = candidate.source_links[0]
+                self.assertEqual(link.verification, expected)
+                if expected == "unresolved_scope_link":
+                    self.assertIsNone(link.season_number)
+                    self.assertIsNone(link.episode_number)
+                    self.assertEqual(link.proposed_season_number, 2)
+                    self.assertEqual(link.proposed_episode_number, 3)
+                    self.assertIn(f"{scoped.fact_id}:unresolved_scope_link",
+                                  candidate.unresolved_sources)
+                else:
+                    self.assertEqual((link.season_number, link.episode_number), (2, 3))
+
+    def test_wikipedia_episode_proof_preserves_tvdb_then_tmdb_preference(self):
+        facts = tuple(fact for entity in _honey_and_clover_graph().candidates
+                      for fact in entity.facts)
+        tvdb = next(fact for fact in facts if fact.provider == "tvdb")
+        wikipedia = replace(
+            next(fact for fact in facts if fact.provider == "wikipedia"),
+            episode_inventory=MappingProxyType({"status": "complete", "wikibase_item": "Q1"}),
+            episodes=({"season_number": 2, "episode_number": 1,
+                       "inventory_status": "complete"},),
+        )
+        tmdb = EvidenceFact(
+            fact_id="tmdb:series:99", provider="tmdb", titles=("Honey and Clover",),
+            year="2005", media_type="series", external_ids=MappingProxyType({"tmdb": "99"}),
+            source_url="https://www.themoviedb.org/tv/99",
+            episodes=({"season_number": 2, "episode_number": 1},),
+        )
+        for regular_facts, expected in (
+            ((tvdb, tmdb), "tvdb_inventory_verified"),
+            ((tmdb,), "tmdb_inventory_verified"),
+            ((), "wikipedia_inventory_verified"),
+        ):
+            with self.subTest(expected=expected):
+                graph = SearchGraph((CandidateEntity("work", (*regular_facts, wikipedia)),))
+                candidate = materialize_anchored_candidates(graph, {
+                    "status": "resolved", "candidates": [{
+                        "candidate_id": "episode", "anchor_fact_id": wikipedia.fact_id,
+                        "identity_role": "episode", "intended_scope": "episode",
+                        "fact_bindings": [
+                            {"fact_id": fact.fact_id, "role": "series_root",
+                             "season_number": None, "episode_number": None}
+                            for fact in regular_facts
+                        ] + [{"fact_id": wikipedia.fact_id, "role": "episode",
+                              "season_number": 2, "episode_number": 1}],
+                        "ai_confidence": 1.0, "ai_reason": "Same episode in three sources",
+                    }],
+                })[0]
+                link = next(link for link in candidate.source_links
+                            if link.fact_id == wikipedia.fact_id)
+                self.assertEqual(link.verification, expected)
+                self.assertEqual((link.season_number, link.episode_number), (2, 1))
 
     def test_direct_link_anchor_cannot_be_changed_or_split(self):
         payload = _series_binding_payload()

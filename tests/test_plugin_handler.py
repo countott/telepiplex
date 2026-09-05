@@ -2196,6 +2196,54 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         update.effective_message.edit_text.assert_not_awaited()
         update.effective_message.reply_text.assert_awaited_once()
 
+    async def test_retired_callback_clears_only_its_message_without_replaying(self):
+        import yaml
+        from app.handlers.plugin_handler import dynamic_callback_gateway
+        from app.runtime.capability_router import CapabilityRouter
+        from app.runtime.plugin_manifest import PluginManifest
+
+        manifest = PluginManifest.from_mapping(yaml.safe_load(
+            (Path(__file__).resolve().parents[1] / "features/sync/manifest.yaml")
+            .read_text(encoding="utf-8")
+        ))
+        client = AsyncMock()
+        router = CapabilityRouter()
+        router.activate("sync", manifest, client)
+        keyboards = {88: ["plex:scan:all"], 99: ["sync:scan:all"]}
+        feedback = []
+
+        async def answer(*, text):
+            feedback.append(text)
+
+        async def clear_clicked(*, reply_markup):
+            keyboards[88] = reply_markup
+
+        update = SimpleNamespace(
+            update_id=100,
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=10),
+            callback_query=SimpleNamespace(
+                data="plex:scan:all",
+                message=SimpleNamespace(message_id=88),
+                answer=answer,
+                edit_message_reply_markup=clear_clicked,
+            ),
+        )
+        context = SimpleNamespace(application=SimpleNamespace(bot_data={
+            "telepiplex_plugin_router": router,
+        }))
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=False):
+            await dynamic_callback_gateway(update, context)
+        self.assertEqual(keyboards[88], ["plex:scan:all"])
+        self.assertEqual(feedback, [])
+        with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+            await dynamic_callback_gateway(update, context)
+        self.assertIsNone(keyboards[88])
+        self.assertEqual(keyboards[99], ["sync:scan:all"])
+        self.assertEqual(len(feedback), 1)
+        self.assertIn("失效", feedback[0])
+        client.request.assert_not_awaited()
+
     async def test_callback_routes_namespace_and_rejects_unknown_response_action(self):
         from app.handlers.plugin_handler import dynamic_callback_gateway
 

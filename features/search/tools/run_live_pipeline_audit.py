@@ -1,197 +1,115 @@
 #!/usr/bin/env python3
-"""Run the opt-in real Wikipedia/Wikidata Search pipeline audit."""
-
+"""Audit the real telepiplex Search business flow with capture-only downloads."""
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
-import time
-from copy import deepcopy
+from collections import Counter
 from datetime import datetime, timezone
+import json
 from pathlib import Path
+import time
 
-from telepiplex_search.adapters.wikidata import (
-    enrich_wikidata_entities,
-    search_wikidata_entities,
-)
-from telepiplex_search.live_pipeline_audit import (
-    audit_live_full_case,
-    audit_root_case,
-    load_real_media_corpus,
-)
-from telepiplex_search.service import SearchFeature
-
+from telepiplex_search.live_pipeline_audit import load_real_media_corpus, run_business_case
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CORPUS = ROOT / "tests/fixtures/real_media_corpus.json"
+DEFAULT_CORPUS = ROOT / 'tests/fixtures/real_media_corpus.json'
 
 
-def _cached(callable_, *, attempts: int = 3):
-    cache = {}
-
-    def wrapped(value):
-        key = json.dumps(value, ensure_ascii=False, sort_keys=True)
-        if key in cache:
-            return deepcopy(cache[key])
-        last_error = None
-        result = None
-        for attempt in range(max(1, attempts)):
-            try:
-                result = callable_(value)
-            except Exception as exc:
-                last_error = exc
-            else:
-                status = (
-                    str(result.get("status") or "")
-                    if isinstance(result, dict)
-                    else ""
-                )
-                if status not in {"server_down", "timeout", "rate_limited"}:
-                    cache[key] = result
-                    return deepcopy(result)
-            if attempt + 1 < max(1, attempts):
-                time.sleep(min(2.0, 0.5 * (attempt + 1)))
-        if last_error is not None:
-            raise last_error
-        cache[key] = result
-        return deepcopy(cache[key])
-
-    return wrapped
+def build_parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--corpus', type=Path, default=DEFAULT_CORPUS)
+    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--mode', choices=('offline', 'public', 'prowlarr'), default='offline')
+    parser.add_argument('--allow-network', action='store_true', help='explicitly permit read-only provider queries')
+    parser.add_argument('--config', type=Path, help='Search YAML config; required for real Prowlarr queries')
+    parser.add_argument('--scenario', choices=('success', 'cancel', 'missing_directory',
+        'missing_inventory', 'missing_episode', 'conflicting_inventory', 'wrong_exact_identity',
+        'partial_releases', 'source_failure', 'prowlarr_failure', 'submit_response_loss',
+        'restart', 'ongoing_season'), default='success',
+        help='explicit simulated scenario; available only in offline mode')
+    parser.add_argument('--limit', type=int, default=0)
+    parser.add_argument('--case-id', action='append', default=[])
+    parser.add_argument('--all-full', action='store_true', help='compatibility option: all selected cases already use the real business flow')
+    return parser
 
 
-def _config(min_interval: float) -> dict:
-    return {
-        "category_folder": [
-            {"kind": "live_action_movie", "path": "/真人电影", "plex_library_id": ""},
-            {"kind": "animated_movie", "path": "/动画电影", "plex_library_id": ""},
-            {"kind": "live_action_series", "path": "/真人剧集", "plex_library_id": ""},
-            {"kind": "animated_series", "path": "/动画剧集", "plex_library_id": ""},
-        ],
-        "metadata": {
-            "wikipedia": {
-                "enable": True,
-                "languages": ["zh", "en"],
-                "timeout": 15,
-                "min_interval": min_interval,
-                "max_queries": 2,
-                "rate_limit_cooldown": 30,
-            },
-            "douban": {"enable": True, "timeout": 10},
-            "tmdb": {"enable": True, "api_key": "", "timeout": 10},
-            "tvdb": {"enable": True, "api_key": "", "timeout": 10},
-            "anilist": {"enable": True, "timeout": 10},
-        },
-    }
-
-
-async def run(args) -> dict:
+async def run(args):
     cases = load_real_media_corpus(args.corpus)
     if args.case_id:
-        selected_ids = set(args.case_id)
-        cases = [case for case in cases if case["case_id"] in selected_ids]
-        missing_ids = selected_ids.difference(
-            case["case_id"] for case in cases
-        )
-        if missing_ids:
-            raise ValueError(
-                "unknown_case_id:" + ",".join(sorted(missing_ids))
-            )
+        selected = set(args.case_id)
+        unknown = selected - {case['case_id'] for case in cases}
+        if unknown:
+            raise ValueError('unknown_case_id:' + ','.join(sorted(unknown)))
+        cases = [case for case in cases if case['case_id'] in selected]
     if args.limit:
-        cases = cases[: args.limit]
-    feature = SearchFeature(config=_config(args.min_interval), host=None)
-    wikipedia = _cached(feature._wikipedia_provider)
-    feature._wikipedia_provider = wikipedia
-    wikidata = _cached(enrich_wikidata_entities)
-    wikidata_search = _cached(search_wikidata_entities)
+        cases = cases[:args.limit]
+    config = None
+    prerequisite = ''
+    if args.mode != 'offline' and not args.allow_network:
+        prerequisite = 'explicit_network_opt_in_required'
+    elif args.mode == 'prowlarr' and not args.config:
+        prerequisite = 'prowlarr_config_required'
+    elif args.config:
+        import yaml
+        try:
+            config = yaml.safe_load(args.config.read_text(encoding='utf-8'))
+        except (OSError, yaml.YAMLError):
+            prerequisite = 'config_unavailable'
+        if not isinstance(config, dict):
+            prerequisite = 'config_invalid'
+        elif args.mode == 'prowlarr':
+            prowlarr = (config.get('search') or {}).get('prowlarr') or {}
+            if not prowlarr.get('api_key') or not prowlarr.get('base_url'):
+                prerequisite = 'prowlarr_credentials_missing'
+    if args.mode != 'offline' and args.scenario != 'success':
+        raise ValueError('simulated_scenarios_require_offline_mode')
     started = time.monotonic()
-    root_reports = []
+    reports = []
     for index, case in enumerate(cases, 1):
-        report = await asyncio.to_thread(
-            audit_root_case,
-            case,
-            wikipedia_lookup=wikipedia,
-            wikidata_lookup=wikidata,
-            wikidata_search=wikidata_search,
-        )
-        root_reports.append(report)
-        print(
-            f"root {index:02d}/{len(cases):02d} "
-            f"{'PASS' if report['passed'] else 'FAIL'} {case['case_id']} "
-            f"{report.get('failure_code') or report.get('matched_qid') or ''}",
-            flush=True,
-        )
-
-    full_cases = (
-        list(cases)
-        if args.all_full
-        else [case for case in cases if case["full_pipeline"]]
-    )
-    full_reports = []
-    for index, case in enumerate(full_cases, 1):
-        report = await audit_live_full_case(
-            case,
-            feature,
-            wikipedia_lookup=wikipedia,
-            wikidata_lookup=wikidata,
-            wikidata_search=wikidata_search,
-        )
-        full_reports.append(report)
-        print(
-            f"full {index:02d}/{len(full_cases):02d} "
-            f"{'PASS' if report['passed'] else 'FAIL'} {case['case_id']} "
-            f"{report.get('failure_code') or ', '.join(report.get('queries') or ())}",
-            flush=True,
-        )
-
+        if args.scenario != 'success':
+            expected = 'source_failure' if args.scenario in {
+                'source_failure', 'prowlarr_failure', 'submit_response_loss'} else 'safe_rejection'
+            case = {**case, 'scenario': args.scenario, 'expected_outcome': expected}
+        if prerequisite:
+            report = {'case_id': case['case_id'], 'outcome': 'skipped', 'passed': False,
+                      'reason_code': prerequisite, 'failure_code': prerequisite, 'stages': {}}
+        else:
+            report = await run_business_case(case, mode=args.mode, config=config, allow_network=args.allow_network)
+        reports.append(report)
+        print(f"{index:02d}/{len(cases):02d} {report['outcome']} {case['case_id']} {report['reason_code']}", flush=True)
+    counts = Counter(item['outcome'] for item in reports)
+    summary = {key: counts[key] for key in (
+        'business_success', 'safe_rejection', 'source_failure', 'unexpected_failure', 'skipped')}
+    executed = len(reports) - summary['skipped']
+    summary.update(total=len(reports), executed=executed,
+                   expected_passed=sum(item['passed'] for item in reports),
+                   business_completion_rate=round(summary['business_success'] / executed, 4) if executed else None)
     return {
-        "schema_version": 1,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "corpus": str(Path(args.corpus).resolve()),
-        "duration_seconds": round(time.monotonic() - started, 3),
-        "safety": {
-            "prowlarr_called": False,
-            "download_submitted": False,
-            "provider_credentials_logged": False,
-        },
-        "summary": {
-            "root_total": len(root_reports),
-            "root_passed": sum(item["passed"] for item in root_reports),
-            "root_failed": sum(not item["passed"] for item in root_reports),
-            "full_total": len(full_reports),
-            "full_passed": sum(item["passed"] for item in full_reports),
-            "full_failed": sum(not item["passed"] for item in full_reports),
-        },
-        "root_reports": root_reports,
-        "full_reports": full_reports,
+        'schema_version': 2, 'mode': args.mode,
+        'generated_at': datetime.now(timezone.utc).isoformat(),
+        'corpus': str(Path(args.corpus).resolve()),
+        'duration_seconds': round(time.monotonic() - started, 3),
+        'safety': {'prowlarr_called': any(item.get('prowlarr_called') for item in reports),
+                   'download_submitted': False, 'file_operations_executed': False,
+                   'provider_credentials_logged': False},
+        'summary': summary, 'full_reports': reports,
+        'online_results': {mode: {'outcome': 'executed' if args.mode == mode and executed else 'skipped',
+                                 'reason_code': prerequisite if args.mode == mode else 'not_requested'}
+                           for mode in ('public', 'prowlarr')},
     }
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--case-id", action="append", default=[])
-    parser.add_argument(
-        "--all-full",
-        action="store_true",
-        help="run the downstream dry-run chain for every selected root case",
-    )
-    parser.add_argument("--min-interval", type=float, default=0.2)
-    args = parser.parse_args()
+def main():
+    args = build_parser().parse_args()
     report = asyncio.run(run(args))
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    print(json.dumps(report["summary"], ensure_ascii=False), flush=True)
-    return 0 if not (
-        report["summary"]["root_failed"]
-        or report["summary"]["full_failed"]
-    ) else 1
+    args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    print(json.dumps(report['summary'], ensure_ascii=False), flush=True)
+    if report['summary']['executed'] == 0:
+        return 2
+    return 1 if any(not item['passed'] for item in report['full_reports'] if item['outcome'] != 'skipped') else 0
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main())

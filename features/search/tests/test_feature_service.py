@@ -3786,10 +3786,15 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             [],
         )
 
+    @patch(
+        "telepiplex_search.direct_link.lookup_douban_subject",
+        return_value=None,
+    )
     @patch("telepiplex_search.service.hydrate_frozen_candidate_anchor")
     async def test_tvdb_unavailable_season_never_degrades_to_whole_series(
         self,
         hydrate,
+        _douban_subject,
     ):
         from telepiplex_search.candidate_hydration import (
             CandidateHydrationError,
@@ -5873,10 +5878,16 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             hydrated["metadata_hydrated"] = True
             return hydrated
 
-        with patch(
-            "telepiplex_search.service.hydrate_frozen_candidate_anchor",
-            side_effect=exact_hydration,
-        ) as hydrate:
+        with (
+            patch(
+                "telepiplex_search.service.hydrate_frozen_candidate_anchor",
+                side_effect=exact_hydration,
+            ) as hydrate,
+            patch(
+                "telepiplex_search.direct_link.lookup_douban_subject",
+                return_value=None,
+            ),
+        ):
             resolved = await self.feature.metadata_capability({
                 "method": "resolve_metadata",
                 "payload": {"query": "布达佩斯大饭店"},
@@ -6244,12 +6255,12 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "2.1.0")
+        self.assertEqual(manifest["version"], "2.1.1")
         self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
-        self.assertEqual(project["project"]["version"], "2.1.0")
+        self.assertEqual(project["project"]["version"], "2.1.1")
         self.assertEqual(
             project["project"]["dependencies"][0],
-            "telepiplex-plugin-sdk==2.0.0",
+            "telepiplex-plugin-sdk==2.1.0",
         )
 
     def test_default_config_enables_free_and_configured_sources(self):
@@ -6280,14 +6291,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-2.1.0.tpx", source)
+        self.assertIn("/tmp/search-2.1.1.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-2.1.0.tpx", source)
+        self.assertNotIn("dist/search-2.1.1.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

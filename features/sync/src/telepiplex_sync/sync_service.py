@@ -78,7 +78,7 @@ class LibrarySyncService:
         category_folders=None,
         scan_poll_interval=5,
         scan_timeout=300,
-        clock=time.time,
+        clock=time.monotonic,
         sleeper=time.sleep,
     ):
         self.jobs = jobs
@@ -339,7 +339,24 @@ class LibrarySyncService:
         result = (job.get("step_results") or {}).get(state) or {}
         return result.get("status") in {"success", "warning", "unchanged", "confirmed"}
 
+    @staticmethod
+    def _check_cancel(should_cancel):
+        if should_cancel and should_cancel():
+            raise PlexOperationCancelled("Plex operation cancelled; completed changes retained")
+
+    def _wait_for_location(self, seconds, should_cancel, deadline):
+        # Short waits bound cancellation latency even at the longest backoff.
+        remaining = seconds
+        while remaining > 0:
+            self._check_cancel(should_cancel)
+            interval = min(remaining, 1.0)
+            self._sleep(interval)
+            remaining = min(remaining - interval, deadline - self._clock())
+        self._check_cancel(should_cancel)
+
     def run_job(self, job_id, *, should_cancel=None, on_stage=None):
+        # Ephemeral per invocation: never persisted or shared across jobs/retries.
+        metadata_cache = {}
         runners = {
             "artwork": self._artwork_stage,
             "audio": self._audio_stage,
@@ -367,10 +384,15 @@ class LibrarySyncService:
                         self.jobs.get(job_id), should_cancel=should_cancel
                     )
                 else:
-                    step_result = runners[state](self.jobs.get(job_id))
+                    stage_job = self.jobs.get(job_id)
+                    stage_job["_metadata_cache"] = metadata_cache
+                    step_result = runners[state](
+                        stage_job, should_cancel=should_cancel
+                    )
             except PlexOperationCancelled:
                 raise
             except WaitingForSelection as exc:
+                self._check_cancel(should_cancel)
                 waiting = exc.as_dict()
                 step_result = exc.step_result or {
                     "status": "awaiting_selection",
@@ -392,6 +414,7 @@ class LibrarySyncService:
                     return self.jobs.get(job_id)
                 step_result = {"status": "warning", "message": message}
             self._record_step(job_id, state, step_result)
+        self._check_cancel(should_cancel)
         completed = self.jobs.update(job_id, state="completed", error=None)
         self._notify_once(completed)
         return self.jobs.get(job_id)
@@ -441,7 +464,10 @@ class LibrarySyncService:
                     error=None,
                 )
             try:
+                self._check_cancel(should_cancel)
                 self.plex.scan_library(library_id)
+            except PlexOperationCancelled:
+                raise
             except Exception as exc:
                 message = self._safe_error(exc)
                 for job in jobs:
@@ -615,6 +641,8 @@ class LibrarySyncService:
                     continue
             try:
                 library_id = str(self._route_library(job, target))
+            except PlexOperationCancelled:
+                raise
             except Exception as exc:
                 target_results[target_id] = {
                     "status": "warning",
@@ -699,7 +727,10 @@ class LibrarySyncService:
                 library_result.pop("message", None)
                 persist_scan()
                 try:
+                    self._check_cancel(should_cancel)
                     self.plex.scan_library(library_id)
+                except PlexOperationCancelled:
+                    raise
                 except Exception as exc:
                     message = self._safe_error(exc)
                     library_result.update({
@@ -730,6 +761,7 @@ class LibrarySyncService:
                 for target in unresolved
             }
             deadline = self._clock() + self.scan_timeout
+            delay = min(self.scan_poll_interval, 30.0)
             while pending:
                 if should_cancel and should_cancel():
                     raise PlexOperationCancelled(
@@ -814,7 +846,16 @@ class LibrarySyncService:
                 persist_scan()
                 if not pending or self._clock() >= deadline:
                     break
-                self._sleep(self.scan_poll_interval)
+                wait_seconds = min(delay, max(0, deadline - self._clock()))
+                logger.info(
+                    "telepiplex Plex location retry library=%s pending=%s wait=%.1fs "
+                    "(backoff capped at 30s; new media detection may be delayed)",
+                    library_id, len(pending), wait_seconds,
+                )
+                self._wait_for_location(wait_seconds, should_cancel, deadline)
+                if self._clock() > deadline:
+                    break
+                delay = min(delay * 2, 30.0)
 
             for target_id, target in pending.items():
                 target_results[target_id] = {
@@ -901,7 +942,7 @@ class LibrarySyncService:
             "confirmed",
         }
 
-    def _run_target_stage(self, job, runner, stage_name):
+    def _run_target_stage(self, job, runner, stage_name, *, should_cancel=None):
         current_step = (
             (job.get("step_results") or {}).get(stage_name)
             or {}
@@ -912,19 +953,22 @@ class LibrarySyncService:
         )
         results = {}
         for target, rating_key in self._located_targets(job):
+            self._check_cancel(should_cancel)
             target_id = str(target.get("target_id") or "")
             previous = previous_results.get(target_id) or {}
             if self._selection_finished(previous):
                 results[target_id] = deepcopy(previous)
                 continue
-            target_job = deepcopy(job)
+            target_job = deepcopy({key: value for key, value in job.items() if key != "_metadata_cache"})
+            target_job["_metadata_cache"] = job.get("_metadata_cache", {})
             target_job["rating_key"] = rating_key
             target_job["target"] = deepcopy(target)
             target_job["_stage_name"] = str(stage_name)
             target_job["_stage_results"] = deepcopy(results)
             try:
-                result = runner(target_job)
+                result = runner(target_job, should_cancel=should_cancel)
             except WaitingForSelection as exc:
+                self._check_cancel(should_cancel)
                 waiting = exc.as_dict()
                 persisted_job = self.jobs.get(job["id"])
                 persisted_step = deepcopy(
@@ -954,26 +998,42 @@ class LibrarySyncService:
                 })
                 exc.step_result = persisted_step
                 raise
+            except PlexOperationCancelled:
+                raise
             except Exception as exc:
                 result = {
                     "status": "warning",
                     "message": self._safe_error(exc),
                 }
             results[target_id] = dict(result or {})
+            # Record a successful remote mutation before observing cancellation.
+            # Artwork has no part-level checkpoint, so every target needs one.
+            self._record_step(job["id"], stage_name, {
+                "status": "started",
+                "targets": {**deepcopy(previous_results), **deepcopy(results)},
+                "confirmed_selections": confirmed_selections,
+            })
+            self._check_cancel(should_cancel)
         return {
             "status": self._stage_status(results),
             "targets": results,
             "confirmed_selections": confirmed_selections,
         }
 
-    def _artwork_stage(self, job):
-        return self._run_target_stage(job, self._artwork, "artwork")
+    def _artwork_stage(self, job, *, should_cancel=None):
+        return self._run_target_stage(
+            job, self._artwork, "artwork", should_cancel=should_cancel
+        )
 
-    def _audio_stage(self, job):
-        return self._run_target_stage(job, self._audio_target, "audio")
+    def _audio_stage(self, job, *, should_cancel=None):
+        return self._run_target_stage(
+            job, self._audio_target, "audio", should_cancel=should_cancel
+        )
 
-    def _subtitle_stage(self, job):
-        return self._run_target_stage(job, self._subtitle_target, "subtitle")
+    def _subtitle_stage(self, job, *, should_cancel=None):
+        return self._run_target_stage(
+            job, self._subtitle_target, "subtitle", should_cancel=should_cancel
+        )
 
     @staticmethod
     def _external_ids_from_item(item):
@@ -995,11 +1055,15 @@ class LibrarySyncService:
         if self.tmdb and ids.get("tmdb"):
             try:
                 tmdb_posters = self.tmdb.textless_posters(media_type, ids["tmdb"])
+            except PlexOperationCancelled:
+                raise
             except Exception as exc:
                 warnings.append(self._safe_error(exc))
         if self.fanart:
             try:
                 fanart_posters = self.fanart.textless_posters(media_type, ids)
+            except PlexOperationCancelled:
+                raise
             except Exception as exc:
                 warnings.append(self._safe_error(exc))
         return tmdb_posters, fanart_posters, warnings
@@ -1110,7 +1174,15 @@ class LibrarySyncService:
             and item.get("grandparent_rating_key")
         ):
             rating_key = str(item["grandparent_rating_key"])
-            item = self.plex.get_item(rating_key)
+            cache = job.get("_metadata_cache", {})
+            key = ("show", rating_key)
+            if key not in cache:
+                show = self.plex.get_item(rating_key)
+                # Only descriptive metadata; mutable poster/stream state stays live.
+                cache[key] = {name: deepcopy(show[name]) for name in (
+                    "rating_key", "title", "year", "media_type", "summary", "guids"
+                ) if name in show}
+            item = deepcopy(cache[key])
         return rating_key, item
 
     def _series_artwork_already_processed(self, job, rating_key):
@@ -1127,7 +1199,7 @@ class LibrarySyncService:
                 return True
         return False
 
-    def _artwork(self, job):
+    def _artwork(self, job, *, should_cancel=None):
         contract = self._media_metadata(job)
         mapping_kind = (
             (contract.get("placement") or {}).get("mapping_kind")
@@ -1143,6 +1215,7 @@ class LibrarySyncService:
                     "message": "No confirmed custom poster",
                     "attempted": True,
                 }
+            self._check_cancel(should_cancel)
             self.plex.set_poster_url(job["rating_key"], poster_url)
             return {
                 "status": "success",
@@ -1181,6 +1254,7 @@ class LibrarySyncService:
         )
         chosen = plex_rules.choose_textless_poster(tmdb_posters, fanart_posters)
         if chosen:
+            self._check_cancel(should_cancel)
             self.plex.set_poster_url(artwork_rating_key, chosen["url"])
             return {
                 "status": "warning" if warnings else "success",
@@ -1205,7 +1279,7 @@ class LibrarySyncService:
             "warnings": warnings,
         }
 
-    def _audio_target(self, job):
+    def _audio_target(self, job, *, should_cancel=None):
         metadata = self._effective_metadata(job)
         tmdb_id = (metadata.get("external_ids") or {}).get("tmdb")
         media_type = "tv" if metadata.get("media_type") in {"show", "episode", "tv"} else "movie"
@@ -1216,12 +1290,15 @@ class LibrarySyncService:
         language_source = "frozen_media_metadata" if original_language else ""
         if not original_language and self.tmdb and tmdb_id:
             try:
-                original_language = self.tmdb.details(
-                    media_type,
-                    tmdb_id,
-                ).get("original_language")
+                cache = job.get("_metadata_cache", {})
+                key = ("tmdb_details", media_type, str(tmdb_id))
+                if key not in cache:
+                    cache[key] = self.tmdb.details(media_type, tmdb_id)
+                original_language = cache[key].get("original_language")
                 if original_language:
                     language_source = "live_tmdb_fallback"
+            except PlexOperationCancelled:
+                raise
             except Exception as exc:
                 message = self._safe_error(exc)
                 if message not in warnings:
@@ -1237,6 +1314,7 @@ class LibrarySyncService:
             warnings.append("TMDB original language is unavailable")
         audio_results = []
         for part in self.plex.list_streams(job["rating_key"]):
+            self._check_cancel(should_cancel)
             persisted = self._persisted_part_result(
                 job,
                 "audio",
@@ -1298,6 +1376,7 @@ class LibrarySyncService:
                 if message not in warnings:
                     warnings.append(message)
             if audio and not audio.get("selected"):
+                self._check_cancel(should_cancel)
                 self.plex.select_audio(
                     job["rating_key"],
                     part["id"],
@@ -1327,9 +1406,10 @@ class LibrarySyncService:
             "original_language_source": language_source or "unavailable",
         }
 
-    def _subtitle_target(self, job):
+    def _subtitle_target(self, job, *, should_cancel=None):
         subtitle_results = []
         for part in self.plex.list_streams(job["rating_key"]):
+            self._check_cancel(should_cancel)
             persisted = self._persisted_part_result(
                 job,
                 "subtitle",
@@ -1378,6 +1458,7 @@ class LibrarySyncService:
                     part_id=part["id"],
                 )
             if subtitle and not subtitle.get("selected"):
+                self._check_cancel(should_cancel)
                 self.plex.select_subtitle(
                     job["rating_key"],
                     part["id"],
@@ -1670,7 +1751,10 @@ class LibrarySyncService:
                 result["failed"].append(library)
                 continue
             try:
+                self._check_cancel(should_cancel)
                 self.plex.scan_library(library_id)
+            except PlexOperationCancelled:
+                raise
             except Exception as exc:
                 library["error"] = self._safe_error(exc)
                 result["failed"].append(library)

@@ -20,3 +20,6 @@ endpoint_intervals:
   token_refresh: 1.0
 storage_read_workers: 4
 save_directories: []
+
+# Enable only after both download and rename support snapshot_ref_v1.
+enable_tree_snapshot_references: false

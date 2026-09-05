@@ -14,6 +14,7 @@ from pathlib import PurePosixPath
 import requests
 
 from .pacing import EndpointPacer
+from telepiplex_plugin_sdk.storage_tree import TreeIntegrityError, collect_complete_tree
 
 
 class Open115Error(RuntimeError):
@@ -1037,58 +1038,10 @@ class Open115Client:
         ).strip()
 
     def get_file_tree(self, root_path: str, *, max_depth=8, limit=1000):
-        root_path = self._normalize(root_path)
-        root = self.get_file_info(root_path)
-        if not root:
-            raise Open115Error("115 download root is unavailable")
-        root_name = PurePosixPath(root_path).name
-        if not self._item_is_dir(root):
-            return [{
-                "name": root_name,
-                "relative_path": root_name,
-                "path": root_path,
-                "is_dir": False,
-                "file_id": self._item_id(root),
-                "size": root.get("fs") or root.get("size") or root.get("size_byte") or 0,
-                "sha1": self._item_sha1(root),
-            }]
-
-        root_id = self._item_id(root)
-        if not root_id:
-            raise Open115Error("115 download root has no file_id")
-        tree = []
-
-        def walk(parent_id, prefix="", depth=0):
-            if depth > int(max_depth) or len(tree) >= int(limit):
-                return
-            response = self.get_file_list({
-                "cid": parent_id,
-                "limit": int(limit),
-                "show_dir": 1,
-            })
-            for item in self._list_items(response):
-                if not isinstance(item, dict) or len(tree) >= int(limit):
-                    continue
-                name = self._item_name(item)
-                if not name:
-                    continue
-                relative = f"{prefix}/{name}".strip("/")
-                is_dir = self._item_is_dir(item)
-                node = {
-                    "name": name,
-                    "relative_path": relative,
-                    "path": f"{root_path.rstrip('/')}/{relative}",
-                    "is_dir": is_dir,
-                    "file_id": self._item_id(item),
-                    "size": item.get("fs") or item.get("size") or item.get("size_byte") or 0,
-                    "sha1": self._item_sha1(item),
-                }
-                tree.append(node)
-                if is_dir and node["file_id"]:
-                    walk(node["file_id"], relative, depth + 1)
-
-        walk(root_id)
-        return tree
+        try:
+            return collect_complete_tree(self, root_path, max_depth=max_depth, limit=limit)
+        except TreeIntegrityError as exc:
+            raise Open115Error(str(exc), code="file_tree_incomplete", operation="get_file_tree") from exc
 
     @staticmethod
     def _normalize(path: str):

@@ -6,6 +6,8 @@ from telepiplex_plugin_sdk.log_sanitizer import sanitize_log_text
 
 from .client import Open115Error
 from .cleanup import DownloadCleanupError
+from .transport_capacity import TreeCapacityError
+from telepiplex_plugin_sdk.storage_snapshot import SnapshotError
 
 
 _AUTH_CODES = {"401", "40140125", "40140126"}
@@ -68,6 +70,16 @@ def classify_download_failure(exc: Exception, *, stage: str) -> DownloadFailure:
         provider_operation = sanitize_log_text(
             exc.operation, max_chars=120
         ).strip()
+
+    if isinstance(exc, (TreeCapacityError, SnapshotError)) or provider_code == "file_tree_incomplete":
+        return DownloadFailure(
+            code="download_tree_capacity_exceeded" if isinstance(exc, TreeCapacityError) else "download_tree_incomplete",
+            summary="下载文件完整性或容量检查未通过，未交给 rename。",
+            detail=detail,
+            remedy="请检查下载目录或拆分资源后重试；已执行的清理记录见任务详情。",
+            stage=safe_stage, provider_code=provider_code,
+            provider_operation=provider_operation,
+        )
 
     normalized = f"{provider_operation} {detail}".lower()
     if isinstance(exc, DownloadCleanupError):

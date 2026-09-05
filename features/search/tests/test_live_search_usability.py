@@ -1,4 +1,4 @@
-"""Opt-in live usability gate for real Provider and AI credentials."""
+"""Opt-in live usability gate for configured metadata providers."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import unittest
 
+import pytest
 import yaml
 
 from telepiplex_search.adapters.douban import lookup_douban_evidence
@@ -187,16 +188,6 @@ def _live_config() -> dict:
     if not config_path.is_file():
         raise unittest.SkipTest("live Search config file is missing")
     config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    tvdb = ((config.get("metadata") or {}).get("tvdb") or {})
-    ai = config.get("ai") or {}
-    if not tvdb.get("api_key"):
-        raise unittest.SkipTest("live Search config has no TVDB API key")
-    if not (
-        ai.get("api_url")
-        and ai.get("api_key")
-        and ai.get("model")
-    ):
-        raise unittest.SkipTest("live Search config has incomplete AI settings")
     return config
 
 
@@ -217,6 +208,7 @@ class LiveSearchCorpusContractTest(unittest.TestCase):
     os.environ.get(PUBLIC_LIVE_ENV, "").strip() == "1",
     f"set {PUBLIC_LIVE_ENV}=1 to query public Providers",
 )
+@pytest.mark.live_network
 class PublicSourceLiveUsabilityTest(unittest.TestCase):
     def test_complex_series_queries_have_real_public_source_recall(self):
         for query, aliases in PUBLIC_COMPLEX_CASES.items():
@@ -256,6 +248,7 @@ class PublicSourceLiveUsabilityTest(unittest.TestCase):
                     self.assertGreater(len(wikipedia["facts"]), 0)
 
 
+@pytest.mark.live_network
 class LiveSearchUsabilityTest(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):

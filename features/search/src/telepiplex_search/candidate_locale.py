@@ -12,6 +12,29 @@ class CandidateLocaleError(ValueError):
         super().__init__(self.code)
 
 
+def commit_candidate_localization(plan: dict, snapshot: dict, localized: dict) -> dict:
+    """Commit a pre-confirmation transaction only to its unchanged revision.
+
+    Locale includes validated source bindings, titles and aliases, not just a
+    poster patch. Nothing is attached to an already displayed/confirmed plan.
+    Comparing the complete snapshot also freezes owner, candidate order, scope,
+    source references and retrieval queries while this transaction is running.
+    """
+    if plan != snapshot:
+        return deepcopy(plan)
+    original_ids = [
+        (item.get("candidate_id"), item.get("candidate_key"))
+        for item in snapshot.get("candidates") or ()
+    ]
+    localized_ids = [
+        (item.get("candidate_id"), item.get("candidate_key"))
+        for item in localized.get("candidates") or ()
+    ]
+    if original_ids != localized_ids:
+        return deepcopy(plan)
+    return localized
+
+
 def _text(value) -> str:
     return " ".join(str(value or "").replace("\xa0", " ").split())
 

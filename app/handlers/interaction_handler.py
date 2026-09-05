@@ -1895,8 +1895,13 @@ async def _render_operation_segment_locked(
                 projection_hash=segment.projection_hash,
             )
             continue
+        markup = operation_markup(record, router, segment=segment)
+        edit_included_controls = markup is not None
         try:
-            await _edit_segment_message(application, router, record, segment)
+            await _edit_segment_message(
+                application, record, segment,
+                markup=markup if edit_included_controls else {"inline_keyboard": []},
+            )
         except Exception as exc:
             edit_attempts += 1
             _log(
@@ -1922,12 +1927,26 @@ async def _render_operation_segment_locked(
         if rendered is None:
             continue
         if rendered.state == "sealing":
+            # Seal can arrive while an open-segment edit is in flight. That
+            # request may still carry old controls. Only compensate when the
+            # actual edit included controls; otherwise its explicit empty
+            # keyboard already acknowledged their removal.
+            if edit_included_controls:
+                await _clear_inflight_seal_controls(
+                    application,
+                    record,
+                    rendered,
+                )
             sealed = coordinator.complete_segment_seal(
                 rendered.segment_id,
                 owner_plugin_id=rendered.owner_plugin_id,
                 generation=rendered.generation,
             )
             return sealed.message_id
+
+
+async def _clear_inflight_seal_controls(application, record, segment):
+    await _clear_segment_controls(application, record, segment)
 
 
 async def _clear_segment_controls(application, record, segment):
@@ -1987,14 +2006,9 @@ async def _send_new_segment_message(application, router, record, segment):
     return await application.bot.send_photo(**kwargs), "photo"
 
 
-async def _edit_segment_message(application, router, record, segment):
+async def _edit_segment_message(application, record, segment, *, markup):
     text = record.status_text or (
         f"任务状态：{record.state}\n阶段：{record.stage or '-'}"
-    )
-    markup = (
-        {"inline_keyboard": []}
-        if segment.state == "sealing"
-        else operation_markup(record, router, segment=segment)
     )
     if segment.presentation_kind == "text":
         if segment.message_kind == "photo":

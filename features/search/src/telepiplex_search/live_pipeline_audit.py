@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import asyncio
 from copy import deepcopy
 from pathlib import Path
 
@@ -13,7 +12,6 @@ from telepiplex_plugin_sdk.media_metadata import (
 )
 
 from .entity_graph import normalize_title
-from .candidate_hydration import hydrate_frozen_candidate
 from .input_contract import classify_search_input
 from .prowlarr_query import build_prowlarr_query_chain
 from .search_plan import confirm_media_metadata
@@ -334,7 +332,7 @@ def audit_full_case(
     wikipedia_lookup,
     wikidata_lookup,
 ) -> dict:
-    """Audit a frozen root through scope, query, confirmation, and SDK handoff."""
+    """Legacy component check for contract/query round-tripping, not business success."""
 
     stages = {
         "input": "pending",
@@ -419,144 +417,237 @@ def audit_full_case(
     }
 
 
-async def audit_live_full_case(
-    case: dict,
-    feature,
-    *,
-    wikipedia_lookup=None,
-    wikidata_lookup=None,
-    wikidata_search=None,
-) -> dict:
-    """Run one live case through frozen exact-read and downstream handoff."""
-
-    stages = {
-        "input": "pending",
-        "wikipedia": "pending",
-        "wikidata": "pending",
-        "root_match": "pending",
-        "metadata_supplement": "pending",
-        "exact_read": "pending",
-        "scope": "pending",
-        "query": "pending",
-        "downstream_contract": "pending",
-    }
-    try:
-        plan = await asyncio.to_thread(
-            build_root_work_search_plan,
-            _text(case.get("query")),
-            f"live-audit:{_text(case.get('case_id'))}",
-            wikipedia_lookup or feature._wikipedia_provider,
-            wikidata_lookup,
-            wikidata_search,
-        )
-    except Exception as exc:
-        stages["input"] = "failed"
-        return _failed_report(case, stages, f"plan:{type(exc).__name__}:{exc}")
-    stages["input"] = "ok"
-    stages["wikipedia"] = "ok"
-    stages["wikidata"] = "ok"
-    candidate = _expected_candidate(case, plan.get("candidates") or [])
-    if candidate is None:
-        stages["root_match"] = "failed"
-        return _failed_report(case, stages, "expected_plan_candidate_not_found")
-    stages["root_match"] = "ok"
-    try:
-        supplemented = await feature._supplement_selected_candidate(
-            candidate,
-            _text(case.get("query")),
-        )
-    except Exception as exc:
-        stages["metadata_supplement"] = "failed"
-        return _failed_report(
-            case,
-            stages,
-            f"supplement:{type(exc).__name__}:{exc}",
-        )
-    stages["metadata_supplement"] = "ok"
-    try:
-        hydrated = await asyncio.to_thread(
-            hydrate_frozen_candidate,
-            supplemented,
-            metadata_id=f"live-audit:{_text(case.get('case_id'))}",
-            raw_query=_text(case.get("query")),
-            require_anchor=True,
-        )
-    except Exception as exc:
-        if (
-            _text(case.get("scope")).casefold() == "episode"
-            and "metadata_incomplete:verified_scope" in str(exc)
-        ):
-            stages["exact_read"] = "safe_rejected"
-            return {
-                "case_id": _text(case.get("case_id")),
-                "passed": True,
-                "outcome": "safe_rejection",
-                "failure_code": "",
-                "reason_code": "episode_inventory_unavailable",
-                "queries": [],
-                "stages": stages,
-            }
-        stages["exact_read"] = "failed"
-        return _failed_report(
-            case,
-            stages,
-            f"exact_read:{type(exc).__name__}:{exc}",
-        )
-    stages["exact_read"] = "ok"
-    try:
-        scoped = _apply_requested_scope(case, hydrated["media_metadata"])
-    except SeriesScopeError as exc:
-        stages["scope"] = "failed"
-        return _failed_report(case, stages, f"scope:{exc}")
-    stages["scope"] = "ok"
-    queries = build_prowlarr_query_chain(
-        scoped,
-        _text(case.get("query")),
-    )
-    if not queries:
-        stages["query"] = "failed"
-        return _failed_report(case, stages, "retrieval_query_missing")
-    scoped.setdefault("retrieval", {})["query"] = queries[0]
-    scoped["retrieval"]["queries"] = list(queries)
-    stages["query"] = "ok"
-    try:
-        confirmed = confirm_media_metadata({
-            "plan_id": f"live-audit:{_text(case.get('case_id'))}",
-            "media_metadata": scoped,
-            "prowlarr_queries": list(queries),
-        })
-        extracted = extract_confirmed_media_metadata(
-            attach_media_metadata({}, confirmed)
-        )
-    except ValueError as exc:
-        stages["downstream_contract"] = "failed"
-        return _failed_report(case, stages, f"downstream:{exc}")
-    if extracted is None:
-        stages["downstream_contract"] = "failed"
-        return _failed_report(case, stages, "downstream_round_trip_failed")
-    stages["downstream_contract"] = "ok"
+def _business_report(case, outcome, reason, stages, **details):
+    expected = case.get("expected_outcome", "business_success")
     return {
-        "case_id": _text(case.get("case_id")),
-        "passed": True,
-        "failure_code": "",
-        "matched_qid": _text(
-            ((extracted.get("identity") or {}).get("external_ids") or {}).get(
-                "wikidata"
-            )
-            or ((extracted.get("identity") or {}).get("external_ids") or {}).get(
-                "wikipedia"
-            )
-        ),
-        "retrieval_scope": _text((extracted.get("retrieval") or {}).get("scope")),
-        "queries": list(queries),
-        "sdk_metadata_id": _text(extracted.get("metadata_id")),
-        "providers": sorted(
-            {
-                _text(item.get("provider"))
-                for item in (extracted.get("evidence") or {}).get("source_links") or ()
-                if isinstance(item, dict) and _text(item.get("provider"))
-            }
-        ),
-        "warnings": list(extracted.get("warnings") or ()),
-        "stages": stages,
+        "case_id": _text(case.get("case_id")), "outcome": outcome,
+        "passed": outcome == expected and outcome != "skipped",
+        "reason_code": reason, "failure_code": "" if outcome == expected else reason,
+        "stages": dict(stages), **details,
     }
+
+
+async def audit_live_full_case(case: dict, feature, **unused) -> dict:
+    """Drive actual Search command/callback state; only a capture Host is allowed.
+
+    External provider fixtures belong at adapter boundaries, never at planning,
+    hydration, confirmation, gating or submission methods. This routine does not
+    execute a download, and refuses an arbitrary/installed Host transport.
+    """
+    from telepiplex_plugin_sdk.media_metadata_v2 import validate_media_metadata_v2
+    from .audit_transport import AuditHost, AuditRuntime
+
+    stages = {name: "pending" for name in (
+        "command", "candidate_confirmation", "scope", "release_selection", "download_capture")}
+    if not isinstance(getattr(feature, "host", None), AuditHost):
+        return _business_report(case, "skipped", "capture_host_required", stages)
+    if not isinstance(getattr(feature, "runtime", None), AuditRuntime):
+        return _business_report(case, "skipped", "audit_runtime_required", stages)
+    host, runtime = feature.host, feature.runtime
+    request = {"chat_id": 91001, "user_id": 91001}
+    callback_trace = []
+    candidate_ids = []
+    selected_identity = None
+
+    async def callback(payload):
+        callback_trace.append(payload.split(":", 1)[0])
+        result = await feature.callback({**request, "payload": payload})
+        await runtime.drain()
+        return result
+
+    def report(outcome, reason, **extra):
+        return _business_report(case, outcome, reason, stages,
+            candidate_identities=candidate_ids, callback_trace=callback_trace,
+            submission_count=len(host.submissions), **extra)
+
+    try:
+        await feature.command({**request, "command": "s", "args": [case["query"]]})
+        await runtime.drain()
+        stages["command"] = "ok"
+        if not feature.plans:
+            return report("source_failure", "discovery_unavailable")
+        plan_id, stored = next(iter(feature.plans.items()))
+        candidates = list(stored.get("candidates") or ())
+        candidate_ids = sorted(_text(c.get("qid") or (
+            ((c.get("media_metadata") or {}).get("identity") or {}).get("external_ids", {}).get("wikidata")))
+            for c in candidates)
+        candidate = _expected_candidate(case, candidates)
+        if candidate is None:
+            outcome = "source_failure" if stored.get("kind") == "planning_failure" else "unexpected_failure"
+            return report(outcome, "expected_candidate_unavailable")
+        selected_identity = deepcopy(candidate["media_metadata"]["identity"])
+        if case.get("scenario") == "cancel":
+            result = await callback(f"cancel:{plan_id}")
+            assert result["operation"]["state"] == "cancelled"
+            assert plan_id not in feature.plans and not host.submissions
+            stages["candidate_confirmation"] = "cancelled"
+            return report("safe_rejection", "user_cancelled")
+        await callback(f"select:{plan_id}:{candidates.index(candidate)}")
+        if not stored.get("selected_candidate"):
+            stages["candidate_confirmation"] = "rejected"
+            return report("safe_rejection", "metadata_not_verified")
+        stages["candidate_confirmation"] = "ok"
+        # Scope callbacks go through the same public entry point as Telegram.
+        # Explicit Sxx/SxxExx may already have started the release search.
+        if not stored.get("confirmed_contract") and plan_id in feature.plans:
+            kind = case.get("scope", "work")
+            scope = "whole_series" if kind == "work" else kind
+            suffix = ""
+            if kind in {"season", "episode"}:
+                suffix += ":" + str(case["season_number"])
+            if kind == "episode":
+                suffix += ":" + str(case["episode_number"])
+            await callback(f"scope:{plan_id}:{scope}{suffix}")
+        contract = stored.get("confirmed_contract")
+        if not contract:
+            reason = "category_route_missing" if not stored.get("selected_path") else "scope_not_verified"
+            return report("safe_rejection", reason)
+        assert validate_media_metadata_v2(contract, require_confirmed=True) is not None, "v2_invalid"
+        identity = contract["identity"]
+        assert str(identity["year"]) == str(case["year"]), "year_changed"
+        assert identity["media_type"] == case["media_type"], "media_type_changed"
+        assert identity["provider_refs"].get("wikidata") == selected_identity.get("external_ids", {}).get("wikidata"), "frozen_identity_changed"
+        expected_scope = {"kind": "movie" if case["media_type"] == "movie" else
+            "whole_series" if case.get("scope", "work") == "work" else case["scope"],
+            "season_number": case.get("season_number"), "episode_number": case.get("episode_number")}
+        assert contract["scope"] == expected_scope, "scope_changed"
+        stages["scope"] = "ok"
+        releases = stored.get("release_by_id") or {}
+        if not releases:
+            failed = any(item.get("stage") == "prowlarr_recovery" for item in host.reports)
+            return report("source_failure" if failed else "safe_rejection",
+                          "release_source_unavailable" if failed else "no_eligible_release")
+        release_id, release = next(iter(releases.items()))
+        stages["release_selection"] = "ok"
+        if case.get("scenario") == "restart":
+            from .service import SearchFeature
+            restarted = SearchFeature(config=deepcopy(feature.config), host=host)
+            restarted.bind_runtime(runtime)
+            result = await restarted.callback({**request, "payload": f"release:{plan_id}:{release_id}"})
+            await runtime.drain()
+            assert result.get("session", {}).get("state") == "close", "stale_session_open"
+            assert not host.submissions, "stale_session_submitted"
+            return report("safe_rejection", "session_expired_after_restart")
+        await callback(f"release:{plan_id}:{release_id}")
+        if not host.submissions and release_id not in (stored.get("release_by_id") or {}):
+            return report("safe_rejection", "release_magnet_unavailable")
+        assert len(host.submissions) == 1, "submission_count_invalid"
+        payload, options = host.submissions[0]
+        assert payload["media_metadata"] == contract, "handoff_metadata_changed"
+        assert payload["release"] == {"title": release.get("title") or "",
+            "indexer": release.get("indexer") or "", "size": release.get("size") or 0}, "handoff_release_changed"
+        assert payload["selected_path"] == stored["selected_path"], "handoff_path_changed"
+        assert options["idempotency_key"] == f"{plan_id}:release:{release_id}", "idempotency_key_changed"
+        assert payload["operation_id"] == stored["operation_id"], "operation_changed"
+        frozen = deepcopy(payload)
+        before = len(host.submissions)
+        await callback(f"release:{plan_id}:{release_id}")
+        assert len(host.submissions) == before, "duplicate_submission"
+        stages["download_capture"] = "ok"
+        # Reports intentionally omit magnet, credentials, and live indexer URLs.
+        frozen.pop("link", None)
+        if host.lose_submit_response:
+            return report("source_failure", "submission_response_lost",
+                          duplicate_submission_count=len(host.submissions) - before)
+        return report("business_success", "", submission=frozen,
+            idempotency_key=options["idempotency_key"], release_id=release_id,
+            duplicate_submission_count=len(host.submissions) - before,
+            eligible_release_ids=sorted(releases),
+            queries=list(stored.get("active_prowlarr_queries") or ()))
+    except SeriesScopeError:
+        return report("safe_rejection", "scope_not_verified")
+    except Exception as exc:
+        # Error type only: exception messages may contain provider credentials.
+        return report("unexpected_failure", str(exc) if isinstance(exc, AssertionError) and str(exc).isidentifier() else type(exc).__name__)
+    finally:
+        await runtime.close(feature)
+
+
+async def run_business_case(case: dict, *, mode="offline", config=None, allow_network=False) -> dict:
+    """Create an isolated Feature and capture Host for a single sequential case."""
+    from contextlib import ExitStack
+    from .audit_transport import AuditHost, AuditRuntime, FixtureProviders, OfflineNetworkGuard, audit_config
+    from .context import runtime_context
+    from .service import SearchFeature
+
+    if mode not in {"offline", "public", "prowlarr"}:
+        raise ValueError("invalid_audit_mode")
+    if mode != "offline" and not allow_network:
+        return _business_report(case, "skipped", "explicit_network_opt_in_required", {})
+    fixture = FixtureProviders(case, scenario=case.get("scenario", "success"))
+    if mode == "offline" and fixture.match is None:
+        return _business_report(case, "skipped", "offline_fixture_unavailable", {})
+    current_config = deepcopy(config if config is not None else audit_config())
+    if mode == "prowlarr":
+        prowlarr = (current_config.get("search") or {}).get("prowlarr") or {}
+        if not prowlarr.get("base_url") or not prowlarr.get("api_key"):
+            return _business_report(case, "skipped", "prowlarr_credentials_missing", {})
+    if mode == "public" and fixture.match is None:
+        return _business_report(case, "skipped", "capture_release_fixture_unavailable", {})
+    if case.get("scenario") == "missing_directory":
+        current_config["category_folder"] = []
+    previous_config = runtime_context.config
+    previous_logger = runtime_context.logger
+    import logging
+    audit_logger = logging.Logger("telepiplex.search.audit")
+    audit_logger.addHandler(logging.NullHandler())
+    audit_logger.propagate = False
+    observed_prowlarr_calls = []
+    failed_exact_reads = []
+    with ExitStack() as stack:
+        guard = stack.enter_context(OfflineNetworkGuard()) if mode == "offline" else None
+        if mode == "offline":
+            stack.enter_context(fixture.active())
+        elif mode == "public":
+            from unittest.mock import patch
+            stack.enter_context(patch("telepiplex_search.service.search_prowlarr", fixture.releases))
+            stack.enter_context(patch("telepiplex_search.service.list_prowlarr_indexers", lambda: []))
+            stack.enter_context(patch("telepiplex_search.service.get_prowlarr_indexer_summary", lambda: {}))
+        if mode == "prowlarr":
+            from unittest.mock import patch
+            from . import service
+            for name in ("search_prowlarr", "search_prowlarr_indexer", "list_prowlarr_indexers", "get_prowlarr_indexer_summary"):
+                original = getattr(service, name)
+                def observe(*args, _original=original, _name=name, **kwargs):
+                    observed_prowlarr_calls.append(_name)
+                    return _original(*args, **kwargs)
+                stack.enter_context(patch.object(service, name, observe))
+        from unittest.mock import patch
+        from . import direct_link
+        for name in ("lookup_wikipedia_page", "lookup_wikipedia_episode_page", "enrich_wikidata_entities"):
+            original = getattr(direct_link, name)
+            def observe_exact(*args, _original=original, _name=name, **kwargs):
+                try:
+                    value = _original(*args, **kwargs)
+                except Exception:
+                    failed_exact_reads.append(_name)
+                    raise
+                if isinstance(value, dict) and value.get("status") in {
+                    "timeout", "rate_limited", "server_down", "unavailable"}:
+                    failed_exact_reads.append(_name)
+                return value
+            stack.enter_context(patch.object(direct_link, name, observe_exact))
+        runtime_context.configure(current_config)
+        runtime_context.logger = audit_logger
+        try:
+            host = AuditHost(lose_submit_response=case.get("scenario") == "submit_response_loss")
+            feature = SearchFeature(config=current_config, host=host,
+                # Do not follow Prowlarr download URLs: GET can trigger a grab.
+                release_resolver=lambda release: release.get("magnet_url") or "")
+            feature.bind_runtime(AuditRuntime())
+            result = await audit_live_full_case(case, feature)
+            if failed_exact_reads and result.get("reason_code") in {
+                "metadata_not_verified", "scope_not_verified"}:
+                result.update(outcome="source_failure",
+                    passed=case.get("expected_outcome") == "source_failure",
+                    reason_code="metadata_source_unavailable", failure_code=("" if case.get("expected_outcome") == "source_failure" else "metadata_source_unavailable"))
+            if guard is not None and guard.attempts:
+                result.update(outcome="unexpected_failure", passed=False, reason_code="offline_network_attempt", failure_code="offline_network_attempt")
+            result["mode"] = mode
+            result["data_origin"] = "simulated_provider_fixtures" if mode == "offline" else "live_metadata"
+            result["provider_calls"] = list(fixture.calls) + observed_prowlarr_calls
+            result["prowlarr_called"] = bool(observed_prowlarr_calls)
+            return result
+        finally:
+            runtime_context.configure(previous_config)
+            runtime_context.logger = previous_logger

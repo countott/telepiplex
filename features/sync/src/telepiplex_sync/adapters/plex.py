@@ -77,28 +77,44 @@ class PlexAdapter:
             for path in final_paths or []
             if str(path or "").strip()
         ]
-        matches = {
-            expected_path: []
-            for expected_path in expected_paths
+        normalized = {
+            path: self._normalize_media_path(path) for path in expected_paths
         }
+        absolute = {path for path in normalized.values() if path.startswith("/")}
+        relative = {path for path in normalized.values() if path and not path.startswith("/")}
+        matches = {path: [] for path in normalized.values()}
         for library_type in library_types:
             for candidate in section.search(libtype=library_type):
                 item = self._item_dict(candidate)
-                for expected_path in expected_paths:
-                    if any(
-                        self._media_path_matches(
-                            part.get("file"),
-                            expected_path,
-                        )
-                        for part in item.get("parts") or []
-                    ):
-                        matches[expected_path].append(item)
+                matched = set()
+                for part in item.get("parts") or []:
+                    actual = self._normalize_media_path(part.get("file"))
+                    # Index absolute file suffixes and parent-directory suffixes.
+                    # Plex may prepend a mount path to the rename final path.
+                    boundaries = [index for index, char in enumerate(actual) if char == "/"]
+                    for start in boundaries:
+                        for end in (*boundaries, len(actual)):
+                            if end > start:
+                                path = actual[start:end]
+                                if path in absolute:
+                                    matched.add(path)
+                    # Legacy relative inputs allow arbitrary character suffixes,
+                    # including ones that start inside a filename/component.
+                    for path in relative:
+                        if self._media_path_matches(actual, path):
+                            matched.add(path)
+                # Multiple matching parts of one item remain a single candidate.
+                for path in matched:
+                    if len(matches[path]) < 2:
+                        matches[path].append(item)
         return {
-            expected_path: (
-                candidates[0] if len(candidates) == 1 else None
-            )
-            for expected_path, candidates in matches.items()
+            expected: matches[path][0] if len(matches[path]) == 1 else None
+            for expected, path in normalized.items()
         }
+
+    @staticmethod
+    def _normalize_media_path(path):
+        return str(path or "").replace("\\", "/").rstrip("/")
 
     @staticmethod
     def _media_path_matches(actual_path, expected_path):

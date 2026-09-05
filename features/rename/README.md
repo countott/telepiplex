@@ -1,6 +1,6 @@
 # rename Feature
 
-`features/rename` 是 telepiplex 的独立媒体整理 Feature。rename 2.0.0 消费 durable `download.completed`，并在任何文件副作用前严格校验 `media_metadata v2`；v1 事件直接拒绝，不再转换或迁移。v2 合同保持不可变，实际整理结果写入独立 `organization_result`，不会把 Rename 观察到的文件事实反写为作品元数据。每次恢复还会读取 Host operation snapshot；任务不存在、已终态或 handoff 未被 Rename 接受时失败关闭，避免脱离全链路所有权后继续改动文件。Rename 的进度和终态只覆写一条 `rename` 消息，终态回执持久化后只重试消息段封存，不重复上报终态。
+`features/rename` 是 telepiplex 的独立媒体整理 Feature。rename 2.1.0 消费 durable `download.completed`，并在任何文件副作用前严格校验 `media_metadata v2`；v1 事件直接拒绝，不再转换或迁移。v2 合同保持不可变，实际整理结果写入独立 `organization_result`，不会把 Rename 观察到的文件事实反写为作品元数据。每次恢复还会读取 Host operation snapshot；任务不存在、已终态或 handoff 未被 Rename 接受时失败关闭，避免脱离全链路所有权后继续改动文件。Rename 的进度和终态只覆写一条 `rename` 消息，终态回执持久化后只重试消息段封存，不重复上报终态。
 
 它也支持 Telegram `/rename` 扫描 115 存量目录；媒体候选确认会先持久化状态，再转入后台调用 search，因此 Telegram callback 不等待长链路，取消操作也能及时生效。文件阶段在首次写入前构建一份不可变预检快照，让目标冲突规划与执行共享同一批源、目标和父目录事实；rename、批量移动、目录清理与源端消失仍以写入后的新鲜读取作为后置条件。文件规划使用 download 1.1.0 的 32 路径分批身份读取，并优先调用 115 官方服务端批量移动，同一目标目录默认按 32 个文件一批提交；每批完成后重新列出源、目标目录，核对 provider ID 和规范文件名，不采信单独的成功回执。动画资源中的 NCOP、NCED 以及带季号或变体号的 OP、ED 会作为同一作品的附加内容保留，不再建立独立媒体搜索任务；无法唯一映射的正片文件仍保持原位并单独提示用户查证。rename 的完整或部分完成终态只表示本地媒体整理安全收敛，不发布下游整理事件，也不自动交接 sync/Plex。媒体候选按钮使用短持久令牌，满足 Telegram callback 的 64-byte 限制，同时支持直接回复候选编号。
 
@@ -37,7 +37,15 @@ rename 会在写操作前按文件预检目标冲突。已有目标与相同 pro
 rename 在媒体文件全部被核验为已整理或规范 `no_op`、不存在原位保留/目标冲突/文件失败，并且源作品目录清理完成时写入 `completed`。若已验证文件至少一个、其余媒体文件仅为安全原位保留，且没有冲突、执行失败或意外清理失败，则写入 `partial_completed`；完全无法匹配仍失败关闭且不执行移动。Telegram 通知是尽力投递的旁路；通知失败不会把已经核验完成的 Job 改成失败，也不会触发重复文件操作。用户通知使用纯文本，文件名和路径不会依赖 Telegram Markdown 转义。
 
 ```bash
-python tools/build_feature.py features/rename /tmp/rename-2.0.1.tpx \
+python tools/build_feature.py features/rename /tmp/rename-2.1.0.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```
+
+### 下载快照分页与恢复
+
+rename 兼容 `inline_v1` 和 `snapshot_ref_v1`。新版引用必须带明确完整标记、job ID 和源根路径匹配的完整元数据；每页必须严格匹配整份引用、顺序、起始位置与下一游标。全部页面、节点拓扑、总数、文件/目录数和 SHA-256 摘要验证通过后，先提交到 `<jobs-db>.snapshots.sqlite3`，重新读盘校验，再确认接收并调用原 file-first 整理流程。缺页、换页、未知格式、错摘要或分页期间取消，都不会改名、移动或删除媒体；不重新扫描另一棵实时树兜底。
+
+本地副本独立于任务结果覆盖而存在。提供方暂时不可用或接收确认丢失，不会使已验证副本失效；重新读取相同引用可直接使用本地副本。单个 job 永久绑定一份不可变快照，另一份引用不能替换它。现有任务重启/终态幂等及中断后安全停止规则不变；本实现不自动重做已开始文件变更的任务。快照只代表扫描时事实，现有稳定对象 ID、移动前后校验与空目录清理验证继续执行。
+
+部署时先升级 download 提供方（保持引用发送关闭），再升级 rename 消费方，最后开启 download 的 `enable_tree_snapshot_references`。回退前停止新引用任务、处理或保留活动任务及双方快照文件，再回退消费者。旧任务表无需变更；sidecar 不设置 TTL，确认接收和完成任务不会触发删除。逐文件结果与完整副本留在本地，自动流程仍止于 rename，不触发 Plex。
