@@ -42,10 +42,6 @@ def _airing_state(value, today: date) -> str:
     return "aired" if parsed <= today else "scheduled"
 
 
-def _aired(value, today: date) -> bool:
-    return _airing_state(value, today) == "aired"
-
-
 def _item_airing_state(item: dict, today: date) -> str:
     if item.get("air_date_conflict") is not True:
         return _airing_state(
@@ -386,7 +382,7 @@ def apply_series_scope(
         selected = [
             item
             for item in result.get("items") or []
-            if _aired(item.get("aired"), today)
+            if _item_airing_state(item, today) == "aired"
         ]
         scope = "whole_series"
         season_number = None
@@ -414,7 +410,7 @@ def apply_series_scope(
                 item
                 for item in result.get("items") or []
                 if _integer(item.get("season_number")) == season_number
-                and _aired(item.get("aired"), today)
+                and _item_airing_state(item, today) == "aired"
             ]
             scope = "season"
             episode_number = None

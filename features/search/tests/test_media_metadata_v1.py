@@ -307,7 +307,7 @@ class MediaMetadataV1Test(unittest.TestCase):
         self.assertEqual(contract["relation"]["type"], "standalone")
         self.assertNotIn("relation_group", contract)
 
-    def test_anilist_episode_count_never_breaks_topology_tie(self):
+    def test_anilist_episode_count_never_overrides_available_tvdb_inventory(self):
         def episodes(provider, count):
             id_key = f"{provider}_episode_id"
             return tuple({
@@ -393,15 +393,13 @@ class MediaMetadataV1Test(unittest.TestCase):
             facts=facts,
         )
 
-        with self.assertRaisesRegex(
-            MetadataV1Error,
-            "provider_order_conflict",
-        ):
-            build_media_metadata_v1(
-                candidate,
-                metadata_id="anime-topology-tie",
-                raw_query="Example Anime",
-            )
+        contract = build_media_metadata_v1(
+            candidate,
+            metadata_id="anime-topology-priority",
+            raw_query="Example Anime",
+        )
+        self.assertEqual(len(contract["items"]), 25)
+        self.assertEqual(contract["evidence"]["series_inventory"]["source"], "tvdb")
 
     def test_latin_fallback_never_populates_semantic_chinese_title(self):
         fact = _fact(
@@ -678,7 +676,7 @@ class MediaMetadataV1Test(unittest.TestCase):
             contract["warnings"],
         )
 
-    def test_tvdb_tmdb_fallback_merges_only_consistent_coordinates(self):
+    def test_tvdb_fallback_preserves_primary_and_supplements_matching_ids(self):
         wikipedia = _fact(
             "wikipedia:Q2",
             "wikipedia",
@@ -737,11 +735,11 @@ class MediaMetadataV1Test(unittest.TestCase):
 
         self.assertEqual(len(contract["items"]), 1)
         item = contract["items"][0]
-        self.assertEqual(item["inventory_source"], "tvdb_tmdb")
+        self.assertEqual(item["inventory_source"], "tvdb")
         self.assertEqual(item["tvdb_episode_id"], "tvdb-1")
         self.assertEqual(item["tmdb_episode_id"], "tmdb-1")
 
-    def test_tvdb_tmdb_fallback_date_conflict_becomes_unknown(self):
+    def test_tvdb_date_is_preserved_when_tmdb_disagrees(self):
         facts = []
         for provider, aired in (("tvdb", "2024-01-01"), ("tmdb", "2024-01-02")):
             facts.append(_fact(
@@ -767,12 +765,45 @@ class MediaMetadataV1Test(unittest.TestCase):
             raw_query="Conflict",
         )
 
-        self.assertEqual(contract["items"][0]["aired"], "")
-        self.assertTrue(contract["items"][0]["air_date_conflict"])
-        self.assertEqual(
-            contract["evidence"]["series_inventory"]["status"],
-            "conflict",
-        )
+        self.assertEqual(contract["items"][0]["aired"], "2024-01-01")
+        self.assertFalse(contract["items"][0].get("air_date_conflict", False))
+        self.assertEqual(contract["items"][0]["air_date_source"], "tvdb")
+        from telepiplex_search.series_scope import apply_series_scope
+        from telepiplex_search.search_plan import confirm_media_metadata
+        scoped = apply_series_scope(contract, "whole_series")
+        confirmed = confirm_media_metadata({"media_metadata": scoped})
+        self.assertEqual(len(confirmed["items"]), 1)
+
+    def test_wikipedia_missing_date_uses_tvdb_then_tmdb_in_confirmed_contract(self):
+        from telepiplex_search.series_scope import apply_series_scope
+        from telepiplex_search.search_plan import confirm_media_metadata
+        for wiki_date, tvdb_date, expected, source in [
+            ("2026-06-01", "2026-06-02", "2026-06-01", "wikipedia"),
+            ("N/A", "2026-06-02", "2026-06-02", "tvdb"),
+            ("", "N/A", "2026-06-03", "tmdb"),
+        ]:
+            with self.subTest(wiki=wiki_date, tvdb=tvdb_date):
+                facts = tuple(_fact(
+                    f"{provider}:priority", provider,
+                    titles=("Example",), year="2026", media_type="series",
+                    url=f"https://example.test/{provider}/priority",
+                    external_ids={"wikidata": "Q1", provider: "1"},
+                    english="Example", episodes=({
+                        "season_number": 1, "episode_number": 1,
+                        "aired": aired, f"{provider}_episode_id": f"{provider}-1",
+                    },),
+                ) for provider, aired in [("wikipedia", wiki_date),
+                                          ("tvdb", tvdb_date),
+                                          ("tmdb", "2026-06-03")])
+                value = build_media_metadata_v1(
+                    _candidate(intended_scope="work", facts=facts),
+                    metadata_id="priority", raw_query="Example")
+                scoped = apply_series_scope(value, "whole_series")
+                confirmed = confirm_media_metadata({"media_metadata": scoped})
+                self.assertEqual(len(confirmed["items"]), 1)
+                self.assertEqual(confirmed["items"][0]["aired"], expected)
+                self.assertEqual(confirmed["items"][0]["air_date_source"], source)
+                self.assertEqual(confirmed["items"][0]["inventory_source"], "wikipedia")
 
     def test_divergent_provider_orders_select_a_complete_profile_not_intersection(self):
         wikipedia = _fact(
@@ -840,14 +871,14 @@ class MediaMetadataV1Test(unittest.TestCase):
             raw_query="死神",
         )
 
-        self.assertEqual(len(contract["items"]), 406)
+        self.assertEqual(len(contract["items"]), 63)
         self.assertEqual(
             contract["evidence"]["series_inventory"]["source"],
-            "tmdb",
+            "tvdb",
         )
         self.assertEqual(
             contract["evidence"]["series_inventory"]["season_totals"],
-            {1: 366, 2: 40},
+            {1: 20, 2: 21, 3: 22},
         )
 
     def test_contract_preserves_anchor_country_for_candidate_presentation(self):

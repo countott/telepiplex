@@ -120,6 +120,7 @@ def log_search_event(
     *,
     search_session_id: str,
     level: str = "info",
+    exception: BaseException | None = None,
     **fields,
 ) -> None:
     session_id = str(search_session_id or "").strip()
@@ -163,6 +164,13 @@ def log_search_event(
         parts.append(
             f"{key}={safe_value}"
         )
-    method(" ".join(parts))
+    kwargs = {}
+    if exception is not None:
+        kwargs["exc_info"] = (
+            type(exception),
+            exception,
+            exception.__traceback__,
+        )
+    method(" ".join(parts), **kwargs)
     if str(event or "").strip() == "search.completed":
         clear_search_log_context(session_id)

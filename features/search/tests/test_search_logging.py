@@ -1,4 +1,8 @@
+import io
+import json
+import logging
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import telepiplex_search.search_logging as search_logging
@@ -9,6 +13,11 @@ from telepiplex_search.search_logging import (
 )
 from telepiplex_search.context import runtime_context
 from telepiplex_search.service import SearchFeature
+from telepiplex_plugin_sdk.diagnostics import render_human_event
+from telepiplex_plugin_sdk.logging_utils import (
+    FEATURE_DIAGNOSTIC_TRANSPORT_PREFIX,
+    _FeatureDiagnosticTransportHandler,
+)
 
 
 class SearchLoggingTest(unittest.TestCase):
@@ -74,6 +83,113 @@ class SearchLoggingTest(unittest.TestCase):
             "terminal_status=ai_fallback",
             logger.warning.call_args.args[0],
         )
+
+    def test_failure_preserves_exception_for_diagnostic_handler(self):
+        logger = Mock()
+
+        try:
+            raise ValueError("series_inventory_invalid")
+        except ValueError as exc:
+            log_search_event(
+                logger,
+                "search.background_task_failed",
+                search_session_id="failure-1",
+                level="warning",
+                exception=exc,
+                stage="metadata_validation",
+            )
+            self.assertIs(logger.warning.call_args.kwargs["exc_info"][1], exc)
+            self.assertIn(
+                "event=search.background_task_failed",
+                logger.warning.call_args.args[0],
+            )
+            self.assertIn(
+                "search_session_id=failure-1",
+                logger.warning.call_args.args[0],
+            )
+
+    def test_sdk_diagnostic_handler_renders_exception_chain_and_redacts_secrets(self):
+        output = io.StringIO()
+        context = SimpleNamespace(
+            manifest={"plugin_id": "search", "version": "2.1.1"},
+        )
+        handler = _FeatureDiagnosticTransportHandler(context, stream=output)
+        logger = logging.Logger("telepiplex.feature.search.test", logging.WARNING)
+        logger.propagate = False
+        logger.addHandler(handler)
+        bind_search_log_context(
+            "failure-sdk",
+            operation_id="operation-sdk",
+        )
+
+        try:
+            try:
+                try:
+                    raise LookupError(
+                        "provider access_token=SEARCH-CAUSE-SECRET"
+                    )
+                except LookupError as cause:
+                    raise ValueError(
+                        "metadata access_token=SEARCH-ERROR-SECRET "
+                        "https://private.example/failure"
+                    ) from cause
+            except ValueError as exc:
+                log_search_event(
+                    logger,
+                    "search.background_task_failed",
+                    search_session_id="failure-sdk",
+                    level="warning",
+                    exception=exc,
+                    stage="metadata_validation",
+                    error="operation_report_failed",
+                    error_code="segment_role_conflict",
+                )
+            handler.flush()
+        finally:
+            search_logging.clear_search_log_context("failure-sdk")
+            logger.removeHandler(handler)
+            handler.close()
+
+        transport_line = next(
+            line
+            for line in output.getvalue().splitlines()
+            if line.startswith(FEATURE_DIAGNOSTIC_TRANSPORT_PREFIX)
+        )
+        event = json.loads(
+            transport_line.removeprefix(FEATURE_DIAGNOSTIC_TRANSPORT_PREFIX)
+        )
+        human = render_human_event(event)
+        machine = json.dumps(event, ensure_ascii=False)
+
+        self.assertEqual(event["event"]["name"], "search.background_task_failed")
+        self.assertEqual(event["event"]["stage"], "metadata_validation")
+        self.assertEqual(event["error"]["type"], "ValueError")
+        self.assertIn("access_token=***redacted***", event["error"]["message"])
+        self.assertIn("Traceback", event["error"]["stack"])
+        self.assertEqual(event["error"]["causes"][0]["type"], "LookupError")
+        self.assertIn(
+            "access_token=***redacted***",
+            event["error"]["causes"][0]["message"],
+        )
+        self.assertEqual(
+            event["facts"]["legacy_fields"]["error"],
+            "operation_report_failed",
+        )
+        self.assertEqual(
+            event["facts"]["legacy_fields"]["error_code"],
+            "segment_role_conflict",
+        )
+        self.assertEqual(
+            event["facts"]["legacy_fields"]["operation_id"],
+            "operation-sdk",
+        )
+        for secret in (
+            "SEARCH-CAUSE-SECRET",
+            "SEARCH-ERROR-SECRET",
+            "private.example",
+        ):
+            self.assertNotIn(secret, machine)
+            self.assertNotIn(secret, human)
 
     def test_bound_session_context_is_inherited_until_terminal_event(self):
         logger = Mock()

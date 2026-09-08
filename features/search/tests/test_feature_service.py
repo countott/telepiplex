@@ -729,6 +729,382 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "identity",
         )
 
+    async def test_conflicting_provider_dates_keep_ten_episodes_through_download_once(self):
+        from tests.test_media_metadata_v1 import _candidate, _fact
+        from telepiplex_search.media_metadata_v1 import build_media_metadata_v1
+        facts = tuple(_fact(
+            f"{provider}:10", provider, titles=("The Glory",), english="The Glory",
+            chinese="黑暗荣耀", year="2022", media_type="series",
+            url=f"https://example.com/{provider}/10", external_ids={provider: "10"},
+            episodes=tuple({
+                f"{provider}_episode_id": f"{provider}-{number}",
+                "season_number": 1, "episode_number": number, "aired": aired,
+                "season_total": 10,
+            } for number in range(1, 11)),
+        ) for provider, aired in (("tvdb", "2022-12-30"), ("tmdb", "2022-12-31")))
+
+        async def planner(_raw_query, plan_id):
+            plan = series_ranked_search_plan()
+            contract = build_media_metadata_v1(
+                _candidate(intended_scope="whole_series", facts=facts),
+                metadata_id=plan_id, raw_query="The Glory",
+            )
+            contract["evidence"]["decision"] = {
+                "mode": "deterministic_bounded", "scope": "movie_or_series",
+            }
+            plan["plan_id"] = plan_id
+            plan["media_metadata"] = contract
+            plan["candidates"][0]["media_metadata"] = contract
+            return plan
+
+        def search(query, media_type):
+            self.search_queries.append((query, media_type))
+            return [{
+                "title": "The.Glory.S01.COMPLETE.1080p.WEB-DL",
+                "magnet_url": "magnet:?xt=urn:btih:" + "c" * 40,
+                "seeders": 10, "size": 100, "indexer": "test",
+            }]
+
+        self.feature.plan_builder = planner
+        self.feature.release_search = search
+        await self.feature.command({
+            "command": "s", "args": ["The Glory"], "user_id": 1, "chat_id": 10,
+        })
+        await self.runtime.run("search-plan-")
+        button = self.host.reports[-1]["details"]["keyboard"][0][0]["callback_data"]
+        plan_id = button.split(":")[2]
+        await self.feature.callback({
+            "payload": f"select:{plan_id}:0", "user_id": 1, "chat_id": 10,
+        })
+        self.assertEqual(self.search_queries, [])
+        await self.feature.callback({
+            "payload": f"scope:{plan_id}:whole_series", "user_id": 1, "chat_id": 10,
+        })
+        await self.runtime.run("search-releases-")
+        stored = self.feature.plans[plan_id]
+        self.assertEqual(len(stored["private_confirmed_contract"]["items"]), 10)
+        self.assertEqual(stored["confirmed_contract"]["schema_version"], 2)
+        self.assertTrue(self.search_queries)
+        self.assertLess(
+            next(i for i, item in enumerate(self.host.timeline)
+                 if item[:2] == ("segment_sealed", "identity")),
+            self.host.timeline.index(("report", "running", "prowlarr_search")),
+        )
+        release_id = next(iter(stored["release_by_id"]))
+        request = {"payload": f"release:{plan_id}:{release_id}", "user_id": 1, "chat_id": 10}
+        from telepiplex_plugin_sdk.runtime import FeatureRuntime
+        runtime = FeatureRuntime(
+            manifest={"plugin_id": "search", "version": "2.1.2", "host_api": ">=1.1,<2.0"},
+            token="offline-test-token",
+        )
+        self.feature.bind_runtime(runtime)
+        await self.feature.callback(request)
+        repeated = await self.feature.callback(request)
+        self.assertEqual(repeated["operation"]["state"], "running")
+        await self.feature.callback(dict(request, payload=f"release:{plan_id}:another-release"))
+        self.assertEqual(stored["selected_release_id"], release_id)
+        await self.feature.operations[stored["operation_id"]]["task"]
+        await self.feature.callback(request)
+        self.assertEqual(len(self.host.calls), 1)
+        capability, method, payload, kwargs = self.host.calls[0]
+        self.assertEqual((capability, method), ("download.provider", "submit"))
+        self.assertEqual(payload["media_metadata"]["scope"]["kind"], "whole_series")
+        self.assertTrue(kwargs["idempotency_key"])
+
+    async def test_scope_observation_records_bounded_input_and_selected_inventory(self):
+        from telepiplex_search.context import runtime_context
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        stored["plan"] = series_ranked_search_plan()
+        contract = stored["plan"]["media_metadata"]
+        contract["evidence"]["series_inventory"]["source"] = "tvdb"
+        logger = Mock()
+        with patch.object(runtime_context, "logger", logger):
+            self.feature._scope_callback(
+                plan_id, stored, "episode", {}, "1", "2",
+            )
+        measurements = [call.kwargs["extra"] for call in logger.info.call_args_list
+                        if call.kwargs.get("extra", {}).get("event_name")
+                        == "search.scope.selected"]
+        self.assertEqual(len(measurements), 1)
+        self.assertEqual(measurements[0]["diagnostic_fields"]["output"], {
+            "scope": "episode", "input_item_count": 8, "selected_item_count": 1,
+            "aired_count": 8, "scheduled_count": 0, "unknown_count": 0,
+            "date_conflict_count": 0, "inventory_source": "tvdb",
+        })
+
+    async def test_metadata_failures_finish_identity_segment(self):
+        for boundary, phase in (
+            ("confirm_media_metadata", "metadata_validation"),
+            ("project_confirmed_media_metadata_v2", "metadata_projection"),
+        ):
+            with self.subTest(boundary=boundary):
+                plan_id = await self._prepare_search()
+                stored = self.feature.plans[plan_id]
+                with patch("telepiplex_search.service." + boundary,
+                           side_effect=ValueError("series_inventory_invalid")):
+                    await self.feature._release_search_task(
+                        plan_id, stored, stored["operation_id"]
+                    )
+                failed = self.host.reports[-1]
+                self.assertEqual(failed["state"], "failed")
+                self.assertEqual(failed["segment"], {
+                    "role": "identity", "presentation_kind": "photo",
+                })
+                self.assertEqual(failed["details"].get("keyboard", []), [])
+                self.assertEqual(stored["release_search_phase"], phase)
+                self.assertEqual(self.search_queries, [])
+                self.assertEqual(self.host.calls, [])
+                self.assertNotIn(plan_id, self.feature.plans)
+
+    async def test_preseal_cancellation_finishes_identity_segment(self):
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        with patch("telepiplex_search.service.confirm_media_metadata",
+                   side_effect=asyncio.CancelledError):
+            await self.feature._release_search_task(
+                plan_id, stored, stored["operation_id"]
+            )
+        cancelled = self.host.reports[-1]
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.assertEqual(cancelled["segment"], {
+            "role": "identity", "presentation_kind": "photo",
+        })
+        self.assertEqual(cancelled["details"].get("keyboard", []), [])
+        self.assertNotIn(plan_id, self.feature.plans)
+
+    async def test_internal_query_failure_records_phase_and_context_before_completion(self):
+        from telepiplex_search.context import runtime_context
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        logger = Mock()
+        original_error = ValueError("invalid query projection")
+        with patch.object(runtime_context, "logger", logger), patch.object(
+            self.feature, "_english_prowlarr_queries", side_effect=original_error
+        ):
+            await self.feature._release_search_task(
+                plan_id, stored, stored["operation_id"]
+            )
+        failed = self.host.reports[-1]
+        self.assertEqual(failed["segment"], {
+            "role": "search", "presentation_kind": "text",
+        })
+        self.assertEqual(failed["state"], "failed")
+        failure = next(call for call in logger.warning.call_args_list
+                       if "event=search.background_task_failed " in call.args[0])
+        self.assertIn("stage=prowlarr_query", failure.args[0])
+        self.assertIs(failure.kwargs["exc_info"][1], original_error)
+        completed = next(call for call in logger.info.call_args_list
+                         if "event=search.completed " in call.args[0])
+        self.assertIn("terminal_status=internal_error", completed.args[0])
+        self.assertEqual(self.search_queries, [])
+
+    async def test_release_processing_error_is_not_classified_as_source_unavailable(self):
+        from telepiplex_search.context import runtime_context
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        logger = Mock()
+        self.feature.release_rank = Mock(side_effect=TypeError("invalid ranking shape"))
+        with patch.object(runtime_context, "logger", logger):
+            await self.feature._release_search_task(plan_id, stored, stored["operation_id"])
+        completed = next(call for call in logger.info.call_args_list
+                         if "event=search.completed " in call.args[0])
+        self.assertIn("terminal_status=internal_error", completed.args[0])
+        self.assertIn("stage=release_processing", completed.args[0])
+        self.assertEqual(self.host.reports[-1]["state"], "failed")
+        self.assertEqual(self.host.reports[-1]["segment"]["role"], "search")
+
+    async def test_final_result_report_failure_keeps_context_until_single_failure_event(self):
+        from telepiplex_search.context import runtime_context
+        for has_results in (True, False):
+            with self.subTest(has_results=has_results):
+                plan_id = await self._prepare_search()
+                stored = self.feature.plans[plan_id]
+                logger = Mock()
+                self.feature.indexer_loader = lambda: []
+                self.feature.indexer_summary = lambda _items: {}
+                if not has_results:
+                    self.feature.release_search = lambda *_args: []
+                report_error = RuntimeError("offline result delivery lost")
+                original_report = self.host.report_operation
+
+                async def fail_final_report(view):
+                    if view["stage"] == "release_selection" or view["state"] == "failed":
+                        raise report_error
+                    return await original_report(view)
+
+                with patch.object(runtime_context, "logger", logger), patch.object(
+                    self.host, "report_operation", side_effect=fail_final_report,
+                ):
+                    await self.feature._release_search_task(plan_id, stored, stored["operation_id"])
+                completed = [call for call in logger.info.call_args_list
+                             if "event=search.completed " in call.args[0]]
+                self.assertEqual(len(completed), 1)
+                self.assertIn("terminal_status=internal_error", completed[0].args[0])
+                failures = [call for call in logger.warning.call_args_list
+                            if call.kwargs.get("exc_info")]
+                self.assertEqual(len(failures), 2)
+                for call in failures:
+                    self.assertIs(call.kwargs["exc_info"][1], report_error)
+                    self.assertIn("chat_id=10", call.args[0])
+                    self.assertIn("user_id=1", call.args[0])
+                self.assertIn("event=search.completed ", logger.method_calls[-1].args[0])
+                self.assertNotIn(plan_id, self.feature.plans)
+
+    async def _assert_search_completion_after_final_report(self, *, has_results):
+        from telepiplex_search.context import runtime_context
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        self.feature.indexer_loader = lambda: []
+        self.feature.indexer_summary = lambda _items: {}
+        if not has_results:
+            self.feature.release_search = lambda *_args: []
+        logger = Mock()
+        original_report = self.host.report_operation
+        premature = []
+
+        async def observe_final_report(view):
+            if view["stage"] == "release_selection" or view["state"] == "failed":
+                premature.extend(call for call in logger.info.call_args_list
+                                 if "event=search.completed " in call.args[0])
+            return await original_report(view)
+
+        with patch.object(runtime_context, "logger", logger), patch.object(
+            self.host, "report_operation", side_effect=observe_final_report,
+        ):
+            await self.feature._release_search_task(plan_id, stored, stored["operation_id"])
+        self.assertEqual(premature, [])
+        completed = [call for call in logger.info.call_args_list
+                     if "event=search.completed " in call.args[0]]
+        self.assertEqual(len(completed), 1)
+        self.assertIn("terminal_status=" + ("success" if has_results else "no_match"),
+                      completed[0].args[0])
+        self.assertIn("chat_id=10", completed[0].args[0])
+        self.assertEqual(self.host.reports[-1]["state"], "awaiting_input" if has_results else "failed")
+
+    async def test_success_completion_waits_for_final_result_report(self):
+        await self._assert_search_completion_after_final_report(has_results=True)
+
+    async def test_no_match_completion_waits_for_final_result_report(self):
+        await self._assert_search_completion_after_final_report(has_results=False)
+
+    async def test_running_release_control_logs_cancel_only_after_terminal_report(self):
+        from telepiplex_search.context import runtime_context
+        for report_fails in (False, True):
+            with self.subTest(report_fails=report_fails):
+                plan_id = await self._prepare_search()
+                stored = self.feature.plans[plan_id]
+                operation_id = stored["operation_id"]
+                started = asyncio.Event()
+                logger = Mock()
+                original_report = self.host.report_operation
+                report_error = RuntimeError("cancel report transport lost")
+
+                async def block_search_report(view):
+                    if view["stage"] == "prowlarr_search" and view["state"] == "running":
+                        started.set()
+                        await asyncio.Event().wait()
+                    if report_fails and view["state"] == "cancelled":
+                        raise report_error
+                    return await original_report(view)
+
+                with patch.object(runtime_context, "logger", logger), patch.object(
+                    self.host, "report_operation", side_effect=block_search_report,
+                ):
+                    task = asyncio.create_task(self.feature._release_search_task(plan_id, stored, operation_id))
+                    self.feature.operations[operation_id].update({
+                        "task": task, "task_id": f"search-releases-{operation_id}",
+                    })
+                    await asyncio.wait_for(started.wait(), timeout=1)
+                    response = await self.feature.operation_control({
+                        "operation_id": operation_id, "action": "cancel",
+                    })
+                    self.assertEqual(response["operation"]["state"], "cancelling")
+                    early = [call for call in logger.info.call_args_list
+                             if "event=search.completed " in call.args[0]]
+                    # Always let the background task settle even on regression.
+                    await task
+                self.assertEqual(early, [])
+                completed = [call for call in logger.info.call_args_list
+                             if "event=search.completed " in call.args[0]]
+                self.assertEqual(len(completed), 1)
+                self.assertIn("terminal_status=cancelled", completed[0].args[0])
+                self.assertIn("report_status=" + ("failed" if report_fails else "accepted"),
+                              completed[0].args[0])
+                if report_fails:
+                    failure = next(call for call in logger.warning.call_args_list
+                                   if call.kwargs.get("exc_info"))
+                    self.assertIs(failure.kwargs["exc_info"][1], report_error)
+                    self.assertIn("chat_id=10", failure.args[0])
+                    self.assertIn("user_id=1", failure.args[0])
+                self.assertIn("event=search.completed ", logger.method_calls[-1].args[0])
+                self.assertNotIn(plan_id, self.feature.plans)
+
+    async def test_unstarted_release_retry_cancel_does_not_wait_for_old_phase(self):
+        from telepiplex_search.context import runtime_context
+        from telepiplex_plugin_sdk.runtime import FeatureRuntime
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        operation_id = stored["operation_id"]
+        stored["release_search_phase"] = "search_result_delivery"
+        runtime = FeatureRuntime(
+            manifest={"plugin_id": "search", "version": "2.1.2", "host_api": ">=1.1,<2.0"},
+            token="offline-test-token",
+        )
+        self.feature.bind_runtime(runtime)
+        logger = Mock()
+        with patch.object(runtime_context, "logger", logger):
+            self.feature._start_release_search_task(plan_id, stored)
+            task = self.feature.operations[operation_id]["task"]
+            result = await self.feature.operation_control({
+                "operation_id": operation_id, "action": "cancel",
+            })
+            await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual(result["operation"]["state"], "cancelled")
+        self.assertNotIn(plan_id, self.feature.plans)
+        completed = [call for call in logger.info.call_args_list
+                     if "event=search.completed " in call.args[0]]
+        self.assertEqual(len(completed), 1)
+        self.assertIn("terminal_status=cancelled", completed[0].args[0])
+
+    async def test_terminal_report_error_is_logged_separately_with_session_context(self):
+        from telepiplex_search.context import runtime_context
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        logger = Mock()
+        original_error = ValueError("invalid metadata")
+        report_error = RuntimeError("report transport lost")
+        self.host.report_operation = AsyncMock(side_effect=report_error)
+        with patch.object(runtime_context, "logger", logger), patch(
+            "telepiplex_search.service.confirm_media_metadata", side_effect=original_error
+        ):
+            await self.feature._release_search_task(
+                plan_id, stored, stored["operation_id"]
+            )
+        failures = [call for call in logger.warning.call_args_list
+                    if call.kwargs.get("exc_info")]
+        self.assertEqual([call.kwargs["exc_info"][1] for call in failures],
+                         [original_error, report_error])
+        for call in failures:
+            self.assertIn("chat_id=10", call.args[0])
+            self.assertIn("user_id=1", call.args[0])
+        events = [call.args[0] for call in logger.method_calls]
+        self.assertIn("event=search.completed ", events[-1])
+        self.assertNotIn(plan_id, self.feature.plans)
+
+    async def test_rejected_identity_report_is_not_reported_again(self):
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        self.host.report_operation = AsyncMock(return_value={
+            "accepted": False, "error_code": "owner_mismatch",
+        })
+        await self.feature._release_search_task(
+            plan_id, stored, stored["operation_id"]
+        )
+        self.host.report_operation.assert_awaited_once()
+        self.assertEqual(self.search_queries, [])
+        self.assertNotIn(plan_id, self.feature.plans)
+
     async def test_prowlarr_failure_keeps_plan_and_offers_retry_exit(self):
         from telepiplex_search.adapters.prowlarr import ProwlarrRequestError
 
@@ -933,7 +1309,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.code, "identity_delivery_failed")
         self.assertEqual(attempts, ["owner_mismatch"])
 
-    async def test_identity_segment_failure_reports_contract_code_not_type(
+    async def test_identity_segment_failure_reports_identity_terminal_message(
         self,
     ):
         from telepiplex_plugin_sdk import FeatureError
@@ -959,7 +1335,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed["state"], "failed")
         self.assertEqual(
             failed["status_text"],
-            "资源搜索失败：identity_delivery_failed",
+            "媒体信息确认失败，请重新搜索。",
         )
         self.assertNotIn("FeatureError", failed["status_text"])
 
@@ -6255,9 +6631,9 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "2.1.1")
+        self.assertEqual(manifest["version"], "2.1.2")
         self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
-        self.assertEqual(project["project"]["version"], "2.1.1")
+        self.assertEqual(project["project"]["version"], "2.1.2")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==2.1.0",
@@ -6291,14 +6667,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-2.1.1.tpx", source)
+        self.assertIn("/tmp/search-2.1.2.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-2.1.1.tpx", source)
+        self.assertNotIn("dist/search-2.1.2.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

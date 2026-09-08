@@ -1037,6 +1037,58 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             context.application.bot.edit_message_media.assert_awaited_once()
             update.effective_message.edit_media.assert_not_awaited()
 
+    async def test_old_scope_callback_cannot_restore_keyboard_after_search_failure(self):
+        from app.handlers.interaction_handler import COORDINATOR_KEY, ROUTER_KEY, OperationReportSink
+        from app.handlers.plugin_handler import handle_feature_result
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        for callback_first in (True, False):
+            with self.subTest(callback_first=callback_first), tempfile.TemporaryDirectory() as tmpdir:
+                coordinator = InteractionCoordinator(Path(tmpdir) / "host.db")
+                self.addCleanup(coordinator.close)
+                sink = OperationReportSink(coordinator)
+                initial = {
+                    "operation_id": "op-scope-failure", "chat_id": 10, "user_id": 1,
+                    "state": "awaiting_input", "stage": "series_scope",
+                    "status_text": "请选择范围", "control": "exit", "revision": 1,
+                    "details": {"keyboard": [[{
+                        "text": "全剧", "callback_data": "search:scope:old:whole_series",
+                    }]]},
+                    "segment": {"role": "identity", "presentation_kind": "photo"},
+                }
+                await sink("search", initial)
+                update, context, _manager = self._request([], user_id=1)
+                route = SimpleNamespace(plugin_id="search", manifest=SimpleNamespace(callbacks=("search",)))
+                router = Mock()
+                router.plugin_route.return_value = route
+                context.application.bot_data.update({COORDINATOR_KEY: coordinator, ROUTER_KEY: router})
+                bot = SimpleNamespace(**{
+                    name: AsyncMock(return_value=SimpleNamespace(message_id=90))
+                    for name in ("send_message", "send_photo", "edit_message_text",
+                                 "edit_message_media", "edit_message_caption",
+                                 "edit_message_reply_markup", "delete_message")
+                })
+                context.application.bot = bot
+                old_result = {"actions": [], "operation": initial}
+                if callback_first:
+                    await handle_feature_result(update, context, route, old_result)
+                terminal = dict(initial, state="failed", stage="identity_confirmation",
+                                status_text="媒体信息确认失败，请重新搜索。", control="",
+                                revision=2, details={"keyboard": []})
+                accepted = await sink("search", terminal)
+                self.assertTrue(accepted["accepted"])
+                for mock in vars(bot).values():
+                    mock.reset_mock()
+                update.effective_message.reply_text.reset_mock()
+                await handle_feature_result(update, context, route, old_result)
+                record = coordinator.get("op-scope-failure")
+                self.assertEqual((record.state, record.revision), ("failed", 2))
+                self.assertEqual(record.details.get("keyboard", []), [])
+                self.assertIsNone(coordinator.active(10, 1))
+                for mock in vars(bot).values():
+                    mock.assert_not_awaited()
+                update.effective_message.reply_text.assert_not_awaited()
+
     async def test_stale_segment_result_never_renders_the_current_segment(self):
         from app.handlers.interaction_handler import COORDINATOR_KEY, ROUTER_KEY
         from app.handlers.plugin_handler import handle_feature_result

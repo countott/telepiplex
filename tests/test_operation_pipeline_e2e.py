@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -572,6 +572,92 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
             (current.plugin_id, current.state, current.revision),
             ("search", "running", 1),
         )
+
+    async def test_search_actual_failures_release_real_host_identity_ownership(self):
+        from app.handlers.interaction_handler import OperationReportSink
+        source = str(ROOT / "features/search/src")
+        if source not in sys.path:
+            sys.path.insert(0, source)
+        from telepiplex_search.service import SearchFeature
+
+        sink = OperationReportSink(self.coordinator)
+        responses = []
+        coordinator = self.coordinator
+
+        class SearchCoreHost:
+            async def report_operation(self, report):
+                response = await sink("search", report)
+                responses.append(response)
+                return response
+
+            async def seal_operation_segment(self, operation_id, role, **_kwargs):
+                segment = coordinator.get_active_segment(operation_id)
+                coordinator.claim_segment_delivery(
+                    segment.segment_id, owner_plugin_id="search", generation=segment.generation,
+                )
+                coordinator.bind_segment_message(
+                    segment.segment_id, owner_plugin_id="search", generation=segment.generation,
+                    chat_id=10, message_id=7002, message_kind="photo",
+                )
+                coordinator.record_segment_rendered(
+                    segment.segment_id, owner_plugin_id="search", generation=segment.generation,
+                    business_revision=segment.business_revision, projection_hash=segment.projection_hash,
+                )
+                sealing = coordinator.seal_segment("search", operation_id, role)
+                sealed = coordinator.complete_segment_seal(
+                    sealing.segment_id, owner_plugin_id="search", generation=sealing.generation,
+                )
+                return {"accepted": True, "state": sealed.state}
+
+        for boundary, error, state in (
+            ("confirm_media_metadata", ValueError("invalid inventory"), "failed"),
+            ("project_confirmed_media_metadata_v2", ValueError("invalid v2"), "failed"),
+            ("confirm_media_metadata", asyncio.CancelledError(), "cancelled"),
+            ("_english_prowlarr_queries", ValueError("invalid query"), "failed"),
+            ("_english_prowlarr_queries", asyncio.CancelledError(), "cancelled"),
+        ):
+            with self.subTest(boundary=boundary, state=state):
+                feature = SearchFeature(config={}, host=SearchCoreHost())
+                operation = feature._new_operation(
+                    {"chat_id": 10, "user_id": 1}, state="awaiting_input",
+                    stage="series_scope", status_text="请选择范围", control="exit",
+                    kind="search",
+                )
+                operation_id = operation["operation_id"]
+                stored = {"plan": {}, "operation_id": operation_id}
+                feature.plans[operation_id] = stored
+                feature.operations[operation_id]["plan_id"] = operation_id
+                await feature._report_operation(
+                    operation_id, state="awaiting_input", stage="series_scope",
+                    status_text="请选择范围", control="exit",
+                    details={"keyboard": [[{
+                        "text": "全剧", "callback_data": "search:scope:old",
+                    }]]},
+                )
+                failure = (
+                    patch.object(feature, boundary, side_effect=error)
+                    if boundary.startswith("_") else
+                    patch("telepiplex_search.service." + boundary, side_effect=error)
+                )
+                with patch("telepiplex_search.service.confirm_media_metadata",
+                           return_value={"retrieval": {"media_type": "movie", "scope": "work"}}), patch(
+                    "telepiplex_search.service.build_identity_presentation",
+                    return_value={"text": "媒体身份", "photo_url": ""},
+                ), patch("telepiplex_search.service.project_confirmed_media_metadata_v2",
+                         return_value={}), failure:
+                    await feature._release_search_task(
+                        operation_id, stored, operation_id,
+                    )
+                self.assertTrue(responses[-1]["accepted"])
+                record = self.coordinator.get(operation_id)
+                self.assertEqual(record.state, state)
+                self.assertIsNone(self.coordinator.active(10, 1))
+                segment = self.coordinator.get_active_segment(operation_id)
+                self.assertEqual(segment.role, "search" if boundary.startswith("_") else "identity")
+                self.assertEqual(segment.presentation_kind, "text" if boundary.startswith("_") else "photo")
+                self.assertEqual(record.details.get("keyboard", []), [])
+                self.assertNotIn(operation_id, feature.plans)
+                # The next loop starts another operation for the same user.
 
     async def test_download_handoff_commit_response_loss_restarts_with_exact_revision(self):
         from app.handlers.interaction_handler import OperationReportSink

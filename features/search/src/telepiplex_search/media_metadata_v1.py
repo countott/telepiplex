@@ -6,8 +6,8 @@ from .anchored_candidate import AnchoredCandidate
 from .entity_graph import CandidateEntity, EvidenceFact, normalize_title
 from .prowlarr_query import build_prowlarr_query_chain
 from .series_topology import (
-    ProviderOrderConflict,
     select_series_topology,
+    episode_air_date,
 )
 from .title_policy import (
     CanonicalTitles,
@@ -361,11 +361,7 @@ def _inventory(
                     "content_role": "main_episode",
                     "season_number": season,
                     "episode_number": episode,
-                    "aired": _text(
-                        raw.get("aired")
-                        or raw.get("firstAired")
-                        or raw.get("air_date")
-                    ),
+                    "aired": episode_air_date(raw),
                     "inventory_source": provider,
                     **{
                         key: raw[key]
@@ -390,63 +386,16 @@ def _inventory(
             ),
         )
 
-    wikipedia_items = collect("wikipedia")
-    if wikipedia_items:
-        downstream_by_coordinate = {}
-        for provider in ("tvdb", "tmdb"):
-            for item in collect(provider):
-                key = (item["season_number"], item["episode_number"])
-                downstream_by_coordinate.setdefault(key, {}).update({
-                    field: item[field]
-                    for field in ("tvdb_episode_id", "tmdb_episode_id")
-                    if item.get(field)
-                })
-        for item in wikipedia_items:
-            item.update(downstream_by_coordinate.get((
-                item["season_number"],
-                item["episode_number"],
-            ), {}))
-        return wikipedia_items, {
-            "status": "wikipedia_authoritative",
-            "selected_provider": "wikipedia",
-            "profile_counts": {"wikipedia": len(wikipedia_items)},
-        }
-    tvdb_items = collect("tvdb")
-    tmdb_items = collect("tmdb")
-    if tvdb_items and tmdb_items:
-        try:
-            selected = select_series_topology(
-                {"tvdb": tvdb_items, "tmdb": tmdb_items},
-                trusted_episode_count=trusted_episode_count,
-                trusted_season_count=trusted_season_count,
-                requested_season_number=requested_season_number,
-            )
-        except ProviderOrderConflict as exc:
-            raise MetadataV1Error(
-                "provider_order_conflict",
-                (exc.reason,),
-            ) from exc
-        items = []
-        for raw in selected.items:
-            item = dict(raw)
-            item["inventory_source"] = selected.provider
-            if item.get("air_date_conflict"):
-                item["inventory_conflict"] = "air_date_conflict"
-            items.append(item)
-        return items, dict(selected.diagnostics)
-    if tvdb_items:
-        return tvdb_items, {
-            "status": "single_profile",
-            "selected_provider": "tvdb",
-            "profile_counts": {"tvdb": len(tvdb_items)},
-        }
-    if tmdb_items:
-        return tmdb_items, {
-            "status": "single_profile",
-            "selected_provider": "tmdb",
-            "profile_counts": {"tmdb": len(tmdb_items)},
-        }
-    return [], {"status": "unavailable", "selected_provider": ""}
+    profiles = {provider: collect(provider) for provider in ("wikipedia", "tvdb", "tmdb")}
+    if not any(profiles.values()):
+        return [], {"status": "unavailable", "selected_provider": ""}
+    selected = select_series_topology(
+        profiles,
+        trusted_episode_count=trusted_episode_count,
+        trusted_season_count=trusted_season_count,
+        requested_season_number=requested_season_number,
+    )
+    return [dict(item) for item in selected.items], dict(selected.diagnostics)
 
 
 def _series_inventory_evidence(

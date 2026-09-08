@@ -1854,6 +1854,7 @@ class SearchFeature:
                 )
 
     def _start_release_search_task(self, plan_id: str, stored: dict) -> dict:
+        stored.pop("release_search_phase", None)
         operation_id = stored["operation_id"]
         task_id = f"search-releases-{operation_id}"
         task = self.runtime.spawn(
@@ -1871,6 +1872,7 @@ class SearchFeature:
     async def _release_search_task(self, plan_id, stored, operation_id):
         try:
             result = await self._confirm_and_search(plan_id, stored)
+            stored["release_search_phase"] = "search_result_delivery"
             if stored.get("selection_frozen"):
                 return
             action = (result.get("actions") or [{}])[0]
@@ -1883,6 +1885,10 @@ class SearchFeature:
                     status_text=str(action.get("text") or "请选择片源。"),
                     control="exit",
                     details=deepcopy(action.get("data") or {}),
+                )
+                self._log_completed_once(
+                    plan_id, stored, terminal_status="success",
+                    release_result_count=len(stored["results"]),
                 )
             elif (
                 plan_id in self.plans
@@ -1907,66 +1913,81 @@ class SearchFeature:
                     control="",
                     details=self._prowlarr_status_details(operation_id),
                 )
+                self._log_completed_once(
+                    plan_id, stored, terminal_status="no_match",
+                    release_result_count=0,
+                )
         except asyncio.CancelledError:
             if stored.get("selection_frozen"):
                 return
-            self._log_completed_once(
-                plan_id,
-                stored,
-                terminal_status="cancelled",
-            )
-            self._release_plan(plan_id)
-            await self._report_operation(
-                operation_id,
-                state="cancelled",
-                stage="prowlarr_search",
-                status_text="已取消搜索。",
-                control="",
-                details=self._prowlarr_status_details(operation_id),
+            await self._finish_release_search(
+                plan_id, stored, operation_id, cancelled=True,
             )
         except Exception as exc:
-            error_code = str(
-                getattr(exc, "code", "")
-                or type(exc).__name__
-            )
             log_search_event(
                 runtime_context.logger,
                 "search.background_task_failed",
                 search_session_id=plan_id,
                 level="warning",
                 operation_id=operation_id,
-                stage="prowlarr_search",
-                error_code=error_code,
+                stage=stored.get("release_search_phase", "metadata_validation"),
+                error_code=str(getattr(exc, "code", "") or type(exc).__name__),
                 error_type=type(exc).__name__,
+                exception=exc,
             )
-            self._log_completed_once(
-                plan_id,
-                stored,
-                terminal_status="source_unavailable",
-                error=error_code,
+            await self._finish_release_search(
+                plan_id, stored, operation_id, exception=exc,
             )
-            self._release_plan(plan_id)
+
+    async def _finish_release_search(
+        self, plan_id, stored, operation_id, *, cancelled=False, exception=None,
+    ):
+        sealed = bool(stored.get("identity_segment_sealed"))
+        phase = stored.get("release_search_phase", "metadata_validation")
+        error_code = (
+            str(getattr(exception, "code", "") or type(exception).__name__)
+            if exception is not None else ""
+        )
+        terminal_status = "cancelled" if cancelled else (
+            "source_unavailable"
+            if phase == "prowlarr_request" and not isinstance(exception, ValueError)
+            else "internal_error"
+        )
+        report_status = "rejected"
+        try:
             if not (self.operations.get(operation_id) or {}).get(
                 "_host_report_rejected"
             ):
-                try:
-                    await self._report_operation(
-                        operation_id,
-                        state="failed",
-                        stage="prowlarr_search",
-                        status_text=(
-                            f"资源搜索失败：{error_code}"
-                        ),
-                        control="",
-                        details=self._prowlarr_status_details(
-                            operation_id
-                        ),
-                    )
-                except Exception:
-                    pass
+                await self._report_operation(
+                    operation_id,
+                    state="cancelled" if cancelled else "failed",
+                    stage="prowlarr_search" if sealed else "identity_confirmation",
+                    status_text=(
+                        "已取消搜索。" if cancelled else
+                        "资源搜索失败，请重新搜索。" if sealed else
+                        "媒体信息确认失败，请重新搜索。"
+                    ),
+                    control="",
+                    details=self._prowlarr_status_details(operation_id) | {"keyboard": []},
+                )
+                report_status = "accepted"
+        except Exception:
+            # _report_operation records the report exception independently.
+            report_status = "failed"
+        finally:
+            self._log_completed_once(
+                plan_id, stored, terminal_status=terminal_status,
+                stage=phase, error=error_code, report_status=report_status,
+            )
+            self._release_plan(plan_id)
 
     def _start_submission_task(self, plan_id, stored, release_id):
         operation_id = stored["operation_id"]
+        if stored.get("selection_frozen"):
+            return {
+                "actions": [],
+                "operation": self._operation_view(self.operations[operation_id]),
+            }
         release_id = str(release_id or "")
         release_by_id = stored.get("release_by_id") or {}
         if release_id not in release_by_id:
@@ -3363,6 +3384,32 @@ class SearchFeature:
         stored["plan"] = plan
         return self._start_selected_release(plan_id, stored)
 
+    def _apply_selected_series_scope(self, plan_id, contract, scope, **coordinates):
+        inventory = series_inventory(contract)
+        items = [
+            item for item in contract.get("items") or ()
+            if isinstance(item, dict)
+        ]
+        evidence_inventory = (contract.get("evidence") or {}).get("series_inventory") or {}
+        selected = None
+        try:
+            selected = apply_series_scope(contract, scope, **coordinates)
+            return selected
+        finally:
+            self._log_measurement(
+                "search.scope.selected", search_session_id=plan_id,
+                status="completed" if selected is not None else "failed",
+                scope=scope, input_item_count=len(items),
+                selected_item_count=len((selected or {}).get("items") or ()),
+                aired_count=sum(map(len, inventory.aired_by_season.values())),
+                scheduled_count=sum(map(len, inventory.scheduled_by_season.values())),
+                unknown_count=sum(map(len, inventory.unknown_by_season.values())),
+                date_conflict_count=sum(
+                    item.get("air_date_conflict") is True for item in items
+                ),
+                inventory_source=str(evidence_inventory.get("source") or "unknown")[:64],
+            )
+
     def _scope_callback(
         self,
         plan_id: str,
@@ -3374,16 +3421,16 @@ class SearchFeature:
         contract = stored["plan"]["media_metadata"]
         decision = ((contract.get("evidence") or {}).get("decision") or {})
         if choice == "whole_series":
-            stored["plan"]["media_metadata"] = apply_series_scope(
-                contract, "whole_series"
+            stored["plan"]["media_metadata"] = self._apply_selected_series_scope(
+                plan_id, contract, "whole_series"
             )
             return self._start_selected_release(plan_id, stored)
         if choice == "season" and len(coordinates) == 1:
             season = int(coordinates[0])
             inventory = series_inventory(contract)
             if inventory.state_by_season.get(season) == "completed":
-                stored["plan"]["media_metadata"] = apply_series_scope(
-                    contract,
+                stored["plan"]["media_metadata"] = self._apply_selected_series_scope(
+                    plan_id, contract,
                     "season",
                     season_number=season,
                 )
@@ -3394,16 +3441,16 @@ class SearchFeature:
                 season,
             )
         if choice == "episode" and len(coordinates) == 2:
-            stored["plan"]["media_metadata"] = apply_series_scope(
-                contract,
+            stored["plan"]["media_metadata"] = self._apply_selected_series_scope(
+                plan_id, contract,
                 "episode",
                 season_number=int(coordinates[0]),
                 episode_number=int(coordinates[1]),
             )
             return self._start_selected_release(plan_id, stored)
         if choice == "season_all":
-            stored["plan"]["media_metadata"] = apply_series_scope(
-                contract,
+            stored["plan"]["media_metadata"] = self._apply_selected_series_scope(
+                plan_id, contract,
                 "season",
                 season_number=decision.get("season_number"),
             )
@@ -3516,14 +3563,14 @@ class SearchFeature:
                     number,
                 )
             self.awaiting_scope_inputs.pop(owner, None)
-            stored["plan"]["media_metadata"] = apply_series_scope(
-                contract, "season", season_number=number
+            stored["plan"]["media_metadata"] = self._apply_selected_series_scope(
+                plan_id, contract, "season", season_number=number
             )
             return self._start_selected_release(plan_id, stored)
         if phase == "episode":
             try:
-                scoped = apply_series_scope(
-                    contract,
+                scoped = self._apply_selected_series_scope(
+                    plan_id, contract,
                     "episode",
                     season_number=pending.get("season_number"),
                     episode_number=number,
@@ -3612,17 +3659,20 @@ class SearchFeature:
     async def _confirm_and_search(self, plan_id: str, stored: dict) -> dict:
         self._measurement_session_id.set(plan_id)
         plan = stored["plan"]
+        stored["release_search_phase"] = "metadata_validation"
         contract = confirm_media_metadata(plan)
         presentation = build_identity_presentation(contract)
         projection_candidate = deepcopy(
             stored.get("selected_candidate") or {}
         )
         projection_candidate["media_metadata"] = contract
+        stored["release_search_phase"] = "metadata_projection"
         public_contract = project_confirmed_media_metadata_v2(
             projection_candidate,
             requested_scope=_v2_scope_from_private_contract(contract),
         )
         stored["identity_presentation"] = deepcopy(presentation)
+        stored["release_search_phase"] = "identity_delivery"
         if not stored.get("identity_segment_sealed"):
             if stored["operation_id"] in self.operations:
                 await self._report_operation(
@@ -3661,6 +3711,7 @@ class SearchFeature:
                     stored["operation_id"]
                 ) | {"telegram_visibility": "silent"}),
             )
+        stored["release_search_phase"] = "prowlarr_query"
         evidence = contract.get("evidence") or {}
         if isinstance(evidence.get("source_links"), list):
             queries = build_prowlarr_query_chain(
@@ -3689,6 +3740,7 @@ class SearchFeature:
         stored["private_confirmed_contract"] = contract
         stored["confirmed_contract"] = public_contract
         stored["active_prowlarr_queries"] = list(queries)
+        stored["release_search_phase"] = "prowlarr_request"
         try:
             indexers = await asyncio.to_thread(self.indexer_loader)
         except Exception as exc:
@@ -3925,6 +3977,7 @@ class SearchFeature:
         raw_items,
         contract: dict,
     ):
+        stored["release_search_phase"] = "release_processing"
         deduplicated = deduplicate_releases(raw_items)
         gate = gate_releases(deduplicated, contract)
         results = self.release_rank(
@@ -3979,22 +4032,10 @@ class SearchFeature:
             search_queries=stored.get("active_prowlarr_queries") or [],
         )
         if not results:
-            self._log_completed_once(
-                plan_id,
-                stored,
-                terminal_status="no_match",
-                release_result_count=0,
-            )
             self._release_plan(plan_id)
             return self._closed(text)
         stored["indexer_summary"] = indexer_summary
         keyboard = release_keyboard(plan_id, results)
-        self._log_completed_once(
-            plan_id,
-            stored,
-            terminal_status="success",
-            release_result_count=len(results),
-        )
         return {
             "actions": [{
                 "kind": "edit_message",
@@ -6898,14 +6939,21 @@ class SearchFeature:
         self.awaiting_queries.discard(owner)
         self.config_wizard.clear({"chat_id": owner[0], "user_id": owner[1]})
         plan_id = str(operation.get("plan_id") or "")
-        if plan_id:
+        task = operation.get("task")
+        stored = self.plans.get(plan_id) or {}
+        release_task_finalizes = (
+            str(operation.get("task_id") or "").startswith("search-releases-")
+            and bool(stored.get("release_search_phase"))
+            and task is not None and not task.done()
+            and not stored.get("selection_frozen")
+        )
+        if plan_id and not release_task_finalizes:
             self._log_completed_once(
                 plan_id,
                 self.plans.get(plan_id),
                 terminal_status="cancelled",
             )
             self._release_plan(plan_id)
-        task = operation.get("task")
         if task is not None and hasattr(task, "cancel") and not task.done():
             task.cancel()
         if operation.get("state") == "awaiting_input" or task is None:
@@ -7068,6 +7116,7 @@ class SearchFeature:
                         or type(exc).__name__
                     ),
                     error_type=type(exc).__name__,
+                    exception=exc,
                 )
                 raise
             if not isinstance(response, dict) or response.get("accepted") is not True:

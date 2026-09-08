@@ -251,6 +251,39 @@ class SeriesScopeTest(unittest.TestCase):
         self.assertEqual(inventory.unknown_by_season, {})
         self.assertEqual(inventory.state_by_season, {1: "completed"})
 
+    def test_historical_conflicts_survive_whole_season_and_episode_selection(self):
+        value = contract()
+        for item in value["items"]:
+            item.update(aired="", air_date_conflict=True,
+                        air_date_candidates=["2026-06-01", "2026-06-02"])
+        today = date(2026, 9, 8)
+        self.assertEqual(series_inventory(value, today=today).state_by_season,
+                         {1: "completed"})
+        for scope, coordinates, expected in [
+            ("whole_series", {}, 3),
+            ("season", {"season_number": 1}, 3),
+            ("episode", {"season_number": 1, "episode_number": 2}, 1),
+        ]:
+            with self.subTest(scope=scope):
+                selected = apply_series_scope(value, scope, today=today, **coordinates)
+                self.assertEqual(len(selected["items"]), expected)
+
+    def test_future_or_unknown_date_conflicts_are_not_selectable(self):
+        for dates in [["2027-06-01", "2027-06-02"],
+                      ["2026-06-01", "2027-06-01"], []]:
+            value = contract()
+            for item in value["items"]:
+                item.update(aired="", air_date_conflict=True,
+                            air_date_candidates=dates)
+            for scope, coordinates in [
+                ("whole_series", {}), ("season", {"season_number": 1}),
+                ("episode", {"season_number": 1, "episode_number": 1}),
+            ]:
+                with self.subTest(dates=dates, scope=scope):
+                    with self.assertRaises(SeriesScopeError):
+                        apply_series_scope(value, scope, today=date(2026, 9, 8),
+                                           **coordinates)
+
     def test_future_date_conflict_is_still_scheduled(self):
         value = contract(seasons=())
         value["items"] = [{
