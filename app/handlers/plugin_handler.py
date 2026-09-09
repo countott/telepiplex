@@ -21,12 +21,14 @@ from app.utils.log_sanitizer import sanitize_log_value
 from app.handlers.interaction_handler import (
     CONFIG_OPERATION_TASKS_KEY,
     COORDINATOR_KEY,
+    _decode_segment_callback,
     callback_dispatch_data,
     deduplicate_terminal_controls,
     operation_markup,
     operation_accepts_text,
     operation_render_lock,
     release_callback_dispatch,
+    repair_rejected_callback,
     render_operation,
 )
 
@@ -597,8 +599,18 @@ async def dynamic_callback_gateway(update, context):
                     f"{getattr(update, 'update_id', '')}"
                 ),
             )
-        released_segment = await asyncio.shield(release_task)
+        interrupted = False
+        while True:
+            try:
+                released_segment = await asyncio.shield(release_task)
+                break
+            except asyncio.CancelledError:
+                if release_task.cancelled():
+                    raise
+                interrupted = True
         release_completed = True
+        if interrupted:
+            raise asyncio.CancelledError
         return released_segment
 
     async def rerender_released_segment():
@@ -631,6 +643,10 @@ async def dynamic_callback_gateway(update, context):
         router = context.application.bot_data.get(ROUTER_KEY)
         route = router.callback_route(namespace) if router is not None else None
         if route is None:
+            if _native_callback_source(update, context):
+                await release_claim()
+                await repair_rejected_callback(update, context)
+                return
             try:
                 await query.answer(text="按钮已失效，请重新打开命令。")
             except Exception:
@@ -658,19 +674,35 @@ async def dynamic_callback_gateway(update, context):
                 deadline=30,
                 idempotency_key=f"telegram:{getattr(update, 'update_id', '')}",
             )
-            await release_claim()
             await handle_feature_result(update, context, route, result)
         except Exception as exc:
             await release_claim()
             code = getattr(exc, "code", "feature_callback_failed")
-            await _feature_feedback(
-                update,
-                f"❌ {code}：{_safe_error(exc)}",
-                prefer_edit=True,
-            )
+            if data != encoded_data:
+                # The durable operation projection owns this card. An RPC
+                # error must not overwrite a newer background report.
+                try:
+                    await query.answer(text=f"操作未完成：{code}，请重试。")
+                except Exception:
+                    pass
+            else:
+                await _feature_feedback(
+                    update,
+                    f"❌ {code}：{_safe_error(exc)}",
+                    prefer_edit=True,
+                    context=context,
+                )
     finally:
-        await release_claim()
-        await rerender_released_segment()
+        interrupted = False
+        try:
+            await release_claim()
+        except asyncio.CancelledError:
+            interrupted = True
+        try:
+            await rerender_released_segment()
+        finally:
+            if interrupted:
+                raise asyncio.CancelledError
 
 
 async def dynamic_message_gateway(update, context):
@@ -784,6 +816,7 @@ async def handle_feature_result(update, context, route, result: dict):
                 update,
                 "任务状态无效，请重新开始。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
+                context=context,
             )
             return
         try:
@@ -871,11 +904,13 @@ async def handle_feature_result(update, context, route, result: dict):
                 update,
                 "任务状态未更新，请稍后重试。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
+                context=context,
             )
             return
     if isinstance(result, dict) and "config_patch" in result:
         await _apply_feature_config_patch(update, context, route, result)
         return
+    native_feedback_only = operation_record is None and _native_callback_source(update, context)
     if (
         operation_record is not None
         and stale_operation_snapshot
@@ -966,7 +1001,11 @@ async def handle_feature_result(update, context, route, result: dict):
             update,
             "会话状态无效，请重新开始。",
             prefer_edit=bool(getattr(update, "callback_query", None)),
+            context=context,
         )
+        return
+    if native_feedback_only:
+        # A legacy session hint cannot retire an authoritative operation card.
         return
     key = _session_key(update)
     if session["state"] == "open":
@@ -1067,6 +1106,7 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
             update,
             "配置内容无效。",
             prefer_edit=prefer_edit,
+            context=context,
         )
         return
     manager = context.application.bot_data.get(MANAGER_KEY)
@@ -1080,6 +1120,7 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
             update,
             "配置不可用。",
             prefer_edit=prefer_edit,
+            context=context,
         )
         return
     try:
@@ -1095,6 +1136,7 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
             update,
             "读取配置失败。",
             prefer_edit=prefer_edit,
+            context=context,
         )
         return
     coordinator = context.application.bot_data.get(COORDINATOR_KEY)
@@ -1133,6 +1175,7 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
         update,
         "正在保存配置。",
         prefer_edit=prefer_edit,
+        context=context,
     )
     try:
         outcome = await manager.configure(
@@ -1166,6 +1209,7 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
                 else "配置保存失败，请检查配置。"
             ),
             prefer_edit=prefer_edit,
+            context=context,
         )
         return
     except Exception as exc:
@@ -1178,6 +1222,7 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
             update,
             "配置保存失败，请检查配置。",
             prefer_edit=prefer_edit,
+            context=context,
         )
         return
     finally:
@@ -1201,6 +1246,7 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
                 update,
                 "配置回滚失败，请检查配置。",
                 prefer_edit=prefer_edit,
+                context=context,
             )
             return
         _finish_feature_config_operation(
@@ -1212,6 +1258,7 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
             update,
             "配置已取消，原配置已恢复。",
             prefer_edit=prefer_edit,
+            context=context,
         )
         return
     _drop_session(context.application.bot_data, _session_key(update))
@@ -1224,6 +1271,7 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
         update,
         "配置已更新。",
         prefer_edit=prefer_edit,
+        context=context,
     )
 
 
@@ -1263,6 +1311,7 @@ async def _render_actions(
     *,
     operation_record=None,
 ) -> tuple[bool, int | None, str | None]:
+    feedback_only = _native_callback_source(update, context)
     actions = result.get("actions") if isinstance(result, dict) else None
     if not isinstance(actions, list) or len(actions) > 20:
         _log_invalid_feature_response(
@@ -1279,6 +1328,7 @@ async def _render_actions(
             update,
             "❌ Feature 返回了无效响应。",
             prefer_edit=bool(getattr(update, "callback_query", None)),
+            context=context,
         )
         return False, None, None
     last_message_id = None
@@ -1301,6 +1351,7 @@ async def _render_actions(
                 update,
                 "❌ Feature 返回了无效响应。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
+                context=context,
             )
             return False, None, None
         text = str(action.get("text") or "")
@@ -1316,6 +1367,7 @@ async def _render_actions(
                 update,
                 "❌ Feature 返回了无效响应。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
+                context=context,
             )
             return False, None, None
         if len(text) > 4096:
@@ -1338,6 +1390,7 @@ async def _render_actions(
                 update,
                 "❌ Feature 返回了无效响应。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
+                context=context,
             )
             return False, None, None
         if index == len(actions) - 1 and operation_record is not None:
@@ -1369,6 +1422,7 @@ async def _render_actions(
                 update,
                 "❌ Feature 返回了无效响应。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
+                context=context,
             )
             return False, None, None
         if (
@@ -1387,8 +1441,14 @@ async def _render_actions(
                 update,
                 "❌ Feature 返回了无效响应。",
                 prefer_edit=bool(getattr(update, "callback_query", None)),
+                context=context,
             )
             return False, None, None
+        if feedback_only:
+            # Without an operation report, actions only carry standalone text.
+            # In particular they cannot install unversioned controls on the card.
+            await _feature_feedback(update, text, context=context)
+            continue
         delivered_action = str(action["kind"])
         if action["kind"] == "send_message":
             sent = await update.effective_message.reply_text(text, **kwargs)
@@ -1617,8 +1677,29 @@ def _poster_items(data):
     return result
 
 
-async def _feature_feedback(update, text: str, *, prefer_edit: bool = False):
+def _native_callback_source(update, context=None):
     query = getattr(update, "callback_query", None)
+    if query is None:
+        return False
+    if _decode_segment_callback(str(getattr(query, "data", "") or "")) is not None:
+        return True
+    if context is None:
+        return False
+    coordinator = context.application.bot_data.get(COORDINATOR_KEY)
+    message_id = getattr(getattr(query, "message", None), "message_id", None)
+    if coordinator is None or not isinstance(message_id, int):
+        return False
+    record = coordinator.find_message_operation(
+        update.effective_chat.id, update.effective_user.id, message_id,
+    )
+    return record is not None and coordinator.has_nonlegacy_message_segments(record.operation_id)
+
+
+async def _feature_feedback(update, text: str, *, prefer_edit: bool = False, context=None):
+    query = getattr(update, "callback_query", None)
+    if _native_callback_source(update, context):
+        # Error feedback must not compete with the owned card's renderer.
+        prefer_edit = False
     action = "send_message"
     if (
         prefer_edit

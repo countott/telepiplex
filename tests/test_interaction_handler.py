@@ -109,6 +109,10 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             message_id=55,
             message_kind="text",
         )
+        segment = self.coordinator.claim_segment_callback(
+            "search", "op-1", message_id=55, segment_generation=segment.generation,
+            callback_generation=segment.callback_generation, callback_token="search:test",
+        )
         context = self.context()
         delivery_started = asyncio.Event()
         release_delivery = asyncio.Event()
@@ -457,6 +461,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         async def delete_message(**_kwargs):
             events.append(("delete_old", None))
+            return True
 
         async def attach_keyboard(**kwargs):
             events.append(("attach_keyboard", kwargs.get("reply_markup")))
@@ -561,7 +566,9 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(events[0][1])
         self.assertIsNotNone(events[-1][1])
         self.assertTrue(
-            events[-1][1].inline_keyboard[0][0].callback_data.startswith("~1.1~")
+            events[-1][1].inline_keyboard[0][0].callback_data.startswith(
+                f"~1.{segment.callback_generation:x}~"
+            )
         )
 
     @patch("app.handlers.interaction_handler.build_poster_grid")
@@ -1112,6 +1119,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
                     if fail_clear and len(clear_attempts) == 1:
                         raise TimedOut("injected control cleanup timeout")
                     visible["reply_markup"] = kwargs["reply_markup"]
+                    return True
 
                 getattr(context.bot, edit_method).side_effect = blocked_edit
                 context.bot.edit_message_reply_markup.side_effect = clear_controls
@@ -2657,7 +2665,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApplicationHandlerStop):
             await operation_gate(update, self.context())
 
-        update.callback_query.answer.assert_awaited_once_with("当前任务进行中")
+        update.callback_query.answer.assert_awaited_once_with("此按钮已失效，请使用当前任务消息。")
 
     async def test_running_prowlarr_allows_only_current_opted_in_release_button(self):
         from app.handlers.interaction_handler import operation_gate
@@ -2692,7 +2700,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         stale = self.callback_update("search:release:stale")
         with self.assertRaises(ApplicationHandlerStop):
             await operation_gate(stale, self.context(router=router))
-        stale.callback_query.answer.assert_awaited_once_with("当前任务进行中")
+        stale.callback_query.answer.assert_awaited_once_with("此按钮已失效，请使用当前任务消息。")
 
     async def test_segment_callback_ack_and_dispatch_do_not_wait_for_busy_render(self):
         from telegram import CallbackQuery, Chat, Message, User
@@ -2812,7 +2820,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             "idle",
         )
 
-    async def test_segment_busy_render_does_not_block_latest_projection(self):
+    async def test_segment_busy_render_serializes_io_without_blocking_report_acceptance(self):
         from telegram import CallbackQuery, Chat, Message, User
         from app.handlers.interaction_handler import (
             CALLBACK_FEEDBACK_TASKS_KEY,
@@ -2914,11 +2922,9 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
                 },
             ),
         )
-        await asyncio.wait_for(
-            render_operation(context.application, router, refreshed),
-            timeout=0.2,
-        )
-        self.assertTrue(projection_started.is_set())
+        rendering = asyncio.create_task(render_operation(context.application, router, refreshed))
+        await asyncio.sleep(0)
+        self.assertFalse(projection_started.is_set())
         claimed = self.coordinator.get_active_segment("op-1")
         self.coordinator.release_segment_callback(
             "search",
@@ -2930,6 +2936,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         release_busy.set()
+        await asyncio.wait_for(rendering, timeout=0.2)
         for _attempt in range(100):
             if not context.application.bot_data.get(
                 CALLBACK_FEEDBACK_TASKS_KEY
@@ -3036,8 +3043,10 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
                 },
             ),
         )
-        await render_operation(context.application, router, refreshed)
+        rendering = asyncio.create_task(render_operation(context.application, router, refreshed))
         self.coordinator.seal_segment("search", "op-1", "identity")
+        release_busy.set()
+        await asyncio.wait_for(rendering, timeout=0.2)
         await render_operation(context.application, router, refreshed)
         self.assertEqual(
             self.coordinator.get_segment(refreshed_segment.segment_id).state,
@@ -3163,7 +3172,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             chat_id=10,
             message_id=92,
             caption="正在确认媒体身份…",
-            reply_markup=None,
+            reply_markup={"inline_keyboard": []},
         )
         with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
             await dynamic_callback_gateway(accepted, context)
@@ -3182,7 +3191,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         replay = self.callback_update(encoded, message_id=92)
         with self.assertRaises(ApplicationHandlerStop):
             await operation_gate(replay, context)
-        replay.callback_query.answer.assert_awaited_once_with("当前任务进行中")
+        replay.callback_query.answer.assert_awaited_once_with("此按钮已失效，请使用当前任务消息。")
 
     async def test_segment_callback_busy_render_failure_does_not_drop_dispatch(self):
         from app.handlers.interaction_handler import (
@@ -3384,7 +3393,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         unrelated = self.callback_update("download:path:1")
         with self.assertRaises(ApplicationHandlerStop):
             await operation_gate(unrelated, context)
-        unrelated.callback_query.answer.assert_awaited_once_with("当前任务进行中")
+        unrelated.callback_query.answer.assert_awaited_once_with("此按钮已失效，请使用当前任务消息。")
 
     async def test_awaiting_input_allows_text_only_for_matching_open_session(self):
         from app.handlers.interaction_handler import operation_gate
@@ -3443,7 +3452,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApplicationHandlerStop):
             await operation_gate(update, self.context(router=router))
 
-        update.callback_query.answer.assert_awaited_once_with("当前任务进行中")
+        update.callback_query.answer.assert_awaited_once_with("此按钮已失效，请使用当前任务消息。")
 
     async def test_awaiting_input_rejects_current_callback_from_old_message(self):
         from app.handlers.interaction_handler import operation_gate
@@ -3475,7 +3484,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApplicationHandlerStop):
             await operation_gate(update, self.context(router=router))
 
-        update.callback_query.answer.assert_awaited_once_with("当前任务进行中")
+        update.callback_query.answer.assert_awaited_once_with("此按钮已失效，请使用当前任务消息。")
 
     async def test_terminal_control_press_is_idempotent_without_feature_dispatch(self):
         from app.handlers.interaction_handler import operation_control_callback
@@ -3518,7 +3527,10 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.request.await_args.args[0], "operation.control")
         self.assertEqual(self.coordinator.get("op-1").state, "cancelling")
 
-        repeated = self.callback_update("host-operation:cancel:op-1")
+        repeated = self.callback_update(
+            "host-operation:cancel:op-1",
+            message_id=self.coordinator.get("op-1").message_id,
+        )
         await operation_control_callback(repeated, self.context(router=router))
         client.request.assert_awaited_once()
         repeated.callback_query.answer.assert_awaited_once_with("任务正在取消")

@@ -6,15 +6,19 @@ from telegram import Bot
 from telegram.ext import ExtBot
 from telegram.request import HTTPXRequest
 
+from app.utils.log_sanitizer import REDACTED, sanitize_log_text
+
 try:
     import init
 except ModuleNotFoundError:  # pragma: no cover - package-imported test/runtime fallback
     from app import init
 
 
-def _message_id(result) -> int | None:
+def _message_id(result, target=None) -> int | None:
     value = getattr(result, "message_id", None)
-    return int(value) if isinstance(value, int) else None
+    if not isinstance(value, int) or isinstance(value, bool):
+        value = target
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _reply_markup_data(reply_markup) -> object | None:
@@ -28,6 +32,13 @@ def _reply_markup_data(reply_markup) -> object | None:
     return str(reply_markup)
 
 
+def _keyboard_intent(reply_markup) -> dict:
+    markup = _reply_markup_data(reply_markup)
+    rows = markup.get("inline_keyboard", ()) if isinstance(markup, Mapping) else ()
+    count = sum(len(row) for row in rows)
+    return {"intent": "replace" if count else "clear", "button_count": count}
+
+
 def _record_delivery(
     *,
     action: str,
@@ -35,7 +46,19 @@ def _record_delivery(
     chat_id,
     result,
     reply_markup=None,
+    message_id=None,
+    keyboard=None,
 ) -> None:
+    if keyboard is not None and result is False:
+        _record_cleanup_failure(
+            action=action,
+            chat_id=chat_id,
+            message_id=message_id,
+            keyboard=keyboard,
+            error=None,
+            token="",
+        )
+        return
     logger = getattr(init, "logger", None)
     method = getattr(logger, "info", None) if logger is not None else None
     if not callable(method):
@@ -48,15 +71,50 @@ def _record_delivery(
     markup = _reply_markup_data(reply_markup)
     if markup not in (None, {}, []):
         user_surface["data"] = {"reply_markup": markup}
+    input_fields = {"chat_id": chat_id}
+    if message_id is not None:
+        input_fields["message_id"] = message_id
+    if keyboard is not None:
+        input_fields["keyboard"] = keyboard
     method(
         "Telegram API 内容已送达",
         event_name="telegram.api.delivered",
         diagnostic_fields={
             "stage": "telegram_delivery",
             "status": "completed",
-            "input": {"chat_id": chat_id},
+            "input": input_fields,
             "user_surface": user_surface,
-            "output": {"message_id": _message_id(result)},
+            "output": {"message_id": _message_id(result, message_id), "success": True},
+        },
+    )
+
+
+def _record_cleanup_failure(*, action, chat_id, message_id, keyboard, error, token):
+    logger = getattr(init, "logger", None)
+    method = getattr(logger, "warning", None) if logger is not None else None
+    if not callable(method):
+        return
+    message = str(error) if error is not None else "Telegram API returned false."
+    if token:
+        message = message.replace(token, REDACTED)
+    method(
+        "Telegram API 消息清理失败",
+        event_name="telegram.api.failed",
+        diagnostic_fields={
+            "stage": "telegram_delivery",
+            "status": "failed",
+            "input": {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "keyboard": keyboard,
+            },
+            "user_surface": {"direction": "outgoing", "action": action, "text": None},
+            "output": {
+                "message_id": message_id,
+                "success": False,
+                "error_type": type(error).__name__ if error is not None else None,
+                "error_message": sanitize_log_text(message),
+            },
         },
     )
 
@@ -110,6 +168,7 @@ class _DiagnosticBotMixin:
             text=text,
             chat_id=chat_id,
             result=result,
+            message_id=message_id,
             reply_markup=kwargs.get("reply_markup"),
         )
         return result
@@ -136,6 +195,7 @@ class _DiagnosticBotMixin:
             text=caption,
             chat_id=chat_id,
             result=result,
+            message_id=message_id,
             reply_markup=kwargs.get("reply_markup"),
         )
         return result
@@ -160,7 +220,72 @@ class _DiagnosticBotMixin:
             text=getattr(media, "caption", None),
             chat_id=chat_id,
             result=result,
+            message_id=message_id,
             reply_markup=kwargs.get("reply_markup"),
+        )
+        return result
+
+    async def edit_message_reply_markup(
+        self,
+        chat_id=None,
+        message_id=None,
+        inline_message_id=None,
+        reply_markup=None,
+        *args,
+        **kwargs,
+    ):
+        keyboard = _keyboard_intent(reply_markup)
+        try:
+            result = await super().edit_message_reply_markup(
+                chat_id,
+                message_id,
+                inline_message_id,
+                reply_markup,
+                *args,
+                **kwargs,
+            )
+        except Exception as exc:
+            _record_cleanup_failure(
+                action="edit_message_reply_markup",
+                chat_id=chat_id,
+                message_id=message_id,
+                keyboard=keyboard,
+                error=exc,
+                token=self.token,
+            )
+            raise
+        _record_delivery(
+            action="edit_message_reply_markup",
+            text=None,
+            chat_id=chat_id,
+            message_id=message_id,
+            result=result,
+            reply_markup=reply_markup,
+            keyboard=keyboard,
+        )
+        return result
+
+    async def delete_message(self, chat_id, message_id, *args, **kwargs):
+        keyboard = {"intent": "delete_message", "button_count": 0}
+        try:
+            result = await super().delete_message(chat_id, message_id, *args, **kwargs)
+        except Exception as exc:
+            _record_cleanup_failure(
+                action="delete_message",
+                chat_id=chat_id,
+                message_id=message_id,
+                keyboard=keyboard,
+                error=exc,
+                token=self.token,
+            )
+            raise
+        _record_delivery(
+            action="delete_message",
+            text=None,
+            chat_id=chat_id,
+            message_id=message_id,
+            result=result,
+            keyboard=keyboard,
         )
         return result
 

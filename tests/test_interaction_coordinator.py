@@ -187,6 +187,216 @@ class InteractionCoordinatorTest(unittest.TestCase):
         self.assertEqual(replaced.delivery_state, "delivered")
         self.assertEqual(replaced.message_id, 78)
         self.assertEqual(replaced.message_kind, "photo")
+        cleanup = self.coordinator.get_message_cleanup("op-1", 77)
+        self.assertTrue(cleanup.delete)
+        self.assertEqual(cleanup.segment_id, replaced.segment_id)
+        self.coordinator.ack_message_cleanup("op-1", 77)
+        historical = self.coordinator.find_message_segment(10, 1, 77)
+        self.assertEqual(historical.message_id, 77)
+        self.assertEqual(historical.segment_id, replaced.segment_id)
+        self.assertIsNone(self.coordinator.find_message_segment(10, 2, 77))
+
+    def test_cleanup_projection_invalidation_only_matches_exact_current_cursor(self):
+        _, segment = self.coordinator.accept_segment_report("search", self.report(
+            segment={"role": "identity", "presentation_kind": "photo"}))
+        self.coordinator.bind_segment_message(segment.segment_id, owner_plugin_id="search",
+            generation=segment.generation, chat_id=10, message_id=77)
+        self.coordinator._connection.execute(
+            "UPDATE operation_message_segments SET rendered_projection_hash=projection_hash, rendered_revision=business_revision")
+        self.assertFalse(self.coordinator.invalidate_segment_projection(segment.segment_id,
+            owner_plugin_id="search", generation=segment.generation, message_id=78))
+        self.assertTrue(self.coordinator.get_segment(segment.segment_id).rendered_projection_hash)
+        claimed = self.coordinator.claim_segment_callback("search", "op-1", message_id=77,
+            segment_generation=segment.generation, callback_generation=1)
+        self.assertEqual(claimed.rendered_projection_hash, "")
+        self.assertEqual(claimed.business_revision, segment.business_revision)
+
+    def test_callback_generation_changes_only_with_idle_interaction_identity(self):
+        report = self.report(segment={"role": "identity", "presentation_kind": "photo"})
+        _, segment = self.coordinator.accept_segment_report("search", report)
+        self.coordinator.bind_segment_message(segment.segment_id, owner_plugin_id="search",
+            generation=segment.generation, chat_id=10, message_id=77)
+        _, progress = self.coordinator.accept_segment_report("search", {
+            **report, "revision": 2, "status_text": "More progress", "details": {"progress": 50}})
+        self.assertEqual(progress.callback_generation, 1)
+        _, changed = self.coordinator.accept_segment_report("search", {
+            **report, "revision": 3, "stage": "next_step"})
+        self.assertEqual(changed.callback_generation, 2)
+        claimed = self.coordinator.claim_segment_callback("search", "op-1", message_id=77,
+            segment_generation=segment.generation, callback_generation=2, callback_token="next")
+        _, busy = self.coordinator.accept_segment_report("search", {
+            **report, "revision": 4, "stage": "last_step"})
+        self.assertEqual(busy.callback_generation, claimed.callback_generation)
+
+    def test_promotion_cursor_and_cleanup_are_committed_atomically(self):
+        _, segment = self.coordinator.accept_segment_report("search", self.report(
+            segment={"role": "identity", "presentation_kind": "photo"}))
+        self.coordinator.bind_segment_message(segment.segment_id, owner_plugin_id="search",
+            generation=segment.generation, chat_id=10, message_id=77, message_kind="text")
+        self.coordinator.claim_segment_replacement_delivery(segment.segment_id,
+            owner_plugin_id="search", generation=segment.generation, chat_id=10,
+            expected_message_id=77, expected_message_kind="text")
+        with patch.object(self.coordinator, "_queue_message_cleanup", side_effect=RuntimeError("disk")):
+            with self.assertRaises(RuntimeError):
+                self.coordinator.replace_segment_message(segment.segment_id, owner_plugin_id="search",
+                    generation=segment.generation, chat_id=10, expected_message_id=77,
+                    expected_message_kind="text", message_id=78, message_kind="photo")
+        self.assertEqual(self.coordinator.get_segment(segment.segment_id).message_id, 77)
+
+    def test_terminal_report_queues_current_message_without_deleting_it(self):
+        self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id("op-1", 77, "text")
+        self.coordinator.report("search", self.report(state="completed", revision=2, control=""))
+        queued = self.coordinator.get_message_cleanup("op-1", 77)
+        self.assertEqual(queued.reason, "terminal")
+        self.assertFalse(queued.delete)
+
+    def test_native_binding_after_terminal_report_queues_newly_known_message(self):
+        report = self.report(segment={"role": "identity", "presentation_kind": "text"})
+        _, segment = self.coordinator.accept_segment_report("search", report)
+        self.coordinator.accept_segment_report("search", {
+            **report, "state": "completed", "control": "", "revision": 2})
+        self.coordinator.bind_segment_message(segment.segment_id, owner_plugin_id="search",
+            generation=segment.generation, chat_id=10, message_id=77)
+        queued = self.coordinator.get_message_cleanup("op-1", 77)
+        self.assertIsNotNone(queued)
+        self.assertEqual(queued.reason, "terminal")
+
+    def test_terminal_late_promotion_queues_the_new_photo_as_well_as_old_text(self):
+        report = self.report(segment={"role": "identity", "presentation_kind": "photo"})
+        _, segment = self.coordinator.accept_segment_report("search", report)
+        self.coordinator.bind_segment_message(segment.segment_id, owner_plugin_id="search",
+            generation=segment.generation, chat_id=10, message_id=77, message_kind="text")
+        self.coordinator.claim_segment_replacement_delivery(segment.segment_id,
+            owner_plugin_id="search", generation=segment.generation, chat_id=10,
+            expected_message_id=77, expected_message_kind="text")
+        self.coordinator.accept_segment_report("search", {
+            **report, "state": "completed", "control": "", "revision": 2})
+        self.coordinator.replace_segment_message(segment.segment_id, owner_plugin_id="search",
+            generation=segment.generation, chat_id=10, expected_message_id=77,
+            expected_message_kind="text", message_id=78, message_kind="photo")
+        self.assertEqual(self.coordinator.get_message_cleanup("op-1", 78).reason, "terminal")
+        self.assertIsNotNone(self.coordinator.get_message_cleanup("op-1", 77))
+
+    def test_message_ownership_cannot_transfer_between_operations_or_users(self):
+        from app.runtime.interaction_coordinator import InteractionError
+        self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id("op-1", 77, "text")
+        self.coordinator.clear_message_id("op-1")
+        self.coordinator.ack_message_cleanup("op-1", 77)
+        new = self.report(operation_id="other", user_id=2)
+        self.coordinator.report("search", new)
+        with self.assertRaises(InteractionError) as raised:
+            self.coordinator.set_message_id("other", 77, "text")
+        self.assertEqual(raised.exception.code, "message_owner_conflict")
+        _, segment = self.coordinator.accept_segment_report("search", {
+            **new, "revision": 2,
+            "segment": {"role": "identity", "presentation_kind": "photo"}})
+        with self.assertRaises(InteractionError):
+            self.coordinator.bind_segment_message(segment.segment_id, owner_plugin_id="search",
+                generation=segment.generation, chat_id=10, message_id=77)
+        self.assertIsNone(self.coordinator.get_segment(segment.segment_id).message_id)
+        self.coordinator.bind_segment_message(segment.segment_id, owner_plugin_id="search",
+            generation=segment.generation, chat_id=10, message_id=78, message_kind="text")
+        self.coordinator.claim_segment_replacement_delivery(segment.segment_id,
+            owner_plugin_id="search", generation=segment.generation, chat_id=10,
+            expected_message_id=78, expected_message_kind="text")
+        with self.assertRaises(InteractionError):
+            self.coordinator.replace_segment_message(segment.segment_id, owner_plugin_id="search",
+                generation=segment.generation, chat_id=10, expected_message_id=78,
+                expected_message_kind="text", message_id=77, message_kind="photo")
+        self.assertEqual(self.coordinator.get_segment(segment.segment_id).message_id, 78)
+
+    def test_authoritative_recovery_releases_only_previous_host_exact_busy_claim(self):
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+        report = self.report(segment={"role": "identity", "presentation_kind": "text"})
+        _, segment = self.coordinator.accept_segment_report("search", report)
+        self.coordinator.bind_segment_message(segment.segment_id, owner_plugin_id="search",
+            generation=segment.generation, chat_id=10, message_id=77)
+        self.coordinator.record_segment_rendered(segment.segment_id, owner_plugin_id="search",
+            generation=segment.generation, business_revision=1, projection_hash=segment.projection_hash)
+        claimed = self.coordinator.claim_segment_callback("search", "op-1", message_id=77,
+            segment_generation=segment.generation, callback_generation=1, callback_token="search:pick")
+        identity = dict(owner_plugin_id="search", segment_id=segment.segment_id,
+            generation=segment.generation, message_id=77, callback_generation=claimed.callback_generation,
+            callback_token=claimed.callback_token, expected_revision=1)
+        self.assertIsNone(self.coordinator.release_recovered_callback("op-1", **identity))
+        self.coordinator.close()
+        self.coordinator = InteractionCoordinator(self.database_path)
+        self.assertEqual(self.coordinator.get_segment(segment.segment_id).rendered_projection_hash, "")
+        self.assertIsNone(self.coordinator.release_recovered_callback("op-1", **{
+            **identity, "message_id": 78}))
+        self.assertIsNone(self.coordinator.release_recovered_callback("op-1", **{
+            **identity, "expected_revision": 2}))
+        self.coordinator.accept_segment_report("search", {**report, "revision": 2})
+        recovered = self.coordinator.release_recovered_callback("op-1", **{
+            **identity, "expected_revision": 2})
+        self.assertEqual(recovered.callback_state, "idle")
+        self.assertEqual(recovered.rendered_projection_hash, "")
+
+    def test_message_ownership_migration_preserves_active_cursor_and_quarantines_old_cleanup(self):
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+        self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id("op-1", 77, "text")
+        self.coordinator.report("search", self.report(state="completed", control="", revision=2))
+        self.coordinator.report("search", self.report(operation_id="new", user_id=2,
+            state="awaiting_input", control="exit"))
+        # Before immutable ownership was introduced, this reuse was legal.
+        self.coordinator._connection.execute(
+            "UPDATE operations SET message_id=77, message_kind='text' WHERE operation_id='new'")
+        self.coordinator._connection.execute("DROP TABLE operation_message_ownership")
+        self.coordinator.close()
+        self.coordinator = InteractionCoordinator(self.database_path)
+        self.assertEqual(self.coordinator.find_message_operation(10, 2, 77).operation_id, "new")
+        self.assertIsNone(self.coordinator.find_message_operation(10, 1, 77))
+        self.assertEqual(self.coordinator.get_message_cleanup("op-1", 77).last_error, "message_owner_conflict")
+        self.assertEqual(self.coordinator.pending_message_cleanups(now=10**12), [])
+
+    def test_message_ownership_migration_handles_reused_terminal_history(self):
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+        self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id("op-1", 77, "text")
+        self.coordinator.report("search", self.report(state="completed", control="", revision=2))
+        self.coordinator.report("search", self.report(operation_id="new", user_id=2,
+            state="completed", control=""))
+        self.coordinator._connection.execute(
+            "UPDATE operations SET message_id=77, message_kind='text' WHERE operation_id='new'")
+        self.coordinator._connection.execute("DROP TABLE operation_message_ownership")
+        self.coordinator.close()
+        self.coordinator = InteractionCoordinator(self.database_path)
+        self.assertEqual(self.coordinator.find_message_operation(10, 2, 77).operation_id, "new")
+        due = self.coordinator.pending_message_cleanups(now=10**12)
+        self.assertEqual([(item.operation_id, item.message_id) for item in due], [("new", 77)])
+
+    def test_quarantined_history_cannot_block_later_terminal_business_state(self):
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+        self.coordinator.report("search", self.report())
+        self.coordinator.set_message_id("op-1", 77, "text")
+        self.coordinator.report("search", self.report(operation_id="new", user_id=2))
+        self.coordinator._connection.execute(
+            "UPDATE operations SET message_id=77, message_kind='text' WHERE operation_id='new'")
+        self.coordinator._connection.execute("DROP TABLE operation_message_ownership")
+        self.coordinator.close()
+        self.coordinator = InteractionCoordinator(self.database_path)
+        terminal = self.coordinator.report("search", self.report(state="completed", control="", revision=2))
+        self.assertEqual(terminal.state, "completed")
+        self.assertEqual(self.coordinator.find_message_operation(10, 2, 77).operation_id, "new")
+
+    def test_noncanonical_migrated_native_cursor_cannot_claim_callbacks(self):
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+        _, segment = self.coordinator.accept_segment_report("search", self.report(
+            segment={"role": "identity", "presentation_kind": "text"}))
+        self.coordinator.bind_segment_message(segment.segment_id, owner_plugin_id="search",
+            generation=segment.generation, chat_id=10, message_id=77)
+        self.coordinator.report("search", self.report(operation_id="new", user_id=2))
+        self.coordinator._connection.execute(
+            "UPDATE operations SET message_id=77, message_kind='text' WHERE operation_id='new'")
+        self.coordinator._connection.execute("DROP TABLE operation_message_ownership")
+        self.coordinator.close()
+        self.coordinator = InteractionCoordinator(self.database_path)
+        claimed = self.coordinator.claim_segment_callback("search", "op-1", message_id=77,
+            segment_generation=segment.generation, callback_generation=1, callback_token="search:pick")
+        self.assertIsNone(claimed)
 
     def test_same_segment_accepts_a_newer_business_revision_in_place(self):
         _operation, created = self.coordinator.accept_segment_report(
@@ -751,11 +961,15 @@ class InteractionCoordinatorTest(unittest.TestCase):
         sealing = self.coordinator.seal_segment(
             "search", "op-1", "identity"
         )
+        queued = self.coordinator.get_message_cleanup("op-1", 91)
+        self.assertIsNotNone(queued)
+        self.coordinator.ack_message_cleanup("op-1", 91)
         sealed = self.coordinator.complete_segment_seal(
             sealing.segment_id,
             owner_plugin_id="search",
             generation=sealing.generation,
         )
+        self.assertEqual(self.coordinator.get_message_cleanup("op-1", 91).state, "completed")
 
         self.assertEqual(identity.rendered_revision, 1)
         self.assertEqual(sealing.state, "sealing")

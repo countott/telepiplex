@@ -424,7 +424,12 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.release_milestone_delivery.is_set())
 
         async with asyncio.timeout(3):
-            while self.coordinator.get(operation_id).state != "completed":
+            # The terminal report precedes the event RPC acknowledgement.
+            # Wait for both durable boundaries before inspecting the journal.
+            while (
+                self.coordinator.get(operation_id).state != "completed"
+                or self.journal.pending("rename")
+            ):
                 await asyncio.sleep(0.01)
         await self.operation_sink.drain()
 
@@ -585,19 +590,23 @@ class OperationPipelineEndToEndTest(unittest.IsolatedAsyncioTestCase):
         coordinator = self.coordinator
 
         class SearchCoreHost:
+            next_message_id = 7002
+
             async def report_operation(self, report):
                 response = await sink("search", report)
                 responses.append(response)
                 return response
 
             async def seal_operation_segment(self, operation_id, role, **_kwargs):
+                message_id = SearchCoreHost.next_message_id
+                SearchCoreHost.next_message_id += 1
                 segment = coordinator.get_active_segment(operation_id)
                 coordinator.claim_segment_delivery(
                     segment.segment_id, owner_plugin_id="search", generation=segment.generation,
                 )
                 coordinator.bind_segment_message(
                     segment.segment_id, owner_plugin_id="search", generation=segment.generation,
-                    chat_id=10, message_id=7002, message_kind="photo",
+                    chat_id=10, message_id=message_id, message_kind="photo",
                 )
                 coordinator.record_segment_rendered(
                     segment.segment_id, owner_plugin_id="search", generation=segment.generation,

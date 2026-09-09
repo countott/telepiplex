@@ -29,7 +29,7 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
     async def test_core_runtime_version_matches_current_host_release(self):
         bot_module = await asyncio.to_thread(load_bot_module)
 
-        self.assertEqual(bot_module.get_version(), "v3.6.9-host")
+        self.assertEqual(bot_module.get_version(), "v3.6.11-host")
 
     async def test_uncaught_telegram_error_uses_the_same_sanitized_incident_in_frontend_and_machine_log(self):
         from app.utils.logger import Logger
@@ -308,6 +308,7 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
         manager = Mock()
         manager.drain_timeout = 13
         manager.close = AsyncMock(side_effect=lambda: events.append("manager.close"))
+        cleanup = SimpleNamespace(close=AsyncMock(side_effect=lambda: events.append("cleanup.close")))
         updater = Mock(running=True)
         updater.start_polling = AsyncMock()
         updater.stop = AsyncMock(side_effect=lambda: events.append("updater.stop"))
@@ -315,6 +316,7 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
         application.bot_data = {
             "telepiplex_plugin_manager": manager,
             "telepiplex_plugin_update_task": monitor_task,
+            "telepiplex_message_cleanup_worker": cleanup,
         }
         application.initialize = AsyncMock()
         application.start = AsyncMock()
@@ -347,10 +349,31 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
             "application.stop",
             "monitor.cancel",
             "feedback.drain",
+            "cleanup.close",
             "manager.close",
             "application.shutdown",
         ])
         feedback_drain.assert_awaited_once_with(application, timeout=13)
+
+    async def test_start_host_runtime_starts_persisted_message_cleanup_worker(self):
+        bot_module = await asyncio.to_thread(load_bot_module)
+        coordinator = object()
+        manager = SimpleNamespace(
+            start=AsyncMock(), interaction_coordinator=coordinator, router=object(),
+            available_updates=AsyncMock(return_value=[]), broker=None)
+        application = SimpleNamespace(bot_data={}, bot=SimpleNamespace(set_my_commands=AsyncMock()))
+        cleanup = SimpleNamespace(start=Mock())
+        with (patch.object(bot_module, "MessageCleanupWorker", return_value=cleanup) as factory,
+              patch.object(bot_module, "recover_active_operations", AsyncMock(return_value={})),
+              patch.object(bot_module, "queue_host_startup_notice"),
+              patch.object(bot_module.init, "bot_config", {})):
+            await bot_module.start_host_runtime(application, manager)
+            monitor = application.bot_data["telepiplex_plugin_update_task"]
+            monitor.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await monitor
+        factory.assert_called_once_with(application, coordinator)
+        cleanup.start.assert_called_once()
 
     async def test_update_notification_contains_one_click_and_decline_buttons(self):
         bot_module = await asyncio.to_thread(load_bot_module)

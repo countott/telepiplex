@@ -1528,6 +1528,21 @@ class SearchFeature:
         stored = self.plans.get(plan_id)
         if not stored or stored["owner"] != self._owner_key(request):
             return self._closed("⚠️ 搜索任务已过期，请重新搜索。")
+        if action in {"confirm", "scope"}:
+            operation = self.operations.get(stored.get("operation_id")) or {}
+            allowed_stages = (
+                {"plan_confirmation", "candidate_selection", "prowlarr_recovery"}
+                if action == "confirm"
+                else {
+                    "plan_confirmation", "candidate_selection",
+                    "series_scope", "series_scope_number",
+                }
+            )
+            if (
+                operation.get("state") != "awaiting_input"
+                or operation.get("stage") not in allowed_stages
+            ):
+                raise FeatureError("invalid_state", "search choice is no longer active")
         if action == "cancel":
             operation_id = stored.get("operation_id")
             terminal_status = (
@@ -1854,19 +1869,52 @@ class SearchFeature:
                 )
 
     def _start_release_search_task(self, plan_id: str, stored: dict) -> dict:
-        stored.pop("release_search_phase", None)
         operation_id = stored["operation_id"]
-        task_id = f"search-releases-{operation_id}"
-        task = self.runtime.spawn(
-            self._release_search_task(plan_id, stored, operation_id),
-            task_id=task_id,
+        previous = self._operation_view(self.operations[operation_id])
+        previous_phase = stored.pop("release_search_phase", None)
+        sealed = bool(stored.get("identity_segment_sealed"))
+        # Consume the choice before the worker can report or the Host can redraw.
+        operation_view = self._advance_operation(
+            operation_id,
+            state="running",
+            stage="prowlarr_search" if sealed else "identity_confirmation",
+            status_text="正在重新搜索片源。" if sealed else "正在确认媒体身份。",
+            control="cancel",
+            details=self._prowlarr_status_details(operation_id) | {"keyboard": []},
         )
+        task_id = f"search-releases-{operation_id}"
+        worker = self._release_search_task(plan_id, stored, operation_id)
+        try:
+            task = self.runtime.spawn(worker, task_id=task_id)
+        except Exception as exc:
+            worker.close()
+            if previous_phase is not None:
+                stored["release_search_phase"] = previous_phase
+            restored = self._advance_operation(
+                operation_id,
+                state=previous["state"],
+                stage=previous["stage"],
+                status_text=previous["status_text"],
+                control=previous["control"],
+                details=previous["details"],
+            )
+            log_search_event(
+                runtime_context.logger,
+                "search.background_task_failed",
+                search_session_id=plan_id,
+                level="warning",
+                operation_id=operation_id,
+                stage="release_search_start",
+                error_code=str(getattr(exc, "code", "") or type(exc).__name__),
+                error_type=type(exc).__name__,
+            )
+            if previous["state"] != "awaiting_input":
+                raise
+            return {"actions": [], "operation": restored}
         self.operations[operation_id].update({"task": task, "task_id": task_id})
         return {
             "actions": [],
-            "operation": self._operation_view(
-                self.operations[operation_id]
-            ),
+            "operation": operation_view,
         }
 
     async def _release_search_task(self, plan_id, stored, operation_id):
@@ -6941,6 +6989,10 @@ class SearchFeature:
         plan_id = str(operation.get("plan_id") or "")
         task = operation.get("task")
         stored = self.plans.get(plan_id) or {}
+        release_task_unstarted = (
+            str(operation.get("task_id") or "").startswith("search-releases-")
+            and not stored.get("release_search_phase")
+        )
         release_task_finalizes = (
             str(operation.get("task_id") or "").startswith("search-releases-")
             and bool(stored.get("release_search_phase"))
@@ -6956,7 +7008,11 @@ class SearchFeature:
             self._release_plan(plan_id)
         if task is not None and hasattr(task, "cancel") and not task.done():
             task.cancel()
-        if operation.get("state") == "awaiting_input" or task is None:
+        if (
+            operation.get("state") == "awaiting_input"
+            or task is None
+            or release_task_unstarted
+        ):
             terminal = self._advance_operation(
                 operation_id,
                 state="cancelled",

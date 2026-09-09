@@ -100,6 +100,128 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         context.application.bot_data = {"telepiplex_plugin_manager": manager}
         return update, context, manager
 
+    def _native_callback_request(self, *, encoded=True):
+        from app.handlers.interaction_handler import COORDINATOR_KEY, ROUTER_KEY, operation_markup
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        coordinator = InteractionCoordinator(Path(tmpdir.name) / "host.db")
+        self.addCleanup(coordinator.close)
+        record, segment = coordinator.accept_segment_report("search", {
+            "operation_id": "op-native-feedback", "chat_id": 10, "user_id": 1,
+            "state": "awaiting_input", "stage": "release_selection", "revision": 2,
+            "status_text": "请选择当前片源", "control": "exit",
+            "details": {"keyboard": [[{"text": "当前片源", "callback_data": "search:release:p1:current"}]]},
+            "segment": {"role": "search", "presentation_kind": "text"},
+        })
+        segment = coordinator.bind_segment_message(
+            segment.segment_id, owner_plugin_id="search", generation=segment.generation,
+            chat_id=10, message_id=55,
+        )
+        update, context, manager = self._request([], user_id=1)
+        route = SimpleNamespace(plugin_id="search", manifest=SimpleNamespace(callbacks=("search",)))
+        router = Mock()
+        router.plugin_route.return_value = route
+        context.application.bot_data.update({COORDINATOR_KEY: coordinator, ROUTER_KEY: router})
+        markup = operation_markup(record, router, segment=segment)
+        surface = {"text": record.status_text, "reply_markup": markup}
+        message = SimpleNamespace(message_id=55, photo=[], reply_text=AsyncMock())
+
+        async def edit_text(text=None, **kwargs):
+            surface.update(text=text, reply_markup=kwargs.get("reply_markup"))
+            return message
+
+        async def edit_markup(*, reply_markup):
+            surface["reply_markup"] = reply_markup
+            return message
+
+        update.effective_message = message
+        update.callback_query = SimpleNamespace(
+            data=(markup.inline_keyboard[0][0].callback_data if encoded else "search:release:p1:current"),
+            message=message, answer=AsyncMock(),
+            edit_message_text=AsyncMock(side_effect=edit_text),
+            edit_message_reply_markup=AsyncMock(side_effect=edit_markup),
+        )
+        async def edit_media(*, media, **kwargs):
+            surface.update(text=media.caption, reply_markup=kwargs.get("reply_markup"))
+            return message
+
+        message.edit_text = update.callback_query.edit_message_text
+        message.edit_reply_markup = update.callback_query.edit_message_reply_markup
+        message.edit_media = AsyncMock(side_effect=edit_media)
+        message.reply_photo = AsyncMock(return_value=SimpleNamespace(message_id=56))
+        context.application.bot = SimpleNamespace(
+            edit_message_text=AsyncMock(side_effect=edit_text),
+            edit_message_reply_markup=AsyncMock(side_effect=edit_markup),
+        )
+        return update, context, route, coordinator, record, surface
+
+    async def test_native_result_validation_feedback_preserves_current_projection(self):
+        from app.handlers.plugin_handler import handle_feature_result
+
+        invalid_results = (
+            {"actions": [], "operation": "invalid"},
+            {"actions": [], "operation": {"operation_id": "op-native-feedback", "chat_id": 20,
+                "user_id": 1, "state": "running", "stage": "planning", "revision": 3}},
+            {"actions": "invalid"},
+            {"actions": [{"kind": "run_shell", "text": "invalid"}]},
+            {"actions": [], "session": {"state": "invalid"}},
+            {"actions": [], "config_patch": ["invalid"]},
+        )
+        for encoded in (True, False):
+            for result in invalid_results:
+                with self.subTest(encoded=encoded, result=result):
+                    update, context, route, coordinator, record, surface = self._native_callback_request(encoded=encoded)
+                    before = dict(surface)
+                    await handle_feature_result(update, context, route, result)
+                    self.assertEqual(surface, before)
+                    update.callback_query.edit_message_text.assert_not_awaited()
+                    update.callback_query.edit_message_reply_markup.assert_not_awaited()
+                    self.assertEqual(coordinator.get(record.operation_id).status_text, "请选择当前片源")
+                    self.assertTrue(update.callback_query.answer.await_count or update.effective_message.reply_text.await_count)
+
+    async def test_missing_callback_route_repairs_current_native_keyboard(self):
+        from app.handlers.plugin_handler import dynamic_callback_gateway
+
+        update, context, route, coordinator, record, surface = self._native_callback_request()
+        context.application.bot_data["telepiplex_plugin_router"].callback_route.return_value = None
+        before = dict(surface)
+        with (
+            patch("app.handlers.plugin_handler.init.check_user", return_value=True),
+            patch("app.handlers.plugin_handler.callback_dispatch_data", return_value="search:release:p1:old"),
+            patch("app.handlers.plugin_handler.release_callback_dispatch", AsyncMock(return_value=None)),
+        ):
+            await dynamic_callback_gateway(update, context)
+        self.assertEqual(surface, before)
+        update.callback_query.edit_message_reply_markup.assert_not_awaited()
+        context.application.bot.edit_message_text.assert_awaited_once()
+
+    async def test_native_actions_without_operation_only_send_independent_feedback(self):
+        from app.handlers.plugin_handler import handle_feature_result
+
+        for kind in ("edit_message", "edit_photo", "send_message", "send_photo"):
+            with self.subTest(kind=kind):
+                update, context, route, coordinator, record, surface = self._native_callback_request()
+                before = dict(surface)
+                data = {"keyboard": [[{"text": "旧重试", "callback_data": "search:retry:p1"}]]}
+                if kind.endswith("photo"):
+                    data["photo_url"] = "https://fixtures.invalid/old.jpg"
+
+                await handle_feature_result(update, context, route, {
+                    "actions": [{"kind": kind, "text": "无法验证该候选，请重试。", "data": data}],
+                    "session": {"state": "close"},
+                })
+
+                self.assertEqual(surface, before)
+                current = coordinator.get(record.operation_id)
+                self.assertEqual((current.state, current.revision), ("awaiting_input", 2))
+                update.effective_message.edit_text.assert_not_awaited()
+                update.effective_message.edit_media.assert_not_awaited()
+                update.callback_query.edit_message_reply_markup.assert_not_awaited()
+                update.effective_message.reply_text.assert_awaited_once_with("无法验证该候选，请重试。")
+                update.effective_message.reply_photo.assert_not_awaited()
+
     def test_direct_feature_markup_deduplicates_terminal_controls(self):
         from app.handlers.plugin_handler import _keyboard_markup
 
@@ -611,7 +733,7 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
                 ],
                 "search:release:current",
             )
-            stale.callback_query.answer.assert_awaited_once_with("当前任务进行中")
+            stale.callback_query.answer.assert_awaited_once_with("此按钮已失效，请使用当前任务消息。")
 
     async def test_feature_result_persists_candidate_photo_for_operation_rendering(self):
         from app.handlers.plugin_handler import _with_rendered_keyboard

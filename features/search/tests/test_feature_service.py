@@ -695,6 +695,61 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(identity_stage_index, seal_index)
         self.assertLess(seal_index, prowlarr_index)
 
+    async def test_confirm_consumes_keyboard_before_release_worker_runs(self):
+        plan_id = await self._prepare_search()
+        previous = self.host.reports[-1]
+        self.assertTrue(previous["details"]["keyboard"])
+
+        started = await self.feature.callback({
+            "payload": f"confirm:{plan_id}", "user_id": 1, "chat_id": 10,
+        })
+
+        operation = started["operation"]
+        self.assertEqual(operation["state"], "running")
+        self.assertEqual(operation["stage"], "identity_confirmation")
+        self.assertEqual(operation["segment"], {
+            "role": "identity", "presentation_kind": "photo",
+        })
+        self.assertEqual(operation["control"], "cancel")
+        self.assertEqual(operation["details"].get("keyboard", []), [])
+        self.assertGreater(operation["revision"], previous["revision"])
+        self.assertEqual(started["actions"], [])
+        self.assertEqual(self.search_queries, [])
+        snapshot = await self.feature.operation_snapshot({
+            "operation_id": operation["operation_id"],
+        })
+        self.assertEqual(snapshot["operations"], [operation])
+
+    async def test_consumed_confirm_cannot_restart_queued_or_finished_search(self):
+        from telepiplex_plugin_sdk import FeatureError
+
+        plan_id = await self._prepare_search()
+        request = {
+            "payload": f"confirm:{plan_id}", "user_id": 1, "chat_id": 10,
+        }
+        await self.feature.callback(request)
+        pending_worker = next(iter(self.runtime.tasks.values()))
+        try:
+            with self.assertRaises(FeatureError) as rejected:
+                await self.feature.callback(request)
+            self.assertEqual(rejected.exception.code, "invalid_state")
+            self.assertIs(next(iter(self.runtime.tasks.values())), pending_worker)
+        finally:
+            if pending_worker not in self.runtime.tasks.values():
+                pending_worker.close()
+
+        await self.runtime.run("search-releases-")
+        selected = deepcopy(self.host.reports[-1])
+        with self.assertRaises(FeatureError) as rejected:
+            await self.feature.callback(request)
+        self.assertEqual(rejected.exception.code, "invalid_state")
+        snapshot = await self.feature.operation_snapshot({
+            "operation_id": selected["operation_id"],
+        })
+        self.assertEqual(snapshot["operations"], [selected])
+        self.assertEqual(self.runtime.tasks, {})
+        self.assertEqual(self.search_queries, [("English Title", "movie")])
+
     async def test_search_reports_use_identity_then_search_message_segments(self):
         plan_id = await self._prepare_search()
         await self.feature.callback({
@@ -794,7 +849,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         request = {"payload": f"release:{plan_id}:{release_id}", "user_id": 1, "chat_id": 10}
         from telepiplex_plugin_sdk.runtime import FeatureRuntime
         runtime = FeatureRuntime(
-            manifest={"plugin_id": "search", "version": "2.1.2", "host_api": ">=1.1,<2.0"},
+            manifest={"plugin_id": "search", "version": "2.1.4", "host_api": ">=1.1,<2.0"},
             token="offline-test-token",
         )
         self.feature.bind_runtime(runtime)
@@ -1048,7 +1103,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         operation_id = stored["operation_id"]
         stored["release_search_phase"] = "search_result_delivery"
         runtime = FeatureRuntime(
-            manifest={"plugin_id": "search", "version": "2.1.2", "host_api": ">=1.1,<2.0"},
+            manifest={"plugin_id": "search", "version": "2.1.4", "host_api": ">=1.1,<2.0"},
             token="offline-test-token",
         )
         self.feature.bind_runtime(runtime)
@@ -1154,6 +1209,116 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("搜索词：English Title", failed["status_text"])
         self.assertNotIn("Prowlarr", failed["status_text"])
         self.assertIn(plan_id, self.feature.plans)
+
+        self.feature.release_search = lambda *_args: [{
+            "title": "English.Title.2024.1080p.WEB-DL",
+            "magnet_url": "magnet:?xt=urn:btih:" + "b" * 40,
+            "indexer": "test",
+        }]
+        retried = await self.feature.callback({
+            "payload": keyboard[0][0]["callback_data"].removeprefix("search:"),
+            "user_id": 1, "chat_id": 10,
+        })
+        self.assertEqual(retried["operation"]["state"], "running")
+        self.assertEqual(retried["operation"]["stage"], "prowlarr_search")
+        self.assertEqual(retried["operation"]["segment"], {
+            "role": "search", "presentation_kind": "text",
+        })
+        self.assertEqual(retried["operation"]["details"].get("keyboard", []), [])
+        await self.runtime.run("search-releases-")
+        self.assertEqual(self.host.reports[-1]["stage"], "release_selection")
+        self.assertEqual(len(self.host.segments_sealed), 1)
+
+    async def test_retry_while_previous_worker_reports_keeps_recovery_action(self):
+        from telepiplex_plugin_sdk.runtime import FeatureRuntime
+        from telepiplex_search.adapters.prowlarr import ProwlarrRequestError
+
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        operation = self.feature.operations[stored["operation_id"]]
+        runtime = FeatureRuntime(
+            manifest={"plugin_id": "search", "version": "2.1.4", "host_api": ">=1.1,<2.0"},
+            token="offline-test-token",
+        )
+        self.feature.bind_runtime(runtime)
+        search = self.feature.release_search
+
+        def unavailable(*_args):
+            raise ProwlarrRequestError("offline search failure", kind="timeout", retryable=True)
+
+        self.feature.release_search = unavailable
+        recovery_reported = asyncio.Event()
+        release_report = asyncio.Event()
+        original_report = self.host.report_operation
+
+        async def delayed_recovery_report(view):
+            result = await original_report(view)
+            if view["stage"] == "prowlarr_recovery":
+                recovery_reported.set()
+                await release_report.wait()
+            return result
+
+        self.host.report_operation = delayed_recovery_report
+        request = {"payload": f"confirm:{plan_id}", "user_id": 1, "chat_id": 10}
+        await self.feature.callback(request)
+        previous_worker = operation["task"]
+        try:
+            await asyncio.wait_for(recovery_reported.wait(), timeout=1)
+            previous = deepcopy(self.host.reports[-1])
+            self.assertFalse(previous_worker.done())
+
+            retried = await self.feature.callback(request)
+
+            self.assertEqual(retried["operation"]["state"], "awaiting_input")
+            self.assertEqual(retried["operation"]["stage"], "prowlarr_recovery")
+            self.assertEqual(retried["operation"]["details"], previous["details"])
+            self.assertGreater(retried["operation"]["revision"], previous["revision"])
+            self.assertEqual(stored["release_search_phase"], "search_result_delivery")
+            self.assertIs(operation["task"], previous_worker)
+            self.assertEqual(runtime.active_tasks, 1)
+        finally:
+            release_report.set()
+            await previous_worker
+
+        self.assertEqual(runtime.active_tasks, 0)
+        snapshot = await self.feature.operation_snapshot({"operation_id": operation["operation_id"]})
+        self.assertEqual(snapshot["operations"], [retried["operation"]])
+
+        self.feature.release_search = search
+        accepted = await self.feature.callback(request)
+        self.assertEqual(accepted["operation"]["state"], "running")
+        await operation["task"]
+        self.assertEqual(self.host.reports[-1]["stage"], "release_selection")
+        self.assertEqual(self.search_queries, [("English Title", "movie")])
+        self.assertEqual(runtime.active_tasks, 0)
+
+    async def test_spawn_refusal_preserves_initial_confirmation_for_retry(self):
+        from telepiplex_plugin_sdk.runtime import FeatureRuntime
+
+        plan_id = await self._prepare_search()
+        stored = self.feature.plans[plan_id]
+        runtime = FeatureRuntime(
+            manifest={"plugin_id": "search", "version": "2.1.4", "host_api": ">=1.1,<2.0"},
+            token="offline-test-token",
+        )
+        runtime.state = "draining"
+        self.feature.bind_runtime(runtime)
+        previous = deepcopy(self.host.reports[-1])
+        request = {"payload": f"confirm:{plan_id}", "user_id": 1, "chat_id": 10}
+
+        refused = await self.feature.callback(request)
+
+        self.assertEqual(refused["operation"]["state"], "awaiting_input")
+        self.assertEqual(refused["operation"]["stage"], "plan_confirmation")
+        self.assertEqual(refused["operation"]["details"], previous["details"])
+        self.assertGreater(refused["operation"]["revision"], previous["revision"])
+        self.assertNotIn("release_search_phase", stored)
+        self.assertEqual(runtime.active_tasks, 0)
+        runtime.state = "healthy"
+        accepted = await self.feature.callback(request)
+        self.assertEqual(accepted["operation"]["state"], "running")
+        await self.feature.operations[stored["operation_id"]]["task"]
+        self.assertEqual(self.host.reports[-1]["stage"], "release_selection")
 
     async def test_related_movie_prompt_hides_search_backend_name(self):
         plan = search_plan()
@@ -4337,13 +4502,19 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         await self.runtime.run("search-plan-")
         await self.runtime.run("search-releases-")
 
-        identity_report = next(
+        identity_reports = [
             report for report in self.host.reports
             if report["stage"] == "identity_confirmation"
-        )
+        ]
+        self.assertTrue(identity_reports)
+        self.assertTrue(all(
+            report["state"] == "running"
+            and not report["details"].get("keyboard")
+            for report in identity_reports
+        ))
         self.assertIn(
             "中文标题1 (English Title)",
-            identity_report["status_text"],
+            identity_reports[-1]["status_text"],
         )
         self.assertEqual(self.host.segments_sealed[0]["role"], "identity")
         self.assertNotIn("已识别为", self.host.reports[-1]["status_text"])
@@ -5724,10 +5895,25 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "chat_id": 10,
         })
         self.assertEqual(started.get("actions"), [])
-        self.assertNotEqual(
-            started["operation"]["stage"],
-            "prowlarr_search",
-        )
+        self.assertEqual(started["operation"]["state"], "running")
+        self.assertEqual(started["operation"]["stage"], "identity_confirmation")
+        self.assertEqual(started["operation"]["segment"], {
+            "role": "identity", "presentation_kind": "photo",
+        })
+        self.assertEqual(started["operation"]["details"].get("keyboard", []), [])
+        self.assertGreater(started["operation"]["revision"], scope["operation"]["revision"])
+        from telepiplex_plugin_sdk import FeatureError
+
+        stored = self.feature.plans[plan_id]
+        metadata = deepcopy(stored["plan"]["media_metadata"])
+        for payload in (f"scope:{plan_id}:whole_series", f"scope:{plan_id}:episode:1:1"):
+            with self.subTest(payload=payload):
+                with self.assertRaises(FeatureError) as rejected:
+                    await self.feature.callback({
+                        "payload": payload, "user_id": 1, "chat_id": 10,
+                    })
+                self.assertEqual(rejected.exception.code, "invalid_state")
+        self.assertEqual(stored["plan"]["media_metadata"], metadata)
         await self.runtime.run("search-releases-")
 
         self.assertEqual(self.search_queries, [
@@ -5735,6 +5921,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             ("The Glory Season 01", "series"),
             ("The Glory Complete", "series"),
         ])
+        self.assertEqual(self.runtime.tasks, {})
 
     def test_multi_season_menu_lists_each_season_directly(self):
         plan = series_ranked_search_plan()
@@ -6631,9 +6818,9 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "2.1.2")
+        self.assertEqual(manifest["version"], "2.1.4")
         self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
-        self.assertEqual(project["project"]["version"], "2.1.2")
+        self.assertEqual(project["project"]["version"], "2.1.4")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==2.1.0",
@@ -6667,14 +6854,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-2.1.2.tpx", source)
+        self.assertIn("/tmp/search-2.1.4.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-2.1.2.tpx", source)
+        self.assertNotIn("dist/search-2.1.4.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

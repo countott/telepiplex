@@ -33,8 +33,10 @@ FEATURE_SESSION_KEY = "telepiplex_plugin_sessions"
 CONTROL_CALLBACK_PREFIX = "host-operation:"
 CONTROL_CALLBACK_PATTERN = r"^host-operation:"
 _CONTROL_RE = re.compile(
-    r"^host-operation:(?P<action>exit|cancel|rollback):"
-    r"(?P<operation_id>[A-Za-z0-9_-]{1,40})$"
+    r"^host-operation:(?P<action>exit|cancel|rollback|e|c|r):"
+    r"(?P<operation_id>[A-Za-z0-9_-]{1,40})"
+    r"(?::(?P<segment_generation>[0-9a-f]+)\."
+    r"(?P<callback_generation>[0-9a-f]+))?$"
 )
 _SEGMENT_CALLBACK_RE = re.compile(
     r"^~(?P<segment_generation>[0-9a-f]+)\."
@@ -45,6 +47,7 @@ _CONTROL_LABELS = {
     "cancel": "取消任务",
     "rollback": "取消并回滚",
 }
+_COMPACT_CONTROL_ACTIONS = {"e": "exit", "c": "cancel", "r": "rollback"}
 _TERMINAL_CONTROL_LABELS = frozenset({
     "退出",
     "取消",
@@ -1036,6 +1039,61 @@ class OperationProjectionLifecycle:
         return all(results)
 
 
+async def repair_rejected_callback(update, context):
+    """Repair the owned source card, never clear a newer keyboard by accident."""
+    query = getattr(update, "callback_query", None)
+    if query is None:
+        return
+    try:
+        await query.answer("此按钮已失效，请使用当前任务消息。")
+    except Exception:
+        pass
+    coordinator = context.application.bot_data.get(COORDINATOR_KEY)
+    message_id = getattr(getattr(query, "message", None), "message_id", None)
+    if coordinator is None or not isinstance(message_id, int):
+        return
+    record = coordinator.find_message_operation(
+        update.effective_chat.id, update.effective_user.id, message_id,
+    )
+    if record is None:
+        return
+    async with operation_render_lock(context.application, record.operation_id):
+        current = coordinator.get(record.operation_id)
+        segment = coordinator.get_active_segment(record.operation_id)
+        if current is None:
+            return
+        if (
+            current.state not in TERMINAL_STATES
+            and segment is not None and segment.message_id == message_id
+            and segment.state == "open"
+        ):
+            coordinator.invalidate_segment_projection(
+                segment.segment_id, owner_plugin_id=segment.owner_plugin_id,
+                generation=segment.generation, message_id=message_id,
+            )
+            await _render_operation_segment_locked(
+                context.application, context.application.bot_data.get(ROUTER_KEY),
+                current.operation_id, segment.segment_id,
+            )
+            return
+        if (
+            current.state not in TERMINAL_STATES
+            and not coordinator.has_nonlegacy_message_segments(current.operation_id)
+            and current.message_id == message_id
+        ):
+            await _render_operation_locked(
+                context.application, context.application.bot_data.get(ROUTER_KEY), current,
+            )
+            return
+        from app.runtime.message_cleanup import deliver_message_cleanup, wake_message_cleanup
+
+        cleanup = coordinator.queue_message_cleanup(
+            current.operation_id, message_id, reason="stale_callback",
+        )
+        await deliver_message_cleanup(context.application, cleanup, lock_held=True)
+        wake_message_cleanup(context.application)
+
+
 async def operation_gate(update, context):
     update_id = getattr(update, "update_id", None)
     set_diagnostic_context(
@@ -1057,6 +1115,17 @@ async def operation_gate(update, context):
         return
     record = coordinator.active(int(chat.id), int(user.id))
     if record is None:
+        query = getattr(update, "callback_query", None)
+        if query is not None:
+            data = str(getattr(query, "data", "") or "")
+            message_id = getattr(getattr(query, "message", None), "message_id", None)
+            known = (
+                coordinator.find_message_operation(chat.id, user.id, message_id)
+                if isinstance(message_id, int) else None
+            )
+            if _decode_segment_callback(data) is not None or known is not None:
+                await repair_rejected_callback(update, context)
+                raise ApplicationHandlerStop
         return
     set_diagnostic_context(operation_id=record.operation_id)
 
@@ -1101,7 +1170,7 @@ async def operation_gate(update, context):
                     claimed,
                 )
                 return
-            await query.answer("当前任务进行中")
+            await repair_rejected_callback(update, context)
             raise ApplicationHandlerStop
         running_interaction = bool(
             record.state == "running"
@@ -1124,7 +1193,7 @@ async def operation_gate(update, context):
                 and callback_message_id == record.message_id
             ):
                 return
-        await query.answer("当前任务进行中")
+        await repair_rejected_callback(update, context)
         raise ApplicationHandlerStop
 
     message = getattr(update, "effective_message", None)
@@ -1150,6 +1219,85 @@ async def operation_gate(update, context):
 
 
 async def operation_control_callback(update, context):
+    """Claim native controls against the exact card before any asynchronous work."""
+    query = update.callback_query
+    data = str(getattr(query, "data", "") or "")
+    match = _CONTROL_RE.fullmatch(data)
+    coordinator = context.application.bot_data.get(COORDINATOR_KEY)
+    record = coordinator.get(match.group("operation_id")) if match and coordinator else None
+    if record is None or (
+        record.chat_id != int(update.effective_chat.id)
+        or record.user_id != int(update.effective_user.id)
+    ):
+        await _dispatch_operation_control(update, context)
+        return
+    segment = coordinator.get_active_segment(record.operation_id)
+    native = coordinator.has_nonlegacy_message_segments(record.operation_id)
+    message_id = getattr(getattr(query, "message", None), "message_id", None)
+    if not native:
+        if record.message_id is not None and (
+            message_id != record.message_id
+            or not coordinator.owns_message(record.operation_id, record.message_id)
+        ):
+            await repair_rejected_callback(update, context)
+            return
+        await _dispatch_operation_control(update, context)
+        return
+    claimed = None
+    if (
+        segment is not None
+        and segment.role != "legacy"
+        and segment.callback_state == "idle"
+        and match.group("segment_generation") is not None
+        and record.control == _COMPACT_CONTROL_ACTIONS.get(match.group("action"), match.group("action"))
+    ):
+        claimed = coordinator.claim_segment_callback(
+            record.plugin_id, record.operation_id,
+            message_id=message_id,
+            segment_generation=int(match.group("segment_generation"), 16),
+            callback_generation=int(match.group("callback_generation"), 16),
+            callback_token=data, busy_text="正在处理任务控制…",
+        )
+    if claimed is None:
+        await repair_rejected_callback(update, context)
+        return
+    schedule_callback_feedback(
+        update, context.application, record, claimed, acknowledge=False,
+    )
+    try:
+        await _dispatch_operation_control(update, context)
+    finally:
+        async def finish_claim():
+            async with operation_render_lock(context.application, record.operation_id):
+                released = coordinator.release_segment_callback(
+                    record.plugin_id, record.operation_id, message_id=message_id,
+                    segment_generation=claimed.generation,
+                    callback_generation=claimed.callback_generation,
+                    callback_token=data,
+                )
+            if released is not None:
+                current = coordinator.get(record.operation_id)
+                if current is not None:
+                    await render_operation(
+                        context.application, context.application.bot_data.get(ROUTER_KEY), current,
+                    )
+
+        # Cancellation must not strand the persisted claim behind a busy writer.
+        finish = asyncio.create_task(finish_claim(), name="telepiplex-control-release")
+        interrupted = False
+        while True:
+            try:
+                await asyncio.shield(finish)
+                break
+            except asyncio.CancelledError:
+                if finish.cancelled():
+                    raise
+                interrupted = True
+        if interrupted:
+            raise asyncio.CancelledError
+
+
+async def _dispatch_operation_control(update, context):
     query = update.callback_query
     match = _CONTROL_RE.fullmatch(str(getattr(query, "data", "") or ""))
     if match is None:
@@ -1174,7 +1322,7 @@ async def operation_control_callback(update, context):
         await query.answer("任务正在取消")
         await render_operation(context.application, None, record)
         return
-    action = match.group("action")
+    action = _COMPACT_CONTROL_ACTIONS.get(match.group("action"), match.group("action"))
     if action != record.control:
         await query.answer("任务状态已更新")
         await render_operation(context.application, None, record)
@@ -1368,6 +1516,15 @@ def operation_markup(record: OperationRecord, router=None, *, segment=None):
         callback_data = (
             f"{CONTROL_CALLBACK_PREFIX}{record.control}:{record.operation_id}"
         )
+        if segment is not None and segment.role != "legacy":
+            callback_data += f":{segment.generation:x}.{segment.callback_generation:x}"
+            if len(callback_data.encode("utf-8")) > 64:
+                compact_action = next((short for short, action in _COMPACT_CONTROL_ACTIONS.items()
+                                       if action == record.control), record.control)
+                callback_data = (
+                    f"{CONTROL_CALLBACK_PREFIX}{compact_action}:{record.operation_id}:"
+                    f"{segment.generation:x}.{segment.callback_generation:x}"
+                )
         if label is not None and len(callback_data.encode("utf-8")) <= 64:
             rows.append([InlineKeyboardButton(label, callback_data=callback_data)])
     return InlineKeyboardMarkup(rows) if rows else None
@@ -1391,6 +1548,11 @@ def deduplicate_terminal_controls(rows):
 
 
 def _feature_status_rows(record: OperationRecord, router, *, segment=None):
+    if record.state != "awaiting_input" and not (
+        record.state == "running"
+        and record.details.get("allow_running_callbacks") is True
+    ):
+        return []
     keyboard = record.details.get("keyboard")
     if not isinstance(keyboard, list) or router is None:
         return []
@@ -1516,34 +1678,52 @@ async def release_callback_dispatch(update, application, coordinator):
 
 
 async def _render_claimed_segment_busy(application, record, segment) -> None:
-    busy_text = segment.callback_busy_text or _segment_callback_busy_text(segment)
-    try:
-        if segment.presentation_kind == "photo":
-            await application.bot.edit_message_caption(
-                chat_id=record.chat_id,
-                message_id=segment.message_id,
-                caption=busy_text,
-                reply_markup=None,
-            )
+    # Feedback is a projection writer too. Never let a delayed request run
+    # concurrently with the latest business projection or a segment seal.
+    async with operation_render_lock(application, record.operation_id):
+        coordinator = application.bot_data.get(COORDINATOR_KEY)
+        current = coordinator.get(record.operation_id) if coordinator else None
+        live = coordinator.get_segment(segment.segment_id) if coordinator else None
+        if (
+            current is None or live is None
+            or current.active_segment_id != live.segment_id
+            or current.plugin_id != live.owner_plugin_id
+            or current.state in TERMINAL_STATES
+            or live.state != "open" or live.callback_state != "busy"
+            or live.callback_generation != segment.callback_generation
+            or live.callback_token != segment.callback_token
+            or live.message_id != segment.message_id
+            or live.business_revision != segment.business_revision
+            or not coordinator.owns_message(record.operation_id, live.message_id)
+        ):
             return
-        await application.bot.edit_message_text(
-            chat_id=record.chat_id,
-            message_id=segment.message_id,
-            text=busy_text,
-            reply_markup=None,
+        busy_text = live.callback_busy_text or _segment_callback_busy_text(live)
+        coordinator.invalidate_segment_projection(
+            live.segment_id, owner_plugin_id=live.owner_plugin_id,
+            generation=live.generation, message_id=live.message_id,
         )
-    except Exception as exc:
-        if not _message_not_modified(exc):
-            _log(
-                "warn",
-                "任务按钮已锁定，但处理提示未能刷新；继续分发本次点击："
-                f"operation_id={record.operation_id}, "
-                f"message_id={segment.message_id}, "
-                f"error={_render_error(exc)}",
-            )
+        try:
+            if live.message_kind == "photo":
+                await application.bot.edit_message_caption(
+                    chat_id=current.chat_id, message_id=live.message_id,
+                    caption=busy_text, reply_markup={"inline_keyboard": []},
+                )
+            else:
+                await application.bot.edit_message_text(
+                    chat_id=current.chat_id, message_id=live.message_id,
+                    text=busy_text, reply_markup={"inline_keyboard": []},
+                )
+        except Exception as exc:
+            if not _message_not_modified(exc):
+                _log(
+                    "warn",
+                    "任务按钮已锁定，但处理提示未能刷新；继续分发本次点击："
+                    f"operation_id={record.operation_id}, "
+                    f"message_id={live.message_id}, error={_render_error(exc)}",
+                )
 
 
-def schedule_callback_feedback(update, application, record, segment):
+def schedule_callback_feedback(update, application, record, segment, *, acknowledge=True):
     """Send callback feedback without delaying the claimed Feature dispatch."""
     bot_data = getattr(application, "bot_data", None)
     if not isinstance(bot_data, dict):
@@ -1552,7 +1732,7 @@ def schedule_callback_feedback(update, application, record, segment):
     if not isinstance(tasks, set):
         raise RuntimeError("callback feedback task registry is invalid")
     task = asyncio.create_task(
-        _deliver_callback_feedback(update, application, record, segment),
+        _deliver_callback_feedback(update, application, record, segment, acknowledge=acknowledge),
         name=(
             "telepiplex-callback-feedback-"
             f"{record.operation_id}-{segment.segment_id}"
@@ -1613,14 +1793,15 @@ async def drain_callback_feedback(application, timeout: float | None = None) -> 
     return True
 
 
-async def _deliver_callback_feedback(update, application, record, segment):
+async def _deliver_callback_feedback(update, application, record, segment, *, acknowledge=True):
     query = getattr(update, "callback_query", None)
     if query is None:
         return
-    try:
-        await query.answer("处理中...")
-    except Exception:
-        pass
+    if acknowledge:
+        try:
+            await query.answer("处理中...")
+        except Exception:
+            pass
     try:
         await _render_claimed_segment_busy(application, record, segment)
     finally:
@@ -1700,6 +1881,7 @@ async def reconcile_segment_projection(
             segment is None
             or segment.generation != int(generation)
             or segment.message_id != int(message_id)
+            or not coordinator.owns_message(operation_id, message_id)
         ):
             return None
         record = coordinator.get(operation_id)
@@ -1789,6 +1971,8 @@ async def _render_operation_segment_locked(
         or record.plugin_id != segment.owner_plugin_id
     ):
         return None
+    if segment.message_id is not None and not coordinator.owns_message(operation_id, segment.message_id):
+        return None
     if segment.state == "delivery_uncertain":
         return segment.message_id
     if segment.delivery_state == "delivering":
@@ -1841,15 +2025,30 @@ async def _render_operation_segment_locked(
         message_id = getattr(message, "message_id", None)
         if not isinstance(message_id, int) or message_id <= 0:
             return None
-        bound = coordinator.bind_segment_message(
-            claimed.segment_id,
-            owner_plugin_id=claimed.owner_plugin_id,
-            generation=claimed.generation,
-            chat_id=sent_record.chat_id,
-            message_id=message_id,
-            message_kind=message_kind,
-        )
+        try:
+            bound = coordinator.bind_segment_message(
+                claimed.segment_id,
+                owner_plugin_id=claimed.owner_plugin_id,
+                generation=claimed.generation,
+                chat_id=sent_record.chat_id,
+                message_id=message_id,
+                message_kind=message_kind,
+            )
+        except Exception:
+            await _discard_unbound_segment_message(
+                application, sent_record.chat_id, message_id,
+                operation_id=operation_id,
+            )
+            raise
         if bound is None:
+            await _discard_unbound_segment_message(
+                application, sent_record.chat_id, message_id,
+                operation_id=operation_id,
+            )
+            coordinator.mark_segment_delivery_uncertain(
+                claimed.segment_id, owner_plugin_id=claimed.owner_plugin_id,
+                generation=claimed.generation,
+            )
             return None
         coordinator.record_segment_rendered(
             bound.segment_id,
@@ -1924,6 +2123,8 @@ async def _render_operation_segment_locked(
             business_revision=segment.business_revision,
             projection_hash=segment.projection_hash,
         )
+        if not edit_included_controls:
+            _ack_segment_controls_cleared(coordinator, record.operation_id, segment.message_id)
         if rendered is None:
             continue
         if rendered.state == "sealing":
@@ -1950,15 +2151,41 @@ async def _clear_inflight_seal_controls(application, record, segment):
 
 
 async def _clear_segment_controls(application, record, segment):
+    from app.runtime.message_cleanup import wake_message_cleanup
+
+    coordinator = application.bot_data.get(COORDINATOR_KEY)
+    if coordinator is not None and not coordinator.owns_message(record.operation_id, segment.message_id):
+        return
+    cleanup = coordinator.queue_message_cleanup(
+        record.operation_id, segment.message_id, reason="seal",
+    ) if coordinator is not None else None
     try:
-        await application.bot.edit_message_reply_markup(
+        result = await application.bot.edit_message_reply_markup(
             chat_id=record.chat_id,
             message_id=segment.message_id,
             reply_markup=None,
         )
+        if result is False or result is None:
+            raise RuntimeError("cleanup_not_acknowledged")
     except Exception as exc:
         if not _message_not_modified(exc):
+            if cleanup is not None:
+                coordinator.fail_message_cleanup(
+                    record.operation_id, segment.message_id,
+                    error=type(exc).__name__, version=cleanup.version,
+                )
+                wake_message_cleanup(application)
             raise
+    if cleanup is not None:
+        coordinator.ack_message_cleanup(
+            record.operation_id, segment.message_id, version=cleanup.version,
+        )
+
+
+def _ack_segment_controls_cleared(coordinator, operation_id, message_id):
+    cleanup = coordinator.get_message_cleanup(operation_id, message_id)
+    if cleanup is not None and cleanup.state == "pending":
+        coordinator.ack_message_cleanup(operation_id, message_id, version=cleanup.version)
 
 
 async def _send_new_segment_message(application, router, record, segment):
@@ -2179,6 +2406,7 @@ async def _promote_segment_text_to_photo(
             application,
             record.chat_id,
             message_id,
+            operation_id=record.operation_id,
         )
         try:
             coordinator.mark_segment_delivery_uncertain(
@@ -2194,6 +2422,7 @@ async def _promote_segment_text_to_photo(
             application,
             record.chat_id,
             message_id,
+            operation_id=record.operation_id,
         )
         coordinator.mark_segment_delivery_uncertain(
             claimed.segment_id,
@@ -2205,6 +2434,7 @@ async def _promote_segment_text_to_photo(
         application,
         record.chat_id,
         segment.message_id,
+        operation_id=record.operation_id,
     )
     if markup is not None:
         await application.bot.edit_message_reply_markup(
@@ -2218,41 +2448,37 @@ async def _discard_unbound_segment_message(
     application,
     chat_id: int,
     message_id: int,
+    *,
+    operation_id: str,
 ) -> None:
-    try:
-        await application.bot.delete_message(
-            chat_id=chat_id,
-            message_id=message_id,
-        )
-    except Exception:
-        pass
+    await _discard_replaced_segment_message(
+        application, chat_id, message_id, operation_id=operation_id,
+    )
 
 
 async def _discard_replaced_segment_message(
     application,
     chat_id: int,
     message_id: int,
+    *,
+    operation_id: str,
 ) -> None:
-    try:
-        await application.bot.delete_message(
-            chat_id=chat_id,
-            message_id=message_id,
-        )
+    from app.runtime.message_cleanup import deliver_message_cleanup, wake_message_cleanup
+
+    coordinator = application.bot_data.get(COORDINATOR_KEY)
+    record = coordinator.get(operation_id) if coordinator is not None else None
+    if record is None or record.chat_id != int(chat_id):
         return
-    except Exception as exc:
-        try:
-            await application.bot.edit_message_reply_markup(
-                chat_id=chat_id,
-                message_id=message_id,
-                reply_markup=None,
-            )
-        except Exception:
-            pass
+    cleanup = coordinator.queue_message_cleanup(
+        operation_id, message_id, delete=True, reason="message_replaced",
+    )
+    if not await deliver_message_cleanup(application, cleanup, lock_held=True):
         _log(
             "warn",
-            "任务媒体就绪后未能删除旧文本状态，已清理其按钮："
-            f"message_id={message_id}, error={_render_error(exc)}",
+            "旧任务消息清理尚未确认，已保留重试记录："
+            f"operation_id={operation_id}, message_id={message_id}",
         )
+        wake_message_cleanup(application)
 
 
 async def _segment_photo_media(record):
@@ -2292,6 +2518,8 @@ async def _render_operation_locked(application, _router, record: OperationRecord
             message_id=current.message_id,
             message_kind=current.message_kind,
         )
+    if record.message_id is not None and not coordinator.owns_message(record.operation_id, record.message_id):
+        return None
     text = record.status_text or (
         f"任务状态：{record.state}\n阶段：{record.stage or '-'}"
     )
@@ -2444,14 +2672,34 @@ def _message_not_modified(exc: Exception) -> bool:
 async def _clear_message_keyboard(application, record: OperationRecord):
     if record.message_id is None:
         return
+    from app.runtime.message_cleanup import wake_message_cleanup
+
+    coordinator = application.bot_data.get(COORDINATOR_KEY)
+    if coordinator is not None and not coordinator.owns_message(record.operation_id, record.message_id):
+        return
+    cleanup = coordinator.queue_message_cleanup(
+        record.operation_id, record.message_id, reason="legacy_message_retired",
+    ) if coordinator is not None else None
     try:
-        await application.bot.edit_message_reply_markup(
+        result = await application.bot.edit_message_reply_markup(
             chat_id=record.chat_id,
             message_id=record.message_id,
             reply_markup=None,
         )
-    except Exception:
-        pass
+        if result is None or result is False:
+            raise RuntimeError("cleanup_not_acknowledged")
+    except Exception as exc:
+        if cleanup is not None:
+            coordinator.fail_message_cleanup(
+                record.operation_id, record.message_id,
+                error=type(exc).__name__, version=cleanup.version,
+            )
+            wake_message_cleanup(application)
+    else:
+        if cleanup is not None:
+            coordinator.ack_message_cleanup(
+                record.operation_id, record.message_id, version=cleanup.version,
+            )
 
 
 def _operation_photo_url(details) -> str:
@@ -2520,6 +2768,7 @@ async def recover_active_operations(application, router, coordinator):
         route = router.plugin_route(record.plugin_id) if router is not None else None
         if route is None:
             continue
+        original_segment = coordinator.get_active_segment(record.operation_id)
         try:
             snapshot = await route.client.request(
                 "operation.snapshot",
@@ -2530,7 +2779,31 @@ async def recover_active_operations(application, router, coordinator):
             report = _snapshot_report(snapshot, record.operation_id)
             if report is None:
                 continue
-            current = coordinator.report(route.plugin_id, report)
+            if isinstance(report.get("segment"), dict):
+                current, _segment = coordinator.accept_segment_report(route.plugin_id, report)
+            elif original_segment is not None and original_segment.role != "legacy":
+                current, _segment = coordinator.accept_segment_report(route.plugin_id, {
+                    **report,
+                    "segment": {"role": original_segment.role,
+                                "presentation_kind": original_segment.presentation_kind},
+                })
+            else:
+                current = coordinator.report(route.plugin_id, report)
+            if (
+                original_segment is not None
+                and original_segment.callback_state == "busy"
+                and original_segment.message_id is not None
+                and report.get("revision") == current.revision
+            ):
+                coordinator.release_recovered_callback(
+                    current.operation_id, owner_plugin_id=record.plugin_id,
+                    segment_id=original_segment.segment_id,
+                    generation=original_segment.generation,
+                    message_id=original_segment.message_id,
+                    callback_generation=original_segment.callback_generation,
+                    callback_token=original_segment.callback_token,
+                    expected_revision=current.revision,
+                )
             rendered.append(current)
             if current.state not in TERMINAL_STATES:
                 confirmed.add(current.operation_id)

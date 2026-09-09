@@ -40,6 +40,7 @@ from app.runtime.runtime_broker import RuntimeBroker
 from app.runtime.event_dispatcher import EventDispatcher
 from app.runtime.event_journal import EventJournal
 from app.runtime.interaction_coordinator import InteractionCoordinator
+from app.runtime.message_cleanup import MESSAGE_CLEANUP_WORKER_KEY, MessageCleanupWorker
 from app.runtime.plugin_catalog import PluginCatalog
 from app.runtime.plugin_manager import PluginManager
 from app.runtime.plugin_store import PluginStore
@@ -101,7 +102,7 @@ DEFAULT_PLUGIN_CATALOG_URL = (
 
 
 def get_version(md_format=False):
-    version = "v3.6.9-host"
+    version = "v3.6.11-host"
     if md_format:
         return escape_markdown(version, version=2)
     return version
@@ -693,6 +694,9 @@ async def run_application_polling(application, after_start=None, stop_event=None
                 else 120
             ),
         )
+        cleanup_worker = bot_data.pop(MESSAGE_CLEANUP_WORKER_KEY, None) if isinstance(bot_data, dict) else None
+        if cleanup_worker is not None:
+            await cleanup_worker.close()
         if manager is not None:
             await manager.close()
         await application.shutdown()
@@ -790,6 +794,12 @@ async def start_host_runtime(application, manager):
     await manager.start()
     coordinator = getattr(manager, "interaction_coordinator", None)
     if coordinator is not None:
+        application.bot_data[COORDINATOR_KEY] = coordinator
+        cleanup_worker = application.bot_data.get(MESSAGE_CLEANUP_WORKER_KEY)
+        if cleanup_worker is None:
+            cleanup_worker = MessageCleanupWorker(application, coordinator)
+            application.bot_data[MESSAGE_CLEANUP_WORKER_KEY] = cleanup_worker
+        cleanup_worker.start()
         recovery = await recover_active_operations(
             application, manager.router, coordinator
         )

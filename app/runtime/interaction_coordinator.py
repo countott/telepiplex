@@ -5,7 +5,7 @@ import re
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import RLock
 from types import MappingProxyType
@@ -147,11 +147,30 @@ class MilestoneIntent:
     updated_at: float
 
 
+@dataclass(frozen=True)
+class MessageCleanupRecord:
+    operation_id: str
+    chat_id: int
+    user_id: int
+    message_id: int
+    segment_id: str
+    segment_generation: int
+    delete: bool
+    reason: str
+    state: str
+    attempt_count: int
+    next_retry_at: float
+    last_error: str
+    version: int
+    completed_at: float | None
+
+
 class InteractionCoordinator:
     def __init__(self, database_path: Path):
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
+        self._callback_host_instance = uuid.uuid4().hex
         self._connection = sqlite3.connect(
             self.database_path,
             check_same_thread=False,
@@ -208,6 +227,13 @@ class InteractionCoordinator:
             WHERE state IN ({active_states});
             CREATE INDEX IF NOT EXISTS operations_active_plugin
             ON operations(plugin_id, state, updated_at);
+            CREATE TABLE IF NOT EXISTS operation_message_ownership (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL CHECK(message_id > 0),
+                operation_id TEXT NOT NULL,
+                PRIMARY KEY(chat_id, message_id),
+                FOREIGN KEY(operation_id) REFERENCES operations(operation_id)
+            );
             CREATE TABLE IF NOT EXISTS operation_message_segments (
                 segment_id TEXT PRIMARY KEY,
                 operation_id TEXT NOT NULL,
@@ -232,6 +258,7 @@ class InteractionCoordinator:
                     CHECK(callback_state IN ('idle', 'busy')),
                 callback_token TEXT NOT NULL DEFAULT '',
                 callback_busy_text TEXT NOT NULL DEFAULT '',
+                callback_host_instance TEXT NOT NULL DEFAULT '',
                 delivery_state TEXT NOT NULL
                     CHECK(delivery_state IN ({segment_delivery_states})),
                 created_at REAL NOT NULL,
@@ -242,6 +269,25 @@ class InteractionCoordinator:
             );
             CREATE INDEX IF NOT EXISTS operation_segments_owner
             ON operation_message_segments(operation_id, owner_plugin_id, sequence);
+            CREATE TABLE IF NOT EXISTS operation_message_cleanups (
+                operation_id TEXT NOT NULL,
+                message_id INTEGER NOT NULL CHECK(message_id > 0),
+                segment_id TEXT NOT NULL DEFAULT '',
+                segment_generation INTEGER NOT NULL DEFAULT 0,
+                delete_requested INTEGER NOT NULL DEFAULT 0,
+                reason TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(state IN ('pending', 'completed')),
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at REAL NOT NULL,
+                last_error TEXT NOT NULL DEFAULT '',
+                version INTEGER NOT NULL DEFAULT 1,
+                completed_at REAL,
+                PRIMARY KEY(operation_id, message_id),
+                FOREIGN KEY(operation_id) REFERENCES operations(operation_id)
+            );
+            CREATE INDEX IF NOT EXISTS operation_message_cleanups_due
+            ON operation_message_cleanups(state, next_retry_at);
             CREATE TABLE IF NOT EXISTS operation_milestones (
                 operation_id TEXT NOT NULL,
                 milestone_id TEXT NOT NULL,
@@ -325,17 +371,19 @@ class InteractionCoordinator:
             "callback_state": "TEXT NOT NULL DEFAULT 'idle'",
             "callback_token": "TEXT NOT NULL DEFAULT ''",
             "callback_busy_text": "TEXT NOT NULL DEFAULT ''",
+            "callback_host_instance": "TEXT NOT NULL DEFAULT ''",
         }.items():
             if column not in segment_columns:
                 self._connection.execute(
                     f"ALTER TABLE operation_message_segments ADD COLUMN "
                     f"{column} {declaration}"
                 )
-        self._connection.execute(
-            "UPDATE operation_message_segments "
-            "SET rendered_projection_hash = projection_hash "
-            "WHERE rendered_projection_hash = '' AND rendered_revision > 0"
-        )
+        if "rendered_projection_hash" not in segment_columns:
+            self._connection.execute(
+                "UPDATE operation_message_segments "
+                "SET rendered_projection_hash = projection_hash "
+                "WHERE rendered_projection_hash = '' AND rendered_revision > 0"
+            )
         milestone_columns = {
             str(row["name"])
             for row in self._connection.execute(
@@ -441,6 +489,88 @@ class InteractionCoordinator:
             "ON operation_message_segments(operation_id) "
             f"WHERE state IN ({active_segment_states})"
         )
+        self._restore_message_ownership()
+        self._restore_retired_message_cleanups()
+
+    def _restore_message_ownership(self):
+        # Backfill durable addresses from every preexisting delivery record.
+        # New writes claim this ledger in the same transaction as binding.
+        terminal = tuple(sorted(TERMINAL_STATES))
+        placeholders = ",".join("?" for _ in terminal)
+        self._connection.execute(
+            "INSERT OR IGNORE INTO operation_message_ownership(chat_id, message_id, operation_id) "
+            "SELECT operation.chat_id, known.message_id, known.operation_id FROM ("
+            "SELECT operation_id, message_id FROM operations UNION "
+            "SELECT operation_id, message_id FROM operation_message_segments UNION "
+            "SELECT operation_id, message_id FROM operation_message_cleanups UNION "
+            "SELECT operation_id, delivered_message_id AS message_id FROM operation_milestones"
+            ") known JOIN operations operation USING(operation_id) "
+            "WHERE typeof(known.message_id)='integer' AND known.message_id>0 "
+            "ORDER BY CASE WHEN operation.state NOT IN (" + placeholders + ") "
+            "AND (operation.message_id=known.message_id OR EXISTS ("
+            "SELECT 1 FROM operation_message_segments active "
+            "WHERE active.segment_id=operation.active_segment_id "
+            "AND active.message_id=known.message_id AND active.state IN ('open','creating'))) "
+            "THEN 1 ELSE 0 END DESC, operation.updated_at DESC, operation.operation_id DESC",
+            terminal,
+        )
+        self._connection.execute(
+            "UPDATE operation_message_cleanups SET last_error='message_owner_conflict' "
+            "WHERE EXISTS (SELECT 1 FROM operation_message_ownership ownership "
+            "JOIN operations operation ON operation.operation_id=operation_message_cleanups.operation_id "
+            "WHERE ownership.chat_id=operation.chat_id "
+            "AND ownership.message_id=operation_message_cleanups.message_id "
+            "AND ownership.operation_id!=operation_message_cleanups.operation_id)"
+        )
+
+    def owns_message(self, operation_id, message_id) -> bool:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT 1 FROM operation_message_ownership ownership JOIN operations operation "
+                "ON operation.operation_id=ownership.operation_id WHERE ownership.operation_id=? "
+                "AND ownership.chat_id=operation.chat_id AND ownership.message_id=?",
+                (str(operation_id), int(message_id)),
+            ).fetchone()
+        return row is not None
+
+    def _claim_message_ownership(self, operation_id, message_id):
+        operation = self.get(operation_id)
+        if operation is None:
+            raise InteractionError("not_found", "operation was not found")
+        self._connection.execute(
+            "INSERT OR IGNORE INTO operation_message_ownership(chat_id, message_id, operation_id) "
+            "VALUES (?, ?, ?)", (operation.chat_id, int(message_id), str(operation_id)),
+        )
+        owner = self._connection.execute(
+            "SELECT operation_id FROM operation_message_ownership WHERE chat_id=? AND message_id=?",
+            (operation.chat_id, int(message_id)),
+        ).fetchone()
+        if owner is None or owner["operation_id"] != str(operation_id):
+            raise InteractionError(
+                "message_owner_conflict", "Telegram message already belongs to another operation"
+            )
+
+    def _restore_retired_message_cleanups(self):
+        terminal = tuple(sorted(TERMINAL_STATES))
+        placeholders = ",".join("?" for _ in terminal)
+        rows = self._connection.execute(
+            "SELECT segment.operation_id, segment.message_id, segment.segment_id, segment.generation "
+            "FROM operation_message_segments segment JOIN operations operation USING(operation_id) "
+            "WHERE segment.message_id IS NOT NULL AND (segment.state IN ('sealing', 'sealed') "
+            f"OR operation.state IN ({placeholders})) UNION "
+            "SELECT operation_id, message_id, '', 0 FROM operations "
+            f"WHERE message_id IS NOT NULL AND state IN ({placeholders})",
+            (*terminal, *terminal),
+        ).fetchall()
+        for row in rows:
+            existing = self._connection.execute(
+                "SELECT 1 FROM operation_message_cleanups WHERE operation_id=? AND message_id=?",
+                (row["operation_id"], row["message_id"]),
+            ).fetchone()
+            if existing is None and self.owns_message(row["operation_id"], row["message_id"]):
+                self._queue_message_cleanup(row["operation_id"], row["message_id"],
+                    reason="restart_retired", segment_id=row["segment_id"],
+                    segment_generation=row["generation"])
 
     def _retire_conflicting_legacy_message_cursors(self) -> None:
         active_states = tuple(sorted(ACTIVE_SEGMENT_STATES))
@@ -643,6 +773,170 @@ class InteractionCoordinator:
         with self._lock:
             self._connection.close()
 
+    def _queue_message_cleanup(self, operation_id, message_id, *, delete=False,
+                               reason="retired", segment_id="", segment_generation=0,
+                               reopen=False, strict_owner=False):
+        """Caller owns the transaction when retiring a cursor."""
+        try:
+            self._claim_message_ownership(operation_id, message_id)
+        except InteractionError as exc:
+            if exc.code != "message_owner_conflict" or strict_owner:
+                raise
+            # Pre-upgrade history can contain a cursor now owned elsewhere.
+            # Its retirement must not roll back the business transition.
+            return
+        existing = self._connection.execute(
+            "SELECT state FROM operation_message_cleanups WHERE operation_id=? AND message_id=?",
+            (str(operation_id), int(message_id)),
+        ).fetchone()
+        if existing and existing["state"] == "completed" and not reopen:
+            return
+        now = time.time()
+        self._connection.execute(
+            "INSERT INTO operation_message_cleanups(operation_id, message_id, "
+            "segment_id, segment_generation, delete_requested, reason, next_retry_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(operation_id, message_id) "
+            "DO UPDATE SET delete_requested=MAX(delete_requested, excluded.delete_requested), "
+            "segment_id=CASE WHEN excluded.segment_id != '' THEN excluded.segment_id ELSE segment_id END, "
+            "segment_generation=MAX(segment_generation, excluded.segment_generation), "
+            "reason=excluded.reason, version=version + CASE "
+            "WHEN state='completed' OR excluded.delete_requested>delete_requested THEN 1 ELSE 0 END, "
+            "next_retry_at=CASE WHEN state='completed' THEN excluded.next_retry_at ELSE next_retry_at END, "
+            "completed_at=NULL, state='pending'",
+            (str(operation_id), int(message_id), segment_id, segment_generation,
+             int(bool(delete)), str(reason)[:160], now),
+        )
+
+    def queue_message_cleanup(self, operation_id, message_id, *, delete=False, reason="retired"):
+        try:
+            message_id = int(message_id)
+        except (TypeError, ValueError):
+            message_id = 0
+        if message_id <= 0:
+            raise InteractionError("invalid_message", "message ID must be positive")
+        with self._lock:
+            if self.get(operation_id) is None:
+                raise InteractionError("not_found", "operation was not found")
+            segment = self._connection.execute(
+                "SELECT segment_id, generation FROM operation_message_segments "
+                "WHERE operation_id=? AND message_id=? ORDER BY sequence DESC LIMIT 1",
+                (str(operation_id), message_id),
+            ).fetchone()
+            self._queue_message_cleanup(operation_id, message_id, delete=delete, reason=reason,
+                segment_id=str(segment["segment_id"]) if segment else "",
+                segment_generation=int(segment["generation"]) if segment else 0,
+                reopen=True, strict_owner=True)
+            return self.get_message_cleanup(operation_id, message_id)
+
+    def _queue_operation_message_cleanups(self, operation_id, *, reason):
+        rows = self._connection.execute(
+            "SELECT message_id, segment_id, generation FROM operation_message_segments "
+            "WHERE operation_id=? AND message_id IS NOT NULL",
+            (str(operation_id),),
+        ).fetchall()
+        for row in rows:
+            self._queue_message_cleanup(operation_id, row["message_id"], reason=reason,
+                segment_id=row["segment_id"], segment_generation=row["generation"])
+        operation = self._connection.execute(
+            "SELECT message_id FROM operations WHERE operation_id=?", (str(operation_id),)
+        ).fetchone()
+        if operation and operation["message_id"] is not None:
+            self._queue_message_cleanup(operation_id, operation["message_id"], reason=reason)
+
+    @staticmethod
+    def _cleanup_from_row(row):
+        return MessageCleanupRecord(
+            operation_id=str(row["operation_id"]), chat_id=int(row["chat_id"]),
+            user_id=int(row["user_id"]), message_id=int(row["message_id"]),
+            segment_id=str(row["segment_id"]), segment_generation=int(row["segment_generation"]),
+            delete=bool(row["delete_requested"]), reason=str(row["reason"]), state=str(row["state"]),
+            attempt_count=int(row["attempt_count"]), next_retry_at=float(row["next_retry_at"]),
+            last_error=str(row["last_error"]), version=int(row["version"]),
+            completed_at=float(row["completed_at"]) if row["completed_at"] is not None else None)
+
+    def get_message_cleanup(self, operation_id, message_id):
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT cleanup.*, operation.chat_id, operation.user_id "
+                "FROM operation_message_cleanups cleanup JOIN operations operation USING(operation_id) "
+                "WHERE cleanup.operation_id=? AND cleanup.message_id=?",
+                (str(operation_id), int(message_id)),
+            ).fetchone()
+        return self._cleanup_from_row(row) if row else None
+
+    def pending_message_cleanups(self, *, now=None, limit=50):
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT cleanup.*, operation.chat_id, operation.user_id "
+                "FROM operation_message_cleanups cleanup JOIN operations operation USING(operation_id) "
+                "JOIN operation_message_ownership ownership ON ownership.chat_id=operation.chat_id "
+                "AND ownership.message_id=cleanup.message_id AND ownership.operation_id=cleanup.operation_id "
+                "WHERE cleanup.state='pending' AND cleanup.next_retry_at<=? "
+                "ORDER BY cleanup.next_retry_at, cleanup.operation_id, cleanup.message_id LIMIT ?",
+                (time.time() if now is None else float(now), max(1, int(limit))),
+            ).fetchall()
+        return [self._cleanup_from_row(row) for row in rows]
+
+    def ack_message_cleanup(self, operation_id, message_id, *, version=None):
+        with self._lock:
+            cursor = self._connection.execute(
+                "UPDATE operation_message_cleanups SET state='completed', completed_at=?, last_error='' "
+                "WHERE operation_id=? AND message_id=? AND state='pending' AND (? IS NULL OR version=?)",
+                (time.time(), str(operation_id), int(message_id), version, version),
+            )
+        return cursor.rowcount == 1
+
+    def fail_message_cleanup(self, operation_id, message_id, *, error, now=None, version=None):
+        with self._lock:
+            current = self.get_message_cleanup(operation_id, message_id)
+            if current is None or current.state != "pending" or (version is not None and current.version != version):
+                return False
+            delay = min(3600.0, 2.0 ** min(current.attempt_count + 1, 12))
+            self._connection.execute(
+                "UPDATE operation_message_cleanups SET attempt_count=attempt_count+1, "
+                "next_retry_at=?, last_error=? WHERE operation_id=? AND message_id=? AND version=?",
+                ((time.time() if now is None else float(now)) + delay, str(error)[:500],
+                 str(operation_id), int(message_id), current.version),
+            )
+        return True
+
+    def find_message_operation(self, chat_id, user_id, message_id):
+        """Resolve only known, owner-scoped message IDs, including retired cursors."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT operation.* FROM operation_message_ownership ownership "
+                "JOIN operations operation USING(operation_id) "
+                "WHERE ownership.chat_id=? AND operation.user_id=? AND ownership.message_id=?",
+                (int(chat_id), int(user_id), int(message_id)),
+            ).fetchone()
+        return self._from_row(row) if row else None
+
+    def find_message_segment(self, chat_id, user_id, message_id):
+        operation = self.find_message_operation(chat_id, user_id, message_id)
+        if operation is None:
+            return None
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM operation_message_segments WHERE operation_id=? AND message_id=? "
+                "ORDER BY sequence DESC LIMIT 1", (operation.operation_id, int(message_id)),
+            ).fetchone()
+            if row:
+                return self._segment_from_row(row)
+            cleanup = self.get_message_cleanup(operation.operation_id, message_id)
+            segment = self.get_segment(cleanup.segment_id) if cleanup and cleanup.segment_id else None
+        return replace(segment, message_id=int(message_id)) if segment else None
+
+    def invalidate_segment_projection(self, segment_id, *, owner_plugin_id, generation, message_id):
+        with self._lock:
+            cursor = self._connection.execute(
+                "UPDATE operation_message_segments SET rendered_projection_hash='' "
+                "WHERE segment_id=? AND owner_plugin_id=? AND generation=? AND message_id=? "
+                "AND EXISTS (SELECT 1 FROM operations operation WHERE operation.active_segment_id=segment_id "
+                "AND operation.operation_id=operation_message_segments.operation_id)",
+                (str(segment_id), str(owner_plugin_id), int(generation), int(message_id)),
+            )
+        return cursor.rowcount == 1
+
     def report(self, plugin_id: str, report: dict) -> OperationRecord:
         values = self._validate_report(plugin_id, report)
         with self._lock:
@@ -720,6 +1014,8 @@ class InteractionCoordinator:
                         ),
                     )
                 self._apply_receipt_transitions(previous, values)
+                if values["state"] in TERMINAL_STATES:
+                    self._queue_operation_message_cleanups(values["operation_id"], reason="terminal")
                 stored = self._connection.execute(
                     "SELECT * FROM operations WHERE operation_id = ?",
                     (values["operation_id"],),
@@ -948,16 +1244,27 @@ class InteractionCoordinator:
                         active_row["business_revision"]
                     )
                     if values["revision"] > current_business_revision:
+                        old_details = previous.details if previous else {}
+                        new_details = json.loads(values["details_json"])
+                        interaction_changed = bool(previous and (
+                            previous.state != values["state"]
+                            or previous.stage != values["stage"]
+                            or previous.control != values["control"]
+                            or old_details.get("keyboard", []) != new_details.get("keyboard", [])
+                        ))
                         self._connection.execute(
                             "UPDATE operation_message_segments SET "
                             "business_revision = ?, projection_hash = ?, "
-                            "projection_json = ?, updated_at = ? "
+                            "projection_json = ?, updated_at = ?, "
+                            "callback_generation=callback_generation + CASE "
+                            "WHEN callback_state='idle' AND ? THEN 1 ELSE 0 END "
                             "WHERE segment_id = ?",
                             (
                                 values["revision"],
                                 normalized_projection_hash,
                                 projection_json,
                                 now,
+                                interaction_changed,
                                 segment_id,
                             ),
                         )
@@ -992,6 +1299,8 @@ class InteractionCoordinator:
                     "SELECT * FROM operation_message_segments WHERE segment_id = ?",
                     (segment_id,),
                 ).fetchone()
+                if values["state"] in TERMINAL_STATES:
+                    self._queue_operation_message_cleanups(values["operation_id"], reason="terminal")
                 self._connection.execute("COMMIT")
             except InteractionError:
                 self._connection.execute("ROLLBACK")
@@ -1076,6 +1385,7 @@ class InteractionCoordinator:
                 "segment delivery target is invalid",
             )
         with self._lock, self._connection:
+            self._connection.execute("SAVEPOINT cleanup_bind_segment")
             cursor = self._connection.execute(
                 "UPDATE operation_message_segments SET "
                 "message_id = ?, message_kind = CASE "
@@ -1099,11 +1409,19 @@ class InteractionCoordinator:
                 ),
             )
             if cursor.rowcount != 1:
+                self._connection.execute("RELEASE cleanup_bind_segment")
                 return None
             row = self._connection.execute(
                 "SELECT * FROM operation_message_segments WHERE segment_id = ?",
                 (str(segment_id),),
             ).fetchone()
+            self._claim_message_ownership(row["operation_id"], normalized_message_id)
+            operation = self.get(row["operation_id"])
+            if operation.state in TERMINAL_STATES:
+                self._queue_message_cleanup(row["operation_id"], normalized_message_id,
+                    reason="terminal", segment_id=row["segment_id"],
+                    segment_generation=row["generation"])
+            self._connection.execute("RELEASE cleanup_bind_segment")
         return self._segment_from_row(row)
 
     def replace_segment_message(
@@ -1145,6 +1463,7 @@ class InteractionCoordinator:
                 "replacement segment delivery target is invalid",
             )
         with self._lock, self._connection:
+            self._connection.execute("SAVEPOINT cleanup_replacement")
             cursor = self._connection.execute(
                 "UPDATE operation_message_segments SET message_id = ?, "
                 "message_kind = ?, delivery_state = 'delivered', updated_at = ? "
@@ -1171,12 +1490,23 @@ class InteractionCoordinator:
                 ),
             )
             if cursor.rowcount != 1:
+                self._connection.execute("RELEASE cleanup_replacement")
                 return None
             row = self._connection.execute(
                 "SELECT * FROM operation_message_segments "
                 "WHERE segment_id = ?",
                 (str(segment_id),),
             ).fetchone()
+            self._claim_message_ownership(row["operation_id"], normalized_message_id)
+            if self.get(row["operation_id"]).state in TERMINAL_STATES:
+                self._queue_message_cleanup(row["operation_id"], normalized_message_id,
+                    reason="terminal", segment_id=row["segment_id"],
+                    segment_generation=row["generation"])
+            if normalized_expected_id != normalized_message_id:
+                self._queue_message_cleanup(row["operation_id"], normalized_expected_id,
+                    delete=True, reason="promotion", segment_id=str(segment_id),
+                    segment_generation=normalized_generation)
+            self._connection.execute("RELEASE cleanup_replacement")
         return self._segment_from_row(row)
 
     def claim_segment_replacement_delivery(
@@ -1443,6 +1773,11 @@ class InteractionCoordinator:
                     "segment_state_conflict",
                     "message segment is not ready to seal",
                 )
+            self._connection.execute("SAVEPOINT cleanup_segment_seal")
+            if row["message_id"] is not None:
+                self._queue_message_cleanup(row["operation_id"], row["message_id"],
+                    reason="sealing", segment_id=row["segment_id"],
+                    segment_generation=row["generation"])
             self._connection.execute(
                 "UPDATE operation_message_segments SET state = 'sealing', "
                 "updated_at = ? WHERE segment_id = ? AND state = 'open' "
@@ -1453,6 +1788,7 @@ class InteractionCoordinator:
                 "SELECT * FROM operation_message_segments WHERE segment_id = ?",
                 (str(row["segment_id"]),),
             ).fetchone()
+            self._connection.execute("RELEASE cleanup_segment_seal")
         return self._segment_from_row(stored)
 
     def complete_segment_seal(
@@ -1508,6 +1844,9 @@ class InteractionCoordinator:
                     "WHERE operation_id = ? AND active_segment_id = ?",
                     (now, str(row["operation_id"]), str(segment_id)),
                 )
+                self._queue_message_cleanup(row["operation_id"], row["message_id"],
+                    reason="sealed", segment_id=str(segment_id),
+                    segment_generation=normalized_generation)
                 stored = self._connection.execute(
                     "SELECT * FROM operation_message_segments WHERE segment_id = ?",
                     (str(segment_id),),
@@ -1562,7 +1901,8 @@ class InteractionCoordinator:
                 "UPDATE operation_message_segments SET "
                 "callback_generation = callback_generation + 1, "
                 "callback_state = 'busy', callback_token = ?, "
-                "callback_busy_text = ?, updated_at = ? "
+                "callback_busy_text = ?, callback_host_instance = ?, "
+                "rendered_projection_hash = '', updated_at = ? "
                 "WHERE operation_id = ? AND owner_plugin_id = ? "
                 "AND generation = ? AND callback_generation = ? "
                 "AND message_id = ? AND state = 'open' AND role != 'legacy' "
@@ -1571,10 +1911,15 @@ class InteractionCoordinator:
                 "WHERE operation.operation_id = operation_message_segments.operation_id "
                 "AND operation.active_segment_id = operation_message_segments.segment_id "
                 "AND operation.plugin_id = ? "
-                "AND operation.state IN ('awaiting_input', 'running'))",
+                "AND operation.state IN ('awaiting_input', 'running') "
+                "AND EXISTS (SELECT 1 FROM operation_message_ownership ownership "
+                "WHERE ownership.chat_id=operation.chat_id "
+                "AND ownership.message_id=operation_message_segments.message_id "
+                "AND ownership.operation_id=operation.operation_id))",
                 (
                     normalized_token,
                     normalized_busy_text,
+                    self._callback_host_instance,
                     time.time(),
                     normalized_operation,
                     normalized_plugin,
@@ -1597,6 +1942,35 @@ class InteractionCoordinator:
                 ),
             ).fetchone()
         return self._segment_from_row(row)
+
+    def release_recovered_callback(
+        self, operation_id, *, owner_plugin_id, segment_id, generation,
+        message_id, callback_generation, callback_token, expected_revision,
+    ) -> OperationMessageSegment | None:
+        """Release an orphan from an older Host after authoritative recovery.
+
+        A Feature restart inside the current Host must not consume its live RPC.
+        The caller accepts the snapshot first, then supplies that exact revision.
+        """
+        with self._lock:
+            cursor = self._connection.execute(
+                "UPDATE operation_message_segments SET callback_state='idle', "
+                "callback_token='', callback_busy_text='', callback_host_instance='', "
+                "rendered_projection_hash='', updated_at=? "
+                "WHERE operation_id=? AND segment_id=? AND owner_plugin_id=? "
+                "AND generation=? AND message_id=? AND callback_generation=? "
+                "AND callback_token=? AND callback_state='busy' AND state='open' "
+                "AND callback_host_instance != ? AND EXISTS (SELECT 1 FROM operations operation "
+                "WHERE operation.operation_id=operation_message_segments.operation_id "
+                "AND operation.active_segment_id=operation_message_segments.segment_id "
+                "AND operation.plugin_id=? AND operation.revision=?)",
+                (time.time(), str(operation_id), str(segment_id), str(owner_plugin_id),
+                 int(generation), int(message_id), int(callback_generation), str(callback_token),
+                 self._callback_host_instance, str(owner_plugin_id), int(expected_revision)),
+            )
+            if cursor.rowcount != 1:
+                return None
+            return self.get_segment(segment_id)
 
     def release_segment_callback(
         self,
@@ -1636,7 +2010,8 @@ class InteractionCoordinator:
             cursor = self._connection.execute(
                 "UPDATE operation_message_segments SET "
                 "callback_state = 'idle', callback_token = '', "
-                "callback_busy_text = '', rendered_projection_hash = '', "
+                "callback_busy_text = '', callback_host_instance = '', "
+                "rendered_projection_hash = '', "
                 "updated_at = ? "
                 "WHERE operation_id = ? AND owner_plugin_id = ? "
                 "AND generation = ? AND callback_generation = ? "
@@ -2283,6 +2658,7 @@ class InteractionCoordinator:
                         "milestone_state_conflict",
                         "operation milestone is not being delivered",
                     )
+                self._claim_message_ownership(operation_id, normalized_message_id)
                 self._connection.execute(
                     "UPDATE operation_milestones SET delivered_message_id = ?, "
                     "delivered_message_kind = ?, updated_at = ? "
@@ -2734,6 +3110,8 @@ class InteractionCoordinator:
                 "invalid_message", "message kind must be text or photo"
             )
         with self._lock, self._connection:
+            self._connection.execute("SAVEPOINT cleanup_set_legacy_cursor")
+            previous = self.get(operation_id)
             if normalized_kind:
                 cursor = self._connection.execute(
                     "UPDATE operations SET message_id = ?, message_kind = ?, "
@@ -2773,6 +3151,12 @@ class InteractionCoordinator:
                 "SELECT * FROM operations WHERE operation_id = ?",
                 (str(operation_id),),
             ).fetchone()
+            self._claim_message_ownership(operation_id, normalized)
+            if row["state"] in TERMINAL_STATES:
+                self._queue_message_cleanup(operation_id, normalized, reason="terminal")
+            if previous and previous.message_id is not None and previous.message_id != normalized:
+                self._queue_message_cleanup(operation_id, previous.message_id, reason="replacement")
+            self._connection.execute("RELEASE cleanup_set_legacy_cursor")
         return self._from_row(row)
 
     def set_message_id_if_current(
@@ -2796,6 +3180,8 @@ class InteractionCoordinator:
         ):
             raise InteractionError("invalid_message", "message cursor is invalid")
         with self._lock, self._connection:
+            self._connection.execute("SAVEPOINT cleanup_cas_legacy_cursor")
+            previous = self.get(operation_id)
             cursor = self._connection.execute(
                 "UPDATE operations SET message_id = ?, message_kind = ?, "
                 "updated_at = ? WHERE operation_id = ? AND plugin_id = ? "
@@ -2813,15 +3199,26 @@ class InteractionCoordinator:
                 ),
             )
             if cursor.rowcount != 1:
+                self._connection.execute("RELEASE cleanup_cas_legacy_cursor")
                 return None
             row = self._connection.execute(
                 "SELECT * FROM operations WHERE operation_id = ?",
                 (str(operation_id),),
             ).fetchone()
+            self._claim_message_ownership(operation_id, normalized_message_id)
+            if row["state"] in TERMINAL_STATES:
+                self._queue_message_cleanup(operation_id, normalized_message_id, reason="terminal")
+            if previous and previous.message_id is not None and previous.message_id != normalized_message_id:
+                self._queue_message_cleanup(operation_id, previous.message_id, reason="replacement")
+            self._connection.execute("RELEASE cleanup_cas_legacy_cursor")
         return self._from_row(row)
 
     def clear_message_id(self, operation_id: str) -> OperationRecord:
         with self._lock, self._connection:
+            self._connection.execute("SAVEPOINT cleanup_legacy_cursor")
+            previous = self.get(operation_id)
+            if previous and previous.message_id is not None:
+                self._queue_message_cleanup(operation_id, previous.message_id, reason="retired")
             cursor = self._connection.execute(
                 "UPDATE operations SET message_id = NULL, message_kind = '', "
                 "updated_at = ? WHERE operation_id = ?",
@@ -2833,6 +3230,7 @@ class InteractionCoordinator:
                 "SELECT * FROM operations WHERE operation_id = ?",
                 (str(operation_id),),
             ).fetchone()
+            self._connection.execute("RELEASE cleanup_legacy_cursor")
         return self._from_row(row)
 
     def interrupt_unowned(
@@ -2902,6 +3300,7 @@ class InteractionCoordinator:
                         "SELECT * FROM operations WHERE operation_id = ?",
                         (current.operation_id,),
                     ).fetchone()
+                    self._queue_operation_message_cleanups(current.operation_id, reason="interrupted")
                     interrupted.append(self._from_row(stored))
                 self._connection.execute("COMMIT")
             except Exception:
