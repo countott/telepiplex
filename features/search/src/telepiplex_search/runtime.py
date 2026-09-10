@@ -26,6 +26,7 @@ def main(context: RuntimeContext) -> FeatureRuntime:
         commands={
             "search": feature.command,
             "s": feature.command,
+            "pr": feature.command,
             "search_config": feature.command,
         },
         callbacks={"search": feature.callback},

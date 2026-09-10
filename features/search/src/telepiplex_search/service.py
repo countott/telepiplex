@@ -111,6 +111,7 @@ from .release_gate import gate_releases
 from .release_identity import deduplicate_releases, stable_release_id
 from .release_report import circled_number, format_release_report, release_keyboard
 from .release_score import rank_releases
+from .raw_search import RawSearch
 from .search_plan import (
     TemporarySpecialAllocator,
     confirm_media_metadata,
@@ -799,6 +800,7 @@ class SearchFeature:
         self.runtime = None
         self.operations = {}
         self.owner_operations = {}
+        self.raw_search = RawSearch(self)
 
     @staticmethod
     def _log_measurement(
@@ -1414,9 +1416,11 @@ class SearchFeature:
 
     async def command(self, request: dict) -> dict:
         command = str(request.get("command") or "")
+        if command == "pr":
+            return self.raw_search.command(request)
         if command == "search_config":
             owner = self._owner_key(request)
-            if owner in self.awaiting_queries or any(
+            if owner in self.awaiting_queries or owner in self.raw_search.awaiting_queries or any(
                 item.get("owner") == owner for item in self.plans.values()
             ):
                 return self._closed(
@@ -1492,6 +1496,10 @@ class SearchFeature:
                 request, self.config_wizard.message(request)
             )
         key = self._owner_key(request)
+        if key in self.raw_search.awaiting_queries:
+            return self.raw_search.start(
+                str(request.get("text") or "").strip(), request, reuse_owner=True
+            )
         if key in self.awaiting_scope_inputs:
             return self._handle_scope_input(request, key)
         if key not in self.awaiting_queries:
@@ -1528,6 +1536,8 @@ class SearchFeature:
         stored = self.plans.get(plan_id)
         if not stored or stored["owner"] != self._owner_key(request):
             return self._closed("⚠️ 搜索任务已过期，请重新搜索。")
+        if stored.get("kind") == "raw" and action != "cancel":
+            return self.raw_search.callback(action, plan_id, stored, parts[2:])
         if action in {"confirm", "scope"}:
             operation = self.operations.get(stored.get("operation_id")) or {}
             allowed_stages = (
@@ -2045,6 +2055,7 @@ class SearchFeature:
             )
         stored["selection_frozen"] = True
         stored["selected_release_id"] = release_id
+        stored["submission_task_started"] = False
         self._cancel_release_tasks(stored)
         operation_view = self._advance_operation(
             operation_id,
@@ -2090,6 +2101,7 @@ class SearchFeature:
                 task.cancel()
 
     async def _submission_task(self, plan_id, stored, raw_index, operation_id):
+        stored["submission_task_started"] = True
         try:
             result = await self._submit_release(
                 plan_id, stored, raw_index, operation_id
@@ -4536,6 +4548,8 @@ class SearchFeature:
         release_id: str,
         error_kind: str,
     ) -> dict:
+        if stored.get("kind") == "raw":
+            return self.raw_search.remove_release(plan_id, stored, release_id)
         release_by_id = stored.setdefault("release_by_id", {})
         release_by_id.pop(release_id, None)
         remaining = [
@@ -4621,7 +4635,10 @@ class SearchFeature:
                 release_id,
                 "magnet_missing",
             )
-        contract = deepcopy(stored["confirmed_contract"])
+        contract = (
+            None if stored.get("kind") == "raw"
+            else deepcopy(stored["confirmed_contract"])
+        )
         operation = self.operations[operation_id]
         if not operation.get("search_segment_sealed"):
             await self._report_operation(
@@ -4692,7 +4709,7 @@ class SearchFeature:
                     "user_id": stored["owner"][1],
                     "operation_id": operation_id,
                     "operation_revision": handoff["revision"],
-                    "media_metadata": contract,
+                    **({"media_metadata": contract} if contract is not None else {}),
                     "release": {
                         "title": item.get("title") or "",
                         "indexer": item.get("indexer") or "",
@@ -6985,6 +7002,7 @@ class SearchFeature:
             raise FeatureError("invalid_control", "search control is invalid")
         owner = (operation["chat_id"], operation["user_id"])
         self.awaiting_queries.discard(owner)
+        self.raw_search.awaiting_queries.discard(owner)
         self.config_wizard.clear({"chat_id": owner[0], "user_id": owner[1]})
         plan_id = str(operation.get("plan_id") or "")
         task = operation.get("task")
@@ -6992,6 +7010,14 @@ class SearchFeature:
         release_task_unstarted = (
             str(operation.get("task_id") or "").startswith("search-releases-")
             and not stored.get("release_search_phase")
+        )
+        raw_task_unstarted = (
+            stored.get("kind") == "raw"
+            and not stored.get("raw_worker_started")
+        )
+        submission_task_unstarted = (
+            str(operation.get("task_id") or "").startswith("search-submit-")
+            and not stored.get("submission_task_started")
         )
         release_task_finalizes = (
             str(operation.get("task_id") or "").startswith("search-releases-")
@@ -7012,6 +7038,8 @@ class SearchFeature:
             operation.get("state") == "awaiting_input"
             or task is None
             or release_task_unstarted
+            or raw_task_unstarted
+            or submission_task_unstarted
         ):
             terminal = self._advance_operation(
                 operation_id,
@@ -7080,6 +7108,7 @@ class SearchFeature:
         if operation is None:
             return self._closed("⚠️ 搜索会话已失效。")
         self.awaiting_queries.discard(owner)
+        self.raw_search.awaiting_queries.discard(owner)
         plan_id = str(operation.get("plan_id") or "")
         if plan_id:
             self._log_completed_once(
@@ -7228,7 +7257,9 @@ class SearchFeature:
                 "resolving_release",
                 "submitting_download",
             }
-            role = "search" if view["stage"] in search_stages else "identity"
+            role = "search" if (
+                view["stage"] in search_stages or operation.get("kind") == "raw_search"
+            ) else "identity"
             if (
                 role == "identity"
                 and operation.get("kind") == "search"

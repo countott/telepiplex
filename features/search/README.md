@@ -1,15 +1,26 @@
 # search Feature
 
-search 2.1.4 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，并把人工确认候选冻结到持久状态。search 不调用 AI。用户原始片名只做空白归一化，不在 query 侧补写冒号、“篇”或别名；例如 `死神 千年血战` 由 Wikipedia 的排序结果承担匹配。规划期间先显示文字状态，候选海报数据就绪后 Host 才把有效消息游标迁移到图片候选并移除旧文字状态，不再提前展示海报占位图；新图片在成为权威游标并清理旧消息前不带按钮。候选按钮第一次点击即进入不可重复消费的确认状态，Host 不改写 Telegram 的只读 callback 对象，而是从已持久化的 claim 恢复原始 payload；后台进度 revision 不会清除 claim，只有对应 Feature RPC 完成后才按 generation、token 和 message ID 原子释放。重复 callback 只返回同一冻结结果。候选、正在确认和最终作品身份都属于 Host API 1.7 的同一条 `identity` 消息段；身份段封存后，Prowlarr 搜索结果才开启新的 `search` 消息，因此不会再出现两条有效身份卡片或两条仅后一条可点击的搜索结果。SDK 2.1.0 提供 v2-only 的最小 `media_metadata` 下游合同和 operation segment API。
+search 2.2.0 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，并把人工确认候选冻结到持久状态。search 不调用 AI。用户原始片名只做空白归一化，不在 query 侧补写冒号、“篇”或别名；例如 `死神 千年血战` 由 Wikipedia 的排序结果承担匹配。规划期间先显示文字状态，候选海报数据就绪后 Host 才把有效消息游标迁移到图片候选并移除旧文字状态，不再提前展示海报占位图；新图片在成为权威游标并清理旧消息前不带按钮。候选按钮第一次点击即进入不可重复消费的确认状态，Host 不改写 Telegram 的只读 callback 对象，而是从已持久化的 claim 恢复原始 payload；后台进度 revision 不会清除 claim，只有对应 Feature RPC 完成后才按 generation、token 和 message ID 原子释放。重复 callback 只返回同一冻结结果。候选、正在确认和最终作品身份都属于 Host API 1.7 的同一条 `identity` 消息段；身份段封存后，Prowlarr 搜索结果才开启新的 `search` 消息，因此不会再出现两条有效身份卡片或两条仅后一条可点击的搜索结果。SDK 2.1.0 提供 v2-only 的最小 `media_metadata` 下游合同和 operation segment API。
 
 ## 发起搜索
 
 - `/s 片名` 或 `/search 片名` 接受明确的中文或英文影视名称，可附年份、电影/剧集类型以及明确的 `S01`、`S01E01` 范围。
+- `/pr <query>` 直接按原文搜索片源；单独发送 `/pr` 后也可以在下一条消息输入 query。
 - 描述性需求、口语改写、错别字推断和特殊内容检索会被拒绝；请改用准确片名。
 - `/s <链接>` 不再兼容，系统会提示直接发送链接。
 - 豆瓣、Wikipedia、Wikidata、TVDB、TMDB 或 AniList 的稳定作品链接可以直接发送到 Telegram 对话。精确链接锁定作品身份并跳过根作品发现。
 - Wikipedia 消歧义链接不会被当成作品；页面标题会回到确定性根作品菜单。
-- Season 0、Special、OVA、OAD 和其他附加内容不进入 Search。
+- `/s` 的身份搜索不接受 Season 0、Special、OVA、OAD 和其他附加内容。
+
+## 原文搜索 `/pr`
+
+例如 `/pr Some.Show.S01E01 1080p`。telepiplex 只移除命令与 query 首尾空白，保留内部空格、换行、引号和标点，直接发送到 Prowlarr 的 `/api/v1/search`。此入口不做媒体身份识别、query 改写、电影/剧集分类限制、片源身份门禁或质量评分；索引器范围与连接设置沿用 Search 的 `search.prowlarr` 配置，具体查询语法和召回范围由 Prowlarr 及索引器决定。
+
+结果按每页 5 条展示资源标题、大小、做种数、发布时间和索引器。默认最新优先，可按时间、标题、大小、Peers、索引器、抓取数、文件数、分类或协议排序；同一排序按钮再次点击切换升降序。排序与翻页只使用本次已获取的结果，不会重复请求索引器，也不受普通搜索的 12 条质量排序展示上限限制。Prowlarr 的搜索 API 没有通用排序参数，此处使用其返回字段实现同类排序；Peers 按 `seeders * 1000000 + leechers` 排序。同一资源来自不同索引器时保留独立行，按钮绑定稳定资源身份，不因重排选错资源。
+
+选择片源后，从 Search 已配置的 `category_folder` 选择保存目录，再复用 `download.provider.submit`、链接转磁力、任务所有权交接和幂等提交。Usenet 或缺少下载链接的结果仍可查看，但不提供投递按钮。原文 query 不是已确认的媒体身份，因此提交中省略 `media_metadata`；下载完成后，rename 复用现有文件识别和媒体确认流程。能搜索到资源不代表 rename 一定能识别，无法确定身份时仍按现有流程处理。
+
+`/pr` 的输入、进度、排序、目录选择与退出使用同一条文字 `search` 消息段。取消后不会显示迟到的搜索结果；无法解析下载链接时移除该项并返回原文结果列表。任务状态保存在 Search 进程内，重启后需重新发起搜索。
 
 ## Wikipedia 根作品发现
 
@@ -66,7 +77,7 @@ search 提供 `media.search.resolve_metadata` 与持久冻结的 `media.search.c
 
 ## 配置与日志
 
-运行配置位于 `/config/plugins/search/config.yaml`。Wikipedia、Wikidata、豆瓣和 AniList 无需 API Key；P4529、P8729、P4086 与 IMDb ID 都直接来自 Wikidata/来源事实，不接入 IMDb 或 MyAnimeList API。TMDB 使用 API Read Access Token，TVDB 使用自身凭据，均可通过 `/search_config` 配置。search 不再包含 AI 配置项。2.1.4 沿用配置 schema v2，并继续通过包内声明安全删除 1.8.0 遗留的顶层 `ai` 配置段，其余用户配置保持不变；回滚时 Host 会恢复升级前的完整配置。
+运行配置位于 `/config/plugins/search/config.yaml`。Wikipedia、Wikidata、豆瓣和 AniList 无需 API Key；P4529、P8729、P4086 与 IMDb ID 都直接来自 Wikidata/来源事实，不接入 IMDb 或 MyAnimeList API。TMDB 使用 API Read Access Token，TVDB 使用自身凭据，均可通过 `/search_config` 配置。search 不再包含 AI 配置项。2.2.0 沿用配置 schema v2，并继续通过包内声明安全删除 1.8.0 遗留的顶层 `ai` 配置段，其余用户配置保持不变；回滚时 Host 会恢复升级前的完整配置。
 
 每个搜索会话使用稳定的 `search_session_id`。日志记录输入分类、直链解析、候选确认、元数据来源状态、最终 query 变体、片源门禁结果和唯一终态；不记录 API Key、Token、Cookie、Authorization、magnet 或完整来源 payload。
 
@@ -103,10 +114,30 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
   "$PY" -m pytest -q -p no:cacheprovider tests
 ```
 
+`/pr` 的本地链路回归命令（从 Mac 开发工作区执行）：
+
+```bash
+cd /Users/young/Documents/telepiplex
+PY=/Users/young/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
+
+for module in search download rename; do
+  (
+    cd "features/$module"
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:../../sdk/src \
+      "$PY" -m pytest -q -p no:cacheprovider tests --tb=short
+  )
+done
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:sdk/src \
+  "$PY" -m pytest -q -p no:cacheprovider \
+  tests/test_raw_search_handoff.py tests/test_operation_pipeline_e2e.py \
+  tests/test_command_catalog.py tests/test_feature_action_contracts.py --tb=short
+```
+
 构建示例：
 
 ```bash
-python tools/build_feature.py features/search /tmp/search-2.1.4.tpx \
+python tools/build_feature.py features/search /tmp/search-2.2.0.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

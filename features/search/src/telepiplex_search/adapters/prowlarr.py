@@ -171,6 +171,14 @@ def _normalize_result(item):
         "magnet_url": magnet_url,
         "size": item.get("size") or 0,
         "seeders": item.get("seeders") or 0,
+        "leechers": item.get("leechers"),
+        "grabs": item.get("grabs"),
+        "files": item.get("files"),
+        "age_minutes": item.get("ageMinutes"),
+        "sort_title": item.get("sortTitle") or item.get("title") or "",
+        "categories": item.get("categories") or [],
+        "indexer_id": item.get("indexerId"),
+        "guid": item.get("guid") or "",
         "indexer": item.get("indexer") or item.get("indexerName") or "",
         "publish_date": item.get("publishDate") or item.get("publish_date") or "",
         "protocol": item.get("protocol") or "",
@@ -180,7 +188,7 @@ def _normalize_result(item):
 
 def search_prowlarr(
     query: str,
-    media_type: str = "movie",
+    media_type: str | None = "movie",
     *,
     indexer_ids=None,
     timeout: float | None = None,
@@ -214,6 +222,10 @@ def search_prowlarr(
         "categories": category,
         "type": "search",
     }
+    # An explicit None is an unrestricted raw search. Ordinary searches retain
+    # their configured movie/series categories.
+    if media_type is None:
+        params.pop("categories")
     url = f"{base_url}/api/v1/search"
     headers = {"X-Api-Key": api_key}
     request_timeout = (
