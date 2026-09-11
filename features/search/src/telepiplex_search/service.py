@@ -5715,23 +5715,62 @@ class SearchFeature:
         if not tasks:
             stored["candidates"] = tuple(candidates)
             return
-        done, pending = await asyncio.wait(
-            tasks,
-            timeout=max(0.01, float(self.candidate_poster_timeout)),
-        )
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
         found = {}
-        for task in done:
-            index, provider = tasks[task]
-            try:
-                url = _text(task.result())
-            except Exception:
-                continue
-            if url.startswith("https://"):
-                found[(index, provider)] = url
+        finished = set()
+        unresolved = {index for index, _provider in tasks.values()}
+        pending = set(tasks)
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + max(
+                0.01, float(self.candidate_poster_timeout)
+            )
+            while pending:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                done, pending = await asyncio.wait(
+                    pending,
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    key = tasks[task]
+                    finished.add(key)
+                    # A source's own cancellation is an unavailable result;
+                    # cancellation of this helper still propagates from wait.
+                    if task.cancelled():
+                        continue
+                    try:
+                        url = _text(task.result())
+                    except Exception:
+                        continue
+                    if url.startswith("https://"):
+                        found[key] = url
+                resolved = set()
+                for index in unresolved:
+                    for provider in ("tmdb", "douban", "tvdb"):
+                        key = (index, provider)
+                        if key not in finished:
+                            break
+                        if key in found:
+                            resolved.add(index)
+                            break
+                    else:
+                        resolved.add(index)
+                # Only discard lower sources after this candidate's winner
+                # (or absence of any poster) can no longer change.
+                for task in tuple(pending):
+                    if tasks[task][0] in resolved:
+                        task.cancel()
+                        pending.remove(task)
+                unresolved.difference_update(resolved)
+        finally:
+            # Own consumers only: SourceScheduler retains shielded shared I/O.
+            # Commit the candidate copy only after cleanup succeeds.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         for index, candidate in enumerate(candidates[:5]):
             selected = next(
                 (

@@ -1,19 +1,27 @@
 """Fetch, validate and durably copy a complete snapshot before file mutations."""
+import asyncio
+
 from telepiplex_plugin_sdk import FeatureError
 from telepiplex_plugin_sdk.storage_snapshot import (
-    SnapshotError, SnapshotStore, validate_reference, validate_page, verify_snapshot,
+    SnapshotError, SnapshotStore, validate_reference, validate_page,
 )
+
+
+def _get_rows(store,ref):
+    pages=store.get(ref)
+    return [row for page in pages for row in page['entries']]
 
 
 async def read_snapshot(host,jobs,ref,*,job_id,root_path,check_cancelled,timeout=120):
     try:
         validate_reference(ref,job_id=job_id,root_path=root_path)
         if jobs is None or not getattr(jobs,'path',None):raise SnapshotError('durable rename job store is required for snapshots')
-        store=SnapshotStore(str(jobs.path)+'.snapshots.sqlite3')
         check_cancelled()
-        if store.contains(ref):
-            pages=store.get(ref)
-        else:
+        store=await asyncio.to_thread(SnapshotStore,str(jobs.path)+'.snapshots.sqlite3')
+        check_cancelled()
+        cached=await asyncio.to_thread(store.contains,ref)
+        check_cancelled()
+        if not cached:
             pages=[];cursor=None;start=0
             for index in range(ref['page_count']):
                 check_cancelled()
@@ -23,11 +31,11 @@ async def read_snapshot(host,jobs,ref,*,job_id,root_path,check_cancelled,timeout
                 page=response.get('value') if isinstance(response,dict) else None
                 rows=validate_page(ref,page,index,start)
                 pages.append(page);start+=len(rows);cursor=page['next_cursor']
-            verify_snapshot(ref,pages)
             check_cancelled()
-            store.put(ref,pages)
+            await asyncio.to_thread(store.put,ref,pages)
+            check_cancelled()
         # Re-read the committed independent copy, including count and digest.
-        rows=verify_snapshot(ref,store.get(ref))
+        rows=await asyncio.to_thread(_get_rows,store,ref)
         check_cancelled()
         # A receipt never deletes provider data. A lost receipt cannot invalidate
         # the locally durable copy, and replay therefore does not need provider.

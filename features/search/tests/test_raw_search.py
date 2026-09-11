@@ -46,6 +46,7 @@ class RawSearchTest(unittest.IsolatedAsyncioTestCase):
                 "result_limit": 2,
             }},
         }
+        self.addCleanup(runtime_context.configure, runtime_context.config)
         runtime_context.configure(self.config)
         self.host = FakeHost()
         self.runtime = FakeRuntime()

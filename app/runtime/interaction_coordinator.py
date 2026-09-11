@@ -45,6 +45,9 @@ TERMINAL_STATES = {
     "interrupted",
 }
 ACTIVE_STATES = VALID_STATES - TERMINAL_STATES
+_ACTIVE_STATES_SQL = ", ".join(
+    f"'{value}'" for value in sorted(ACTIVE_STATES)
+)
 HANDOFF_STATES = {"prepared", "submitted", "accepted", "failed", "cancelled"}
 EFFECT_RECEIPT_STATES = {
     "prepared",
@@ -184,7 +187,6 @@ class InteractionCoordinator:
     def _create_schema(self):
         states = ", ".join(f"'{value}'" for value in sorted(VALID_STATES))
         controls = ", ".join(f"'{value}'" for value in sorted(VALID_CONTROLS))
-        active_states = ", ".join(f"'{value}'" for value in sorted(ACTIVE_STATES))
         handoff_states = ", ".join(
             f"'{value}'" for value in sorted(HANDOFF_STATES)
         )
@@ -224,7 +226,7 @@ class InteractionCoordinator:
             );
             CREATE UNIQUE INDEX IF NOT EXISTS operations_one_active_owner
             ON operations(chat_id, user_id)
-            WHERE state IN ({active_states});
+            WHERE state IN ({_ACTIVE_STATES_SQL});
             CREATE INDEX IF NOT EXISTS operations_active_plugin
             ON operations(plugin_id, state, updated_at);
             CREATE TABLE IF NOT EXISTS operation_message_ownership (
@@ -3073,22 +3075,21 @@ class InteractionCoordinator:
             )
 
     def active(self, chat_id: int, user_id: int) -> OperationRecord | None:
-        placeholders = ",".join("?" for _ in ACTIVE_STATES)
         with self._lock:
             row = self._connection.execute(
                 f"SELECT * FROM operations WHERE chat_id = ? AND user_id = ? "
-                f"AND state IN ({placeholders}) ORDER BY updated_at DESC LIMIT 1",
-                (int(chat_id), int(user_id), *sorted(ACTIVE_STATES)),
+                f"AND state IN ({_ACTIVE_STATES_SQL}) "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (int(chat_id), int(user_id)),
             ).fetchone()
         return self._from_row(row) if row is not None else None
 
     def active_records(self) -> list[OperationRecord]:
-        placeholders = ",".join("?" for _ in ACTIVE_STATES)
         with self._lock:
             rows = self._connection.execute(
-                f"SELECT * FROM operations WHERE state IN ({placeholders}) "
+                f"SELECT * FROM operations "
+                f"WHERE state IN ({_ACTIVE_STATES_SQL}) "
                 "ORDER BY created_at, operation_id",
-                tuple(sorted(ACTIVE_STATES)),
             ).fetchall()
         return [self._from_row(row) for row in rows]
 

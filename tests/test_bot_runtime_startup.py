@@ -29,7 +29,7 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
     async def test_core_runtime_version_matches_current_host_release(self):
         bot_module = await asyncio.to_thread(load_bot_module)
 
-        self.assertEqual(bot_module.get_version(), "v3.6.11-host")
+        self.assertEqual(bot_module.get_version(), "v3.6.12-host")
 
     async def test_uncaught_telegram_error_uses_the_same_sanitized_incident_in_frontend_and_machine_log(self):
         from app.utils.logger import Logger

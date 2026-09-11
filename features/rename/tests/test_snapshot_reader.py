@@ -1,11 +1,16 @@
+import asyncio
 import copy
 import sqlite3
+import threading
 import unittest
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
+import telepiplex_plugin_sdk.storage_snapshot as snapshot_storage
 from telepiplex_plugin_sdk import FeatureError
 from telepiplex_plugin_sdk.storage_snapshot import SnapshotStore, build_snapshot, encoded
 from telepiplex_rename.jobs import RenameJobStore
+import telepiplex_rename.snapshot_reader as snapshot_reader
 from telepiplex_rename.snapshot_reader import read_snapshot
 from telepiplex_rename.operations import OperationCancelled
 from telepiplex_rename.service import RenameFeature
@@ -23,14 +28,16 @@ class ReaderTests(unittest.IsolatedAsyncioTestCase):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.jobs=RenameJobStore(Path(self.temp.name)/'jobs.db')
         self.ref,self.pages=make_snapshot();self.calls=[];self.cancelled=False
+        self.validate_ack_copy=True
         self.transform=lambda page: page
         outer=self
         class Host:
             async def call_capability(self,capability,method,payload,**kwargs):
                 outer.calls.append((method,payload))
                 if method=='acknowledge_tree_snapshot':
-                    store=SnapshotStore(str(outer.jobs.path)+'.snapshots.sqlite3')
-                    assert store.get(outer.ref)==outer.pages
+                    if outer.validate_ack_copy:
+                        store=SnapshotStore(str(outer.jobs.path)+'.snapshots.sqlite3')
+                        assert store.get(outer.ref)==outer.pages
                     return {'value':{'retained':True}}
                 cursor=payload['args'][1];index=int(cursor.split(':')[1]) if cursor else 0
                 return {'value':outer.transform(copy.deepcopy(outer.pages[index]))}
@@ -48,6 +55,160 @@ class ReaderTests(unittest.IsolatedAsyncioTestCase):
         self.host.call_capability=offline
         self.assertEqual(await self.read(),rows)
         self.assertEqual(self.jobs.get('job')['result'],{'replacement':'no snapshot in result'})
+
+    async def test_committed_copy_has_one_read_and_only_required_full_validations(self):
+        self.validate_ack_copy=False
+        real_get=SnapshotStore.get;real_validate_nodes=snapshot_storage.validate_nodes
+        get_calls=[];validation_calls=[]
+        def counted_get(store,ref):
+            get_calls.append(ref['snapshot_id'])
+            return real_get(store,ref)
+        def counted_validate_nodes(rows,ref):
+            validation_calls.append(ref['snapshot_id'])
+            return real_validate_nodes(rows,ref)
+        with patch.object(SnapshotStore,'get',counted_get), \
+             patch.object(snapshot_storage,'validate_nodes',counted_validate_nodes):
+            await self.read()
+            cold=(len(get_calls),len(validation_calls),
+                  sum(method=='get_tree_snapshot_page' for method,_ in self.calls))
+            get_calls.clear();validation_calls.clear();self.calls.clear()
+            await self.read()
+            replay=(len(get_calls),len(validation_calls),
+                    sum(method=='get_tree_snapshot_page' for method,_ in self.calls))
+        self.assertEqual(cold,(1,2,self.ref['page_count']))
+        self.assertEqual(replay,(1,1,0))
+
+    async def test_local_store_work_and_row_flattening_leave_event_loop_responsive(self):
+        self.validate_ack_copy=False
+        loop=asyncio.get_running_loop();loop_thread=threading.get_ident()
+        names=('construct','contains','put','get')
+        entered={name:threading.Event() for name in names}
+        release={name:threading.Event() for name in names}
+        responsive={};worker_threads={};entry_threads=[];check_threads=[]
+
+        def pause(name):
+            worker_threads[name]=threading.get_ident();entered[name].set()
+            if not release[name].wait(2):raise AssertionError(f'{name} release timed out')
+        class ThreadObservedEntries(list):
+            def __iter__(self):
+                entry_threads.append(threading.get_ident())
+                return super().__iter__()
+        class PausedStore:
+            def __init__(self,path):
+                pause('construct');self.inner=SnapshotStore(path)
+            def contains(self,ref):
+                pause('contains');return self.inner.contains(ref)
+            def put(self,ref,pages):
+                pause('put');return self.inner.put(ref,pages)
+            def get(self,ref):
+                pause('get');pages=self.inner.get(ref)
+                for page in pages:page['entries']=ThreadObservedEntries(page['entries'])
+                return pages
+        def control():
+            for name in names:
+                if not entered[name].wait(2):
+                    responsive[name]=False;release[name].set();continue
+                tick=threading.Event();loop.call_soon_threadsafe(tick.set)
+                responsive[name]=tick.wait(.25);release[name].set()
+        controller=threading.Thread(target=control,daemon=True);controller.start()
+        def check():
+            check_threads.append(threading.get_ident());self.check()
+        try:
+            with patch.object(snapshot_reader,'SnapshotStore',PausedStore):
+                rows=await read_snapshot(self.host,self.jobs,self.ref,job_id='job',
+                    root_path='/root',check_cancelled=check)
+        finally:
+            for event in release.values():event.set()
+            controller.join(2)
+        self.assertEqual(len(rows),1001)
+        self.assertEqual(responsive,{name:True for name in names})
+        self.assertTrue(all(worker_threads[name]!=loop_thread for name in names))
+        self.assertTrue(entry_threads)
+        self.assertTrue(all(thread_id!=loop_thread for thread_id in entry_threads))
+        self.assertTrue(check_threads)
+        self.assertEqual(set(check_threads),{loop_thread})
+
+    async def test_cancel_during_local_put_stops_before_committed_read_and_ack(self):
+        entered=threading.Event();release=threading.Event();get_calls=[]
+        class PausedPutStore:
+            def __init__(self,path):self.inner=SnapshotStore(path)
+            def contains(self,ref):return self.inner.contains(ref)
+            def put(self,ref,pages):
+                result=self.inner.put(ref,pages);entered.set()
+                if not release.wait(2):raise AssertionError('put release timed out')
+                return result
+            def get(self,ref):
+                get_calls.append(ref['snapshot_id']);return self.inner.get(ref)
+        def cancel():
+            if entered.wait(2):self.cancelled=True
+            release.set()
+        canceller=threading.Thread(target=cancel,daemon=True);canceller.start()
+        try:
+            with patch.object(snapshot_reader,'SnapshotStore',PausedPutStore):
+                with self.assertRaises(OperationCancelled):await self.read()
+        finally:
+            release.set();canceller.join(2)
+        self.assertEqual(get_calls,[])
+        self.assertNotIn('acknowledge_tree_snapshot',[method for method,_ in self.calls])
+        self.assertTrue(SnapshotStore(str(self.jobs.path)+'.snapshots.sqlite3').contains(self.ref))
+
+    async def test_cancel_during_committed_read_stops_before_second_read_and_ack(self):
+        SnapshotStore(str(self.jobs.path)+'.snapshots.sqlite3').put(self.ref,self.pages)
+        entered=threading.Event();release=threading.Event();get_calls=[]
+        class PausedGetStore:
+            def __init__(self,path):self.inner=SnapshotStore(path)
+            def contains(self,ref):return self.inner.contains(ref)
+            def get(self,ref):
+                get_calls.append(ref['snapshot_id']);pages=self.inner.get(ref)
+                if len(get_calls)==1:
+                    entered.set()
+                    if not release.wait(2):raise AssertionError('get release timed out')
+                return pages
+        def cancel():
+            if entered.wait(2):self.cancelled=True
+            release.set()
+        canceller=threading.Thread(target=cancel,daemon=True);canceller.start()
+        try:
+            with patch.object(snapshot_reader,'SnapshotStore',PausedGetStore):
+                with self.assertRaises(OperationCancelled):await self.read()
+        finally:
+            release.set();canceller.join(2)
+        self.assertEqual(len(get_calls),1)
+        self.assertEqual(self.calls,[])
+
+    async def test_persisted_missing_page_or_bad_digest_is_rejected_without_ack(self):
+        self.validate_ack_copy=False
+        await self.read()
+        store_path=str(self.jobs.path)+'.snapshots.sqlite3'
+        for kind in ('missing','digest'):
+            with self.subTest(kind=kind):
+                with sqlite3.connect(store_path) as db:
+                    if kind=='missing':
+                        db.execute('DELETE FROM snapshot_pages_v1 WHERE snapshot_id=? AND page_index=1',
+                                   (self.ref['snapshot_id'],))
+                    else:
+                        page=copy.deepcopy(self.pages[0]);page['entries'][0]['size']+=1
+                        db.execute('UPDATE snapshot_pages_v1 SET page_json=? WHERE snapshot_id=? AND page_index=0',
+                                   (encoded(page).decode(),self.ref['snapshot_id']))
+                self.calls.clear()
+                with self.assertRaises(FeatureError):await self.read()
+                self.assertEqual(self.calls,[])
+                with sqlite3.connect(store_path) as db:
+                    db.execute('DELETE FROM snapshot_pages_v1 WHERE snapshot_id=?',(self.ref['snapshot_id'],))
+                    db.executemany('INSERT INTO snapshot_pages_v1 VALUES (?,?,?)',
+                        [(self.ref['snapshot_id'],i,encoded(page).decode()) for i,page in enumerate(self.pages)])
+
+    async def test_first_fetch_rejects_corruption_after_put_before_ack(self):
+        self.validate_ack_copy=False
+        real_put=SnapshotStore.put
+        def corrupt_after_put(store,ref,pages):
+            real_put(store,ref,pages)
+            with sqlite3.connect(store.path) as db:
+                db.execute('DELETE FROM snapshot_pages_v1 WHERE snapshot_id=? AND page_index=1',
+                           (ref['snapshot_id'],))
+        with patch.object(SnapshotStore,'put',corrupt_after_put):
+            with self.assertRaises(FeatureError):await self.read()
+        self.assertNotIn('acknowledge_tree_snapshot',[method for method,_ in self.calls])
     async def test_page_faults_fail_without_ack_or_partial_copy(self):
         def faults(kind,page):
             if page['index']==1:
