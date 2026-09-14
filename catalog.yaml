@@ -1287,5 +1287,15 @@ plugins:
           branch: main
           commit: c75e70cbc5567f38309c731551e42688a1a5b938
         url: https://github.com/countott/telepiplex/releases/download/sync-v2.0.1/sync-2.0.1.tpx
-release: rename-v2.1.2
+      2.0.2:
+        host_api: '>=1.2,<2.0'
+        provides:
+        - library.sync
+        requires: []
+        sha256: 07b6e58b1a5745340bbf53bd9592e96e2b7c0bff2b5eb784b33bffe44f16ee01
+        source:
+          branch: main
+          commit: 13805601d7a3d1b55ae12a9ca8b751e4211fd0af
+        url: https://github.com/countott/telepiplex/releases/download/sync-v2.0.2/sync-2.0.2.tpx
+release: sync-v2.0.2
 schema_version: 1
