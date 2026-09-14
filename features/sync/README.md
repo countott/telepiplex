@@ -1,6 +1,6 @@
 # Plex Management Feature
 
-当前版本：`2.0.2`；SDK：`2.1.1`。本次为品牌文案补丁，随 Host `3.6.13` 发布；代码身份、User-Agent 与 MCP 服务名称保持不变。
+当前版本：`2.0.2`；SDK：`2.1.1`。本次为品牌文案补丁，建议搭配 Host `3.6.14`；代码身份、User-Agent 与 MCP 服务名称保持不变。
 
 `features/sync` 是独立 Feature 源码目录。Telepiplex 将其构建为不可变 `.tpx`，并在 Telepiplex 容器内以独立 venv/子进程运行。
 

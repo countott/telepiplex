@@ -1,6 +1,6 @@
 # rename Feature
 
-当前版本：`2.1.2`；SDK：`2.1.1`。本次为品牌文案补丁，随 Host `3.6.13` 发布；代码身份、User-Agent 与 MCP 服务名称保持不变。
+当前版本：`2.1.2`；SDK：`2.1.1`。本次为品牌文案补丁，建议搭配 Host `3.6.14`；代码身份、User-Agent 与 MCP 服务名称保持不变。
 
 `features/rename` 是 Telepiplex 的独立媒体整理 Feature。rename 2.1.2 消费 durable `download.completed`，并在任何文件副作用前严格校验 `media_metadata v2`；v1 事件直接拒绝，不再转换或迁移。v2 合同保持不可变，实际整理结果写入独立 `organization_result`，不会把 Rename 观察到的文件事实反写为作品元数据。每次恢复还会读取 Host operation snapshot；任务不存在、已终态或 handoff 未被 Rename 接受时失败关闭，避免脱离全链路所有权后继续改动文件。Rename 的进度和终态只覆写一条 `rename` 消息，终态回执持久化后只重试消息段封存，不重复上报终态。
 

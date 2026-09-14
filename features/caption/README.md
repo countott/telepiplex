@@ -1,6 +1,6 @@
 # caption
 
-当前版本：`0.1.5`；SDK：`2.1.1`。本次为品牌文案补丁，随 Host `3.6.13` 发布；代码身份、User-Agent 与 MCP 服务名称保持不变。
+当前版本：`0.1.5`；SDK：`2.1.1`。本次为品牌文案补丁，建议搭配 Host `3.6.14`；代码身份、User-Agent 与 MCP 服务名称保持不变。
 
 `caption` 是字幕查找与统一化功能预留的 Telepiplex Feature。
 

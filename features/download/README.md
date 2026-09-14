@@ -1,6 +1,6 @@
 # download Feature
 
-当前版本：`2.1.1`；SDK：`2.1.1`。本次为品牌文案补丁，随 Host `3.6.13` 发布；代码身份、User-Agent 与 MCP 服务名称保持不变。
+当前版本：`2.1.1`；SDK：`2.1.1`。本次为品牌文案补丁，建议搭配 Host `3.6.14`；代码身份、User-Agent 与 MCP 服务名称保持不变。
 
 `features/download` 是独立 Feature 源码目录，提供 `download.provider` 与 `storage.provider`。2.1.1 在任何 115 副作用发生前严格校验并深拷贝 search 交付的最小 `media_metadata v2`，拒绝 v1、未知字段、非法范围和新链路中的 `naming_metadata`；完成事件原样转交冻结合同，不追加展示元数据。下载进度、资源选择和终态只覆写 Host API 1.7 的一条 `download` 消息，终态被 Host 精确确认后封存消息段，再交接 Rename；回执不确定时只重试同一消息段，不创建第二条可点击消息。
 

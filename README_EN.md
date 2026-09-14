@@ -264,11 +264,11 @@ The current Host API 1.7 provides durable operation message segments, reusing on
 
 #### Current source versions
 
-Branding patch: user-facing names use `Telepiplex`; code and protocol identities stay unchanged. These are the current source versions; available updates depend on published Releases and the Feature catalog.
+Branding patch: user-facing names use `Telepiplex`; code and protocol identities stay unchanged. Host `3.6.14` fixes the obsolete branding test; SDK and Feature versions remain at their branding patch versions. These are the current source versions; available updates depend on published Releases and the Feature catalog.
 
 | Component | Version |
 | --- | --- |
-| Host | `3.6.13` |
+| Host | `3.6.14` |
 | SDK | `2.1.1` |
 | `download` | `2.1.1` |
 | `search` | `2.2.2` |

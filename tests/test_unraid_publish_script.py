@@ -22,7 +22,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
         host_source=textwrap.dedent(
             '''\
             def get_version(md_format=False):
-                version = "v3.6.13-host"
+                version = "v3.6.14-host"
                 return version
             '''
         ),
@@ -198,7 +198,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
         self.assertEqual(
             tag_pushes,
             [
-                "push origin refs/tags/telepiplex-v3.6.13",
+                "push origin refs/tags/telepiplex-v3.6.14",
                 "push origin refs/tags/download-v2.1.1",
                 "push origin refs/tags/search-v2.2.2",
                 "push origin refs/tags/rename-v2.1.2",
@@ -222,7 +222,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
             changed_path="features/download/README.md",
             remote_tags="\n".join(
                 (
-                    "host refs/tags/telepiplex-v3.6.13",
+                    "host refs/tags/telepiplex-v3.6.14",
                     "a refs/tags/download-v2.1.1",
                     "b refs/tags/search-v2.2.2",
                     "c refs/tags/rename-v2.1.2",
@@ -242,7 +242,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
             changed_path="features/search/manifest.yaml",
             remote_tags="\n".join(
                 (
-                    "host refs/tags/telepiplex-v3.6.13",
+                    "host refs/tags/telepiplex-v3.6.14",
                     "a refs/tags/download-v2.1.1",
                     "b refs/tags/search-v1.12.3",
                     "c refs/tags/rename-v2.1.2",
@@ -268,7 +268,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
             changed_path="",
             remote_tags="\n".join(
                 (
-                    "host refs/tags/telepiplex-v3.6.13",
+                    "host refs/tags/telepiplex-v3.6.14",
                     "a refs/tags/download-v2.1.1",
                     "b refs/tags/search-v2.2.2",
                     "c refs/tags/rename-v2.1.2",
