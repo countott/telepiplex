@@ -75,7 +75,7 @@ class _FeatureDiagnosticTransportHandler(logging.Handler):
     def _transport_failure(exc):
         try:
             sys.__stderr__.write(
-                "telepiplex Feature diagnostics transport failed: "
+                "Telepiplex Feature diagnostics transport failed: "
                 f"{type(exc).__name__}\n"
             )
             sys.__stderr__.flush()

@@ -1,10 +1,10 @@
-# telepiplex
+# Telepiplex
 
 **Search, download to 115, and organize your media from Telegram.**
 
 [简体中文](README.md) · [Quick start](#quick-start) · [Everyday use](#everyday-use) · [Features](#feature-modules) · [MIT License](LICENSE)
 
-telepiplex is a self-hosted media management tool. Send an exact title or a media page link, confirm the work and episode range, then choose a release and destination. It connects media search, 115 offline downloads, and file organization in one trackable task. You can also organize existing files on 115 and manage Plex libraries through a separate module.
+Telepiplex is a self-hosted media management tool. Send an exact title or a media page link, confirm the work and episode range, then choose a release and destination. It connects media search, 115 offline downloads, and file organization in one trackable task. You can also organize existing files on 115 and manage Plex libraries through a separate module.
 
 A single Docker container runs the persistent Host. Business capabilities are installed and updated independently as Feature modules, with everyday controls in Telegram.
 
@@ -95,7 +95,7 @@ The active Host configuration is `/config/config.yaml` inside the container. Pro
 
 Open your Bot in Telegram and send `/start`. Send `/plugin` to open module management.
 
-Use the buttons to install `download`, `search`, and `rename` in that order. Only dependency-satisfied, ready candidates receive an Install button; missing dependencies are listed on the page. Install and Update buttons target that Feature's newest stable, Host-compatible release. telepiplex never installs automatically.
+Use the buttons to install `download`, `search`, and `rename` in that order. Only dependency-satisfied, ready candidates receive an Install button; missing dependencies are listed on the page. Install and Update buttons target that Feature's newest stable, Host-compatible release. Telepiplex never installs automatically.
 
 Send `/config`, choose a module, and follow its prompts:
 
@@ -157,7 +157,7 @@ Work folders use `Chinese Title (English Title)`. Media filenames use the confir
 
 After installing and configuring `sync`, send `/scan` to scan one or all Plex libraries, or `/sync` to inspect jobs. `/scan` only submits a library scan; it does not create artwork, audio, or subtitle enhancement jobs.
 
-telepiplex does not mount 115 storage for Plex. Make media accessible to Plex through your existing setup. Organization does not automatically trigger a Plex scan. See the [sync documentation](features/sync/README.md) for the MCP management interface.
+Telepiplex does not mount 115 storage for Plex. Make media accessible to Plex through your existing setup. Organization does not automatically trigger a Plex scan. See the [sync documentation](features/sync/README.md) for the MCP management interface.
 
 ### Common commands
 
@@ -195,7 +195,7 @@ docker logs -f telepiplex
 
 Each Host startup creates a session directory under `/config/logs/`, containing `telepiplex.human.log`, `telepiplex.machine.jsonl`, and corresponding `feature-<plugin_id>` views. Human logs provide a Chinese business timeline; JSONL preserves structured diagnostics. Sensitive fields are redacted. Complete sessions are retained for at most 30 startups and 30 days.
 
-Update Features through `/plugin`. The Host refreshes the official catalog at startup and checks again every six hours by default. Available updates are sent to the authorized user; the transaction runs only after they select “Confirm update” (确认更新). telepiplex never updates silently. It verifies the package, checks a separate new process, drains old work, and switches routes. A failed update keeps the old version.
+Update Features through `/plugin`. The Host refreshes the official catalog at startup and checks again every six hours by default. Available updates are sent to the authorized user; the transaction runs only after they select “Confirm update” (确认更新). Telepiplex never updates silently. It verifies the package, checks a separate new process, drains old work, and switches routes. A failed update keeps the old version.
 
 Updating the Host image requires recreating the container:
 
@@ -228,7 +228,7 @@ The first two examples below illustrate historical version syntax only. Choose a
 
 `plugins.catalog` accepts an HTTPS URL or local file. The official rolling endpoint is `https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml`. Feature Releases include a complete catalog snapshot; save it as `/config/plugins/catalog.yaml` and point the configuration there if needed. Offline use also requires the corresponding artifacts and runtime dependencies.
 
-The legacy default catalog is `<plugins.root>/catalog.yaml`; telepiplex falls back to the official URL only when that legacy file is missing. An existing legacy file remains local, and every other explicit local path preserves its local configuration intent even when its file is missing. Failed remote refreshes preserve the last valid catalog.
+The legacy default catalog is `<plugins.root>/catalog.yaml`; Telepiplex falls back to the official URL only when that legacy file is missing. An existing legacy file remains local, and every other explicit local path preserves its local configuration intent even when its file is missing. Failed remote refreshes preserve the last valid catalog.
 
 ### Large directories and older configurations
 
@@ -262,7 +262,24 @@ The current Host API 1.7 provides durable operation message segments, reusing on
 
 ### Independent releases
 
-`main` is the active source branch for Core/Host and all five Features. The Host uses `telepiplex-v<semver>` tags, with release commits verified as contained in remote `main`. The release workflow publishes `ghcr.io/<owner>/telepiplex:<semver>` and `latest`, then creates a same-tag GitHub Release explicitly marked **Latest**. An ordinary `main` push does not update official images or Latest entry points.
+#### Current source versions
+
+Branding patch: user-facing names use `Telepiplex`; code and protocol identities stay unchanged. These are the current source versions; available updates depend on published Releases and the Feature catalog.
+
+| Component | Version |
+| --- | --- |
+| Host | `3.6.13` |
+| SDK | `2.1.1` |
+| `download` | `2.1.1` |
+| `search` | `2.2.2` |
+| `rename` | `2.1.2` |
+| `sync` | `2.0.2` |
+| `caption` | `0.1.5` |
+
+Existing installations must update the Host image and confirm updates for installed modules through `/plugin`. The SDK is bundled during builds and needs no separate installation.
+
+
+`main` is the active source branch for Core/Host and all five Features. The Host uses `telepiplex-v<semver>` tags, with release commits verified as contained in remote `main`. The release workflow publishes `ghcr.io/<owner>/telepiplex:<semver>` and `latest`, then creates a GitHub Release titled `Telepiplex <semver>` for that tag explicitly marked **Latest**. An ordinary `main` push does not update official images or Latest entry points.
 
 Features use independent `<plugin_id>-v<semver>` tags and immutable `.tpx` artifacts identified by `name@version`. The Feature version in `manifest.yaml` must match its package version. Changed contents require a new version; published identities are not overwritten. Feature Releases do not take the Latest label, and Host Releases contain no Feature or catalog assets.
 
@@ -302,4 +319,4 @@ The maintainer workspace follows [AGENTS.md](AGENTS.md): development and local v
 
 ## License
 
-telepiplex is available under the [MIT License](LICENSE). Third-party dependencies retain their respective licenses; module directories contain the relevant notices.
+Telepiplex is available under the [MIT License](LICENSE). Third-party dependencies retain their respective licenses; module directories contain the relevant notices.

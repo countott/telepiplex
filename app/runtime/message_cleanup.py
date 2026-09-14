@@ -1,4 +1,4 @@
-"""Durable removal of controls from retired telepiplex Telegram messages."""
+"""Durable removal of controls from retired Telepiplex Telegram messages."""
 from __future__ import annotations
 
 import asyncio
@@ -111,7 +111,7 @@ class MessageCleanupWorker:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                _LOGGER.warning("telepiplex message cleanup worker failed: %s", type(exc).__name__)
+                _LOGGER.warning("Telepiplex message cleanup worker failed: %s", type(exc).__name__)
             try:
                 await asyncio.wait_for(self._wake.wait(), self.interval)
             except asyncio.TimeoutError:

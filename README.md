@@ -1,10 +1,10 @@
-# telepiplex
+# Telepiplex
 
 **在 Telegram 里完成影视搜索、115 下载与媒体整理。**
 
 [English](README_EN.md) · [快速开始](#快速开始) · [日常使用](#日常使用) · [模块说明](#功能模块) · [MIT License](LICENSE)
 
-telepiplex 是一个自托管的媒体管理工具。发送准确片名或作品链接，确认作品和季集范围，选择片源与保存目录，就能把搜索、115 离线下载、文件整理串成一条可跟踪的任务。已有的 115 媒体也可以单独扫描整理；Plex 媒体库由独立模块按需管理。
+Telepiplex 是一个自托管的媒体管理工具。发送准确片名或作品链接，确认作品和季集范围，选择片源与保存目录，就能把搜索、115 离线下载、文件整理串成一条可跟踪的任务。已有的 115 媒体也可以单独扫描整理；Plex 媒体库由独立模块按需管理。
 
 一个 Docker 容器承载常驻 Host，业务能力通过 Feature 模块按需安装、独立更新。日常操作在 Telegram 中完成。
 
@@ -95,7 +95,7 @@ docker logs -f telepiplex
 
 在 Telegram 打开你的 Bot，发送 `/start`，再发送 `/plugin`。
 
-依次点击安装 `download`、`search`、`rename`。只有依赖满足的 ready 候选才显示安装按钮；缺少依赖时，页面会提示先安装哪个模块。安装按钮和更新按钮都绑定该 Feature 的最新稳定兼容版本。telepiplex 不会自动安装模块。
+依次点击安装 `download`、`search`、`rename`。只有依赖满足的 ready 候选才显示安装按钮；缺少依赖时，页面会提示先安装哪个模块。安装按钮和更新按钮都绑定该 Feature 的最新稳定兼容版本。Telepiplex 不会自动安装模块。
 
 安装后发送 `/config`，选择模块并按提示配置：
 
@@ -157,7 +157,7 @@ Wikipedia、Wikidata、豆瓣和 AniList 不需要 API Key。search 没有 AI �
 
 安装并配置 `sync` 后，发送 `/scan` 选择一个或全部 Plex 媒体库进行扫描，发送 `/sync` 查看任务。`/scan` 只提交扫描，不创建海报、音轨或字幕增强任务。
 
-telepiplex 不提供 115 到 Plex 的文件挂载。请先确保 Plex 能通过你已有的方案访问媒体；整理完成不会自动触发 Plex 扫描。需要 MCP 管理接口时，参阅 [sync 文档](features/sync/README.md)。
+Telepiplex 不提供 115 到 Plex 的文件挂载。请先确保 Plex 能通过你已有的方案访问媒体；整理完成不会自动触发 Plex 扫描。需要 MCP 管理接口时，参阅 [sync 文档](features/sync/README.md)。
 
 ### 常用命令
 
@@ -195,7 +195,7 @@ docker logs -f telepiplex
 
 每次 Host 启动会在 `/config/logs/` 建立新会话目录，包含 `telepiplex.human.log`、`telepiplex.machine.jsonl` 和对应 `feature-<plugin_id>` 分类日志。人类日志为中文业务时间线，JSONL 保存结构化诊断信息；敏感字段经脱敏。日志按完整会话保留，最多最近 30 次启动且不超过 30 天。
 
-Feature 通过 `/plugin` 更新。Host 启动时刷新官方目录，默认每 6 小时再次检查；发现更新会通知授权用户，点击“确认更新”后才执行，telepiplex 不会静默更新。新版本经过校验、独立进程健康检查、旧任务排空和路由切换，失败时保留旧版本。
+Feature 通过 `/plugin` 更新。Host 启动时刷新官方目录，默认每 6 小时再次检查；发现更新会通知授权用户，点击“确认更新”后才执行，Telepiplex 不会静默更新。新版本经过校验、独立进程健康检查、旧任务排空和路由切换，失败时保留旧版本。
 
 更新 Host 镜像则需要重建容器：
 
@@ -228,7 +228,7 @@ Host 与 Feature 独立发布，镜像更新不会替你更新已安装模块。
 
 `plugins.catalog` 支持 HTTPS 地址或本地文件。官方滚动入口为 `https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml`。Feature Release 附带完整 catalog 快照，可保存为 `/config/plugins/catalog.yaml`，再将配置指向该路径；离线使用还需要准备相应包与运行依赖。
 
-旧版默认 catalog 是 `<plugins.root>/catalog.yaml`；仅当这个 legacy 文件缺失时，telepiplex 才回退到官方 URL。已存在的 legacy 文件继续使用本地目录；其他显式本地路径即使当前文件缺失，也保持本地配置意图。远程刷新失败时保留上一次有效目录。
+旧版默认 catalog 是 `<plugins.root>/catalog.yaml`；仅当这个 legacy 文件缺失时，Telepiplex 才回退到官方 URL。已存在的 legacy 文件继续使用本地目录；其他显式本地路径即使当前文件缺失，也保持本地配置意图。远程刷新失败时保留上一次有效目录。
 
 ### 大目录与旧配置
 
@@ -262,7 +262,24 @@ Host 负责 Telegram 接入、命令路由、任务与事件持久化、配置�
 
 ### 独立发布
 
-`main` 是 Core/Host 与五个 Feature 的有效源码分支。Host 使用 `telepiplex-v<semver>` tag，发布前验证提交已包含在远端 `main`；正式流水线生成 `ghcr.io/<owner>/telepiplex:<semver>` 与 `latest` 镜像，创建同名 GitHub Release 并强制设为 **Latest**。普通 `main` push 不更新正式镜像或 Latest 入口。
+#### 当前源码版本
+
+品牌文案补丁：对外名称统一为 `Telepiplex`，代码与协议身份保持不变。以下为当前源码版本，实际可更新版本以正式 Release 与模块目录为准。
+
+| 组件 | 版本 |
+| --- | --- |
+| Host | `3.6.13` |
+| SDK | `2.1.1` |
+| `download` | `2.1.1` |
+| `search` | `2.2.2` |
+| `rename` | `2.1.2` |
+| `sync` | `2.0.2` |
+| `caption` | `0.1.5` |
+
+现有部署需更新 Host 镜像，并在 `/plugin` 中确认更新已安装模块。SDK 随构建打包，无需单独安装。
+
+
+`main` 是 Core/Host 与五个 Feature 的有效源码分支。Host 使用 `telepiplex-v<semver>` tag，发布前验证提交已包含在远端 `main`；正式流水线生成 `ghcr.io/<owner>/telepiplex:<semver>` 与 `latest` 镜像，创建标题为 `Telepiplex <semver>` 的 GitHub Release 并强制设为 **Latest**。普通 `main` push 不更新正式镜像或 Latest 入口。
 
 Feature 使用 `<plugin_id>-v<semver>` 独立 tag，生成不可变 `.tpx`，以 `name@version` 标识包身份。`manifest.yaml` 中的 Feature version 与包版本必须一致；内容变化需要新版本，不覆盖已发布身份。Feature Release 不占用 Latest，Host Release 不携带 Feature 或 catalog 资产。
 
@@ -302,4 +319,4 @@ done
 
 ## 许可证
 
-telepiplex 使用 [MIT License](LICENSE)。各模块依赖的第三方软件保留其各自许可证，相关声明见模块目录。
+Telepiplex 使用 [MIT License](LICENSE)。各模块依赖的第三方软件保留其各自许可证，相关声明见模块目录。

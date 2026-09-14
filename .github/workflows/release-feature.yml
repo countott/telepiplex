@@ -1,4 +1,4 @@
-name: Publish one telepiplex Feature
+name: Publish one Telepiplex Feature
 
 on:
   push:
@@ -29,7 +29,7 @@ jobs:
       source_commit: ${{ steps.artifact.outputs.source_commit }}
       artifact_name: ${{ steps.feature.outputs.artifact_name }}
     steps:
-      - name: Checkout telepiplex release infrastructure
+      - name: Checkout Telepiplex release infrastructure
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -360,7 +360,7 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout telepiplex release infrastructure
+      - name: Checkout Telepiplex release infrastructure
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -502,9 +502,9 @@ jobs:
               ;;
             404)
               gh release create "$RELEASE_TAG" "dist/$ASSET_NAME" release/catalog.yaml release/catalog.yaml.sha256 \
-                --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$RELEASE_TAG" \
+                --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Telepiplex ${RELEASE_TAG%-v*} ${RELEASE_TAG##*-v}" \
                 --latest=false \
-                --notes "Immutable telepiplex Feature release for $RELEASE_TAG."
+                --notes "Immutable Telepiplex Feature release for $RELEASE_TAG."
               ;;
             *)
               echo "Feature Release publication probe failed: HTTP $HTTP_CODE" >&2
@@ -565,7 +565,7 @@ jobs:
             find catalog-publish -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
             cp release/catalog.yaml release/catalog.yaml.sha256 catalog-publish/
             cat > catalog-publish/README.md <<'EOF'
-          # telepiplex Feature catalog
+          # Telepiplex Feature catalog
 
           This branch is maintained by optimistic Feature release merges.
           `catalog.yaml` points only to immutable published Feature Release assets.

@@ -102,7 +102,7 @@ DEFAULT_PLUGIN_CATALOG_URL = (
 
 
 def get_version(md_format=False):
-    version = "v3.6.12-host"
+    version = "v3.6.13-host"
     if md_format:
         return escape_markdown(version, version=2)
     return version
@@ -111,12 +111,12 @@ def get_version(md_format=False):
 def log_runtime_features():
     revision = os.getenv("TELEPIPLEX_COMMIT") or os.getenv("GIT_COMMIT") or "unknown"
     init.logger.info(
-        "telepiplex runtime features: telepiplex_host=enabled, "
+        "Telepiplex runtime features: telepiplex_host=enabled, "
         "basic_telegram_runtime=enabled, message_queue=enabled, "
         f"plugin_host=enabled, revision={revision}"
     )
     init.logger.info(
-        "telepiplex runtime logs: "
+        "Telepiplex runtime logs: "
         f"host_log={host_log_path(init.CONFIG)}, "
         "feature_log_template=/config/plugins/<plugin_id>/state/logs/runtime.log"
     )
@@ -231,7 +231,7 @@ def build_plugin_manager(config=None, host_database=None):
 
 
 def build_host_startup_notice_text():
-    return "✅ telepiplex 启动完成\n\n可使用 /plugin 查看并安装 Feature"
+    return "✅ Telepiplex 启动完成\n\n可使用 /plugin 查看并安装 Feature"
 
 
 def queue_host_startup_notice():
@@ -570,7 +570,7 @@ async def telepiplex_error_handler(update, context):
     )
     incident_id = new_incident_id()
     frontend = (
-        "❌ telepiplex 处理请求时发生错误。\n"
+        "❌ Telepiplex 处理请求时发生错误。\n"
         f"问题编号：{incident_id}\n"
         "请保留该编号以便从日志中定位完整链路。"
     )

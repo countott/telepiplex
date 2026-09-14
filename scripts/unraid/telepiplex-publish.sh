@@ -1,6 +1,6 @@
 #!/bin/bash
-#name=telepiplex Publish
-#description=提交 Syncthing 同步内容，并发布 telepiplex Host 与待发布 Feature 版本
+#name=Telepiplex Publish
+#description=提交 Syncthing 同步内容，并发布 Telepiplex Host 与待发布 Feature 版本
 #foregroundOnly=true
 #arrayStarted=true
 #clearLog=true
@@ -40,7 +40,7 @@ if (($# > 0)); then
   echo '提示：已忽略 User Scripts 保留的旧参数；版本将从源码自动读取。'
 fi
 
-COMMIT_MESSAGE='update telepiplex'
+COMMIT_MESSAGE='update Telepiplex'
 
 # Unraid User Scripts 通常由 root 运行，而 Syncthing 接收目录可能保留其他
 # 所有者。将信任范围限制在本次命令和唯一仓库，不修改全局 Git 配置。
@@ -122,7 +122,7 @@ assert_newer_than_remote() {
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCK_FILE"
   flock -n 9 ||
-    die '另一个 telepiplex 发布任务正在运行'
+    die '另一个 Telepiplex 发布任务正在运行'
 fi
 
 [[ -d "$REPO" ]] ||
@@ -211,7 +211,7 @@ done
 [[ -z "$("${GIT[@]}" diff --name-only --diff-filter=U)" ]] ||
   die '存在未解决的 Git 冲突'
 
-# 确保始终使用 telepiplex 专用部署密钥和 GitHub SSH 443 连接。
+# 确保始终使用 Telepiplex 专用部署密钥和 GitHub SSH 443 连接。
 "${GIT[@]}" config --local core.sshCommand \
   "ssh -i $SSH_KEY -o IdentitiesOnly=yes -o UpdateHostKeys=no -o BatchMode=yes"
 

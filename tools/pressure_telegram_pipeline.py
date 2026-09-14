@@ -335,7 +335,7 @@ class SimulatedTelegramRequest(BaseRequest):
             return {
                 "id": 9001,
                 "is_bot": True,
-                "first_name": "telepiplex pressure",
+                "first_name": "Telepiplex pressure",
                 "username": "telepiplex_pressure_bot",
             }
         if endpoint in {"answerCallbackQuery", "deleteMessage", "setMyCommands"}:

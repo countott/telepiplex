@@ -308,7 +308,7 @@ class DualDiagnosticHandler(logging.Handler):
         except Exception as exc:
             try:
                 sys.__stderr__.write(
-                    f"telepiplex diagnostics write failed: {type(exc).__name__}\n"
+                    f"Telepiplex diagnostics write failed: {type(exc).__name__}\n"
                 )
                 sys.__stderr__.flush()
             except Exception:

@@ -1,4 +1,4 @@
-"""Strict minimal media identity contract for new telepiplex operations."""
+"""Strict minimal media identity contract for new Telepiplex operations."""
 
 from __future__ import annotations
 

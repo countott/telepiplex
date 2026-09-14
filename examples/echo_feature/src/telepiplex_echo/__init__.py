@@ -1,2 +1,2 @@
-"""Reference no-restart telepiplex Feature."""
+"""Reference no-restart Telepiplex Feature."""
 

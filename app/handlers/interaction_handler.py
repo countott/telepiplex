@@ -2490,7 +2490,7 @@ async def _segment_photo_media(record):
         return photo_url
     return await asyncio.to_thread(
         build_poster_grid,
-        [{"number": 1, "title": "telepiplex"}],
+        [{"number": 1, "title": "Telepiplex"}],
     )
 
 

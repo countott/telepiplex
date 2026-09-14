@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telepiplex-plugin-sdk"
-version = "2.1.0"
-description = "Runtime SDK for telepiplex Feature subprocesses"
+version = "2.1.1"
+description = "Runtime SDK for Telepiplex Feature subprocesses"
 requires-python = ">=3.12"
 
 [tool.setuptools.packages.find]

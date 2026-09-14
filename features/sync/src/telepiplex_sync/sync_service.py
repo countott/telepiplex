@@ -848,7 +848,7 @@ class LibrarySyncService:
                     break
                 wait_seconds = min(delay, max(0, deadline - self._clock()))
                 logger.info(
-                    "telepiplex Plex location retry library=%s pending=%s wait=%.1fs "
+                    "Telepiplex Plex location retry library=%s pending=%s wait=%.1fs "
                     "(backoff capped at 30s; new media detection may be delayed)",
                     library_id, len(pending), wait_seconds,
                 )

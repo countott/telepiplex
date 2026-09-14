@@ -1,4 +1,4 @@
-name: Publish telepiplex release
+name: Publish Telepiplex release
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
   validate-telepiplex:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout telepiplex release source
+      - name: Checkout Telepiplex release source
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -31,12 +31,12 @@ jobs:
           python-version: '3.12'
           cache: pip
 
-      - name: Install telepiplex system test dependencies
+      - name: Install Telepiplex system test dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends fonts-noto-cjk
 
-      - name: Install telepiplex test dependencies
+      - name: Install Telepiplex test dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest setuptools wheel
@@ -45,14 +45,14 @@ jobs:
             python -m pip install -r "features/$module/requirements-feature.txt"
           done
 
-      - name: Validate immutable telepiplex tag
+      - name: Validate immutable Telepiplex tag
         run: |
           if [[ ! "$RELEASE_TAG" =~ ^telepiplex-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "Invalid telepiplex release tag: $RELEASE_TAG" >&2
+            echo "Invalid Telepiplex release tag: $RELEASE_TAG" >&2
             exit 1
           fi
 
-      - name: Verify telepiplex release commit belongs to main
+      - name: Verify Telepiplex release commit belongs to main
         run: |
           set -euo pipefail
           git fetch --force --no-tags origin \
@@ -60,10 +60,10 @@ jobs:
           RELEASE_COMMIT=$(git rev-parse "${GITHUB_SHA}^{commit}")
           MAIN_COMMIT=$(git rev-parse "refs/remotes/origin/main^{commit}")
           if ! git merge-base --is-ancestor "$RELEASE_COMMIT" "$MAIN_COMMIT"; then
-            echo "telepiplex release commit is not contained in main: $RELEASE_COMMIT" >&2
+            echo "Telepiplex release commit is not contained in main: $RELEASE_COMMIT" >&2
             exit 1
           fi
-          echo "Confirmed telepiplex release commit belongs to main: $RELEASE_COMMIT"
+          echo "Confirmed Telepiplex release commit belongs to main: $RELEASE_COMMIT"
 
       - name: Run Host tests
         run: |
@@ -113,7 +113,7 @@ jobs:
       packages: write
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout telepiplex release source
+      - name: Checkout Telepiplex release source
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -138,19 +138,19 @@ jobs:
           INSPECT_STATUS=$?
           set -e
           if [[ "$INSPECT_STATUS" -eq 0 ]]; then
-            echo "telepiplex image tag already exists: $TELEPIPLEX_IMAGE:$VERSION" >&2
+            echo "Telepiplex image tag already exists: $TELEPIPLEX_IMAGE:$VERSION" >&2
             exit 1
           fi
           if grep -Eiq 'manifest[ _-]*(unknown|not[ _-]*found)|MANIFEST_UNKNOWN' <<< "$INSPECT_OUTPUT" \
             || grep -Eiq '^ERROR: .+: not found$' <<< "$INSPECT_OUTPUT"; then
-            echo "Confirmed unused telepiplex image tag: $TELEPIPLEX_IMAGE:$VERSION"
+            echo "Confirmed unused Telepiplex image tag: $TELEPIPLEX_IMAGE:$VERSION"
           else
-            echo "Unable to prove telepiplex image tag is unused; refusing publication." >&2
+            echo "Unable to prove Telepiplex image tag is unused; refusing publication." >&2
             printf '%s\n' "$INSPECT_OUTPUT" >&2
             exit 1
           fi
 
-      - name: Build and push telepiplex image
+      - name: Build and push Telepiplex image
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -179,20 +179,20 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
-      - name: Refuse an existing telepiplex Release
+      - name: Refuse an existing Telepiplex Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "telepiplex Release already exists: $RELEASE_TAG" >&2
+            echo "Telepiplex Release already exists: $RELEASE_TAG" >&2
             exit 1
           fi
 
-      - name: Write telepiplex release notes
+      - name: Write Telepiplex release notes
         run: |
           VERSION="${RELEASE_TAG#telepiplex-v}"
           {
-            echo "# telepiplex $VERSION"
+            echo "# Telepiplex $VERSION"
             echo
             echo "- Image: \`$TELEPIPLEX_IMAGE:$VERSION\`"
             echo "- Commit: \`$GITHUB_SHA\`"
@@ -206,6 +206,6 @@ jobs:
           gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
-            --title "$RELEASE_TAG" \
+            --title "Telepiplex ${RELEASE_TAG#telepiplex-v}" \
             --notes-file release-notes.md \
             --latest

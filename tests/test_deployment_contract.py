@@ -127,7 +127,7 @@ class DeploymentContractTest(unittest.TestCase):
             (ROOT / "sdk" / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(project["project"]["version"], "2.1.0")
+        self.assertEqual(project["project"]["version"], "2.1.1")
 
     def test_build_script_only_references_existing_dockerfiles(self):
         source = (ROOT / "build.sh").read_text(encoding="utf-8")
@@ -180,7 +180,7 @@ class DeploymentContractTest(unittest.TestCase):
             "telepiplex-v<semver>",
             "远端 `main`",
             "普通 `main` push",
-            "同名 GitHub Release",
+            "标题为 `Telepiplex <semver>` 的 GitHub Release",
             "强制设为 **Latest**",
             "download-v1.0.0",
             "search-v1.0.0",
@@ -203,7 +203,7 @@ class DeploymentContractTest(unittest.TestCase):
             "telepiplex-v<semver>",
             "remote `main`",
             "ordinary `main` push",
-            "same-tag GitHub Release",
+            "GitHub Release titled `Telepiplex <semver>` for that tag",
             "explicitly marked **Latest**",
             "download-v1.0.0",
             "search-v1.0.0",
@@ -260,7 +260,7 @@ class DeploymentContractTest(unittest.TestCase):
             "安装按钮和更新按钮都绑定该 Feature 的最新稳定兼容版本",
             "只有依赖满足的 ready 候选才显示安装按钮",
             "旧版默认 catalog 是 `<plugins.root>/catalog.yaml`",
-            "仅当这个 legacy 文件缺失时，telepiplex 才回退到官方 URL",
+            "仅当这个 legacy 文件缺失时，Telepiplex 才回退到官方 URL",
             "已存在的 legacy 文件继续使用本地目录",
             "其他显式本地路径即使当前文件缺失，也保持本地配置意图",
             "不会自动安装",
@@ -292,7 +292,7 @@ class DeploymentContractTest(unittest.TestCase):
             "Install and Update buttons target that Feature's newest stable, Host-compatible release",
             "Only dependency-satisfied, ready candidates receive an Install button",
             "The legacy default catalog is `<plugins.root>/catalog.yaml`",
-            "telepiplex falls back to the official URL only when that legacy file is missing",
+            "Telepiplex falls back to the official URL only when that legacy file is missing",
             "An existing legacy file remains local",
             "every other explicit local path preserves its local configuration intent even when its file is missing",
             "never installs automatically",

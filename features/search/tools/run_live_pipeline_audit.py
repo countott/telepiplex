@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit the real telepiplex Search business flow with capture-only downloads."""
+"""Audit the real Telepiplex Search business flow with capture-only downloads."""
 from __future__ import annotations
 
 import argparse

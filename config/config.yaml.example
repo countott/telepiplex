@@ -1,4 +1,4 @@
-# telepiplex 配置模板；运行时配置路径为 /config/config.yaml。
+# Telepiplex 配置模板；运行时配置路径为 /config/config.yaml。
 
 log_level: info
 

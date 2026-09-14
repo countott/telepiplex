@@ -1,6 +1,8 @@
 # search Feature
 
-search 2.2.1 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，并把人工确认候选冻结到持久状态。search 不调用 AI。用户原始片名只做空白归一化，不在 query 侧补写冒号、“篇”或别名；例如 `死神 千年血战` 由 Wikipedia 的排序结果承担匹配。规划期间先显示文字状态，候选海报数据就绪后 Host 才把有效消息游标迁移到图片候选并移除旧文字状态，不再提前展示海报占位图；新图片在成为权威游标并清理旧消息前不带按钮。候选按钮第一次点击即进入不可重复消费的确认状态，Host 不改写 Telegram 的只读 callback 对象，而是从已持久化的 claim 恢复原始 payload；后台进度 revision 不会清除 claim，只有对应 Feature RPC 完成后才按 generation、token 和 message ID 原子释放。重复 callback 只返回同一冻结结果。候选、正在确认和最终作品身份都属于 Host API 1.7 的同一条 `identity` 消息段；身份段封存后，Prowlarr 搜索结果才开启新的 `search` 消息，因此不会再出现两条有效身份卡片或两条仅后一条可点击的搜索结果。SDK 2.1.0 提供 v2-only 的最小 `media_metadata` 下游合同和 operation segment API。
+当前版本：`2.2.2`；SDK：`2.1.1`。本次为品牌文案补丁，随 Host `3.6.13` 发布；代码身份、User-Agent 与 MCP 服务名称保持不变。
+
+search 2.2.2 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，并把人工确认候选冻结到持久状态。search 不调用 AI。用户原始片名只做空白归一化，不在 query 侧补写冒号、“篇”或别名；例如 `死神 千年血战` 由 Wikipedia 的排序结果承担匹配。规划期间先显示文字状态，候选海报数据就绪后 Host 才把有效消息游标迁移到图片候选并移除旧文字状态，不再提前展示海报占位图；新图片在成为权威游标并清理旧消息前不带按钮。候选按钮第一次点击即进入不可重复消费的确认状态，Host 不改写 Telegram 的只读 callback 对象，而是从已持久化的 claim 恢复原始 payload；后台进度 revision 不会清除 claim，只有对应 Feature RPC 完成后才按 generation、token 和 message ID 原子释放。重复 callback 只返回同一冻结结果。候选、正在确认和最终作品身份都属于 Host API 1.7 的同一条 `identity` 消息段；身份段封存后，Prowlarr 搜索结果才开启新的 `search` 消息，因此不会再出现两条有效身份卡片或两条仅后一条可点击的搜索结果。SDK 2.1.1 提供 v2-only 的最小 `media_metadata` 下游合同和 operation segment API。
 
 ## 发起搜索
 
@@ -14,7 +16,7 @@ search 2.2.1 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，�
 
 ## 原文搜索 `/pr`
 
-例如 `/pr Some.Show.S01E01 1080p`。telepiplex 只移除命令与 query 首尾空白，保留内部空格、换行、引号和标点，直接发送到 Prowlarr 的 `/api/v1/search`。此入口不做媒体身份识别、query 改写、电影/剧集分类限制、片源身份门禁或质量评分；索引器范围与连接设置沿用 Search 的 `search.prowlarr` 配置，具体查询语法和召回范围由 Prowlarr 及索引器决定。
+例如 `/pr Some.Show.S01E01 1080p`。Telepiplex 只移除命令与 query 首尾空白，保留内部空格、换行、引号和标点，直接发送到 Prowlarr 的 `/api/v1/search`。此入口不做媒体身份识别、query 改写、电影/剧集分类限制、片源身份门禁或质量评分；索引器范围与连接设置沿用 Search 的 `search.prowlarr` 配置，具体查询语法和召回范围由 Prowlarr 及索引器决定。
 
 结果按每页 5 条展示资源标题、大小、做种数、发布时间和索引器。默认最新优先，可按时间、标题、大小、Peers、索引器、抓取数、文件数、分类或协议排序；同一排序按钮再次点击切换升降序。排序与翻页只使用本次已获取的结果，不会重复请求索引器，也不受普通搜索的 12 条质量排序展示上限限制。Prowlarr 的搜索 API 没有通用排序参数，此处使用其返回字段实现同类排序；Peers 按 `seeders * 1000000 + leechers` 排序。同一资源来自不同索引器时保留独立行，按钮绑定稳定资源身份，不因重排选错资源。
 
@@ -79,7 +81,7 @@ search 提供 `media.search.resolve_metadata` 与持久冻结的 `media.search.c
 
 ## 配置与日志
 
-运行配置位于 `/config/plugins/search/config.yaml`。Wikipedia、Wikidata、豆瓣和 AniList 无需 API Key；P4529、P8729、P4086 与 IMDb ID 都直接来自 Wikidata/来源事实，不接入 IMDb 或 MyAnimeList API。TMDB 使用 API Read Access Token，TVDB 使用自身凭据，均可通过 `/search_config` 配置。search 不再包含 AI 配置项。2.2.1 沿用配置 schema v2，并继续通过包内声明安全删除 1.8.0 遗留的顶层 `ai` 配置段，其余用户配置保持不变；回滚时 Host 会恢复升级前的完整配置。
+运行配置位于 `/config/plugins/search/config.yaml`。Wikipedia、Wikidata、豆瓣和 AniList 无需 API Key；P4529、P8729、P4086 与 IMDb ID 都直接来自 Wikidata/来源事实，不接入 IMDb 或 MyAnimeList API。TMDB 使用 API Read Access Token，TVDB 使用自身凭据，均可通过 `/search_config` 配置。search 不再包含 AI 配置项。2.2.2 沿用配置 schema v2，并继续通过包内声明安全删除 1.8.0 遗留的顶层 `ai` 配置段，其余用户配置保持不变；回滚时 Host 会恢复升级前的完整配置。
 
 每个搜索会话使用稳定的 `search_session_id`。日志记录输入分类、直链解析、候选确认、元数据来源状态、最终 query 变体、片源门禁结果和唯一终态；不记录 API Key、Token、Cookie、Authorization、magnet 或完整来源 payload。
 
@@ -139,7 +141,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:sdk/src \
 构建示例：
 
 ```bash
-python tools/build_feature.py features/search /tmp/search-2.2.1.tpx \
+python tools/build_feature.py features/search /tmp/search-2.2.2.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```
