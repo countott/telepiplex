@@ -9,6 +9,8 @@ from telepiplex_rename.media_metadata_v2 import (
     observed_episode_plan,
     scope_allows_coordinate,
 )
+from telepiplex_rename.media_naming import build_media_naming_plan
+from telepiplex_rename.tvdb_rename import build_confirmed_rename_plan
 
 
 def contract(kind="whole_series"):
@@ -36,6 +38,44 @@ def contract(kind="whole_series"):
 
 
 class RenameMediaMetadataV2Test(unittest.TestCase):
+    def test_frozen_romaji_names_series_video_and_subtitle_consistently(self):
+        value = contract()
+        value["placement"]["category_kind"] = "animated_series"
+        value["identity"].update({
+            "naming_title": "Source Romaji",
+            "naming_title_kind": "romaji",
+        })
+        before = copy.deepcopy(value)
+        plan = build_confirmed_rename_plan(
+            final_path="/source", selected_path="/动画剧集",
+            metadata=naming_identity_from_v2(value), media_metadata=value,
+            ai_plan={"episode_map": [{
+                "source_file": "Release.S01E01.mkv", "season_number": 1, "episode_number": 1,
+            }]},
+            file_tree=[
+                {"relative_path": "Release.S01E01.mkv", "name": "Release.S01E01.mkv", "is_dir": False},
+                {"relative_path": "Release.S01E01.eng.ass", "name": "Release.S01E01.eng.ass", "is_dir": False},
+            ],
+        )
+        self.assertEqual(plan["target_root"], "/动画剧集/中文剧集 ⋯ Source Romaji")
+        self.assertEqual({op["rename_to"] for op in plan["operations"]}, {
+            "Source Romaji S01E01.mkv", "Source Romaji S01E01.chi.ass",
+        })
+        self.assertTrue(all(op["target_dir"].endswith("/Source Romaji Season 01") for op in plan["operations"]))
+        self.assertEqual(value, before)
+
+    def test_movie_uses_frozen_title_and_year_without_release_year_fallback(self):
+        value = contract("movie")
+        value["identity"].update(media_type="movie", naming_title="Source Romaji", naming_title_kind="romaji")
+        value["placement"]["category_kind"] = "animated_movie"
+        value["metadata_id"] = build_media_metadata_v2_id(value)
+        naming = naming_identity_from_v2(value)
+        plan = build_media_naming_plan(naming, "Release.2099.1080p", "release.mkv")
+        self.assertEqual(plan.target_relative_dir, "中文剧集 (2024) ⋯ Source Romaji")
+        self.assertEqual(plan.file_name, "Source Romaji.mkv")
+        naming["year"] = None
+        self.assertIsNone(build_media_naming_plan(naming, "Release.2099.1080p", "release.mkv"))
+
     def test_naming_and_scope_are_pure_and_do_not_need_provider_inventory(self):
         value = contract("whole_series")
         before = copy.deepcopy(value)

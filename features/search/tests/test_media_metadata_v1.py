@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 
 from telepiplex_search.adapters import douban
 from telepiplex_search.anchored_candidate import (
@@ -155,6 +156,36 @@ def _candidate(*, intended_scope="movie", facts=None, unresolved=()):
 
 
 class MediaMetadataV1Test(unittest.TestCase):
+    def test_movie_year_uses_confirmed_anchor_then_verified_populated_binding(self):
+        original = _candidate()
+        for first, second, expected in (
+            ("2001", "2002", "2001"),
+            ("", "2002", "2002"),
+            ("unknown", "2002", "2002"),
+            ("01", "2002", "2002"),
+        ):
+            with self.subTest(first=first, second=second):
+                candidate = replace(original, facts=(
+                    replace(original.facts[0], year=first),
+                    replace(original.facts[1], year=second),
+                ))
+                result = build_media_metadata_v1(candidate, metadata_id="year-test", raw_query="千与千寻")
+                self.assertEqual(result["identity"]["year"], expected)
+
+    def test_movie_year_does_not_use_related_or_unverified_sources(self):
+        original = _candidate()
+        for role, verification in (("related_work", "fact_verified"), ("movie", "ai_supplied_unverified")):
+            with self.subTest(role=role, verification=verification):
+                candidate = replace(
+                    original,
+                    facts=(replace(original.facts[0], year=""), original.facts[1]),
+                    source_links=(original.source_links[0], replace(
+                        original.source_links[1], role=role, verification=verification,
+                    )),
+                )
+                with self.assertRaisesRegex(MetadataV1Error, "year"):
+                    build_media_metadata_v1(candidate, metadata_id="year-test", raw_query="千与千寻")
+
     def test_anilist_entry_owns_release_identity_without_replacing_work_root(self):
         root = _fact(
             "wikidata:Q112631839",

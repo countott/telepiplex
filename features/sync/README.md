@@ -1,6 +1,6 @@
 # Plex Management Feature
 
-当前版本：`2.0.2`；SDK：`2.1.1`。本次为品牌文案补丁，建议搭配 Host `3.6.14`；代码身份、User-Agent 与 MCP 服务名称保持不变。
+当前版本：`2.0.3`；SDK：`2.2.0`。本次同步 SDK 命名字段兼容；Plex 管理业务与触发方式保持。建议搭配 Host `3.7.0`。
 
 `features/sync` 是独立 Feature 源码目录。Telepiplex 将其构建为不可变 `.tpx`，并在 Telepiplex 容器内以独立 venv/子进程运行。
 
@@ -12,7 +12,7 @@ Telepiplex 对删除或改名的配置字段采用 fail-closed 策略；如果�
 
 ## 独立手动管理
 
-sync 2.0.2 不订阅 rename 事件，也不会在 rename 完成后自动扫描 Plex。Plex 扫描与增强只能由用户通过 Telegram 命令或带确认令牌的 MCP 写工具独立发起；rename 的成功或失败不依赖 sync 是否安装、启用或可用。
+sync 2.0.3 不订阅 rename 事件，也不会在 rename 完成后自动扫描 Plex。Plex 扫描与增强只能由用户通过 Telegram 命令或带确认令牌的 MCP 写工具独立发起；rename 的成功或失败不依赖 sync 是否安装、启用或可用。
 
 用户明确发起增强 Job 后，Plex 自己负责识别、匹配和基础元数据，插件执行：
 
@@ -43,7 +43,7 @@ MCP 对外地址由 `mcp.host`、`mcp.port`、`mcp.path` 控制；非本机监�
 纯本地验证构建（不读取 Git 元数据）：
 
 ```bash
-python tools/build_feature.py features/sync /tmp/sync-2.0.2.tpx \
+python tools/build_feature.py features/sync /tmp/sync-2.0.3.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

@@ -18,6 +18,7 @@ class MediaAutoRenameTest(unittest.TestCase):
     def test_old_search_contract_uses_english_original_and_removes_duplicate_suffix(self):
         plan = build_media_naming_plan(
             {
+                "year": 2026,
                 "source": "media_metadata",
                 "chinese_title": "后室 Backrooms",
                 "english_title": "Backrooms: sin salida",
@@ -29,12 +30,13 @@ class MediaAutoRenameTest(unittest.TestCase):
             "movie.mp4",
         )
 
-        self.assertEqual(plan.target_relative_dir, "后室 (Backrooms)")
+        self.assertEqual(plan.target_relative_dir, "后室 (2026) ⋯ Backrooms")
         self.assertEqual(plan.file_name, "Backrooms.mp4")
 
     def test_mixed_chinese_title_does_not_repeat_matching_english_title(self):
         plan = build_media_naming_plan(
             {
+                "year": 1996,
                 "source": "media_metadata",
                 "chinese_title": "火星人玩转地球 Mars Attacks!",
                 "english_title": "Mars Attacks!",
@@ -47,7 +49,7 @@ class MediaAutoRenameTest(unittest.TestCase):
 
         self.assertEqual(
             plan.target_relative_dir,
-            "火星人玩转地球 (Mars Attacks!)",
+            "火星人玩转地球 (1996) ⋯ Mars Attacks!",
         )
         self.assertEqual(plan.file_name, "Mars Attacks!.mkv")
 
@@ -67,13 +69,14 @@ class MediaAutoRenameTest(unittest.TestCase):
 
         self.assertEqual(
             plan.target_relative_dir,
-            "进击的巨人 (Shingeki no Kyojin)/Shingeki no Kyojin Season 01",
+            "进击的巨人 ⋯ Shingeki no Kyojin/Shingeki no Kyojin Season 01",
         )
         self.assertTrue(plan.file_name.startswith("Shingeki no Kyojin"))
         self.assertNotIn("Attack on Titan", plan.file_name)
     def test_build_movie_plan_accepts_host_media_metadata_identity(self):
         plan = build_media_naming_plan(
             {
+                "year": 2022,
                 "source": "media_metadata",
                 "chinese_title": "想见你",
                 "english_title": "Someday or One Day The Movie",
@@ -84,7 +87,7 @@ class MediaAutoRenameTest(unittest.TestCase):
 
         self.assertEqual(
             plan.target_relative_dir,
-            "想见你 (Someday or One Day The Movie)",
+            "想见你 (2022) ⋯ Someday or One Day The Movie",
         )
 
     def test_build_movie_plan_uses_douban_chinese_and_english_titles(self):
@@ -99,12 +102,13 @@ class MediaAutoRenameTest(unittest.TestCase):
             "movie.mkv",
         )
 
-        self.assertEqual(plan.target_relative_dir, "布达佩斯大饭店 (The Grand Budapest Hotel)")
+        self.assertEqual(plan.target_relative_dir, "布达佩斯大饭店 (2014) ⋯ The Grand Budapest Hotel")
         self.assertEqual(plan.file_name, "The Grand Budapest Hotel.mkv")
 
     def test_build_movie_plan_uses_collection_parent_without_suffixes(self):
         plan = build_media_naming_plan(
             {
+                "year": 2023,
                 "source": "douban",
                 "chinese_title": "碟中谍7：致命清算（上）",
                 "english_title": "Mission Impossible Dead Reckoning Part One",
@@ -117,13 +121,14 @@ class MediaAutoRenameTest(unittest.TestCase):
 
         self.assertEqual(
             plan.target_relative_dir,
-            "碟中谍 (Mission Impossible)/碟中谍7 致命清算(上) (Mission Impossible Dead Reckoning Part One)",
+            "碟中谍 ⋯ Mission Impossible/碟中谍7 致命清算(上) (2023) ⋯ Mission Impossible Dead Reckoning Part One",
         )
         self.assertEqual(plan.file_name, "Mission Impossible Dead Reckoning Part One.mkv")
 
     def test_build_plan_normalizes_chinese_punctuation_at_final_path_stage(self):
         plan = build_media_naming_plan(
             {
+                "year": 1962,
                 "source": "douban",
                 "chinese_title": "随心所欲（十二章）——导演版",
                 "english_title": "Vivre sa vie: Film en douze tableaux",
@@ -134,7 +139,7 @@ class MediaAutoRenameTest(unittest.TestCase):
 
         self.assertEqual(
             plan.target_relative_dir,
-            "随心所欲(十二章) - 导演版 (Vivre sa vie Film en douze tableaux)",
+            "随心所欲(十二章) - 导演版 (1962) ⋯ Vivre sa vie Film en douze tableaux",
         )
         self.assertEqual(plan.file_name, "Vivre sa vie Film en douze tableaux.mkv")
 
@@ -150,7 +155,7 @@ class MediaAutoRenameTest(unittest.TestCase):
             "episode.mp4",
         )
 
-        self.assertEqual(plan.target_relative_dir, "绝命毒师 (Breaking Bad)/Breaking Bad Season 01")
+        self.assertEqual(plan.target_relative_dir, "绝命毒师 ⋯ Breaking Bad/Breaking Bad Season 01")
         self.assertEqual(plan.file_name, "Breaking Bad S01E02.mp4")
 
     def test_build_episode_plan_uses_specials_and_three_digit_episode_width(self):
@@ -173,7 +178,7 @@ class MediaAutoRenameTest(unittest.TestCase):
             "episode.mkv",
         )
 
-        self.assertEqual(special.target_relative_dir, "神秘博士 (Doctor Who)/Doctor Who Season 00")
+        self.assertEqual(special.target_relative_dir, "神秘博士 ⋯ Doctor Who/Doctor Who Season 00")
         self.assertEqual(special.file_name, "Doctor Who S00E07.mkv")
         self.assertEqual(long_season.file_name, "One Piece S01E100.mkv")
 
@@ -197,6 +202,7 @@ class MediaAutoRenameTest(unittest.TestCase):
     def test_build_movie_plan_infers_english_title_for_plain_search(self):
         plan = build_media_naming_plan(
             {
+                "year": 2014,
                 "source": "search_query",
                 "chinese_title": "布达佩斯大饭店",
             },
@@ -204,7 +210,7 @@ class MediaAutoRenameTest(unittest.TestCase):
             "movie.mkv",
         )
 
-        self.assertEqual(plan.target_relative_dir, "布达佩斯大饭店 (The Grand Budapest Hotel)")
+        self.assertEqual(plan.target_relative_dir, "布达佩斯大饭店 (2014) ⋯ The Grand Budapest Hotel")
         self.assertEqual(plan.file_name, "The Grand Budapest Hotel.mkv")
 
     def test_build_episode_plan_infers_show_title_for_plain_search(self):
@@ -217,12 +223,13 @@ class MediaAutoRenameTest(unittest.TestCase):
             "episode.mp4",
         )
 
-        self.assertEqual(plan.target_relative_dir, "绝命毒师 (Breaking Bad)/Breaking Bad Season 02")
+        self.assertEqual(plan.target_relative_dir, "绝命毒师 ⋯ Breaking Bad/Breaking Bad Season 02")
         self.assertEqual(plan.file_name, "Breaking Bad S02E03.mp4")
 
     def test_build_plan_removes_forbidden_path_symbols(self):
         plan = build_media_naming_plan(
             {
+                "year": 2017,
                 "source": "douban",
                 "chinese_title": '异形/契约:导演剪辑版',
                 "english_title": 'Alien: Covenant "Director Cut"',
@@ -231,7 +238,7 @@ class MediaAutoRenameTest(unittest.TestCase):
             "movie.mkv",
         )
 
-        self.assertEqual(plan.target_relative_dir, "异形契约 导演剪辑版 (Alien Covenant Director Cut)")
+        self.assertEqual(plan.target_relative_dir, "异形契约 导演剪辑版 (2017) ⋯ Alien Covenant Director Cut")
         self.assertEqual(plan.file_name, "Alien Covenant Director Cut.mkv")
 
     def test_target_name_cleans_cross_platform_special_cases(self):

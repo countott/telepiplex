@@ -34,11 +34,11 @@ flowchart LR
 
 | Feature | 用途 | 安装依赖 | 详细说明 |
 | --- | --- | --- | --- |
-| `download` | 115 授权、离线下载、存储访问与下载清理 | 无 | [download](features/download/README.md) |
-| `search` | 作品确认、季集选择、元数据补全与片源搜索 | `download` | [search](features/search/README.md) |
-| `rename` | 下载后整理、115 存量媒体扫描、逐文件命名与移动 | `download`、`search` | [rename](features/rename/README.md) |
-| `sync` | 独立手动 Plex 扫描、任务查看及 MCP 管理接口 | 无；实际操作需连接 Plex | [sync](features/sync/README.md) |
-| `caption` | 字幕查找与统一化的预留模块 | 当前无业务能力 | [caption](features/caption/README.md) |
+| `download` | 115 授权、离线下载与存储访问 | 无 | [模块说明](features/download/README.md) |
+| `search` | 作品确认、元数据补全与片源搜索 | `download` | [模块说明](features/search/README.md) |
+| `rename` | 下载后整理与 115 存量媒体整理 | `download`、`search` | [模块说明](features/rename/README.md) |
+| `sync` | 手动管理 Plex 扫描与资料增强 | 无 | [模块说明](features/sync/README.md) |
+| `caption` | 验证打包、安装与启动的占位模块 | 无 | [模块说明](features/caption/README.md) |
 
 首次使用完整搜索与整理流程，依次安装 `download → search → rename`。`sync` 按需安装；`caption` 当前仅验证打包、安装与启动，没有字幕搜索或处理功能。
 
@@ -101,9 +101,9 @@ docker logs -f telepiplex
 
 | 模块 | 首次配置内容 |
 | --- | --- |
-| `download` | 通过 `/auth` 录入 Access/Refresh Token，或按提示扫码授权；在“保存目录”中至少添加一个 115 目录 |
-| `search` | 填写 Prowlarr 服务地址和 API Key；按需配置 TMDB API Read Access Token、TVDB 凭据 |
-| `rename` | 核对分类目录；需要处理规则无法覆盖的文件名时，再配置 AI 服务 |
+| `download` | 完成 115 授权并设置保存目录 |
+| `search` | 填写 Prowlarr 地址与 API Key，配置 TMDB、TVDB 凭据并核对分类目录 |
+| `rename` | 核对分类目录；按需配置用于文件映射的 AI 地址、API Key 与模型 |
 | `sync`（可选） | 填写 Plex 地址与 Token；海报等增强功能按需配置 TMDB、Fanart.tv |
 
 115 保存目录分两步录入：先填写按钮显示名称，再填写实际路径。例如显示名称 `真人电影`，路径填写 `真人电影`；多级路径可填写 `series/live action`。在 Telegram 输入路径时不要以 `/` 开头，以免被识别为命令。
@@ -139,17 +139,17 @@ Wikipedia、Wikidata、豆瓣和 AniList 不需要 API Key。search 没有 AI �
 
 ```text
 真人电影/
-└── 星际穿越 (Interstellar)/
+└── 星际穿越 (2014) ⋯ Interstellar/
     └── Interstellar.mkv
 
 真人剧集/
-└── 西部世界 (Westworld)/
+└── 西部世界 ⋯ Westworld/
     └── Westworld Season 01/
         ├── Westworld S01E01.mkv
         └── Westworld S01E01.chi.srt
 ```
 
-作品目录使用 `中文名 (English Title)`，媒体文件使用已确认英文名；剧集统一季集编号。外挂字幕保留实际扩展名，名称中的 `.chi` 是统一标记，不代表系统检测到了中文字幕。
+电影目录使用 `中文名 (年份) ⋯ Title`，剧集根目录使用 `中文名 ⋯ Title`。`Title` 为已确认的命名外文标题：日本动画优先 Romaji，真人作品及非日本动画使用英文；电影视频不增加年份，剧集继续使用现有季集编号。外挂字幕保留实际扩展名，名称中的 `.chi` 是统一标记，不代表系统检测到了中文字幕。
 
 **下载清理与存量整理的规则不同：** download 在自动交接前会删除下载内容中的非视频文件，以及低于 `minimum_video_size_mib` 的视频，默认阈值为 **100 MiB**；这包括下载包里的外挂字幕。阈值设为 `0` 仍会过滤非视频文件。如果没有合格视频，会在删除前停止。`/rename` 整理存量媒体时则保留无法匹配的文件和字幕，并报告待确认项。需要保留下载包附带文件时，应先了解这一规则，详见 [download 清理说明](features/download/README.md)。
 
@@ -264,20 +264,19 @@ Host 负责 Telegram 接入、命令路由、任务与事件持久化、配置�
 
 #### 当前源码版本
 
-品牌文案补丁：对外名称统一为 `Telepiplex`，代码与协议身份保持不变。Host `3.6.14` 修正了旧品牌校验测试；SDK 和 Feature 版本沿用本次品牌补丁。以下为当前源码版本，实际可更新版本以正式 Release 与模块目录为准。
+命名规则更新：统一双语分隔符、电影年份及英文/Romaji 命名标题。Host 携带 SDK 2.2.0；五个 Feature 同步 SDK 构建依赖，download、sync 和 caption 的业务逻辑保持。以下为当前源码版本，实际可更新版本以正式 Release 与模块目录为准。
 
 | 组件 | 版本 |
 | --- | --- |
-| Host | `3.6.14` |
-| SDK | `2.1.1` |
-| `download` | `2.1.1` |
-| `search` | `2.2.2` |
-| `rename` | `2.1.2` |
-| `sync` | `2.0.2` |
-| `caption` | `0.1.5` |
+| Host | `3.7.0` |
+| SDK | `2.2.0` |
+| `download` | `2.1.2` |
+| `search` | `2.3.0` |
+| `rename` | `2.2.0` |
+| `sync` | `2.0.3` |
+| `caption` | `0.1.6` |
 
-现有部署需更新 Host 镜像，并在 `/plugin` 中确认更新已安装模块。SDK 随构建打包，无需单独安装。
-
+现有部署先更新 Host，再更新已安装的 download、rename、sync，最后更新 search；caption 随本次 SDK 依赖同步更新。SDK 随构建打包，无需单独安装。旧 v2 合同仍可读取；新命名字段必须成对出现且通过校验，旧消费者会拒绝新字段，因此完成消费端升级后再提交新任务。Host API 保持 1.7。
 
 `main` 是 Core/Host 与五个 Feature 的有效源码分支。Host 使用 `telepiplex-v<semver>` tag，发布前验证提交已包含在远端 `main`；正式流水线生成 `ghcr.io/<owner>/telepiplex:<semver>` 与 `latest` 镜像，创建标题为 `Telepiplex <semver>` 的 GitHub Release 并强制设为 **Latest**。普通 `main` push 不更新正式镜像或 Latest 入口。
 

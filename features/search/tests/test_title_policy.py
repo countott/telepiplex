@@ -38,6 +38,8 @@ class TitlePolicyTest(unittest.TestCase):
             official_english_title="Attack on Titan",
             romanized_original_title="Shingeki no Kyojin",
             media_type="series",
+            genres=("Animation",),
+            countries=("日本",),
         ),))
 
         titles = resolve_title_policy(candidate)
@@ -47,6 +49,23 @@ class TitlePolicyTest(unittest.TestCase):
         self.assertEqual(titles.canonical_search_title, "Shingeki no Kyojin")
         self.assertEqual(titles.canonical_latin_title, "Shingeki no Kyojin")
         self.assertEqual(titles.search_title_policy, "romanized_original")
+
+    def test_romaji_requires_animation_and_japanese_origin(self):
+        for genres, countries, language, expected in (
+            (("Drama",), ("Japan",), "ja", "Official English"),
+            (("Animation",), ("China",), "ja", "Official English"),
+            (("Animation",), ("US",), "en", "Official English"),
+            (("Animation",), ("JP",), "en", "Source Romaji"),
+        ):
+            with self.subTest(genres=genres, countries=countries):
+                titles = resolve_title_policy(CandidateEntity("test", (fact(
+                    original_language=language,
+                    official_english_title="Official English",
+                    romanized_original_title="Source Romaji",
+                    genres=genres,
+                    countries=countries,
+                ),)))
+                self.assertEqual(titles.canonical_latin_title, expected)
 
     def test_japanese_kanji_uses_provider_official_english_when_romaji_is_unavailable(self):
         candidate = CandidateEntity("tvdb:series:3", (fact(

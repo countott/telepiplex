@@ -97,10 +97,10 @@ class OrganizationStatusCopyTest(unittest.TestCase):
             service._organization_status_text(
                 8,
                 completed=True,
-                folder_name="繁花 (Blossoms Shanghai)",
+                folder_name="繁花 ⋯ Blossoms Shanghai",
                 kept_unresolved=2,
             ),
-            "已整理：繁花 (Blossoms Shanghai)\n"
+            "已整理：繁花 ⋯ Blossoms Shanghai\n"
             "另有 2 个文件无法确认，保留在原目录。",
         )
 
@@ -150,14 +150,14 @@ class StorageProxyBatchTest(unittest.TestCase):
         self.assertTrue(
             storage.move_file(
                 "/Downloads/Release/Movie.2024.mkv",
-                "/Movies/中文电影 (English Movie)",
+                "/Movies/中文电影 (2024) ⋯ English Movie",
             )
         )
 
         self.assertEqual(storage.get_file_list({"cid": "root"}), [])
         self.assertEqual(
             storage.get_file_info(
-                "/Movies/中文电影 (English Movie)/Movie.2024.mkv"
+                "/Movies/中文电影 (2024) ⋯ English Movie/Movie.2024.mkv"
             )["file_id"],
             "source-1",
         )
@@ -302,7 +302,7 @@ class ExtraVideoDeleteFailureStorage(FakeStorage):
 
 class TargetConflictStorage(FakeStorage):
     def get_file_info(self, path):
-        if path.endswith("/中文电影 (English Movie)/English Movie.mkv"):
+        if path.endswith("/中文电影 (2024) ⋯ English Movie/English Movie.mkv"):
             return {"file_id": "existing", "file_category": "1"}
         return super().get_file_info(path)
 
@@ -1318,10 +1318,10 @@ class RenamingProcessorTest(unittest.TestCase):
         result = process_generic_media(event)
 
         self.assertTrue(result.handled)
-        self.assertEqual(result.final_path, "/Movies/中文电影 (English Movie)")
+        self.assertEqual(result.final_path, "/Movies/中文电影 (2024) ⋯ English Movie")
         self.assertEqual(storage.deleted, [])
         self.assertIn("保留 1", result.message)
-        self.assertEqual(storage.moved[-1][1], "/Movies/中文电影 (English Movie)")
+        self.assertEqual(storage.moved[-1][1], "/Movies/中文电影 (2024) ⋯ English Movie")
 
     def test_movie_video_and_subtitle_share_one_preflighted_plan(self):
         storage = FakeStorage([
@@ -1363,8 +1363,8 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertEqual(
             [target for _source, target in storage.moved],
             [
-                "/Movies/中文电影 (English Movie)",
-                "/Movies/中文电影 (English Movie)",
+                "/Movies/中文电影 (2024) ⋯ English Movie",
+                "/Movies/中文电影 (2024) ⋯ English Movie",
             ],
         )
 
@@ -1381,14 +1381,14 @@ class RenamingProcessorTest(unittest.TestCase):
         result = process_generic_media(event)
 
         self.assertTrue(result.handled)
-        self.assertEqual(result.final_path, "/Movies/中文电影 (English Movie)")
+        self.assertEqual(result.final_path, "/Movies/中文电影 (2024) ⋯ English Movie")
         self.assertEqual(storage.renamed, [(
             "/Downloads/Release/Movie.2024.CHS.vtt",
             "English Movie.chi.vtt",
         )])
         self.assertEqual(storage.moved, [(
             "/Downloads/Release/English Movie.chi.vtt",
-            "/Movies/中文电影 (English Movie)",
+            "/Movies/中文电影 (2024) ⋯ English Movie",
         )])
 
     def test_unmarked_movie_subtitle_uses_fixed_chi_suffix(self):
@@ -1406,7 +1406,7 @@ class RenamingProcessorTest(unittest.TestCase):
         result = process_generic_media(event)
 
         self.assertTrue(result.handled)
-        self.assertEqual(result.final_path, "/Movies/中文电影 (English Movie)")
+        self.assertEqual(result.final_path, "/Movies/中文电影 (2024) ⋯ English Movie")
         self.assertEqual(storage.renamed, [
             (
                 "/Downloads/Release/Movie.2024.mkv",
@@ -1420,11 +1420,11 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertEqual(storage.moved, [
             (
                 "/Downloads/Release/English Movie.mkv",
-                "/Movies/中文电影 (English Movie)",
+                "/Movies/中文电影 (2024) ⋯ English Movie",
             ),
             (
                 "/Downloads/Release/English Movie.chi.srt",
-                "/Movies/中文电影 (English Movie)",
+                "/Movies/中文电影 (2024) ⋯ English Movie",
             ),
         ])
         self.assertNotIn("/Downloads/Release", storage.deleted)
@@ -1442,7 +1442,7 @@ class RenamingProcessorTest(unittest.TestCase):
 
         result = process_generic_media(event)
 
-        self.assertEqual(result.final_path, "/Movies/中文电影 (English Movie)")
+        self.assertEqual(result.final_path, "/Movies/中文电影 (2024) ⋯ English Movie")
         self.assertIn("目标冲突 1", result.message)
         self.assertEqual(storage.renamed, [(
             "/Downloads/Release/Movie.2024.mkv",
@@ -1450,7 +1450,7 @@ class RenamingProcessorTest(unittest.TestCase):
         )])
         self.assertEqual(storage.moved, [(
             "/Downloads/Release/English Movie.mkv",
-            "/Movies/中文电影 (English Movie)",
+            "/Movies/中文电影 (2024) ⋯ English Movie",
         )])
 
     def test_identical_hash_with_different_subtitle_identity_keeps_source(self):
@@ -1592,7 +1592,7 @@ class RenamingProcessorTest(unittest.TestCase):
         result = process_tvdb_episode(event)
 
         self.assertTrue(result.handled)
-        self.assertEqual(result.final_path, "/Series/中文剧集 (English Series)")
+        self.assertEqual(result.final_path, "/Series/中文剧集 ⋯ English Series")
         ai_mock.assert_not_called()
         self.assertNotIn("/Downloads/Series.Release/sample.S00E99.mp4", storage.deleted)
         self.assertNotIn("/Downloads/Series.Release", storage.deleted)
@@ -1654,14 +1654,14 @@ class RenamingProcessorTest(unittest.TestCase):
         result = process_tvdb_episode(event)
 
         self.assertTrue(result.handled)
-        self.assertEqual(result.final_path, "/Series/游戏人生 (No Game, No Life)")
+        self.assertEqual(result.final_path, "/Series/游戏人生 ⋯ No Game, No Life")
         self.assertEqual(storage.renamed, [(
             "/Downloads/Series.Release/No.Game.No.Life.S01E01.mkv",
             "No Game, No Life S01E01.mkv",
         )])
         self.assertEqual(storage.moved, [(
             "/Downloads/Series.Release/No Game, No Life S01E01.mkv",
-            "/Series/游戏人生 (No Game, No Life)/No Game, No Life Season 01",
+            "/Series/游戏人生 ⋯ No Game, No Life/No Game, No Life Season 01",
         )])
         self.assertNotIn("ノーゲーム", repr(storage.renamed + storage.moved))
         ai_mock.assert_not_called()
@@ -1682,14 +1682,53 @@ class RenamingProcessorTest(unittest.TestCase):
         result = process_tvdb_episode(event)
 
         self.assertTrue(result.handled)
-        self.assertEqual(result.final_path, "/Series/中文剧集 (English Series)")
+        self.assertEqual(result.final_path, "/Series/中文剧集 ⋯ English Series")
         self.assertEqual(storage.moved, [(
             "/Downloads/Series.Release/English Series S01E01.chi.vtt",
-            "/Series/中文剧集 (English Series)/English Series Season 01",
+            "/Series/中文剧集 ⋯ English Series/English Series Season 01",
         )])
 
+    def test_frozen_movie_romaji_survives_processor_and_keeps_subtitle_policy(self):
+        contract = movie_contract_v2()
+        contract["placement"]["category_kind"] = "animated_movie"
+        contract["identity"].update(naming_title="Source Romaji", naming_title_kind="romaji")
+        before = deepcopy(contract)
+        storage = FakeStorage([
+            {"fn": "Movie.2099.mkv", "fid": "1", "fc": "1", "fs": 1_000_000},
+            {"fn": "Movie.2099.eng.srt", "fid": "2", "fc": "1", "fs": 100},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Movies", user_id=1,
+            final_path="/Downloads/Release", resource_name="Movie.2099",
+            metadata={"media_metadata": contract}, storage=storage,
+        )
+        result = process_generic_media(event)
+        self.assertTrue(result.handled)
+        self.assertEqual(result.final_path, "/Movies/中文电影 (2024) ⋯ Source Romaji")
+        self.assertEqual({name for _, name in storage.renamed}, {
+            "Source Romaji.mkv", "Source Romaji.chi.srt",
+        })
+        self.assertTrue(all(target == result.final_path for _, target in storage.moved))
+        self.assertEqual(contract, before)
+        self.assertEqual(storage.deleted, ["/Downloads/Release"])
+
+    def test_movie_without_any_metadata_year_has_no_storage_mutations(self):
+        contract = movie_contract_v2()
+        contract["identity"]["year"] = None
+        storage = FakeStorage([
+            {"fn": "Movie.2099.mkv", "fid": "1", "fc": "1", "fs": 1000},
+        ])
+        event = DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Movies", user_id=1,
+            final_path="/Downloads/Release", resource_name="Movie.2099",
+            metadata={"media_metadata": contract}, storage=storage,
+        )
+        result = process_generic_media(event)
+        self.assertFalse(result.handled)
+        self.assertEqual(storage.renamed + storage.moved + storage.deleted, [])
+
     def test_partial_series_rename_keeps_canonical_video_as_anchor(self):
-        target_root = "/Series/中文剧集 (English Series)"
+        target_root = "/Series/中文剧集 ⋯ English Series"
         storage = FakeStorage([
             {"fn": "English Series S01E01.mkv", "fid": "video", "fc": "1"},
             {"fn": "English.Series.S01E01.CHS.srt", "fid": "subtitle", "fc": "1"},
@@ -1701,7 +1740,7 @@ class RenamingProcessorTest(unittest.TestCase):
         event = DownloadCompletedEvent(
             link="magnet:?x", selected_path="/Series", user_id=1,
             final_path=target_root,
-            resource_name="中文剧集 (English Series)",
+            resource_name="中文剧集 ⋯ English Series",
             naming_metadata={"english_title": "English Series"},
             metadata=attach_media_metadata({}, series_contract()),
             file_tree=[{
@@ -1762,7 +1801,7 @@ class RenamingProcessorTest(unittest.TestCase):
 
         result = process_tvdb_episode(event)
 
-        self.assertEqual(result.final_path, "/Series/中文剧集 (English Series)")
+        self.assertEqual(result.final_path, "/Series/中文剧集 ⋯ English Series")
         self.assertEqual(storage.renamed, [
             (
                 "/Downloads/Series.Release/English.Series.S01E01.mkv",
@@ -1776,11 +1815,11 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertEqual(storage.moved, [
             (
                 "/Downloads/Series.Release/English Series S01E01.mkv",
-                "/Series/中文剧集 (English Series)/English Series Season 01",
+                "/Series/中文剧集 ⋯ English Series/English Series Season 01",
             ),
             (
                 "/Downloads/Series.Release/English Series S01E01.chi.srt",
-                "/Series/中文剧集 (English Series)/English Series Season 01",
+                "/Series/中文剧集 ⋯ English Series/English Series Season 01",
             ),
         ])
         self.assertNotIn("/Downloads/Series.Release", storage.deleted)
@@ -2089,7 +2128,7 @@ class FakeHost:
                 },
                 "presentation": {
                     "milestone_id": "media-movie-2024",
-                    "text": "🎬 中文电影 (English Movie)",
+                    "text": "🎬 中文电影 (2024) ⋯ English Movie",
                     "photo_url": "https://img.example/movie.jpg",
                 },
             }
@@ -2286,7 +2325,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 host.storage.created[-1],
-                "/真人电影/中文电影 (English Movie)",
+                "/真人电影/中文电影 (2024) ⋯ English Movie",
             )
             self.assertEqual(host.events, [])
             self.assertEqual(
@@ -2400,7 +2439,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             })
             await runtime.wait()
 
-            target_dir = "/真人电影/设备 名 (CON_)"
+            target_dir = "/真人电影/设备 名 (2024) ⋯ CON_"
             self.assertEqual(storage.created[-1], target_dir)
             self.assertEqual(
                 storage.renamed,
@@ -2610,7 +2649,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 if cid == "root-series":
                     return [{
                         "file_id": "organized-1",
-                        "name": "白宫杀人事件 (The Residence)",
+                        "name": "白宫杀人事件 ⋯ The Residence",
                         "is_dir": True,
                     }, {
                         "file_id": "raw-1",
@@ -2749,7 +2788,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 if cid == "root-unorganized":
                     return [{
                         "file_id": "normalized-1",
-                        "name": "中文电影 (English Movie)",
+                        "name": "中文电影 (2024) ⋯ English Movie",
                         "is_dir": True,
                     }, {
                         "file_id": "raw-1",
@@ -2932,7 +2971,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                         "presentation": {
                             "milestone_id": "media-confirmed-b",
                             "text": (
-                                "游戏人生 (No Game, No Life)\n"
+                                "游戏人生 ⋯ No Game, No Life\n"
                                 "2014｜日本｜剧集｜S02E01\n"
                                 "来源：豆瓣\n"
                                 "已确认身份，开始搜索"
@@ -3057,7 +3096,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 host.storage.moved[0][1],
-                "/Series/游戏人生 (No Game, No Life)/No Game, No Life Season 02",
+                "/Series/游戏人生 ⋯ No Game, No Life/No Game, No Life Season 02",
             )
             confirmed = restored.jobs.get(
                 "telegram:219358366"
@@ -3730,7 +3769,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "organized": True,
                 "cleanup_complete": True,
                 "partial_completed": False,
-                "final_path": "/Movies/中文电影 (English Movie)",
+                "final_path": "/Movies/中文电影 (2024) ⋯ English Movie",
             },
         })
         self.assertEqual(host.events, [])
@@ -3803,7 +3842,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                         "media_metadata": series_contract_v2(),
                         "presentation": {
                             "milestone_id": "game-life",
-                            "text": "📺 游戏人生 (No Game, No Life)",
+                            "text": "📺 游戏人生 ⋯ No Game, No Life",
                         },
                     }
                 return await super().call_capability(
@@ -3866,7 +3905,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(terminal), 1, host.reports)
             self.assertEqual(
                 terminal[0]["details"]["effect_receipt"]["receipt"]["final_path"],
-                "/Series/游戏人生 (No Game, No Life)",
+                "/Series/游戏人生 ⋯ No Game, No Life",
             )
             self.assertEqual(host.milestones, [])
             identity_reports = [
@@ -4006,7 +4045,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             "_metadata_presentation": {
                 "milestone_id": "rename-identity-lost-response",
                 "text": (
-                    "🎬 中文电影 (English Movie)\n"
+                    "🎬 中文电影 (2024) ⋯ English Movie\n"
                     "2024｜美国｜电影｜电影\n"
                     "来源：豆瓣\n"
                     "已确认身份，开始搜索"
@@ -4060,7 +4099,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         payload = {
             "_metadata_presentation": {
                 "milestone_id": "rename-identity-rejected",
-                "text": "🎬 中文电影 (English Movie)",
+                "text": "🎬 中文电影 (2024) ⋯ English Movie",
                 "photo_url": "https://img.example/movie.jpg",
             },
         }
@@ -4112,7 +4151,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.reports[-1]["stage"], "completed")
         self.assertEqual(storage.moved, [(
             "/Downloads/Release/English Movie.mkv",
-            "/Movies/中文电影 (English Movie)",
+            "/Movies/中文电影 (2024) ⋯ English Movie",
         )])
         self.assertNotIn("next_plugin_id", host.reports[-1])
         self.assertEqual(host.reports[-1]["details"]["effect_receipt"], {
@@ -4123,7 +4162,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 "organized": True,
                 "cleanup_complete": True,
                 "partial_completed": False,
-                "final_path": "/Movies/中文电影 (English Movie)",
+                "final_path": "/Movies/中文电影 (2024) ⋯ English Movie",
             },
         })
 
@@ -4321,7 +4360,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             report for report in host.reports
             if report["stage"] == "identity_confirmation"
         )
-        self.assertIn("中文电影 (English Movie)", identity_report["status_text"])
+        self.assertIn("中文电影 (2024) ⋯ English Movie", identity_report["status_text"])
         self.assertTrue(identity_report["status_text"].endswith(
             "已确认身份，开始整理"
         ))
@@ -4531,7 +4570,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.events, [])
         self.assertEqual(
             host.notifications[0][1],
-            "已整理：中文电影 (English Movie)",
+            "已整理：中文电影 (2024) ⋯ English Movie",
         )
 
     async def test_cleanup_failure_publishes_nothing_and_is_not_success(self):
@@ -4588,7 +4627,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                         "organized": True,
                         "cleanup_complete": False,
                         "partial_completed": False,
-                        "final_path": "/Movies/中文电影 (English Movie)",
+                        "final_path": "/Movies/中文电影 (2024) ⋯ English Movie",
                     },
                 },
             )
@@ -4615,7 +4654,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             )
             feature._process = lambda _event: PostDownloadResult(
                 handled=True,
-                final_path="/Series/中文剧集 (English Series)",
+                final_path="/Series/中文剧集 ⋯ English Series",
                 message="⚠️ 已整理 1，原位保留 1。",
                 metadata=attach_media_metadata({}, series_contract()),
                 file_results={
@@ -4665,7 +4704,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                         "organized": True,
                         "cleanup_complete": True,
                         "partial_completed": True,
-                        "final_path": "/Series/中文剧集 (English Series)",
+                        "final_path": "/Series/中文剧集 ⋯ English Series",
                     },
                 },
             )
@@ -5001,7 +5040,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                         "organized": True,
                         "cleanup_complete": True,
                         "partial_completed": False,
-                        "final_path": "/Movies/中文电影 (English Movie)",
+                        "final_path": "/Movies/中文电影 (2024) ⋯ English Movie",
                     },
                 },
             )
@@ -5753,10 +5792,10 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "2.1.2")
+        self.assertEqual(manifest["version"], "2.2.0")
         self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
-        self.assertIn('version = "2.1.2"', project)
-        self.assertIn('telepiplex-plugin-sdk==2.1.1', project)
+        self.assertIn('version = "2.2.0"', project)
+        self.assertIn('telepiplex-plugin-sdk==2.2.0', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
         manifest = yaml.safe_load(
@@ -5771,8 +5810,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-2.1.2.tpx", source)
-        self.assertNotIn("dist/rename-2.1.2.tpx", source)
+        self.assertIn("/tmp/rename-2.2.0.tpx", source)
+        self.assertNotIn("dist/rename-2.2.0.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

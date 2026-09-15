@@ -10,6 +10,59 @@ from telepiplex_search.media_metadata_v2 import (
 
 
 class SearchMediaMetadataV2ProjectionTest(unittest.TestCase):
+    def test_freezes_naming_title_by_category_without_replacing_english(self):
+        for category, country, expected_kind in (
+            ("animated_movie", "日本", "romaji"),
+            ("animated_series", "JP", "romaji"),
+            ("live_action_movie", "日本", "english"),
+            ("live_action_series", "日本", "english"),
+            ("animated_series", "China", "english"),
+        ):
+            with self.subTest(category=category, country=country):
+                candidate = self._candidate()
+                movie = category.endswith("_movie")
+                private = candidate["media_metadata"]
+                private["retrieval"]["media_type"] = "movie" if movie else "series"
+                private["placement"]["category_kind"] = category
+                private["identity"].update({
+                    "official_english_title": "Official English",
+                    "english_title": "Source Romaji",
+                    "romanized_original_title": "Source Romaji",
+                    "original_language": "ja",
+                    "countries": [country],
+                    "search_title_policy": "romanized_original",
+                })
+                before = copy.deepcopy(candidate)
+                result = project_confirmed_media_metadata_v2(candidate, requested_scope={
+                    "kind": "movie" if movie else "whole_series",
+                    "season_number": None,
+                    "episode_number": None,
+                })
+                self.assertEqual(result["identity"]["title_en"], "Official English")
+                self.assertEqual(result["identity"]["naming_title_kind"], expected_kind)
+                self.assertEqual(result["identity"]["naming_title"],
+                                 "Source Romaji" if expected_kind == "romaji" else "Official English")
+                self.assertEqual(candidate, before)
+
+    def test_romaji_without_english_and_verified_english_fallback(self):
+        candidate = self._candidate()
+        identity = candidate["media_metadata"]["identity"]
+        identity.update({
+            "official_english_title": "",
+            "english_title": "Source Romaji",
+            "romanized_original_title": "Source Romaji",
+            "original_language": "ja",
+            "search_title_policy": "romanized_original",
+        })
+        scope = {"kind": "whole_series", "season_number": None, "episode_number": None}
+        result = project_confirmed_media_metadata_v2(candidate, requested_scope=scope)
+        self.assertEqual(result["identity"]["title_en"], "")
+        self.assertEqual(result["identity"]["naming_title"], "Source Romaji")
+        identity.update(romanized_original_title="", official_english_title="Official English")
+        result = project_confirmed_media_metadata_v2(candidate, requested_scope=scope)
+        self.assertEqual(result["identity"]["naming_title_kind"], "english")
+        self.assertEqual(result["identity"]["naming_title"], "Official English")
+
     def _candidate(self):
         return {
             "anchor_fact_id": "tmdb:456",
@@ -88,6 +141,8 @@ class SearchMediaMetadataV2ProjectionTest(unittest.TestCase):
             "title_zh": "死神: 千年血战篇",
             "title_en": "Bleach: Thousand-Year Blood War",
             "title_original": "BLEACH 千年血戦篇",
+            "naming_title": "Bleach: Thousand-Year Blood War",
+            "naming_title_kind": "english",
             "year": 2022,
         })
         self.assertEqual(projected["scope"], {
@@ -176,6 +231,8 @@ class SearchMediaMetadataV2ProjectionTest(unittest.TestCase):
             "title_zh",
             "title_en",
             "title_original",
+            "naming_title",
+            "naming_title_kind",
             "year",
         })
         changed_root = copy.deepcopy(candidate)

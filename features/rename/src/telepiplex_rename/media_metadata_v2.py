@@ -25,6 +25,8 @@ def naming_identity_from_v2(contract: dict) -> dict:
         "chinese_title": identity["title_zh"],
         "english_title": identity["title_en"],
         "original_title": identity["title_original"],
+        "naming_title": identity.get("naming_title", identity["title_en"]),
+        "naming_title_kind": identity.get("naming_title_kind", "english"),
         "year": identity["year"],
         "category_kind": value["placement"]["category_kind"],
     }

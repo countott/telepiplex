@@ -122,7 +122,7 @@ def _display_folder(chinese_title: str, english_title: str) -> str:
     chinese_title = sanitize_target_name(chinese_title)
     english_title = sanitize_target_name(english_title)
     if chinese_title and english_title and chinese_title != english_title:
-        return f"{chinese_title} ({english_title})"
+        return f"{chinese_title} ⋯ {english_title}"
     return chinese_title or english_title
 
 
@@ -309,7 +309,9 @@ def build_confirmed_rename_plan(
     source_video_paths = {node["relative_path"] for node in _video_file_nodes(file_tree)}
     if is_v2:
         chinese_title = sanitize_target_name(identity.get("title_zh"))
-        english_title = sanitize_target_name(identity.get("title_en"))
+        english_title = sanitize_target_name(
+            identity.get("naming_title", identity.get("title_en"))
+        )
     else:
         chinese_title, english_title = (
             sanitize_target_name(title)

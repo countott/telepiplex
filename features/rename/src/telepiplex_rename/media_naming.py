@@ -73,7 +73,7 @@ def _strip_collection_suffix(name: str, suffix: str) -> str:
     return sanitize_target_name(name)
 
 
-def _display_folder(chinese_title: str, english_title: str) -> str:
+def _display_folder(chinese_title: str, english_title: str, year: str = "") -> str:
     chinese_title = sanitize_target_name(chinese_title)
     english_title = sanitize_target_name(english_title)
     if (
@@ -82,13 +82,15 @@ def _display_folder(chinese_title: str, english_title: str) -> str:
         and chinese_title.casefold().endswith(english_title.casefold())
     ):
         prefix = chinese_title[: -len(english_title)].rstrip(
-            " \t-–—:：/／|｜·・"
+            " \t-–—:：/／|｜·・⋯"
         )
         if prefix and CJK_PATTERN.search(prefix):
             chinese_title = sanitize_target_name(prefix)
     if chinese_title and english_title and chinese_title != english_title:
-        return f"{chinese_title} ({english_title})"
-    return chinese_title or english_title
+        year_suffix = f" ({year})" if year else ""
+        return f"{chinese_title}{year_suffix} ⋯ {english_title}"
+    title = chinese_title or english_title
+    return f"{title} ({year})" if title and year else title
 
 
 def _collection_titles(metadata: dict) -> tuple[str, str]:
@@ -152,13 +154,16 @@ def build_media_naming_plan(metadata: dict | None, release_title: str, original_
     metadata = metadata or {}
     source = str(metadata.get("source") or "").strip()
     chinese_folder = sanitize_target_name(metadata.get("chinese_title"))
-    english_folder = sanitize_target_name(metadata.get("english_title"))
+    english_folder = sanitize_target_name(
+        metadata.get("naming_title") or metadata.get("english_title")
+    )
     original_language = str(
         metadata.get("original_language") or ""
     ).strip().casefold().replace("_", "-").split("-", 1)[0]
     original_title = sanitize_target_name(metadata.get("original_title"))
     if (
         source == "media_metadata"
+        and not metadata.get("naming_title")
         and original_language in {"en", "eng"}
         and original_title
     ):
@@ -181,7 +186,10 @@ def build_media_naming_plan(metadata: dict | None, release_title: str, original_
         file_stem = f"{english_folder} {marker}"
         is_episode = True
     else:
-        movie_folder = _display_folder(chinese_folder, english_folder)
+        year = str(metadata.get("year") or "").strip()
+        if not re.fullmatch(r"[1-9][0-9]{3}", year):
+            return None
+        movie_folder = _display_folder(chinese_folder, english_folder, year)
         collection_chinese, collection_english = _collection_titles(metadata)
         collection_folder = _display_folder(collection_chinese, collection_english)
         target_relative_dir = f"{collection_folder}/{movie_folder}" if collection_folder else movie_folder

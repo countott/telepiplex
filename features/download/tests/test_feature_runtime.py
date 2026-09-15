@@ -663,6 +663,11 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_v2_is_copied_before_background_work_and_malformed_v2_has_no_side_effect(self):
         metadata = media_metadata_v2()
+        metadata["identity"].update({
+            "naming_title": "Source Romaji",
+            "naming_title_kind": "romaji",
+        })
+        metadata["placement"]["category_kind"] = "animated_movie"
         await self.feature.download_capability({
             "method": "submit",
             "payload": {
@@ -673,12 +678,17 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
             "context": {"idempotency_key": "v2-copy"},
         })
         metadata["identity"]["title_zh"] = "调用方后来修改"
+        metadata["identity"]["naming_title"] = "Caller changed the naming title"
         await self.runtime.tasks.pop("v2-copy")
 
         self.assertEqual(
             self.host.events[-1][1]["media_metadata"]["identity"]["title_zh"],
             "中文名",
         )
+        delivered_identity = self.host.events[-1][1]["media_metadata"]["identity"]
+        self.assertEqual(delivered_identity["naming_title"], "Source Romaji")
+        self.assertEqual(delivered_identity["naming_title_kind"], "romaji")
+        self.assertEqual(delivered_identity["title_en"], "English")
 
         malformed = media_metadata_v2()
         malformed["identity"]["provider_refs"]["wikidata"] = "Q2"
@@ -3317,17 +3327,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "2.1.1")
+        self.assertEqual(manifest["version"], "2.1.2")
         self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "2.1.1")
+        self.assertEqual(project["project"]["version"], "2.1.2")
         self.assertEqual(
             project["project"]["dependencies"][0],
-            "telepiplex-plugin-sdk==2.1.1",
+            "telepiplex-plugin-sdk==2.2.0",
         )
-        self.assertIn("/tmp/download-2.1.1.tpx", readme)
-        self.assertNotIn("dist/download-2.1.1.tpx", readme)
+        self.assertIn("/tmp/download-2.1.2.tpx", readme)
+        self.assertNotIn("dist/download-2.1.2.tpx", readme)
         self.assertIn("逐条新增、编辑和删除", readme)
         self.assertIn("series/live action", readme)
         self.assertIn("单级目录", readme)

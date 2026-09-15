@@ -21,6 +21,33 @@ class TitlePolicyError(ValueError):
         super().__init__(code)
 
 
+def is_japanese_animation(
+    *,
+    original_language: str = "",
+    genres=(),
+    countries=(),
+    category_kind: str = "",
+) -> bool:
+    """Use animation evidence and origin; language alone is insufficient."""
+
+    animated = (
+        category_kind in {"animated_movie", "animated_series"}
+        if category_kind
+        else any(
+            signal in _text(genre).casefold()
+            for genre in genres
+            for signal in ("animation", "animated", "anime", "动画", "動畫")
+        )
+    )
+    origins = {_text(country).casefold() for country in countries if _text(country)}
+    japanese = (
+        bool(origins & {"jp", "jpn", "japan", "日本", "日本国", "日本國"})
+        if origins
+        else _text(original_language).casefold().replace("_", "-").split("-", 1)[0] in {"ja", "jpn"}
+    )
+    return animated and japanese
+
+
 @dataclass(frozen=True)
 class CanonicalTitles:
     chinese_title: str
@@ -129,6 +156,8 @@ def resolve_title_policy(
     candidate: CandidateEntity,
     *,
     preferred_chinese_title: str = "",
+    category_kind: str = "",
+    countries=None,
 ) -> CanonicalTitles:
     language_values = _preferred_fact_values(candidate, "original_language")
     original_language = "ja" if "ja" in language_values else next(
@@ -143,7 +172,15 @@ def resolve_title_policy(
     romanized_original_title = next(
         iter(_preferred_fact_values(candidate, "romanized_original_title")), ""
     )
-    if original_language == "ja":
+    if is_japanese_animation(
+        original_language=original_language,
+        genres=(genre for fact in candidate.facts for genre in fact.genres),
+        countries=(
+            countries if countries is not None
+            else (country for fact in candidate.facts for country in fact.countries)
+        ),
+        category_kind=category_kind,
+    ):
         if romanized_original_title:
             canonical = romanized_original_title
             policy = "romanized_original"

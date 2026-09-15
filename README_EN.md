@@ -34,11 +34,13 @@ The automatic task ends with file organization. Plex scans are initiated separat
 
 | Feature | Purpose | Dependencies | Details |
 | --- | --- | --- | --- |
-| `download` | 115 authorization, offline downloads, storage access, and download cleanup | None | [download](features/download/README.md) |
-| `search` | Work confirmation, episode selection, metadata enrichment, and release search | `download` | [search](features/search/README.md) |
-| `rename` | Post-download organization, existing 115 media scans, file naming and moves | `download`, `search` | [rename](features/rename/README.md) |
-| `sync` | Independent manual Plex scans, job inspection, and MCP management tools | None; Plex operations require a connection | [sync](features/sync/README.md) |
-| `caption` | Reserved for subtitle discovery and normalization | No business functionality yet | [caption](features/caption/README.md) |
+| `download` | 115 authorization, offline downloads, and storage access | None | [Module guide](features/download/README.md) |
+| `search` | Media confirmation, metadata enrichment, and release search | `download` | [Module guide](features/search/README.md) |
+| `rename` | Organize downloads and existing media on 115 | `download`, `search` | [Module guide](features/rename/README.md) |
+| `sync` | Manually manage Plex scans and metadata enhancements | None | [Module guide](features/sync/README.md) |
+| `caption` | Placeholder for package, installation, and startup verification | None | [Module guide](features/caption/README.md) |
+
+Upgrade Host, then installed download/rename/sync consumers, and search last. Caption updates its SDK dependency only. Old v2 contracts remain readable; the paired naming fields require SDK 2.2.0 consumers. Host API remains 1.7.
 
 For the complete search and organization flow, install `download → search → rename` in that order. Install `sync` as needed. `caption` currently verifies packaging, installation, and startup only; it does not search for or process subtitles.
 
@@ -101,9 +103,9 @@ Send `/config`, choose a module, and follow its prompts:
 
 | Module | Initial configuration |
 | --- | --- |
-| `download` | Use `/auth` to enter Access/Refresh Tokens or follow QR authorization; add at least one 115 destination under save directories |
-| `search` | Set the Prowlarr address and API Key; configure a TMDB API Read Access Token and TVDB credentials as needed |
-| `rename` | Check category destinations; configure an AI service only if you need help mapping filenames beyond the deterministic rules |
+| `download` | Complete 115 authorization and set save directories |
+| `search` | Set the Prowlarr address and API Key, configure TMDB and TVDB credentials, and check category directories |
+| `rename` | Check category directories; configure the AI endpoint, API Key, and model for file mapping as needed |
 | `sync` (optional) | Set the Plex address and Token; configure TMDB and Fanart.tv as needed for artwork and other enhancements |
 
 A save directory is entered in two steps: its button label, then its actual path. For example, enter `真人电影` as both label and path, or use a nested path such as `series/live action`. Do not start a path entered in Telegram with `/`, which Telegram treats as a command.
@@ -139,17 +141,17 @@ Typical output looks like this. Actual names come from confirmed metadata:
 
 ```text
 真人电影/
-└── 星际穿越 (Interstellar)/
+└── 星际穿越 (2014) ⋯ Interstellar/
     └── Interstellar.mkv
 
 真人剧集/
-└── 西部世界 (Westworld)/
+└── 西部世界 ⋯ Westworld/
     └── Westworld Season 01/
         ├── Westworld S01E01.mkv
         └── Westworld S01E01.chi.srt
 ```
 
-Work folders use `Chinese Title (English Title)`. Media filenames use the confirmed English title and consistent season/episode numbering. External subtitles retain their real extension. The `.chi` suffix is a naming convention, not evidence that the subtitle language was detected as Chinese.
+Movie folders use `Chinese Title (Year) ⋯ Title`; series roots use `Chinese Title ⋯ Title`. The frozen naming title prefers source-backed Romaji for Japanese animation and English for live action and other animation. Movie filenames omit the year; existing season/episode numbering stays in place. External subtitles retain their real extension. The `.chi` suffix is a naming convention, not evidence that the subtitle language was detected as Chinese.
 
 **Download cleanup and existing-media organization have different rules.** Before automatic handoff, download deletes non-video files and videos below `minimum_video_size_mib`, which defaults to **100 MiB**. This includes external subtitles in the download package. Setting the threshold to `0` still filters non-video files. If there is no qualifying video, cleanup stops before deletion. When organizing existing media, `/rename` keeps unmatched files and subtitles in place and reports items needing attention. If you need to preserve files accompanying a download, review the [download cleanup behavior](features/download/README.md) first.
 
@@ -264,20 +266,19 @@ The current Host API 1.7 provides durable operation message segments, reusing on
 
 #### Current source versions
 
-Branding patch: user-facing names use `Telepiplex`; code and protocol identities stay unchanged. Host `3.6.14` fixes the obsolete branding test; SDK and Feature versions remain at their branding patch versions. These are the current source versions; available updates depend on published Releases and the Feature catalog.
+Naming update: bilingual separators, movie years and separate English/Romaji naming titles. Host includes SDK 2.2.0. All Features update their pinned SDK dependency; download, sync and caption keep their existing business behavior. These are source versions; available updates depend on published Releases and the Feature catalog.
 
 | Component | Version |
 | --- | --- |
-| Host | `3.6.14` |
-| SDK | `2.1.1` |
-| `download` | `2.1.1` |
-| `search` | `2.2.2` |
-| `rename` | `2.1.2` |
-| `sync` | `2.0.2` |
-| `caption` | `0.1.5` |
+| Host | `3.7.0` |
+| SDK | `2.2.0` |
+| `download` | `2.1.2` |
+| `search` | `2.3.0` |
+| `rename` | `2.2.0` |
+| `sync` | `2.0.3` |
+| `caption` | `0.1.6` |
 
-Existing installations must update the Host image and confirm updates for installed modules through `/plugin`. The SDK is bundled during builds and needs no separate installation.
-
+For existing installations, update Host first, then installed download, rename, and sync consumers, and finally search. Update caption for the matching SDK dependency. The SDK is bundled during builds and needs no separate installation. Existing v2 contracts remain readable; the new naming fields must appear together and pass validation. Older consumers reject these fields, so complete consumer updates before submitting new tasks. Host API remains 1.7.
 
 `main` is the active source branch for Core/Host and all five Features. The Host uses `telepiplex-v<semver>` tags, with release commits verified as contained in remote `main`. The release workflow publishes `ghcr.io/<owner>/telepiplex:<semver>` and `latest`, then creates a GitHub Release titled `Telepiplex <semver>` for that tag explicitly marked **Latest**. An ordinary `main` push does not update official images or Latest entry points.
 

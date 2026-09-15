@@ -8,6 +8,7 @@ from telepiplex_plugin_sdk.media_metadata_v2 import (
     build_media_metadata_v2_id,
     validate_media_metadata_v2_detailed,
 )
+from .title_policy import is_japanese_animation
 
 
 _VERIFIED_LINK_STATES = frozenset({
@@ -194,8 +195,19 @@ def project_confirmed_media_metadata_v2(
     title_zh = sanitize_contract_name(identity.get("chinese_title"))
     title_en = sanitize_contract_name(
         identity.get("official_english_title")
-        or identity.get("english_title")
+        or (
+            identity.get("english_title")
+            if identity.get("search_title_policy") != "romanized_original"
+            else ""
+        )
     )
+    romaji = sanitize_contract_name(identity.get("romanized_original_title"))
+    use_romaji = bool(romaji and is_japanese_animation(
+        original_language=identity.get("original_language") or "",
+        genres=identity.get("genres") or (),
+        countries=identity.get("countries") or (),
+        category_kind=_text(placement.get("category_kind")),
+    ))
     title_original = sanitize_contract_name(
         identity.get("original_title")
         or identity.get("official_original_title")
@@ -220,6 +232,8 @@ def project_confirmed_media_metadata_v2(
             "title_zh": title_zh,
             "title_en": title_en,
             "title_original": title_original,
+            "naming_title": romaji if use_romaji else title_en,
+            "naming_title_kind": "romaji" if use_romaji else "english",
             "year": year,
         },
         "scope": scope,

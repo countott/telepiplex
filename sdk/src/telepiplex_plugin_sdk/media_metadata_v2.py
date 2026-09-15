@@ -41,6 +41,7 @@ IDENTITY_KEYS = frozenset({
     "title_original",
     "year",
 })
+NAMING_KEYS = frozenset({"naming_title", "naming_title_kind"})
 PRIMARY_REF_KEYS = frozenset({"provider", "id"})
 SCOPE_KEYS = frozenset({"kind", "season_number", "episode_number"})
 PLACEMENT_KEYS = frozenset({"category_kind"})
@@ -106,7 +107,10 @@ def _diagnose(
         return _issue("$.confirmed", "confirmation_required", "confirmed must be true")
 
     identity = value.get("identity")
-    if not _exact_keys(identity, IDENTITY_KEYS):
+    if not (
+        _exact_keys(identity, IDENTITY_KEYS)
+        or _exact_keys(identity, IDENTITY_KEYS | NAMING_KEYS)
+    ):
         return _issue("$.identity", "keys_invalid", "identity keys must be exact")
     primary_ref = identity.get("primary_ref")
     if not _exact_keys(primary_ref, PRIMARY_REF_KEYS):
@@ -137,7 +141,16 @@ def _diagnose(
         or not isinstance(title_original, str)
     ):
         return _issue("$.identity", "title_invalid", "titles must be strings")
-    if not _text(title_en):
+    naming_kind = identity.get("naming_title_kind")
+    if NAMING_KEYS & identity.keys():
+        naming_title = identity.get("naming_title")
+        if not isinstance(naming_title, str) or not _text(naming_title):
+            return _issue("$.identity.naming_title", "naming_title_required", "naming title must be a nonblank string")
+        if not isinstance(naming_kind, str) or naming_kind not in {"english", "romaji"}:
+            return _issue("$.identity.naming_title_kind", "naming_title_kind_invalid", "naming title kind must be english or romaji")
+        if naming_kind == "english" and _text(naming_title) != _text(title_en):
+            return _issue("$.identity.naming_title", "naming_title_conflict", "English naming title must match title_en")
+    if not _text(title_en) and naming_kind != "romaji":
         return _issue(
             "$.identity.title_en",
             "english_title_required",
@@ -177,6 +190,8 @@ def _diagnose(
     category_kind = placement.get("category_kind")
     if CATEGORY_LIBRARY_TYPES.get(category_kind) != media_type:
         return _issue("$.placement.category_kind", "category_kind_invalid", "category kind must exist and match media_type")
+    if naming_kind == "romaji" and category_kind not in {"animated_movie", "animated_series"}:
+        return _issue("$.identity.naming_title_kind", "naming_category_conflict", "Romaji naming requires animated media")
 
     try:
         expected_id = build_media_metadata_v2_id(value)

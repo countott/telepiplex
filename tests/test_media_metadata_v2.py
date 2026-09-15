@@ -81,6 +81,41 @@ class MediaMetadataV2Test(unittest.TestCase):
         self.assertEqual(issue["path"], "$.identity")
         self.assertEqual(issue["reason_code"], "keys_invalid")
 
+    def test_naming_extension_is_paired_validated_and_identity_stable(self):
+        value = self._value()
+        value["identity"].update({
+            "naming_title": "BLEACH: Sennen Kessen-hen",
+            "naming_title_kind": "romaji",
+        })
+        self.assertEqual(build_media_metadata_v2_id(value), value["metadata_id"])
+        self.assertEqual(extract_confirmed_media_metadata_v2(
+            attach_media_metadata_v2({}, value)
+        ), value)
+        mutations = (
+            lambda v: v["identity"].pop("naming_title_kind"),
+            lambda v: v["identity"].update(naming_title=""),
+            lambda v: v["identity"].update(naming_title_kind="original"),
+            lambda v: v["identity"].update(naming_title_kind="english"),
+            lambda v: v["placement"].update(category_kind="live_action_series"),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                invalid = copy.deepcopy(value)
+                mutate(invalid)
+                self.assertIsNone(validate_media_metadata_v2(invalid))
+
+    def test_verified_romaji_does_not_have_to_masquerade_as_english(self):
+        value = self._value()
+        value["identity"].update({
+            "title_en": "",
+            "naming_title": "BLEACH: Sennen Kessen-hen",
+            "naming_title_kind": "romaji",
+        })
+        self.assertIsNotNone(validate_media_metadata_v2(value))
+        value["identity"].pop("naming_title")
+        value["identity"].pop("naming_title_kind")
+        self.assertIsNone(validate_media_metadata_v2(value))
+
     def test_original_title_may_remain_japanese_when_english_is_present(self):
         value = self._value()
         value["identity"].update({

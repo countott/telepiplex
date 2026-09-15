@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 from .entity_graph import normalize_title
+from .title_policy import is_japanese_animation
 
 
 @dataclass(frozen=True)
@@ -110,13 +111,10 @@ def build_tmdb_query(identity: ConfirmedIdentity) -> dict | None:
 
 
 def is_confirmed_japanese_animation(identity: ConfirmedIdentity) -> bool:
-    return bool(
-        identity.original_language == "ja"
-        and any(
-            signal in _text(genre).casefold()
-            for genre in identity.genres
-            for signal in ("animation", "animated", "anime", "动画", "動畫")
-        )
+    return is_japanese_animation(
+        original_language=identity.original_language,
+        genres=identity.genres,
+        countries=identity.countries,
     )
 
 

@@ -22,7 +22,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
         host_source=textwrap.dedent(
             '''\
             def get_version(md_format=False):
-                version = "v3.6.14-host"
+                version = "v3.7.0-host"
                 return version
             '''
         ),
@@ -198,12 +198,12 @@ class UnraidPublishScriptTest(unittest.TestCase):
         self.assertEqual(
             tag_pushes,
             [
-                "push origin refs/tags/telepiplex-v3.6.14",
-                "push origin refs/tags/download-v2.1.1",
-                "push origin refs/tags/search-v2.2.2",
-                "push origin refs/tags/rename-v2.1.2",
-                "push origin refs/tags/sync-v2.0.2",
-                "push origin refs/tags/caption-v0.1.5",
+                "push origin refs/tags/telepiplex-v3.7.0",
+                "push origin refs/tags/download-v2.1.2",
+                "push origin refs/tags/search-v2.3.0",
+                "push origin refs/tags/rename-v2.2.0",
+                "push origin refs/tags/sync-v2.0.3",
+                "push origin refs/tags/caption-v0.1.6",
             ],
         )
         self.assertTrue(
@@ -222,40 +222,40 @@ class UnraidPublishScriptTest(unittest.TestCase):
             changed_path="features/download/README.md",
             remote_tags="\n".join(
                 (
-                    "host refs/tags/telepiplex-v3.6.14",
-                    "a refs/tags/download-v2.1.1",
-                    "b refs/tags/search-v2.2.2",
-                    "c refs/tags/rename-v2.1.2",
-                    "d refs/tags/sync-v2.0.2",
-                    "e refs/tags/caption-v0.1.5",
+                    "host refs/tags/telepiplex-v3.7.0",
+                    "a refs/tags/download-v2.1.2",
+                    "b refs/tags/search-v2.3.0",
+                    "c refs/tags/rename-v2.2.0",
+                    "d refs/tags/sync-v2.0.3",
+                    "e refs/tags/caption-v0.1.6",
                 )
             ),
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("仅进入 main、不创建标签", result.stdout)
-        self.assertIn("download 2.1.1", result.stdout)
-        self.assertNotIn("refs/tags/download-v2.1.1", git_log.read_text())
+        self.assertIn("download 2.1.2", result.stdout)
+        self.assertNotIn("refs/tags/download-v2.1.2", git_log.read_text())
 
     def test_unpublished_feature_version_is_tagged(self):
         result, git_log = self._run_script(
             changed_path="features/search/manifest.yaml",
             remote_tags="\n".join(
                 (
-                    "host refs/tags/telepiplex-v3.6.14",
-                    "a refs/tags/download-v2.1.1",
+                    "host refs/tags/telepiplex-v3.7.0",
+                    "a refs/tags/download-v2.1.2",
                     "b refs/tags/search-v1.12.3",
-                    "c refs/tags/rename-v2.1.2",
-                    "d refs/tags/sync-v2.0.2",
-                    "e refs/tags/caption-v0.1.5",
+                    "c refs/tags/rename-v2.2.0",
+                    "d refs/tags/sync-v2.0.3",
+                    "e refs/tags/caption-v0.1.6",
                 )
             ),
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("search-v2.2.2", result.stdout)
+        self.assertIn("search-v2.3.0", result.stdout)
         self.assertIn(
-            "push origin refs/tags/search-v2.2.2",
+            "push origin refs/tags/search-v2.3.0",
             git_log.read_text(encoding="utf-8"),
         )
 
@@ -268,12 +268,12 @@ class UnraidPublishScriptTest(unittest.TestCase):
             changed_path="",
             remote_tags="\n".join(
                 (
-                    "host refs/tags/telepiplex-v3.6.14",
-                    "a refs/tags/download-v2.1.1",
-                    "b refs/tags/search-v2.2.2",
-                    "c refs/tags/rename-v2.1.2",
-                    "d refs/tags/sync-v2.0.2",
-                    "e refs/tags/caption-v0.1.5",
+                    "host refs/tags/telepiplex-v3.7.0",
+                    "a refs/tags/download-v2.1.2",
+                    "b refs/tags/search-v2.3.0",
+                    "c refs/tags/rename-v2.2.0",
+                    "d refs/tags/sync-v2.0.3",
+                    "e refs/tags/caption-v0.1.6",
                 )
             ),
             script_args=("PUBLISH 3.4.9 release telepiplex 3.4.9",),

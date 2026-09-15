@@ -1,8 +1,10 @@
 # search Feature
 
-当前版本：`2.2.2`；SDK：`2.1.1`。本次为品牌文案补丁，建议搭配 Host `3.6.14`；代码身份、User-Agent 与 MCP 服务名称保持不变。
+当前版本：`2.3.0`；SDK：`2.2.0`。本次增加独立命名标题及类型，按日本动画身份选择 Romaji，并完善电影年份缺值回退。建议搭配 Host `3.7.0`。
 
-search 2.2.2 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，并把人工确认候选冻结到持久状态。search 不调用 AI。用户原始片名只做空白归一化，不在 query 侧补写冒号、“篇”或别名；例如 `死神 千年血战` 由 Wikipedia 的排序结果承担匹配。规划期间先显示文字状态，候选海报数据就绪后 Host 才把有效消息游标迁移到图片候选并移除旧文字状态，不再提前展示海报占位图；新图片在成为权威游标并清理旧消息前不带按钮。候选按钮第一次点击即进入不可重复消费的确认状态，Host 不改写 Telegram 的只读 callback 对象，而是从已持久化的 claim 恢复原始 payload；后台进度 revision 不会清除 claim，只有对应 Feature RPC 完成后才按 generation、token 和 message ID 原子释放。重复 callback 只返回同一冻结结果。候选、正在确认和最终作品身份都属于 Host API 1.7 的同一条 `identity` 消息段；身份段封存后，Prowlarr 搜索结果才开启新的 `search` 消息，因此不会再出现两条有效身份卡片或两条仅后一条可点击的搜索结果。SDK 2.1.1 提供 v2-only 的最小 `media_metadata` 下游合同和 operation segment API。
+search 2.3.0 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，并把人工确认候选冻结到持久状态。search 不调用 AI。用户原始片名只做空白归一化，不在 query 侧补写冒号、“篇”或别名；例如 `死神 千年血战` 由 Wikipedia 的排序结果承担匹配。规划期间先显示文字状态，候选海报数据就绪后 Host 才把有效消息游标迁移到图片候选并移除旧文字状态，不再提前展示海报占位图；新图片在成为权威游标并清理旧消息前不带按钮。候选按钮第一次点击即进入不可重复消费的确认状态，Host 不改写 Telegram 的只读 callback 对象，而是从已持久化的 claim 恢复原始 payload；后台进度 revision 不会清除 claim，只有对应 Feature RPC 完成后才按 generation、token 和 message ID 原子释放。重复 callback 只返回同一冻结结果。候选、正在确认和最终作品身份都属于 Host API 1.7 的同一条 `identity` 消息段；身份段封存后，Prowlarr 搜索结果才开启新的 `search` 消息，因此不会再出现两条有效身份卡片或两条仅后一条可点击的搜索结果。SDK 2.2.0 提供 v2-only 的最小 `media_metadata` 下游合同和 operation segment API。
+
+电影年份在同作品已验证绑定中按“当前发行条目/根条目 → 确认锚点 → 其余绑定顺序”取首个有效四位年份。高优先级源缺值或无效才回退；来源年份不同不会单独阻断命名。关联作品、未验证来源、下载时间及文件修改时间不能补年份。所有可信来源均缺失时保持未解析。剧集根年份、范围年份与排序规则保持。
 
 ## 发起搜索
 
@@ -51,7 +53,7 @@ search 2.2.2 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，�
 4. 精确 P4529 豆瓣条目在候选展示前写入权威简中根标题；没有精确绑定时，只对前五个候选使用标题之外至少两个强字段形成唯一匹配，歧义结果不写入中文标题；豆瓣不提供整剧季集结构；
 5. 仅当作品已确认是日本动画电影或剧集时，AniList 才作为“动漫发行条目可靠源”加入。绑定优先使用 Wikidata P8729（AniList ID），该 ID 失效时可继续验证 P4086（MyAnimeList ID）；只有完全没有可用跨站 ID 时，才允许标题、年份和媒体类型唯一匹配，显式 ID 冲突不会被标题结果静默覆盖。AniList 负责条目的日文原名、罗马字名、正式英文名、发行格式、状态、年份、时长和集数校验，relation edge 只保留为有界审计证据。它不接管 Wikipedia/Wikidata 的作品根，也不提供季集拓扑；豆瓣继续负责可靠简中标题。AniList 不可用时记录未解析状态，不改写已确认作品根。
 
-字段以来源事实逐项收敛，不使用后返回覆盖，也不记录 Search AI 决策。海报优先级为 TMDB、豆瓣、Wikipedia、占位图、纯文本。日本动画的 search 私有 v1 合同同时保存 `work_root_ref`、`anime_entry_ref`、绑定方式与 AniList 条目事实；AniList 集数只能用于条目校验，不能参与 TVDB/TMDB 拓扑裁决。向 Download/Rename 交付的严格 `media_metadata v2` 不增加字段，但已绑定的 AniList 条目会成为 `primary_ref`，作品根仍保留在 `provider_refs`。其中 `title_en` 是已验证英文名，`title_original` 是原语种标题，两者不再互相代替；合同不携带海报、演员、分级、国家、relation evidence、完整分集表或 `naming_metadata`。Plex 需要的丰富资料继续由 Plex 自身 provider 完成。Rename 完成即为本链路终态，不自动触发 Plex 扫描。
+字段以来源事实逐项收敛，不使用后返回覆盖，也不记录 Search AI 决策。海报优先级为 TMDB、豆瓣、Wikipedia、占位图、纯文本。日本动画的 search 私有 v1 合同同时保存 `work_root_ref`、`anime_entry_ref`、绑定方式与 AniList 条目事实；AniList 集数只能用于条目校验，不能参与 TVDB/TMDB 拓扑裁决。向 Download/Rename 交付的 `media_metadata v2` 增加成对的 `identity.naming_title` 与 `identity.naming_title_kind`（`english` / `romaji`）；已绑定的 AniList 条目会成为 `primary_ref`，作品根仍保留在 `provider_refs`。其中 `title_en` 是已验证英文名，`title_original` 是原语种标题，`naming_title` 是最终命名外文标题，三者语义独立。日本动画优先使用来源提供的 Romaji，缺失时使用已验证英文；真人作品（含日本真人）及非日本动画使用英文。动画判定结合分类与产地；产地缺失时才以动画证据加原语言辅助判定，不本地音译。只有可靠 Romaji 而无英文时，`title_en` 可为空；合同不携带海报、演员、分级、国家、relation evidence、完整分集表或 `naming_metadata`。Plex 需要的丰富资料继续由 Plex 自身 provider 完成。Rename 完成即为本链路终态，不自动触发 Plex 扫描。
 
 ## 剧集范围菜单
 
@@ -81,7 +83,7 @@ search 提供 `media.search.resolve_metadata` 与持久冻结的 `media.search.c
 
 ## 配置与日志
 
-运行配置位于 `/config/plugins/search/config.yaml`。Wikipedia、Wikidata、豆瓣和 AniList 无需 API Key；P4529、P8729、P4086 与 IMDb ID 都直接来自 Wikidata/来源事实，不接入 IMDb 或 MyAnimeList API。TMDB 使用 API Read Access Token，TVDB 使用自身凭据，均可通过 `/search_config` 配置。search 不再包含 AI 配置项。2.2.2 沿用配置 schema v2，并继续通过包内声明安全删除 1.8.0 遗留的顶层 `ai` 配置段，其余用户配置保持不变；回滚时 Host 会恢复升级前的完整配置。
+运行配置位于 `/config/plugins/search/config.yaml`。Wikipedia、Wikidata、豆瓣和 AniList 无需 API Key；P4529、P8729、P4086 与 IMDb ID 都直接来自 Wikidata/来源事实，不接入 IMDb 或 MyAnimeList API。TMDB 使用 API Read Access Token，TVDB 使用自身凭据，均可通过 `/search_config` 配置。search 不再包含 AI 配置项。2.3.0 沿用配置 schema v2，并继续通过包内声明安全删除 1.8.0 遗留的顶层 `ai` 配置段，其余用户配置保持不变；回滚时 Host 会恢复升级前的完整配置。
 
 每个搜索会话使用稳定的 `search_session_id`。日志记录输入分类、直链解析、候选确认、元数据来源状态、最终 query 变体、片源门禁结果和唯一终态；不记录 API Key、Token、Cookie、Authorization、magnet 或完整来源 payload。
 
@@ -141,7 +143,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:sdk/src \
 构建示例：
 
 ```bash
-python tools/build_feature.py features/search /tmp/search-2.2.2.tpx \
+python tools/build_feature.py features/search /tmp/search-2.3.0.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

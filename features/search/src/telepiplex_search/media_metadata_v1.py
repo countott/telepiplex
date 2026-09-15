@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from .anchored_candidate import AnchoredCandidate
 from .entity_graph import CandidateEntity, EvidenceFact, normalize_title
 from .prowlarr_query import build_prowlarr_query_chain
@@ -105,6 +107,30 @@ def _root_fact(candidate: AnchoredCandidate) -> EvidenceFact:
         if link.role == "series_root" and link.fact_id in facts:
             return facts[link.fact_id]
     return facts.get(candidate.anchor_fact_id) or candidate.facts[0]
+
+
+def _movie_year(candidate: AnchoredCandidate, preferred: EvidenceFact) -> str:
+    """Pick the first populated year among verified bindings of this movie."""
+
+    facts = {fact.fact_id: fact for fact in candidate.facts}
+    eligible = [
+        link.fact_id for link in candidate.source_links
+        if link.role in {"movie", "anime_entry"}
+        and link.verification in {
+            "fact_verified", "verified", "provider_verified",
+            "wikipedia_explicit_link", "exact",
+        }
+        and link.fact_id in facts
+        and facts[link.fact_id].media_type == "movie"
+    ]
+    # The confirmed entry/root and anchor outrank supplementary bindings.
+    for fact_id in dict.fromkeys((preferred.fact_id, candidate.anchor_fact_id, *eligible)):
+        if fact_id not in eligible:
+            continue
+        year = _text(facts[fact_id].year)
+        if re.fullmatch(r"[1-9][0-9]{3}", year):
+            return year
+    return ""
 
 
 def _anime_work_root_fact(candidate: AnchoredCandidate) -> EvidenceFact:
@@ -586,6 +612,16 @@ def build_media_metadata_v1(
     if not media_types or next(iter(media_types)) not in {"movie", "series"}:
         raise MetadataV1Error("metadata_incomplete", ("media_type",))
     media_type = next(iter(media_types))
+    countries = _unique(
+        country for fact in primary_facts for country in fact.countries
+    )
+    animation = any(
+        signal in _text(genre).casefold()
+        for fact in primary_facts
+        for genre in fact.genres
+        for signal in ("animation", "animated", "anime", "动画", "動畫")
+    )
+    category = f"{'animated' if animation else 'live_action'}_{media_type}"
     entry_link, entry_fact = _anime_entry(candidate)
     if entry_fact is not None:
         title_facts = tuple(
@@ -616,6 +652,8 @@ def build_media_metadata_v1(
         titles = resolve_title_policy(
             entity,
             preferred_chinese_title=raw_query,
+            category_kind=category,
+            countries=countries,
         )
     except TitlePolicyError as exc:
         if not degraded_series_candidate:
@@ -679,6 +717,9 @@ def build_media_metadata_v1(
         if entry_fact is not None and entry_fact.year
         else root_year
     )
+    if media_type == "movie":
+        year = _movie_year(candidate, entry_fact or root)
+        root_year = _movie_year(candidate, root)
     if not year:
         raise MetadataV1Error("metadata_incomplete", ("year",))
     root_link = next(
@@ -774,9 +815,6 @@ def build_media_metadata_v1(
         *(title for fact in alias_facts for title in fact.titles),
         titles.chinese_title,
     ))
-    countries = _unique(
-        country for fact in primary_facts for country in fact.countries
-    )
     genres = _unique(
         genre for fact in primary_facts for genre in fact.genres
     )
@@ -813,13 +851,6 @@ def build_media_metadata_v1(
         "proposed_episode_number": link.proposed_episode_number,
         "verification": link.verification,
     } for link in candidate.source_links if link.external_ids]
-    animation = any(
-        signal in _text(genre).casefold()
-        for fact in primary_facts
-        for genre in fact.genres
-        for signal in ("animation", "animated", "anime", "动画", "動畫")
-    )
-    category = f"{'animated' if animation else 'live_action'}_{media_type}"
     chinese_title = titles.chinese_title
     original_release_date = (
         _text(entry_fact.original_release_date)
