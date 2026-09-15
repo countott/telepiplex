@@ -1350,5 +1350,15 @@ plugins:
           branch: main
           commit: 13805601d7a3d1b55ae12a9ca8b751e4211fd0af
         url: https://github.com/countott/telepiplex/releases/download/sync-v2.0.2/sync-2.0.2.tpx
-release: caption-v0.1.6
+      2.0.3:
+        host_api: '>=1.2,<2.0'
+        provides:
+        - library.sync
+        requires: []
+        sha256: 7272725d88aca46f9c79eb9297fe70867edd4bbe204189fef5b3e53c2713dbea
+        source:
+          branch: main
+          commit: 53682993f896b6312ee75f16394d9f4c7bb50d97
+        url: https://github.com/countott/telepiplex/releases/download/sync-v2.0.3/sync-2.0.3.tpx
+release: sync-v2.0.3
 schema_version: 1
