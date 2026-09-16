@@ -1,6 +1,6 @@
 # 整理后继续操作
 
-适用版本：Host 3.8.0（Host API 1.8）、Search 2.4.0、Rename 2.3.0、Sync 2.1.0。SDK 仍为 2.2.0。
+适用版本：Host 3.8.1（Host API 1.8）、Search 2.4.0、Rename 2.3.0、Sync 2.1.0。SDK 仍为 2.2.0。Host 3.8.1 包含下文的发布测试修复。
 
 ## 交互
 
@@ -116,3 +116,40 @@ done
 另外已检查所有改动 Python 文件可解析，三个 Feature 的 manifest／pyproject 版本一致且均声明 Host API `>=1.8,<2.0`；确认本地无 `.git`、无 `.worktrees`，`.stfolder` 存在。未修改 Download、Caption 或 SDK，未重跑这两个 Feature 的独立测试。
 
 已覆盖新任务独立消息、回调绑定、任意按钮消费、60 秒截止、重复点击、重启删除重试、完整季集目录恢复、目录过期刷新、用户／作品／范围隔离，以及 Prowlarr 重复实时调用。本地测试使用模拟 Telegram／Plex 和资料源，未进行真实 Telegram／Plex 端到端操作，也未声称获得生产速度测量结果。
+
+## Host 3.8.1：发布测试修复（2026-09-16）
+
+用户提供的 `telepiplex-v3.8.0` 发布日志显示：Host 测试 700 passed、3 failed、1 skipped，三个失败均在 `tests/test_unraid_publish_script.py`。测试将当前 Feature manifest／pyproject 复制到临时目录，却用固定旧版本断言发布标签；升级 Search、Rename、Sync 后，输入与预期不再一致。此前本地排除该测试文件，未发现这个问题。
+
+发布脚本测试现使用独立的固定版本样本，保持远端标签、输入版本、断言处于同一场景。新增任意版本 `9.12.34` 的用例，验证脚本仍从样本文件读取版本；单 Feature 发布场景同时断言不会连带发布其他 Feature。
+
+测试仅在临时脚本副本替换 VCS 命令和目录标记，采用封闭 PATH 与离线替身；不执行真实 Git、不创建 `.git`、不连接仓库。生产发布脚本和 CI 工作流保持原样。版本号升级为 Host 3.8.1，供下次发布创建新标签；不移动已经创建的 3.8.0 标签，Feature／SDK／Host API 版本保持不变。
+
+本轮修改 6 个文件，无新增、删除或重命名：
+
+| 文件 | 用途 |
+| --- | --- |
+| [tests/test_unraid_publish_script.py](../tests/test_unraid_publish_script.py) | 隔离版本样本、封闭离线测试环境、补充任意版本和仅发布目标 Feature 的验证。 |
+| [app/115bot.py](../app/115bot.py) | Host 版本升为 `v3.8.1-host`。 |
+| [tests/test_bot_runtime_startup.py](../tests/test_bot_runtime_startup.py) | 同步 Host 版本断言。 |
+| [README.md](../README.md) | 更新中文版本表和升级顺序。 |
+| [README_EN.md](../README_EN.md) | 更新英文版本表和升级顺序。 |
+| [docs/post-rename-next-actions.md](post-rename-next-actions.md) | 记录本轮故障原因、修复和验证。 |
+
+本轮 Host 回归分两条命令覆盖整个 `tests` 目录，未遗漏上次排除的发布测试：
+
+```bash
+cd /Users/young/Documents/telepiplex
+PY=/Users/young/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:sdk/src \
+  "$PY" -m pytest -q -p no:cacheprovider tests \
+  --ignore=tests/test_release_workflow.py --tb=short
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:sdk/src \
+  "$PY" -m pytest -q -p no:cacheprovider tests/test_release_workflow.py
+```
+
+实际结果：第一组 683 passed、1 skipped、275 subtests passed（97.87 s）；第二组 21 passed、35 subtests passed（19.66 s）。合计 **704 passed、1 skipped、310 subtests passed**。失败测试所在文件另已单独运行，6 passed、3 subtests passed（4.00 s 左右），不重复计入合计。
+
+改动 Python 文件语法解析通过；确认本地无 `.git`／`.worktrees` 且 `.stfolder` 存在。本轮未改动 Feature 业务代码，未重跑各 Feature 独立套件，也未代替 GitHub Actions 宣称远端验证已通过。等待 Syncthing `Up to Date / 最新` 后，由用户在 Unraid 发布 Host 3.8.1；直接重跑原 3.8.0 工作流仍会使用旧标签对应的源码。

@@ -270,7 +270,7 @@ This update adds post-rename choices to continue searching the same series, expl
 
 | Component | Version |
 | --- | --- |
-| Host | `3.8.0` |
+| Host | `3.8.1` |
 | SDK | `2.2.0` |
 | `download` | `2.1.2` |
 | `search` | `2.4.0` |
@@ -278,7 +278,7 @@ This update adds post-rename choices to continue searching the same series, expl
 | `sync` | `2.1.0` |
 | `caption` | `0.1.6` |
 
-Update Host to 3.8.0 first, then Search to 2.4.0 and Sync to 2.1.0 if installed, and finally Rename to 2.3.0 before starting new tasks. These Features require Host API 1.8. SDK remains 2.2.0; download and caption are unchanged. Existing frozen task metadata is not rewritten. See [post-rename choices](docs/post-rename-next-actions.md).
+Update Host to 3.8.1 first, then Search to 2.4.0 and Sync to 2.1.0 if installed, and finally Rename to 2.3.0 before starting new tasks. These Features require Host API 1.8. SDK remains 2.2.0; download and caption are unchanged. Existing frozen task metadata is not rewritten. See [post-rename choices](docs/post-rename-next-actions.md).
 
 When upgrading from SDK versions before 2.2.0, update Host first, then installed download, rename, and sync consumers, and finally search. Update caption for the matching SDK dependency. The SDK is bundled during builds and needs no separate installation. Existing v2 contracts remain readable; the new naming fields must appear together and pass validation. Older consumers reject these fields, so complete consumer updates before submitting new tasks. Host API is now 1.8.
 

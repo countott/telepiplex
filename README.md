@@ -268,7 +268,7 @@ Host 负责 Telegram 接入、命令路由、任务与事件持久化、配置�
 
 | 组件 | 版本 |
 | --- | --- |
-| Host | `3.8.0` |
+| Host | `3.8.1` |
 | SDK | `2.2.0` |
 | `download` | `2.1.2` |
 | `search` | `2.4.0` |
@@ -276,7 +276,7 @@ Host 负责 Telegram 接入、命令路由、任务与事件持久化、配置�
 | `sync` | `2.1.0` |
 | `caption` | `0.1.6` |
 
-本次先更新 Host 3.8.0，再更新 Search 2.4.0、Sync 2.1.0（如已安装），最后更新 Rename 2.3.0，完成后再发起新任务。三个 Feature 要求 Host API 1.8；SDK 保持 2.2.0，download 和 caption 无需为本次功能升级。已有冻结任务的元数据不自动改写。交互、缓存时效与验证见 [整理后继续操作](docs/post-rename-next-actions.md)。
+本次先更新 Host 3.8.1，再更新 Search 2.4.0、Sync 2.1.0（如已安装），最后更新 Rename 2.3.0，完成后再发起新任务。三个 Feature 要求 Host API 1.8；SDK 保持 2.2.0，download 和 caption 无需为本次功能升级。已有冻结任务的元数据不自动改写。交互、缓存时效与验证见 [整理后继续操作](docs/post-rename-next-actions.md)。
 
 从 SDK 2.2.0 之前的版本升级时，还需更新已安装的 download 和 caption 至表中版本。SDK 随构建打包，无需单独安装。旧 v2 合同仍可读取；新命名字段必须成对出现且通过校验，旧消费者会拒绝新字段，因此完成消费端升级后再提交新任务。
 

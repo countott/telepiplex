@@ -9,7 +9,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "unraid" / "telepiplex-publish.sh"
-MODULES = ("download", "search", "rename", "sync", "caption")
+# These versions describe the scenarios below, not the current release.
+# Copying live manifests here makes unrelated Feature bumps change the scenario.
+FEATURE_VERSIONS = {
+    "download": "2.1.2",
+    "search": "2.3.1",
+    "rename": "2.2.1",
+    "sync": "2.0.3",
+    "caption": "0.1.6",
+}
 
 
 class UnraidPublishScriptTest(unittest.TestCase):
@@ -19,6 +27,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
         changed_path,
         remote_tags,
         script_args=(),
+        feature_versions=None,
         host_source=textwrap.dedent(
             '''\
             def get_version(md_format=False):
@@ -36,23 +45,45 @@ class UnraidPublishScriptTest(unittest.TestCase):
         fakebin = root / "bin"
         repository.mkdir()
         fakebin.mkdir()
-        (repository / ".git").mkdir()
+        (repository / "fixture-vcs").mkdir()
         (repository / ".stfolder").mkdir()
         app = repository / "app"
         app.mkdir()
         (app / "115bot.py").write_text(host_source, encoding="utf-8")
 
-        for module in MODULES:
+        versions = FEATURE_VERSIONS | (feature_versions or {})
+        for module, version in versions.items():
             target = repository / "features" / module
             target.mkdir(parents=True)
-            shutil.copy(ROOT / "features" / module / "manifest.yaml", target)
-            shutil.copy(ROOT / "features" / module / "pyproject.toml", target)
+            (target / "manifest.yaml").write_text(
+                f'id: {module}\nversion: "{version}"\n', encoding="utf-8",
+            )
+            (target / "pyproject.toml").write_text(
+                f'[project]\nname = "telepiplex-{module}"\nversion = "{version}"\n',
+                encoding="utf-8",
+            )
+
+        # Run the real script's decision logic with only its VCS boundary replaced.
+        # No Git executable or Git metadata is available in this fixture.
+        source = SCRIPT.read_text(encoding="utf-8")
+        for original, replacement in (
+            ("GIT=(\n  git\n", "GIT=(\n  publisher-vcs-stub\n"),
+            ("[[ -d .git ]]", "[[ -d fixture-vcs ]]"),
+        ):
+            self.assertEqual(source.count(original), 1)
+            source = source.replace(original, replacement, 1)
+        test_script = root / "publish-under-test.sh"
+        test_script.write_text(source, encoding="utf-8")
+        for command in ("bash", "awk", "sed", "sort", "tail", "tr", "grep"):
+            executable = shutil.which(command)
+            self.assertIsNotNone(executable, command)
+            (fakebin / command).symlink_to(executable)
 
         ssh_key = root / "telepiplex_github"
         ssh_key.write_text("test key\n", encoding="utf-8")
         git_log = root / "git.log"
         git_log.touch()
-        fake_git = fakebin / "git"
+        fake_git = fakebin / "publisher-vcs-stub"
         fake_git.write_text(
             textwrap.dedent(
                 r"""\
@@ -86,7 +117,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
                     printf '%s\n' publisher@example.test
                     ;;
                   "rev-parse --git-dir")
-                    printf '%s\n' .git
+                    printf '%s\n' fixture-vcs
                     ;;
                   "diff --name-only --diff-filter=U")
                     ;;
@@ -156,7 +187,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
         env = os.environ.copy()
         env.update(
             {
-                "PATH": f"{fakebin}:{env['PATH']}",
+                "PATH": str(fakebin),
                 "TELEPIPLEX_PUBLISH_REPO": str(repository),
                 "TELEPIPLEX_PUBLISH_SSH_KEY": str(ssh_key),
                 "TELEPIPLEX_PUBLISH_LOCK_FILE": str(root / "publish.lock"),
@@ -166,7 +197,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
             }
         )
         result = subprocess.run(
-            ["bash", str(SCRIPT), *script_args],
+            [str(fakebin / "bash"), str(test_script), *script_args],
             cwd=ROOT,
             env=env,
             capture_output=True,
@@ -257,6 +288,28 @@ class UnraidPublishScriptTest(unittest.TestCase):
         self.assertIn(
             "push origin refs/tags/search-v2.3.1",
             git_log.read_text(encoding="utf-8"),
+        )
+        self.assertEqual(
+            [line for line in git_log.read_text().splitlines()
+             if line.startswith("push origin refs/tags/")],
+            ["push origin refs/tags/search-v2.3.1"],
+        )
+
+    def test_arbitrary_feature_version_is_read_from_the_fixture(self):
+        remote_tags = ["host refs/tags/telepiplex-v3.7.0"] + [
+            f"feature refs/tags/{module}-v{version}"
+            for module, version in FEATURE_VERSIONS.items()
+        ]
+        result, git_log = self._run_script(
+            changed_path="features/search/manifest.yaml",
+            remote_tags="\n".join(remote_tags),
+            feature_versions={"search": "9.12.34"},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            [line for line in git_log.read_text().splitlines()
+             if line.startswith("push origin refs/tags/")],
+            ["push origin refs/tags/search-v9.12.34"],
         )
 
     def test_user_script_is_zero_argument_and_ignores_legacy_arguments(self):
