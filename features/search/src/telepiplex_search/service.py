@@ -94,6 +94,7 @@ from .input_contract import classify_search_input, contains_url
 from .identity_presentation import build_identity_presentation
 from .log_sanitizer import sanitize_log_value
 from .metadata_resolutions import MetadataResolutionStore
+from .content_cache import ContentCache, cache_key, normalized_query, rebind_metadata
 from .media_metadata_v2 import project_confirmed_media_metadata_v2
 from .errors import SearchPlanningError
 from .enrichment_policy import (
@@ -756,6 +757,7 @@ class SearchFeature:
         selected_candidate_supplementer=None,
         candidate_poster_lookup=None,
         metadata_resolution_store=None,
+        content_cache=None,
         source_scheduler=None,
     ):
         self.config = config
@@ -794,6 +796,7 @@ class SearchFeature:
             observer=self._observe_source_request,
         )
         self.plans = {}
+        self.content_cache = content_cache or ContentCache()
         self.awaiting_queries = set()
         self.awaiting_scope_inputs = {}
         self.config_wizard = SearchConfigWizard(config)
@@ -1034,6 +1037,46 @@ class SearchFeature:
         raw_query: str,
         require_anchor: bool,
     ) -> dict:
+        key = cache_key({
+            "version": 1, "config": self.config,
+            "links": candidate.get("source_links"),
+            "anchor": candidate.get("anchor_fact_id"),
+            "identity": (candidate.get("media_metadata") or {}).get("identity"),
+            "scope": candidate.get("intended_scope"),
+            "season": candidate.get("requested_season_number"),
+            "episode": candidate.get("requested_episode_number"),
+            "require_anchor": require_anchor,
+        })
+        cached = self.content_cache.get("hydrated", key)
+        if cached is not None:
+            self._log_measurement("search.content_cache.hit", search_session_id=metadata_id,
+                                  cache_kind="hydrated")
+            return rebind_metadata(cached, metadata_id)
+        result = await self._hydrate_uncached_candidate(
+            candidate, metadata_id=metadata_id, raw_query=raw_query,
+            require_anchor=require_anchor,
+        )
+        ttl = self._inventory_cache_ttl(result)
+        result["_inventory_expires_at"] = self.content_cache.now() + ttl
+        self.content_cache.put("hydrated", key, result, ttl)
+        return result
+
+    @staticmethod
+    def _inventory_cache_ttl(candidate):
+        contract = candidate.get("media_metadata") or {}
+        inventory = series_inventory(contract)
+        return 86400 if inventory.seasons and all(
+            inventory.state_by_season.get(season) == "completed" for season in inventory.seasons
+        ) else 900
+
+    def _inventory_cache_expiry(self, candidate):
+        expiry = self.content_cache.now() + self._inventory_cache_ttl(candidate)
+        source_expiry = candidate.get("_inventory_expires_at")
+        return min(expiry, float(source_expiry)) if source_expiry is not None else expiry
+
+    async def _hydrate_uncached_candidate(
+        self, candidate: dict, *, metadata_id: str, raw_query: str, require_anchor: bool,
+    ) -> dict:
         self._measurement_session_id.set(metadata_id)
         started_at = time.monotonic()
         try:
@@ -1161,6 +1204,9 @@ class SearchFeature:
 
     async def metadata_capability(self, request: dict) -> dict:
         method = str(request.get("method") or "")
+        if method == "continuation_status":
+            payload = request.get("payload") or {}
+            return {"available": self._continuation_snapshot(payload) is not None}
         if method not in {"resolve_metadata", "confirm_metadata"}:
             raise FeatureError(
                 "method_not_allowed",
@@ -1416,6 +1462,8 @@ class SearchFeature:
 
     async def command(self, request: dict) -> dict:
         command = str(request.get("command") or "")
+        if command in {"search", "s"} and request.get("resume_operation_id"):
+            return self._start_series_continuation(request)
         if command == "pr":
             return self.raw_search.command(request)
         if command == "search_config":
@@ -3041,6 +3089,7 @@ class SearchFeature:
         try:
             await self._apply_selected_relation(candidate, selected_plan, stored)
             contract = selected_plan["media_metadata"]
+            self._remember_series(stored, candidate)
             placement = contract.get("placement") or {}
             if placement.get("mapping_kind") == "temporary_related_special":
                 stored["plan"] = selected_plan
@@ -5017,6 +5066,21 @@ class SearchFeature:
         plan_id: str,
         *,
         locked_identity: tuple[str, str] | None = None,
+    ):
+        key = cache_key({"version": 1, "query": normalized_query(raw_query),
+                         "config": self.config, "lock": locked_identity})
+        cached = self.content_cache.get("discovery", key)
+        if cached is not None:
+            self._log_measurement("search.content_cache.hit", search_session_id=plan_id,
+                                  cache_kind="discovery")
+            return rebind_metadata(cached, plan_id)
+        result = await self._build_uncached_plan(raw_query, plan_id, locked_identity=locked_identity)
+        if result.get("candidates") or result.get("media_metadata"):
+            self.content_cache.put("discovery", key, result, 900)
+        return result
+
+    async def _build_uncached_plan(
+        self, raw_query: str, plan_id: str, *, locked_identity=None,
     ):
         del locked_identity
         parsed = classify_search_input(raw_query)
@@ -7005,6 +7069,107 @@ class SearchFeature:
             contract,
         )[0]
 
+    def _remember_series(self, stored, candidate):
+        contract = candidate.get("media_metadata") or {}
+        if (contract.get("placement") or {}).get("library_type") != "series" or not contract.get("items"):
+            return
+        snapshot = {
+            "owner": list(stored["owner"]), "candidate": deepcopy(candidate),
+            "raw_query": str((stored.get("plan") or {}).get("raw_query") or ""),
+            "inventory_expires": self._inventory_cache_expiry(candidate),
+            "config_key": cache_key(self.config),
+            "needs_root_inventory": str(candidate.get("intended_scope") or
+                ((contract.get("evidence") or {}).get("decision") or {}).get("scope") or "") in {"season", "episode"},
+        }
+        self.content_cache.put("continuation", stored["operation_id"], snapshot, 7 * 86400)
+
+    def _continuation_snapshot(self, request):
+        snapshot = self.content_cache.get("continuation", str(request.get("resume_operation_id") or ""))
+        if not snapshot or snapshot.get("owner") != list(self._owner_key(request)):
+            return None
+        return snapshot
+
+    def _start_series_continuation(self, request):
+        snapshot = self._continuation_snapshot(request)
+        if snapshot is None:
+            return self._closed("剧集资料已过期，请使用 /s 重新搜索。")
+        operation = self._new_operation(request, state="running", stage="planning",
+                                        status_text="正在读取已确认的剧集…", control="cancel", kind="search")
+        plan_id = uuid.uuid4().hex[:10]
+        operation_id = operation["operation_id"]
+        self.operations[operation_id]["plan_id"] = plan_id
+        self.operations[operation_id]["continued_series"] = True
+        if (not snapshot.get("needs_root_inventory")
+                and snapshot["inventory_expires"] > self.content_cache.now()
+                and snapshot.get("config_key") == cache_key(self.config)):
+            return self._continued_series_scope(request, snapshot, plan_id, operation_id)
+        task_id = f"search-resume-{operation_id}"
+        task = self.runtime.spawn(self._refresh_series_continuation(
+            request, snapshot, plan_id, operation_id), task_id=task_id)
+        self.operations[operation_id].update({"task": task, "task_id": task_id})
+        return {"actions": [{"kind": "send_message", "text": "正在更新这部剧的季集目录…"}],
+                "operation": operation, "session": {"state": "close"}}
+
+    async def _refresh_series_continuation(self, request, snapshot, plan_id, operation_id):
+        try:
+            candidate = deepcopy(snapshot["candidate"])
+            if snapshot.get("needs_root_inventory"):
+                candidate["intended_scope"] = "work"
+                candidate["requested_season_number"] = None
+                candidate["requested_episode_number"] = None
+                contract = candidate["media_metadata"]
+                contract.setdefault("evidence", {})["decision"] = {"scope": "movie_or_series"}
+                contract["retrieval"] = {"media_type": "series", "scope": "work"}
+            # Refresh the confirmed provider anchors; never rediscover by a title.
+            candidate = await self._hydrate_selected_candidate(
+                candidate, metadata_id=plan_id, raw_query=snapshot["raw_query"], require_anchor=True)
+            snapshot["candidate"] = candidate
+            snapshot["inventory_expires"] = self._inventory_cache_expiry(candidate)
+            snapshot["config_key"] = cache_key(self.config)
+            snapshot["needs_root_inventory"] = False
+            result = self._continued_series_scope(request, snapshot, plan_id, operation_id)
+            response = await self.host.report_operation(result["operation"])
+            if not isinstance(response, dict) or response.get("accepted") is not True:
+                self._release_plan(plan_id)
+                self.operations[operation_id].update({"state": "interrupted", "control": ""})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._release_plan(plan_id)
+            await self._report_operation(operation_id, state="failed", stage="planning",
+                                         status_text="季集目录更新失败，请使用 /s 重试。", control="")
+
+    def _continued_series_scope(self, request, snapshot, plan_id, operation_id):
+        candidate = rebind_metadata(snapshot["candidate"], plan_id)
+        contract = candidate["media_metadata"]
+        contract.setdefault("evidence", {})["decision"] = {"scope": "movie_or_series"}
+        contract["retrieval"] = {"media_type": "series", "scope": "work"}
+        stored = {
+            "owner": self._owner_key(request), "created_at": time.time(),
+            "operation_id": operation_id, "candidates": (deepcopy(candidate),),
+            "selected_candidate": deepcopy(candidate), "selected_path": "", "results": [],
+            "plan": {"plan_id": plan_id, "media_metadata": contract,
+                     "raw_query": snapshot["raw_query"],
+                     "prowlarr_queries": [], "source_queries": {}},
+        }
+        self.plans[plan_id] = stored
+        # Reuse must not extend the freshness of an unchanged episode inventory.
+        self.content_cache.put("continuation", operation_id, snapshot, 7 * 86400)
+        result = self._series_scope_action(plan_id, stored)
+        identity = contract.get("identity") or {}
+        title = identity.get("chinese_title") or identity.get("english_title") or ""
+        if title:
+            text = f"{title}\n{result['actions'][0]['text']}"
+            result["actions"][0]["text"] = text
+            self.operations[operation_id]["status_text"] = text
+            result["operation"] = self._operation_view(self.operations[operation_id])
+        result["actions"][0]["kind"] = "send_message"
+        result["session"] = {"state": "close"}
+        self._log_measurement("search.series.continued", search_session_id=plan_id,
+                              source_operation_id=request.get("resume_operation_id"),
+                              operation_id=operation_id)
+        return result
+
     def _release_plan(self, plan_id: str):
         stored = self.plans.pop(plan_id, None)
         if isinstance(stored, dict):
@@ -7183,6 +7348,7 @@ class SearchFeature:
             "revision": 1,
             "details": {},
             "kind": kind,
+            "parent_operation_id": str(request.get("parent_operation_id") or ""),
         }
         self.operations[operation_id] = operation
         self.owner_operations[owner] = operation_id
@@ -7288,6 +7454,8 @@ class SearchFeature:
         }
         if operation.get("next_plugin_id"):
             view["next_plugin_id"] = str(operation["next_plugin_id"])
+        if operation.get("parent_operation_id"):
+            view["details"]["parent_operation_id"] = operation["parent_operation_id"]
         if view["state"] != "handed_off":
             search_stages = {
                 "prowlarr_search",
@@ -7302,7 +7470,7 @@ class SearchFeature:
             if (
                 role == "identity"
                 and operation.get("kind") == "search"
-                and view["stage"] == "planning"
+                and (view["stage"] == "planning" or operation.get("continued_series"))
             ):
                 view["details"]["defer_photo_until_media"] = True
             view["segment"] = {

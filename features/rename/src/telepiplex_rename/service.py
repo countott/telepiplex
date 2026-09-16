@@ -2532,6 +2532,11 @@ class RenameFeature:
                 ) if complete else "failed",
                 "final_path": outcome.get("final_path"),
                 "effect_receipt": facts["effect_receipt"],
+                **({"next_actions": {
+                    "kind": "post_rename",
+                    "media_metadata": deepcopy((outcome.get("event_payload") or {}).get("media_metadata")),
+                    "final_path": str(outcome.get("final_path") or ""),
+                }} if complete and not partial_completed else {}),
             },
         )
         outcome["terminal_operation_report"] = deepcopy(terminal_report)

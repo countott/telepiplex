@@ -115,7 +115,7 @@ class DeploymentContractTest(unittest.TestCase):
     def test_operation_segments_are_declared_as_host_api_1_7(self):
         from app.runtime.plugin_contract import HOST_API_VERSION
 
-        self.assertEqual(HOST_API_VERSION, "1.7")
+        self.assertEqual(HOST_API_VERSION, "1.8")
         for name in ("README.md", "README_EN.md"):
             source = (ROOT / name).read_text(encoding="utf-8")
             self.assertIn("Host API 1.5", source)

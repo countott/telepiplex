@@ -220,6 +220,8 @@ class SyncFeature:
         if command == "scan":
             if request.get("args"):
                 return self._message("用法：/scan")
+            if isinstance(request.get("post_rename"), dict):
+                return await self._post_rename_scan(request, service)
             return await self._scan_menu(service)
         text = " ".join(str(item) for item in request.get("args") or []).strip()
         if not text:
@@ -274,6 +276,19 @@ class SyncFeature:
                 request, self.config_wizard.message(request)
             )
         return self._message("⚠️ Plex 配置会话已失效。")
+
+    async def _post_rename_scan(self, request, service):
+        payload = request["post_rename"]
+        try:
+            library_id = service._route_library({"payload": {
+                "metadata": {"media_metadata": payload.get("media_metadata")},
+                "selected_path": payload.get("final_path") or "",
+            }})
+        except (LookupError, ValueError, KeyError):
+            library_id = ""
+        if library_id:
+            return await self._scan_callback(request, service, f"scan:{library_id}")
+        return await self._scan_menu(service)
 
     async def _scan_menu(self, service, *, page=0, edit=False):
         libraries = await asyncio.to_thread(service.list_libraries)
@@ -800,6 +815,10 @@ class SyncFeature:
     async def management_capability(self, request: dict) -> dict:
         """Expose stable read-only job inspection to other Features."""
         method = str(request.get("method") or "")
+        if method == "scan_status":
+            config = self.config.get("plex") or {}
+            return {"available": bool(str(config.get("base_url") or "").strip()
+                                      and str(config.get("token") or "").strip())}
         if method not in {"get_job", "list_jobs"}:
             raise ValueError(f"unsupported library.sync method: {method}")
         params = request.get("payload") or {}
@@ -1275,6 +1294,7 @@ class SyncFeature:
             "details": {},
             "kind": kind,
             "cancel_event": threading.Event(),
+            "parent_operation_id": str(request.get("parent_operation_id") or ""),
         }
         self.operations[operation_id] = operation
         self.owner_operations[owner] = operation_id
@@ -1334,7 +1354,11 @@ class SyncFeature:
             "status_text": str(operation.get("status_text") or ""),
             "control": str(operation.get("control") or ""),
             "revision": int(operation.get("revision") or 0),
-            "details": dict(operation.get("details") or {}),
+            "details": {
+                **dict(operation.get("details") or {}),
+                **({"parent_operation_id": operation["parent_operation_id"]}
+                   if operation.get("parent_operation_id") else {}),
+            },
         }
 
     @staticmethod

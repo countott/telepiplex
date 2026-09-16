@@ -41,6 +41,7 @@ from app.runtime.event_dispatcher import EventDispatcher
 from app.runtime.event_journal import EventJournal
 from app.runtime.interaction_coordinator import InteractionCoordinator
 from app.runtime.message_cleanup import MESSAGE_CLEANUP_WORKER_KEY, MessageCleanupWorker
+from app.runtime.next_actions import NEXT_ACTIONS_KEY, NextActions
 from app.runtime.plugin_catalog import PluginCatalog
 from app.runtime.plugin_manager import PluginManager
 from app.runtime.plugin_store import PluginStore
@@ -102,7 +103,7 @@ DEFAULT_PLUGIN_CATALOG_URL = (
 
 
 def get_version(md_format=False):
-    version = "v3.7.0-host"
+    version = "v3.8.0-host"
     if md_format:
         return escape_markdown(version, version=2)
     return version
@@ -695,6 +696,9 @@ async def run_application_polling(application, after_start=None, stop_event=None
             ),
         )
         cleanup_worker = bot_data.pop(MESSAGE_CLEANUP_WORKER_KEY, None) if isinstance(bot_data, dict) else None
+        next_actions = bot_data.pop(NEXT_ACTIONS_KEY, None) if isinstance(bot_data, dict) else None
+        if next_actions is not None:
+            await next_actions.close()
         if cleanup_worker is not None:
             await cleanup_worker.close()
         if manager is not None:
@@ -800,6 +804,12 @@ async def start_host_runtime(application, manager):
             cleanup_worker = MessageCleanupWorker(application, coordinator)
             application.bot_data[MESSAGE_CLEANUP_WORKER_KEY] = cleanup_worker
         cleanup_worker.start()
+        if hasattr(coordinator, "database_path"):
+            next_actions = application.bot_data.get(NEXT_ACTIONS_KEY)
+            if next_actions is None:
+                next_actions = NextActions(application, coordinator, manager.router)
+                application.bot_data[NEXT_ACTIONS_KEY] = next_actions
+            next_actions.start()
         recovery = await recover_active_operations(
             application, manager.router, coordinator
         )

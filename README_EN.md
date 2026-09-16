@@ -40,7 +40,7 @@ The automatic task ends with file organization. Plex scans are initiated separat
 | `sync` | Manually manage Plex scans and metadata enhancements | None | [Module guide](features/sync/README.md) |
 | `caption` | Placeholder for package, installation, and startup verification | None | [Module guide](features/caption/README.md) |
 
-When upgrading from SDK versions before 2.2.0, upgrade Host, then installed download/rename/sync consumers, and search last. Caption updates its SDK dependency only. Old v2 contracts remain readable; the paired naming fields require SDK 2.2.0 consumers. Host API remains 1.7.
+When upgrading from SDK versions before 2.2.0, upgrade Host, then installed download/rename/sync consumers, and search last. Caption updates its SDK dependency only. Old v2 contracts remain readable; the paired naming fields require SDK 2.2.0 consumers. Host API is now 1.8.
 
 For the complete search and organization flow, install `download → search → rename` in that order. Install `sync` as needed. `caption` currently verifies packaging, installation, and startup only; it does not search for or process subtitles.
 
@@ -260,27 +260,27 @@ Local builds do not change the official `ghcr.io/countott/telepiplex:latest` ima
 
 The Host owns Telegram access, command routing, durable tasks and events, configuration, and module lifecycles. Each Feature runs in its own Python virtual environment and subprocess. Capabilities are called over Unix Domain Sockets under the temporary `/tmp/telepiplex` directory. Business source is not bundled into the Host image, and Features do not directly import one another.
 
-The current Host API 1.7 provides durable operation message segments, reusing one message within a stage and handling duplicate callbacks, sealing, and recovery. It retains identity/stage milestones from Host API 1.6 and versioned configuration migrations from Host API 1.5. Each module declares its `host_api` range and capability dependencies in `manifest.yaml`.
+The current Host API 1.8 adds disposable post-rename choices with one-time consumption and a durable 60-second expiry. It retains durable operation message segments from Host API 1.7, identity/stage milestones from Host API 1.6, and versioned configuration migrations from Host API 1.5. Each module declares its `host_api` range and capability dependencies in `manifest.yaml`.
 
 ### Independent releases
 
 #### Current source versions
 
-This update adds the series premiere year to series root folders. Search freezes the work-root year and Rename uses it for directory names. Only Search and Rename versions change; Host, SDK and other Features retain their versions. These are source versions; available updates depend on published Releases and the Feature catalog.
+This update adds post-rename choices to continue searching the same series, explicitly scan Plex, or exit. Clicking consumes and deletes the choice card; inactivity expires it after 60 seconds. Search persists metadata and episode inventories. Prowlarr release results are never cached. These are source versions; available updates depend on published Releases and the Feature catalog.
 
 | Component | Version |
 | --- | --- |
-| Host | `3.7.0` |
+| Host | `3.8.0` |
 | SDK | `2.2.0` |
 | `download` | `2.1.2` |
-| `search` | `2.3.1` |
-| `rename` | `2.2.1` |
-| `sync` | `2.0.3` |
+| `search` | `2.4.0` |
+| `rename` | `2.3.0` |
+| `sync` | `2.1.0` |
 | `caption` | `0.1.6` |
 
-For installations already using SDK 2.2.0, update Search to 2.3.1 and then Rename to 2.2.1 before starting new tasks. Existing frozen task metadata is not rewritten.
+Update Host to 3.8.0 first, then Search to 2.4.0 and Sync to 2.1.0 if installed, and finally Rename to 2.3.0 before starting new tasks. These Features require Host API 1.8. SDK remains 2.2.0; download and caption are unchanged. Existing frozen task metadata is not rewritten. See [post-rename choices](docs/post-rename-next-actions.md).
 
-When upgrading from SDK versions before 2.2.0, update Host first, then installed download, rename, and sync consumers, and finally search. Update caption for the matching SDK dependency. The SDK is bundled during builds and needs no separate installation. Existing v2 contracts remain readable; the new naming fields must appear together and pass validation. Older consumers reject these fields, so complete consumer updates before submitting new tasks. Host API remains 1.7.
+When upgrading from SDK versions before 2.2.0, update Host first, then installed download, rename, and sync consumers, and finally search. Update caption for the matching SDK dependency. The SDK is bundled during builds and needs no separate installation. Existing v2 contracts remain readable; the new naming fields must appear together and pass validation. Older consumers reject these fields, so complete consumer updates before submitting new tasks. Host API is now 1.8.
 
 `main` is the active source branch for Core/Host and all five Features. The Host uses `telepiplex-v<semver>` tags, with release commits verified as contained in remote `main`. The release workflow publishes `ghcr.io/<owner>/telepiplex:<semver>` and `latest`, then creates a GitHub Release titled `Telepiplex <semver>` for that tag explicitly marked **Latest**. An ordinary `main` push does not update official images or Latest entry points.
 

@@ -258,27 +258,27 @@ docker compose up -d
 
 Host 负责 Telegram 接入、命令路由、任务与事件持久化、配置和模块生命周期。Feature 在各自 Python 虚拟环境与子进程中运行，通过 Unix Domain Socket 调用 capability；socket 位于临时目录 `/tmp/telepiplex`。业务源码不打入 Host 镜像，各 Feature 不直接 import 其他 Feature。
 
-当前 Host API 1.7 提供持久化任务消息段，在同一阶段复用同一条消息并处理重复回调、封口与恢复。它延续 Host API 1.6 的身份／阶段里程碑和 Host API 1.5 的逐版本配置迁移合同。模块通过 `manifest.yaml` 声明 `host_api` 范围和 capability 依赖。
+当前 Host API 1.8 增加整理完成后的独立下一步选择卡，支持一次性点击、60 秒退出和持久化清理。它延续 Host API 1.7 的任务消息段、Host API 1.6 的身份／阶段里程碑和 Host API 1.5 的逐版本配置迁移合同。模块通过 `manifest.yaml` 声明 `host_api` 范围和 capability 依赖。
 
 ### 独立发布
 
 #### 当前源码版本
 
-本次更新：剧集根目录加入作品首播年份，Search 冻结作品根年份，Rename 用该年份生成目录。本次仅提升 Search 与 Rename；Host、SDK 和其他 Feature 保持。以下为当前源码版本，实际可更新版本以正式 Release 与模块目录为准。
+本次更新：整理完成后选择继续找同剧集、扫描 Plex 或退出；选择卡点击即删除，60 秒未选择自动退出。Search 持久化作品与季集资料以加速重复搜索，Prowlarr 片源结果始终实时查询。以下为当前源码版本，实际可更新版本以正式 Release 与模块目录为准。
 
 | 组件 | 版本 |
 | --- | --- |
-| Host | `3.7.0` |
+| Host | `3.8.0` |
 | SDK | `2.2.0` |
 | `download` | `2.1.2` |
-| `search` | `2.3.1` |
-| `rename` | `2.2.1` |
-| `sync` | `2.0.3` |
+| `search` | `2.4.0` |
+| `rename` | `2.3.0` |
+| `sync` | `2.1.0` |
 | `caption` | `0.1.6` |
 
-已使用 SDK 2.2.0 的部署，本次先更新 Search 2.3.1，再更新 Rename 2.2.1，两者完成后再发起新任务。已有冻结任务的元数据不自动改写。
+本次先更新 Host 3.8.0，再更新 Search 2.4.0、Sync 2.1.0（如已安装），最后更新 Rename 2.3.0，完成后再发起新任务。三个 Feature 要求 Host API 1.8；SDK 保持 2.2.0，download 和 caption 无需为本次功能升级。已有冻结任务的元数据不自动改写。交互、缓存时效与验证见 [整理后继续操作](docs/post-rename-next-actions.md)。
 
-从 SDK 2.2.0 之前的版本升级时，先更新 Host，再更新已安装的 download、rename、sync，最后更新 search；caption 随本次 SDK 依赖同步更新。SDK 随构建打包，无需单独安装。旧 v2 合同仍可读取；新命名字段必须成对出现且通过校验，旧消费者会拒绝新字段，因此完成消费端升级后再提交新任务。Host API 保持 1.7。
+从 SDK 2.2.0 之前的版本升级时，还需更新已安装的 download 和 caption 至表中版本。SDK 随构建打包，无需单独安装。旧 v2 合同仍可读取；新命名字段必须成对出现且通过校验，旧消费者会拒绝新字段，因此完成消费端升级后再提交新任务。
 
 `main` 是 Core/Host 与五个 Feature 的有效源码分支。Host 使用 `telepiplex-v<semver>` tag，发布前验证提交已包含在远端 `main`；正式流水线生成 `ghcr.io/<owner>/telepiplex:<semver>` 与 `latest` 镜像，创建标题为 `Telepiplex <semver>` 的 GitHub Release 并强制设为 **Latest**。普通 `main` push 不更新正式镜像或 Latest 入口。
 

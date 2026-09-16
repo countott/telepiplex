@@ -1095,6 +1095,14 @@ async def repair_rejected_callback(update, context):
 
 
 async def operation_gate(update, context):
+    from app.runtime.next_actions import CALLBACK_PREFIX, NEXT_ACTIONS_KEY
+
+    query = getattr(update, "callback_query", None)
+    if query is not None and str(getattr(query, "data", "")).startswith(CALLBACK_PREFIX):
+        worker = context.application.bot_data.get(NEXT_ACTIONS_KEY)
+        if worker is not None and init.check_user(update.effective_user.id):
+            await worker.callback(update)
+        raise ApplicationHandlerStop
     update_id = getattr(update, "update_id", None)
     set_diagnostic_context(
         trace_id=f"TG-{update_id}" if update_id is not None else new_trace_id(),

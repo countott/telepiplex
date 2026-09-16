@@ -6,6 +6,7 @@ from telepiplex_plugin_sdk import FeatureRuntime, RuntimeContext
 
 from .context import runtime_context
 from .metadata_resolutions import MetadataResolutionStore
+from .content_cache import ContentCache
 from .service import SearchFeature
 
 
@@ -15,6 +16,7 @@ def main(context: RuntimeContext) -> FeatureRuntime:
     feature = SearchFeature(
         config=config,
         host=context.host,
+        content_cache=ContentCache(context.state_path / "content_cache.db"),
         metadata_resolution_store=MetadataResolutionStore(
             context.state_path / "metadata_resolutions.db"
         ),
