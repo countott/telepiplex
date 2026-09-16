@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from telepiplex_plugin_sdk.media_metadata import sanitize_contract_name
 from telepiplex_plugin_sdk.media_metadata_v2 import (
     PROVIDER_REF_KEYS,
@@ -213,8 +215,18 @@ def project_confirmed_media_metadata_v2(
         or identity.get("official_original_title")
         or title_en
     )
+    raw_year = identity.get("year")
+    if media_type == "series":
+        # Missing root_year is supported only for older, unscoped root identities.
+        raw_year = identity.get("root_year") if (
+            "root_year" in identity
+            or identity.get("anime_entry_ref")
+            or identity.get("scope_year")
+        ) else raw_year
+        if not re.fullmatch(r"[1-9][0-9]{3}", _text(raw_year)):
+            raise ValueError("series_root_year_required")
     try:
-        year = int(identity.get("year")) if identity.get("year") else None
+        year = int(raw_year) if raw_year else None
     except (TypeError, ValueError):
         year = None
     scope = {

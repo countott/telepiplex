@@ -10,6 +10,41 @@ from telepiplex_search.media_metadata_v2 import (
 
 
 class SearchMediaMetadataV2ProjectionTest(unittest.TestCase):
+    def test_all_series_scopes_freeze_root_year_without_changing_private_years(self):
+        for category in ("live_action_series", "animated_series"):
+            for kind, season, episode in (("whole_series", None, None), ("season", 2, None), ("episode", 2, 3)):
+                with self.subTest(category=category, kind=kind):
+                    candidate = self._candidate()
+                    private = candidate["media_metadata"]
+                    private["placement"]["category_kind"] = category
+                    private["identity"].update(year="2022", root_year="2004", scope_year="2026")
+                    before = copy.deepcopy(candidate)
+                    result = project_confirmed_media_metadata_v2(candidate, requested_scope={
+                        "kind": kind, "season_number": season, "episode_number": episode,
+                    })
+                    self.assertEqual(result["identity"]["year"], 2004)
+                    self.assertEqual(candidate, before)
+
+    def test_missing_or_invalid_root_year_never_uses_later_entry_year(self):
+        for year in (None, "", "unknown", 123, 12345, True):
+            with self.subTest(year=year):
+                candidate = self._candidate()
+                candidate["media_metadata"]["identity"].update(root_year=year, year="2022")
+                with self.assertRaisesRegex(ValueError, "series_root_year_required"):
+                    project_confirmed_media_metadata_v2(candidate, requested_scope={
+                        "kind": "season", "season_number": 2, "episode_number": None,
+                    })
+
+    def test_movie_keeps_its_release_year(self):
+        candidate = self._candidate()
+        candidate["media_metadata"]["identity"].update(root_year="2004", year="2022")
+        candidate["media_metadata"]["retrieval"]["media_type"] = "movie"
+        candidate["media_metadata"]["placement"]["category_kind"] = "animated_movie"
+        result = project_confirmed_media_metadata_v2(candidate, requested_scope={
+            "kind": "movie", "season_number": None, "episode_number": None,
+        })
+        self.assertEqual(result["identity"]["year"], 2022)
+
     def test_freezes_naming_title_by_category_without_replacing_english(self):
         for category, country, expected_kind in (
             ("animated_movie", "日本", "romaji"),
@@ -73,6 +108,7 @@ class SearchMediaMetadataV2ProjectionTest(unittest.TestCase):
                     "english_title": "Bleach: Thousand-Year Blood War",
                     "original_title": "BLEACH 千年血戦篇",
                     "year": "2022",
+                    "root_year": "2022",
                     "content_kind": "series",
                     "external_ids": {
                         "wikidata": "Q114103300",

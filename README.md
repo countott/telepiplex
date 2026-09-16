@@ -143,13 +143,13 @@ Wikipedia、Wikidata、豆瓣和 AniList 不需要 API Key。search 没有 AI �
     └── Interstellar.mkv
 
 真人剧集/
-└── 西部世界 ⋯ Westworld/
+└── 西部世界 (2016) ⋯ Westworld/
     └── Westworld Season 01/
         ├── Westworld S01E01.mkv
         └── Westworld S01E01.chi.srt
 ```
 
-电影目录使用 `中文名 (年份) ⋯ Title`，剧集根目录使用 `中文名 ⋯ Title`。`Title` 为已确认的命名外文标题：日本动画优先 Romaji，真人作品及非日本动画使用英文；电影视频不增加年份，剧集继续使用现有季集编号。外挂字幕保留实际扩展名，名称中的 `.chi` 是统一标记，不代表系统检测到了中文字幕。
+电影目录使用 `中文名 (年份) ⋯ Title`，剧集根目录使用 `中文名 (首播年份) ⋯ Title`。`Title` 为已确认的命名外文标题：日本动画优先 Romaji，真人作品及非日本动画使用英文；电影视频不增加年份，同一剧集所有季共用作品首播年份，季目录和单集文件不重复加年，继续使用现有季集编号。外挂字幕保留实际扩展名，名称中的 `.chi` 是统一标记，不代表系统检测到了中文字幕。
 
 **下载清理与存量整理的规则不同：** download 在自动交接前会删除下载内容中的非视频文件，以及低于 `minimum_video_size_mib` 的视频，默认阈值为 **100 MiB**；这包括下载包里的外挂字幕。阈值设为 `0` 仍会过滤非视频文件。如果没有合格视频，会在删除前停止。`/rename` 整理存量媒体时则保留无法匹配的文件和字幕，并报告待确认项。需要保留下载包附带文件时，应先了解这一规则，详见 [download 清理说明](features/download/README.md)。
 
@@ -264,19 +264,21 @@ Host 负责 Telegram 接入、命令路由、任务与事件持久化、配置�
 
 #### 当前源码版本
 
-命名规则更新：统一双语分隔符、电影年份及英文/Romaji 命名标题。Host 携带 SDK 2.2.0；五个 Feature 同步 SDK 构建依赖，download、sync 和 caption 的业务逻辑保持。以下为当前源码版本，实际可更新版本以正式 Release 与模块目录为准。
+本次更新：剧集根目录加入作品首播年份，Search 冻结作品根年份，Rename 用该年份生成目录。本次仅提升 Search 与 Rename；Host、SDK 和其他 Feature 保持。以下为当前源码版本，实际可更新版本以正式 Release 与模块目录为准。
 
 | 组件 | 版本 |
 | --- | --- |
 | Host | `3.7.0` |
 | SDK | `2.2.0` |
 | `download` | `2.1.2` |
-| `search` | `2.3.0` |
-| `rename` | `2.2.0` |
+| `search` | `2.3.1` |
+| `rename` | `2.2.1` |
 | `sync` | `2.0.3` |
 | `caption` | `0.1.6` |
 
-现有部署先更新 Host，再更新已安装的 download、rename、sync，最后更新 search；caption 随本次 SDK 依赖同步更新。SDK 随构建打包，无需单独安装。旧 v2 合同仍可读取；新命名字段必须成对出现且通过校验，旧消费者会拒绝新字段，因此完成消费端升级后再提交新任务。Host API 保持 1.7。
+已使用 SDK 2.2.0 的部署，本次先更新 Search 2.3.1，再更新 Rename 2.2.1，两者完成后再发起新任务。已有冻结任务的元数据不自动改写。
+
+从 SDK 2.2.0 之前的版本升级时，先更新 Host，再更新已安装的 download、rename、sync，最后更新 search；caption 随本次 SDK 依赖同步更新。SDK 随构建打包，无需单独安装。旧 v2 合同仍可读取；新命名字段必须成对出现且通过校验，旧消费者会拒绝新字段，因此完成消费端升级后再提交新任务。Host API 保持 1.7。
 
 `main` 是 Core/Host 与五个 Feature 的有效源码分支。Host 使用 `telepiplex-v<semver>` tag，发布前验证提交已包含在远端 `main`；正式流水线生成 `ghcr.io/<owner>/telepiplex:<semver>` 与 `latest` 镜像，创建标题为 `Telepiplex <semver>` 的 GitHub Release 并强制设为 **Latest**。普通 `main` push 不更新正式镜像或 Latest 入口。
 

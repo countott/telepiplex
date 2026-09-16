@@ -8,7 +8,7 @@ from telepiplex_plugin_sdk.media_metadata import (
     merge_resolved_items,
     series_titles,
 )
-from .media_naming import sanitize_path_name, sanitize_target_name
+from .media_naming import naming_year, sanitize_path_name, sanitize_target_name
 from .subtitles import build_series_subtitle_plan
 
 
@@ -118,20 +118,22 @@ def _episode_marker_text(season: int, episode: int) -> str:
     return f"S{season:02d}E{episode:0{episode_width}d}"
 
 
-def _display_folder(chinese_title: str, english_title: str) -> str:
+def _display_folder(chinese_title: str, english_title: str, year: str) -> str:
     chinese_title = sanitize_target_name(chinese_title)
     english_title = sanitize_target_name(english_title)
     if chinese_title and english_title and chinese_title != english_title:
-        return f"{chinese_title} ⋯ {english_title}"
-    return chinese_title or english_title
+        return f"{chinese_title} ({year}) ⋯ {english_title}"
+    title = chinese_title or english_title
+    return f"{title} ({year})" if title else ""
 
 
 def _target_root(selected_path: str, metadata: dict, ai_plan: dict) -> str:
     series_name = sanitize_target_name(ai_plan.get("series_name") or metadata.get("english_title") or metadata.get("query"))
     chinese_title = sanitize_target_name(metadata.get("chinese_title"))
-    if not series_name:
+    year = naming_year(metadata, series=True)
+    if not series_name or not year:
         return ""
-    return _join_path(selected_path, _display_folder(chinese_title, series_name))
+    return _join_path(selected_path, _display_folder(chinese_title, series_name, year))
 
 
 def _target_relative_path(item: dict, source_relative_path: str, series_name: str) -> str:
@@ -318,12 +320,18 @@ def build_confirmed_rename_plan(
             for title in series_titles(media_metadata)
         )
     series_name = english_title or chinese_title
-    if not series_name:
+    year_identity = identity
+    if not is_v2:
+        target_series = (media_metadata.get("relation") or {}).get("target_series") or {}
+        if target_series.get("chinese_title") or target_series.get("english_title"):
+            year_identity = target_series
+    year = naming_year(year_identity, series=True)
+    if not series_name or not year:
         return None
 
     target_root = _join_path(
         selected_path,
-        _display_folder(chinese_title, english_title),
+        _display_folder(chinese_title, english_title, year),
     )
     operations = []
     seen_sources = set()

@@ -1,10 +1,10 @@
 # search Feature
 
-当前版本：`2.3.0`；SDK：`2.2.0`。本次增加独立命名标题及类型，按日本动画身份选择 Romaji，并完善电影年份缺值回退。建议搭配 Host `3.7.0`。
+当前版本：`2.3.1`；SDK：`2.2.0`。本次将剧集公开合同中的年份统一为作品首播年份，供 Rename 生成带年份的作品根目录。建议搭配 Host `3.7.0`。
 
-search 2.3.0 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，并把人工确认候选冻结到持久状态。search 不调用 AI。用户原始片名只做空白归一化，不在 query 侧补写冒号、“篇”或别名；例如 `死神 千年血战` 由 Wikipedia 的排序结果承担匹配。规划期间先显示文字状态，候选海报数据就绪后 Host 才把有效消息游标迁移到图片候选并移除旧文字状态，不再提前展示海报占位图；新图片在成为权威游标并清理旧消息前不带按钮。候选按钮第一次点击即进入不可重复消费的确认状态，Host 不改写 Telegram 的只读 callback 对象，而是从已持久化的 claim 恢复原始 payload；后台进度 revision 不会清除 claim，只有对应 Feature RPC 完成后才按 generation、token 和 message ID 原子释放。重复 callback 只返回同一冻结结果。候选、正在确认和最终作品身份都属于 Host API 1.7 的同一条 `identity` 消息段；身份段封存后，Prowlarr 搜索结果才开启新的 `search` 消息，因此不会再出现两条有效身份卡片或两条仅后一条可点击的搜索结果。SDK 2.2.0 提供 v2-only 的最小 `media_metadata` 下游合同和 operation segment API。
+search 2.3.1 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，并把人工确认候选冻结到持久状态。search 不调用 AI。用户原始片名只做空白归一化，不在 query 侧补写冒号、“篇”或别名；例如 `死神 千年血战` 由 Wikipedia 的排序结果承担匹配。规划期间先显示文字状态，候选海报数据就绪后 Host 才把有效消息游标迁移到图片候选并移除旧文字状态，不再提前展示海报占位图；新图片在成为权威游标并清理旧消息前不带按钮。候选按钮第一次点击即进入不可重复消费的确认状态，Host 不改写 Telegram 的只读 callback 对象，而是从已持久化的 claim 恢复原始 payload；后台进度 revision 不会清除 claim，只有对应 Feature RPC 完成后才按 generation、token 和 message ID 原子释放。重复 callback 只返回同一冻结结果。候选、正在确认和最终作品身份都属于 Host API 1.7 的同一条 `identity` 消息段；身份段封存后，Prowlarr 搜索结果才开启新的 `search` 消息，因此不会再出现两条有效身份卡片或两条仅后一条可点击的搜索结果。SDK 2.2.0 提供 v2-only 的最小 `media_metadata` 下游合同和 operation segment API。
 
-电影年份在同作品已验证绑定中按“当前发行条目/根条目 → 确认锚点 → 其余绑定顺序”取首个有效四位年份。高优先级源缺值或无效才回退；来源年份不同不会单独阻断命名。关联作品、未验证来源、下载时间及文件修改时间不能补年份。所有可信来源均缺失时保持未解析。剧集根年份、范围年份与排序规则保持。
+电影年份在同作品已验证绑定中按“当前发行条目/根条目 → 确认锚点 → 其余绑定顺序”取首个有效四位年份。高优先级源缺值或无效才回退；来源年份不同不会单独阻断命名。关联作品、未验证来源、下载时间及文件修改时间不能补年份。所有可信来源均缺失时保持未解析。剧集目录年份使用作品首播年，范围年份与排序规则保持。
 
 ## 发起搜索
 
@@ -79,11 +79,11 @@ search 2.3.0 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，�
 
 Prowlarr 仍按 Indexer 和 query 有界并发搜索，执行身份与范围硬门禁、去重和质量排序，最多展示 12 个结果。电影片源标题必须包含匹配年份；剧集资源按已确认范围验证。特殊内容在进入资源搜索前即被排除。
 
-search 提供 `media.search.resolve_metadata` 与持久冻结的 `media.search.confirm_metadata` capability。Rename 的结构化 probe 只用于补全已存在文件的确定身份；Rename 自身约束式文件映射能力不属于 search 的 AI 移除范围。剧集身份同时保存根作品年份、AniList 发行条目年份与范围年份；TVDB 补全优先使用稳定 Series ID，否则只使用根作品年份，不使用季条目或补充来源的年份。最终契约失败会记录精确字段路径、原因码和说明。
+search 提供 `media.search.resolve_metadata` 与持久冻结的 `media.search.confirm_metadata` capability。Rename 的结构化 probe 只用于补全已存在文件的确定身份；Rename 自身约束式文件映射能力不属于 search 的 AI 移除范围。剧集身份同时保存根作品年份、AniList 发行条目年份与范围年份；TVDB 补全优先使用稳定 Series ID，否则只使用根作品年份，不使用季条目或补充来源的年份。向下游冻结 v2 时，剧集 `identity.year` 使用作品根 `root_year`，同一作品的全剧、整季、单集范围共用首播年份。补缺仅使用已确认的作品根来源；季条目年份和不同 AniList 发行条目年份不补入作品根。可靠作品首播年缺失时暂缓。私有合同中的发行条目年、范围年及片源检索逻辑保持，电影继续使用对应电影年份。最终契约失败会记录精确字段路径、原因码和说明。
 
 ## 配置与日志
 
-运行配置位于 `/config/plugins/search/config.yaml`。Wikipedia、Wikidata、豆瓣和 AniList 无需 API Key；P4529、P8729、P4086 与 IMDb ID 都直接来自 Wikidata/来源事实，不接入 IMDb 或 MyAnimeList API。TMDB 使用 API Read Access Token，TVDB 使用自身凭据，均可通过 `/search_config` 配置。search 不再包含 AI 配置项。2.3.0 沿用配置 schema v2，并继续通过包内声明安全删除 1.8.0 遗留的顶层 `ai` 配置段，其余用户配置保持不变；回滚时 Host 会恢复升级前的完整配置。
+运行配置位于 `/config/plugins/search/config.yaml`。Wikipedia、Wikidata、豆瓣和 AniList 无需 API Key；P4529、P8729、P4086 与 IMDb ID 都直接来自 Wikidata/来源事实，不接入 IMDb 或 MyAnimeList API。TMDB 使用 API Read Access Token，TVDB 使用自身凭据，均可通过 `/search_config` 配置。search 不再包含 AI 配置项。2.3.1 沿用配置 schema v2，并继续通过包内声明安全删除 1.8.0 遗留的顶层 `ai` 配置段，其余用户配置保持不变；回滚时 Host 会恢复升级前的完整配置。
 
 每个搜索会话使用稳定的 `search_session_id`。日志记录输入分类、直链解析、候选确认、元数据来源状态、最终 query 变体、片源门禁结果和唯一终态；不记录 API Key、Token、Cookie、Authorization、magnet 或完整来源 payload。
 
@@ -143,7 +143,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:sdk/src \
 构建示例：
 
 ```bash
-python tools/build_feature.py features/search /tmp/search-2.3.0.tpx \
+python tools/build_feature.py features/search /tmp/search-2.3.1.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

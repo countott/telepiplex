@@ -38,6 +38,38 @@ def contract(kind="whole_series"):
 
 
 class RenameMediaMetadataV2Test(unittest.TestCase):
+    def test_all_seasons_share_premiere_year_only_in_root(self):
+        value = contract()
+        value["identity"]["year"] = 2014
+        before = copy.deepcopy(value)
+        plan = build_confirmed_rename_plan(
+            final_path="/Downloads/Release.2026", selected_path="/Series",
+            metadata={"year": 2026}, media_metadata=value,
+            ai_plan={"episode_map": [
+                {"source_file": f"source-{season}.mkv", "season_number": season, "episode_number": 1}
+                for season in (1, 2)
+            ]},
+            file_tree=[{"relative_path": f"source-{season}.mkv", "is_dir": False} for season in (1, 2)],
+        )
+        self.assertEqual(plan["target_root"], "/Series/中文剧集 (2014) ⋯ English Series")
+        self.assertEqual([item["target_relative_path"] for item in plan["operations"]], [
+            "English Series Season 01/English Series S01E01.mkv",
+            "English Series Season 02/English Series S02E01.mkv",
+        ])
+        self.assertEqual(value, before)
+
+    def test_invalid_series_year_cannot_be_taken_from_release_or_auxiliary_metadata(self):
+        for year in (None, "", 123, 12345, True):
+            with self.subTest(year=year):
+                value = contract()
+                value["identity"]["year"] = year
+                self.assertIsNone(build_confirmed_rename_plan(
+                    final_path="/Downloads/Release.2026", selected_path="/Series",
+                    metadata={"year": 2026}, media_metadata=value,
+                    ai_plan={"episode_map": [{"source_file": "Show.S01E01.mkv", "season_number": 1, "episode_number": 1}]},
+                    file_tree=[{"relative_path": "Show.S01E01.mkv", "is_dir": False}],
+                ))
+
     def test_frozen_romaji_names_series_video_and_subtitle_consistently(self):
         value = contract()
         value["placement"]["category_kind"] = "animated_series"
@@ -57,7 +89,7 @@ class RenameMediaMetadataV2Test(unittest.TestCase):
                 {"relative_path": "Release.S01E01.eng.ass", "name": "Release.S01E01.eng.ass", "is_dir": False},
             ],
         )
-        self.assertEqual(plan["target_root"], "/动画剧集/中文剧集 ⋯ Source Romaji")
+        self.assertEqual(plan["target_root"], "/动画剧集/中文剧集 (2024) ⋯ Source Romaji")
         self.assertEqual({op["rename_to"] for op in plan["operations"]}, {
             "Source Romaji S01E01.mkv", "Source Romaji S01E01.chi.ass",
         })

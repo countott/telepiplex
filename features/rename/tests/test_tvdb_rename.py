@@ -460,7 +460,7 @@ class TvdbRenamePlanTest(unittest.TestCase):
         self.assertEqual(plan["operations"][0]["source_path"], source_path)
         self.assertEqual(
             plan["target_root"],
-            "/真人剧集/嗜血法医 源罪 ⋯ Dexter Original Sin",
+            "/真人剧集/嗜血法医 源罪 (2024) ⋯ Dexter Original Sin",
         )
         self.assertEqual(
             plan["operations"][0]["target_relative_path"],
@@ -509,7 +509,7 @@ class TvdbRenamePlanTest(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(plan["target_root"], "/真人剧集/嗜血法医 ⋯ Dexter")
+        self.assertEqual(plan["target_root"], "/真人剧集/嗜血法医 (2006) ⋯ Dexter")
         self.assertEqual(
             plan["operations"],
             [
@@ -518,7 +518,7 @@ class TvdbRenamePlanTest(unittest.TestCase):
                     "source_path": "/真人剧集/Release.Name/Season 1/Dexter.S01E01.mkv",
                     "rename_to": "Dexter S01E01.mkv",
                     "renamed_source_path": "/真人剧集/Release.Name/Season 1/Dexter S01E01.mkv",
-                    "target_dir": "/真人剧集/嗜血法医 ⋯ Dexter/Dexter Season 01",
+                    "target_dir": "/真人剧集/嗜血法医 (2006) ⋯ Dexter/Dexter Season 01",
                     "target_relative_path": "Dexter Season 01/Dexter S01E01.mkv",
                 }
             ],
@@ -529,6 +529,7 @@ class TvdbRenamePlanTest(unittest.TestCase):
             final_path="/真人剧集/Release.Name",
             selected_path="/真人剧集",
             metadata={
+                "year": 1999,
                 "chinese_title": "海贼王",
                 "english_title": "One Piece",
             },
@@ -569,6 +570,7 @@ class TvdbRenamePlanTest(unittest.TestCase):
             final_path="/真人剧集/Release.Name",
             selected_path="/真人剧集",
             metadata={
+                "year": 2024,
                 "chinese_title": "嗜血法医：源罪（前传）——第一季",
                 "english_title": "Dexter Original Sin",
             },
@@ -596,7 +598,7 @@ class TvdbRenamePlanTest(unittest.TestCase):
 
         self.assertEqual(
             plan["target_root"],
-            "/真人剧集/嗜血法医 源罪(前传) - 第一季 ⋯ Dexter Original Sin",
+            "/真人剧集/嗜血法医 源罪(前传) - 第一季 (2024) ⋯ Dexter Original Sin",
         )
 
     def test_build_plan_rejects_invented_source_file(self):
@@ -648,7 +650,7 @@ class TvdbRenamePlanTest(unittest.TestCase):
         plan = build_tvdb_rename_plan(
             final_path="/真人剧集/Release.Name",
             selected_path="/真人剧集",
-            metadata={"chinese_title": "测试剧", "english_title": "Test Show"},
+            metadata={"year": 2024, "chinese_title": "测试剧", "english_title": "Test Show"},
             ai_plan={
                 "tvdb_series_id": "100",
                 "series_name": "Test Show",
@@ -682,7 +684,7 @@ class TvdbRenamePlanTest(unittest.TestCase):
         plan = build_tvdb_rename_plan(
             final_path="/真人剧集/Release.Name",
             selected_path="/真人剧集",
-            metadata={"chinese_title": "测试剧", "english_title": "Test Show"},
+            metadata={"year": 2024, "chinese_title": "测试剧", "english_title": "Test Show"},
             ai_plan={
                 "tvdb_series_id": "100",
                 "series_name": "Test Show",

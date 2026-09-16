@@ -56,6 +56,7 @@ class MediaAutoRenameTest(unittest.TestCase):
     def test_japanese_romaji_compatibility_title_reaches_series_and_file_names(self):
         plan = build_media_naming_plan(
             {
+                "year": 2013,
                 "source": "media_metadata",
                 "chinese_title": "进击的巨人",
                 "english_title": "Shingeki no Kyojin",
@@ -69,7 +70,7 @@ class MediaAutoRenameTest(unittest.TestCase):
 
         self.assertEqual(
             plan.target_relative_dir,
-            "进击的巨人 ⋯ Shingeki no Kyojin/Shingeki no Kyojin Season 01",
+            "进击的巨人 (2013) ⋯ Shingeki no Kyojin/Shingeki no Kyojin Season 01",
         )
         self.assertTrue(plan.file_name.startswith("Shingeki no Kyojin"))
         self.assertNotIn("Attack on Titan", plan.file_name)
@@ -155,12 +156,13 @@ class MediaAutoRenameTest(unittest.TestCase):
             "episode.mp4",
         )
 
-        self.assertEqual(plan.target_relative_dir, "绝命毒师 ⋯ Breaking Bad/Breaking Bad Season 01")
+        self.assertEqual(plan.target_relative_dir, "绝命毒师 (2008) ⋯ Breaking Bad/Breaking Bad Season 01")
         self.assertEqual(plan.file_name, "Breaking Bad S01E02.mp4")
 
     def test_build_episode_plan_uses_specials_and_three_digit_episode_width(self):
         special = build_media_naming_plan(
             {
+                "year": 2005,
                 "source": "douban",
                 "chinese_title": "神秘博士",
                 "english_title": "Doctor Who",
@@ -170,6 +172,7 @@ class MediaAutoRenameTest(unittest.TestCase):
         )
         long_season = build_media_naming_plan(
             {
+                "year": 1999,
                 "source": "douban",
                 "chinese_title": "海贼王",
                 "english_title": "One Piece",
@@ -178,7 +181,7 @@ class MediaAutoRenameTest(unittest.TestCase):
             "episode.mkv",
         )
 
-        self.assertEqual(special.target_relative_dir, "神秘博士 ⋯ Doctor Who/Doctor Who Season 00")
+        self.assertEqual(special.target_relative_dir, "神秘博士 (2005) ⋯ Doctor Who/Doctor Who Season 00")
         self.assertEqual(special.file_name, "Doctor Who S00E07.mkv")
         self.assertEqual(long_season.file_name, "One Piece S01E100.mkv")
 
@@ -216,6 +219,7 @@ class MediaAutoRenameTest(unittest.TestCase):
     def test_build_episode_plan_infers_show_title_for_plain_search(self):
         plan = build_media_naming_plan(
             {
+                "year": 2008,
                 "source": "search_query",
                 "chinese_title": "绝命毒师",
             },
@@ -223,7 +227,7 @@ class MediaAutoRenameTest(unittest.TestCase):
             "episode.mp4",
         )
 
-        self.assertEqual(plan.target_relative_dir, "绝命毒师 ⋯ Breaking Bad/Breaking Bad Season 02")
+        self.assertEqual(plan.target_relative_dir, "绝命毒师 (2008) ⋯ Breaking Bad/Breaking Bad Season 02")
         self.assertEqual(plan.file_name, "Breaking Bad S02E03.mp4")
 
     def test_build_plan_removes_forbidden_path_symbols(self):

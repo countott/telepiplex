@@ -160,6 +160,45 @@ def _anime_work_root_fact(candidate: AnchoredCandidate) -> EvidenceFact:
     return facts[min(links, key=priority).fact_id]
 
 
+def _series_root_year(candidate: AnchoredCandidate, root: EvidenceFact) -> str:
+    """Fill the premiere year from work roots, never seasons or later entries."""
+
+    facts = {fact.fact_id: fact for fact in candidate.facts}
+    eligible = [
+        link.fact_id for link in candidate.source_links
+        if (
+            link.role == "series_root"
+            or (link.role == "anime_entry" and link.fact_id == root.fact_id)
+            or (
+                link.role in {"season", "episode"}
+                and link.verification in {
+                    "tvdb_inventory_verified", "tmdb_inventory_verified",
+                    "wikipedia_inventory_verified", "wikipedia_season_count_verified",
+                }
+                and link.fact_id in facts
+                and facts[link.fact_id].source_season_number is None
+                and link.provider in {"tvdb", "tmdb", "wikipedia"}
+            )
+        )
+        and link.verification in {
+            "fact_verified", "verified", "provider_verified",
+            "wikipedia_explicit_link", "exact",
+            "tvdb_inventory_verified", "tmdb_inventory_verified",
+            "wikipedia_inventory_verified", "wikipedia_season_count_verified",
+        }
+        and link.fact_id in facts
+        and facts[link.fact_id].media_type == "series"
+        and facts[link.fact_id].source_season_number is None
+    ]
+    for fact_id in dict.fromkeys((root.fact_id, candidate.anchor_fact_id, *eligible)):
+        if fact_id not in eligible:
+            continue
+        year = _text(facts[fact_id].year)
+        if re.fullmatch(r"[1-9][0-9]{3}", year):
+            return year
+    return ""
+
+
 def _anime_entry(
     candidate: AnchoredCandidate,
 ) -> tuple[object | None, EvidenceFact | None]:
@@ -717,6 +756,8 @@ def build_media_metadata_v1(
         if entry_fact is not None and entry_fact.year
         else root_year
     )
+    if media_type == "series":
+        root_year = _series_root_year(candidate, root)
     if media_type == "movie":
         year = _movie_year(candidate, entry_fact or root)
         root_year = _movie_year(candidate, root)

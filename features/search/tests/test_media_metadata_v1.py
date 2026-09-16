@@ -13,6 +13,7 @@ from telepiplex_search.media_metadata_v1 import (
     build_media_metadata_v1,
 )
 from telepiplex_search.prowlarr_query import build_prowlarr_query_chain
+from telepiplex_search.media_metadata_v2 import project_confirmed_media_metadata_v2
 
 
 def _fact(
@@ -122,7 +123,7 @@ def _candidate(*, intended_scope="movie", facts=None, unresolved=()):
             fact_id=fact.fact_id,
             url=fact.source_url,
             external_ids=fact.external_ids,
-            role="movie",
+            role="series_root" if fact.media_type == "series" else "movie",
             season_number=None,
             episode_number=None,
             verification="fact_verified",
@@ -185,6 +186,43 @@ class MediaMetadataV1Test(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(MetadataV1Error, "year"):
                     build_media_metadata_v1(candidate, metadata_id="year-test", raw_query="千与千寻")
+
+    def test_root_year_fills_only_from_verified_work_roots(self):
+        for root_year, supplement_year, verification, expected in (
+            ("2004", "2010", "fact_verified", "2004"),
+            ("", "2010", "fact_verified", "2010"),
+            ("", "", "fact_verified", ""),
+            ("", "2010", "unresolved_scope_link", ""),
+        ):
+            with self.subTest(root=root_year, supplement=supplement_year, verification=verification):
+                root = _fact(
+                    "wikipedia:root", "wikipedia", titles=("Example Series",),
+                    year=root_year, media_type="series", english="Example Series",
+                    chinese="示例剧集", url="https://example.invalid/root",
+                    external_ids={"wikidata": "Q1"},
+                )
+                season = replace(root, fact_id="wikipedia:season", year="2026", source_season_number=2)
+                supplement = replace(root, fact_id="tvdb:1", provider="tvdb", year=supplement_year)
+                candidate = _candidate(
+                    intended_scope="whole_series", facts=(root, season, supplement),
+                    unresolved=("tvdb:unavailable",),
+                )
+                candidate = replace(candidate, source_links=(
+                    candidate.source_links[0],
+                    replace(candidate.source_links[1], role="season", season_number=2,
+                            verification="wikipedia_season_count_verified"),
+                    replace(candidate.source_links[2], verification=verification),
+                ))
+                contract = build_media_metadata_v1(candidate, metadata_id="root-year", raw_query="Example Series")
+                self.assertEqual(contract["identity"]["root_year"], expected)
+                frozen = {**candidate.to_dict(), "media_metadata": contract}
+                scope = {"kind": "whole_series", "season_number": None, "episode_number": None}
+                if expected:
+                    projected = project_confirmed_media_metadata_v2(frozen, requested_scope=scope)
+                    self.assertEqual(projected["identity"]["year"], int(expected))
+                else:
+                    with self.assertRaisesRegex(ValueError, "series_root_year_required"):
+                        project_confirmed_media_metadata_v2(frozen, requested_scope=scope)
 
     def test_anilist_entry_owns_release_identity_without_replacing_work_root(self):
         root = _fact(
@@ -309,6 +347,12 @@ class MediaMetadataV1Test(unittest.TestCase):
         self.assertEqual(identity["binding_method"], "wikidata_anilist_id")
         self.assertEqual(identity["year"], "2022")
         self.assertEqual(identity["root_year"], "2004")
+        projected = project_confirmed_media_metadata_v2(
+            {**candidate.to_dict(), "media_metadata": contract},
+            requested_scope={"kind": "season", "season_number": 2, "episode_number": None},
+        )
+        self.assertEqual(projected["identity"]["year"], 2004)
+        self.assertEqual(identity["year"], "2022")
         self.assertEqual(identity["chinese_title"], "死神 千年血战篇")
         self.assertEqual(identity["original_title"], "BLEACH 千年血戦篇")
         self.assertEqual(

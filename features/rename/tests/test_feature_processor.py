@@ -1592,7 +1592,7 @@ class RenamingProcessorTest(unittest.TestCase):
         result = process_tvdb_episode(event)
 
         self.assertTrue(result.handled)
-        self.assertEqual(result.final_path, "/Series/中文剧集 ⋯ English Series")
+        self.assertEqual(result.final_path, "/Series/中文剧集 (2024) ⋯ English Series")
         ai_mock.assert_not_called()
         self.assertNotIn("/Downloads/Series.Release/sample.S00E99.mp4", storage.deleted)
         self.assertNotIn("/Downloads/Series.Release", storage.deleted)
@@ -1654,14 +1654,14 @@ class RenamingProcessorTest(unittest.TestCase):
         result = process_tvdb_episode(event)
 
         self.assertTrue(result.handled)
-        self.assertEqual(result.final_path, "/Series/游戏人生 ⋯ No Game, No Life")
+        self.assertEqual(result.final_path, "/Series/游戏人生 (2014) ⋯ No Game, No Life")
         self.assertEqual(storage.renamed, [(
             "/Downloads/Series.Release/No.Game.No.Life.S01E01.mkv",
             "No Game, No Life S01E01.mkv",
         )])
         self.assertEqual(storage.moved, [(
             "/Downloads/Series.Release/No Game, No Life S01E01.mkv",
-            "/Series/游戏人生 ⋯ No Game, No Life/No Game, No Life Season 01",
+            "/Series/游戏人生 (2014) ⋯ No Game, No Life/No Game, No Life Season 01",
         )])
         self.assertNotIn("ノーゲーム", repr(storage.renamed + storage.moved))
         ai_mock.assert_not_called()
@@ -1682,10 +1682,10 @@ class RenamingProcessorTest(unittest.TestCase):
         result = process_tvdb_episode(event)
 
         self.assertTrue(result.handled)
-        self.assertEqual(result.final_path, "/Series/中文剧集 ⋯ English Series")
+        self.assertEqual(result.final_path, "/Series/中文剧集 (2024) ⋯ English Series")
         self.assertEqual(storage.moved, [(
             "/Downloads/Series.Release/English Series S01E01.chi.vtt",
-            "/Series/中文剧集 ⋯ English Series/English Series Season 01",
+            "/Series/中文剧集 (2024) ⋯ English Series/English Series Season 01",
         )])
 
     def test_frozen_movie_romaji_survives_processor_and_keeps_subtitle_policy(self):
@@ -1727,8 +1727,27 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertFalse(result.handled)
         self.assertEqual(storage.renamed + storage.moved + storage.deleted, [])
 
+    def test_series_without_premiere_year_has_no_storage_mutations(self):
+        contract = series_contract_v2()
+        contract["identity"]["year"] = None
+        before = deepcopy(contract)
+        storage = FakeStorage([
+            {"fn": "Show.2026.S01E01.mkv", "fid": "1", "fc": "1", "fs": 1000},
+            {"fn": "Show.2026.S01E01.chi.srt", "fid": "2", "fc": "1", "fs": 100},
+        ])
+        result = process_tvdb_episode(DownloadCompletedEvent(
+            link="magnet:?x", selected_path="/Series", user_id=1,
+            final_path="/Downloads/Series.Release", resource_name="Show.2026.S01E01",
+            metadata={"media_metadata": contract}, storage=storage,
+        ))
+        self.assertTrue(result.should_stop)
+        self.assertEqual(result.final_path, "/Downloads/Series.Release")
+        self.assertIn("保持原位", result.message)
+        self.assertEqual(storage.renamed + storage.moved + storage.deleted, [])
+        self.assertEqual(contract, before)
+
     def test_partial_series_rename_keeps_canonical_video_as_anchor(self):
-        target_root = "/Series/中文剧集 ⋯ English Series"
+        target_root = "/Series/中文剧集 (2024) ⋯ English Series"
         storage = FakeStorage([
             {"fn": "English Series S01E01.mkv", "fid": "video", "fc": "1"},
             {"fn": "English.Series.S01E01.CHS.srt", "fid": "subtitle", "fc": "1"},
@@ -1740,7 +1759,7 @@ class RenamingProcessorTest(unittest.TestCase):
         event = DownloadCompletedEvent(
             link="magnet:?x", selected_path="/Series", user_id=1,
             final_path=target_root,
-            resource_name="中文剧集 ⋯ English Series",
+            resource_name="中文剧集 (2024) ⋯ English Series",
             naming_metadata={"english_title": "English Series"},
             metadata=attach_media_metadata({}, series_contract()),
             file_tree=[{
@@ -1801,7 +1820,7 @@ class RenamingProcessorTest(unittest.TestCase):
 
         result = process_tvdb_episode(event)
 
-        self.assertEqual(result.final_path, "/Series/中文剧集 ⋯ English Series")
+        self.assertEqual(result.final_path, "/Series/中文剧集 (2024) ⋯ English Series")
         self.assertEqual(storage.renamed, [
             (
                 "/Downloads/Series.Release/English.Series.S01E01.mkv",
@@ -1815,11 +1834,11 @@ class RenamingProcessorTest(unittest.TestCase):
         self.assertEqual(storage.moved, [
             (
                 "/Downloads/Series.Release/English Series S01E01.mkv",
-                "/Series/中文剧集 ⋯ English Series/English Series Season 01",
+                "/Series/中文剧集 (2024) ⋯ English Series/English Series Season 01",
             ),
             (
                 "/Downloads/Series.Release/English Series S01E01.chi.srt",
-                "/Series/中文剧集 ⋯ English Series/English Series Season 01",
+                "/Series/中文剧集 (2024) ⋯ English Series/English Series Season 01",
             ),
         ])
         self.assertNotIn("/Downloads/Series.Release", storage.deleted)
@@ -3096,7 +3115,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 host.storage.moved[0][1],
-                "/Series/游戏人生 ⋯ No Game, No Life/No Game, No Life Season 02",
+                "/Series/游戏人生 (2014) ⋯ No Game, No Life/No Game, No Life Season 02",
             )
             confirmed = restored.jobs.get(
                 "telegram:219358366"
@@ -3905,7 +3924,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(terminal), 1, host.reports)
             self.assertEqual(
                 terminal[0]["details"]["effect_receipt"]["receipt"]["final_path"],
-                "/Series/游戏人生 ⋯ No Game, No Life",
+                "/Series/游戏人生 (2014) ⋯ No Game, No Life",
             )
             self.assertEqual(host.milestones, [])
             identity_reports = [
@@ -4654,7 +4673,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             )
             feature._process = lambda _event: PostDownloadResult(
                 handled=True,
-                final_path="/Series/中文剧集 ⋯ English Series",
+                final_path="/Series/中文剧集 (2024) ⋯ English Series",
                 message="⚠️ 已整理 1，原位保留 1。",
                 metadata=attach_media_metadata({}, series_contract()),
                 file_results={
@@ -4704,7 +4723,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                         "organized": True,
                         "cleanup_complete": True,
                         "partial_completed": True,
-                        "final_path": "/Series/中文剧集 ⋯ English Series",
+                        "final_path": "/Series/中文剧集 (2024) ⋯ English Series",
                     },
                 },
             )
@@ -5792,9 +5811,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "2.2.0")
+        self.assertEqual(manifest["version"], "2.2.1")
         self.assertEqual(manifest["host_api"], ">=1.7,<2.0")
-        self.assertIn('version = "2.2.0"', project)
+        self.assertIn('version = "2.2.1"', project)
         self.assertIn('telepiplex-plugin-sdk==2.2.0', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
@@ -5810,8 +5829,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-2.2.0.tpx", source)
-        self.assertNotIn("dist/rename-2.2.0.tpx", source)
+        self.assertIn("/tmp/rename-2.2.1.tpx", source)
+        self.assertNotIn("dist/rename-2.2.1.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

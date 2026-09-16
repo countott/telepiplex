@@ -64,7 +64,7 @@ def _event(root, tree, *episodes):
 
 
 def test_restored_series_in_canonical_directory_is_rename_only():
-    root = "/Series/中文剧集 ⋯ English Series/English Series Season 01"
+    root = "/Series/中文剧集 (2024) ⋯ English Series/English Series Season 01"
     source = f"{root}/English.Series.S01E01.mkv"
     target = f"{root}/English Series S01E01.mkv"
     storage = StatefulStorage(
@@ -302,7 +302,7 @@ def test_target_conflict_is_local_and_source_is_not_moved_to_unorganized():
     root = "/Downloads/Conflict"
     source = f"{root}/English.Series.S01E01.mkv"
     target = (
-        "/Series/中文剧集 ⋯ English Series/English Series Season 01/"
+        "/Series/中文剧集 (2024) ⋯ English Series/English Series Season 01/"
         "English Series S01E01.mkv"
     )
     storage = StatefulStorage(
@@ -354,7 +354,7 @@ def test_one_failed_episode_does_not_stop_the_next_episode():
     result = process_tvdb_episode(event)
 
     target_second = (
-        "/Series/中文剧集 ⋯ English Series/English Series Season 01/"
+        "/Series/中文剧集 (2024) ⋯ English Series/English Series Season 01/"
         "English Series S01E02.mkv"
     )
     assert result.handled is True
@@ -380,7 +380,7 @@ def test_one_failed_episode_does_not_stop_the_next_episode():
             "state": "failed",
             "source_path": first,
             "target_path": (
-                "/Series/中文剧集 ⋯ English Series/"
+                "/Series/中文剧集 (2024) ⋯ English Series/"
                 "English Series Season 01/English Series S01E01.mkv"
             ),
             "observed_path": renamed_first,

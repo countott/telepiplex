@@ -93,6 +93,12 @@ def _display_folder(chinese_title: str, english_title: str, year: str = "") -> s
     return f"{title} ({year})" if title and year else title
 
 
+def naming_year(metadata: dict, *, series: bool = False) -> str:
+    value = metadata.get("root_year", metadata.get("year")) if series else metadata.get("year")
+    year = str(value or "").strip()
+    return year if re.fullmatch(r"[1-9][0-9]{3}", year) else ""
+
+
 def _collection_titles(metadata: dict) -> tuple[str, str]:
     chinese_title = (
         metadata.get("collection_chinese_title")
@@ -179,16 +185,16 @@ def build_media_naming_plan(metadata: dict | None, release_title: str, original_
 
     suffix = Path(str(original_file_name or "")).suffix
     episode_marker = parse_episode_marker(release_title)
+    year = naming_year(metadata, series=bool(episode_marker))
+    if not year:
+        return None
     if episode_marker:
         season, episode = episode_marker
         marker = _episode_marker_text(season, episode)
-        target_relative_dir = f"{_display_folder(chinese_folder, english_folder)}/{english_folder} Season {season:02d}"
+        target_relative_dir = f"{_display_folder(chinese_folder, english_folder, year)}/{english_folder} Season {season:02d}"
         file_stem = f"{english_folder} {marker}"
         is_episode = True
     else:
-        year = str(metadata.get("year") or "").strip()
-        if not re.fullmatch(r"[1-9][0-9]{3}", year):
-            return None
         movie_folder = _display_folder(chinese_folder, english_folder, year)
         collection_chinese, collection_english = _collection_titles(metadata)
         collection_folder = _display_folder(collection_chinese, collection_english)

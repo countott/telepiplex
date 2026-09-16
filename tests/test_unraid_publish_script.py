@@ -200,8 +200,8 @@ class UnraidPublishScriptTest(unittest.TestCase):
             [
                 "push origin refs/tags/telepiplex-v3.7.0",
                 "push origin refs/tags/download-v2.1.2",
-                "push origin refs/tags/search-v2.3.0",
-                "push origin refs/tags/rename-v2.2.0",
+                "push origin refs/tags/search-v2.3.1",
+                "push origin refs/tags/rename-v2.2.1",
                 "push origin refs/tags/sync-v2.0.3",
                 "push origin refs/tags/caption-v0.1.6",
             ],
@@ -224,8 +224,8 @@ class UnraidPublishScriptTest(unittest.TestCase):
                 (
                     "host refs/tags/telepiplex-v3.7.0",
                     "a refs/tags/download-v2.1.2",
-                    "b refs/tags/search-v2.3.0",
-                    "c refs/tags/rename-v2.2.0",
+                    "b refs/tags/search-v2.3.1",
+                    "c refs/tags/rename-v2.2.1",
                     "d refs/tags/sync-v2.0.3",
                     "e refs/tags/caption-v0.1.6",
                 )
@@ -245,7 +245,7 @@ class UnraidPublishScriptTest(unittest.TestCase):
                     "host refs/tags/telepiplex-v3.7.0",
                     "a refs/tags/download-v2.1.2",
                     "b refs/tags/search-v1.12.3",
-                    "c refs/tags/rename-v2.2.0",
+                    "c refs/tags/rename-v2.2.1",
                     "d refs/tags/sync-v2.0.3",
                     "e refs/tags/caption-v0.1.6",
                 )
@@ -253,9 +253,9 @@ class UnraidPublishScriptTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("search-v2.3.0", result.stdout)
+        self.assertIn("search-v2.3.1", result.stdout)
         self.assertIn(
-            "push origin refs/tags/search-v2.3.0",
+            "push origin refs/tags/search-v2.3.1",
             git_log.read_text(encoding="utf-8"),
         )
 
@@ -270,8 +270,8 @@ class UnraidPublishScriptTest(unittest.TestCase):
                 (
                     "host refs/tags/telepiplex-v3.7.0",
                     "a refs/tags/download-v2.1.2",
-                    "b refs/tags/search-v2.3.0",
-                    "c refs/tags/rename-v2.2.0",
+                    "b refs/tags/search-v2.3.1",
+                    "c refs/tags/rename-v2.2.1",
                     "d refs/tags/sync-v2.0.3",
                     "e refs/tags/caption-v0.1.6",
                 )

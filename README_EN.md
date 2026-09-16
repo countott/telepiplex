@@ -40,7 +40,7 @@ The automatic task ends with file organization. Plex scans are initiated separat
 | `sync` | Manually manage Plex scans and metadata enhancements | None | [Module guide](features/sync/README.md) |
 | `caption` | Placeholder for package, installation, and startup verification | None | [Module guide](features/caption/README.md) |
 
-Upgrade Host, then installed download/rename/sync consumers, and search last. Caption updates its SDK dependency only. Old v2 contracts remain readable; the paired naming fields require SDK 2.2.0 consumers. Host API remains 1.7.
+When upgrading from SDK versions before 2.2.0, upgrade Host, then installed download/rename/sync consumers, and search last. Caption updates its SDK dependency only. Old v2 contracts remain readable; the paired naming fields require SDK 2.2.0 consumers. Host API remains 1.7.
 
 For the complete search and organization flow, install `download → search → rename` in that order. Install `sync` as needed. `caption` currently verifies packaging, installation, and startup only; it does not search for or process subtitles.
 
@@ -145,13 +145,13 @@ Typical output looks like this. Actual names come from confirmed metadata:
     └── Interstellar.mkv
 
 真人剧集/
-└── 西部世界 ⋯ Westworld/
+└── 西部世界 (2016) ⋯ Westworld/
     └── Westworld Season 01/
         ├── Westworld S01E01.mkv
         └── Westworld S01E01.chi.srt
 ```
 
-Movie folders use `Chinese Title (Year) ⋯ Title`; series roots use `Chinese Title ⋯ Title`. The frozen naming title prefers source-backed Romaji for Japanese animation and English for live action and other animation. Movie filenames omit the year; existing season/episode numbering stays in place. External subtitles retain their real extension. The `.chi` suffix is a naming convention, not evidence that the subtitle language was detected as Chinese.
+Movie folders use `Chinese Title (Year) ⋯ Title`; series roots use `Chinese Title (Premiere Year) ⋯ Title`. The frozen naming title prefers source-backed Romaji for Japanese animation and English for live action and other animation. Movie filenames omit the year. All seasons share the series premiere year in the root folder; season folders and episode files omit it. Existing season/episode numbering stays in place. External subtitles retain their real extension. The `.chi` suffix is a naming convention, not evidence that the subtitle language was detected as Chinese.
 
 **Download cleanup and existing-media organization have different rules.** Before automatic handoff, download deletes non-video files and videos below `minimum_video_size_mib`, which defaults to **100 MiB**. This includes external subtitles in the download package. Setting the threshold to `0` still filters non-video files. If there is no qualifying video, cleanup stops before deletion. When organizing existing media, `/rename` keeps unmatched files and subtitles in place and reports items needing attention. If you need to preserve files accompanying a download, review the [download cleanup behavior](features/download/README.md) first.
 
@@ -266,19 +266,21 @@ The current Host API 1.7 provides durable operation message segments, reusing on
 
 #### Current source versions
 
-Naming update: bilingual separators, movie years and separate English/Romaji naming titles. Host includes SDK 2.2.0. All Features update their pinned SDK dependency; download, sync and caption keep their existing business behavior. These are source versions; available updates depend on published Releases and the Feature catalog.
+This update adds the series premiere year to series root folders. Search freezes the work-root year and Rename uses it for directory names. Only Search and Rename versions change; Host, SDK and other Features retain their versions. These are source versions; available updates depend on published Releases and the Feature catalog.
 
 | Component | Version |
 | --- | --- |
 | Host | `3.7.0` |
 | SDK | `2.2.0` |
 | `download` | `2.1.2` |
-| `search` | `2.3.0` |
-| `rename` | `2.2.0` |
+| `search` | `2.3.1` |
+| `rename` | `2.2.1` |
 | `sync` | `2.0.3` |
 | `caption` | `0.1.6` |
 
-For existing installations, update Host first, then installed download, rename, and sync consumers, and finally search. Update caption for the matching SDK dependency. The SDK is bundled during builds and needs no separate installation. Existing v2 contracts remain readable; the new naming fields must appear together and pass validation. Older consumers reject these fields, so complete consumer updates before submitting new tasks. Host API remains 1.7.
+For installations already using SDK 2.2.0, update Search to 2.3.1 and then Rename to 2.2.1 before starting new tasks. Existing frozen task metadata is not rewritten.
+
+When upgrading from SDK versions before 2.2.0, update Host first, then installed download, rename, and sync consumers, and finally search. Update caption for the matching SDK dependency. The SDK is bundled during builds and needs no separate installation. Existing v2 contracts remain readable; the new naming fields must appear together and pass validation. Older consumers reject these fields, so complete consumer updates before submitting new tasks. Host API remains 1.7.
 
 `main` is the active source branch for Core/Host and all five Features. The Host uses `telepiplex-v<semver>` tags, with release commits verified as contained in remote `main`. The release workflow publishes `ghcr.io/<owner>/telepiplex:<semver>` and `latest`, then creates a GitHub Release titled `Telepiplex <semver>` for that tag explicitly marked **Latest**. An ordinary `main` push does not update official images or Latest entry points.
 
