@@ -82,6 +82,8 @@ class NextActions:
         payload = dict(record.details.get("next_actions") or {})
         if payload.get("kind") != "post_rename":
             return
+        if ((payload.get("media_metadata") or {}).get("identity") or {}).get("media_type") != "series":
+            return
         token = uuid.uuid4().hex[:20]
         inserted = self.db.execute(
             "INSERT OR IGNORE INTO next_action_cards "

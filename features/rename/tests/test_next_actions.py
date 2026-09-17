@@ -11,7 +11,8 @@ def test_only_successful_complete_rename_offers_next_actions_and_receipt_replay_
         operation = feature._new_operation({"chat_id": 10, "user_id": 1}, state="running",
             stage="organizing", status_text="整理中", control="cancel", kind="organization")
         outcome = {"organized": organized, "cleanup_complete": cleanup, "partial_completed": partial,
-                   "final_path": "/TV/Show", "event_payload": {"media_metadata": {"schema_version": 2}},
+                   "final_path": "/TV/Show", "event_payload": {"media_metadata": {
+                       "schema_version": 2, "identity": {"media_type": "series"}}},
                    "file_results": {"media_files_total": 1}}
         feature._prepare_terminal_outcome("job", outcome, operation["operation_id"])
         report = outcome["terminal_operation_report"]
@@ -20,3 +21,16 @@ def test_only_successful_complete_rename_offers_next_actions_and_receipt_replay_
         feature._prepare_terminal_outcome("job", outcome, operation["operation_id"])
         assert outcome["terminal_operation_report"] == saved
         assert report["details"]["effect_receipt"]["state"] == ("completed" if organized and cleanup else "failed")
+
+
+def test_completed_movie_ends_without_next_actions():
+    feature = RenameFeature(config={}, host=SimpleNamespace())
+    operation = feature._new_operation({"chat_id": 10, "user_id": 1}, state="running",
+        stage="organizing", status_text="整理中", control="cancel", kind="organization")
+    outcome = {"organized": True, "cleanup_complete": True, "final_path": "/Movies/Title",
+               "event_payload": {"media_metadata": {"schema_version": 2,
+                   "identity": {"media_type": "movie"}}}, "file_results": {"media_files_total": 1}}
+    feature._prepare_terminal_outcome("job", outcome, operation["operation_id"])
+    report = outcome["terminal_operation_report"]
+    assert report["state"] == "completed"
+    assert "next_actions" not in report["details"]

@@ -31,7 +31,8 @@ class NextActionsTest(unittest.IsolatedAsyncioTestCase):
                                       command_route=Mock(return_value=self.route))
         self.worker = NextActions(self.application, self.coordinator, self.router, clock=lambda: self.now)
         self.record = SimpleNamespace(operation_id="old", chat_id=10, user_id=1, details={
-            "next_actions": {"kind": "post_rename", "final_path": "/TV/Show"},
+            "next_actions": {"kind": "post_rename", "final_path": "/TV/Show",
+                             "media_metadata": {"identity": {"media_type": "series"}}},
         })
 
     async def asyncTearDown(self):
@@ -43,6 +44,13 @@ class NextActionsTest(unittest.IsolatedAsyncioTestCase):
         await self.worker.offer(self.record)
         row = self.worker.db.execute("SELECT token FROM next_action_cards").fetchone()
         return self.worker.get(row[0])
+
+    async def test_movie_completion_has_no_followup_card_or_availability_calls(self):
+        self.record.details["next_actions"]["media_metadata"]["identity"]["media_type"] = "movie"
+        await self.worker.offer(self.record)
+        self.client.request.assert_not_awaited()
+        self.bot.send_message.assert_not_awaited()
+        assert self.worker.db.execute("SELECT COUNT(*) FROM next_action_cards").fetchone()[0] == 0
 
     def update(self, card, action, *, user_id=1, message_id=200):
         return SimpleNamespace(update_id=1, effective_chat=SimpleNamespace(id=10),

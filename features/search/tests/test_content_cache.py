@@ -104,6 +104,25 @@ def test_stale_inventory_refreshes_confirmed_anchors_not_title_discovery(tmp_pat
     asyncio.run(run())
 
 
+def test_movie_cannot_create_or_restore_series_continuation():
+    async def run():
+        feature = SearchFeature(config={}, host=FakeHost())
+        candidate = {"media_metadata": search_plan()["media_metadata"]}
+        stored = {"owner": (10, 1), "operation_id": "movie", "plan": {}}
+        feature._remember_series(stored, candidate)
+        assert feature.content_cache.get("continuation", "movie") is None
+        # Even an old or malformed cached record must not expose the entry.
+        feature.content_cache.put("continuation", "movie", {
+            "owner": [10, 1], "candidate": candidate,
+        }, 86400)
+        request = {"chat_id": 10, "user_id": 1, "resume_operation_id": "movie"}
+        assert feature._continuation_snapshot(request) is None
+        result = await feature.command(dict(request, command="s"))
+        assert "operation" not in result
+        assert not feature.plans
+    asyncio.run(run())
+
+
 def test_scope_specific_context_reads_root_inventory_before_offering_other_episodes():
     async def run():
         feature = SearchFeature(config={}, host=FakeHost())

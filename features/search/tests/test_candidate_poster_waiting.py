@@ -308,6 +308,7 @@ class CandidatePosterCommandTest(unittest.IsolatedAsyncioTestCase):
         plan_id = next(iter(self.feature.plans))
         stored = self.feature.plans[plan_id]
         await self.feature.callback({"payload": confirm.removeprefix("search:"), "user_id": 1, "chat_id": 10})
+        await self.runtime.run("search-select-")
         await self.runtime.run("search-releases-")
         contract = deepcopy(stored["confirmed_contract"])
         self.assertEqual(contract["schema_version"], 2)

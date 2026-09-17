@@ -266,19 +266,19 @@ The current Host API 1.8 adds disposable post-rename choices with one-time consu
 
 #### Current source versions
 
-This update adds post-rename choices to continue searching the same series, explicitly scan Plex, or exit. Clicking consumes and deletes the choice card; inactivity expires it after 60 seconds. Search persists metadata and episode inventories. Prowlarr release results are never cached. These are source versions; available updates depend on published Releases and the Feature catalog.
+This patch ends movie tasks after rename and offers next-step choices only for series. Identity confirmation runs in the background and rejects duplicate callbacks. Confirmed identity messages use the selected poster or a title placeholder when no image is available; failure to seal the message stops further searching. These are source versions; available updates depend on published Releases and the Feature catalog.
 
 | Component | Version |
 | --- | --- |
-| Host | `3.8.1` |
+| Host | `3.8.2` |
 | SDK | `2.2.0` |
 | `download` | `2.1.2` |
-| `search` | `2.4.0` |
-| `rename` | `2.3.0` |
+| `search` | `2.4.1` |
+| `rename` | `2.3.1` |
 | `sync` | `2.1.0` |
 | `caption` | `0.1.6` |
 
-Update Host to 3.8.1 first, then Search to 2.4.0 and Sync to 2.1.0 if installed, and finally Rename to 2.3.0 before starting new tasks. These Features require Host API 1.8. SDK remains 2.2.0; download and caption are unchanged. Existing frozen task metadata is not rewritten. See [post-rename choices](docs/post-rename-next-actions.md).
+Update Host to 3.8.2 first, then Search to 2.4.1 and Rename to 2.3.1 before starting new tasks. Host API remains 1.8 and SDK remains 2.2.0; download, sync, and caption are unchanged in this patch. Existing frozen task metadata is not rewritten. See [post-rename choices](docs/post-rename-next-actions.md).
 
 When upgrading from SDK versions before 2.2.0, update Host first, then installed download, rename, and sync consumers, and finally search. Update caption for the matching SDK dependency. The SDK is bundled during builds and needs no separate installation. Existing v2 contracts remain readable; the new naming fields must appear together and pass validation. Older consumers reject these fields, so complete consumer updates before submitting new tasks. Host API is now 1.8.
 

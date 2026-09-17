@@ -41,6 +41,30 @@ def jpeg_payload() -> bytes:
 
 
 class PosterGridTest(unittest.TestCase):
+    def test_identity_poster_upload_has_no_candidate_number_or_strip(self):
+        with patch.object(poster_grid, "urlopen", return_value=ImageResponse(
+            jpeg_payload(), "https://img.example/selected.jpg",
+        )), patch.object(poster_grid, "_number_label", side_effect=AssertionError("candidate label")):
+            poster = poster_grid.build_identity_poster("Selected", "https://img.example/selected.jpg")
+        self.assertEqual(Image.open(poster).size, (32, 48))
+        self.assertEqual(poster.name, "telepiplex-identity.jpg")
+
+    def test_missing_identity_poster_uses_selected_title_without_number(self):
+        with patch.object(poster_grid, "_number_label", side_effect=AssertionError("candidate label")):
+            first = poster_grid.build_identity_poster("Selected movie")
+            second = poster_grid.build_identity_poster("Different movie")
+        self.assertNotEqual(first.getvalue(), second.getvalue())
+
+    def test_blocked_identity_poster_is_a_valid_selected_title_image(self):
+        with patch.object(poster_grid, "urlopen", side_effect=HTTPError(
+            "https://img.example/selected.jpg", 403, "Forbidden", {}, None,
+        )), patch.object(poster_grid, "_number_label", side_effect=AssertionError("candidate number")):
+            poster = poster_grid.build_identity_poster("所选电影", "https://img.example/selected.jpg")
+        self.assertEqual(poster.getvalue(), poster_grid.build_identity_poster("所选电影").getvalue())
+        image = Image.open(poster)
+        image.verify()
+        self.assertEqual(image.format, "JPEG")
+
     def test_selected_font_has_distinct_chinese_glyphs(self):
         font = poster_grid._font(48)
 

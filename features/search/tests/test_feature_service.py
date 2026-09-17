@@ -831,6 +831,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         await self.feature.callback({
             "payload": f"select:{plan_id}:0", "user_id": 1, "chat_id": 10,
         })
+        await self.runtime.run("search-select-")
         self.assertEqual(self.search_queries, [])
         await self.feature.callback({
             "payload": f"scope:{plan_id}:whole_series", "user_id": 1, "chat_id": 10,
@@ -5724,6 +5725,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         selected = await self.feature.callback({
             "payload": f"select:{plan_id}:1", "user_id": 1, "chat_id": 10,
         })
+        await self.runtime.run("search-select-")
         self.assertEqual(selected.get("actions"), [])
         self.assertNotEqual(
             selected["operation"]["stage"],
@@ -5768,12 +5770,13 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         callback = self.host.reports[-1]["details"]["keyboard"][0][0]["callback_data"]
         plan_id = callback.split(":")[2]
 
-        placement = await self.feature.callback({
+        await self.feature.callback({
             "payload": f"select:{plan_id}:0", "user_id": 1, "chat_id": 10,
         })
+        await self.runtime.run("search-select-")
         self.assertIn(
             "Specials",
-            placement["actions"][0]["data"]["keyboard"][0][0]["text"],
+            self.host.reports[-1]["details"]["keyboard"][0][0]["text"],
         )
 
         started = await self.feature.callback({
@@ -5846,6 +5849,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "user_id": 1,
             "chat_id": 10,
         })
+        await self.runtime.run("search-select-")
 
         self.assertEqual(selected.get("actions"), [])
         self.assertNotEqual(
@@ -5879,11 +5883,13 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "user_id": 1,
             "chat_id": 10,
         })
+        await self.runtime.run("search-select-")
+        scope = self.host.reports[-1]
 
         self.assertEqual(self.search_queries, [])
         labels = [
             row[0]["text"]
-            for row in scope["actions"][0]["data"]["keyboard"]
+            for row in scope["details"]["keyboard"]
         ]
         self.assertIn("全剧（共 1 季）", labels)
         self.assertNotIn("指定集", labels)
@@ -5901,7 +5907,7 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "role": "identity", "presentation_kind": "photo",
         })
         self.assertEqual(started["operation"]["details"].get("keyboard", []), [])
-        self.assertGreater(started["operation"]["revision"], scope["operation"]["revision"])
+        self.assertGreater(started["operation"]["revision"], scope["revision"])
         from telepiplex_plugin_sdk import FeatureError
 
         stored = self.feature.plans[plan_id]
@@ -6818,9 +6824,9 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "2.4.0")
+        self.assertEqual(manifest["version"], "2.4.1")
         self.assertEqual(manifest["host_api"], ">=1.8,<2.0")
-        self.assertEqual(project["project"]["version"], "2.4.0")
+        self.assertEqual(project["project"]["version"], "2.4.1")
         self.assertEqual(
             project["project"]["dependencies"][0],
             "telepiplex-plugin-sdk==2.2.0",
@@ -6854,14 +6860,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-2.4.0.tpx", source)
+        self.assertIn("/tmp/search-2.4.1.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-2.4.0.tpx", source)
+        self.assertNotIn("dist/search-2.4.1.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

@@ -18,7 +18,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - package-imported test/runtime fallback
     from app import init
 from app.runtime.interaction_coordinator import TERMINAL_STATES, OperationRecord
-from app.runtime.poster_grid import build_poster_grid
+from app.runtime.poster_grid import build_identity_poster, build_poster_grid
 from app.runtime.telegram_text import bounded_photo_caption
 from app.utils.log_sanitizer import sanitize_log_text
 
@@ -2214,6 +2214,7 @@ async def _send_new_segment_message(application, router, record, segment):
     photo_url = _operation_photo_url(record.details)
     if (
         record.details.get("defer_photo_until_media") is True
+        and record.details.get("identity_confirmed") is not True
         and not poster_items
         and not photo_url
     ):
@@ -2229,7 +2230,7 @@ async def _send_new_segment_message(application, router, record, segment):
         text,
         record.details.get("parse_mode"),
     )
-    photo = await _segment_photo_media(record)
+    photo = await _segment_photo_media(record, upload_confirmed=True)
     kwargs = {
         "chat_id": record.chat_id,
         "photo": photo,
@@ -2278,10 +2279,11 @@ async def _edit_segment_message(application, record, segment, *, markup):
             if not _message_not_modified(exc):
                 raise
         return
-    poster_items = _operation_poster_items(record.details)
+    confirmed = record.details.get("identity_confirmed") is True
+    poster_items = [] if confirmed else _operation_poster_items(record.details)
     photo_url = _operation_photo_url(record.details)
     if segment.message_kind == "text":
-        if not poster_items and not photo_url:
+        if not poster_items and not photo_url and not confirmed:
             try:
                 await application.bot.edit_message_text(
                     chat_id=record.chat_id,
@@ -2305,9 +2307,9 @@ async def _edit_segment_message(application, record, segment, *, markup):
         text,
         record.details.get("parse_mode"),
     )
-    if poster_items or photo_url:
+    if poster_items or photo_url or record.details.get("identity_confirmed") is True:
         try:
-            await application.bot.edit_message_media(
+            result = await application.bot.edit_message_media(
                 chat_id=record.chat_id,
                 message_id=segment.message_id,
                 media=InputMediaPhoto(
@@ -2317,10 +2319,34 @@ async def _edit_segment_message(application, record, segment, *, markup):
                 ),
                 reply_markup=markup,
             )
+            if confirmed and (result is None or result is False):
+                raise RuntimeError("identity_media_edit_not_acknowledged")
             return
         except Exception as exc:
             if _message_not_modified(exc):
                 return
+            # A caption-only fallback would acknowledge the new identity while
+            # leaving the candidate collage visible. Replace the media itself.
+            if segment.role != "identity" or poster_items:
+                raise
+            _log("warn", "已确认海报链接编辑失败，改为上传所选作品海报："
+                 f"operation_id={record.operation_id}, error={_render_error(exc)}")
+            media = await asyncio.to_thread(
+                build_identity_poster, text.splitlines()[0], photo_url,
+            )
+            try:
+                result = await application.bot.edit_message_media(
+                    chat_id=record.chat_id,
+                    message_id=segment.message_id,
+                    media=InputMediaPhoto(media=media, caption=caption, parse_mode=parse_mode),
+                    reply_markup=markup,
+                )
+                if confirmed and (result is None or result is False):
+                    raise RuntimeError("identity_media_edit_not_acknowledged")
+            except Exception as fallback_exc:
+                if not _message_not_modified(fallback_exc):
+                    raise
+            return
     try:
         await application.bot.edit_message_caption(
             chat_id=record.chat_id,
@@ -2348,7 +2374,7 @@ async def _promote_segment_text_to_photo(
     )
     kwargs = {
         "chat_id": record.chat_id,
-        "photo": await _segment_photo_media(record),
+        "photo": await _segment_photo_media(record, upload_confirmed=True),
         "caption": caption,
         "reply_markup": None,
     }
@@ -2489,11 +2515,19 @@ async def _discard_replaced_segment_message(
         wake_message_cleanup(application)
 
 
-async def _segment_photo_media(record):
+async def _segment_photo_media(record, *, upload_confirmed=False):
+    photo_url = _operation_photo_url(record.details)
+    if record.details.get("identity_confirmed") is True:
+        # Final identity always wins over any leftover candidate grid fields.
+        # Sending/promoting uploads bytes so Telegram need not fetch hotlinked URLs.
+        if photo_url and not upload_confirmed:
+            return photo_url
+        return await asyncio.to_thread(
+            build_identity_poster, (record.status_text or "Telepiplex").splitlines()[0], photo_url,
+        )
     poster_items = _operation_poster_items(record.details)
     if poster_items:
         return await asyncio.to_thread(build_poster_grid, poster_items)
-    photo_url = _operation_photo_url(record.details)
     if photo_url:
         return photo_url
     return await asyncio.to_thread(

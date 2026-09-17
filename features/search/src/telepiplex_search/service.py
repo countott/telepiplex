@@ -1586,19 +1586,22 @@ class SearchFeature:
             return self._closed("⚠️ 搜索任务已过期，请重新搜索。")
         if stored.get("kind") == "raw" and action != "cancel":
             return self.raw_search.callback(action, plan_id, stored, parts[2:])
-        if action in {"confirm", "scope"}:
+        choice_stages = {
+            "confirm": {"plan_confirmation", "candidate_selection", "prowlarr_recovery"},
+            "scope": {"plan_confirmation", "candidate_selection", "series_scope", "series_scope_number"},
+            "select": {"plan_confirmation", "candidate_selection"},
+            "browse": {"plan_confirmation", "candidate_selection"},
+            "candidate_page": {"plan_confirmation", "candidate_selection"},
+            "reject": {"plan_confirmation", "candidate_selection"},
+            "retry": {"candidate_recovery"},
+            "clarify": {"clarification"},
+            "placement": {"related_movie_placement"},
+        }
+        if action in choice_stages:
             operation = self.operations.get(stored.get("operation_id")) or {}
-            allowed_stages = (
-                {"plan_confirmation", "candidate_selection", "prowlarr_recovery"}
-                if action == "confirm"
-                else {
-                    "plan_confirmation", "candidate_selection",
-                    "series_scope", "series_scope_number",
-                }
-            )
             if (
                 operation.get("state") != "awaiting_input"
-                or operation.get("stage") not in allowed_stages
+                or operation.get("stage") not in choice_stages[action]
             ):
                 raise FeatureError("invalid_state", "search choice is no longer active")
         if action == "cancel":
@@ -1686,6 +1689,17 @@ class SearchFeature:
         if action == "candidate_page" and len(parts) == 3:
             return self._candidate_page(plan_id, stored, parts[2])
         if action == "select" and len(parts) == 3:
+            try:
+                index = int(parts[2])
+                if index < 0:
+                    raise IndexError
+                candidate = stored["candidates"][index]
+            except (ValueError, IndexError):
+                raise FeatureError("invalid_candidate", "selected candidate is invalid") from None
+            if candidate.get("selectable") is not False:
+                return self._start_candidate_selection(
+                    plan_id, stored, parts[2], update_id=request.get("update_id"),
+                )
             return await self._select_candidate(plan_id, stored, parts[2])
         if action == "scope" and len(parts) >= 3:
             return self._scope_callback(
@@ -2907,11 +2921,95 @@ class SearchFeature:
         )
         return {"actions": [action], "operation": operation}
 
+    def _start_candidate_selection(self, plan_id, stored, raw_index, *, update_id=None):
+        operation_id = stored["operation_id"]
+        if self.plans.get(plan_id) is not stored or not self._is_candidate_screen(self.operations[operation_id]):
+            raise FeatureError("invalid_state", "search choice is no longer active")
+        update_key = str(update_id) if update_id is not None else ""
+        if update_key and update_key in stored.get("confirmation_updates", set()):
+            raise FeatureError("invalid_state", "this confirmation update was already consumed")
+        previous = self._operation_view(self.operations[operation_id])
+        operation = self._advance_operation(
+            operation_id, state="running", stage="candidate_hydration",
+            status_text="正在读取所选作品的资料…", control="cancel", details={"keyboard": []},
+        )
+        task_id = f"search-select-{operation_id}"
+        worker = self._candidate_selection_task(plan_id, stored, raw_index)
+        try:
+            task = self.runtime.spawn(worker, task_id=task_id)
+        except Exception:
+            worker.close()
+            restored = self._advance_operation(
+                operation_id, state=previous["state"], stage=previous["stage"],
+                status_text=previous["status_text"], control=previous["control"],
+                details=previous["details"],
+            )
+            return {"actions": [], "operation": restored}
+        # Retain replay protection when a genuine failure reopens retry controls.
+        # A fresh user click has a new Telegram update ID and may retry normally.
+        if update_key:
+            stored.setdefault("confirmation_updates", set()).add(update_key)
+        self._invalidate_candidate_poster_enrichment(stored)
+        self.operations[operation_id].update({"task": task, "task_id": task_id})
+        return {"actions": [], "operation": operation}
+
+    async def _candidate_selection_task(self, plan_id, stored, raw_index):
+        operation_id = stored["operation_id"]
+        try:
+            if self.plans.get(plan_id) is not stored:
+                return
+            result = await self._select_candidate(plan_id, stored, raw_index)
+            returned = result.get("operation") or {}
+            if returned.get("state") == "running":
+                # The release worker owns all following identity/search reports.
+                return
+            action = (result.get("actions") or [{}])[0]
+            active = self.plans.get(plan_id) is stored
+            await self._report_operation(
+                operation_id,
+                state=returned.get("state") or ("awaiting_input" if active else "failed"),
+                stage=returned.get("stage") or "candidate_selection",
+                status_text=action.get("text") or "所选作品资料读取失败，请重试。",
+                control=returned.get("control") or ("exit" if active else ""),
+                details=deepcopy(action.get("data") or {}),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if self.plans.get(plan_id) is not stored or self.operations[operation_id].get("_host_report_rejected"):
+                return
+            log_search_event(
+                runtime_context.logger, "search.background_task_failed",
+                search_session_id=plan_id, level="warning", operation_id=operation_id,
+                stage="candidate_hydration", error_type=type(exc).__name__,
+            )
+            action = self._candidate_action(stored, int(raw_index), edit=True)
+            await self._report_operation(
+                operation_id, state="awaiting_input", stage="candidate_selection",
+                status_text=action["text"] + "\n资料读取失败，可重试或退出。", control="exit",
+                details=deepcopy(action.get("data") or {}),
+            )
+
     async def _select_candidate(
         self, plan_id: str, stored: dict, raw_index: str
     ) -> dict:
+        tracked = self.plans.get(plan_id) is stored
+
+        def ensure_current():
+            # Provider I/O may finish after cancellation or plan replacement.
+            # Never let that result publish scope choices or start a search.
+            operation = self.operations.get(stored.get("operation_id")) or {}
+            if tracked and (
+                self.plans.get(plan_id) is not stored
+                or operation.get("state") in {"cancelling", "cancelled", "failed", "interrupted", "completed", "handed_off"}
+            ):
+                raise asyncio.CancelledError
+
+        ensure_current()
         try:
             index = int(raw_index)
+            if index < 0:
+                raise IndexError
             candidate = deepcopy(stored["candidates"][index])
         except (ValueError, IndexError):
             raise FeatureError("invalid_candidate", "selected candidate is invalid") from None
@@ -2939,8 +3037,10 @@ class SearchFeature:
                     raw_query=raw_query,
                     require_anchor=True,
                 )
+                ensure_current()
                 stored["candidates"][index].update(deepcopy(candidate))
             except CandidateHydrationError as exc:
+                ensure_current()
                 source_links = [
                     item
                     for item in candidate.get("source_links") or ()
@@ -3001,8 +3101,10 @@ class SearchFeature:
                             resolver=self.exact_link_resolver,
                         )
                     except CandidateHydrationError as degraded_exc:
+                        ensure_current()
                         exc = degraded_exc
                     else:
+                        ensure_current()
                         stored["candidates"][index].update(
                             deepcopy(candidate)
                         )
@@ -3088,6 +3190,7 @@ class SearchFeature:
         }
         try:
             await self._apply_selected_relation(candidate, selected_plan, stored)
+            ensure_current()
             contract = selected_plan["media_metadata"]
             self._remember_series(stored, candidate)
             placement = contract.get("placement") or {}
@@ -3790,7 +3893,7 @@ class SearchFeature:
                     stage="identity_confirmation",
                     status_text=presentation["text"],
                     control="cancel",
-                    details={"photo_url": presentation["photo_url"]},
+                    details={"photo_url": presentation["photo_url"], "identity_confirmed": True},
                 )
             try:
                 await self._seal_operation_segment(
@@ -7087,6 +7190,9 @@ class SearchFeature:
         snapshot = self.content_cache.get("continuation", str(request.get("resume_operation_id") or ""))
         if not snapshot or snapshot.get("owner") != list(self._owner_key(request)):
             return None
+        contract = (snapshot.get("candidate") or {}).get("media_metadata") or {}
+        if (contract.get("identity") or {}).get("content_kind") != "series":
+            return None
         return snapshot
 
     def _start_series_continuation(self, request):
@@ -7244,6 +7350,7 @@ class SearchFeature:
             or release_task_unstarted
             or raw_task_unstarted
             or submission_task_unstarted
+            or str(operation.get("task_id") or "").startswith("search-select-")
         ):
             terminal = self._advance_operation(
                 operation_id,
@@ -7315,6 +7422,8 @@ class SearchFeature:
         self.raw_search.awaiting_queries.discard(owner)
         plan_id = str(operation.get("plan_id") or "")
         if plan_id:
+            if str(operation.get("task_id") or "").startswith("search-select-"):
+                self._cancel_release_tasks(self.plans.get(plan_id) or {})
             self._log_completed_once(
                 plan_id,
                 self.plans.get(plan_id),

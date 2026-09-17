@@ -2492,6 +2492,8 @@ class RenameFeature:
         complete = facts["complete"]
         partial_completed = facts["partial_completed"]
         organized = facts["organized"]
+        media_metadata = (outcome.get("event_payload") or {}).get("media_metadata") or {}
+        is_series = (media_metadata.get("identity") or {}).get("media_type") == "series"
         file_results = dict(outcome.get("file_results") or {})
         terminal_text = _organization_status_text(
             int(file_results.get("media_files_total") or 0),
@@ -2534,9 +2536,9 @@ class RenameFeature:
                 "effect_receipt": facts["effect_receipt"],
                 **({"next_actions": {
                     "kind": "post_rename",
-                    "media_metadata": deepcopy((outcome.get("event_payload") or {}).get("media_metadata")),
+                    "media_metadata": deepcopy(media_metadata),
                     "final_path": str(outcome.get("final_path") or ""),
-                }} if complete and not partial_completed else {}),
+                }} if complete and not partial_completed and is_series else {}),
             },
         )
         outcome["terminal_operation_report"] = deepcopy(terminal_report)

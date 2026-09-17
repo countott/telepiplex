@@ -255,6 +255,21 @@ def _card(
     return card, image is not None, requested, failure
 
 
+def build_identity_poster(title: str, poster_url: str = "", *, timeout: float = 5) -> BytesIO:
+    """Upload the selected poster (or its title), without candidate numbering."""
+    image, reason = _download_image(poster_url, timeout=timeout)
+    if image is None:
+        if poster_url:
+            _log_download_failure(0, poster_url, reason)
+        image = _placeholder(0, title)
+    image.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
+    output = BytesIO()
+    image.save(output, format="JPEG", quality=88, optimize=True)
+    output.seek(0)
+    output.name = "telepiplex-identity.jpg"
+    return output
+
+
 def build_poster_grid(
     poster_items: list[dict],
     *,

@@ -1008,6 +1008,192 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(sealed_edit["reply_markup"])
 
+    async def test_confirmed_identity_replaces_grid_before_sealing_even_when_url_fails(self):
+        from app.handlers.interaction_handler import OperationReportSink, render_operation
+
+        initial = self.report(state="awaiting_input", stage="candidate_selection",
+            status_text="候选列表", details={"poster_items": [{"number": 1, "title": "候选"}]},
+            segment={"role": "identity", "presentation_kind": "photo"})
+        _, segment = self.coordinator.accept_segment_report("search", initial)
+        segment = self.coordinator.bind_segment_message(segment.segment_id, owner_plugin_id="search",
+            generation=segment.generation, chat_id=10, message_id=91, message_kind="photo")
+        self.coordinator.record_segment_rendered(segment.segment_id, owner_plugin_id="search",
+            generation=segment.generation, business_revision=1, projection_hash=segment.projection_hash)
+        context = self.context()
+        context.bot.edit_message_media.side_effect = [BadRequest("failed to get HTTP URL content"), True]
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(lambda record: render_operation(context.application, Mock(), record))
+        with patch("app.handlers.interaction_handler.build_identity_poster", return_value=BytesIO(b"selected")) as upload:
+            await sink("search", {**initial, "revision": 2, "state": "running",
+                "stage": "identity_confirmation", "status_text": "所选电影\n已确认身份",
+                "details": {"photo_url": "https://img.example/selected.jpg", "identity_confirmed": True}})
+            response = await sink.seal("search", "op-1", "identity")
+            await sink.drain()
+        self.assertTrue(response["accepted"])
+        upload.assert_called_once_with("所选电影", "https://img.example/selected.jpg")
+        self.assertEqual(context.bot.edit_message_media.await_count, 2)
+        self.assertEqual(context.bot.edit_message_media.await_args.kwargs["message_id"], 91)
+        self.assertEqual(context.bot.edit_message_media.await_args.kwargs["media"].caption, "所选电影\n已确认身份")
+        context.bot.edit_message_caption.assert_not_awaited()
+        context.bot.send_photo.assert_not_awaited()
+
+    async def test_failed_identity_media_replacement_cannot_be_acknowledged_by_caption_edit(self):
+        from app.handlers.interaction_handler import _edit_segment_message
+
+        context = self.context()
+        context.bot.edit_message_media.side_effect = BadRequest("cannot edit media")
+        record = SimpleNamespace(status_text="Selected", chat_id=10, operation_id="op-1",
+            details={"photo_url": "https://img.example/selected.jpg", "identity_confirmed": True})
+        segment = SimpleNamespace(role="identity", presentation_kind="photo", message_kind="photo", message_id=91)
+        with patch("app.handlers.interaction_handler.build_identity_poster", return_value=BytesIO(b"selected")):
+            with self.assertRaises(BadRequest):
+                await _edit_segment_message(context.application, record, segment, markup=None)
+        context.bot.edit_message_caption.assert_not_awaited()
+
+    async def test_confirmed_identity_without_poster_clears_candidate_grid(self):
+        from app.handlers.interaction_handler import _edit_segment_message
+
+        context = self.context()
+        record = SimpleNamespace(status_text="Selected", chat_id=10, operation_id="op-1",
+            details={"photo_url": "", "identity_confirmed": True})
+        segment = SimpleNamespace(role="identity", presentation_kind="photo", message_kind="photo", message_id=91)
+        with patch("app.handlers.interaction_handler.build_identity_poster", return_value=BytesIO(b"selected")) as upload:
+            await _edit_segment_message(context.application, record, segment, markup=None)
+        upload.assert_called_once_with("Selected", "")
+        context.bot.edit_message_media.assert_awaited_once()
+        context.bot.edit_message_caption.assert_not_awaited()
+
+    async def test_failed_or_unacknowledged_identity_image_never_seals_and_can_retry(self):
+        from app.handlers.interaction_handler import OperationReportSink, render_operation
+
+        for index, failure in enumerate((BadRequest("bad media"), TimedOut("lost reply"), False, None)):
+            with self.subTest(failure=failure):
+                operation_id = f"image-failure-{index}"
+                initial = self.report(operation_id=operation_id, user_id=index + 1, state="awaiting_input", stage="candidate_selection",
+                    status_text="候选", segment={"role": "identity", "presentation_kind": "photo"})
+                _, segment = self.coordinator.accept_segment_report("search", initial)
+                segment = self.coordinator.bind_segment_message(segment.segment_id, owner_plugin_id="search",
+                    generation=segment.generation, chat_id=10, message_id=100 + index, message_kind="photo")
+                self.coordinator.record_segment_rendered(segment.segment_id, owner_plugin_id="search",
+                    generation=segment.generation, business_revision=1, projection_hash=segment.projection_hash)
+                context = self.context()
+                if isinstance(failure, Exception):
+                    context.bot.edit_message_media.side_effect = failure
+                else:
+                    context.bot.edit_message_media.return_value = failure
+                sink = OperationReportSink(self.coordinator)
+                sink.attach(lambda record: render_operation(context.application, Mock(), record))
+                with patch("app.handlers.interaction_handler.build_identity_poster", side_effect=lambda *a: BytesIO(b"selected")):
+                    await sink("search", {**initial, "revision": 2, "state": "running",
+                        "stage": "identity_confirmation", "status_text": "已选作品",
+                        "details": {"identity_confirmed": True, "photo_url": "https://img.example/selected.jpg"}})
+                    result = await sink.seal("search", operation_id, "identity")
+                    await sink.drain()
+                    self.assertFalse(result["accepted"])
+                    current = self.coordinator.get_segment(segment.segment_id)
+                    self.assertEqual(current.state, "sealing")
+                    self.assertEqual(current.rendered_revision, 1)
+                    context.bot.edit_message_media.side_effect = None
+                    context.bot.edit_message_media.return_value = True
+                    self.assertTrue((await sink.seal("search", operation_id, "identity"))["accepted"])
+                    await sink.drain()
+                self.assertEqual(self.coordinator.get_segment(segment.segment_id).rendered_revision, 2)
+                self.assertTrue(all(call.kwargs["message_id"] == 100 + index
+                    for call in context.bot.edit_message_media.await_args_list))
+                context.bot.edit_message_caption.assert_not_awaited()
+                context.bot.send_photo.assert_not_awaited()
+
+    async def test_confirmed_identity_uploads_selected_media_for_new_and_promoted_cards(self):
+        from app.handlers.interaction_handler import OperationReportSink, render_operation
+
+        for index, previous_kind in enumerate((None, "text")):
+            with self.subTest(previous_kind=previous_kind):
+                operation_id = f"image-upload-{index}"
+                context = self.context()
+                context.bot.send_photo.return_value = SimpleNamespace(message_id=120 + index)
+                context.bot.delete_message.return_value = True
+                sink = OperationReportSink(self.coordinator)
+                sink.attach(lambda record: render_operation(context.application, Mock(), record))
+                if previous_kind:
+                    initial = self.report(operation_id=operation_id, user_id=index + 1,
+                        segment={"role": "identity", "presentation_kind": "photo"})
+                    _, segment = self.coordinator.accept_segment_report("search", initial)
+                    self.coordinator.bind_segment_message(segment.segment_id, owner_plugin_id="search",
+                        generation=segment.generation, chat_id=10, message_id=110, message_kind="text")
+                local_poster = BytesIO(b"selected")
+                with patch("app.handlers.interaction_handler.build_identity_poster", return_value=local_poster) as upload:
+                    await sink("search", self.report(operation_id=operation_id, user_id=index + 1, revision=2,
+                        stage="identity_confirmation", status_text="所选电影\n已确认",
+                        details={"identity_confirmed": True, "defer_photo_until_media": True,
+                                 "photo_url": "", "poster_items": [{"number": 1, "title": "旧候选"}]},
+                        segment={"role": "identity", "presentation_kind": "photo"}))
+                    await sink.drain()
+                upload.assert_called_once_with("所选电影", "")
+                context.bot.send_photo.assert_awaited_once()
+                self.assertIs(context.bot.send_photo.await_args.kwargs["photo"], local_poster)
+                self.assertEqual(self.coordinator.get_active_segment(operation_id).message_kind, "photo")
+                context.bot.send_message.assert_not_awaited()
+
+    async def test_confirmed_identity_ignores_stale_grid_and_uploads_url_for_new_messages(self):
+        from app.handlers.interaction_handler import _segment_photo_media
+
+        record = SimpleNamespace(status_text="Selected\nConfirmed", details={"identity_confirmed": True,
+            "photo_url": "https://img.example/selected.jpg", "poster_items": [{"number": 1, "title": "Old"}]})
+        with patch("app.handlers.interaction_handler.build_poster_grid", side_effect=AssertionError("stale grid")), \
+             patch("app.handlers.interaction_handler.build_identity_poster", return_value=BytesIO(b"selected")) as upload:
+            self.assertEqual(await _segment_photo_media(record), "https://img.example/selected.jpg")
+            await _segment_photo_media(record, upload_confirmed=True)
+        upload.assert_called_once_with("Selected", "https://img.example/selected.jpg")
+
+    async def test_inflight_candidate_image_cannot_overwrite_confirmed_image_at_seal(self):
+        from app.handlers.interaction_handler import OperationReportSink, render_operation
+
+        initial = self.report(state="awaiting_input", stage="candidate_selection", status_text="候选第一页",
+            segment={"role": "identity", "presentation_kind": "photo"})
+        _, segment = self.coordinator.accept_segment_report("search", initial)
+        segment = self.coordinator.bind_segment_message(segment.segment_id, owner_plugin_id="search",
+            generation=segment.generation, chat_id=10, message_id=91, message_kind="photo")
+        self.coordinator.record_segment_rendered(segment.segment_id, owner_plugin_id="search",
+            generation=segment.generation, business_revision=1, projection_hash=segment.projection_hash)
+        context = self.context()
+        entered, release = asyncio.Event(), asyncio.Event()
+        visible = []
+        async def edit(**kwargs):
+            if kwargs["media"].caption == "候选第二页":
+                entered.set()
+                await release.wait()
+            visible.append(kwargs["media"].caption)
+            return True
+        context.bot.edit_message_media.side_effect = edit
+        sink = OperationReportSink(self.coordinator)
+        sink.attach(lambda record: render_operation(context.application, Mock(), record))
+        await sink("search", {**initial, "revision": 2, "status_text": "候选第二页",
+            "details": {"photo_url": "https://img.example/candidate.jpg"}})
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        sealing = None
+        try:
+            await sink("search", {**initial, "revision": 3, "stage": "identity_confirmation",
+                "state": "running", "status_text": "最终所选作品",
+                "details": {"identity_confirmed": True, "photo_url": "https://img.example/selected.jpg"}})
+            sealing = asyncio.create_task(sink.seal("search", "op-1", "identity"))
+            await asyncio.sleep(0)
+            self.assertFalse(sealing.done())
+            release.set()
+            self.assertTrue((await asyncio.wait_for(sealing, timeout=2))["accepted"])
+            await sink.drain()
+            final = self.coordinator.get_segment(segment.segment_id)
+            self.assertEqual(final.rendered_revision, 3)
+            self.assertEqual(final.state, "sealed")
+            self.assertEqual(final.rendered_projection_hash, final.projection_hash)
+            self.assertEqual(visible, ["候选第二页", "最终所选作品"])
+            self.assertEqual(context.bot.edit_message_media.await_args.kwargs["media"].media,
+                             "https://img.example/selected.jpg")
+        finally:
+            release.set()
+            if sealing is not None:
+                await asyncio.gather(sealing, return_exceptions=True)
+            await sink.drain()
+
     async def test_latest_segment_report_and_seal_share_one_telegram_edit(self):
         from app.handlers.interaction_handler import (
             OperationReportSink,
