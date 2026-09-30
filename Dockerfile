@@ -11,6 +11,7 @@ ENV TELEPIPLEX_COMMIT="${TELEPIPLEX_COMMIT}" \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     fonts-noto-cjk \
+    unar \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

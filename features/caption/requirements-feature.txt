@@ -1,1 +1,5 @@
-# The caption placeholder has no third-party runtime dependencies.
+PyYAML>=6.0.2
+opencc-python-reimplemented>=0.1.7,<1
+charset-normalizer>=3.3,<4
+py7zr>=1.0,<2
+rarfile>=4.2,<5

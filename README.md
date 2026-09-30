@@ -13,7 +13,8 @@ flowchart LR
     A[片名或作品链接] --> B[确认作品与季集范围]
     B --> C[选择片源和保存目录]
     C --> D[115 离线下载]
-    D --> E[文件识别与整理]
+    D --> S[外挂字幕查找（caption 按需安装）]
+    S --> E[文件识别与整理]
     E --> F[报告整理结果]
     G[115 存量目录] --> E
     H[手动发起 Plex 扫描] --> I[Plex 媒体库]
@@ -38,9 +39,9 @@ flowchart LR
 | `search` | 作品确认、元数据补全与片源搜索 | `download` | [模块说明](features/search/README.md) |
 | `rename` | 下载后整理与 115 存量媒体整理 | `download`、`search` | [模块说明](features/rename/README.md) |
 | `sync` | 手动管理 Plex 扫描与资料增强 | 无 | [模块说明](features/sync/README.md) |
-| `caption` | 验证打包、安装与启动的占位模块 | 无 | [模块说明](features/caption/README.md) |
+| `caption` | 下载后、媒体库与独立 query 的外挂字幕查找 | `download`、`search`、`rename` | [模块说明](features/caption/README.md) |
 
-首次使用完整搜索与整理流程，依次安装 `download → search → rename`。`sync` 按需安装；`caption` 当前仅验证打包、安装与启动，没有字幕搜索或处理功能。
+首次使用完整搜索与整理流程，依次安装 `download → search → rename`。`sync` 按需安装；`caption` 安装后可在 rename 前查找外挂字幕，也支持 `/caption scan` 和无视频的 `/caption 片名 年份`。
 
 ## 快速开始
 
@@ -258,27 +259,25 @@ docker compose up -d
 
 Host 负责 Telegram 接入、命令路由、任务与事件持久化、配置和模块生命周期。Feature 在各自 Python 虚拟环境与子进程中运行，通过 Unix Domain Socket 调用 capability；socket 位于临时目录 `/tmp/telepiplex`。业务源码不打入 Host 镜像，各 Feature 不直接 import 其他 Feature。
 
-当前 Host API 1.8 增加整理完成后的独立下一步选择卡，支持一次性点击、60 秒退出和持久化清理。它延续 Host API 1.7 的任务消息段、Host API 1.6 的身份／阶段里程碑和 Host API 1.5 的逐版本配置迁移合同。模块通过 `manifest.yaml` 声明 `host_api` 范围和 capability 依赖。
+当前 Host API 1.9 增加可选 capability 依赖与 caption 任务消息段；Host API 1.8 提供整理完成后的独立下一步选择卡，支持一次性点击、60 秒退出和持久化清理。它延续 Host API 1.7 的任务消息段、Host API 1.6 的身份／阶段里程碑和 Host API 1.5 的逐版本配置迁移合同。模块通过 `manifest.yaml` 声明 `host_api` 范围和 capability 依赖。
 
 ### 独立发布
 
 #### 当前源码版本
 
-本次修复：电影整理完成后直接结束，仅剧集提供下一步选择卡；作品确认改为后台执行并拦截重复回调；确认后的身份消息使用所选海报，缺图时显示所选片名占位图，消息封存失败时停止后续搜索。以下为当前源码版本，实际可更新版本以正式 Release 与模块目录为准。
+本次 Caption 1.1.0 扩展免费中文外挂字幕来源、字幕组成品索引和本地归档，增加详情链接入口、有界检索与质量检查。Search 2.6.0 提供有明确身份对应的参考时长。三条业务链路、chi/cht 命名与既有 Plex 入口保持。以下为本地源码版本，未自动发布。
 
 | 组件 | 版本 |
 | --- | --- |
-| Host | `3.8.2` |
-| SDK | `2.2.0` |
-| `download` | `2.1.2` |
-| `search` | `2.4.1` |
-| `rename` | `2.3.1` |
-| `sync` | `2.1.0` |
-| `caption` | `0.1.6` |
+| Host | `3.9.0` |
+| SDK | `2.2.1` |
+| `download` | `2.2.0` |
+| `search` | `2.6.0` |
+| `rename` | `2.4.0` |
+| `sync` | `2.1.1` |
+| `caption` | `1.1.0` |
 
-本次先更新 Host 3.8.2，再更新 Search 2.4.1 和 Rename 2.3.1，完成后再发起新任务。Host API 保持 1.8，SDK 保持 2.2.0；download、sync 和 caption 本次版本不变。已有冻结任务的元数据不自动改写。交互、缓存时效与验证见 [整理后继续操作](docs/post-rename-next-actions.md)。
-
-从 SDK 2.2.0 之前的版本升级时，还需更新已安装的 download 和 caption 至表中版本。SDK 随构建打包，无需单独安装。旧 v2 合同仍可读取；新命名字段必须成对出现且通过校验，旧消费者会拒绝新字段，因此完成消费端升级后再提交新任务。
+升级顺序：Host 3.9.0 → Download 2.2.0 → Search 2.6.0 → Rename 2.4.0 → Caption 1.1.0；已安装 Sync 的用户可同步到 2.1.1（仅 SDK 更新）。Host API 1.9，SDK 2.2.1 随 Feature 构建打包，无需单独安装。更新完成后再提交新任务。详情见 [caption 模块说明](features/caption/README.md)。
 
 `main` 是 Core/Host 与五个 Feature 的有效源码分支。Host 使用 `telepiplex-v<semver>` tag，发布前验证提交已包含在远端 `main`；正式流水线生成 `ghcr.io/<owner>/telepiplex:<semver>` 与 `latest` 镜像，创建标题为 `Telepiplex <semver>` 的 GitHub Release 并强制设为 **Latest**。普通 `main` push 不更新正式镜像或 Latest 入口。
 

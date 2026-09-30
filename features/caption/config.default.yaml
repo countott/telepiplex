@@ -1,1 +1,87 @@
-{}
+enabled: true
+automatic: true
+output_path: /字幕
+request_timeout_seconds: 15
+provider_timeout_seconds: 45
+retrieval_timeout_seconds: 180
+automatic_timeout_seconds: 240
+max_candidates: 30
+max_candidates_per_provider: 15
+max_download_bytes: 16777216
+providers:
+  assrt:
+    enabled: true
+    token: ""
+  shooter:
+    enabled: true
+  subhd:
+    enabled: true
+    cookie: ""
+    user_agent: ""
+  zimuku:
+    enabled: true
+    cookie: ""
+    user_agent: ""
+  opensubtitles:
+    enabled: true
+    api_key: ""
+    username: ""
+    password: ""
+    token: ""
+  xunlei:
+    enabled: true
+  subdl:
+    enabled: true
+    api_key: ""
+  subsource:
+    enabled: true
+    api_key: ""
+  subf2m:
+    enabled: true
+  r3sub:
+    enabled: true
+  addic7ed:
+    enabled: true
+    cookie: ""
+    user_agent: ""
+  lwltv:
+    enabled: true
+    cookie: ""
+    user_agent: ""
+  yysub:
+    enabled: true
+    cookie: ""
+    user_agent: ""
+  nekomoe:
+    enabled: true
+    github_token: ""
+    cache_ttl_seconds: 3600
+    title_aliases: {}
+    episode_mappings: {}
+  mingy:
+    enabled: true
+    github_token: ""
+    cache_ttl_seconds: 3600
+    max_release_pages: 3
+    title_aliases: {}
+    episode_mappings: {}
+  kitauji:
+    enabled: true
+    github_token: ""
+    cache_ttl_seconds: 3600
+    title_aliases: {}
+    episode_mappings: {}
+  haruhana:
+    enabled: true
+    github_token: ""
+    cache_ttl_seconds: 3600
+    title_aliases: {}
+    episode_mappings: {}
+  local_archive:
+    enabled: true
+    roots: []
+    mapping_file: ""
+    cache_ttl_seconds: 300
+    max_files: 20000
+    max_depth: 12
+    episode_mappings: {}

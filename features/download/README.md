@@ -1,10 +1,10 @@
 # download Feature
 
-当前版本：`2.1.2`；SDK：`2.2.0`。本次同步 SDK 命名字段校验与原样传递；下载及清理规则保持。建议搭配 Host `3.7.0`。
+当前版本：`2.2.0`；SDK：`2.2.1`。新增外挂字幕持久化分块接收及 115 OpenAPI / OSS 上传；继续提供 download.provider 与 storage.provider。建议搭配 Host `3.9.0`。
 
-`features/download` 是独立 Feature 源码目录，提供 `download.provider` 与 `storage.provider`。2.1.2 在任何 115 副作用发生前严格校验并深拷贝 search 交付的最小 `media_metadata v2`，拒绝 v1、未知字段、非法范围和新链路中的 `naming_metadata`；完成事件原样转交冻结合同，不追加展示元数据。下载进度、资源选择和终态只覆写 Host API 1.7 的一条 `download` 消息，终态被 Host 精确确认后封存消息段，再交接 Rename；回执不确定时只重试同一消息段，不创建第二条可点击消息。
+`features/download` 是独立 Feature 源码目录，提供 `download.provider` 与 `storage.provider`。2.2.0 在任何 115 副作用发生前严格校验并深拷贝 search 交付的最小 `media_metadata v2`，拒绝 v1、未知字段、非法范围和新链路中的 `naming_metadata`；完成事件原样转交冻结合同，不追加展示元数据。下载进度、资源选择和终态只覆写 Host API 1.7 的一条 `download` 消息，终态被 Host 精确确认后封存消息段，再交接 Rename；回执不确定时只重试同一消息段，不创建第二条可点击消息。
 
-115 离线轮询、离线写入、存储读取、存储写入和 Token 刷新分别限速，长时间不变的下载轮询从 2 秒起按 1.7 倍退避到最多 30 秒；进度或状态变化会立即把下一次等待恢复为 2 秒。存储读取全局最多四路并发，成功写入与文件信息缓存通过同一代际屏障收敛，残缺或没有稳定 provider ID 的文件事实不会进入缓存。`move_files_by_id` 使用 115 官方 `POST /open/ufile/move` 服务端移动接口，一次接收 1–100 个去重文件 ID 与目标目录 ID；正常 115 整理不再通过 copy 后 delete 放大请求和等待时间。旧 `move_file_detailed` 仅保留给不支持新 capability 的兼容路径。`get_file_info_batch` 的单次上限仍为 32 个路径，文件树继续保留 provider 返回的 SHA1。它使用 SDK 2.2.0，由 Telepiplex 构建为不可变 `.tpx`，安装后在 Telepiplex 容器内以独立 venv/子进程运行。
+115 离线轮询、离线写入、存储读取、存储写入和 Token 刷新分别限速，长时间不变的下载轮询从 2 秒起按 1.7 倍退避到最多 30 秒；进度或状态变化会立即把下一次等待恢复为 2 秒。存储读取全局最多四路并发，成功写入与文件信息缓存通过同一代际屏障收敛，残缺或没有稳定 provider ID 的文件事实不会进入缓存。`move_files_by_id` 使用 115 官方 `POST /open/ufile/move` 服务端移动接口，一次接收 1–100 个去重文件 ID 与目标目录 ID；正常 115 整理不再通过 copy 后 delete 放大请求和等待时间。旧 `move_file_detailed` 仅保留给不支持新 capability 的兼容路径。`get_file_info_batch` 的单次上限仍为 32 个路径，文件树继续保留 provider 返回的 SHA1。它使用 SDK 2.2.1，由 Telepiplex 构建为不可变 `.tpx`，安装后在 Telepiplex 容器内以独立 venv/子进程运行。
 
 配置位于 `/config/plugins/download/config.yaml`。`minimum_video_size_mib` 控制交给 Rename 的最小视频体积，默认 `100` MiB；设为 `0` 可只按视频扩展名过滤。Telepiplex `/config` 选择 download 后，可进入“授权配置”“保存目录”或“最小视频体积”：授权支持分步录入 Access/Refresh Token 与 115 扫码，保存目录支持逐条新增、编辑和删除，最小视频体积支持输入 `0–10240` 的整数 MiB；配置均原子写入并立即生效。新增目录分两步：第一步填写只用于按钮展示的名称；第二步填写实际保存路径。单级目录可依次输入显示名称 `真人电影`、保存路径 `真人电影`；多级路径可填写 `series/live action`。路径末尾 `/` 可省略，但不要以 / 开头，因为 Telegram 会将它识别为命令。直接发送 `/auth` 仍会进入授权方式选择。两种授权路线及自动刷新只原子写回该 Feature 私有配置，Token 不进入消息与日志。
 
@@ -15,7 +15,7 @@
 纯本地验证构建（不读取 Git 元数据）：
 
 ```bash
-python tools/build_feature.py features/download /tmp/download-2.1.2.tpx \
+python tools/build_feature.py features/download /tmp/download-2.2.0.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```
@@ -29,3 +29,14 @@ python tools/build_feature.py features/download /tmp/download-2.1.2.tpx \
 download 在任务数据库旁的 `<jobs-db>.snapshots.sqlite3` 保存不可变完整副本；`download.completed` 发送 `file_tree_transport: snapshot_ref_v1`、`snapshot_complete: true`、空 `file_tree` 和 `file_tree_snapshot`。引用包含版本、唯一快照 ID、job ID、根路径/ID、节点/文件/目录数量、SHA-256 摘要和页数。`storage.provider.get_tree_snapshot_page(reference, cursor)` 只读取此本地副本，不按页扫描 115；每页最多 500 个节点且节点 JSON 不超过 262,144 UTF-8 字节，完整响应保留 RPC 封装余量后小于 1 MiB。
 
 `acknowledge_tree_snapshot(reference)` 仅记录接收凭据，不删除快照。两个 Feature 的快照副本均无 TTL 清理，也不依赖可被覆盖的任务 `result_json`。新增独立数据库，不迁移旧任务表；回退旧版本前先关闭引用发送、处理活动任务并保留双方 sidecar 文件。保留旧任务数据库格式不代表旧消费者能处理新版活动任务。当前没有自动快照垃圾回收，磁盘使用会随完成任务增长。
+
+
+## 外挂字幕上传
+
+storage.provider 的 `upload_subtitle_chunk` 接收 Rename 已确定的绝对目标路径（仅 chi/cht 文本字幕），每块 192 KiB、每份最多 8 MiB。临时分块写入状态目录中 download.db.subtitles.sqlite3；校验完整大小和 SHA1 后调用 115 官方 `/open/upload/init`，支持二次 SHA1 challenge 与秒传，普通上传由 oss2 使用 `/open/upload/get_token` 返回的短期凭证执行 OSS PutObject + 115 callback。115 bearer token 不发送给 OSS。上传后重新查询目标 SHA1，只有验证通过才返回 placed。
+
+同名同内容为 exists；同名不同内容保留已有文件并返回 target_conflict。传输支持乱序、重复块和进程重启，24 小时清理未完成传输，最多 32 份并行暂存。已经完成的分块内容立即删除，只留幂等回执。自动化测试使用完整 OpenAPI/OSS 协议 mock；没有真实账户凭据时不能声称已验证实际云端写入。
+
+接口依据：[115 上传调度](https://www.yuque.com/115yun/open/ul4mrauo5i2uza0q)、[115 上传令牌](https://www.yuque.com/115yun/open/kzacvzl0g7aiyyn4)、[OpenList 115 SDK 上传结构](https://github.com/OpenListTeam/115-sdk-go/blob/main/upload.go)。
+
+取消正在上传的 RPC 会停止后续分块，但已经开始的云端写入必须完成或失败；`wait_subtitle_uploads` 等待已接受上传的工作线程结束，超时返回 subtitle_upload_busy。Rename 在字幕请求异常或超时后，先等待这一屏障，再刷新文件树；屏障无法确认时停止媒体整理，防止上传与视频移动并发。已完成传输再次收到分块时重新核对目标 SHA1，目标删除后不会返回过期的成功回执。

@@ -1,6 +1,581 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "properties": {},
+  "properties": {
+    "enabled": {
+      "type": "boolean"
+    },
+    "automatic": {
+      "type": "boolean"
+    },
+    "output_path": {
+      "type": "string",
+      "pattern": "^/",
+      "minLength": 1
+    },
+    "request_timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 60
+    },
+    "provider_timeout_seconds": {
+      "type": "integer",
+      "minimum": 5,
+      "maximum": 180
+    },
+    "automatic_timeout_seconds": {
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 1800
+    },
+    "max_candidates": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    },
+    "max_candidates_per_provider": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50
+    },
+    "max_download_bytes": {
+      "type": "integer",
+      "minimum": 1024,
+      "maximum": 33554432
+    },
+    "providers": {
+      "type": "object",
+      "properties": {
+        "assrt": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "token": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "shooter": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "subhd": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "cookie": {
+              "type": "string",
+              "maxLength": 8192,
+              "pattern": "^[^\\r\\n]*$"
+            },
+            "user_agent": {
+              "type": "string",
+              "maxLength": 512,
+              "pattern": "^[^\\r\\n]*$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "zimuku": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "cookie": {
+              "type": "string",
+              "maxLength": 8192,
+              "pattern": "^[^\\r\\n]*$"
+            },
+            "user_agent": {
+              "type": "string",
+              "maxLength": 512,
+              "pattern": "^[^\\r\\n]*$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "opensubtitles": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "api_key": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            },
+            "password": {
+              "type": "string"
+            },
+            "token": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "xunlei": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "subdl": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "api_key": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\r\\n]*$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "subsource": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "api_key": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\r\\n]*$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "subf2m": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "r3sub": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "addic7ed": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "cookie": {
+              "type": "string",
+              "maxLength": 8192,
+              "pattern": "^[^\\r\\n]*$"
+            },
+            "user_agent": {
+              "type": "string",
+              "maxLength": 512,
+              "pattern": "^[^\\r\\n]*$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "lwltv": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "cookie": {
+              "type": "string",
+              "maxLength": 8192,
+              "pattern": "^[^\\r\\n]*$"
+            },
+            "user_agent": {
+              "type": "string",
+              "maxLength": 512,
+              "pattern": "^[^\\r\\n]*$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "yysub": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "cookie": {
+              "type": "string",
+              "maxLength": 8192,
+              "pattern": "^[^\\r\\n]*$"
+            },
+            "user_agent": {
+              "type": "string",
+              "maxLength": 512,
+              "pattern": "^[^\\r\\n]*$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "nekomoe": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "github_token": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\r\\n]*$"
+            },
+            "cache_ttl_seconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400
+            },
+            "title_aliases": {
+              "type": "object",
+              "maxProperties": 2000,
+              "additionalProperties": {
+                "type": "array",
+                "maxItems": 30,
+                "items": {
+                  "type": "string",
+                  "maxLength": 500
+                }
+              }
+            },
+            "episode_mappings": {
+              "type": "object",
+              "maxProperties": 2000,
+              "additionalProperties": {
+                "type": "object",
+                "required": [
+                  "season"
+                ],
+                "properties": {
+                  "season": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 99
+                  },
+                  "offset": {
+                    "type": "integer",
+                    "minimum": -1000,
+                    "maximum": 1000
+                  },
+                  "first": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9999
+                  },
+                  "last": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9999
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "mingy": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "github_token": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\r\\n]*$"
+            },
+            "cache_ttl_seconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400
+            },
+            "title_aliases": {
+              "type": "object",
+              "maxProperties": 2000,
+              "additionalProperties": {
+                "type": "array",
+                "maxItems": 30,
+                "items": {
+                  "type": "string",
+                  "maxLength": 500
+                }
+              }
+            },
+            "episode_mappings": {
+              "type": "object",
+              "maxProperties": 2000,
+              "additionalProperties": {
+                "type": "object",
+                "required": [
+                  "season"
+                ],
+                "properties": {
+                  "season": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 99
+                  },
+                  "offset": {
+                    "type": "integer",
+                    "minimum": -1000,
+                    "maximum": 1000
+                  },
+                  "first": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9999
+                  },
+                  "last": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9999
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "max_release_pages": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10
+            }
+          },
+          "additionalProperties": false
+        },
+        "kitauji": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "github_token": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\r\\n]*$"
+            },
+            "cache_ttl_seconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400
+            },
+            "title_aliases": {
+              "type": "object",
+              "maxProperties": 2000,
+              "additionalProperties": {
+                "type": "array",
+                "maxItems": 30,
+                "items": {
+                  "type": "string",
+                  "maxLength": 500
+                }
+              }
+            },
+            "episode_mappings": {
+              "type": "object",
+              "maxProperties": 2000,
+              "additionalProperties": {
+                "type": "object",
+                "required": [
+                  "season"
+                ],
+                "properties": {
+                  "season": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 99
+                  },
+                  "offset": {
+                    "type": "integer",
+                    "minimum": -1000,
+                    "maximum": 1000
+                  },
+                  "first": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9999
+                  },
+                  "last": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9999
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "haruhana": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "github_token": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\r\\n]*$"
+            },
+            "cache_ttl_seconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400
+            },
+            "title_aliases": {
+              "type": "object",
+              "maxProperties": 2000,
+              "additionalProperties": {
+                "type": "array",
+                "maxItems": 30,
+                "items": {
+                  "type": "string",
+                  "maxLength": 500
+                }
+              }
+            },
+            "episode_mappings": {
+              "type": "object",
+              "maxProperties": 2000,
+              "additionalProperties": {
+                "type": "object",
+                "required": [
+                  "season"
+                ],
+                "properties": {
+                  "season": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 99
+                  },
+                  "offset": {
+                    "type": "integer",
+                    "minimum": -1000,
+                    "maximum": 1000
+                  },
+                  "first": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9999
+                  },
+                  "last": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9999
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "local_archive": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "roots": {
+              "type": "array",
+              "maxItems": 20,
+              "items": {
+                "type": "string",
+                "maxLength": 4096
+              }
+            },
+            "mapping_file": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "cache_ttl_seconds": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 86400
+            },
+            "max_files": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000
+            },
+            "max_depth": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30
+            },
+            "episode_mappings": {
+              "type": "object",
+              "maxProperties": 2000,
+              "additionalProperties": {
+                "type": "object",
+                "required": [
+                  "season"
+                ],
+                "properties": {
+                  "season": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 99
+                  },
+                  "offset": {
+                    "type": "integer",
+                    "minimum": -1000,
+                    "maximum": 1000
+                  },
+                  "first": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9999
+                  },
+                  "last": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9999
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "retrieval_timeout_seconds": {
+      "type": "number",
+      "minimum": 10,
+      "maximum": 600
+    }
+  },
   "additionalProperties": false
 }

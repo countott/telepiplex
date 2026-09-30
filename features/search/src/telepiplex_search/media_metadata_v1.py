@@ -439,6 +439,7 @@ def _inventory(
                             "revision_id",
                             "tvdb_episode_id",
                             "tmdb_episode_id",
+                            "runtime_minutes",
                         )
                         if raw.get(key) not in (None, "")
                     },

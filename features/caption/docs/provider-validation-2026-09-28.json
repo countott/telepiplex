@@ -1,0 +1,332 @@
+{
+  "verified_at": "2026-09-28",
+  "scope": "Public provider search, real subtitle bytes, archive extraction and quality selection; no video synchronization verified.",
+  "credentials_used": false,
+  "live_results": [
+    {
+      "time_utc": "2026-09-28T03:12:46.520331+00:00",
+      "query": {
+        "title": "你的名字",
+        "original_title": "君の名は。",
+        "year": 2016,
+        "media_type": "movie",
+        "tmdb_id": "",
+        "imdb_id": "",
+        "season": null,
+        "episode": null,
+        "original_language": "ja",
+        "video_path": "",
+        "release_name": "",
+        "duration_seconds": null,
+        "fps": null,
+        "aliases": [
+          "Your Name",
+          "Kimi no Na wa"
+        ],
+        "shooter_hash": "",
+        "file_size": null
+      },
+      "selections": [
+        {
+          "provider": "assrt",
+          "candidate_id": "617491",
+          "source_page": "https://assrt.net/xml/sub/617/617491.xml",
+          "source_filename": "Your.Name.2016.BluRay.720p.x264.AC3-CMCT/Your.Name.2016.BluRay.720p.x264.AC3-CMCT.简体.ass",
+          "language": "chi",
+          "format": "ass",
+          "bilingual": false,
+          "cue_count": 1466,
+          "timing_verified": false,
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "season": null,
+          "episode": null
+        }
+      ],
+      "status": "matched",
+      "providers": [
+        {
+          "provider": "assrt",
+          "status": "ok",
+          "count": 10
+        },
+        {
+          "provider": "shooter",
+          "status": "not_applicable",
+          "count": 0
+        },
+        {
+          "provider": "subhd",
+          "status": "ok",
+          "count": 15
+        },
+        {
+          "provider": "zimuku",
+          "status": "user_action_required",
+          "count": 0
+        },
+        {
+          "provider": "opensubtitles",
+          "status": "auth_required",
+          "count": 0
+        }
+      ],
+      "examined_candidates": 16,
+      "candidate_limit_reached": true,
+      "selection_budget_reached": false
+    },
+    {
+      "time_utc": "2026-09-28T03:13:35.564615+00:00",
+      "query": {
+        "title": "星际穿越",
+        "original_title": "Interstellar",
+        "year": 2014,
+        "media_type": "movie",
+        "tmdb_id": "",
+        "imdb_id": "",
+        "season": null,
+        "episode": null,
+        "original_language": "en",
+        "video_path": "",
+        "release_name": "",
+        "duration_seconds": null,
+        "fps": null,
+        "aliases": [],
+        "shooter_hash": "",
+        "file_size": null
+      },
+      "selections": [
+        {
+          "provider": "assrt",
+          "candidate_id": "698567",
+          "source_page": "https://assrt.net/xml/sub/698/698567.xml",
+          "source_filename": "Interstellar.2014.1080p.BluRay.x264-DAA/Interstellar.2014.1080p.BluRay.x264-DAA.╝≥╠σ&╙ó╬─.ass",
+          "language": "chi",
+          "format": "ass",
+          "bilingual": true,
+          "cue_count": 2205,
+          "timing_verified": false,
+          "warnings": [
+            "video_timing_unverified",
+            "year_unverified"
+          ],
+          "season": null,
+          "episode": null
+        }
+      ],
+      "status": "matched",
+      "providers": [
+        {
+          "provider": "assrt",
+          "status": "ok",
+          "count": 15
+        },
+        {
+          "provider": "shooter",
+          "status": "not_applicable",
+          "count": 0
+        },
+        {
+          "provider": "subhd",
+          "status": "ok",
+          "count": 15
+        },
+        {
+          "provider": "zimuku",
+          "status": "user_action_required",
+          "count": 0
+        },
+        {
+          "provider": "opensubtitles",
+          "status": "auth_required",
+          "count": 0
+        }
+      ],
+      "examined_candidates": 16,
+      "candidate_limit_reached": true,
+      "selection_budget_reached": false
+    },
+    {
+      "time_utc": "2026-09-28T03:13:57.012304+00:00",
+      "query": {
+        "title": "流浪地球",
+        "original_title": "",
+        "year": 2019,
+        "media_type": "movie",
+        "tmdb_id": "",
+        "imdb_id": "",
+        "season": null,
+        "episode": null,
+        "original_language": "zh",
+        "video_path": "",
+        "release_name": "",
+        "duration_seconds": null,
+        "fps": null,
+        "aliases": [
+          "The Wandering Earth"
+        ],
+        "shooter_hash": "",
+        "file_size": null
+      },
+      "selections": [
+        {
+          "provider": "assrt",
+          "candidate_id": "632031",
+          "source_page": "https://assrt.net/xml/sub/632/632031.xml",
+          "source_filename": "The.Wandering.Earth.2019.CHINESE.1080p.WEBRip.AAC2.0.x264-STUTTERSHIT.srt",
+          "language": "chi",
+          "format": "srt",
+          "bilingual": false,
+          "cue_count": 1797,
+          "timing_verified": false,
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "season": null,
+          "episode": null
+        }
+      ],
+      "status": "matched",
+      "providers": [
+        {
+          "provider": "assrt",
+          "status": "ok",
+          "count": 4
+        },
+        {
+          "provider": "shooter",
+          "status": "not_applicable",
+          "count": 0
+        },
+        {
+          "provider": "subhd",
+          "status": "ok",
+          "count": 15
+        },
+        {
+          "provider": "zimuku",
+          "status": "user_action_required",
+          "count": 0
+        },
+        {
+          "provider": "opensubtitles",
+          "status": "auth_required",
+          "count": 0
+        }
+      ],
+      "examined_candidates": 10,
+      "candidate_limit_reached": false,
+      "selection_budget_reached": false
+    }
+  ],
+  "live_results_note": "Historical engine snapshots preserve the statuses returned during those runs. Search status ok did not prove that source downloads worked; SubHD downloads in these runs required website interaction. Candidate limits restrict best-of-source claims to inspected candidates.",
+  "artifact_rechecks": [
+    {
+      "time_utc": "2026-09-28T03:27:52.995628+00:00",
+      "verification_stage": "Local recheck of an already downloaded real provider archive: extraction, content inspection and ranking only; no new network retrieval or full CaptionEngine run.",
+      "provider": "assrt",
+      "candidate_id": "612651",
+      "source_page": "https://assrt.net/xml/sub/612/612651.xml",
+      "query": {
+        "title": "Spirited Away",
+        "original_title": "",
+        "year": 2001,
+        "media_type": "movie",
+        "tmdb_id": "",
+        "imdb_id": "",
+        "season": null,
+        "episode": null,
+        "original_language": "ja",
+        "video_path": "",
+        "release_name": "",
+        "duration_seconds": null,
+        "fps": null,
+        "aliases": [
+          "千与千寻"
+        ],
+        "shooter_hash": "",
+        "file_size": null
+      },
+      "archive": {
+        "download_filename_extension": ".zip",
+        "detected_format": "rar",
+        "size_bytes": 11153340,
+        "sha256": "bdd1ded92c7fa96f5d14de050be7db0bea3926bd9f9bd3a7015c1ae3e3826c31",
+        "local_backend": "macOS bsdtar with bounded stdout and CRC checks"
+      },
+      "supported_documents": 3,
+      "documents": [
+        {
+          "source_filename": "千与千寻 Spirited Away (2001) BluRay English.srt",
+          "format": "srt",
+          "accepted": false,
+          "language": "",
+          "bilingual": false,
+          "cue_count": 1092,
+          "encoding": "utf-8-sig",
+          "timing_verified": false,
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "reasons": [
+            "insufficient_chinese_dialogue",
+            "chinese_script_unverified"
+          ],
+          "rank": null
+        },
+        {
+          "source_filename": "千与千寻 Spirited Away (2001) BluRay Mandarin Simplified Chinese.srt",
+          "format": "srt",
+          "accepted": true,
+          "language": "chi",
+          "bilingual": false,
+          "cue_count": 1416,
+          "encoding": "utf-8-sig",
+          "timing_verified": false,
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "reasons": [],
+          "rank": [
+            200,
+            55,
+            -1,
+            1416,
+            0
+          ]
+        },
+        {
+          "source_filename": "千与千寻 Spirited Away (2001) BluRay Mandarin Traditional Chinese.srt",
+          "format": "srt",
+          "accepted": true,
+          "language": "cht",
+          "bilingual": false,
+          "cue_count": 1416,
+          "encoding": "utf-8-sig",
+          "timing_verified": false,
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "reasons": [],
+          "rank": [
+            100,
+            55,
+            -1,
+            1416,
+            0
+          ]
+        }
+      ],
+      "preferred_document": "千与千寻 Spirited Away (2001) BluRay Mandarin Simplified Chinese.srt",
+      "not_verified": [
+        "network availability during this local recheck",
+        "Search metadata resolution",
+        "115 upload or Rename placement",
+        "video release compatibility",
+        "dialogue synchronization",
+        "translation accuracy"
+      ]
+    }
+  ]
+}

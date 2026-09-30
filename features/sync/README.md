@@ -1,6 +1,8 @@
 # Plex Management Feature
 
-当前版本：`2.1.0`；SDK：`2.2.0`；要求 Host API 1.8 / Host `3.8.0`。本次允许用户从整理完成后的选择卡主动进入 Plex 扫描；地址或 Token 未配置时隐藏入口。优先扫描本次分类对应库，未配置映射时显示既有媒体库选择，不自动扫描全部库。
+2.1.1 仅同步 SDK 2.2.1 的字幕内容日志脱敏修复；Plex 扫描、增强与手动入口不变。
+
+当前版本：`2.1.1`；SDK：`2.2.1`；要求 Host API 1.8 / Host `3.8.0`。本次允许用户从整理完成后的选择卡主动进入 Plex 扫描；地址或 Token 未配置时隐藏入口。优先扫描本次分类对应库，未配置映射时显示既有媒体库选择，不自动扫描全部库。
 
 `features/sync` 是独立 Feature 源码目录。Telepiplex 将其构建为不可变 `.tpx`，并在 Telepiplex 容器内以独立 venv/子进程运行。
 
@@ -12,7 +14,7 @@ Telepiplex 对删除或改名的配置字段采用 fail-closed 策略；如果�
 
 ## 独立手动管理
 
-sync 2.1.0 不订阅 rename 事件，也不会在 rename 完成后自动扫描 Plex。扫描由用户通过 Telegram 命令、整理后的「扫描 Plex」按钮或带确认令牌的 MCP 写工具发起；按钮只启动扫描，不启动海报／音轨／字幕增强。rename 的成功或失败不依赖 sync 是否安装、启用或可用。`library.sync` 继续只提供查询能力，新增 `scan_status` 仅检查配置完整性，不联系 Plex。
+sync 2.1.1 不订阅 rename 事件，也不会在 rename 完成后自动扫描 Plex。扫描由用户通过 Telegram 命令、整理后的「扫描 Plex」按钮或带确认令牌的 MCP 写工具发起；按钮只启动扫描，不启动海报／音轨／字幕增强。rename 的成功或失败不依赖 sync 是否安装、启用或可用。`library.sync` 继续只提供查询能力，新增 `scan_status` 仅检查配置完整性，不联系 Plex。
 
 用户明确发起增强 Job 后，Plex 自己负责识别、匹配和基础元数据，插件执行：
 
@@ -43,7 +45,7 @@ MCP 对外地址由 `mcp.host`、`mcp.port`、`mcp.path` 控制；非本机监�
 纯本地验证构建（不读取 Git 元数据）：
 
 ```bash
-python tools/build_feature.py features/sync /tmp/sync-2.1.0.tpx \
+python tools/build_feature.py features/sync /tmp/sync-2.1.1.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

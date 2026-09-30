@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import sys
 import tempfile
@@ -219,6 +220,88 @@ class PluginRpcClientTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(completed.diagnostic_fields["status"], "completed")
         self.assertGreaterEqual(completed.diagnostic_fields["duration_ms"], 0)
+
+    async def test_freeform_reply_is_redacted_in_host_and_sdk_logs_without_changing_request(self):
+        from app.runtime.plugin_rpc import RpcClient
+        from telepiplex_plugin_sdk.diagnostics import REDACTED
+
+        records = []
+        received = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        async def receive(request):
+            received.append(dict(request))
+            return {"accepted": True}
+
+        runtime, _task = await self._server()
+        runtime.messages = receive
+        for name in ("telepiplex.rpc.feature", "telepiplex.runtime"):
+            logger = logging.getLogger(name)
+            previous_level = logger.level
+            logger.setLevel(logging.INFO)
+            capture = Capture()
+            logger.addHandler(capture)
+            self.addCleanup(logger.removeHandler, capture)
+            self.addCleanup(logger.setLevel, previous_level)
+
+        # Neither a recognizable credential prefix nor a key=value label is needed.
+        secret = "0123456789abcdef0123456789abcdef"
+        params = {"text": secret, "caption": "short-key", "user_id": 1, "chat_id": 10}
+        result = await RpcClient(self.socket_path, "secret-token").request(
+            "message.dispatch", params, deadline=1,
+        )
+
+        self.assertEqual(result, {"accepted": True})
+        self.assertEqual(params["text"], secret)
+        self.assertEqual(params["caption"], "short-key")
+        self.assertEqual(received, [params])
+        for name in ("rpc.feature.started", "feature.dispatch.started"):
+            record = next(record for record in records if record.event_name == name)
+            logged = record.diagnostic_fields["input"]["params"]
+            self.assertEqual(logged["text"], REDACTED)
+            self.assertEqual(logged["caption"], REDACTED)
+            self.assertEqual(logged["chat_id"], 10)
+        serialized = json.dumps([record.diagnostic_fields for record in records])
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn("short-key", serialized)
+
+    async def test_command_and_callback_context_remains_visible_in_host_and_sdk_logs(self):
+        from app.runtime.plugin_rpc import RpcClient
+
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        async def receive(_request):
+            return {"accepted": True}
+
+        runtime, _task = await self._server()
+        runtime.commands["caption"] = receive
+        runtime.callbacks["caption"] = receive
+        for name in ("telepiplex.rpc.feature", "telepiplex.runtime"):
+            logger = logging.getLogger(name)
+            previous_level = logger.level
+            logger.setLevel(logging.INFO)
+            capture = Capture()
+            logger.addHandler(capture)
+            self.addCleanup(logger.removeHandler, capture)
+            self.addCleanup(logger.setLevel, previous_level)
+
+        client = RpcClient(self.socket_path, "secret-token")
+        for method, params in (
+            ("command.dispatch", {"command": "caption", "text": "/caption 星际穿越"}),
+            ("callback.dispatch", {"namespace": "caption", "data": "caption:providers"}),
+        ):
+            records.clear()
+            await client.request(method, params, deadline=1)
+            for name in ("rpc.feature.started", "feature.dispatch.started"):
+                record = next(record for record in records if record.event_name == name)
+                self.assertEqual(record.diagnostic_fields["input"]["params"], params)
 
 
 if __name__ == "__main__":

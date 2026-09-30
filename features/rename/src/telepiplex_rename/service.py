@@ -38,6 +38,34 @@ _STORAGE_METHODS = {
 }
 
 
+def _caption_completion_note(outcome):
+    result = (outcome.get("event_payload") or {}).get("caption_result") or {}
+    if not result or result.get("status") == "disabled":
+        return ""
+    text = f"\n外挂字幕：新增 {int(result.get('added_count') or 0)}，已存在 {int(result.get('existing_count') or 0)}。"
+    if result.get("status") not in {"completed", "disabled"}:
+        text += "部分字幕未找到、未通过检查或来源不可用。"
+    for source in result.get("attribution") or []:
+        if source.get("provider") == "assrt":
+            text += "\n字幕服务由 assrt.net 提供"
+        else:
+            text += "\n字幕来源：" + str(source.get("provider") or "未知")
+        url = str(source.get("source_page") or "")
+        if url.startswith("https://") and "\n" not in url:
+            text += "\n" + url[:300]
+    return text
+
+
+def _retain_caption_terminal_context(outcome, payload, operation_id):
+    result = payload.get("caption_result")
+    if isinstance(result, dict):
+        outcome.setdefault("event_payload", {}).update({
+            "operation_id": operation_id,
+            "caption_result": deepcopy(result),
+        })
+        outcome["message"] += _caption_completion_note(outcome)
+
+
 _STORAGE_STAGES = {
     "get_file_info": ("conflict_validation", "正在验证目标文件冲突。"),
     "get_file_info_batch": ("conflict_validation", "正在批量验证文件身份与目标冲突。"),
@@ -793,6 +821,10 @@ class RenameFeature:
         )
         return response.get("value") if isinstance(response, dict) else None
 
+    async def rename_capability(self, request: dict) -> dict:
+        from .caption_bridge import capability
+        return await capability(self, request)
+
     @staticmethod
     def _storage_items(value) -> list[dict]:
         if isinstance(value, list):
@@ -834,10 +866,7 @@ class RenameFeature:
 
     @staticmethod
     def _inventory_item_id(item: dict) -> str:
-        return str(
-            item.get("file_id") or item.get("fid")
-            or item.get("cid") or item.get("id") or ""
-        ).strip()
+        return next((str(item[key]).strip() for key in ("file_id", "fid", "cid", "id") if key in item and item[key] is not None and not isinstance(item[key], bool) and str(item[key]).strip()), "")
 
     @staticmethod
     def _inventory_item_size(item: dict):
@@ -877,6 +906,7 @@ class RenameFeature:
         offset = 0
         items = []
         seen_page_items = set()
+        expected_count = None
         while True:
             response = await self._storage_value(
                 "get_file_list",
@@ -892,8 +922,23 @@ class RenameFeature:
                     "inventory_tree_incomplete",
                     "storage reported an incomplete inventory page",
                 )
+            wrapper = response
+            while isinstance(wrapper, dict):
+                if "count" in wrapper:
+                    raw_count = wrapper["count"]
+                    if isinstance(raw_count, bool) or not str(raw_count).isdigit():
+                        raise FeatureError("inventory_tree_incomplete", "storage inventory count is invalid")
+                    count = int(raw_count)
+                    if expected_count is not None and count != expected_count:
+                        raise FeatureError("inventory_tree_incomplete", "storage inventory changed during scan")
+                    expected_count = count
+                wrapper = wrapper.get("list", wrapper.get("data", wrapper.get("items")))
+            if not isinstance(wrapper, list):
+                raise FeatureError("inventory_tree_incomplete", "storage inventory page is malformed")
             page = self._storage_items(response)
             if not page:
+                if expected_count is not None and len(items) != expected_count:
+                    raise FeatureError("inventory_tree_incomplete", "storage inventory ended before declared count")
                 return items
             new_items = []
             for item in page:
@@ -903,7 +948,7 @@ class RenameFeature:
                     self._inventory_item_is_dir(item),
                 )
                 if identity in seen_page_items:
-                    continue
+                    raise FeatureError("inventory_tree_incomplete", "storage inventory repeats an object")
                 seen_page_items.add(identity)
                 new_items.append(item)
             if not new_items:
@@ -912,7 +957,9 @@ class RenameFeature:
                     "storage pagination did not advance",
                 )
             items.extend(new_items)
-            if len(page) < page_size:
+            if expected_count is not None and len(items) > expected_count:
+                raise FeatureError("inventory_tree_incomplete", "storage inventory exceeds declared count")
+            if len(page) < page_size and (expected_count is None or len(items) == expected_count):
                 return items
             offset += len(page)
 
@@ -920,6 +967,7 @@ class RenameFeature:
         self,
         child: dict,
         source_path: str,
+        max_nodes: int | None = None,
     ) -> list[dict]:
         root_id = self._inventory_item_id(child)
         if not root_id:
@@ -943,10 +991,14 @@ class RenameFeature:
             for item in descendants:
                 name = self._inventory_item_name(item)
                 if not name:
-                    continue
+                    raise FeatureError("inventory_tree_incomplete", "storage inventory node has no name")
+                if name in {".", ".."} or "/" in name or "\\" in name or "\x00" in name:
+                    raise FeatureError("inventory_tree_incomplete", "storage inventory node has an invalid name")
                 relative_path = f"{prefix}/{name}".strip("/")
                 is_dir = self._inventory_item_is_dir(item)
                 file_id = self._inventory_item_id(item)
+                if not file_id:
+                    raise FeatureError("inventory_tree_incomplete", "storage inventory node has no stable identity")
                 tree.append({
                     **item,
                     "name": name,
@@ -956,6 +1008,8 @@ class RenameFeature:
                     "file_id": file_id,
                     "size": self._inventory_item_size(item),
                 })
+                if max_nodes is not None and len(tree) > max_nodes:
+                    raise FeatureError("inventory_too_large", f"library scan exceeds {max_nodes} entries; select a narrower library path")
                 if is_dir:
                     if not file_id:
                         raise FeatureError(
@@ -1947,6 +2001,130 @@ class RenameFeature:
             })
         return task
 
+    async def _prepare_caption(self, payload, event, operation_id):
+        """Finish optional sidecar discovery before any Rename file mutation."""
+        from .inventory import VIDEO_EXTENSIONS
+        videos = [
+            {key: deepcopy(node[key]) for key in ("path", "name", "relative_path", "file_id", "size", "sha1") if key in node}
+            for node in event.file_tree or []
+            if isinstance(node, dict) and not node.get("is_dir")
+            and PurePosixPath(str(node.get("path") or node.get("relative_path") or node.get("name") or "")).suffix.lower() in VIDEO_EXTENSIONS
+        ]
+        if not videos:
+            return
+        source_root = PurePosixPath(str(event.download_root or event.final_path))
+        for node in videos:
+            relative = str(node.get("relative_path") or node.get("name") or "")
+            if not node.get("path"):
+                node["path"] = str(source_root if source_root.suffix.lower() in VIDEO_EXTENSIONS and relative == source_root.name else source_root / relative)
+            if not node.get("name"):
+                node["name"] = PurePosixPath(node["path"]).name
+        main_paths = {
+            fact.absolute_path for fact in build_file_facts(videos, root_path=str(source_root), provider="download", snapshot_id="")
+            if parse_file_evidence(fact).content_role == "main"
+        }
+        videos = [node for node in videos if node["path"] in main_paths]
+        if not videos:
+            return
+        result = {"status": "completed", "added_count": 0, "existing_count": 0, "processed_count": 0, "warnings": [], "needs_rescan": False, "attribution": []}
+
+        def remember_result():
+            payload["caption_result"] = {key: deepcopy(result[key]) for key in ("status", "added_count", "existing_count", "warnings", "attribution")}
+            operation = self.operations.get(operation_id)
+            if operation is not None:
+                operation["caption_result"] = deepcopy(payload["caption_result"])
+
+        try:
+            await self._report_if_active(
+                operation_id, state="running", stage="caption",
+                status_text="正在匹配外挂字幕。", control="cancel", details={},
+            )
+            timeout = float(self.config.get("caption_timeout") or 300)
+            async with asyncio.timeout(timeout):
+                for index in range(0, len(videos), 50):
+                    self._raise_if_cancelled(operation_id)
+                    batch_payload = {key: deepcopy(payload[key]) for key in ("job_id", "media_metadata", "subtitle_context") if key in payload}
+                    batch_payload["file_tree"] = videos[index:index + 50]
+                    response = await self.host.call_capability(
+                        "subtitle.caption", "prepare_download", batch_payload,
+                        deadline=timeout,
+                        idempotency_key=f"{payload.get('job_id') or operation_id}:caption:{index // 50}",
+                    )
+                    if not isinstance(response, dict):
+                        raise FeatureError("invalid_response", "caption returned no batch result")
+                    if response.get("status") == "disabled":
+                        if result["processed_count"] or result["added_count"] or result["existing_count"]:
+                            result["status"] = "partial"
+                            result["warnings"] = (result["warnings"] + ["caption_disabled_after_partial"])[:30]
+                        else:
+                            result["status"] = "disabled"
+                        break
+                    for key in ("added_count", "existing_count", "processed_count"):
+                        result[key] += max(0, int(response.get(key) or 0))
+                    result["warnings"] = (result["warnings"] + list(response.get("warnings") or []))[:30]
+                    known_providers = {source.get("provider") for source in result["attribution"]}
+                    result["attribution"] = (result["attribution"] + [source for source in response.get("attribution") or [] if isinstance(source, dict) and source.get("provider") not in known_providers])[:5]
+                    result["needs_rescan"] = result["needs_rescan"] or bool(response.get("needs_rescan"))
+                    if response.get("status") != "completed":
+                        result["status"] = "partial"
+                    # Keep completed batches available when a later request or
+                    # the organizer is cancelled, including its source credit.
+                    remember_result()
+        except (asyncio.CancelledError, OperationCancelled):
+            result["status"] = "partial"
+            result["warnings"] = (result["warnings"] + ["caption_cancelled"])[:30]
+            remember_result()
+            raise
+        except FeatureError as exc:
+            if exc.code in {"capability_unavailable", "dependent_capability_lost", "not_found", "method_not_allowed"} and not (result["added_count"] or result["existing_count"] or result["processed_count"]):
+                await self._report_if_active(operation_id, state="running", stage="organizing", status_text="正在整理", control="cancel", details={})
+                return
+            # A failed request may have uploaded some files before it stopped.
+            # Refresh the tree even on error; never rename against stale evidence.
+            result.update(status="partial" if result["added_count"] else "unavailable", needs_rescan=True)
+            result["warnings"] = (result["warnings"] + ["caption_request_failed"])[:30]
+        except Exception:
+            result.update(status="partial" if result["added_count"] else "unavailable", needs_rescan=True)
+            result["warnings"] = (result["warnings"] + ["caption_request_failed"])[:30]
+        remember_result()
+        self._raise_if_cancelled(operation_id)
+        if result.get("needs_rescan"):
+            response = await self.host.call_capability("storage.provider", "wait_subtitle_uploads", {}, deadline=160)
+            if not isinstance(response, dict) or (response.get("value") or {}).get("settled") is not True:
+                raise FeatureError("subtitle_upload_busy", "字幕上传尚未确认结束，已暂停媒体整理，可稍后重试。")
+        if int(result.get("added_count") or 0) > 0 or int(result.get("existing_count") or 0) > 0 or result.get("needs_rescan"):
+            root = str(payload.get("download_root") or payload.get("final_path") or "")
+            info = await self._storage_value("get_file_info", root)
+            if info and not self._inventory_item_is_dir(info):
+                source = PurePosixPath(root)
+                paths = [root] + [str(source.with_name(f"{source.stem}.{language}.{extension}")) for language in ("chi", "cht") for extension in ("srt", "ass", "vtt", "ssa")]
+                tree = []
+                for path in paths:
+                    item = await self._storage_value("get_file_info", path)
+                    if item and not self._inventory_item_is_dir(item):
+                        tree.append({**item, "name": PurePosixPath(path).name, "relative_path": PurePosixPath(path).name, "path": path, "is_dir": False, "file_id": self._inventory_item_id(item), "size": self._inventory_item_size(item)})
+            else:
+                tree = await self._inventory_file_tree(info or {}, root, max_nodes=20000)
+            # An old immutable download snapshot cannot describe the new sidecars.
+            # This strict scan provides the replacement evidence for this run.
+            event.file_tree = tree
+            from .processor import validate_inline_tree
+            validate_inline_tree(tree, root_path=root, max_nodes=20000)
+            event.caption_tree_verified = True
+            event.snapshot_verified = False
+            event.file_tree_transport = "inline_v1"
+            event.snapshot_id = ""
+            event.snapshot_complete = True
+            payload["file_tree"] = tree
+            payload["file_tree_transport"] = "inline_v1"
+            payload["snapshot_complete"] = True
+            payload.pop("file_tree_snapshot", None)
+            payload.pop("snapshot_id", None)
+        await self._report_if_active(
+            operation_id, state="running", stage="organizing",
+            status_text="正在整理", control="cancel", details={},
+        )
+
     async def _run_organization(self, job_id, payload, operation_id):
         user_id = int(payload.get("user_id") or 0)
         is_inventory = bool(
@@ -2145,6 +2323,8 @@ class RenameFeature:
             event.file_tree = await asyncio.to_thread(_event_file_tree, event)
             payload["file_tree"] = event.file_tree
             payload["snapshot_complete"] = True
+            if metadata and not is_inventory and self.config.get("caption_enabled", True):
+                await self._prepare_caption(payload, event, operation_id)
             if operation_id:
                 operation_state["thread_started"] = True
             if metadata:
@@ -2220,6 +2400,8 @@ class RenameFeature:
                 "file_results": downstream_file_results,
                 "file_warnings": list(file_results.get("warnings") or []),
             }
+            if isinstance(payload.get("caption_result"), dict):
+                event_payload["caption_result"] = deepcopy(payload["caption_result"])
             event_payload["organization_result"] = {
                 "status": "completed" if organized else "failed",
                 "files": deepcopy(file_results.get("files") or []),
@@ -2346,6 +2528,7 @@ class RenameFeature:
                 "user_id": user_id,
                 "job_id": job_id,
             }
+            _retain_caption_terminal_context(outcome, payload, operation_id)
             if self.jobs:
                 self.jobs.update(job_id, "cancelled", outcome)
             if (self.operations.get(operation_id) or {}).get("state") != "rolling_back":
@@ -2413,6 +2596,7 @@ class RenameFeature:
                 "job_id": job_id,
                 "error": error_details,
             }
+            _retain_caption_terminal_context(outcome, payload, operation_id)
             if self.jobs:
                 self.jobs.update(job_id, "failed", outcome)
             if is_inventory:
@@ -2508,6 +2692,9 @@ class RenameFeature:
                 "已整理，但源目录清理未完成。\n"
                 f"目标目录：{outcome.get('final_path') or ''}"
             )
+        if not (complete or organized):
+            terminal_text = outcome.get("message") or "媒体整理未满足完整成功条件。"
+        terminal_text += _caption_completion_note(outcome)
         terminal_report = self._advance_operation(
             operation_id,
             state="completed" if complete else "failed",
@@ -2518,12 +2705,7 @@ class RenameFeature:
                 if complete
                 else "cleanup" if organized else "organizing"
             ),
-            status_text=(
-                terminal_text
-                if complete or organized
-                else outcome.get("message")
-                or "媒体整理未满足完整成功条件。"
-            ),
+            status_text=terminal_text,
             control="",
             details={
                 "organized": organized,
@@ -2651,6 +2833,7 @@ class RenameFeature:
                         "已整理，但源目录清理未完成。\n"
                         f"目标目录：{outcome.get('final_path') or ''}"
                     )
+                stage_text += _caption_completion_note(outcome)
                 for attempt in range(3):
                     try:
                         seal_response = await self.host.seal_operation_segment(
@@ -2772,7 +2955,7 @@ class RenameFeature:
             try:
                 await self.host.notify_user(
                     int(outcome["user_id"]),
-                    text,
+                    text + _caption_completion_note(outcome),
                     idempotency_key=f"{job_id}:rename-notice",
                 )
             except Exception as exc:
@@ -3109,6 +3292,12 @@ class RenameFeature:
                 ],
                 "error": type(exc).__name__,
             }
+        caption_result = (self.operations.get(operation_id) or {}).get("caption_result")
+        if isinstance(caption_result, dict):
+            outcome["caption_result"] = deepcopy(caption_result)
+        caption_note = _caption_completion_note({"event_payload": outcome})
+        if caption_note and int((caption_result or {}).get("added_count") or 0) > 0:
+            caption_note = "\n已获取的外挂字幕保留。" + caption_note
         await self._report_operation(
             operation_id,
             state=outcome["state"],
@@ -3117,7 +3306,7 @@ class RenameFeature:
                 "已取消并回滚全部可验证的重命名。"
                 if outcome["state"] == "rolled_back"
                 else "回滚未能完整完成，请按剩余路径人工检查。"
-            ),
+            ) + caption_note,
             control="",
             details=outcome,
         )

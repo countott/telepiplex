@@ -1,0 +1,2455 @@
+{
+  "schema_version": 1,
+  "verified_date": "2026-09-28",
+  "scope": "Research only: public external subtitle downloads and current parser checks; new providers are not implemented.",
+  "limitations": [
+    "No video playback, per-line synchronization or translation accuracy verification.",
+    "No complete CaptionEngine provider retrieval run for these new sources.",
+    "No account registration, private-site login, API key acquisition, purchase or challenge bypass.",
+    "accepted fields are observed current parser output, not ground truth. Known false acceptance cases are retained explicitly.",
+    "Raw subtitle and archive bodies remain in temporary files, not in this record.",
+    "Downloads and search results can overlap; counts are not independent inventory totals."
+  ],
+  "known_quality_findings": [
+    {
+      "id": "fragment_coverage",
+      "source": "xunlei",
+      "files": [
+        "Interstellar.2014.IMAX.1080p.Bluray.x264-002.ass",
+        "绝命毒师.S01E01 (1)-001_track3_chi.ssa"
+      ],
+      "finding": "Current parser accepts suspected fragments of about 64.5 and 9.8 minutes; positive priority is not full-subtitle qualification.",
+      "runtime_code_changed": false
+    },
+    {
+      "id": "japanese_bilingual_misclassification",
+      "source": "MingYRelease",
+      "finding": "Four JPSC/JPTC episode 06 members are accepted as monolingual despite substantial Japanese dialogue; the 28 accepted count is not a qualified subtitle count.",
+      "runtime_code_changed": false
+    },
+    {
+      "id": "archive_ratio",
+      "source": "NekomoeRelease",
+      "finding": "Downloaded legitimate-looking 24-ASS season archive exceeds ratio 200; current rejection retained, contents not quality-approved.",
+      "runtime_code_changed": false
+    },
+    {
+      "id": "preview_export_newlines",
+      "source": "r3sub",
+      "finding": "Initial naive HTML br conversion doubled line breaks and was rejected; correct page-export normalization succeeded without timing/dialogue changes.",
+      "runtime_code_changed": false
+    }
+  ],
+  "evidence": {
+    "xunlei_search": [
+      {
+        "query": "Interstellar.2014.1080p.BluRay.x264",
+        "url": "https://api-shoulei-ssl.xunlei.com/oracle/subtitle?name=Interstellar.2014.1080p.BluRay.x264",
+        "http_status": 200,
+        "api_code": 0,
+        "count": 46,
+        "sample": [
+          {
+            "gcid": "00B61E47A0C5F3752C6E8786BEF39C8E5481B21B",
+            "cid": "00B61E47A0C5F3752C6E8786BEF39C8E5481B21B",
+            "url": "https://subtitle.v.geilijiasu.com/00/B6/00B61E47A0C5F3752C6E8786BEF39C8E5481B21B.ass",
+            "ext": "ass",
+            "name": "星际穿越.srt.ass",
+            "simple_name": "中文[ASS]星际穿越",
+            "duration": 9942400,
+            "languages": [
+              "简体"
+            ],
+            "source": 0,
+            "score": 0,
+            "fingerprintf_score": 0,
+            "mt": 5
+          },
+          {
+            "gcid": "00780928222DF7A57CCF1598B70671A87D51A615",
+            "cid": "00780928222DF7A57CCF1598B70671A87D51A615",
+            "url": "https://subtitle.v.geilijiasu.com/00/78/00780928222DF7A57CCF1598B70671A87D51A615.srt",
+            "ext": "srt",
+            "name": "Interstellar.2014.1080p.BluRay.x264.DTS-RARBG.简体.srt",
+            "simple_name": "中文[SRT]星际穿越(2014)",
+            "duration": 9943562,
+            "languages": [
+              "简体"
+            ],
+            "source": 0,
+            "score": 0,
+            "fingerprintf_score": 0,
+            "mt": 5
+          },
+          {
+            "gcid": "008947EA4614283938EB4DC0133BEF44D9E242CA",
+            "cid": "008947EA4614283938EB4DC0133BEF44D9E242CA",
+            "url": "https://subtitle.v.geilijiasu.com/00/89/008947EA4614283938EB4DC0133BEF44D9E242CA.srt",
+            "ext": "srt",
+            "name": "Interstellar.2014.1080p.BluRay.x264.DTS-PIGHD-简体.srt",
+            "simple_name": "中文[SRT]星际穿越(2014)",
+            "duration": 9944100,
+            "languages": [
+              "简体"
+            ],
+            "source": 0,
+            "score": 0,
+            "fingerprintf_score": 0,
+            "mt": 5
+          }
+        ]
+      },
+      {
+        "query": "星际穿越",
+        "url": "https://api-shoulei-ssl.xunlei.com/oracle/subtitle?name=%E6%98%9F%E9%99%85%E7%A9%BF%E8%B6%8A",
+        "http_status": 200,
+        "api_code": 0,
+        "count": 46,
+        "sample": [
+          {
+            "gcid": "00B61E47A0C5F3752C6E8786BEF39C8E5481B21B",
+            "cid": "00B61E47A0C5F3752C6E8786BEF39C8E5481B21B",
+            "url": "https://subtitle.v.geilijiasu.com/00/B6/00B61E47A0C5F3752C6E8786BEF39C8E5481B21B.ass",
+            "ext": "ass",
+            "name": "星际穿越.srt.ass",
+            "simple_name": "中文[ASS]星际穿越",
+            "duration": 9942400,
+            "languages": [
+              "简体"
+            ],
+            "source": 0,
+            "score": 0,
+            "fingerprintf_score": 0,
+            "mt": 5
+          },
+          {
+            "gcid": "00780928222DF7A57CCF1598B70671A87D51A615",
+            "cid": "00780928222DF7A57CCF1598B70671A87D51A615",
+            "url": "https://subtitle.v.geilijiasu.com/00/78/00780928222DF7A57CCF1598B70671A87D51A615.srt",
+            "ext": "srt",
+            "name": "Interstellar.2014.1080p.BluRay.x264.DTS-RARBG.简体.srt",
+            "simple_name": "中文[SRT]星际穿越(2014)",
+            "duration": 9943562,
+            "languages": [
+              "简体"
+            ],
+            "source": 0,
+            "score": 0,
+            "fingerprintf_score": 0,
+            "mt": 5
+          },
+          {
+            "gcid": "008947EA4614283938EB4DC0133BEF44D9E242CA",
+            "cid": "008947EA4614283938EB4DC0133BEF44D9E242CA",
+            "url": "https://subtitle.v.geilijiasu.com/00/89/008947EA4614283938EB4DC0133BEF44D9E242CA.srt",
+            "ext": "srt",
+            "name": "Interstellar.2014.1080p.BluRay.x264.DTS-PIGHD-简体.srt",
+            "simple_name": "中文[SRT]星际穿越(2014)",
+            "duration": 9944100,
+            "languages": [
+              "简体"
+            ],
+            "source": 0,
+            "score": 0,
+            "fingerprintf_score": 0,
+            "mt": 5
+          }
+        ]
+      },
+      {
+        "query": "流浪地球.2019",
+        "url": "https://api-shoulei-ssl.xunlei.com/oracle/subtitle?name=%E6%B5%81%E6%B5%AA%E5%9C%B0%E7%90%83.2019",
+        "http_status": 200,
+        "api_code": 0,
+        "count": 57,
+        "sample": [
+          {
+            "gcid": "0CE26BE05D459333D637EAD0D6EF96B4513D0245",
+            "cid": "524530592E87A325221BFD9A9651D438671B4FB9",
+            "url": "https://subtitle.v.geilijiasu.com/52/45/524530592E87A325221BFD9A9651D438671B4FB9.ass",
+            "ext": "ass",
+            "name": "流浪地球.简体中文.ass",
+            "simple_name": "中文[ASS]流浪地球",
+            "duration": 7502780,
+            "languages": [
+              "简体中文"
+            ],
+            "source": 0,
+            "score": 0,
+            "fingerprintf_score": 0,
+            "mt": 5
+          },
+          {
+            "gcid": "05057BB16A8AEEE4CC6B6D26326DD63C60F5CECB",
+            "cid": "AE588AFBA0CA068B32EDBF7A32FFAF86AF606C59",
+            "url": "https://subtitle.v.geilijiasu.com/AE/58/AE588AFBA0CA068B32EDBF7A32FFAF86AF606C59.ass",
+            "ext": "ass",
+            "name": "流浪地球.简体中文.ass",
+            "simple_name": "中文[ASS]流浪地球",
+            "duration": 7502780,
+            "languages": [
+              "简体中文"
+            ],
+            "source": 0,
+            "score": 0,
+            "fingerprintf_score": 0,
+            "mt": 5
+          },
+          {
+            "gcid": "07D06D98147565CC935940121732266FA671DBF8",
+            "cid": "B55580AA42581D4B93BA29A48BF96E2271F7ED5B",
+            "url": "https://subtitle.v.geilijiasu.com/B5/55/B55580AA42581D4B93BA29A48BF96E2271F7ED5B.ass",
+            "ext": "ass",
+            "name": "流浪地球预告片恶搞（2019.02）.ass",
+            "simple_name": "中文[ASS]流浪地球(2019)",
+            "duration": 82880,
+            "languages": [
+              "简体"
+            ],
+            "source": 0,
+            "score": 0,
+            "fingerprintf_score": 0,
+            "mt": 5
+          }
+        ]
+      },
+      {
+        "query": "你的名字.2016",
+        "url": "https://api-shoulei-ssl.xunlei.com/oracle/subtitle?name=%E4%BD%A0%E7%9A%84%E5%90%8D%E5%AD%97.2016",
+        "http_status": 200,
+        "api_code": 0,
+        "count": 52,
+        "sample": [
+          {
+            "gcid": "05C3308DAC7249F8504D56BB0CBBF4410A946B98",
+            "cid": "05C3308DAC7249F8504D56BB0CBBF4410A946B98",
+            "url": "https://subtitle.v.geilijiasu.com/05/C3/05C3308DAC7249F8504D56BB0CBBF4410A946B98.ass",
+            "ext": "ass",
+            "name": "Kimi.No.Na.Wa.2016.BluRay.1080p.x264.DTS-HD.MA.5.1-HDChina.ass",
+            "simple_name": "中文[ASS]你的名字。(2016)",
+            "duration": 6386920,
+            "languages": [
+              "简体"
+            ],
+            "source": 0,
+            "score": 0,
+            "fingerprintf_score": 0,
+            "mt": 5
+          },
+          {
+            "gcid": "0335161F8492781256D40325BBC8AEAF057216B0",
+            "cid": "0335161F8492781256D40325BBC8AEAF057216B0",
+            "url": "https://subtitle.v.geilijiasu.com/03/35/0335161F8492781256D40325BBC8AEAF057216B0.srt",
+            "ext": "srt",
+            "name": "Kimi.No.Na.Wa.2016.BluRay.1080p.x264.DTS-HD.MA.5.1-HDChina.srt",
+            "simple_name": "中文[SRT]你的名字。(2016)",
+            "duration": 6375990,
+            "languages": [
+              "简体"
+            ],
+            "source": 0,
+            "score": 0,
+            "fingerprintf_score": 0,
+            "mt": 5
+          },
+          {
+            "gcid": "05686A30303F877E3338EA93BD314A6F46AF0E90",
+            "cid": "05686A30303F877E3338EA93BD314A6F46AF0E90",
+            "url": "https://subtitle.v.geilijiasu.com/05/68/05686A30303F877E3338EA93BD314A6F46AF0E90.ass",
+            "ext": "ass",
+            "name": "Your Name..ass",
+            "simple_name": "中文[ASS]你的名字。",
+            "duration": 32832910,
+            "languages": [
+              "简体"
+            ],
+            "source": 0,
+            "score": 0,
+            "fingerprintf_score": 0,
+            "mt": 5
+          }
+        ]
+      },
+      {
+        "query": "Breaking.Bad.S01E01",
+        "url": "https://api-shoulei-ssl.xunlei.com/oracle/subtitle?name=Breaking.Bad.S01E01",
+        "http_status": 200,
+        "api_code": 0,
+        "count": 54,
+        "sample": [
+          {
+            "gcid": "0149FF8BAD8AC965F1E7B7BFC3DC0FB8294C2589",
+            "cid": "0149FF8BAD8AC965F1E7B7BFC3DC0FB8294C2589",
+            "url": "https://subtitle.v.geilijiasu.com/01/49/0149FF8BAD8AC965F1E7B7BFC3DC0FB8294C2589.srt",
+            "ext": "srt",
+            "name": "Breaking.Bad.S01E01.720p.BluRay.X264-REWARD_ReEnc480p.srt",
+            "simple_name": "中文[SRT]绝命毒师S01E01",
+            "duration": 3434800,
+            "languages": [
+              "繁体"
+            ],
+            "source": 0,
+            "score": 0,
+            "fingerprintf_score": 0,
+            "mt": 5
+          },
+          {
+            "gcid": "08B87CAF0A08F028461FDD79AF842BFF3DF8D004",
+            "cid": "08B87CAF0A08F028461FDD79AF842BFF3DF8D004",
+            "url": "https://subtitle.v.geilijiasu.com/08/B8/08B87CAF0A08F028461FDD79AF842BFF3DF8D004.srt",
+            "ext": "srt",
+            "name": "Breaking Bad.1x01.Pilot.WEB-DL.720p.AC3.srt",
+            "simple_name": "中文[SRT]绝命毒师S01E01",
+            "duration": 3386700,
+            "languages": [
+              "繁体"
+            ],
+            "source": 0,
+            "score": 0,
+            "fingerprintf_score": 0,
+            "mt": 5
+          },
+          {
+            "gcid": "0A5FB23D071B4702A44E7281558D2EBC7D28FB98",
+            "cid": "0A5FB23D071B4702A44E7281558D2EBC7D28FB98",
+            "url": "https://subtitle.v.geilijiasu.com/0A/5F/0A5FB23D071B4702A44E7281558D2EBC7D28FB98.srt",
+            "ext": "srt",
+            "name": "Breaking.Bad.S01E01.BluRay.720p.x264.AC3-CnSCG.srt",
+            "simple_name": "中文[SRT]绝命毒师S01E01",
+            "duration": 3431170,
+            "languages": [
+              "繁体"
+            ],
+            "source": 0,
+            "score": 0,
+            "fingerprintf_score": 0,
+            "mt": 5
+          }
+        ]
+      }
+    ],
+    "xunlei_initial_samples": [
+      {
+        "query": "Interstellar.2014.1080p.BluRay.x264",
+        "candidate": "星际穿越.srt.ass",
+        "url": "https://subtitle.v.geilijiasu.com/00/B6/00B61E47A0C5F3752C6E8786BEF39C8E5481B21B.ass",
+        "bytes": 198453,
+        "sha256": "a5afd14bc9d26c463f3ac1abb523650edfdf339540b9e50faa7a5c4a6ff2ade0",
+        "quality": {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": false,
+          "cue_count": 2428,
+          "first_start": 19.0,
+          "last_end": 9942.4,
+          "encoding": "gb18030",
+          "timing_verified": false,
+          "format": "ass",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.975,
+          "bilingual_ratio": 0.0
+        },
+        "priority": 0
+      },
+      {
+        "query": "Interstellar.2014.1080p.BluRay.x264",
+        "candidate": "Interstellar.2014.1080p.BluRay.x264.DTS-RARBG.简体.srt",
+        "url": "https://subtitle.v.geilijiasu.com/00/78/00780928222DF7A57CCF1598B70671A87D51A615.srt",
+        "bytes": 139140,
+        "sha256": "bba8b82571407496e899376d1a884f7a1030bb17c3d1f221d7ffe169c6c4696c",
+        "quality": {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": false,
+          "cue_count": 2443,
+          "first_start": 20.162,
+          "last_end": 9943.562,
+          "encoding": "gb18030",
+          "timing_verified": false,
+          "format": "srt",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.975,
+          "bilingual_ratio": 0.0
+        },
+        "priority": 200
+      },
+      {
+        "query": "流浪地球.2019",
+        "candidate": "流浪地球.简体中文.ass",
+        "url": "https://subtitle.v.geilijiasu.com/52/45/524530592E87A325221BFD9A9651D438671B4FB9.ass",
+        "bytes": 348330,
+        "sha256": "63214ce5256b59a5d3a4129b9913ac29899fafc6929303217f612182575264a6",
+        "quality": {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": false,
+          "cue_count": 1831,
+          "first_start": 0.0,
+          "last_end": 7502.78,
+          "encoding": "gb18030",
+          "timing_verified": false,
+          "format": "ass",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.972,
+          "bilingual_ratio": 0.001
+        },
+        "priority": 200
+      },
+      {
+        "query": "流浪地球.2019",
+        "candidate": "流浪地球.简体中文.ass",
+        "url": "https://subtitle.v.geilijiasu.com/AE/58/AE588AFBA0CA068B32EDBF7A32FFAF86AF606C59.ass",
+        "bytes": 232112,
+        "sha256": "59a6af0cd09c6b05826525f5db9485d48fec5e8c3401bd572c4691acaadeaa63",
+        "quality": {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": false,
+          "cue_count": 1831,
+          "first_start": 0.0,
+          "last_end": 7502.78,
+          "encoding": "gb18030",
+          "timing_verified": false,
+          "format": "ass",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.972,
+          "bilingual_ratio": 0.001
+        },
+        "priority": 200
+      },
+      {
+        "query": "你的名字.2016",
+        "candidate": "Kimi.No.Na.Wa.2016.BluRay.1080p.x264.DTS-HD.MA.5.1-HDChina.ass",
+        "url": "https://subtitle.v.geilijiasu.com/05/C3/05C3308DAC7249F8504D56BB0CBBF4410A946B98.ass",
+        "bytes": 209225,
+        "sha256": "2a4cb49c5d94c2a77ca4d501ff43440d604e8b2a706b99e7cd407e00d76be987",
+        "quality": {
+          "accepted": false,
+          "language": "chi",
+          "bilingual": false,
+          "cue_count": 1773,
+          "first_start": 53.41,
+          "last_end": 6388.23,
+          "encoding": "utf-8-sig",
+          "timing_verified": false,
+          "format": "ass",
+          "reasons": [
+            "malformed_cues"
+          ],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.966,
+          "bilingual_ratio": 0.005
+        },
+        "priority": 0
+      },
+      {
+        "query": "你的名字.2016",
+        "candidate": "Kimi.No.Na.Wa.2016.BluRay.1080p.x264.DTS-HD.MA.5.1-HDChina.srt",
+        "url": "https://subtitle.v.geilijiasu.com/03/35/0335161F8492781256D40325BBC8AEAF057216B0.srt",
+        "bytes": 88416,
+        "sha256": "e59ac47a349eb7fbaba4b12fd5a4ff0d2188039029213d2641c552d3ecf9284c",
+        "quality": {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": false,
+          "cue_count": 1470,
+          "first_start": 53.36,
+          "last_end": 6375.99,
+          "encoding": "gb18030",
+          "timing_verified": false,
+          "format": "srt",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.967,
+          "bilingual_ratio": 0.0
+        },
+        "priority": 200
+      },
+      {
+        "query": "Breaking.Bad.S01E01",
+        "candidate": "Breaking.Bad.S01E01.720p.BluRay.X264-REWARD_ReEnc480p.srt",
+        "url": "https://subtitle.v.geilijiasu.com/01/49/0149FF8BAD8AC965F1E7B7BFC3DC0FB8294C2589.srt",
+        "bytes": 38367,
+        "sha256": "d9482baa53563bd7a1e2c588d724c1871f634b8423bba599c1b007bc27271cca",
+        "quality": {
+          "accepted": true,
+          "language": "cht",
+          "bilingual": false,
+          "cue_count": 647,
+          "first_start": 0.13,
+          "last_end": 3434.8,
+          "encoding": "big5",
+          "timing_verified": false,
+          "format": "srt",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.963,
+          "bilingual_ratio": 0.008
+        },
+        "priority": 100
+      },
+      {
+        "query": "Breaking.Bad.S01E01",
+        "candidate": "Breaking Bad.1x01.Pilot.WEB-DL.720p.AC3.srt",
+        "url": "https://subtitle.v.geilijiasu.com/08/B8/08B87CAF0A08F028461FDD79AF842BFF3DF8D004.srt",
+        "bytes": 38371,
+        "sha256": "4b2c7547784b03acab0afc1153ebc7925537cb8d531b10c2ada7a4568ace5053",
+        "quality": {
+          "accepted": true,
+          "language": "cht",
+          "bilingual": false,
+          "cue_count": 647,
+          "first_start": 0.13,
+          "last_end": 3386.7,
+          "encoding": "big5",
+          "timing_verified": false,
+          "format": "srt",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.961,
+          "bilingual_ratio": 0.008
+        },
+        "priority": 100
+      }
+    ],
+    "xunlei_bilingual_samples": [
+      {
+        "query": "Interstellar.2014.1080p.BluRay",
+        "candidate": "Interstellar 2014 中英字幕.srt",
+        "url": "https://subtitle.v.geilijiasu.com/00/93/00937AD378550F8E810592C62FBB48AA14BAB317.srt",
+        "labels": [
+          "繁体&英语"
+        ],
+        "bytes": 181189,
+        "sha256": "54d5f5c62eaea613011c0d6a04e45226880dd891bf6763e91f3050e192f4eb45",
+        "quality": {
+          "accepted": false,
+          "language": "cht",
+          "bilingual": true,
+          "cue_count": 1649,
+          "first_start": 16.717,
+          "last_end": 9770.369,
+          "encoding": "big5hkscs",
+          "timing_verified": false,
+          "format": "srt",
+          "reasons": [
+            "malformed_cues"
+          ],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.982,
+          "bilingual_ratio": 0.899
+        },
+        "priority": 0
+      },
+      {
+        "query": "Interstellar.2014.1080p.BluRay",
+        "candidate": "Interstellar.2014.IMAX.1080p.Bluray.x264-002.ass",
+        "url": "https://subtitle.v.geilijiasu.com/00/F4/00F40DDB72B4E30F03EE41FECE6C305D19A5A4B5.ass",
+        "labels": [
+          "简体&英语"
+        ],
+        "bytes": 96170,
+        "sha256": "e6300b21a9afefe4a132baab344b5115d5ae1274c30dd66c05dfb0c364f69011",
+        "quality": {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": true,
+          "cue_count": 770,
+          "first_start": 0.0,
+          "last_end": 3872.96,
+          "encoding": "utf-8-sig",
+          "timing_verified": false,
+          "format": "ass",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.965,
+          "bilingual_ratio": 0.844
+        },
+        "priority": 400
+      },
+      {
+        "query": "Interstellar.2014.1080p.BluRay",
+        "candidate": "Interstellar.2014.720p.BluRay.x264.DTS-RARBG.ass",
+        "url": "https://subtitle.v.geilijiasu.com/00/33/003322A111D8125BC9D6D2C774E0BFCF26BA19FC.ass",
+        "labels": [
+          "简体&英语"
+        ],
+        "bytes": 277552,
+        "sha256": "ea8c715e5e081e3e06c8f12afa5c6963929394e262b10b283d60a8d23ae97689",
+        "quality": {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": true,
+          "cue_count": 2240,
+          "first_start": 3.5,
+          "last_end": 10135.52,
+          "encoding": "utf-8-sig",
+          "timing_verified": false,
+          "format": "ass",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.967,
+          "bilingual_ratio": 0.851
+        },
+        "priority": 400
+      },
+      {
+        "query": "Interstellar.2014.1080p.BluRay",
+        "candidate": "Interstellar.2014.1080p.BluRay.x264.DTS-RARBG.srt",
+        "url": "https://subtitle.v.geilijiasu.com/93/CF/93CF58D7CD0FA9B0EB3A50EE3984F7DC286EC6AC.srt",
+        "labels": [
+          "简体&英语"
+        ],
+        "bytes": 207536,
+        "sha256": "8ac865168d36d5001508abf6fdb6f77f288ff4e5e4be2a95ae8cbaaf6e84c38f",
+        "quality": {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": true,
+          "cue_count": 2376,
+          "first_start": 75.4,
+          "last_end": 9821.76,
+          "encoding": "gb18030",
+          "timing_verified": false,
+          "format": "srt",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.981,
+          "bilingual_ratio": 0.821
+        },
+        "priority": 300
+      },
+      {
+        "query": "Breaking.Bad.S01E01",
+        "candidate": "breaking.bad.s01e01.720p.hdtv.x264-bia.gb.srt",
+        "url": "https://subtitle.v.geilijiasu.com/07/A2/07A2296BF44754DCCDD0383E73418C9CA8A99F93.srt",
+        "labels": [
+          "简体",
+          "English",
+          "French"
+        ],
+        "bytes": 30615,
+        "sha256": "ac8725f20532a8a26cb7440d0f419aad34159a328f4581c73d1640f71375f567",
+        "quality": {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": false,
+          "cue_count": 525,
+          "first_start": 134.15,
+          "last_end": 2727.374,
+          "encoding": "gb18030",
+          "timing_verified": false,
+          "format": "srt",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.956,
+          "bilingual_ratio": 0.004
+        },
+        "priority": 200
+      },
+      {
+        "query": "Breaking.Bad.S01E01",
+        "candidate": "breaking.bad.s01e01.720p.bluray.x264-reward.chs&eng.srt",
+        "url": "https://subtitle.v.geilijiasu.com/04/06/0406363CC5EFDAE53F76BB64F63384D29FE6EAF1.srt",
+        "labels": [
+          "简体&英语"
+        ],
+        "bytes": 63042,
+        "sha256": "5c59c60336d7ad07cb795a79ad9e464ebbc9fdcf6a8f5eaffeb163da9571abf3",
+        "quality": {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": true,
+          "cue_count": 690,
+          "first_start": 134.33,
+          "last_end": 3431.14,
+          "encoding": "utf-8-sig",
+          "timing_verified": false,
+          "format": "srt",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.994,
+          "bilingual_ratio": 0.806
+        },
+        "priority": 300
+      },
+      {
+        "query": "Breaking.Bad.S01E01",
+        "candidate": "绝命毒师.S01E01 (1)-001_track3_chi.ssa",
+        "url": "https://subtitle.v.geilijiasu.com/04/A1/04A1DD451B9B941802CEE66AD16248FC3B7A1ACA.ssa",
+        "labels": [
+          "简体&英语"
+        ],
+        "bytes": 20095,
+        "sha256": "8a531eca02bcb1ddbdfe4b54f5078ca7b3c9b4e084df8acb85a047da84b289e6",
+        "quality": {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": true,
+          "cue_count": 105,
+          "first_start": 1.0,
+          "last_end": 588.33,
+          "encoding": "utf-8-sig",
+          "timing_verified": false,
+          "format": "ssa",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 1.0,
+          "bilingual_ratio": 0.695
+        },
+        "priority": 400
+      },
+      {
+        "query": "Breaking.Bad.S01E01",
+        "candidate": "绝命毒师.S01E01_track3_chi.ssa",
+        "url": "https://subtitle.v.geilijiasu.com/02/E7/02E7D19DA794F6F596880C891DCB2075D6E92D64.ssa",
+        "labels": [
+          "简体&英语"
+        ],
+        "bytes": 130198,
+        "sha256": "d562136ede34ded4a20be7b3248c21e44fd3ee1d973093f03b94aa7dcb45b4f1",
+        "quality": {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": true,
+          "cue_count": 688,
+          "first_start": 1.0,
+          "last_end": 3431.14,
+          "encoding": "utf-8-sig",
+          "timing_verified": false,
+          "format": "ssa",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.994,
+          "bilingual_ratio": 0.808
+        },
+        "priority": 400
+      }
+    ],
+    "international_downloads": {
+      "verified_date": "2026-09-28",
+      "scope": "Public subtitle body download; no video synchronization or semantic quality claim",
+      "samples": [
+        {
+          "provider": "subdl",
+          "evidence_grade": "A_public_body_download",
+          "source_page": "https://subdl.com/s/info/gJBYsee3tr/dune",
+          "anonymous_download_status": 200,
+          "archive_bytes": 108831,
+          "files": [
+            {
+              "name": "Dune.2021.1080p.HMAX.WEB-DL.DD5.1.x264-EVO.cn&en.ass",
+              "bytes": 262354,
+              "encoding": "utf-8-sig",
+              "cue_count": 1001,
+              "cjk_characters": 10859,
+              "bilingual_cue_count": 986,
+              "t2s_character_changes": 0,
+              "sha256": "259624b14cef8959d6615df41af42c004d06180dcda5540984d614911f76eb5c"
+            },
+            {
+              "name": "Dune.2021.1080p.HMAX.WEB-DL.DD5.1.x264-EVO.zh&en.ass",
+              "bytes": 307778,
+              "encoding": "utf-8-sig",
+              "cue_count": 1261,
+              "cjk_characters": 10935,
+              "bilingual_cue_count": 1164,
+              "t2s_character_changes": 0,
+              "sha256": "1441f97f5aabb8fdd1009c057d28c5f7b1346faa506470064f549b19c89c3e96"
+            }
+          ]
+        },
+        {
+          "provider": "subsource",
+          "evidence_grade": "A_public_body_download",
+          "source_page": "https://subsource.net/subtitle/dune-2021/chinese_bg_code/2706679",
+          "anonymous_download_status": 200,
+          "archive_bytes": 34869,
+          "files": [
+            {
+              "name": "Dune.2021.WEBRip.iTunes.srt",
+              "bytes": 84221,
+              "encoding": "utf-8-sig",
+              "cue_count": 1263,
+              "cjk_characters": 10851,
+              "bilingual_cue_count": 0,
+              "t2s_character_changes": 0,
+              "sha256": "151e94f0b591c9c5c966edb1af770832749760e0256204aaa8f20c48c0ab1e75"
+            }
+          ]
+        },
+        {
+          "provider": "subf2m",
+          "evidence_grade": "A_public_body_download",
+          "source_page": "https://subf2m.co/subtitles/interstellar/chinese-bg-code/1081833",
+          "anonymous_download_status": 200,
+          "archive_bytes": 106753,
+          "files": [
+            {
+              "name": "Interstellar.2014.IMAX.720p.Bluray.x264.DTS-EVO.chs&eng.srt",
+              "bytes": 370948,
+              "encoding": "utf-16",
+              "cue_count": 2217,
+              "cjk_characters": 19018,
+              "bilingual_cue_count": 2044,
+              "t2s_character_changes": 0,
+              "sha256": "e6e657e49f908281ef272467401ec9c960a8079eac1f79102d625ea96579d199"
+            }
+          ]
+        },
+        {
+          "provider": "addic7ed",
+          "evidence_grade": "A_public_body_download",
+          "source_page": "https://www.addic7ed.com/season/8438/1",
+          "anonymous_download_status": 200,
+          "archive_bytes": 36047,
+          "files": [
+            {
+              "name": "Physical.S01E01.zh-Hans.srt",
+              "bytes": 36047,
+              "encoding": "utf-8-sig",
+              "cue_count": 518,
+              "cjk_characters": 4860,
+              "bilingual_cue_count": 0,
+              "t2s_character_changes": 0,
+              "sha256": "a7672d050397b12316e87629d21331fea4f1ce548da78d1241924db2d5cffc56"
+            }
+          ]
+        }
+      ]
+    },
+    "international_caption_checks": {
+      "verified_date": "2026-09-28",
+      "archive_function": "telepiplex_caption.archive.extract_subtitles (current function name; no unpack_subtitles symbol)",
+      "quality_function": "telepiplex_caption.quality.inspect_subtitle",
+      "query_original_language": "en",
+      "video_duration_not_supplied": true,
+      "results": [
+        {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": true,
+          "cue_count": 1000,
+          "first_start": 5.29,
+          "last_end": 8815.21,
+          "encoding": "utf-8-sig",
+          "timing_verified": false,
+          "format": "ass",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.997,
+          "bilingual_ratio": 0.871,
+          "provider": "subdl",
+          "filename": "Dune.2021.1080p.HMAX.WEB-DL.DD5.1.x264-EVO.cn&en.ass",
+          "priority": 400
+        },
+        {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": true,
+          "cue_count": 1261,
+          "first_start": 5.0,
+          "last_end": 8927.88,
+          "encoding": "utf-8-sig",
+          "timing_verified": false,
+          "format": "ass",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.99,
+          "bilingual_ratio": 0.797,
+          "provider": "subdl",
+          "filename": "Dune.2021.1080p.HMAX.WEB-DL.DD5.1.x264-EVO.zh&en.ass",
+          "priority": 400
+        },
+        {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": false,
+          "cue_count": 1263,
+          "first_start": 5.756,
+          "last_end": 8928.637,
+          "encoding": "utf-8-sig",
+          "timing_verified": false,
+          "format": "srt",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.989,
+          "bilingual_ratio": 0.0,
+          "provider": "subsource",
+          "filename": "Dune.2021.WEBRip.iTunes.srt",
+          "priority": 200
+        },
+        {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": true,
+          "cue_count": 2213,
+          "first_start": 11.162,
+          "last_end": 9940.062,
+          "encoding": "utf-16",
+          "timing_verified": false,
+          "format": "srt",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.969,
+          "bilingual_ratio": 0.858,
+          "provider": "subf2m",
+          "filename": "Interstellar.2014.IMAX.720p.Bluray.x264.DTS-EVO.chs&eng.srt",
+          "priority": 300
+        },
+        {
+          "accepted": true,
+          "language": "chi",
+          "bilingual": false,
+          "cue_count": 518,
+          "first_start": 12.888,
+          "last_end": 2056.473,
+          "encoding": "utf-8-sig",
+          "timing_verified": false,
+          "format": "srt",
+          "reasons": [],
+          "warnings": [
+            "video_timing_unverified"
+          ],
+          "chinese_ratio": 0.977,
+          "bilingual_ratio": 0.0,
+          "provider": "addic7ed",
+          "filename": "Physical.S01E01.srt",
+          "priority": 200
+        }
+      ]
+    },
+    "r3sub_caption_check": {
+      "source_page": "https://www.r3sub.com/show.php?id=rVshnE23414",
+      "preview_http_status": 200,
+      "preview_response_bytes": 123980,
+      "normalization": "HTML entity decoding and each <br /> plus optional following newline converted to one newline; no dialogue or timing modification",
+      "normalized_bytes": 80612,
+      "normalized_sha256": "293e6672a9515de38cad0078a2a51e831f8d414ff27dcd3723d237ba06f06959",
+      "quality": {
+        "accepted": true,
+        "language": "chi",
+        "bilingual": false,
+        "cue_count": 1398,
+        "first_start": 76.167,
+        "last_end": 5562.833,
+        "encoding": "utf-8",
+        "timing_verified": false,
+        "format": "srt",
+        "reasons": [],
+        "warnings": [
+          "video_timing_unverified"
+        ],
+        "chinese_ratio": 0.895,
+        "bilingual_ratio": 0.001
+      },
+      "priority": 200,
+      "zip_download_verified": false,
+      "initial_recheck": "A naive br-to-newline replacement retained the existing following newline, doubled all line breaks, and was correctly rejected as malformed SRT; corrected export normalization used here."
+    },
+    "anime_downloads": [
+      {
+        "source": "bipy/Anime-Subtitles",
+        "name": "AIR 2005 [BD 1920x1080 VFR HEVC-yuv444p10 FLAC] - yan04000985/AIR 2005 EP01 [BD 1920x1080 VFR HEVC-yuv444p10 FLAC] - yan04000985.ass",
+        "url": "https://raw.githubusercontent.com/bipy/Anime-Subtitles/master/AIR%202005%20%5BBD%201920x1080%20VFR%20HEVC-yuv444p10%20FLAC%5D%20-%20yan04000985/AIR%202005%20EP01%20%5BBD%201920x1080%20VFR%20HEVC-yuv444p10%20FLAC%5D%20-%20yan04000985.ass",
+        "http_status": 200,
+        "content_type": "text/plain; charset=utf-8",
+        "bytes": 90283,
+        "sha256": "e9e70389eff04e89e62f7373f3ffbcd3cac08391cebfc97e5abc4b4a7c775dc4",
+        "dialogue_lines": 914,
+        "has_events": true,
+        "kana_dialogue_lines": 454
+      },
+      {
+        "source": "foxofice/sub_share",
+        "name": "subs_list/animation/1970/(1970.4.1)明日之丈 第1季/BD/冷番补完字幕组/[冷番补完][明日之丈][あしたのジョー][01][480P][简体外挂].ass",
+        "url": "https://raw.githubusercontent.com/foxofice/sub_share/master/subs_list/animation/1970/%281970.4.1%29%E6%98%8E%E6%97%A5%E4%B9%8B%E4%B8%88%20%E7%AC%AC1%E5%AD%A3/BD/%E5%86%B7%E7%95%AA%E8%A1%A5%E5%AE%8C%E5%AD%97%E5%B9%95%E7%BB%84/%5B%E5%86%B7%E7%95%AA%E8%A1%A5%E5%AE%8C%5D%5B%E6%98%8E%E6%97%A5%E4%B9%8B%E4%B8%88%5D%5B%E3%81%82%E3%81%97%E3%81%9F%E3%81%AE%E3%82%B8%E3%83%A7%E3%83%BC%5D%5B01%5D%5B480P%5D%5B%E7%AE%80%E4%BD%93%E5%A4%96%E6%8C%82%5D.ass",
+        "http_status": 200,
+        "content_type": "text/plain; charset=utf-8",
+        "bytes": 39390,
+        "sha256": "84501230e469f67bbc1872405229fcffef326609726c9d575af9eb135efd9936",
+        "dialogue_lines": 391,
+        "has_events": true,
+        "kana_dialogue_lines": 42
+      },
+      {
+        "source": "MingYSub/SubsArchive",
+        "name": "Archive/Hokkyoku Hyakkaten no Concierge-san/[MingY] Hokkyoku Hyakkaten no Concierge-san [Movie].CHS.ass",
+        "url": "https://raw.githubusercontent.com/MingYSub/SubsArchive/main/Archive/Hokkyoku%20Hyakkaten%20no%20Concierge-san/%5BMingY%5D%20Hokkyoku%20Hyakkaten%20no%20Concierge-san%20%5BMovie%5D.CHS.ass",
+        "http_status": 200,
+        "content_type": "text/plain; charset=utf-8",
+        "bytes": 454860,
+        "sha256": "09394b64621a0dae33799b98dd027f7a1ee1f14e5beb0bd981076b155268fcd1",
+        "dialogue_lines": 1091,
+        "has_events": true,
+        "kana_dialogue_lines": 37
+      },
+      {
+        "source": "Nekomoekissaten-SUB/Nekomoekissaten-Storage",
+        "name": "7dayswar/[Nekomoe kissaten] Bokura no Nanokakan Sensou [BDRip].SC.ass",
+        "url": "https://raw.githubusercontent.com/Nekomoekissaten-SUB/Nekomoekissaten-Storage/master/7dayswar/%5BNekomoe%20kissaten%5D%20Bokura%20no%20Nanokakan%20Sensou%20%5BBDRip%5D.SC.ass",
+        "http_status": 200,
+        "content_type": "text/plain; charset=utf-8",
+        "bytes": 839170,
+        "sha256": "aefcae00380630f82910464ae6e6f2272f55cad8b6bdf845033beb4223a035c0",
+        "dialogue_lines": 6342,
+        "has_events": true,
+        "kana_dialogue_lines": 72
+      },
+      {
+        "source": "HaruhanaSub/Haruhana-Storage",
+        "name": "Byousoku 5 centimeters/[Haruhana] Byousoku 5 Centimeter [Subtitles].7z",
+        "url": "https://raw.githubusercontent.com/HaruhanaSub/Haruhana-Storage/main/Byousoku%205%20centimeters/%5BHaruhana%5D%20Byousoku%205%20Centimeter%20%5BSubtitles%5D.7z",
+        "http_status": 200,
+        "content_type": "application/octet-stream",
+        "bytes": 62415,
+        "sha256": "a5d6de920e0857a188135f4f46e00780965d3111daf78184b5fcf76ebf89e20f"
+      },
+      {
+        "source": "MingYRelease",
+        "name": "Food.Court.7z",
+        "url": "https://github.com/MingYSub/SubsArchive/releases/download/202507/Food.Court.7z",
+        "http_status": 200,
+        "content_type": "application/octet-stream",
+        "bytes": 156469,
+        "sha256": "fea2bd08f8a95851a99591b7c490cc383f5555e249e61f293957d69e909a1cbb"
+      },
+      {
+        "source": "NekomoeRelease",
+        "name": "5Hanayome_BD_zho.7z",
+        "url": "https://github.com/Nekomoekissaten-SUB/Nekomoekissaten-Storage/releases/download/subtitle_pkg/5Hanayome_BD_zho.7z",
+        "http_status": 200,
+        "content_type": "application/octet-stream",
+        "bytes": 331852,
+        "sha256": "4414e00aeb2bd37d891822d1a21ddfdd056035b88cf41dd04d7440dbc71e41d6"
+      }
+    ],
+    "anime_caption_checks": [
+      {
+        "source": "bipy/Anime-Subtitles",
+        "document_count": 1,
+        "results": [
+          {
+            "accepted": false,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 459,
+            "first_start": 1.7,
+            "last_end": 1449.85,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.946,
+            "bilingual_ratio": 0.005,
+            "filename": "AIR 2005 [BD 1920x1080 VFR HEVC-yuv444p10 FLAC] - yan04000985/AIR 2005 EP01 [BD 1920x1080 VFR HEVC-yuv444p10 FLAC] - yan04000985.ass",
+            "kana_dialogue_lines": 454
+          }
+        ]
+      },
+      {
+        "source": "foxofice/sub_share",
+        "document_count": 1,
+        "results": [
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 346,
+            "first_start": 0.0,
+            "last_end": 1482.8,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.986,
+            "bilingual_ratio": 0.003,
+            "filename": "subs_list/animation/1970/(1970.4.1)明日之丈 第1季/BD/冷番补完字幕组/[冷番补完][明日之丈][あしたのジョー][01][480P][简体外挂].ass",
+            "kana_dialogue_lines": 42
+          }
+        ]
+      },
+      {
+        "source": "MingYSub/SubsArchive",
+        "document_count": 1,
+        "results": [
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 1036,
+            "first_start": 6.99,
+            "last_end": 4178.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.978,
+            "bilingual_ratio": 0.011,
+            "filename": "Archive/Hokkyoku Hyakkaten no Concierge-san/[MingY] Hokkyoku Hyakkaten no Concierge-san [Movie].CHS.ass",
+            "kana_dialogue_lines": 37
+          }
+        ]
+      },
+      {
+        "source": "Nekomoekissaten-SUB/Nekomoekissaten-Storage",
+        "document_count": 1,
+        "results": [
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 2519,
+            "first_start": 27.01,
+            "last_end": 5228.19,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.968,
+            "bilingual_ratio": 0.007,
+            "filename": "7dayswar/[Nekomoe kissaten] Bokura no Nanokakan Sensou [BDRip].SC.ass",
+            "kana_dialogue_lines": 72
+          }
+        ]
+      },
+      {
+        "source": "HaruhanaSub/Haruhana-Storage",
+        "document_count": 2,
+        "results": [
+          {
+            "accepted": false,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 754,
+            "first_start": 3.82,
+            "last_end": 3763.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.979,
+            "bilingual_ratio": 0.004,
+            "filename": "[Haruhana] Byousoku 5 centimeters [BDRip][HEVC-10bit 1080p].chs_jpn.ass",
+            "kana_dialogue_lines": 693
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 754,
+            "first_start": 3.82,
+            "last_end": 3763.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.979,
+            "bilingual_ratio": 0.004,
+            "filename": "[Haruhana] Byousoku 5 centimeters [BDRip][HEVC-10bit 1080p].cht_jpn.ass",
+            "kana_dialogue_lines": 693
+          }
+        ]
+      },
+      {
+        "source": "MingYRelease",
+        "document_count": 60,
+        "results": [
+          {
+            "accepted": false,
+            "language": "",
+            "bilingual": false,
+            "cue_count": 389,
+            "first_start": 3.86,
+            "last_end": 1403.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue",
+              "mixed_chinese_scripts"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.617,
+            "bilingual_ratio": 0.0,
+            "filename": "JPN/[MingY] Food Court de, Mata Ashita - 01.Encore.JPN.ass",
+            "kana_dialogue_lines": 397
+          },
+          {
+            "accepted": false,
+            "language": "",
+            "bilingual": false,
+            "cue_count": 389,
+            "first_start": 3.86,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue",
+              "mixed_chinese_scripts"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.622,
+            "bilingual_ratio": 0.0,
+            "filename": "JPN/[MingY] Food Court de, Mata Ashita - 01.JPN.ass",
+            "kana_dialogue_lines": 397
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 374,
+            "first_start": 3.36,
+            "last_end": 1403.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.591,
+            "bilingual_ratio": 0.0,
+            "filename": "JPN/[MingY] Food Court de, Mata Ashita - 02.Encore.JPN.ass",
+            "kana_dialogue_lines": 378
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 373,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.584,
+            "bilingual_ratio": 0.0,
+            "filename": "JPN/[MingY] Food Court de, Mata Ashita - 02.JPN.ass",
+            "kana_dialogue_lines": 377
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 464,
+            "first_start": 3.36,
+            "last_end": 1403.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.627,
+            "bilingual_ratio": 0.0,
+            "filename": "JPN/[MingY] Food Court de, Mata Ashita - 03.Encore.JPN.ass",
+            "kana_dialogue_lines": 471
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 465,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.626,
+            "bilingual_ratio": 0.0,
+            "filename": "JPN/[MingY] Food Court de, Mata Ashita - 03.JPN.ass",
+            "kana_dialogue_lines": 472
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 429,
+            "first_start": 3.36,
+            "last_end": 1403.69,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.552,
+            "bilingual_ratio": 0.0,
+            "filename": "JPN/[MingY] Food Court de, Mata Ashita - 04.Encore.JPN.ass",
+            "kana_dialogue_lines": 431
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 429,
+            "first_start": 3.36,
+            "last_end": 1403.71,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.552,
+            "bilingual_ratio": 0.0,
+            "filename": "JPN/[MingY] Food Court de, Mata Ashita - 04.JPN.ass",
+            "kana_dialogue_lines": 431
+          },
+          {
+            "accepted": false,
+            "language": "",
+            "bilingual": false,
+            "cue_count": 395,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue",
+              "mixed_chinese_scripts"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.539,
+            "bilingual_ratio": 0.0,
+            "filename": "JPN/[MingY] Food Court de, Mata Ashita - 05.Encore.JPN.ass",
+            "kana_dialogue_lines": 403
+          },
+          {
+            "accepted": false,
+            "language": "",
+            "bilingual": false,
+            "cue_count": 396,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue",
+              "mixed_chinese_scripts"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.535,
+            "bilingual_ratio": 0.0,
+            "filename": "JPN/[MingY] Food Court de, Mata Ashita - 05.JPN.ass",
+            "kana_dialogue_lines": 404
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 429,
+            "first_start": 3.36,
+            "last_end": 1412.79,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.592,
+            "bilingual_ratio": 0.0,
+            "filename": "JPN/[MingY] Food Court de, Mata Ashita - 06.Encore.JPN.ass",
+            "kana_dialogue_lines": 434
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 426,
+            "first_start": 3.36,
+            "last_end": 1384.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.589,
+            "bilingual_ratio": 0.0,
+            "filename": "JPN/[MingY] Food Court de, Mata Ashita - 06.JPN.ass",
+            "kana_dialogue_lines": 431
+          },
+          {
+            "accepted": false,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 800,
+            "first_start": 3.86,
+            "last_end": 1403.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.991,
+            "bilingual_ratio": 0.013,
+            "filename": "JPSC/[MingY] Food Court de, Mata Ashita - 01.Encore.JPSC.ass",
+            "kana_dialogue_lines": 402
+          },
+          {
+            "accepted": false,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 800,
+            "first_start": 3.86,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.991,
+            "bilingual_ratio": 0.013,
+            "filename": "JPSC/[MingY] Food Court de, Mata Ashita - 01.JPSC.ass",
+            "kana_dialogue_lines": 402
+          },
+          {
+            "accepted": false,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 388,
+            "first_start": 3.36,
+            "last_end": 1403.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.977,
+            "bilingual_ratio": 0.0,
+            "filename": "JPSC/[MingY] Food Court de, Mata Ashita - 02.Encore.JPSC.ass",
+            "kana_dialogue_lines": 378
+          },
+          {
+            "accepted": false,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 387,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.977,
+            "bilingual_ratio": 0.0,
+            "filename": "JPSC/[MingY] Food Court de, Mata Ashita - 02.JPSC.ass",
+            "kana_dialogue_lines": 377
+          },
+          {
+            "accepted": false,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 485,
+            "first_start": 3.36,
+            "last_end": 1403.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.979,
+            "bilingual_ratio": 0.002,
+            "filename": "JPSC/[MingY] Food Court de, Mata Ashita - 03.Encore.JPSC.ass",
+            "kana_dialogue_lines": 471
+          },
+          {
+            "accepted": false,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 486,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.979,
+            "bilingual_ratio": 0.002,
+            "filename": "JPSC/[MingY] Food Court de, Mata Ashita - 03.JPSC.ass",
+            "kana_dialogue_lines": 472
+          },
+          {
+            "accepted": false,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 434,
+            "first_start": 3.36,
+            "last_end": 1403.69,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.972,
+            "bilingual_ratio": 0.0,
+            "filename": "JPSC/[MingY] Food Court de, Mata Ashita - 04.Encore.JPSC.ass",
+            "kana_dialogue_lines": 431
+          },
+          {
+            "accepted": false,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 434,
+            "first_start": 3.36,
+            "last_end": 1403.71,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.972,
+            "bilingual_ratio": 0.0,
+            "filename": "JPSC/[MingY] Food Court de, Mata Ashita - 04.JPSC.ass",
+            "kana_dialogue_lines": 431
+          },
+          {
+            "accepted": false,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 472,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.958,
+            "bilingual_ratio": 0.0,
+            "filename": "JPSC/[MingY] Food Court de, Mata Ashita - 05.Encore.JPSC.ass",
+            "kana_dialogue_lines": 404
+          },
+          {
+            "accepted": false,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 473,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.958,
+            "bilingual_ratio": 0.0,
+            "filename": "JPSC/[MingY] Food Court de, Mata Ashita - 05.JPSC.ass",
+            "kana_dialogue_lines": 405
+          },
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 866,
+            "first_start": 3.36,
+            "last_end": 1412.79,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.992,
+            "bilingual_ratio": 0.0,
+            "filename": "JPSC/[MingY] Food Court de, Mata Ashita - 06.Encore.JPSC.ass",
+            "kana_dialogue_lines": 434
+          },
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 863,
+            "first_start": 3.36,
+            "last_end": 1384.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.992,
+            "bilingual_ratio": 0.0,
+            "filename": "JPSC/[MingY] Food Court de, Mata Ashita - 06.JPSC.ass",
+            "kana_dialogue_lines": 431
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 800,
+            "first_start": 3.86,
+            "last_end": 1403.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.991,
+            "bilingual_ratio": 0.013,
+            "filename": "JPTC/[MingY] Food Court de, Mata Ashita - 01.Encore.JPTC.ass",
+            "kana_dialogue_lines": 402
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 800,
+            "first_start": 3.86,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.991,
+            "bilingual_ratio": 0.013,
+            "filename": "JPTC/[MingY] Food Court de, Mata Ashita - 01.JPTC.ass",
+            "kana_dialogue_lines": 402
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 388,
+            "first_start": 3.36,
+            "last_end": 1403.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.977,
+            "bilingual_ratio": 0.0,
+            "filename": "JPTC/[MingY] Food Court de, Mata Ashita - 02.Encore.JPTC.ass",
+            "kana_dialogue_lines": 378
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 387,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.977,
+            "bilingual_ratio": 0.0,
+            "filename": "JPTC/[MingY] Food Court de, Mata Ashita - 02.JPTC.ass",
+            "kana_dialogue_lines": 377
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 485,
+            "first_start": 3.36,
+            "last_end": 1403.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.984,
+            "bilingual_ratio": 0.002,
+            "filename": "JPTC/[MingY] Food Court de, Mata Ashita - 03.Encore.JPTC.ass",
+            "kana_dialogue_lines": 471
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 486,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.984,
+            "bilingual_ratio": 0.002,
+            "filename": "JPTC/[MingY] Food Court de, Mata Ashita - 03.JPTC.ass",
+            "kana_dialogue_lines": 472
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 434,
+            "first_start": 3.36,
+            "last_end": 1403.69,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.972,
+            "bilingual_ratio": 0.0,
+            "filename": "JPTC/[MingY] Food Court de, Mata Ashita - 04.Encore.JPTC.ass",
+            "kana_dialogue_lines": 431
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 434,
+            "first_start": 3.36,
+            "last_end": 1403.71,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.972,
+            "bilingual_ratio": 0.0,
+            "filename": "JPTC/[MingY] Food Court de, Mata Ashita - 04.JPTC.ass",
+            "kana_dialogue_lines": 431
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 472,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.958,
+            "bilingual_ratio": 0.0,
+            "filename": "JPTC/[MingY] Food Court de, Mata Ashita - 05.Encore.JPTC.ass",
+            "kana_dialogue_lines": 404
+          },
+          {
+            "accepted": false,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 473,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [
+              "non_chinese_or_multilingual_dialogue"
+            ],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.958,
+            "bilingual_ratio": 0.0,
+            "filename": "JPTC/[MingY] Food Court de, Mata Ashita - 05.JPTC.ass",
+            "kana_dialogue_lines": 405
+          },
+          {
+            "accepted": true,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 867,
+            "first_start": 3.36,
+            "last_end": 1412.79,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.992,
+            "bilingual_ratio": 0.0,
+            "filename": "JPTC/[MingY] Food Court de, Mata Ashita - 06.Encore.JPTC.ass",
+            "kana_dialogue_lines": 435
+          },
+          {
+            "accepted": true,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 863,
+            "first_start": 3.36,
+            "last_end": 1384.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.992,
+            "bilingual_ratio": 0.0,
+            "filename": "JPTC/[MingY] Food Court de, Mata Ashita - 06.JPTC.ass",
+            "kana_dialogue_lines": 431
+          },
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 800,
+            "first_start": 3.86,
+            "last_end": 1403.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.991,
+            "bilingual_ratio": 0.011,
+            "filename": "SC/[MingY] Food Court de, Mata Ashita - 01.Encore.SC.ass",
+            "kana_dialogue_lines": 47
+          },
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 800,
+            "first_start": 3.86,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.991,
+            "bilingual_ratio": 0.011,
+            "filename": "SC/[MingY] Food Court de, Mata Ashita - 01.SC.ass",
+            "kana_dialogue_lines": 47
+          },
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 388,
+            "first_start": 3.36,
+            "last_end": 1403.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.977,
+            "bilingual_ratio": 0.0,
+            "filename": "SC/[MingY] Food Court de, Mata Ashita - 02.Encore.SC.ass",
+            "kana_dialogue_lines": 42
+          },
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 387,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.977,
+            "bilingual_ratio": 0.0,
+            "filename": "SC/[MingY] Food Court de, Mata Ashita - 02.SC.ass",
+            "kana_dialogue_lines": 42
+          },
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 485,
+            "first_start": 3.36,
+            "last_end": 1403.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.979,
+            "bilingual_ratio": 0.0,
+            "filename": "SC/[MingY] Food Court de, Mata Ashita - 03.Encore.SC.ass",
+            "kana_dialogue_lines": 42
+          },
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 486,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.979,
+            "bilingual_ratio": 0.0,
+            "filename": "SC/[MingY] Food Court de, Mata Ashita - 03.SC.ass",
+            "kana_dialogue_lines": 42
+          },
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 434,
+            "first_start": 3.36,
+            "last_end": 1403.69,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.972,
+            "bilingual_ratio": 0.0,
+            "filename": "SC/[MingY] Food Court de, Mata Ashita - 04.Encore.SC.ass",
+            "kana_dialogue_lines": 42
+          },
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 434,
+            "first_start": 3.36,
+            "last_end": 1403.71,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.972,
+            "bilingual_ratio": 0.0,
+            "filename": "SC/[MingY] Food Court de, Mata Ashita - 04.SC.ass",
+            "kana_dialogue_lines": 42
+          },
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 472,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.958,
+            "bilingual_ratio": 0.0,
+            "filename": "SC/[MingY] Food Court de, Mata Ashita - 05.Encore.SC.ass",
+            "kana_dialogue_lines": 43
+          },
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 473,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.958,
+            "bilingual_ratio": 0.0,
+            "filename": "SC/[MingY] Food Court de, Mata Ashita - 05.SC.ass",
+            "kana_dialogue_lines": 43
+          },
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 866,
+            "first_start": 3.36,
+            "last_end": 1412.79,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.992,
+            "bilingual_ratio": 0.0,
+            "filename": "SC/[MingY] Food Court de, Mata Ashita - 06.Encore.SC.ass",
+            "kana_dialogue_lines": 42
+          },
+          {
+            "accepted": true,
+            "language": "chi",
+            "bilingual": false,
+            "cue_count": 863,
+            "first_start": 3.36,
+            "last_end": 1384.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.992,
+            "bilingual_ratio": 0.0,
+            "filename": "SC/[MingY] Food Court de, Mata Ashita - 06.SC.ass",
+            "kana_dialogue_lines": 42
+          },
+          {
+            "accepted": true,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 800,
+            "first_start": 3.86,
+            "last_end": 1403.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.991,
+            "bilingual_ratio": 0.011,
+            "filename": "TC/[MingY] Food Court de, Mata Ashita - 01.Encore.TC.ass",
+            "kana_dialogue_lines": 47
+          },
+          {
+            "accepted": true,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 800,
+            "first_start": 3.86,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.991,
+            "bilingual_ratio": 0.011,
+            "filename": "TC/[MingY] Food Court de, Mata Ashita - 01.TC.ass",
+            "kana_dialogue_lines": 47
+          },
+          {
+            "accepted": true,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 388,
+            "first_start": 3.36,
+            "last_end": 1403.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.977,
+            "bilingual_ratio": 0.0,
+            "filename": "TC/[MingY] Food Court de, Mata Ashita - 02.Encore.TC.ass",
+            "kana_dialogue_lines": 42
+          },
+          {
+            "accepted": true,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 387,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.977,
+            "bilingual_ratio": 0.0,
+            "filename": "TC/[MingY] Food Court de, Mata Ashita - 02.TC.ass",
+            "kana_dialogue_lines": 42
+          },
+          {
+            "accepted": true,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 485,
+            "first_start": 3.36,
+            "last_end": 1403.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.984,
+            "bilingual_ratio": 0.0,
+            "filename": "TC/[MingY] Food Court de, Mata Ashita - 03.Encore.TC.ass",
+            "kana_dialogue_lines": 42
+          },
+          {
+            "accepted": true,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 486,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.984,
+            "bilingual_ratio": 0.0,
+            "filename": "TC/[MingY] Food Court de, Mata Ashita - 03.TC.ass",
+            "kana_dialogue_lines": 42
+          },
+          {
+            "accepted": true,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 434,
+            "first_start": 3.36,
+            "last_end": 1403.69,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.972,
+            "bilingual_ratio": 0.0,
+            "filename": "TC/[MingY] Food Court de, Mata Ashita - 04.Encore.TC.ass",
+            "kana_dialogue_lines": 42
+          },
+          {
+            "accepted": true,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 434,
+            "first_start": 3.36,
+            "last_end": 1403.71,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.972,
+            "bilingual_ratio": 0.0,
+            "filename": "TC/[MingY] Food Court de, Mata Ashita - 04.TC.ass",
+            "kana_dialogue_lines": 42
+          },
+          {
+            "accepted": true,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 472,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.958,
+            "bilingual_ratio": 0.0,
+            "filename": "TC/[MingY] Food Court de, Mata Ashita - 05.Encore.TC.ass",
+            "kana_dialogue_lines": 43
+          },
+          {
+            "accepted": true,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 473,
+            "first_start": 3.36,
+            "last_end": 1403.76,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.958,
+            "bilingual_ratio": 0.0,
+            "filename": "TC/[MingY] Food Court de, Mata Ashita - 05.TC.ass",
+            "kana_dialogue_lines": 43
+          },
+          {
+            "accepted": true,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 867,
+            "first_start": 3.36,
+            "last_end": 1412.79,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.992,
+            "bilingual_ratio": 0.0,
+            "filename": "TC/[MingY] Food Court de, Mata Ashita - 06.Encore.TC.ass",
+            "kana_dialogue_lines": 42
+          },
+          {
+            "accepted": true,
+            "language": "cht",
+            "bilingual": false,
+            "cue_count": 863,
+            "first_start": 3.36,
+            "last_end": 1384.74,
+            "encoding": "utf-8-sig",
+            "timing_verified": false,
+            "format": "ass",
+            "reasons": [],
+            "warnings": [
+              "video_timing_unverified"
+            ],
+            "chinese_ratio": 0.992,
+            "bilingual_ratio": 0.0,
+            "filename": "TC/[MingY] Food Court de, Mata Ashita - 06.TC.ass",
+            "kana_dialogue_lines": 42
+          }
+        ]
+      },
+      {
+        "source": "NekomoeRelease",
+        "error": "archive_compression_ratio"
+      }
+    ],
+    "kitauji_archive": {
+      "member_count": 24,
+      "subtitle_count": 24,
+      "uncompressed_bytes": 28073816,
+      "first_names": [
+        "ep1_tc.ass",
+        "ep1.ass",
+        "ep10_tc.ass",
+        "ep10.ass",
+        "ep11_tc.ass",
+        "ep11.ass"
+      ]
+    }
+  }
+}

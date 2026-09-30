@@ -294,10 +294,12 @@ class RuntimeBroker:
         idempotency_key = str(request.get("idempotency_key") or "")
         if method == "capability.call":
             capability = str(params.get("capability") or "")
-            if capability not in identity.manifest.requires:
+            if capability not in (
+                identity.manifest.requires + identity.manifest.optional_requires
+            ):
                 raise BrokerError(
                     "capability_not_declared",
-                    f"Feature did not declare required capability: {capability}",
+                    f"Feature did not declare capability: {capability}",
                 )
             try:
                 return await self.router.call(
@@ -407,7 +409,7 @@ class RuntimeBroker:
             operation_id = str(params.get("operation_id") or "").strip()
             role = str(params.get("role") or "").strip()
             if not operation_id or role not in {
-                "identity", "search", "download", "rename"
+                "identity", "search", "download", "caption", "rename"
             }:
                 raise BrokerError(
                     "invalid_segment",

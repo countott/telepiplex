@@ -2,6 +2,20 @@ import unittest
 
 
 class PluginManifestTest(unittest.TestCase):
+    def test_optional_capabilities_are_explicit_but_not_required(self):
+        from app.runtime.plugin_contract import ContractError
+        from app.runtime.plugin_manifest import PluginManifest
+
+        value = self._value()
+        value["optional_requires"] = ["subtitle.caption"]
+        parsed = PluginManifest.from_mapping(value)
+        self.assertEqual(parsed.optional_requires, ("subtitle.caption",))
+        self.assertNotIn("subtitle.caption", parsed.requires)
+        for optional in (["runtime.clock"], ["subtitle.caption", "subtitle.caption"], "subtitle.caption"):
+            value["optional_requires"] = optional
+            with self.assertRaises(ContractError):
+                PluginManifest.from_mapping(value)
+
     def _value(self):
         return {
             "plugin_id": "echo",

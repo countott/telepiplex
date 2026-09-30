@@ -24,7 +24,7 @@ class FailingProviderClient:
         )
 
 
-def manifest(plugin_id, *, provides=(), requires=(), publishes=(), subscribes=()):
+def manifest(plugin_id, *, provides=(), requires=(), optional_requires=(), publishes=(), subscribes=()):
     from app.runtime.plugin_manifest import PluginManifest
 
     return PluginManifest.from_mapping({
@@ -35,6 +35,7 @@ def manifest(plugin_id, *, provides=(), requires=(), publishes=(), subscribes=()
         "entry_point": f"telepiplex_{plugin_id.replace('-', '_')}.runtime:main",
         "provides": [{"name": name, "exclusive": True} for name in provides],
         "requires": list(requires),
+        "optional_requires": list(optional_requires),
         "subscribes": list(subscribes),
         "publishes": list(publishes),
         "commands": [],
@@ -48,6 +49,24 @@ def manifest(plugin_id, *, provides=(), requires=(), publishes=(), subscribes=()
 
 
 class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_optional_caption_is_callable_when_present_and_does_not_block_rename(self):
+        from telepiplex_plugin_sdk import HostClient, FeatureError
+
+        rename = manifest("rename", provides=("media.rename",), optional_requires=("subtitle.caption",))
+        self.router.activate("rename", rename, ProviderClient())
+        self.assertNotIn("rename", self.router.snapshot.blocked)
+        self.broker.register("rename", "rename-token", rename)
+        client = HostClient(self.broker.socket_path, "rename-token")
+        with self.assertRaises(FeatureError) as raised:
+            await client.call_capability("subtitle.caption", "prepare_download", {}, deadline=1)
+        self.assertEqual(raised.exception.code, "capability_unavailable")
+        provider = ProviderClient()
+        self.router.activate("caption", manifest("caption", provides=("subtitle.caption",), requires=("media.rename",)), provider)
+        await client.call_capability("subtitle.caption", "prepare_download", {"test": True}, deadline=1)
+        self.assertEqual(provider.calls[0][1]["payload"], {"test": True})
+        self.router.deactivate("caption")
+        self.assertNotIn("rename", self.router.snapshot.blocked)
+
     async def asyncSetUp(self):
         from app.runtime.capability_router import CapabilityRouter
         from app.runtime.interaction_coordinator import InteractionCoordinator

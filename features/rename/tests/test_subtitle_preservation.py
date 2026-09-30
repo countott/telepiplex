@@ -15,10 +15,10 @@ def _series_plan(tree):
     )
 
 
-def test_all_original_language_markers_use_fixed_chi_suffix():
+def test_traditional_marker_is_distinct_and_unknown_language_remains_unknown():
     markers = [
         ("CHS", "chi"),
-        ("CHT", "chi"),
+        ("CHT", "cht"),
         ("CHS&ENG", "chi"),
         ("ENG", "eng"),
         ("JPN", "jpn"),
@@ -42,9 +42,10 @@ def test_all_original_language_markers_use_fixed_chi_suffix():
 
     assert len(plan["operations"]) == len(markers)
     assert {item["language_code"] for item in plan["operations"]} == {
-        "unknown"
+        "chi", "cht", "unknown"
     }
-    assert all(".chi.srt" in item["rename_to"] for item in plan["operations"])
+    assert sum(item["rename_to"].endswith(".cht.srt") for item in plan["operations"]) == 1
+    assert all(item["rename_to"].endswith((".chi.srt", ".cht.srt")) for item in plan["operations"])
     assert plan["discard_sources"] == []
     assert plan["kept_sources"] == []
     assert plan["unresolved_sources"] == []
@@ -87,9 +88,9 @@ def test_duplicate_language_and_extension_get_stable_variant_names():
         item["source_id"]: item["rename_to"]
         for item in forward["operations"]
     } == {
-        "source-a": "Show S01E01.chi.srt",
-        "source-b": "Show S01E01.variant-02.chi.srt",
-        "source-c": "Show S01E01.variant-03.chi.srt",
+        "source-a": "Show S01E01.cht.srt",
+        "source-b": "Show S01E01.chi.srt",
+        "source-c": "Show S01E01.variant-02.chi.srt",
     }
     assert {
         item["source_id"]: item["rename_to"]
@@ -157,11 +158,11 @@ def test_movie_subtitle_duplicates_keep_real_extensions_and_variants():
     } == {
         "ass": "Movie.chi.ass",
         "srt-a": "Movie.chi.srt",
-        "srt-b": "Movie.variant-02.chi.srt",
+        "srt-b": "Movie.cht.srt",
     }
 
 
-def test_language_evidence_never_claims_detected_language():
+def test_language_marker_evidence_does_not_claim_bilingual_content_detection():
     evidence = collect_subtitle_evidence([{
         "file_id": "traditional",
         "relative_path": "Show.S01E01.CHT.srt",
@@ -173,8 +174,8 @@ def test_language_evidence_never_claims_detected_language():
     }])
 
     assert [item["language_code"] for item in evidence] == [
-        "unknown",
-        "unknown",
+        "cht",
+        "chi",
     ]
     assert [item["subtitle_variant"] for item in evidence] == [
         "unknown",

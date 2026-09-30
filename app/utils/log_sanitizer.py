@@ -18,6 +18,7 @@ _SENSITIVE_KEY_PARTS = (
     "accesskey",
 )
 _SENSITIVE_EXACT_KEYS = {
+    "content_base64", "chunk_base64", "normalized_text",
     "link",
     "url",
     "endpoint",

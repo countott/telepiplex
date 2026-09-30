@@ -1,14 +1,26 @@
 plugin_id: caption
 name: caption
-version: 0.1.6
-host_api: ">=1.2,<2.0"
+version: 1.1.0
+host_api: ">=1.9,<2.0"
 entry_point: telepiplex_caption.runtime:main
-provides: []
-requires: []
+provides:
+  - name: subtitle.caption
+    exclusive: true
+requires:
+  - media.search
+  - media.rename
+  - storage.provider
 subscribes: []
 publishes: []
-commands: []
-callbacks: []
+commands:
+  - name: caption
+    description: 查找外挂字幕或扫描媒体库补字幕
+    menu_visible: true
+  - name: caption_config
+    description: 配置外挂字幕来源与保存目录
+    menu_visible: false
+callbacks:
+  - caption
 config_schema_version: 1
 state_schema_version: 1
 source:

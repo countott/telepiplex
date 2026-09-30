@@ -42,6 +42,8 @@ class Open115Client:
         ("POST", "/open/ufile/copy"): "storage.mutation",
         ("POST", "/open/ufile/delete"): "storage.mutation",
         ("POST", "/open/ufile/move"): "storage.mutation",
+        ("POST", "/open/upload/init"): "storage.mutation",
+        ("GET", "/open/upload/get_token"): "storage.read",
     }
     _MUTATION_CLASSES = {
         "offline.mutation",
@@ -59,6 +61,8 @@ class Open115Client:
         ("POST", "/open/ufile/copy"): "move_files",
         ("POST", "/open/ufile/delete"): "delete_file",
         ("POST", "/open/ufile/move"): "move_files",
+        ("POST", "/open/upload/init"): "upload_subtitle",
+        ("GET", "/open/upload/get_token"): "upload_token",
     }
 
     def __init__(

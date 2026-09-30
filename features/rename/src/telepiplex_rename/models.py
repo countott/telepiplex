@@ -19,6 +19,7 @@ class DownloadCompletedEvent:
     snapshot_complete: bool | None = True
     file_tree_transport: str = ""
     snapshot_verified: bool = False
+    caption_tree_verified: bool = False
     storage: Any = None
 
 

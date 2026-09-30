@@ -19,7 +19,7 @@ class SubtitlePlanningTest(unittest.TestCase):
 
         evidence = collect_subtitle_evidence(tree)
 
-        self.assertEqual(SUBTITLE_EXTENSIONS, {".srt", ".ass", ".sup", ".vtt"})
+        self.assertEqual(SUBTITLE_EXTENSIONS, {".srt", ".ass", ".ssa", ".sup", ".vtt"})
         self.assertEqual([item["extension"] for item in evidence], [
             ".srt", ".ass", ".sup", ".vtt",
         ])
@@ -132,7 +132,7 @@ class SubtitlePlanningTest(unittest.TestCase):
         )
         self.assertEqual(plan["discard_sources"], [])
 
-    def test_all_original_language_markers_use_fixed_chi_suffix(self):
+    def test_traditional_language_marker_keeps_cht_suffix(self):
         tree = [{
             "name": "Show.S01E01.CHT.ass",
             "relative_path": "Show.S01E01.CHT.ass",
@@ -158,7 +158,7 @@ class SubtitlePlanningTest(unittest.TestCase):
         self.assertEqual(
             {item["rename_to"] for item in plan["operations"]},
             {
-                "Show S01E01.chi.ass",
+                "Show S01E01.cht.ass",
                 "Show S01E01.chi.srt",
                 "Show S01E01.chi.sup",
             },

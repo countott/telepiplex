@@ -10,7 +10,7 @@ import unicodedata
 from .media_naming import parse_episode_marker, sanitize_target_name
 
 
-SUBTITLE_EXTENSIONS = {".srt", ".ass", ".sup", ".vtt"}
+SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".sup", ".vtt"}
 
 _SEASON = re.compile(
     r"(?i)(?:^|[ ._\-/])(?:S|Season[ ._-]*)(\d{1,2})(?:$|[ ._\-/])"
@@ -19,6 +19,25 @@ _BARE_EPISODE = re.compile(
     r"(?i)^(?:E|EP|Episode[ ._-]*)?(\d{1,4})(?=$|[ ._\-])"
 )
 SUBTITLE_FILENAME_LANGUAGE = "chi"
+
+
+def subtitle_language(node: dict) -> str:
+    """Keep explicit traditional Chinese evidence through the Rename boundary."""
+    explicit = str(node.get("language_code") or node.get("language") or "").casefold()
+    if explicit in {"cht", "zh-hant", "zht", "zh-tw", "zh-hk"}:
+        return "cht"
+    if explicit in {"chi", "chs", "zh-hans", "zho", "zh-cn"}:
+        return "chi"
+    name = _text(str(node.get("name") or node.get("relative_path") or "")).casefold()
+    if re.search(r"(?:^|[. _\-\[\]])(?:cht|zht|zh-hant|zh-tw|zh-hk|big5)(?:$|[.& _\-\[\]])|繁[體体中]", name):
+        return "cht"
+    if re.search(r"(?:^|[. _\-\[\]])(?:chi|chs|zho|zh-hans|zh-cn)(?:$|[.& _\-\[\]])|简[體体中]", name):
+        return "chi"
+    return "unknown"
+
+
+def _filename_language(node):
+    return "cht" if subtitle_language(node) == "cht" else "chi"
 
 
 def _text(value: str) -> str:
@@ -76,7 +95,7 @@ def collect_subtitle_evidence(file_tree: list[dict]) -> list[dict]:
         evidence.append({
             **node,
             "episode_key": _episode_key(node["relative_path"]),
-            "language_code": "unknown",
+            "language_code": subtitle_language(node),
             "language_profile": "unknown",
             "subtitle_variant": "unknown",
         })
@@ -95,7 +114,7 @@ def _operation(
     target_stem = sanitize_target_name(target_stem)
     variant = f".variant-{variant_index:02d}" if variant_index > 1 else ""
     rename_to = (
-        f"{target_stem}{variant}.{SUBTITLE_FILENAME_LANGUAGE}"
+        f"{target_stem}{variant}.{_filename_language(node)}"
         f"{node['extension']}"
     )
     source_path = str(node.get("path") or "") or (
@@ -114,7 +133,7 @@ def _operation(
         "target_relative_path": rename_to,
         "final_path": f"{str(target_dir).rstrip('/')}/{rename_to}",
         "language_profile": "unknown",
-        "language_code": "unknown",
+        "language_code": subtitle_language(node),
         "subtitle_variant": "unknown",
         "extension": node["extension"],
         "source_sha1": str(
@@ -149,6 +168,7 @@ def _plan_subtitles(
         grouped[(
             grouping_key(item),
             item["extension"],
+            _filename_language(item),
         )].append(item)
 
     planned = []

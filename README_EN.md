@@ -38,11 +38,11 @@ The automatic task ends with file organization. Plex scans are initiated separat
 | `search` | Media confirmation, metadata enrichment, and release search | `download` | [Module guide](features/search/README.md) |
 | `rename` | Organize downloads and existing media on 115 | `download`, `search` | [Module guide](features/rename/README.md) |
 | `sync` | Manually manage Plex scans and metadata enhancements | None | [Module guide](features/sync/README.md) |
-| `caption` | Placeholder for package, installation, and startup verification | None | [Module guide](features/caption/README.md) |
+| `caption` | Chinese external subtitles after download, from a library, or by query | `download`, `search`, `rename` | [Module guide](features/caption/README.md) |
 
-When upgrading from SDK versions before 2.2.0, upgrade Host, then installed download/rename/sync consumers, and search last. Caption updates its SDK dependency only. Old v2 contracts remain readable; the paired naming fields require SDK 2.2.0 consumers. Host API is now 1.8.
+Caption 1.0.0 requires Host API 1.9 and the updated Download, Search, and Rename Features listed below. SDK 2.2.1 is bundled into each Feature.
 
-For the complete search and organization flow, install `download → search → rename` in that order. Install `sync` as needed. `caption` currently verifies packaging, installation, and startup only; it does not search for or process subtitles.
+For the complete search and organization flow, install `download → search → rename` in that order. Install `sync` as needed. Install `caption` after Rename to add external subtitle lookup before organization, `/caption scan`, and standalone `/caption Title Year` queries.
 
 ## Quick start
 
@@ -260,27 +260,25 @@ Local builds do not change the official `ghcr.io/countott/telepiplex:latest` ima
 
 The Host owns Telegram access, command routing, durable tasks and events, configuration, and module lifecycles. Each Feature runs in its own Python virtual environment and subprocess. Capabilities are called over Unix Domain Sockets under the temporary `/tmp/telepiplex` directory. Business source is not bundled into the Host image, and Features do not directly import one another.
 
-The current Host API 1.8 adds disposable post-rename choices with one-time consumption and a durable 60-second expiry. It retains durable operation message segments from Host API 1.7, identity/stage milestones from Host API 1.6, and versioned configuration migrations from Host API 1.5. Each module declares its `host_api` range and capability dependencies in `manifest.yaml`.
+The current Host API 1.9 adds optional capability dependencies and caption message segments. Host API 1.8 provides disposable post-rename choices with one-time consumption and a durable 60-second expiry. It retains durable operation message segments from Host API 1.7, identity/stage milestones from Host API 1.6, and versioned configuration migrations from Host API 1.5. Each module declares its `host_api` range and capability dependencies in `manifest.yaml`.
 
 ### Independent releases
 
 #### Current source versions
 
-This patch ends movie tasks after rename and offers next-step choices only for series. Identity confirmation runs in the background and rejects duplicate callbacks. Confirmed identity messages use the selected poster or a title placeholder when no image is available; failure to seal the message stops further searching. These are source versions; available updates depend on published Releases and the Feature catalog.
+Caption 1.1.0 expands free Chinese subtitle providers, finished subtitle-group catalogs, local archives, direct detail links, bounded retrieval and content checks. Search 2.6.0 supplies reference durations tied to confirmed identities. The three workflows, chi/cht naming and existing Plex entry remain intact. These source versions have not been published automatically.
 
 | Component | Version |
 | --- | --- |
-| Host | `3.8.2` |
-| SDK | `2.2.0` |
-| `download` | `2.1.2` |
-| `search` | `2.4.1` |
-| `rename` | `2.3.1` |
-| `sync` | `2.1.0` |
-| `caption` | `0.1.6` |
+| Host | `3.9.0` |
+| SDK | `2.2.1` |
+| `download` | `2.2.0` |
+| `search` | `2.6.0` |
+| `rename` | `2.4.0` |
+| `sync` | `2.1.1` |
+| `caption` | `1.1.0` |
 
-Update Host to 3.8.2 first, then Search to 2.4.1 and Rename to 2.3.1 before starting new tasks. Host API remains 1.8 and SDK remains 2.2.0; download, sync, and caption are unchanged in this patch. Existing frozen task metadata is not rewritten. See [post-rename choices](docs/post-rename-next-actions.md).
-
-When upgrading from SDK versions before 2.2.0, update Host first, then installed download, rename, and sync consumers, and finally search. Update caption for the matching SDK dependency. The SDK is bundled during builds and needs no separate installation. Existing v2 contracts remain readable; the new naming fields must appear together and pass validation. Older consumers reject these fields, so complete consumer updates before submitting new tasks. Host API is now 1.8.
+Upgrade Host 3.9.0, Download 2.2.0, Search 2.6.0, Rename 2.4.0, then Caption 1.1.0 before starting new tasks. Sync 2.1.1 only updates its SDK dependency. Host API is 1.9; SDK 2.2.1 is bundled with Features. See [Caption](features/caption/README.md).
 
 `main` is the active source branch for Core/Host and all five Features. The Host uses `telepiplex-v<semver>` tags, with release commits verified as contained in remote `main`. The release workflow publishes `ghcr.io/<owner>/telepiplex:<semver>` and `latest`, then creates a GitHub Release titled `Telepiplex <semver>` for that tag explicitly marked **Latest**. An ordinary `main` push does not update official images or Latest entry points.
 

@@ -18,7 +18,7 @@ from .file_facts import (
 _VIDEO = re.compile(
     r"(?i)\.(?:mkv|mp4|avi|mov|m4v|ts|m2ts|wmv|flv|webm)$"
 )
-_SUBTITLE = re.compile(r"(?i)\.(?:srt|ass|sup|vtt)$")
+_SUBTITLE = re.compile(r"(?i)\.(?:srt|ass|ssa|sup|vtt)$")
 _EPISODE = re.compile(r"(?i)\bS(\d{1,2})E(\d{1,4})\b")
 _EPISODE_CHAIN = re.compile(
     r"(?i)\bS(\d{1,2})((?:E\d{1,4}){2,})(?!\d)"

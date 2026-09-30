@@ -55,6 +55,8 @@ _STORAGE_METHODS = {
     "get_files_from_dir",
     "get_file_tree",
     "get_tree_snapshot_page", "acknowledge_tree_snapshot",
+    "upload_subtitle_chunk",
+    "wait_subtitle_uploads",
 }
 
 
@@ -129,6 +131,7 @@ class DownloadFeature:
         self.operations = {}
         self.jobs = jobs
         self.config_store = config_store
+        self._subtitle_upload_tasks = set()
 
     def bind_runtime(self, runtime):
         self.runtime = runtime
@@ -149,6 +152,34 @@ class DownloadFeature:
         if method not in _STORAGE_METHODS:
             raise FeatureError("method_not_allowed", f"storage method is not allowed: {method}")
         payload = request.get("payload") or {}
+        if method == "wait_subtitle_uploads":
+            # A timed-out caption RPC may still have an OSS write in a worker.
+            # Drain all accepted transfers before Rename takes a new snapshot.
+            try:
+                async with asyncio.timeout(150):
+                    while self._subtitle_upload_tasks:
+                        await asyncio.shield(asyncio.gather(*tuple(self._subtitle_upload_tasks), return_exceptions=True))
+                return {"value": {"settled": True}}
+            except TimeoutError:
+                raise FeatureError("subtitle_upload_busy", "subtitle cloud write has not settled; media organization must wait") from None
+        if method == "upload_subtitle_chunk":
+            from .subtitle_upload import receive_chunk
+            if not isinstance(payload, dict):
+                raise FeatureError("invalid_request", "invalid subtitle upload payload")
+            task = asyncio.create_task(asyncio.to_thread(receive_chunk, self.jobs, self.client, payload))
+            self._subtitle_upload_tasks.add(task)
+            task.add_done_callback(self._subtitle_upload_tasks.discard)
+            try:
+                value = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # Cancellation stops new chunks, not an already accepted upload.
+                # Keep that mutation visible to the barrier until it settles.
+                try:
+                    await asyncio.shield(task)
+                except Exception:
+                    pass
+                raise
+            return {"value": value}
         args = payload.get("args") or []
         kwargs = payload.get("kwargs") or {}
         if not isinstance(args, list) or not isinstance(kwargs, dict):

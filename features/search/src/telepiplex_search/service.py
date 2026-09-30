@@ -94,6 +94,7 @@ from .input_contract import classify_search_input, contains_url
 from .identity_presentation import build_identity_presentation
 from .log_sanitizer import sanitize_log_value
 from .metadata_resolutions import MetadataResolutionStore
+from .subtitle_context import build_subtitle_context
 from .content_cache import ContentCache, cache_key, normalized_query, rebind_metadata
 from .media_metadata_v2 import project_confirmed_media_metadata_v2
 from .errors import SearchPlanningError
@@ -1451,6 +1452,9 @@ class SearchFeature:
             "status": "resolved",
             "media_metadata": contract,
             "presentation": build_identity_presentation(private_contract),
+            # Caption needs the original language to choose its priority policy.
+            # Keep enrichment outside the frozen minimal v2 naming identity.
+            "subtitle_context": build_subtitle_context(private_contract, selected),
         }
         if method == "confirm_metadata":
             self.metadata_resolution_store.cache_result(

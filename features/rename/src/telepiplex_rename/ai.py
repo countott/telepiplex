@@ -33,7 +33,7 @@ TVDB_EPISODE_PLAN_PROMPT = """你是媒体库剧集整理助手。根据输入�
 10. 只映射能够从 file_tree 精确定位的文件；无法可靠映射的文件不要写入 episode_map。
 11. 额外、无法确认或不属于目标作品的文件不要映射；禁止决定删除、丢弃或移动这些文件。
 12. 外挂字幕只允许写入 subtitle_map，且只补 season_number 和 episode_number；禁止判断字幕语言、禁止决定保留或丢弃字幕。
-13. subtitle_map 的 source_file 必须精确等于 file_tree 中的 .srt、.ass、.sup 或 .vtt 相对路径；无法可靠归属时不要映射。
+13. subtitle_map 的 source_file 必须精确等于 file_tree 中的 .srt、.ass、.ssa、.sup 或 .vtt 相对路径；无法可靠归属时不要映射。
 
 JSON结构：
 {

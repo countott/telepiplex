@@ -1,8 +1,8 @@
 # rename Feature
 
-当前版本：`2.3.1`；SDK：`2.2.0`；要求 Host API 1.8 / Host `3.8.0`。本次仅为剧集在完整整理成功后的终态回执中提供下一步上下文；配合 Host `3.8.2`，封存完成记录后单独显示临时选择卡，电影直接结束。选择卡的点击、退出和删除不会改写成功回执或重放文件操作；失败、清理未完成和部分成功不提供该卡。
+当前版本：`2.4.0`；SDK：`2.2.1`；要求 Host API 1.9 / Host `3.9.0`。新增 `media.rename` 字幕命名、放置和媒体库扫描能力，并在下载整理前可选调用 caption；成功整理后的 Plex 链路保持原样。
 
-`features/rename` 是 Telepiplex 的独立媒体整理 Feature。rename 2.3.1 消费 durable `download.completed`，并在任何文件副作用前严格校验 `media_metadata v2`；v1 事件直接拒绝，不再转换或迁移。v2 合同保持不可变，实际整理结果写入独立 `organization_result`，不会把 Rename 观察到的文件事实反写为作品元数据。每次恢复还会读取 Host operation snapshot；任务不存在、已终态或 handoff 未被 Rename 接受时失败关闭，避免脱离全链路所有权后继续改动文件。Rename 的进度和终态只覆写一条 `rename` 消息，终态回执持久化后只重试消息段封存，不重复上报终态。
+`features/rename` 是 Telepiplex 的独立媒体整理 Feature。rename 2.4.0 消费 durable `download.completed`，并在任何文件副作用前严格校验 `media_metadata v2`；v1 事件直接拒绝，不再转换或迁移。v2 合同保持不可变，实际整理结果写入独立 `organization_result`，不会把 Rename 观察到的文件事实反写为作品元数据。每次恢复还会读取 Host operation snapshot；任务不存在、已终态或 handoff 未被 Rename 接受时失败关闭，避免脱离全链路所有权后继续改动文件。Rename 的进度和终态只覆写一条 `rename` 消息，终态回执持久化后只重试消息段封存，不重复上报终态。
 
 它也支持 Telegram `/rename` 扫描 115 存量目录；媒体候选确认会先持久化状态，再转入后台调用 search，因此 Telegram callback 不等待长链路，取消操作也能及时生效。文件阶段在首次写入前构建一份不可变预检快照，让目标冲突规划与执行共享同一批源、目标和父目录事实；rename、批量移动、目录清理与源端消失仍以写入后的新鲜读取作为后置条件。文件规划使用 download 1.1.0 的 32 路径分批身份读取，并优先调用 115 官方服务端批量移动，同一目标目录默认按 32 个文件一批提交；每批完成后重新列出源、目标目录，核对 provider ID 和规范文件名，不采信单独的成功回执。动画资源中的 NCOP、NCED 以及带季号或变体号的 OP、ED 会作为同一作品的附加内容保留，不再建立独立媒体搜索任务；无法唯一映射的正片文件仍保持原位并单独提示用户查证。rename 的完整或部分完成终态只表示本地媒体整理安全收敛，不发布下游整理事件，也不自动交接 sync/Plex。媒体候选按钮使用短持久令牌，满足 Telegram callback 的 64-byte 限制，同时支持直接回复候选编号。
 
@@ -34,14 +34,14 @@ rename 会对下载根或用户选择的扫描根建立一次完整、递归、�
 
 合集、Absolute Order 与 Special 不属于当前对外支持的整理业务，本次不新增这些能力。现有字幕标记、视频选择、关联文件范围、冲突处理、同哈希恢复和清理规则保持。
 
-rename 不识别也不筛选字幕语言。只要字幕已经映射到确认的电影或剧集集号，目标名就固定增加 `.chi`，并保留源文件真实扩展名；`forced`、`sdh`、`cc` 和原语言标记都不进入目标名。`.chi` 只是交给 caption 继续处理前的统一文件名标记，不代表 rename 检测到了中文。无法安全确认媒体身份或集号的字幕保持原名原位，不阻塞其他文件。多个同集、同扩展名字幕若会生成相同目标名，按稳定 `source_id` 分配规范名与 `.variant-NN.chi` 防重名，绝不静默丢弃。
+caption 负责字幕搜索、内容验证、简繁识别与质量选择；rename 负责最终文件名。简中采用 `.chi`，繁中采用 `.cht`，保留真实 `.srt` / `.ass` / `.ssa` 扩展名；双语、forced、sdh 等不再扩展语言命名。已有明确 CHT、zh-Hant 或繁体标记不会被改成 chi。没有语言证据的历史 sidecar 仍保留既有 chi 兼容规则，不能据此声称已识别到中文。无法确认媒体身份或集号的字幕保持原名原位；同语言、同扩展名冲突使用稳定 `.variant-NN` 保留。
 
 rename 会在写操作前按文件预检目标冲突。已有目标与相同 provider 身份对应时作为幂等 `no_op`；目标与源文件 SHA1 相同但 provider 身份不同，视为历史复制后删源中断，仅在重新验证两端指纹后删除残留源文件；其他同路径不同身份只阻断当前文件且不覆盖。跨目录移动优先使用 download 的 `move_files_by_id` 对同一目标目录分批提交；`storage_move_batch_size` 默认 32，允许 1–100。批量接口不可用时才兼容回退旧移动方法；普通 115 路径不调用 copy/delete。接口返回失败但目录观测已满足后置条件时仍按成功收敛，接口返回成功但文件 ID/名称或源端状态不符时按失败处理，不盲目拆分重试。
 
 rename 在媒体文件全部被核验为已整理或规范 `no_op`、不存在原位保留/目标冲突/文件失败，并且源作品目录清理完成时写入 `completed`。若已验证文件至少一个、其余媒体文件仅为安全原位保留，且没有冲突、执行失败或意外清理失败，则写入 `partial_completed`；完全无法匹配仍失败关闭且不执行移动。Telegram 通知是尽力投递的旁路；通知失败不会把已经核验完成的 Job 改成失败，也不会触发重复文件操作。用户通知使用纯文本，文件名和路径不会依赖 Telegram Markdown 转义。
 
 ```bash
-python tools/build_feature.py features/rename /tmp/rename-2.3.1.tpx \
+python tools/build_feature.py features/rename /tmp/rename-2.4.0.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```
@@ -52,6 +52,19 @@ rename 兼容 `inline_v1` 和 `snapshot_ref_v1`。新版引用必须带明确完
 
 本地副本独立于任务结果覆盖而存在。提供方暂时不可用或接收确认丢失，不会使已验证副本失效；重新读取相同引用可直接使用本地副本。单个 job 永久绑定一份不可变快照，另一份引用不能替换它。现有任务重启/终态幂等及中断后安全停止规则不变；本实现不自动重做已开始文件变更的任务。快照只代表扫描时事实，现有稳定对象 ID、移动前后校验与空目录清理验证继续执行。
 
-rename 2.3.1 将本地快照存储和完整校验放入工作线程。首次接收仍在写入前完整校验，并在提交后独立重读校验；重启命中已有副本只完整读取、校验一次。取消检查在每个本地存储等待边界执行，取消后不继续确认或整理。已经开始的本地写入可能完成并留下完整副本，但不会因此继续修改远端文件；线程中的 Python 校验仍可能短暂竞争事件循环执行时间。
+rename 2.4.0 将本地快照存储和完整校验放入工作线程。首次接收仍在写入前完整校验，并在提交后独立重读校验；重启命中已有副本只完整读取、校验一次。取消检查在每个本地存储等待边界执行，取消后不继续确认或整理。已经开始的本地写入可能完成并留下完整副本，但不会因此继续修改远端文件；线程中的 Python 校验仍可能短暂竞争事件循环执行时间。
 
 部署时先升级 download 提供方（保持引用发送关闭），再升级 rename 消费方，最后开启 download 的 `enable_tree_snapshot_references`。回退前停止新引用任务、处理或保留活动任务及双方快照文件，再回退消费者。旧任务表无需变更；sidecar 不设置 TTL，确认接收和完成任务不会触发删除。逐文件结果与完整副本留在本地，自动流程仍止于 rename，不触发 Plex。
+
+
+## Caption 接入
+
+`optional_requires: [subtitle.caption]` 只允许可选调用，不影响 caption 未安装时 Rename 的依赖就绪。下载任务先完成身份与完整文件树校验，再调用 `prepare_download`；新字幕写入后重新扫描，最后由既有整理流程统一重命名并继续 Plex。单视频下载只补入同名 chi/cht sidecar，不扩大到整个父目录；父目录不进入清理范围。`caption_enabled` 默认 true，`caption_timeout` 默认 300 秒，限制整个自动字幕阶段。只把验证后的视频事实按每批最多 50 条交付 Caption，避免大型下载快照超过 RPC 容量；超时和部分处理写入独立 caption_result。出现可能仍在写入的异常时，先等待 Download 上传屏障，再重新扫描；无法确认写入结束时停止媒体整理。
+
+`media.rename` 提供：
+
+- `scan_library`：省略 root_path 列出分类根目录；传 root_path 返回媒体分页，调用方必须继续 next_cursor。每页最多 200 个视频，单次完整扫描超过 50000 个节点时报错并要求缩小根目录；游标 30 分钟有效。
+- `name_subtitle`：有 video_path 时严格匹配视频名字主体；无视频时必须给出确认的 media_metadata v2、target_dir 和剧集坐标，复用既有媒体目录与命名规则。
+- `place_subtitle`：命名后调用 Download 的持久化分块上传。每块最多 192 KiB、完整字幕最多 8 MiB，传 transfer_id、chunk_index/count、chunk_base64、content_sha1、size_bytes；重复分块可安全重试。同名同 SHA1 为 exists，不同内容报 target_conflict 并保留原文件。
+
+当前上传服务仅服务外挂文本字幕，不写视频，不读取内嵌字幕。扫描只读，caption 的媒体库补字幕不会触发整库视频重命名。

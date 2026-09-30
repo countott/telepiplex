@@ -7,7 +7,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 
-SEGMENT_ROLES = {"identity", "search", "download", "rename", "legacy"}
+SEGMENT_ROLES = {"identity", "search", "download", "caption", "rename", "legacy"}
 PRESENTATION_KINDS = {"text", "photo"}
 SEGMENT_STATES = {
     "creating",

@@ -13,11 +13,11 @@ from telepiplex_plugin_sdk import FeatureRuntime
 
 ROOT = Path(__file__).resolve().parents[1]
 FEATURES = {
-    "search": ("telepiplex_search", "2.4.1", "2.2.0"),
-    "download": ("telepiplex_download", "2.1.2", "2.2.0"),
-    "rename": ("telepiplex_rename", "2.3.1", "2.2.0"),
-    "sync": ("telepiplex_sync", "2.1.0", "2.2.0"),
-    "caption": ("telepiplex_caption", "0.1.6", "2.2.0"),
+    "search": ("telepiplex_search", "2.6.0", "2.2.1"),
+    "download": ("telepiplex_download", "2.2.0", "2.2.1"),
+    "rename": ("telepiplex_rename", "2.4.0", "2.2.1"),
+    "sync": ("telepiplex_sync", "2.1.1", "2.2.1"),
+    "caption": ("telepiplex_caption", "1.1.0", "2.2.1"),
 }
 LEGACY_FEATURE_DIRS = (
     "media-search",
@@ -100,27 +100,13 @@ def test_sync_exposes_a_backend_neutral_library_capability():
     }
 
 
-def test_caption_is_an_installable_inert_placeholder():
-    feature_dir = ROOT / "features" / "caption"
-    manifest = _yaml(feature_dir / "manifest.yaml")
-    for field in ("provides", "requires", "subscribes", "publishes", "commands", "callbacks"):
-        assert manifest[field] == []
-
-    sys.path.insert(0, str(feature_dir / "src"))
-    try:
-        module = importlib.import_module("telepiplex_caption.runtime")
-        runtime = module.main(SimpleNamespace(manifest=manifest, token="test-token"))
-    finally:
-        sys.path.pop(0)
-        sys.modules.pop("telepiplex_caption.runtime", None)
-        sys.modules.pop("telepiplex_caption", None)
-
-    assert isinstance(runtime, FeatureRuntime)
-    assert runtime.capabilities == {}
-    assert runtime.events == {}
-    assert runtime.commands == {}
-    assert runtime.callbacks == {}
-    assert runtime.messages is None
+def test_caption_declares_real_external_subtitle_contract():
+    manifest = _yaml(ROOT / "features" / "caption" / "manifest.yaml")
+    assert manifest["provides"] == [{"name": "subtitle.caption", "exclusive": True}]
+    assert set(manifest["requires"]) == {"media.search", "media.rename", "storage.provider"}
+    assert manifest["subscribes"] == []
+    assert {row["name"] for row in manifest["commands"]} == {"caption", "caption_config"}
+    assert manifest["callbacks"] == ["caption"]
 
 
 def test_feature_release_catalog_accepts_only_new_ids():

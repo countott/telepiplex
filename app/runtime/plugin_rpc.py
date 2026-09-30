@@ -8,7 +8,10 @@ import uuid
 from pathlib import Path
 
 from app.runtime.plugin_contract import ContractError
-from telepiplex_plugin_sdk.diagnostics import outbound_diagnostic_context
+from telepiplex_plugin_sdk.diagnostics import (
+    dispatch_diagnostic_params,
+    outbound_diagnostic_context,
+)
 
 
 class RpcClient:
@@ -63,7 +66,7 @@ class RpcClient:
                 "diagnostic_fields": {
                     "stage": "rpc",
                     "status": "started",
-                    "input": {"params": params},
+                    "input": {"params": dispatch_diagnostic_params(method, params)},
                     "transport": transport,
                 },
             },

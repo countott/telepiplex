@@ -12,6 +12,7 @@ from .diagnostics import (
     bounded_diagnostic_event,
     bounded_diagnostic_value,
     build_diagnostic_event,
+    dispatch_diagnostic_params,
     infer_legacy_diagnostics,
     render_machine_event,
 )
@@ -201,7 +202,9 @@ def log_dispatch_start(method: str, key: str, params: dict):
                 "input": {
                     "method": str(method),
                     "handler": str(key),
-                    "params": bounded_diagnostic_value(params),
+                    "params": bounded_diagnostic_value(
+                        dispatch_diagnostic_params(method, params)
+                    ),
                 },
             },
         },

@@ -70,7 +70,7 @@ def _normalized_media_identity(
     extension = relative.suffix.lower()
     if extension in VIDEO_EXTENSIONS:
         return relative.stem, "video"
-    if extension in SUBTITLE_EXTENSIONS and relative.stem.endswith(".chi"):
+    if extension in SUBTITLE_EXTENSIONS and relative.stem.endswith((".chi", ".cht")):
         return relative.stem[:-4], extension
     return None
 

@@ -15,7 +15,7 @@ VIDEO_EXTENSIONS = {
     ".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts", ".m2ts",
     ".wmv", ".flv", ".webm",
 }
-SUBTITLE_EXTENSIONS = {".srt", ".ass", ".sup", ".vtt"}
+SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".sup", ".vtt"}
 OTHER_MEDIA_EXTENSIONS = {
     ".aac", ".ac3", ".dts", ".flac", ".mka", ".mp3", ".wav",
 }

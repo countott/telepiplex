@@ -248,6 +248,39 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             encoding="utf-8"
         )
 
+    async def test_operation_gate_hides_bare_credentials_in_text_and_caption_logs(self):
+        from app.handlers import interaction_handler
+        from app.handlers.interaction_handler import operation_gate
+        from app.utils.logger import Logger
+        from telepiplex_plugin_sdk.diagnostics import REDACTED
+
+        for field in ("text", "caption"):
+            with self.subTest(field=field):
+                secret = "0123456789abcdef0123456789abcdef"
+                logger = Logger(
+                    config_root=Path(self.temp.name) / f"diagnostics-{field}",
+                    session_id=f"INCOMING-FREEFORM-{field}",
+                )
+                update = self.message_update(secret if field == "text" else None)
+                if field == "caption":
+                    update.effective_message.caption = secret
+                try:
+                    with patch.object(interaction_handler.init, "logger", logger):
+                        await operation_gate(update, self.context())
+                finally:
+                    for handler in list(logging.getLogger().handlers):
+                        if getattr(handler, "_telepiplex_handler_kind", ""):
+                            logging.getLogger().removeHandler(handler)
+                            handler.close()
+
+                machine = logger.session.machine_path.read_text(encoding="utf-8")
+                event = json.loads(machine)
+                assert event["facts"]["user_surface"]["kind"] == "message"
+                assert event["facts"]["user_surface"]["text"] == REDACTED
+                assert secret not in machine
+                assert secret not in logger.session.human_path.read_text(encoding="utf-8")
+                assert getattr(update.effective_message, field) == secret
+
     def test_terminal_control_dedup_keeps_navigation_duplicates(self):
         from app.handlers.interaction_handler import operation_markup
 

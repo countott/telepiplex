@@ -11,7 +11,7 @@ from weakref import WeakValueDictionary
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.error import BadRequest
 from telegram.ext import ApplicationHandlerStop
-from telepiplex_plugin_sdk.diagnostics import new_trace_id, set_diagnostic_context
+from telepiplex_plugin_sdk.diagnostics import REDACTED, new_trace_id, set_diagnostic_context
 
 try:
     import init
@@ -109,7 +109,7 @@ def _log_incoming_telegram_interaction(update) -> None:
             "user_surface": {
                 "direction": "incoming",
                 "kind": kind,
-                "text": text,
+                "text": REDACTED if kind == "message" else text,
                 "callback_data": callback_data,
             },
         },

@@ -99,6 +99,9 @@ def collect_storage_file_tree(storage, root_path, max_depth=8, limit=1000):
 
 
 def _event_file_tree(event: DownloadCompletedEvent):
+    if event.caption_tree_verified:
+        validate_inline_tree(event.file_tree, root_path=event.final_path, max_nodes=20000)
+        return [dict(node) for node in event.file_tree]
     transport = getattr(event, "file_tree_transport", "")
     if transport not in ("", "inline_v1", "snapshot_ref_v1"):
         raise FeatureError("unsupported_file_tree_transport", "unsupported file tree transport")
@@ -120,9 +123,14 @@ def _event_file_tree(event: DownloadCompletedEvent):
     return collect_storage_file_tree(_storage(event), event.final_path)
 
 
-def validate_inline_tree(tree, *, root_path=""):
-    if not isinstance(tree, list) or len(tree) > 1000:
-        raise FeatureError("download_tree_incomplete", "inline file tree must contain at most 1000 nodes")
+def validate_inline_tree(tree, *, root_path="", max_nodes=1000):
+    if not isinstance(tree, list) or len(tree) > max_nodes:
+        raise FeatureError("download_tree_incomplete", f"inline file tree exceeds {max_nodes} nodes")
+    root_file = Path(str(root_path))
+    related_file_scope = bool(
+        root_file.suffix.lower() in VIDEO_EXTENSIONS
+        and any(isinstance(node, dict) and node.get("path") == str(root_file) and node.get("is_dir") is False for node in tree)
+    )
     identities, paths = set(), set()
     for node in tree:
         if not isinstance(node, dict):
@@ -137,9 +145,12 @@ def validate_inline_tree(tree, *, root_path=""):
             raise FeatureError("download_tree_incomplete", "inline file tree contains an invalid identity, path or depth")
         absolute = str(node.get("path") or "")
         root = str(root_path).rstrip("/")
-        single_file = (len(tree) == 1 and not node["is_dir"]
+        single_file = ((len(tree) == 1 or related_file_scope) and not node["is_dir"]
                        and relative == root.rsplit("/", 1)[-1] and absolute == root)
-        if absolute and root and absolute != f"{root}/{relative}" and not single_file:
+        related_sidecar = bool(related_file_scope and not node["is_dir"] and len(parts) == 1
+            and absolute == str(root_file.parent / relative)
+            and relative in {f"{root_file.stem}.{language}.{extension}" for language in ("chi", "cht") for extension in ("srt", "ass", "vtt", "ssa")})
+        if absolute and root and absolute != f"{root}/{relative}" and not single_file and not related_sidecar:
             raise FeatureError("download_tree_incomplete", "inline file tree path is outside its declared root")
         identities.add(identity)
         paths.add(relative)

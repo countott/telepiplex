@@ -101,10 +101,9 @@ class InventoryClassificationTest(unittest.TestCase):
             }],
         ))
 
-    def test_raw_or_traditional_series_subtitle_is_not_complete(self):
+    def test_raw_series_subtitle_is_not_complete(self):
         for subtitle in (
             "The Residence S01E01.CHS.srt",
-            "The Residence S01E01.cht.srt",
             "The Residence S01E01.srt",
         ):
             with self.subTest(subtitle=subtitle):

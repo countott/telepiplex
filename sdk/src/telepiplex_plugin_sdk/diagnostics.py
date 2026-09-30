@@ -39,6 +39,7 @@ _SENSITIVE_KEY_PARTS = (
     "accesskey",
 )
 _SENSITIVE_EXACT_KEYS = {
+    "content_base64", "chunk_base64", "normalized_text",
     "link",
     "url",
     "endpoint",
@@ -202,6 +203,22 @@ def sanitize_diagnostic_value(value: Any) -> tuple[Any, list[str]]:
         return sanitized
 
     return visit(value, "", 0), sorted(set(redacted_paths))
+
+
+def dispatch_diagnostic_params(method: str, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Snapshot dispatch arguments without logging freeform credential replies.
+
+    Message handlers may accept bare API keys with no recognizable prefix. Keep
+    the actual request intact and redact text by its input channel, not its value.
+    Commands and callbacks retain their existing diagnostic context.
+    """
+
+    snapshot = dict(params)
+    if method == "message.dispatch":
+        for field in ("text", "caption"):
+            if field in snapshot and snapshot[field] is not None:
+                snapshot[field] = REDACTED
+    return snapshot
 
 
 def bounded_diagnostic_value(

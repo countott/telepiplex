@@ -27,6 +27,7 @@ def main(context: RuntimeContext) -> FeatureRuntime:
     runtime = FeatureRuntime(
         manifest=context.manifest,
         token=context.token,
+        capabilities={"media.rename": feature.rename_capability},
         events={"download.completed": feature.download_completed},
         commands={
             "rename": feature.command,

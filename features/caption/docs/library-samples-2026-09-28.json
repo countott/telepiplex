@@ -1,0 +1,285 @@
+{
+  "source_project": "Flip the server",
+  "inventory_snapshot_date": "2026-09-17",
+  "source_index_sha256": "afcef915a929c1b7cfa63ea63c0c038eb694e47a080b8a960dfb7d6014df9aca",
+  "source_files": [
+    "handoff/2026-09-17-agent-machine/package/12-files.jsonl",
+    "handoff/2026-09-17-agent-machine/package/13-paths.jsonl"
+  ],
+  "scope": "Read-only title samples; no media writes, no current filesystem or playback verification. Paths and private server details omitted.",
+  "cases": [
+    {
+      "title": "双城之战",
+      "original_title": "Arcane",
+      "aliases": [
+        "Arcane",
+        "Arcane"
+      ],
+      "year": 2021,
+      "media_type": "series",
+      "season": 1,
+      "episode": 1,
+      "original_language": "en",
+      "inventory_category": "动画剧集",
+      "inventory_filename": "Arcane S01E01.mkv",
+      "inventory_file_id": "7d6aad8ab97c35f7d03c8351",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    },
+    {
+      "title": "奇巧计程车",
+      "original_title": "",
+      "aliases": [
+        "Odd Taxi",
+        "ODD TAXI"
+      ],
+      "year": 2021,
+      "media_type": "series",
+      "season": 1,
+      "episode": 1,
+      "original_language": "ja",
+      "inventory_category": "动画剧集",
+      "inventory_filename": "ODD TAXI S01E01.mkv",
+      "inventory_file_id": "1d8a907c40ddcd8bb92d4e2a",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    },
+    {
+      "title": "瑞克和莫蒂",
+      "original_title": "Rick and Morty",
+      "aliases": [
+        "Rick and Morty",
+        "Rick and Morty"
+      ],
+      "year": 2013,
+      "media_type": "series",
+      "season": 1,
+      "episode": 1,
+      "original_language": "en",
+      "inventory_category": "动画剧集",
+      "inventory_filename": "Rick and Morty S01E01.mkv",
+      "inventory_file_id": "6842d7212032b47c4edee487",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    },
+    {
+      "title": "葬送的芙莉莲",
+      "original_title": "",
+      "aliases": [
+        "Frieren Beyond Journeys End",
+        "Sousou no Frieren"
+      ],
+      "year": 2023,
+      "media_type": "series",
+      "season": 1,
+      "episode": 1,
+      "original_language": "ja",
+      "inventory_category": "动画剧集",
+      "inventory_filename": "Sousou no Frieren S01E01.mkv",
+      "inventory_file_id": "ced1fbb99a8469f9e00aae30",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    },
+    {
+      "title": "你的名字。",
+      "original_title": "",
+      "aliases": [
+        "Your Name",
+        "Kimi no Na wa."
+      ],
+      "year": 2016,
+      "media_type": "movie",
+      "season": null,
+      "episode": null,
+      "original_language": "ja",
+      "inventory_category": "动画电影",
+      "inventory_filename": "Kimi no Na wa..mkv",
+      "inventory_file_id": "snapshot:39130",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    },
+    {
+      "title": "千与千寻",
+      "original_title": "",
+      "aliases": [
+        "Spirited Away",
+        "Sen to Chihiro no Kamikakushi"
+      ],
+      "year": 2001,
+      "media_type": "movie",
+      "season": null,
+      "episode": null,
+      "original_language": "ja",
+      "inventory_category": "动画电影",
+      "inventory_filename": "Sen to Chihiro no Kamikakushi.mkv",
+      "inventory_file_id": "snapshot:39150",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    },
+    {
+      "title": "寻梦环游记",
+      "original_title": "Coco",
+      "aliases": [
+        "Coco",
+        "Coco"
+      ],
+      "year": 2017,
+      "media_type": "movie",
+      "season": null,
+      "episode": null,
+      "original_language": "en",
+      "inventory_category": "动画电影",
+      "inventory_filename": "Coco.mkv",
+      "inventory_file_id": "snapshot:39172",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    },
+    {
+      "title": "想见你",
+      "original_title": "",
+      "aliases": [
+        "Someday or One Day",
+        "Someday or One Day"
+      ],
+      "year": 2019,
+      "media_type": "series",
+      "season": 1,
+      "episode": 1,
+      "original_language": "zh",
+      "inventory_category": "真人剧集",
+      "inventory_filename": "Someday or One Day S01E01.mkv",
+      "inventory_file_id": "snapshot:40699",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    },
+    {
+      "title": "摩登家庭",
+      "original_title": "Modern Family",
+      "aliases": [
+        "Modern Family",
+        "Modern Family"
+      ],
+      "year": 2009,
+      "media_type": "series",
+      "season": 1,
+      "episode": 1,
+      "original_language": "en",
+      "inventory_category": "真人剧集",
+      "inventory_filename": "Modern Family S01E01.mkv",
+      "inventory_file_id": "snapshot:41059",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    },
+    {
+      "title": "绝命毒师",
+      "original_title": "Breaking Bad",
+      "aliases": [
+        "Breaking Bad",
+        "Breaking Bad"
+      ],
+      "year": 2008,
+      "media_type": "series",
+      "season": 1,
+      "episode": 1,
+      "original_language": "en",
+      "inventory_category": "真人剧集",
+      "inventory_filename": "Breaking Bad S01E01.mkv",
+      "inventory_file_id": "snapshot:43272",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    },
+    {
+      "title": "请回答1988",
+      "original_title": "",
+      "aliases": [
+        "Reply 1988",
+        "Reply 1988"
+      ],
+      "year": 2015,
+      "media_type": "series",
+      "season": 1,
+      "episode": 1,
+      "original_language": "ko",
+      "inventory_category": "真人剧集",
+      "inventory_filename": "Reply 1988 S01E01.mkv",
+      "inventory_file_id": "snapshot:44541",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    },
+    {
+      "title": "功夫",
+      "original_title": "",
+      "aliases": [
+        "Kung Fu Hustle",
+        "Kung Fu Hustle"
+      ],
+      "year": 2004,
+      "media_type": "movie",
+      "season": null,
+      "episode": null,
+      "original_language": "yue",
+      "inventory_category": "真人电影",
+      "inventory_filename": "Kung Fu Hustle.mkv",
+      "inventory_file_id": "snapshot:45604",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    },
+    {
+      "title": "天堂电影院",
+      "original_title": "",
+      "aliases": [
+        "Cinema Paradiso",
+        "Cinema Paradiso"
+      ],
+      "year": 1988,
+      "media_type": "movie",
+      "season": null,
+      "episode": null,
+      "original_language": "it",
+      "inventory_category": "真人电影",
+      "inventory_filename": "Cinema Paradiso.mkv",
+      "inventory_file_id": "snapshot:45727",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    },
+    {
+      "title": "寄生虫",
+      "original_title": "",
+      "aliases": [
+        "Parasite",
+        "Parasite"
+      ],
+      "year": 2019,
+      "media_type": "movie",
+      "season": null,
+      "episode": null,
+      "original_language": "ko",
+      "inventory_category": "真人电影",
+      "inventory_filename": "Parasite.mkv",
+      "inventory_file_id": "snapshot:45761",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    },
+    {
+      "title": "我不是药神",
+      "original_title": "",
+      "aliases": [
+        "Dying to Survive",
+        "Dying to Survive"
+      ],
+      "year": 2018,
+      "media_type": "movie",
+      "season": null,
+      "episode": null,
+      "original_language": "zh",
+      "inventory_category": "真人电影",
+      "inventory_filename": "Dying to Survive.mkv",
+      "inventory_file_id": "snapshot:45831",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    },
+    {
+      "title": "星际穿越",
+      "original_title": "Interstellar",
+      "aliases": [
+        "Interstellar",
+        "Interstellar"
+      ],
+      "year": 2014,
+      "media_type": "movie",
+      "season": null,
+      "episode": null,
+      "original_language": "en",
+      "inventory_category": "真人电影",
+      "inventory_filename": "Interstellar.mkv",
+      "inventory_file_id": "snapshot:45910",
+      "identity_note": "Inventory proves presence/title/year/file scope. Original-language test policy and English aliases are explicit test inputs, not a live Search metadata resolution."
+    }
+  ],
+  "missing_targets": []
+}

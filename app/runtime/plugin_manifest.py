@@ -29,6 +29,7 @@ _MANIFEST_KEYS = {
     "entry_point",
     "provides",
     "requires",
+    "optional_requires",
     "subscribes",
     "publishes",
     "commands",
@@ -134,6 +135,7 @@ class PluginManifest:
     config_schema_version: int
     state_schema_version: int
     source: SourceDeclaration
+    optional_requires: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, value: dict) -> "PluginManifest":
@@ -208,6 +210,12 @@ class PluginManifest:
         if not _COMMIT.fullmatch(commit):
             _invalid("source.commit must be a 40-character hexadecimal SHA")
 
+        requires = _unique_identifiers(value.get("requires", []), "requires")
+        optional_requires = _unique_identifiers(
+            value.get("optional_requires", []), "optional_requires"
+        )
+        if set(requires) & set(optional_requires):
+            _invalid("required and optional capabilities must not overlap")
         return cls(
             plugin_id=plugin_id,
             name=name,
@@ -215,7 +223,8 @@ class PluginManifest:
             host_api=host_api,
             entry_point=entry_point,
             provides=tuple(provides),
-            requires=_unique_identifiers(value.get("requires", []), "requires"),
+            requires=requires,
+            optional_requires=optional_requires,
             subscribes=_unique_identifiers(value.get("subscribes", []), "subscribes"),
             publishes=_unique_identifiers(value.get("publishes", []), "publishes"),
             commands=tuple(commands),
