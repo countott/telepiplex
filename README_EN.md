@@ -40,7 +40,7 @@ The automatic task ends with file organization. Plex scans are initiated separat
 | `sync` | Manually manage Plex scans and metadata enhancements | None | [Module guide](features/sync/README.md) |
 | `caption` | Chinese external subtitles after download, from a library, or by query | `download`, `search`, `rename` | [Module guide](features/caption/README.md) |
 
-Caption 1.0.0 requires Host API 1.9 and the updated Download, Search, and Rename Features listed below. SDK 2.2.1 is bundled into each Feature.
+Caption 1.1.2 requires Host API 1.9 and the updated Download, Search, and Rename Features listed below. SDK 2.2.1 is bundled into each Feature.
 
 For the complete search and organization flow, install `download → search → rename` in that order. Install `sync` as needed. Install `caption` after Rename to add external subtitle lookup before organization, `/caption scan`, and standalone `/caption Title Year` queries.
 
@@ -266,19 +266,19 @@ The current Host API 1.9 adds optional capability dependencies and caption messa
 
 #### Current source versions
 
-Caption 1.1.0 expands free Chinese subtitle providers, finished subtitle-group catalogs, local archives, direct detail links, bounded retrieval and content checks. Search 2.6.0 supplies reference durations tied to confirmed identities. The three workflows, chi/cht naming and existing Plex entry remain intact. These source versions have not been published automatically.
+Caption 1.1.2 expands free Chinese subtitle providers, finished subtitle-group catalogs, local archives, direct detail links, bounded retrieval and content checks. Search 2.6.1 supplies reference durations tied to confirmed identities. The three workflows, chi/cht naming and existing Plex entry remain intact. These source versions have not been published automatically.
 
 | Component | Version |
 | --- | --- |
 | Host | `3.9.0` |
 | SDK | `2.2.1` |
 | `download` | `2.2.0` |
-| `search` | `2.6.0` |
+| `search` | `2.6.1` |
 | `rename` | `2.4.0` |
 | `sync` | `2.1.1` |
-| `caption` | `1.1.0` |
+| `caption` | `1.1.2` |
 
-Upgrade Host 3.9.0, Download 2.2.0, Search 2.6.0, Rename 2.4.0, then Caption 1.1.0 before starting new tasks. Sync 2.1.1 only updates its SDK dependency. Host API is 1.9; SDK 2.2.1 is bundled with Features. See [Caption](features/caption/README.md).
+Upgrade Host 3.9.0, Download 2.2.0, Search 2.6.1, Rename 2.4.0, then Caption 1.1.2 before starting new tasks. Sync 2.1.1 only updates its SDK dependency. Host API is 1.9; SDK 2.2.1 is bundled with Features. See [Caption](features/caption/README.md).
 
 `main` is the active source branch for Core/Host and all five Features. The Host uses `telepiplex-v<semver>` tags, with release commits verified as contained in remote `main`. The release workflow publishes `ghcr.io/<owner>/telepiplex:<semver>` and `latest`, then creates a GitHub Release titled `Telepiplex <semver>` for that tag explicitly marked **Latest**. An ordinary `main` push does not update official images or Latest entry points.
 

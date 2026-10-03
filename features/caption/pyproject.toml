@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telepiplex-caption"
-version = "1.1.0"
+version = "1.1.2"
 description = "Chinese external subtitle discovery and quality selection for Telepiplex"
 requires-python = ">=3.12"
 dependencies = ["telepiplex-plugin-sdk==2.2.1", "PyYAML>=6.0.2", "opencc-python-reimplemented>=0.1.7,<1", "charset-normalizer>=3.3,<4", "py7zr>=1.0,<2", "rarfile>=4.2,<5"]

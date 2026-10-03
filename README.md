@@ -265,19 +265,19 @@ Host 负责 Telegram 接入、命令路由、任务与事件持久化、配置�
 
 #### 当前源码版本
 
-本次 Caption 1.1.0 扩展免费中文外挂字幕来源、字幕组成品索引和本地归档，增加详情链接入口、有界检索与质量检查。Search 2.6.0 提供有明确身份对应的参考时长。三条业务链路、chi/cht 命名与既有 Plex 入口保持。以下为本地源码版本，未自动发布。
+本次 Caption 1.1.2 扩展免费中文外挂字幕来源、字幕组成品索引和本地归档，增加详情链接入口、有界检索与质量检查。Search 2.6.1 提供有明确身份对应的参考时长。三条业务链路、chi/cht 命名与既有 Plex 入口保持。以下为本地源码版本，未自动发布。
 
 | 组件 | 版本 |
 | --- | --- |
 | Host | `3.9.0` |
 | SDK | `2.2.1` |
 | `download` | `2.2.0` |
-| `search` | `2.6.0` |
+| `search` | `2.6.1` |
 | `rename` | `2.4.0` |
 | `sync` | `2.1.1` |
-| `caption` | `1.1.0` |
+| `caption` | `1.1.2` |
 
-升级顺序：Host 3.9.0 → Download 2.2.0 → Search 2.6.0 → Rename 2.4.0 → Caption 1.1.0；已安装 Sync 的用户可同步到 2.1.1（仅 SDK 更新）。Host API 1.9，SDK 2.2.1 随 Feature 构建打包，无需单独安装。更新完成后再提交新任务。详情见 [caption 模块说明](features/caption/README.md)。
+升级顺序：Host 3.9.0 → Download 2.2.0 → Search 2.6.1 → Rename 2.4.0 → Caption 1.1.2；已安装 Sync 的用户可同步到 2.1.1（仅 SDK 更新）。Host API 1.9，SDK 2.2.1 随 Feature 构建打包，无需单独安装。更新完成后再提交新任务。详情见 [caption 模块说明](features/caption/README.md)。
 
 `main` 是 Core/Host 与五个 Feature 的有效源码分支。Host 使用 `telepiplex-v<semver>` tag，发布前验证提交已包含在远端 `main`；正式流水线生成 `ghcr.io/<owner>/telepiplex:<semver>` 与 `latest` 镜像，创建标题为 `Telepiplex <semver>` 的 GitHub Release 并强制设为 **Latest**。普通 `main` push 不更新正式镜像或 Latest 入口。
 
