@@ -1364,6 +1364,17 @@ plugins:
           branch: main
           commit: 845d49d54274719b43cfc682a6e88454bf9b8568
         url: https://github.com/countott/telepiplex/releases/download/search-v2.6.0/search-2.6.0.tpx
+      2.6.1:
+        host_api: '>=1.8,<2.0'
+        provides:
+        - media.search
+        requires:
+        - download.provider
+        sha256: 426c211c079c41334c82acc11f5ae03858f94167aa978dfca618db0b9dd59871
+        source:
+          branch: main
+          commit: e0c6d5fcbd1869939e9943b53c9a3a2afe37bc88
+        url: https://github.com/countott/telepiplex/releases/download/search-v2.6.1/search-2.6.1.tpx
   sync:
     versions:
       1.0.0:
@@ -1506,5 +1517,5 @@ plugins:
           branch: main
           commit: 845d49d54274719b43cfc682a6e88454bf9b8568
         url: https://github.com/countott/telepiplex/releases/download/sync-v2.1.1/sync-2.1.1.tpx
-release: caption-v1.1.2
+release: search-v2.6.1
 schema_version: 1
