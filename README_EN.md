@@ -266,11 +266,11 @@ The current Host API 1.9 adds optional capability dependencies and caption messa
 
 #### Current source versions
 
-Caption 1.2.0 aligns `/caption` with Rename: choose a directory from a paginated menu, enter another path, or search for subtitles by title. Scans show the video count and wait for the user to start subtitle retrieval. Detailed candidates support numeric replies; ambiguous identities or missing original languages pause a batch for confirmation before it continues. Progress and cancellation stay in one task panel. Host 3.9.1 clears stale text sessions after asynchronous tasks finish so they do not consume the next title link. Search remains at 2.6.1. Subtitle providers, configuration, chi/cht naming and the existing Plex entry remain intact. These source versions have not been published automatically.
+Caption 1.2.0 aligns `/caption` with Rename: choose a directory from a paginated menu, enter another path, or search for subtitles by title. Scans show the video count and wait for the user to start subtitle retrieval. Detailed candidates support numeric replies; ambiguous identities or missing original languages pause a batch for confirmation before it continues. Progress and cancellation stay in one task panel. Host 3.9.2 retains text session cleanup after asynchronous tasks finish and updates CI integration tests to confirm scans before processing. Search remains at 2.6.1. Subtitle providers, configuration, chi/cht naming and the existing Plex entry remain intact. These source versions have not been published automatically.
 
 | Component | Version |
 | --- | --- |
-| Host | `3.9.1` |
+| Host | `3.9.2` |
 | SDK | `2.2.1` |
 | `download` | `2.2.0` |
 | `search` | `2.6.1` |
@@ -278,7 +278,7 @@ Caption 1.2.0 aligns `/caption` with Rename: choose a directory from a paginated
 | `sync` | `2.1.1` |
 | `caption` | `1.2.0` |
 
-Upgrade Host 3.9.1, Download 2.2.0, Search 2.6.1, Rename 2.4.0, then Caption 1.2.0 before starting new tasks. Sync 2.1.1 only updates its SDK dependency. Host API is 1.9; SDK 2.2.1 is bundled with Features. See [Caption](features/caption/README.md).
+Upgrade Host 3.9.2, Download 2.2.0, Search 2.6.1, Rename 2.4.0, then Caption 1.2.0 before starting new tasks. Sync 2.1.1 only updates its SDK dependency. Host API is 1.9; SDK 2.2.1 is bundled with Features. See [Caption](features/caption/README.md).
 
 `main` is the active source branch for Core/Host and all five Features. The Host uses `telepiplex-v<semver>` tags, with release commits verified as contained in remote `main`. The release workflow publishes `ghcr.io/<owner>/telepiplex:<semver>` and `latest`, then creates a GitHub Release titled `Telepiplex <semver>` for that tag explicitly marked **Latest**. An ordinary `main` push does not update official images or Latest entry points.
 

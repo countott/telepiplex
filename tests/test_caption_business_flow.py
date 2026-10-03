@@ -231,15 +231,44 @@ def test_caption_download_then_rename_and_standalone_across_host_rpc(tmp_path, m
                 await drain("rename")
                 assert replay["duplicate"] is True and storage.writes == writes_before_replay
 
-                # Library scan uses Rename's read-only scanner and writes no
-                # video changes; the same verified subtitle is an idempotent hit.
+                # Scanning is read-only until the user confirms the fixed batch.
+                # Exercise the actual RPC callback instead of bypassing the UI
+                # state transition or restoring the pre-confirmation behavior.
+                queries_before_scan = list(provider.queries)
+                downloads_before_scan = list(provider.downloads)
+                metadata_before_scan = deepcopy(metadata_calls)
+                chunks_before_scan = deepcopy(upload_chunks)
                 inventory = await clients["caption"].request("command.dispatch", {
                     "command": "caption", "args": ["scan", "/Movies"], "chat_id": 10, "user_id": 1,
                 }, deadline=20)
                 await harness.operation_sink("caption", inventory["operation"])
                 await drain("caption")
                 scanned = features["caption"].operations[inventory["operation"]["operation_id"]]
+                assert scanned["state"] == "awaiting_input", scanned
+                assert scanned["stage"] == "inventory_confirmation"
+                assert scanned["control"] == "exit"
+                assert scanned["details"]["total"] == 1
+                assert harness.coordinator.get(scanned["operation_id"]).state == "awaiting_input"
+                assert provider.queries == queries_before_scan
+                assert provider.downloads == downloads_before_scan
+                assert metadata_calls == metadata_before_scan
+                assert upload_chunks == chunks_before_scan
+                assert storage.writes == writes_before_replay
+
+                start = next(button for row in scanned["details"]["keyboard"] for button in row
+                             if button["text"].startswith("开始补字幕"))
+                namespace, payload = start["callback_data"].split(":", 1)
+                confirmed = await clients["caption"].request("callback.dispatch", {
+                    "namespace": namespace, "payload": payload, "chat_id": 10, "user_id": 1,
+                }, deadline=20)
+                assert confirmed["operation"]["operation_id"] == scanned["operation_id"]
+                assert confirmed["session"]["state"] == "open"
+                await harness.operation_sink("caption", confirmed["operation"])
+                await drain("caption")
+
+                # The same verified subtitle is an idempotent hit after confirmation.
                 assert scanned["state"] == "completed", scanned
+                assert harness.coordinator.get(scanned["operation_id"]).state == "completed"
                 assert scanned["result"]["added_count"] == 0
                 assert scanned["result"]["existing_count"] == 1
                 assert storage.writes == writes_before_replay
