@@ -714,6 +714,22 @@ async def dynamic_message_gateway(update, context):
     router = bot_data.get(ROUTER_KEY)
     session = sessions.get(key) if isinstance(sessions, dict) else None
     coordinator = bot_data.get(COORDINATOR_KEY)
+    if isinstance(session, dict) and session.get("operation_id"):
+        bound = (
+            coordinator.get(str(session["operation_id"]))
+            if coordinator is not None
+            else None
+        )
+        if (
+            bound is None
+            or bound.state in TERMINAL_STATES
+            or bound.plugin_id != session.get("plugin_id")
+            or (bound.chat_id, bound.user_id) != key
+        ):
+            # Background completion has no command result to close its text
+            # session. Retire that binding before selecting a direct route.
+            _drop_session(bot_data, key)
+            session = None
     active = (
         coordinator.active(*key)
         if coordinator is not None
@@ -1008,18 +1024,49 @@ async def handle_feature_result(update, context, route, result: dict):
         # A legacy session hint cannot retire an authoritative operation card.
         return
     key = _session_key(update)
-    if session["state"] == "open":
+    operation_id = (
+        operation_record.operation_id if operation_record is not None else ""
+    )
+    current_operation = (
+        coordinator.get(operation_id) if operation_id and coordinator is not None else None
+    )
+    if operation_id and (
+        current_operation is None
+        or current_operation.state in TERMINAL_STATES
+        or current_operation.plugin_id != route.plugin_id
+        or (current_operation.chat_id, current_operation.user_id) != key
+    ):
+        # Rendering awaits Telegram and can race background completion or a
+        # newer task. An old result must not reopen or retire the newer session.
+        _drop_operation_session(
+            context.application.bot_data, key, route.plugin_id, operation_id,
+        )
+    elif (
+        operation_id
+        and session["state"] == "close"
+        and _is_stale_operation_snapshot(operation, current_operation)
+    ):
+        pass
+    elif session["state"] == "open":
         sessions = context.application.bot_data.setdefault(SESSION_KEY, {})
         sessions[key] = {
             "plugin_id": route.plugin_id,
             "expires_at": time.time() + SESSION_TTL_SECONDS,
         }
+        if operation_id:
+            sessions[key]["operation_id"] = operation_id
     else:
-        _drop_session(context.application.bot_data, key)
+        if operation_id:
+            _drop_operation_session(
+                context.application.bot_data, key, route.plugin_id, operation_id,
+            )
+        else:
+            _drop_session(context.application.bot_data, key)
         active = coordinator.active(*key) if coordinator is not None else None
         if (
             active is not None
             and active.plugin_id == route.plugin_id
+            and (not operation_id or active.operation_id == operation_id)
             and active.state == "awaiting_input"
             and not _is_stale_operation_snapshot(operation, active)
         ):
@@ -1753,6 +1800,17 @@ def _drop_session(bot_data: dict, key):
     sessions.pop(key, None)
     if not sessions:
         bot_data.pop(SESSION_KEY, None)
+
+
+def _drop_operation_session(bot_data: dict, key, plugin_id: str, operation_id: str):
+    sessions = bot_data.get(SESSION_KEY)
+    session = sessions.get(key) if isinstance(sessions, dict) else None
+    if (
+        isinstance(session, dict)
+        and session.get("plugin_id") == plugin_id
+        and session.get("operation_id") == operation_id
+    ):
+        _drop_session(bot_data, key)
 
 
 def _clear_plugin_sessions(bot_data: dict, plugin_id: str):

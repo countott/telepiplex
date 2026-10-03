@@ -15,7 +15,7 @@ class CaptionStore:
             db.execute("CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, payload TEXT, updated REAL)")
 
     def save(self, operation: dict):
-        value = {k: v for k, v in operation.items() if k not in {"task", "cancel_event", "session"}}
+        value = {k: v for k, v in operation.items() if k not in {"task", "cancel_event", "session", "inventory"}}
         with sqlite3.connect(self.path) as db:
             db.execute("INSERT OR REPLACE INTO operations VALUES (?,?,?)", (
                 value["operation_id"], json.dumps(value, ensure_ascii=False), time.time(),

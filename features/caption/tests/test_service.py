@@ -215,6 +215,11 @@ class ServiceTest(unittest.IsolatedAsyncioTestCase):
         self.host.pages = [{"snapshot_complete": True, "total": 2, "media": [{"path": "/Movies/Test Work 2020.mkv", "name": "Test Work 2020.mkv"}], "next_cursor": "page2"},
                            {"snapshot_complete": True, "total": 2, "media": [{"path": "/Movies/Test Work 2020.mp4", "name": "Test Work 2020.mp4"}], "next_cursor": ""}]
         operation = await self.run_command(["scan", "/Movies"])
+        self.assertEqual(operation["state"], "awaiting_input")
+        self.assertFalse(self.engine.queries)
+        self.assertFalse(self.host.chunks)
+        await self.feature.callback({**self.owner, "payload": f"menu:{operation['operation_id'][:12]}:confirm"})
+        await operation["task"]
         self.assertEqual(operation["result"]["processed_count"], 2)
         self.assertEqual([c[1] for c in self.host.calls[:2]], ["scan_library", "scan_library"])
 
@@ -327,3 +332,225 @@ class ServiceTest(unittest.IsolatedAsyncioTestCase):
             "file_tree": [{"path": "/Movie/Test Work 2020.mkv", "name": "Test Work 2020.mkv", "is_dir": False}]})
         self.assertEqual(result["added_count"], 1)
         self.assertTrue(0 < captured[0] <= 80)
+
+    async def menu(self):
+        operation = await self.run_command([])
+        self.assertEqual(operation['stage'], 'inventory_root_selection')
+        return operation
+
+    async def click_menu(self, operation, action):
+        return await self.feature.callback({**self.owner, 'payload': f"menu:{operation['operation_id'][:12]}:{action}"})
+
+    async def test_caption_entry_is_an_owned_directory_panel(self):
+        operation = await self.menu()
+        self.assertEqual(operation['state'], 'awaiting_input')
+        self.assertEqual(operation['control'], 'exit')
+        buttons = [b for row in operation['details']['keyboard'] for b in row]
+        self.assertEqual([b['text'] for b in buttons], ['电影', '输入其他目录', '单独查找字幕'])
+        self.assertEqual(self.host.calls, [('media.rename', 'scan_library', {})])
+        response = await self.feature.command({**self.owner, 'command': 'caption'})
+        self.assertEqual(response['operation']['operation_id'], operation['operation_id'])
+        self.assertEqual(response['session']['state'], 'open')
+        self.assertEqual(response['actions'], [])
+        self.assertEqual(len(self.feature.operations), 1)
+
+    async def test_all_directory_pages_are_reachable_with_host_keyboard_limit(self):
+        original = self.host.call_capability
+        async def many_roots(capability, method, payload, **kwargs):
+            if method == 'scan_library' and not payload.get('root_path'):
+                return {'roots': [{'name': f'目录{i}', 'path': f'/Root{i}'} for i in range(19)]}
+            return await original(capability, method, payload, **kwargs)
+        self.host.call_capability = many_roots
+        operation = await self.menu()
+        for page in (0, 1, 2):
+            if page:
+                await self.click_menu(operation, f'page-{page}')
+            rows = operation['details']['keyboard']
+            self.assertLessEqual(len(rows), 10)
+            self.assertIn(f'目录{page * 8}', str(rows))
+        await self.click_menu(operation, 'root-18')
+        await operation['task']
+        self.assertEqual(operation['stage'], 'inventory_confirmation')
+        self.assertEqual(operation['input'], '/Root18')
+        self.assertFalse(self.host.chunks)
+
+    async def test_menu_query_and_back_keep_one_operation(self):
+        operation = await self.menu()
+        identity = operation['operation_id']
+        await self.click_menu(operation, 'query')
+        self.assertEqual(operation['stage'], 'query_input')
+        await self.click_menu(operation, 'back')
+        self.assertEqual(operation['stage'], 'inventory_root_selection')
+        await self.click_menu(operation, 'query')
+        response = await self.feature.message({**self.owner, 'text': 'Test Work 2020'})
+        self.assertEqual(response['operation']['operation_id'], identity)
+        await operation['task']
+        self.assertEqual(operation['state'], 'completed')
+        self.assertEqual(len(self.feature.operations), 1)
+        self.assertEqual(operation['result']['added_count'], 1)
+
+    async def test_custom_path_validation_retains_back_and_confirmation(self):
+        operation = await self.menu()
+        await self.click_menu(operation, 'path')
+        invalid = await self.feature.message({**self.owner, 'text': '../private'})
+        self.assertEqual(invalid['operation']['state'], 'awaiting_input')
+        self.assertIn('keyboard', invalid['operation']['details'])
+        await self.feature.message({**self.owner, 'text': 'Movies'})
+        await operation['task']
+        self.assertEqual(operation['input'], '/Movies')
+        self.assertEqual(operation['stage'], 'inventory_confirmation')
+        self.assertFalse(self.engine.queries)
+        await self.click_menu(operation, 'back')
+        self.assertNotIn('inventory', operation)
+        self.assertEqual(operation['stage'], 'inventory_root_selection')
+
+    async def test_confirm_double_click_only_processes_batch_once(self):
+        operation = await self.run_command(['scan', '/Movies'])
+        await self.click_menu(operation, 'confirm')
+        task = operation['task']
+        await self.click_menu(operation, 'confirm')
+        self.assertIs(operation['task'], task)
+        await task
+        self.assertEqual(len(self.engine.queries), 1)
+        self.assertEqual(len(self.host.chunks), 1)
+
+    async def test_scan_ambiguity_pauses_and_number_reply_resumes_current_batch(self):
+        self.host.pages[0]['media'].append({'path': '/Movies/Second.mkv', 'name': 'Second.mkv'})
+        self.host.resolved = {'status': 'confirmation_required', 'resolution_id': 'choice-1',
+                              'candidates': [{'ref': 'tmdb:42', 'title': '测试作品', 'original_title': 'Test Work',
+                                              'year': 2020, 'countries': ['美国'], 'media_type': 'movie'}]}
+        operation = await self.run_command(['scan', '/Movies'])
+        await self.click_menu(operation, 'confirm')
+        await operation['task']
+        self.assertEqual(operation['stage'], 'metadata_choice')
+        self.assertIn('/Movies/Test Work 2020.mkv', operation['status_text'])
+        self.assertIn('2020｜美国｜电影', operation['status_text'])
+        self.assertEqual(operation['inventory']['index'], 0)
+        self.assertFalse(self.host.chunks)
+        self.host.resolved = {'status': 'resolved', 'media_metadata': metadata(), 'subtitle_context': {'original_language': 'en'}}
+        wrong = await self.feature.message({**self.owner, 'text': '9'})
+        self.assertEqual(wrong['operation']['state'], 'awaiting_input')
+        response = await self.feature.message({**self.owner, 'text': '1'})
+        self.assertEqual(response['session']['state'], 'open')
+        await operation['task']
+        self.assertEqual(operation['state'], 'completed')
+        self.assertEqual(operation['result']['processed_count'], 2)
+        self.assertEqual([q.video_path for q in self.engine.queries], ['/Movies/Test Work 2020.mkv', '/Movies/Second.mkv'])
+        self.assertEqual(sum(c[1] == 'confirm_metadata' for c in self.host.calls), 1)
+        self.assertNotIn('inventory', self.feature.store.get(operation['operation_id']))
+
+    async def test_scan_missing_language_waits_before_write_then_resumes(self):
+        self.host.resolved['subtitle_context'] = {}
+        operation = await self.run_command(['scan', '/Movies'])
+        await self.click_menu(operation, 'confirm')
+        await operation['task']
+        self.assertEqual(operation['stage'], 'original_language')
+        self.assertFalse(self.engine.queries)
+        await self.feature.callback({**self.owner, 'payload': f"language:{operation['operation_id'][:12]}:zh"})
+        await operation['task']
+        self.assertEqual(operation['state'], 'completed')
+        self.assertEqual(self.engine.queries[0].original_language, 'zh')
+        self.assertEqual(self.engine.queries[0].video_path, '/Movies/Test Work 2020.mkv')
+
+    async def test_exit_before_confirm_writes_nothing_and_absorbs_host_revision(self):
+        operation = await self.run_command(['scan', '/Movies'])
+        response = await self.feature.operation_control({'operation_id': operation['operation_id'], 'action': 'exit', 'revision': 100})
+        self.assertEqual(response['operation']['revision'], 101)
+        self.assertEqual(response['session']['state'], 'close')
+        self.assertEqual(operation['state'], 'cancelled')
+        self.assertEqual(operation['details'], {})
+        self.assertNotIn('inventory', operation)
+        stale = await self.click_menu(operation, 'confirm')
+        self.assertNotIn('operation', stale)
+        self.assertFalse(self.engine.queries)
+        self.assertFalse(self.host.chunks)
+
+    async def test_cancel_late_inventory_response_cannot_resurrect_menu(self):
+        entered = asyncio.Event()
+        original = self.host.call_capability
+        async def slow(capability, method, payload, **kwargs):
+            if method == 'scan_library':
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    return {'snapshot_complete': True, 'media': self.host.pages[0]['media']}
+            return await original(capability, method, payload, **kwargs)
+        self.host.call_capability = slow
+        result = await self.feature.command({**self.owner, 'command': 'caption', 'args': ['scan', '/Movies']})
+        operation = self.feature.operations[result['operation']['operation_id']]
+        await entered.wait()
+        await self.feature.operation_control({'operation_id': operation['operation_id'], 'action': 'cancel', 'revision': 40})
+        await operation['task']
+        self.assertEqual(operation['state'], 'cancelled')
+        self.assertEqual(operation['revision'], 41)
+        self.assertNotIn('inventory', operation)
+        self.assertFalse(self.engine.queries)
+
+    async def test_stale_or_foreign_controls_do_not_cancel_selection(self):
+        operation = await self.menu()
+        with self.assertRaises(FeatureError) as caught:
+            await self.feature.operation_control({'operation_id': operation['operation_id'], 'action': 'cancel'})
+        self.assertEqual(caught.exception.code, 'stale_control')
+        with self.assertRaises(FeatureError):
+            await self.feature.operation_control({'operation_id': operation['operation_id'], 'action': 'exit', 'chat_id': 99, 'user_id': 2})
+        foreign = await self.feature.callback({'chat_id': 99, 'user_id': 2, 'payload': f"menu:{operation['operation_id'][:12]}:root-0"})
+        self.assertNotIn('operation', foreign)
+        self.assertEqual(operation['stage'], 'inventory_root_selection')
+        self.assertFalse(operation['cancel_event'].is_set())
+
+    async def test_expired_selection_closes_owned_operation(self):
+        operation = await self.menu()
+        operation['session']['expires'] = 0
+        result = await self.click_menu(operation, 'query')
+        self.assertEqual(result['operation']['state'], 'cancelled')
+        self.assertEqual(result['session']['state'], 'close')
+        self.assertEqual(operation['details'], {})
+
+    async def test_old_candidate_feedback_does_not_close_new_menu(self):
+        self.host.resolved = {'status': 'confirmation_required', 'resolution_id': 'choice-1',
+                              'candidates': [{'ref': 'tmdb:42', 'title': 'Test'}]}
+        old = await self.run_command(['Test'])
+        await self.feature.operation_control({'operation_id': old['operation_id'], 'action': 'exit'})
+        current = await self.menu()
+        stale = await self.feature.callback({**self.owner, 'payload': f"choose:{old['operation_id'][:12]}:0"})
+        self.assertNotIn('session', stale)
+        self.assertEqual(current['state'], 'awaiting_input')
+
+    async def test_empty_scan_can_return_without_search_or_write(self):
+        self.host.pages = [{'snapshot_complete': True, 'media': [], 'next_cursor': ''}]
+        operation = await self.run_command(['scan', '/Empty'])
+        self.assertIn('0 个视频', operation['status_text'])
+        self.assertNotIn(':confirm', str(operation['details']))
+        await self.click_menu(operation, 'back')
+        await operation['task']
+        self.assertEqual(operation['stage'], 'inventory_root_selection')
+        self.assertFalse(self.engine.queries)
+        self.assertFalse(self.host.chunks)
+
+    async def test_incomplete_inventory_never_reaches_confirmation_or_writes(self):
+        self.host.pages = [{'snapshot_complete': False, 'media': [{'path': '/Movies/Test.mkv'}]}]
+        operation = await self.run_command(['scan', '/Movies'])
+        self.assertEqual(operation['state'], 'failed')
+        self.assertEqual(operation['details']['reason'], 'inventory_incomplete')
+        self.assertFalse(self.engine.queries)
+        self.assertFalse(self.host.chunks)
+
+    async def test_scan_whitespace_shortcut_keeps_directory_semantics(self):
+        operation = await self.run_command('scan\t/Movies')
+        self.assertEqual(operation['stage'], 'inventory_confirmation')
+        self.assertEqual(operation['input'], '/Movies')
+        self.assertFalse(self.engine.queries)
+
+    async def test_root_paths_follow_rename_leading_slash_normalization(self):
+        original = self.host.call_capability
+        async def relative_root(capability, method, payload, **kwargs):
+            if method == 'scan_library' and not payload.get('root_path'):
+                return {'roots': [{'name': '电影', 'path': 'Movies/'}]}
+            return await original(capability, method, payload, **kwargs)
+        self.host.call_capability = relative_root
+        operation = await self.menu()
+        await self.click_menu(operation, 'root-0')
+        await operation['task']
+        self.assertEqual(operation['input'], '/Movies')
+        self.assertEqual(operation['stage'], 'inventory_confirmation')

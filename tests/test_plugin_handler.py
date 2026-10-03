@@ -544,6 +544,85 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             button = markup.inline_keyboard[-1][0]
             self.assertEqual(button.text, "退出")
             self.assertEqual(button.callback_data, "host-operation:exit:op-1")
+            self.assertEqual(
+                context.application.bot_data["telepiplex_plugin_sessions"][(10, 1)]["operation_id"],
+                "op-1",
+            )
+
+    async def test_render_completion_cannot_reopen_or_clear_another_text_session(self):
+        from app.handlers.plugin_handler import handle_feature_result
+
+        for replacement in (None, "same", "new_operation", "legacy_config"):
+            for session_state in ("open", "close"):
+                with self.subTest(replacement=replacement, session_state=session_state):
+                    update, context, route, coordinator, record, _surface = self._native_callback_request()
+                    report = {
+                        "operation_id": record.operation_id, "chat_id": 10, "user_id": 1,
+                        "state": "awaiting_input", "stage": "query", "revision": 3,
+                        "status_text": "请输入片名", "control": "exit", "details": {},
+                        "segment": {"role": "search", "presentation_kind": "text"},
+                    }
+                    saved_session = {"plugin_id": "search", "expires_at": 9999999999}
+                    if replacement == "same":
+                        saved_session["operation_id"] = record.operation_id
+                    elif replacement == "new_operation":
+                        saved_session["operation_id"] = "new-operation"
+
+                    async def complete_while_rendering(*_args, **_kwargs):
+                        coordinator.report("search", {
+                            **report, "state": "completed", "control": "", "revision": 4,
+                        })
+                        if replacement == "new_operation":
+                            coordinator.report("search", {
+                                **report, "operation_id": "new-operation", "revision": 1,
+                            })
+                        if replacement is not None:
+                            context.application.bot_data["telepiplex_plugin_sessions"] = {
+                                (10, 1): deepcopy(saved_session),
+                            }
+                        return 55
+
+                    with patch("app.handlers.plugin_handler.render_operation", side_effect=complete_while_rendering):
+                        await handle_feature_result(update, context, route, {
+                            "actions": [], "session": {"state": session_state}, "operation": report,
+                        })
+
+                    sessions = context.application.bot_data.get("telepiplex_plugin_sessions", {})
+                    if replacement in {None, "same"}:
+                        self.assertNotIn((10, 1), sessions)
+                    else:
+                        self.assertEqual(sessions[(10, 1)], saved_session)
+                    if replacement == "new_operation":
+                        self.assertEqual(coordinator.active(10, 1).operation_id, "new-operation")
+
+    async def test_background_prompt_can_open_text_route_after_start_report_advances(self):
+        from app.handlers.plugin_handler import handle_feature_result
+
+        update, context, route, coordinator, record, _surface = self._native_callback_request()
+        report = {
+            "operation_id": record.operation_id, "chat_id": 10, "user_id": 1,
+            "state": "running", "stage": "metadata", "revision": 3,
+            "status_text": "正在识别", "control": "cancel", "details": {},
+            "segment": {"role": "search", "presentation_kind": "text"},
+        }
+
+        async def advance_while_rendering(*_args, **_kwargs):
+            coordinator.report("search", {
+                **report, "state": "awaiting_input", "stage": "metadata_choice",
+                "status_text": "请选择作品", "control": "exit", "revision": 4,
+            })
+            return 55
+
+        with patch("app.handlers.plugin_handler.render_operation", side_effect=advance_while_rendering):
+            await handle_feature_result(update, context, route, {
+                "actions": [], "session": {"state": "open"}, "operation": report,
+            })
+
+        self.assertEqual(
+            context.application.bot_data["telepiplex_plugin_sessions"][(10, 1)]["operation_id"],
+            record.operation_id,
+        )
+        self.assertEqual(coordinator.active(10, 1).state, "awaiting_input")
 
     async def test_closing_session_releases_awaiting_operation(self):
         from app.runtime.interaction_coordinator import InteractionCoordinator
@@ -1969,6 +2048,108 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         update.effective_message.reply_text.assert_awaited_once_with(
             "已接收作品链接"
         )
+
+    async def test_finished_or_invalid_operation_session_releases_the_next_direct_message(self):
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+        from app.handlers.plugin_handler import dynamic_message_gateway
+
+        cases = ("completed", "cancelled", "failed", "interrupted", "missing", "wrong_owner", "wrong_plugin")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmpdir:
+                coordinator = InteractionCoordinator(Path(tmpdir) / "host.db")
+                self.addCleanup(coordinator.close)
+                if case != "missing":
+                    coordinator.report("rename" if case == "wrong_plugin" else "caption", {
+                        "operation_id": "caption-finished", "chat_id": 20 if case == "wrong_owner" else 10,
+                        "user_id": 1, "state": "awaiting_input" if case == "wrong_owner" else "completed" if case == "wrong_plugin" else case,
+                        "stage": "completed", "status_text": "字幕处理完成", "control": "exit" if case == "wrong_owner" else "", "revision": 2,
+                    })
+                update, context, _manager = self._request([], user_id=1)
+                update.effective_message.text = "https://www.themoviedb.org/movie/157336"
+                search = SimpleNamespace(plugin_id="search", client=AsyncMock())
+                search.client.request.return_value = {"actions": []}
+                router = Mock()
+                router.direct_message_route.return_value = search
+                context.application.bot_data.update({
+                    "telepiplex_interaction_coordinator": coordinator,
+                    "telepiplex_plugin_router": router,
+                    "telepiplex_plugin_sessions": {(10, 1): {
+                        "plugin_id": "caption", "operation_id": "caption-finished", "expires_at": 9999999999,
+                    }},
+                })
+
+                with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+                    await dynamic_message_gateway(update, context)
+
+                self.assertNotIn("telepiplex_plugin_sessions", context.application.bot_data)
+                router.plugin_route.assert_not_called()
+                router.direct_message_route.assert_called_once_with(update.effective_message.text)
+                search.client.request.assert_awaited_once()
+                self.assertEqual(search.client.request.await_args.args[0], "message.dispatch")
+
+    async def test_active_bound_operation_keeps_its_text_session(self):
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+        from app.handlers.plugin_handler import dynamic_message_gateway
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "host.db")
+            self.addCleanup(coordinator.close)
+            coordinator.report("caption", {
+                "operation_id": "caption-active", "chat_id": 10, "user_id": 1,
+                "state": "awaiting_input", "stage": "metadata_choice", "status_text": "请选择作品",
+                "control": "exit", "revision": 2,
+            })
+            update, context, _manager = self._request([], user_id=1)
+            update.effective_message.text = "1"
+            caption = SimpleNamespace(plugin_id="caption", client=AsyncMock())
+            caption.client.request.return_value = {"actions": []}
+            router = Mock()
+            router.plugin_route.return_value = caption
+            session = {"plugin_id": "caption", "operation_id": "caption-active", "expires_at": 9999999999}
+            context.application.bot_data.update({
+                "telepiplex_interaction_coordinator": coordinator,
+                "telepiplex_plugin_router": router,
+                "telepiplex_plugin_sessions": {(10, 1): deepcopy(session)},
+            })
+
+            with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+                await dynamic_message_gateway(update, context)
+
+            router.direct_message_route.assert_not_called()
+            caption.client.request.assert_awaited_once()
+            self.assertEqual(context.application.bot_data["telepiplex_plugin_sessions"][(10, 1)], session)
+
+    async def test_legacy_config_session_remains_usable_after_a_completed_operation(self):
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+        from app.handlers.plugin_handler import dynamic_message_gateway
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            coordinator = InteractionCoordinator(Path(tmpdir) / "host.db")
+            self.addCleanup(coordinator.close)
+            coordinator.report("caption", {
+                "operation_id": "caption-old", "chat_id": 10, "user_id": 1,
+                "state": "completed", "stage": "completed", "status_text": "已完成",
+                "control": "", "revision": 2,
+            })
+            update, context, _manager = self._request([], user_id=1)
+            update.effective_message.text = "/字幕保存目录"
+            caption = SimpleNamespace(plugin_id="caption", client=AsyncMock())
+            caption.client.request.return_value = {"actions": []}
+            router = Mock()
+            router.plugin_route.return_value = caption
+            session = {"plugin_id": "caption", "expires_at": 9999999999}
+            context.application.bot_data.update({
+                "telepiplex_interaction_coordinator": coordinator,
+                "telepiplex_plugin_router": router,
+                "telepiplex_plugin_sessions": {(10, 1): deepcopy(session)},
+            })
+
+            with patch("app.handlers.plugin_handler.init.check_user", return_value=True):
+                await dynamic_message_gateway(update, context)
+
+            caption.client.request.assert_awaited_once()
+            router.direct_message_route.assert_not_called()
+            self.assertEqual(context.application.bot_data["telepiplex_plugin_sessions"][(10, 1)], session)
 
     async def test_active_button_only_operation_blocks_direct_message_dispatch(self):
         from app.handlers.plugin_handler import dynamic_message_gateway

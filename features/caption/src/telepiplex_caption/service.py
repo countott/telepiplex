@@ -16,6 +16,7 @@ from telepiplex_plugin_sdk import FeatureError
 from telepiplex_plugin_sdk.media_metadata_v2 import validate_media_metadata_v2
 
 from .engine import CaptionEngine
+from .interaction import metadata_choice_view
 from .metadata import make_query, metadata_query, same_work, video_items
 from .store import CaptionStore
 
@@ -136,52 +137,91 @@ class CaptionFeature:
                 [{"text": "退出", "callback_data": "caption:config:cancel"}],
             ], session="open")
         args = _args(request)
-        if args.startswith("scan") and (args == "scan" or args[4:5].isspace()):
-            root = args[4:].strip()
-            if not root:
-                response = await self.host.call_capability("media.rename", "scan_library", {}, deadline=30)
-                roots = response.get("roots") or []
-                self.sessions[_owner(request)] = {"kind": "roots", "roots": roots, "expires": time.time() + SESSION_TTL}
-                if not roots:
-                    return _response("没有已配置媒体目录。可发送 /caption scan /115目录。")
-                return _response("选择要补齐外挂字幕的媒体目录：", keyboard=[[
-                    {"text": str(root.get("name") or root["path"]), "callback_data": f"caption:root:{index}"}
-                ] for index, root in enumerate(roots[:8])], session="open")
+        if not args or args == "scan":
+            return self._start(request, "menu", "")
+        if args.startswith("scan") and args[4:5].isspace():
             try:
-                root = _path(root)
+                root = _path(args[4:].strip())
             except ValueError as exc:
                 return _response(str(exc))
             return self._start(request, "scan", root)
-        if not args:
-            return _response("发送 /caption 片名 年份（剧集可加 S01E02）查找字幕。\n"
-                             "发送 /caption scan 扫描媒体库。\n"
-                             "已找到字幕详情时：/caption 片名 年份 --source 字幕详情链接。\n"
-                             "无视频时保存到：" + str(self.config.get("output_path", "/字幕")))
+        try:
+            query, source_url = self._query_input(args)
+        except ValueError as exc:
+            return _response(str(exc))
+        return self._start(request, "query", query, source_url=source_url)
+
+    def _query_input(self, value):
+        value = str(value).strip()
+        if not value or len(value) > 2000:
+            raise ValueError("请输入片名和年份；剧集可加 S01E02。")
         source_url = ""
-        if "--source" in args:
-            match = re.fullmatch(r"(.+?)\s+--source\s+(https://\S+)", args)
+        if "--source" in value:
+            match = re.fullmatch(r"(.+?)\s+--source\s+(https://\S+)", value)
             if not match or "--source" in match[1] or not any(
                     getattr(p, "supports_detail_url", lambda _: False)(match[2]) for p in self.engine.providers):
-                return _response("请使用 /caption 片名 年份 --source 字幕详情链接；目前支持 SubHD、字幕库、LWLTV 和 YYSub 的公开详情页。")
-            args, source_url = match[1].strip(), match[2]
-        return self._start(request, "query", args, source_url=source_url)
+                raise ValueError("请使用 片名 年份 --source 字幕详情链接；支持 SubHD、字幕库、Subf2m、R3SUB 等已接入来源的正规详情页。")
+            value, source_url = match[1].strip(), match[2]
+        return value, source_url
+
+    def _active_operation(self, request):
+        return next((op for op in self.operations.values()
+                     if (op["chat_id"], op["user_id"]) == _owner(request)
+                     and op["state"] not in TERMINAL), None)
+
+    def _operation_response(self, operation):
+        return {"actions": [], "session": {"state": "close" if operation["state"] in TERMINAL else "open"},
+                "operation": self._view(operation)}
 
     def _start(self, request, kind, value, *, source_url=""):
         if not self.config.get("enabled", True):
             return _response("字幕模块已停用，请先启用 caption。")
-        for operation in self.operations.values():
-            if (operation["chat_id"], operation["user_id"]) == _owner(request) and operation["state"] not in TERMINAL:
-                return _response("已有字幕任务正在进行，请先完成或取消。")
+        active = self._active_operation(request)
+        if active:
+            return self._operation_response(active)
+        self.sessions.pop(_owner(request), None)
         chat_id, user_id = _owner(request)
+        text = {"menu": "正在读取媒体目录。", "scan": "正在扫描媒体文件。", "query": "正在确认作品。"}[kind]
         operation = {"operation_id": uuid.uuid4().hex, "chat_id": chat_id, "user_id": user_id,
                      "state": "running", "stage": "metadata" if kind == "query" else "inventory",
-                     "status_text": "正在确认作品并查找外挂字幕。" if kind == "query" else "正在扫描媒体文件。",
-                     "control": "cancel", "revision": 1, "details": {}, "kind": kind,
+                     "status_text": text, "control": "cancel", "revision": 1, "details": {}, "kind": kind,
                      "input": value, "source_url": source_url, "cancel_event": asyncio.Event()}
         self.operations[operation["operation_id"]] = operation
         self.store.save(operation)
         self._spawn(operation, self._run(operation, kind, value))
-        return {"actions": [], "session": {"state": "close"}, "operation": self._view(operation)}
+        return self._operation_response(operation)
+
+    def _menu_view(self, operation, page=0):
+        roots = operation.get("menu_roots") or []
+        last = max(0, (len(roots) - 1) // 8)
+        page = min(max(0, page), last)
+        token = operation["operation_id"][:12]
+        def button(label, action):
+            return {"text": label, "callback_data": f"caption:menu:{token}:{action}"}
+        keyboard = [[button(str(root.get("name") or root["path"])[:80], f"root-{i}")]
+                    for i, root in enumerate(roots) if page * 8 <= i < (page + 1) * 8]
+        navigation = []
+        if page:
+            navigation.append(button("上一页", f"page-{page - 1}"))
+        if page < last:
+            navigation.append(button("下一页", f"page-{page + 1}"))
+        if navigation:
+            keyboard.append(navigation)
+        keyboard.append([button("输入其他目录", "path"), button("单独查找字幕", "query")])
+        text = "选择要补齐外挂字幕的目录：" if roots else "没有已配置媒体目录，可输入 115 目录或单独查找字幕。"
+        if last:
+            text += f"\n第 {page + 1}/{last + 1} 页"
+        operation["session"] = {"kind": "menu", "page": page, "expires": time.time() + SESSION_TTL}
+        return text, {"keyboard": keyboard}
+
+    async def _load_menu(self, operation):
+        response = await self.host.call_capability("media.rename", "scan_library", {}, deadline=30)
+        self._check_cancel(operation)
+        operation["menu_roots"] = [dict(root, path=_path("/" + str(root["path"]).strip("/"))) for root in response.get("roots") or []
+                                   if isinstance(root, dict) and root.get("path")]
+        text, details = self._menu_view(operation)
+        await self._report(operation, state="awaiting_input", stage="inventory_root_selection", control="exit",
+                           status_text=text, details=details)
 
     def _spawn(self, operation, awaitable):
         if self.runtime is None:
@@ -199,32 +239,24 @@ class CaptionFeature:
         try:
             # Command results register ownership in Host after dispatch returns.
             await self._confirm_ownership(operation)
+            if kind == "menu":
+                await self._load_menu(operation)
+                return
             if kind == "scan":
-                await self._scan(operation, value)
+                if (operation.get("inventory") or {}).get("confirmed"):
+                    await self._run_scan_batch(operation, resolved=resolved)
+                else:
+                    await self._scan(operation, value)
                 return
             resolved = resolved or await self._resolve(value)
             self._check_cancel(operation)
-            if resolved.get("status") == "confirmation_required":
-                candidates = list(resolved.get("candidates") or [])[:5]
-                operation["session"] = {"kind": "metadata", "resolved": resolved, "candidates": candidates, "expires": time.time() + SESSION_TTL}
-                await self._report(operation, state="awaiting_input", stage="metadata_choice", control="exit",
-                    status_text="找到多个同名作品，请确认要找字幕的作品。", details={"keyboard": [[{
-                        "text": f"{c.get('title', '')} {c.get('year', '')}".strip(),
-                        "callback_data": f"caption:choose:{operation['operation_id'][:12]}:{i}",
-                    }] for i, c in enumerate(candidates)]})
+            if await self._await_resolution(operation, resolved):
                 return
             if resolved.get("status") != "resolved":
                 await self._report(operation, state="failed", stage="metadata_unresolved", control="",
                     status_text="未能确认作品或季集范围，请补充年份、作品链接或 S01E02。", details={"reason": resolved.get("reason_code", "metadata_unresolved")})
                 return
             context = resolved.get("subtitle_context") or {}
-            if not context.get("original_language"):
-                operation["session"] = {"kind": "language", "resolved": resolved, "expires": time.time() + SESSION_TTL}
-                await self._report(operation, state="awaiting_input", stage="original_language", control="exit",
-                    status_text="元数据没有原始语言。请选择原始语言，以应用正确的字幕优先级。", details={"keyboard": [[{
-                        "text": label, "callback_data": f"caption:language:{operation['operation_id'][:12]}:{code}"
-                    }] for label, code in (("英语", "en"), ("中文／粤语", "zh"), ("其他语言", "und-other"))]})
-                return
             await self._report(operation, state="running", stage="caption", control="cancel", status_text="正在检索、下载并检查外挂字幕。", details={})
             result = await self._process(resolved["media_metadata"], context, operation=operation)
             await self._finish(operation, self._batch_result([result]))
@@ -235,13 +267,37 @@ class CaptionFeature:
             await self._report(operation, state="failed", stage="failed", control="", status_text="字幕任务未完成；已写入的文件保留。",
                                details={"reason": str(getattr(exc, "code", type(exc).__name__))})
 
+    async def _await_resolution(self, operation, resolved, *, item=None):
+        self._check_cancel(operation)
+        video_path = str((item or {}).get("path") or "")
+        if resolved.get("status") == "confirmation_required" and resolved.get("candidates"):
+            candidates = list(resolved["candidates"])[:5]
+            operation["session"] = {"kind": "metadata", "resolved": resolved, "candidates": candidates,
+                                    "expires": time.time() + SESSION_TTL}
+            text, details = metadata_choice_view(candidates, operation["operation_id"], video_path=video_path)
+            await self._report(operation, state="awaiting_input", stage="metadata_choice", control="exit",
+                               status_text=text, details=details)
+            return True
+        if resolved.get("status") == "resolved" and not (resolved.get("subtitle_context") or {}).get("original_language"):
+            operation["session"] = {"kind": "language", "resolved": resolved, "expires": time.time() + SESSION_TTL}
+            text = "元数据没有原始语言。请选择原始语言，以应用正确的字幕优先级。"
+            if video_path:
+                text += "\n当前文件：" + video_path[:240]
+            await self._report(operation, state="awaiting_input", stage="original_language", control="exit",
+                status_text=text, details={"keyboard": [[{
+                    "text": label, "callback_data": f"caption:language:{operation['operation_id'][:12]}:{code}"
+                }] for label, code in (("英语", "en"), ("中文／粤语", "zh"), ("其他语言", "und-other"))]})
+            return True
+        operation["session"] = {}
+        return False
+
     async def _scan(self, operation, root):
-        cursor, results, processed = "", [], 0
-        items, seen_cursors = [], set()
+        cursor, items, seen_cursors = "", [], set()
         while True:
             self._check_cancel(operation)
             inventory = await self.host.call_capability("media.rename", "scan_library",
                 {"root_path": root, "cursor": cursor, "limit": 100}, deadline=180)
+            self._check_cancel(operation)
             if not inventory.get("snapshot_complete"):
                 raise FeatureError("inventory_incomplete", "library scan was not complete")
             items.extend(inventory.get("media") or [])
@@ -253,22 +309,44 @@ class CaptionFeature:
             if cursor in seen_cursors:
                 raise FeatureError("inventory_incomplete", "library pagination did not advance")
             seen_cursors.add(cursor)
-        # Finish the bounded inventory before potentially slow subtitle queries;
-        # an inventory cursor must not expire halfway through a large library.
-        for item in items:
+        # Read all pages before asking for confirmation; no subtitle retrieval or
+        # storage writes occur until the user starts this fixed batch.
+        operation["inventory"] = {"items": items, "results": [], "index": 0, "confirmed": False}
+        operation["session"] = {"kind": "scan_confirmation", "expires": time.time() + SESSION_TTL}
+        token = operation["operation_id"][:12]
+        keyboard = []
+        if items:
+            keyboard.append([{"text": f"开始补字幕（{len(items)}）", "callback_data": f"caption:menu:{token}:confirm"}])
+        keyboard.append([{"text": "返回目录", "callback_data": f"caption:menu:{token}:back"}])
+        text = f"扫描完成：{root[:240]}\n发现 {len(items)} 个视频文件。"
+        text += "\n确认后逐个查找外挂字幕，保存到对应视频旁。" if items else "\n没有可补字幕的视频文件。"
+        await self._report(operation, state="awaiting_input", stage="inventory_confirmation", control="exit",
+                           status_text=text, details={"total": len(items), "keyboard": keyboard})
+
+    async def _run_scan_batch(self, operation, *, resolved=None):
+        inventory = operation["inventory"]
+        items, results = inventory["items"], inventory["results"]
+        while inventory["index"] < len(items):
             self._check_cancel(operation)
+            processed = inventory["index"]
+            item = items[processed]
             await self._report(operation, state="running", stage="caption", control="cancel",
-                status_text=f"正在补齐外挂字幕：{processed + 1}/{len(items)}\n{str(item.get('name') or '')}",
+                status_text=f"正在补齐外挂字幕：{processed + 1}/{len(items)}\n{str(item.get('name') or '')[:240]}",
                 details={"processed": processed, "total": len(items)})
             try:
-                resolved = await self._resolve(self._query_for_file(item))
+                resolved = resolved or await self._resolve(self._query_for_file(item))
+                self._check_cancel(operation)
+                if await self._await_resolution(operation, resolved, item=item):
+                    return
                 if resolved.get("status") != "resolved":
                     results.append({"status": "metadata_required", "video_path": item.get("path"), "reason": resolved.get("reason_code") or "ambiguous_metadata", "placements": []})
                 else:
                     results.append(await self._process(resolved["media_metadata"], resolved.get("subtitle_context") or {}, item=item, operation=operation))
             except FeatureError as exc:
+                self._check_cancel(operation)
                 results.append({"status": "failed", "video_path": item.get("path"), "reason": exc.code, "placements": []})
-            processed += 1
+            inventory["index"] += 1
+            resolved = None
         await self._finish(operation, self._batch_result(results))
 
     @staticmethod
@@ -428,6 +506,8 @@ class CaptionFeature:
                 text += "\n" + source["source_page"]
         # Keep the durable audit in the Feature store and a bounded Host summary.
         operation["result"] = result
+        operation["session"] = {}
+        operation.pop("inventory", None)
         final_state = "failed" if result["status"] in {"failed", "unavailable", "metadata_required"} else "completed"
         await self._report(operation, state=final_state, stage="completed" if final_state == "completed" else result["status"], control="", status_text=text,
             details={k: result[k] for k in ("status", "added_count", "existing_count", "processed_count", "unmatched_count", "warnings")})
@@ -436,26 +516,17 @@ class CaptionFeature:
         payload = str(request.get("payload") or "")
         if payload.startswith("config:"):
             return self._config_callback(request, payload.split(":", 1)[1])
-        if payload.startswith("root:"):
-            session = self.sessions.get(_owner(request)) or {}
-            if session.get("kind") != "roots" or session.get("expires", 0) < time.time():
-                return _response("目录选择已过期，请重新发送 /caption scan。", session="close")
-            try:
-                index = int(payload.split(":", 1)[1])
-                if index < 0:
-                    raise ValueError
-                root = session["roots"][index]["path"]
-            except (ValueError, IndexError, KeyError):
-                raise FeatureError("invalid_selection", "invalid caption directory") from None
-            self.sessions.pop(_owner(request), None)
-            return self._start(request, "scan", root)
+        if payload.startswith("menu:"):
+            return self._menu_callback(request, payload)
         parts = payload.split(":")
         if len(parts) != 3 or parts[0] not in {"choose", "language"}:
             raise FeatureError("invalid_callback", "unknown caption action")
-        operation = next((op for op in self.operations.values() if op["operation_id"].startswith(parts[1]) and (op["chat_id"], op["user_id"]) == _owner(request)), None)
+        operation = next((op for op in self.operations.values() if op["operation_id"][:12] == parts[1] and (op["chat_id"], op["user_id"]) == _owner(request)), None)
         session = (operation or {}).get("session") or {}
-        if not operation or operation["state"] != "awaiting_input" or session.get("expires", 0) < time.time():
-            return _response("此选择已失效，请重新发送 /caption。", session="close")
+        if not operation or operation["state"] != "awaiting_input":
+            return _response("此选择已失效，请使用当前字幕面板。")
+        if session.get("expires", 0) < time.time():
+            return self._expired(operation)
         if parts[0] == "language" and session.get("kind") == "language":
             if parts[2] not in {"en", "zh", "und-other"}:
                 raise FeatureError("invalid_selection", "invalid original language")
@@ -473,18 +544,81 @@ class CaptionFeature:
             operation["session"] = {}
             self._change(operation, state="running", stage="metadata", control="cancel", status_text="正在确认作品。", details={})
             self._spawn(operation, self._confirm_choice(operation, session["resolved"]["resolution_id"], candidate["ref"]))
-            return {"actions": [], "operation": self._view(operation)}
+            return self._operation_response(operation)
         else:
             raise FeatureError("invalid_selection", "caption action does not match current step")
         operation["session"] = {}
         self._change(operation, state="running", stage="caption", control="cancel", status_text="正在查找字幕。", details={})
-        self._spawn(operation, self._run(operation, "query", operation["input"], resolved=resolved))
-        return {"actions": [], "operation": self._view(operation)}
+        self._spawn(operation, self._run(operation, operation["kind"], operation["input"], resolved=resolved))
+        return self._operation_response(operation)
+
+    def _menu_callback(self, request, payload):
+        parts = payload.split(":")
+        operation = self._active_operation(request)
+        if len(parts) != 3 or not operation or parts[1] != operation["operation_id"][:12]:
+            return _response("此选择已失效，请重新发送 /caption。")
+        session = operation.get("session") or {}
+        if operation["state"] != "awaiting_input":
+            return self._operation_response(operation)
+        if session.get("expires", 0) < time.time():
+            return self._expired(operation)
+        action, kind = parts[2], session.get("kind")
+        if action.startswith("page-") and kind == "menu":
+            try:
+                page = int(action[5:])
+            except ValueError:
+                raise FeatureError("invalid_selection", "invalid caption directory page") from None
+            text, details = self._menu_view(operation, page)
+            self._change(operation, status_text=text, details=details)
+        elif action in {"query", "path"} and kind == "menu":
+            operation["session"] = {"kind": action + "_input", "expires": time.time() + SESSION_TTL}
+            text = ("请输入片名和年份，剧集可加 S01E02。\n例如：星际穿越 2014\n无视频时保存到：" + str(self.config.get("output_path", "/字幕"))
+                    if action == "query" else "请输入 115 中要扫描的目录，例如：真人电影 或 /真人电影。")
+            self._change(operation, stage=action + "_input", status_text=text,
+                details={"keyboard": [[{"text": "返回目录", "callback_data": f"caption:menu:{parts[1]}:back"}]]})
+        elif action == "back" and kind in {"query_input", "path_input", "scan_confirmation"}:
+            operation.pop("inventory", None)
+            operation.update(kind="menu", input="", source_url="", session={})
+            if "menu_roots" in operation:
+                text, details = self._menu_view(operation)
+                self._change(operation, stage="inventory_root_selection", status_text=text, details=details)
+            else:
+                self._change(operation, state="running", stage="inventory", control="cancel", status_text="正在读取媒体目录。", details={})
+                self._spawn(operation, self._run(operation, "menu", ""))
+        elif action.startswith("root-") and kind == "menu":
+            try:
+                index = int(action[5:])
+                if index < 0:
+                    raise ValueError
+                root = operation["menu_roots"][index]["path"]
+            except (ValueError, KeyError, IndexError):
+                raise FeatureError("invalid_selection", "invalid caption directory") from None
+            self._continue_operation(operation, "scan", root)
+        elif action == "confirm" and kind == "scan_confirmation" and (operation.get("inventory") or {}).get("items"):
+            operation["inventory"]["confirmed"] = True
+            self._continue_operation(operation, "scan", operation["input"])
+        else:
+            raise FeatureError("invalid_selection", "caption action does not match current step")
+        return self._operation_response(operation)
+
+    def _continue_operation(self, operation, kind, value, *, source_url=""):
+        operation.update(kind=kind, input=value, source_url=source_url, session={})
+        self._change(operation, state="running", stage="metadata" if kind == "query" else "inventory",
+                     control="cancel", status_text="正在确认作品。" if kind == "query" else "正在处理媒体目录。", details={})
+        self._spawn(operation, self._run(operation, kind, value))
+
+    def _expired(self, operation):
+        operation["cancel_event"].set()
+        operation.pop("inventory", None)
+        operation["session"] = {}
+        self._change(operation, state="cancelled", stage="expired", control="", details={},
+                     status_text="此选择已过期，请重新发送 /caption；已写入的字幕保留。")
+        return self._operation_response(operation)
 
     async def _confirm_choice(self, operation, resolution_id, candidate_ref):
         try:
             resolved = await self._resolve("", confirmation={"resolution_id": resolution_id, "candidate_ref": candidate_ref})
-            await self._run(operation, "query", operation["input"], resolved=resolved)
+            await self._run(operation, operation["kind"], operation["input"], resolved=resolved)
         except asyncio.CancelledError:
             await self._cancelled(operation)
         except Exception as exc:
@@ -506,6 +640,30 @@ class CaptionFeature:
         return _response("请输入 115 内的绝对保存路径。" if action == "output_path" else "请发送授权值；发送 clear 清空。授权值不会在回复中显示。", session="open")
 
     async def message(self, request):
+        operation = self._active_operation(request)
+        if operation:
+            session = operation.get("session") or {}
+            if operation["state"] != "awaiting_input":
+                return self._operation_response(operation)
+            if session.get("expires", 0) < time.time():
+                return self._expired(operation)
+            value = str(request.get("text") or "").strip()
+            kind = session.get("kind")
+            if kind == "metadata" and value.isascii() and value.isdigit() and 1 <= int(value) <= len(session["candidates"]):
+                return await self.callback({**request, "payload": f"choose:{operation['operation_id'][:12]}:{int(value) - 1}"})
+            if kind in {"query_input", "path_input"}:
+                try:
+                    if kind == "query_input":
+                        query, source_url = self._query_input(value)
+                        self._continue_operation(operation, "query", query, source_url=source_url)
+                    else:
+                        path = _path(value if value.startswith("/") else "/" + value) if value else _path("")
+                        self._continue_operation(operation, "scan", path)
+                except ValueError as exc:
+                    self._change(operation, status_text=str(exc))
+                return self._operation_response(operation)
+            # Keep the same selection panel and its owned controls for invalid input.
+            return self._operation_response(operation)
         session = self.sessions.get(_owner(request)) or {}
         if session.get("kind") != "config" or session.get("expires", 0) < time.time():
             return _response("请发送 /caption 片名，或 /caption_config 配置字幕。", session="close")
@@ -528,14 +686,29 @@ class CaptionFeature:
         operation = self.operations.get(str(request.get("operation_id") or ""))
         if not operation:
             raise FeatureError("operation_not_found", "caption task not found")
+        if any(key in request for key in ("chat_id", "user_id")) and _owner(request) != (operation["chat_id"], operation["user_id"]):
+            raise FeatureError("ownership_rejected", "caption operation belongs to another user")
         if operation["state"] in TERMINAL:
-            return {"actions": [], "operation": self._view(operation)}
+            return self._operation_response(operation)
+        action = str(request.get("action") or "")
+        if action not in {"exit", "cancel"}:
+            raise FeatureError("invalid_control", "caption control is invalid")
+        if action != operation.get("control"):
+            raise FeatureError("stale_control", "caption control has changed")
+        try:
+            operation["revision"] = max(operation["revision"], int(request.get("revision") or 0))
+        except (TypeError, ValueError):
+            pass
         operation["cancel_event"].set()
+        operation["session"] = {}
+        operation.pop("inventory", None)
+        self.sessions.pop((operation["chat_id"], operation["user_id"]), None)
         task = operation.get("task")
         if task and not task.done():
             task.cancel()
-        self._change(operation, state="cancelled", stage="cancelled", control="", status_text="字幕任务已取消；已写入的字幕保留。", details={})
-        return {"actions": [], "operation": self._view(operation)}
+        text = "已退出字幕任务；已写入的字幕保留。" if action == "exit" else "字幕任务已取消；已写入的字幕保留。"
+        self._change(operation, state="cancelled", stage="cancelled", control="", status_text=text, details={})
+        return self._operation_response(operation)
 
     async def operation_snapshot(self, request):
         operation_id = str(request.get("operation_id") or "")
@@ -564,6 +737,10 @@ class CaptionFeature:
         self.store.save(operation)
 
     async def _report(self, operation, **changes):
+        if operation["state"] in TERMINAL:
+            return
+        if changes.get("state") != "cancelled":
+            self._check_cancel(operation)
         self._change(operation, **changes)
         response = await self.host.report_operation(self._view(operation))
         if response.get("accepted") is not True:
