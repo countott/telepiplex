@@ -153,8 +153,8 @@ def test_file_info_batch_normalizes_deduplicates_orders_and_isolates_failures():
             self.path_counts = {}
 
         def request(self, method, _url, **kwargs):
-            assert method == "GET"
-            path = kwargs["params"]["path"]
+            assert method == "POST" and _url.endswith("/open/folder/get_info")
+            path = kwargs["data"]["path"]
             self.reads.append(path)
             self.path_counts[path] = self.path_counts.get(path, 0) + 1
             if path == "/raises":
@@ -275,7 +275,7 @@ def test_storage_mutation_generation_prevents_late_read_from_refilling_cache():
             self.read_count = 0
 
         def request(self, method, url, **kwargs):
-            if method == "POST":
+            if method == "POST" and not url.endswith("/open/folder/get_info"):
                 return _Response({"state": True, "code": 0, "data": {}})
             assert url.endswith("/open/folder/get_info")
             self.read_count += 1
@@ -331,7 +331,7 @@ def test_committed_storage_mutation_blocks_stale_cache_hits_until_linearized():
             self.read_count = 0
 
         def request(self, method, _url, **kwargs):
-            if method == "POST":
+            if method == "POST" and not _url.endswith("/open/folder/get_info"):
                 self.committed.set()
                 return BlockingResponse(
                     {"state": True, "code": 0, "data": {}},
@@ -398,7 +398,7 @@ def test_rejected_storage_mutation_releases_readers_without_invalidating_cache()
             self.read_count = 0
 
         def request(self, method, _url, **kwargs):
-            if method == "POST":
+            if method == "POST" and not _url.endswith("/open/folder/get_info"):
                 return _Response({"state": False, "code": 50001})
             self.read_count += 1
             return _Response({
@@ -428,7 +428,7 @@ def test_storage_mutation_exception_releases_readers_without_invalidating_cache(
             self.read_count = 0
 
         def request(self, method, _url, **kwargs):
-            if method == "POST":
+            if method == "POST" and not _url.endswith("/open/folder/get_info"):
                 raise requests.ReadTimeout("mutation response lost")
             self.read_count += 1
             return _Response({

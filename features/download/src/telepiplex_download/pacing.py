@@ -70,17 +70,21 @@ class EndpointPacer:
         except KeyError as exc:
             raise ValueError(f"unknown endpoint class: {endpoint_class}") from exc
 
-    def acquire(self, endpoint_class: str) -> float:
+    def acquire(self, endpoint_class: str, *, deadline=None) -> float:
         state = self._state(endpoint_class)
         started = self._clock()
         while True:
             with state.lock:
                 now = self._clock()
+                if deadline is not None and now >= deadline:
+                    raise TimeoutError("endpoint pacing deadline exceeded")
                 target = max(state.next_start, state.cooldown_until)
                 delay = max(0.0, target - now)
                 if delay <= 0:
                     state.next_start = now + state.interval
                     return max(0.0, self._clock() - started)
+            if deadline is not None:
+                delay = min(delay, max(0.0, deadline - self._clock()))
             self._sleep(delay)
 
     def observe_throttle(self, endpoint_class: str, retry_after) -> float:

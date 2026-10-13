@@ -27,6 +27,16 @@ def test_confirmed_identity_preserves_aliases_and_subtitle_context_without_video
     assert query.tmdb_id == "123" and query.imdb_id == "tt123"
     assert query.original_language == "en" and query.video_path == ""
     assert query.duration_seconds is None
+    assert query.category_kind == "live_action_movie"
+
+
+@pytest.mark.parametrize("category", ["animated_movie", "animated_series"])
+def test_animation_routing_uses_confirmed_placement_without_inferring_from_language(category):
+    metadata = media_metadata(media_type="series" if category.endswith("series") else "movie")
+    metadata["placement"]["category_kind"] = category
+    metadata["metadata_id"] = build_media_metadata_v2_id(metadata)
+    query = make_query(metadata, {"original_language": "en"})
+    assert query.category_kind == category and query.original_language == "en"
 
 
 @pytest.mark.parametrize("season,episode", [(None, None), (2, None), (2, 3)])

@@ -106,6 +106,13 @@ class EventJournal:
             self._connection.execute(
                 "ALTER TABLE event_delivery_failures ADD COLUMN projected_at REAL"
             )
+        # Keep polling proportional to outstanding dead letters. Add this after
+        # the legacy column migration so existing databases can reopen safely.
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS event_delivery_failures_unprojected "
+            "ON event_delivery_failures(dead_lettered_at, event_id, plugin_id) "
+            "WHERE dead_lettered_at IS NOT NULL AND projected_at IS NULL"
+        )
 
     def close(self):
         with self._lock:

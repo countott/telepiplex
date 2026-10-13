@@ -76,6 +76,16 @@ def test_endpoint_pacer_rechecks_after_unlocked_sleep_when_throttle_moves_target
     assert clock.sleeps == pytest.approx([0.25, 1.75])
 
 
+def test_verification_deadline_bounds_existing_throttle_cooldown():
+    clock = FakeClock()
+    pacer = EndpointPacer(clock=clock.monotonic, sleeper=clock.sleep)
+    pacer.observe_throttle("storage.read", "300")
+    with pytest.raises(TimeoutError):
+        pacer.acquire("storage.read", deadline=10)
+    assert clock.value == 10 and clock.sleeps == [10]
+    assert pacer.acquire("storage.mutation") == 0
+
+
 def test_endpoint_pacer_retry_after_is_bounded_parsed_and_class_local():
     clock = FakeClock()
     wall_now = 1_700_000_000.0
@@ -181,6 +191,7 @@ def test_open115_request_classifies_every_current_provider_route():
         ("POST", "/open/offline/add_task_urls", "offline.mutation"),
         ("POST", "/open/offline/del_task", "offline.mutation"),
         ("GET", "/open/folder/get_info", "storage.read"),
+        ("POST", "/open/folder/get_info", "storage.read"),
         ("GET", "/open/ufile/files", "storage.read"),
         ("POST", "/open/folder/add", "storage.mutation"),
         ("POST", "/open/ufile/update", "storage.mutation"),
@@ -453,14 +464,14 @@ def test_storage_read_batch_uses_one_client_wide_bound_of_four_workers():
             self.max_active = 0
 
         def request(self, method, url, **kwargs):
-            assert method == "GET"
+            assert method == "POST" and url.endswith("/open/folder/get_info")
             with self.state_lock:
                 self.active += 1
                 self.max_active = max(self.max_active, self.active)
             time.sleep(0.03)
             with self.state_lock:
                 self.active -= 1
-            path = kwargs["params"]["path"]
+            path = kwargs["data"]["path"]
             return FakeResponse({
                 "state": True,
                 "code": 0,
@@ -493,14 +504,14 @@ def test_two_simultaneous_batches_still_share_the_same_four_read_slots():
             self.max_active = 0
 
         def request(self, method, _url, **kwargs):
-            assert method == "GET"
+            assert method == "POST" and _url.endswith("/open/folder/get_info")
             with self.state_lock:
                 self.active += 1
                 self.max_active = max(self.max_active, self.active)
             time.sleep(0.04)
             with self.state_lock:
                 self.active -= 1
-            path = kwargs["params"]["path"]
+            path = kwargs["data"]["path"]
             return FakeResponse({
                 "state": True,
                 "code": 0,

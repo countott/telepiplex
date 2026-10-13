@@ -131,7 +131,9 @@ class _PressureStorage:
         return ([{"file_id": "retained"}]
                 if self.child_files[path] > 0 else [])
 
-    def delete_single_file(self, path):
+    def delete_single_file(self, path, *, expected_file_id=None):
+        if expected_file_id is not None and str((self.get_file_info(path) or {}).get("file_id")) != str(expected_file_id):
+            return False
         self.delete_attempts += 1
         if path in self.fail_deletes:
             return False
@@ -286,9 +288,13 @@ class _LogicalStorageProxy(StorageProxy):
                 path != directory
                 and str(PurePosixPath(path).parent) == directory
             ))
-            return items
+            offset = params.get("offset", 0)
+            return {"list": items[offset:offset + params.get("limit", 1000)],
+                    "count": len(items), "offset": offset}
         if method == "delete_single_file":
             path = args[0]
+            if kwargs.get("expected_file_id") != f"dir:{path}":
+                return False
             if any(
                 str(PurePosixPath(value).parent) == path
                 for value in (*self.files, *self.directories)
@@ -356,10 +362,10 @@ def test_attachment_equivalent_transaction_uses_directory_snapshot_and_fresh_nat
         "rename": 16,
         "create_dir_recursive": 1,
         "move_files_by_id": 1,
-        "get_file_list": 6,
+        "get_file_list": 9,
         "delete_single_file": 1,
     }
-    assert len(storage.calls) == 61
+    assert len(storage.calls) == 64  # Three extra empty-tail proofs for count-only pages.
     snapshot_paths = [
         path
         for _phase, method, args, _kwargs in storage.calls
@@ -373,7 +379,7 @@ def test_attachment_equivalent_transaction_uses_directory_snapshot_and_fresh_nat
         if phase == "pre_move" and method == "get_file_list"
     ]
     assert Counter(params["cid"] for params in pre_submit_lists) == {
-        "dir:/Downloads/Release": 2,
+        "dir:/Downloads/Release": 4,
         "dir:/Series/Show": 1,
     }
     post_move_lists = [
@@ -383,7 +389,7 @@ def test_attachment_equivalent_transaction_uses_directory_snapshot_and_fresh_nat
     ]
     assert Counter(params["cid"] for params in post_move_lists) == {
         "dir:/Downloads/Release": 2,
-        "dir:/Series/Show": 1,
+        "dir:/Series/Show": 2,
     }
     assert all(
         phase == "post_move"
@@ -392,7 +398,7 @@ def test_attachment_equivalent_transaction_uses_directory_snapshot_and_fresh_nat
     )
 
 
-def test_two_interleaved_source_parents_are_order_independent_at_72_calls_with_fresh_native_gate():
+def test_two_interleaved_source_parents_are_order_independent_at_77_calls_with_fresh_native_gate():
     parents = [
         f"/Downloads/Release/Part-{index % 2 + 1}"
         for index in range(16)
@@ -408,10 +414,10 @@ def test_two_interleaved_source_parents_are_order_independent_at_72_calls_with_f
         "rename": 16,
         "create_dir_recursive": 1,
         "move_files_by_id": 1,
-        "get_file_list": 11,
+        "get_file_list": 16,
         "delete_single_file": 3,
     }
-    assert len(storage.calls) == 72
+    assert len(storage.calls) == 77  # Count-only pages retain five empty-tail proofs.
     snapshot_paths = [
         path
         for _phase, method, args, _kwargs in storage.calls
@@ -429,8 +435,8 @@ def test_two_interleaved_source_parents_are_order_independent_at_72_calls_with_f
         if phase == "pre_move" and method == "get_file_list"
     ]
     assert Counter(params["cid"] for params in pre_submit_lists) == {
-        "dir:/Downloads/Release/Part-1": 2,
-        "dir:/Downloads/Release/Part-2": 2,
+        "dir:/Downloads/Release/Part-1": 4,
+        "dir:/Downloads/Release/Part-2": 4,
         "dir:/Series/Show": 1,
     }
     post_move_lists = [
@@ -442,5 +448,5 @@ def test_two_interleaved_source_parents_are_order_independent_at_72_calls_with_f
         "dir:/Downloads/Release": 1,
         "dir:/Downloads/Release/Part-1": 2,
         "dir:/Downloads/Release/Part-2": 2,
-        "dir:/Series/Show": 1,
+        "dir:/Series/Show": 2,
     }

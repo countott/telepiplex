@@ -1,0 +1,1358 @@
+{
+  "schema_version": "telepiplex.self_check.v1",
+  "date": "2026-10-13",
+  "timezone": "Asia/Shanghai",
+  "versions": {
+    "host": "3.9.2-host",
+    "sdk": "2.2.1",
+    "download": "2.2.0",
+    "search": "2.6.1",
+    "rename": "2.4.0",
+    "sync": "2.1.1",
+    "caption": "1.3.0"
+  },
+  "scope": {
+    "source_changes": false,
+    "git_used": false,
+    "real_media_writes": false,
+    "live_telegram_115_plex_verified": false,
+    "live_prowlarr_verified": false
+  },
+  "suites": [
+    {
+      "component": "Host",
+      "passed": 730,
+      "skipped": 1,
+      "subtests": 333,
+      "seconds": 108.08
+    },
+    {
+      "component": "download",
+      "passed": 180,
+      "skipped": 0,
+      "subtests": 33,
+      "seconds": 2.55
+    },
+    {
+      "component": "search",
+      "passed": 694,
+      "skipped": 2,
+      "subtests": 152,
+      "seconds": 46.62
+    },
+    {
+      "component": "rename",
+      "passed": 413,
+      "skipped": 0,
+      "subtests": 28,
+      "seconds": 6.87
+    },
+    {
+      "component": "sync",
+      "passed": 160,
+      "skipped": 0,
+      "subtests": 80,
+      "seconds": 5.36
+    },
+    {
+      "component": "caption",
+      "passed": 473,
+      "skipped": 0,
+      "subtests": 0,
+      "seconds": 8.76
+    }
+  ],
+  "totals": {
+    "passed": 2650,
+    "skipped": 3,
+    "subtests": 626
+  },
+  "environment": {
+    "python": "/Users/young/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+    "caption_dependency_path": "/tmp/telepiplex-audit-caption-deps",
+    "initial_host_failures": 2,
+    "initial_caption_failures": 44,
+    "cause": "声明的 OpenCC/7z 等依赖不在 bundled Python 默认路径，补齐后全套通过"
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "priority": "P1",
+      "component": "rename",
+      "title": "目录响应矛盾时仍判空并删除",
+      "file": "features/rename/src/telepiplex_rename/file_executor.py",
+      "line": 1639,
+      "actual": "list=[] 且 count=1；清理器发出源目录删除，模拟 notes.txt 一并删除。",
+      "evidence_origin": "真实清理器加内存存储故障注入"
+    },
+    {
+      "id": "F2",
+      "priority": "P1 conditional",
+      "component": "download",
+      "title": "兼容移动未验证复制目标就删源",
+      "file": "features/download/src/telepiplex_download/client.py",
+      "line": 973,
+      "actual": "copy success ack、目标未出现；真实执行器最后 failed/target_missing_after_move，但源视频已删除。",
+      "evidence_origin": "真实 client 和执行器加 HTTP 故障注入；native capability 不可用"
+    },
+    {
+      "id": "F3",
+      "priority": "P1",
+      "component": "caption",
+      "title": "结构化季集覆盖明确发布命名冲突",
+      "file": "features/caption/src/telepiplex_caption/matching.py",
+      "line": 200,
+      "actual": "请求 S01E02；候选字段 S01E02 但发布名 S02E03；通用成员 chi.srt 经完整引擎仍 matched。",
+      "evidence_origin": "真实 SubDL 适配器和引擎加固定响应/字幕正文"
+    },
+    {
+      "id": "F4",
+      "priority": "P2",
+      "component": "caption",
+      "title": "分辨率误判作品年份",
+      "file": "features/caption/src/telepiplex_caption/matching.py",
+      "line": 124,
+      "actual": "Example.S01E02.1920x1080.chi.srt 被当作1920年并误拒。",
+      "evidence_origin": "真实匹配器；在线 ODDTAXI 包亦出现同拒绝原因但还有其他原因"
+    },
+    {
+      "id": "F5",
+      "priority": "P2",
+      "component": "search",
+      "title": "下划线季集片源误拒",
+      "file": "features/search/src/telepiplex_search/release_gate.py",
+      "line": 100,
+      "actual": "点分隔 Fargo.S02E03 可捕获投递；下划线等价标题无可用片源。",
+      "evidence_origin": "真实 Search command/callback 加固定来源"
+    },
+    {
+      "id": "F6",
+      "priority": "P2",
+      "component": "search",
+      "title": "已匹配剧名中的 Special Extras 误判特别内容",
+      "file": "features/search/src/telepiplex_search/release_gate.py",
+      "line": 212,
+      "actual": "Special、Extras、Special Ops 均 identity_match=True 后 unsupported_special_content。",
+      "evidence_origin": "真实资源门禁加正常库存/有效链接"
+    },
+    {
+      "id": "F7",
+      "priority": "P2",
+      "component": "search",
+      "title": "根作品选已完结季度跳过单集菜单",
+      "file": "features/search/src/telepiplex_search/service.py",
+      "line": 3647,
+      "actual": "Fargo 选第二季直接 release_selection；Fargo S02 则显示全季和单集按钮。",
+      "evidence_origin": "真实渲染按钮和 command/callback 加完整库存"
+    }
+  ],
+  "offline_search": {
+    "business_success": 8,
+    "safe_rejection": 0,
+    "source_failure": 0,
+    "unexpected_failure": 0,
+    "skipped": 62,
+    "total": 70,
+    "executed": 8,
+    "expected_passed": 8,
+    "business_completion_rate": 1.0
+  },
+  "public_search": [
+    {
+      "case_id": "us-fargo-movie",
+      "outcome": "business_success",
+      "reason_code": "",
+      "submission_count": 1,
+      "identity": {
+        "primary_ref": {
+          "provider": "wikidata",
+          "id": "Q222720"
+        },
+        "provider_refs": {
+          "wikidata": "Q222720",
+          "douban_subject": "1292067"
+        },
+        "media_type": "movie",
+        "title_zh": "冰血暴",
+        "title_en": "Fargo",
+        "title_original": "Fargo",
+        "naming_title": "Fargo",
+        "naming_title_kind": "english",
+        "year": 1996
+      },
+      "scope": {
+        "kind": "movie",
+        "season_number": null,
+        "episode_number": null
+      }
+    },
+    {
+      "case_id": "us-fargo-series",
+      "outcome": "safe_rejection",
+      "reason_code": "no_eligible_release",
+      "submission_count": 0,
+      "identity": null,
+      "scope": null
+    },
+    {
+      "case_id": "us-westworld-movie",
+      "outcome": "business_success",
+      "reason_code": "",
+      "submission_count": 1,
+      "identity": {
+        "primary_ref": {
+          "provider": "wikidata",
+          "id": "Q503343"
+        },
+        "provider_refs": {
+          "wikidata": "Q503343",
+          "douban_subject": "1297907"
+        },
+        "media_type": "movie",
+        "title_zh": "西部世界",
+        "title_en": "Westworld",
+        "title_original": "Westworld",
+        "naming_title": "Westworld",
+        "naming_title_kind": "english",
+        "year": 1973
+      },
+      "scope": {
+        "kind": "movie",
+        "season_number": null,
+        "episode_number": null
+      }
+    },
+    {
+      "case_id": "tw-someday-movie",
+      "outcome": "business_success",
+      "reason_code": "",
+      "submission_count": 1,
+      "identity": {
+        "primary_ref": {
+          "provider": "wikidata",
+          "id": "Q112046092"
+        },
+        "provider_refs": {
+          "wikidata": "Q112046092",
+          "douban_subject": "35208467"
+        },
+        "media_type": "movie",
+        "title_zh": "想见你",
+        "title_en": "Someday or One Day",
+        "title_original": "Someday or One Day",
+        "naming_title": "Someday or One Day",
+        "naming_title_kind": "english",
+        "year": 2022
+      },
+      "scope": {
+        "kind": "movie",
+        "season_number": null,
+        "episode_number": null
+      }
+    },
+    {
+      "case_id": "jp-spirited-away",
+      "outcome": "business_success",
+      "reason_code": "",
+      "submission_count": 1,
+      "identity": {
+        "primary_ref": {
+          "provider": "wikidata",
+          "id": "Q155653"
+        },
+        "provider_refs": {
+          "anilist": "199",
+          "wikidata": "Q155653",
+          "douban_subject": "1291561"
+        },
+        "media_type": "movie",
+        "title_zh": "千与千寻",
+        "title_en": "Spirited Away",
+        "title_original": "Spirited Away",
+        "naming_title": "Spirited Away",
+        "naming_title_kind": "english",
+        "year": 2001
+      },
+      "scope": {
+        "kind": "movie",
+        "season_number": null,
+        "episode_number": null
+      }
+    },
+    {
+      "case_id": "uk-extras",
+      "outcome": "safe_rejection",
+      "reason_code": "no_eligible_release",
+      "submission_count": 0,
+      "identity": null,
+      "scope": null
+    },
+    {
+      "case_id": "us-fargo-e203",
+      "outcome": "safe_rejection",
+      "reason_code": "metadata_not_verified",
+      "submission_count": 0,
+      "identity": null,
+      "scope": null
+    }
+  ],
+  "public_search_boundary": "真实公共元数据读取；片源为 fixture，投递只捕获；4成功3安全拒绝",
+  "caption_live": {
+    "started_at_utc": "2026-10-13T07:35:24Z",
+    "scope": "Sequential low-volume live provider retrieval using historical inventory titles. Test identities are explicit inputs, not a live Search resolution. No media writes, video access, playback sync or semantic translation verification.",
+    "providers": [
+      "assrt",
+      "subhd",
+      "xunlei"
+    ],
+    "cases": [
+      {
+        "title": "双城之战",
+        "year": 2021,
+        "original_language": "en",
+        "media_type": "series",
+        "season": 1,
+        "episode": 1,
+        "elapsed_seconds": 14.266,
+        "selected": [
+          {
+            "provider": "subhd",
+            "candidate_id": "4tqy0O",
+            "source_page": "https://subhd.tv/a/4tqy0O",
+            "source_filename": "Arcane.S01E01.Welcome.to.the.Playground.1080p.NF.WEB-DL.DDP5.1.x264-TEPES.ass",
+            "language": "chi",
+            "format": "ass",
+            "bilingual": true,
+            "cue_count": 466,
+            "timing_verified": false,
+            "warnings": [
+              "video_timing_unverified",
+              "year_unverified",
+              "release_unverified"
+            ],
+            "season": 1,
+            "episode": 1,
+            "bytes": 59408,
+            "sha256": "97be828af4c2eae890efb5d28fc29a043d37668910965e2a4aaf1cae033b69a7",
+            "first_start": 8.7,
+            "last_end": 2498.95
+          }
+        ],
+        "diagnostics": {
+          "status": "matched",
+          "providers": [
+            {
+              "provider": "assrt",
+              "status": "ok",
+              "message": "",
+              "count": 6
+            },
+            {
+              "provider": "subhd",
+              "status": "ok",
+              "message": "",
+              "count": 2
+            },
+            {
+              "provider": "xunlei",
+              "status": "ok",
+              "message": "",
+              "count": 15
+            }
+          ],
+          "examined_candidates": 6,
+          "source_profile": "balanced",
+          "searched_sources": [
+            "assrt",
+            "subhd",
+            "xunlei"
+          ],
+          "source_mode": "search",
+          "reason": "",
+          "candidate_limit_reached": true,
+          "selection_budget_reached": false,
+          "retrieval_budget_reached": false,
+          "warnings": [],
+          "rejection_count": 18,
+          "rejection_examples": [
+            {
+              "provider": "assrt",
+              "candidate_id": "645517",
+              "filename": "Arcane.S01E02.Some.Mysteries.Are.Better.Left.Unsolved.1080p.NF.WEB-DL.DDP5.1.H.264-EniaHD.ass",
+              "reason": "document_episode_mismatch"
+            },
+            {
+              "provider": "assrt",
+              "candidate_id": "645517",
+              "filename": "Arcane.S01E03.The.Base.Violence.Necessary.for.Change.1080p.NF.WEB-DL.DDP5.1.H.264-EniaHD.ass",
+              "reason": "document_episode_mismatch"
+            },
+            {
+              "provider": "assrt",
+              "candidate_id": "645517",
+              "filename": "Arcane.S01E04.Happy.Progress.Day.1080p.NF.WEB-DL.DDP5.1.H.264-EniaHD.ass",
+              "reason": "document_episode_mismatch"
+            }
+          ]
+        }
+      },
+      {
+        "title": "奇巧计程车",
+        "year": 2021,
+        "original_language": "ja",
+        "media_type": "series",
+        "season": 1,
+        "episode": 1,
+        "elapsed_seconds": 11.981,
+        "selected": [
+          {
+            "provider": "xunlei",
+            "candidate_id": "23404C53BA9355057951244D4F1456D6EBA76990",
+            "source_page": "",
+            "source_filename": "奇巧计程车 01.ass",
+            "language": "cht",
+            "format": "ass",
+            "bilingual": false,
+            "cue_count": 1269,
+            "timing_verified": false,
+            "warnings": [
+              "video_timing_unverified",
+              "year_unverified",
+              "release_unverified"
+            ],
+            "season": 1,
+            "episode": 1,
+            "bytes": 152687,
+            "sha256": "90fac01c48b196e246c534e9f0b0356dcac8264f2d4cf6bfd48f9e68400e2a37",
+            "first_start": 0.0,
+            "last_end": 1443.0
+          }
+        ],
+        "diagnostics": {
+          "status": "matched",
+          "providers": [
+            {
+              "provider": "assrt",
+              "status": "no_results",
+              "message": "",
+              "count": 0
+            },
+            {
+              "provider": "subhd",
+              "status": "ok",
+              "message": "",
+              "count": 5
+            },
+            {
+              "provider": "xunlei",
+              "status": "ok",
+              "message": "",
+              "count": 11
+            }
+          ],
+          "examined_candidates": 6,
+          "source_profile": "balanced",
+          "searched_sources": [
+            "assrt",
+            "subhd",
+            "xunlei"
+          ],
+          "source_mode": "search",
+          "reason": "",
+          "candidate_limit_reached": true,
+          "selection_budget_reached": false,
+          "retrieval_budget_reached": false,
+          "warnings": [],
+          "rejection_count": 50,
+          "rejection_examples": [
+            {
+              "provider": "subhd",
+              "candidate_id": "kAGj7K",
+              "filename": "",
+              "reason": "year_mismatch"
+            },
+            {
+              "provider": "xunlei",
+              "candidate_id": "E74D67CE61DEF473BFAE9002F148A089F408EA8D",
+              "filename": "オッドタクシー #01(新) HD追加「変わり者の運転手」.ass",
+              "reason": "document_title_mismatch"
+            },
+            {
+              "provider": "subhd",
+              "candidate_id": "SxGv5I",
+              "filename": "",
+              "reason": "invalid_archive"
+            }
+          ]
+        }
+      }
+    ],
+    "completed_at_utc": "2026-10-13T07:35:52Z",
+    "matched_cases": 2
+  },
+  "storage_reproductions": {
+    "cleanup_declared_nonempty_empty_page": {
+      "expected": "retain or lookup_failed; zero delete calls",
+      "actual": {
+        "candidate_directories": 1,
+        "deleted_directories": 1,
+        "retained_directories": 0,
+        "failed_directories": 0,
+        "complete": true,
+        "deleted_paths": [
+          "/Downloads/Release"
+        ],
+        "failures": []
+      },
+      "deleted_calls": [
+        "/Downloads/Release"
+      ],
+      "remaining_files": []
+    },
+    "preflight_declared_truncated_page": {
+      "expected": "None because count=2 and only one object returned",
+      "actual": [
+        {
+          "file_id": "a",
+          "fn": "a.mkv",
+          "size": 10,
+          "sha1": "sha-a"
+        }
+      ]
+    },
+    "sdk_same_truncated_page": "file tree ended before its declared count",
+    "legacy_copy_ack_missing_target": {
+      "expected": "unverified target; source retained",
+      "actual": {
+        "state": "moved",
+        "copied": true,
+        "source_deleted": true,
+        "source_path": "/Downloads/Show.mkv",
+        "target_path": "/Series/Show/Show.mkv",
+        "error": ""
+      },
+      "source_deleted_calls": [
+        "/Downloads/Show.mkv"
+      ],
+      "target_info": null,
+      "request_calls": [
+        "/open/ufile/copy"
+      ]
+    },
+    "benchmark": [
+      {
+        "files": 1000,
+        "batch_size": 32,
+        "organized": 1000,
+        "failed": 0,
+        "native_calls": 32,
+        "listing_calls": 130,
+        "elapsed_s": 1.422,
+        "simulated_per_request_latency_ms": 1
+      },
+      {
+        "files": 1000,
+        "batch_size": 100,
+        "organized": 1000,
+        "failed": 0,
+        "native_calls": 10,
+        "listing_calls": 42,
+        "elapsed_s": 0.9268,
+        "simulated_per_request_latency_ms": 1
+      }
+    ]
+  },
+  "storage_compatibility": {
+    "compat_real_executor_copy_success_no_target": {
+      "outcomes": [
+        {
+          "state": "failed",
+          "reason_codes": [
+            "target_missing_after_move"
+          ]
+        }
+      ],
+      "actual_remaining_files": {
+        "/Downloads": {
+          "file_id": "downloads",
+          "file_category": "0"
+        },
+        "/Series/Show": {
+          "file_id": "show",
+          "file_category": "0"
+        }
+      },
+      "requests": [
+        "/open/folder/get_info",
+        "/open/folder/get_info",
+        "/open/folder/get_info",
+        "/open/folder/get_info",
+        "/open/ufile/copy",
+        "/open/folder/get_info",
+        "/open/ufile/delete",
+        "/open/folder/get_info"
+      ]
+    },
+    "tree_known_count_empty_probes": {
+      "directories_including_root": 21,
+      "nodes": 40,
+      "list_calls": 42,
+      "empty_probe_calls": 21,
+      "elapsed_s": 0.000135
+    }
+  },
+  "caption_matching_reproductions": [
+    {
+      "case": "resolution-as-year",
+      "filename": "Example.S01E02.1920x1080.chi.srt",
+      "actual": {
+        "accepted": false,
+        "score": 95,
+        "reasons": [
+          "document_year_mismatch"
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "case": "resolution-as-year",
+      "filename": "Example.S01E02.2020.1920x1080.chi.srt",
+      "actual": {
+        "accepted": true,
+        "score": 95,
+        "reasons": [],
+        "warnings": []
+      }
+    },
+    {
+      "case": "metadata-overrides-conflicting-release",
+      "provider_status": "ok",
+      "accepted_candidates": [
+        {
+          "provider": "subdl",
+          "candidate_id": "abc123",
+          "title": "Example",
+          "download_url": "",
+          "detail_url": "https://subdl.com/s/info/abc123/example",
+          "release_name": "Example.2021.S02E03.WEB",
+          "year": 2020,
+          "media_type": "tv",
+          "season": 1,
+          "episode": 2,
+          "language": "chi",
+          "subtitle_format": "",
+          "downloads": 0,
+          "metadata": {
+            "n_id": "abc123",
+            "filename": "example.zip",
+            "imdb_id": "tt1234567",
+            "tmdb_id": "42",
+            "source_page": "https://subdl.com/s/info/abc123/example",
+            "fps": null,
+            "season_pack": false,
+            "bilingual": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "full-engine-conflicting-release",
+      "status": "matched",
+      "selected": 1,
+      "match": {
+        "accepted": true,
+        "score": 75,
+        "reasons": [],
+        "warnings": []
+      },
+      "rejections": []
+    }
+  ],
+  "caption_performance": {
+    "repeated": {
+      "requests": 160,
+      "matched": 160,
+      "elapsed_no_tracemalloc": 0.5588,
+      "quality_invocations": 160,
+      "archive_invocations": 160,
+      "provider_searches": 1,
+      "provider_downloads": 1
+    },
+    "phase_barrier": {
+      "matched": 1,
+      "elapsed": 0.6191,
+      "events": [
+        [
+          "fast_search_ready",
+          0.0153
+        ],
+        [
+          "slow_search_ready",
+          0.3103
+        ],
+        [
+          "download_started",
+          0.311
+        ]
+      ]
+    }
+  },
+  "caption_pressure": {
+    "scope": "Offline synthetic subtitle bodies and fault injection against real engine, using 16 inventory title identities. No public-site traffic, media writes or playback verification.",
+    "verified_at_utc": "2026-10-13T07:36:04Z",
+    "load": {
+      "requests": 500,
+      "caller_concurrency": 24,
+      "matched": 500,
+      "failures": [],
+      "elapsed_seconds": 43.334,
+      "requests_per_second": 11.54,
+      "latency_p50_seconds": 2.031,
+      "latency_p95_seconds": 2.209,
+      "python_peak_allocated_bytes": 21383700,
+      "process_peak_rss_bytes": 79003648,
+      "good_source_searches": 16,
+      "good_source_downloads": 16,
+      "good_source_peak_active": 3,
+      "failing_source_searches": 2,
+      "search_cache_entries": 16,
+      "download_cache_bytes": 139216,
+      "remaining_workers": 0,
+      "remaining_active_work": 0,
+      "remaining_shared_requests": 0,
+      "passed": true
+    }
+  },
+  "event_query_performance": [
+    {
+      "historical_failure_rows": 1000,
+      "before": {
+        "rows": 0,
+        "vm_steps": 7017,
+        "p50_ms": 0.04595849895849824,
+        "p95_ms": 0.05266699008643627,
+        "n": 30
+      },
+      "after_temp_index": {
+        "rows": 0,
+        "vm_steps": 18,
+        "p50_ms": 0.007813010597601533,
+        "p95_ms": 0.009665964171290398,
+        "n": 30
+      },
+      "before_plan": [
+        [
+          4,
+          0,
+          216,
+          "SCAN event_delivery_failures"
+        ],
+        [
+          25,
+          0,
+          0,
+          "USE TEMP B-TREE FOR ORDER BY"
+        ]
+      ],
+      "after_plan": [
+        [
+          5,
+          0,
+          214,
+          "SEARCH event_delivery_failures USING INDEX audit_dead_letters_pending (dead_lettered_at>?)"
+        ]
+      ]
+    },
+    {
+      "historical_failure_rows": 10000,
+      "before": {
+        "rows": 0,
+        "vm_steps": 70017,
+        "p50_ms": 0.3803535073529929,
+        "p95_ms": 0.3861670265905559,
+        "n": 30
+      },
+      "after_temp_index": {
+        "rows": 0,
+        "vm_steps": 18,
+        "p50_ms": 0.0072290131356567144,
+        "p95_ms": 0.007874972652643919,
+        "n": 30
+      },
+      "before_plan": [
+        [
+          4,
+          0,
+          216,
+          "SCAN event_delivery_failures"
+        ],
+        [
+          25,
+          0,
+          0,
+          "USE TEMP B-TREE FOR ORDER BY"
+        ]
+      ],
+      "after_plan": [
+        [
+          5,
+          0,
+          214,
+          "SEARCH event_delivery_failures USING INDEX audit_dead_letters_pending (dead_lettered_at>?)"
+        ]
+      ]
+    },
+    {
+      "historical_failure_rows": 100000,
+      "before": {
+        "rows": 0,
+        "vm_steps": 700017,
+        "p50_ms": 4.17410398949869,
+        "p95_ms": 4.366083012428135,
+        "n": 30
+      },
+      "after_temp_index": {
+        "rows": 0,
+        "vm_steps": 18,
+        "p50_ms": 0.007062510121613741,
+        "p95_ms": 0.008459028322249651,
+        "n": 30
+      },
+      "before_plan": [
+        [
+          4,
+          0,
+          216,
+          "SCAN event_delivery_failures"
+        ],
+        [
+          25,
+          0,
+          0,
+          "USE TEMP B-TREE FOR ORDER BY"
+        ]
+      ],
+      "after_plan": [
+        [
+          5,
+          0,
+          214,
+          "SEARCH event_delivery_failures USING INDEX audit_dead_letters_pending (dead_lettered_at>?)"
+        ]
+      ]
+    }
+  ],
+  "operation_pressure": {
+    "completed_operations": 200,
+    "concurrency": 32,
+    "duplicate_milestones": 800,
+    "elapsed_seconds": 1.882,
+    "event_deliveries": 200,
+    "event_types": [
+      "download.completed"
+    ],
+    "failures": 0,
+    "host_api_calls": 3600,
+    "injected_milestone_faults": 10,
+    "milestone_deliveries": 800,
+    "milestone_requests": 1600,
+    "pipelines": 200,
+    "pipelines_per_second": 106.3,
+    "recovered_milestones": 10,
+    "terminal_owners": [
+      "rename"
+    ]
+  },
+  "telegram_pressure": {
+    "normal": {
+      "scenario": {
+        "busy_latency_ms": 50.0,
+        "cancelled_busy_late_apply_ms": null,
+        "concurrency": 1,
+        "download_latency_ms": 100.0,
+        "duplicate_clicks": 2,
+        "force_inflight_seal_race": false,
+        "pipelines": 10,
+        "rename_latency_ms": 50.0,
+        "search_latency_ms": 50.0,
+        "telegram_latency_ms": 50.0,
+        "update_processor_concurrency": 1
+      },
+      "correctness": {
+        "callback_dispatches": 10,
+        "callback_feedback_drain_completed": true,
+        "completed_operations": 10,
+        "delivered_milestones": 10,
+        "download_effects": 10,
+        "duplicate_callbacks_rejected": 10,
+        "durable_seal_failures": [],
+        "durably_sealed_segments": 30,
+        "event_deliveries": 10,
+        "event_types": [
+          "download.completed"
+        ],
+        "exactly_once_milestones": 10,
+        "failures": 0,
+        "final_segment_failures": [],
+        "final_segment_visible": 30,
+        "final_terminal_failures": [],
+        "final_terminal_visible": 10,
+        "handler_errors": [],
+        "late_telegram_drain_completed": true,
+        "milestone_delivery_counts": {
+          "telegram-pressure-0000": 1,
+          "telegram-pressure-0001": 1,
+          "telegram-pressure-0002": 1,
+          "telegram-pressure-0003": 1,
+          "telegram-pressure-0004": 1,
+          "telegram-pressure-0005": 1,
+          "telegram-pressure-0006": 1,
+          "telegram-pressure-0007": 1,
+          "telegram-pressure-0008": 1,
+          "telegram-pressure-0009": 1
+        },
+        "milestone_drain_completed": true,
+        "operation_drain_completed": true,
+        "operations_without_active_segment": 10,
+        "ordered_milestones": 10,
+        "passed": true,
+        "pipeline_failures": [],
+        "published_milestones": 10,
+        "rename_effects": 10,
+        "sealed_segments": 30,
+        "terminal_owners": [
+          "rename"
+        ],
+        "terminal_projections": 10
+      },
+      "latency_ms": {
+        "callback_ack_ms": {
+          "max": 59.073,
+          "mean": 53.275,
+          "min": 51.728,
+          "n": 10,
+          "p50": 52.178,
+          "p95": 59.073,
+          "p99": 59.073
+        },
+        "callback_to_feature_rpc_ms": {
+          "max": 9.47,
+          "mean": 3.45,
+          "min": 1.9,
+          "n": 10,
+          "p50": 2.577,
+          "p95": 9.47,
+          "p99": 9.47
+        },
+        "command_to_candidate_ms": {
+          "max": 247.167,
+          "mean": 171.866,
+          "min": 61.108,
+          "n": 10,
+          "p50": 170.826,
+          "p95": 247.167,
+          "p99": 247.167
+        },
+        "download_stage_ms": {
+          "max": 264.475,
+          "mean": 181.587,
+          "min": 159.499,
+          "n": 10,
+          "p50": 168.094,
+          "p95": 264.475,
+          "p99": 264.475
+        },
+        "event_queue_ms": {
+          "max": 12.35,
+          "mean": 5.339,
+          "min": 2.313,
+          "n": 10,
+          "p50": 3.3,
+          "p95": 12.35,
+          "p99": 12.35
+        },
+        "foreground_complete_ms": {
+          "max": 920.031,
+          "mean": 775.896,
+          "min": 637.37,
+          "n": 10,
+          "p50": 747.211,
+          "p95": 920.031,
+          "p99": 920.031
+        },
+        "rename_stage_ms": {
+          "max": 178.515,
+          "mean": 78.343,
+          "min": 61.886,
+          "n": 10,
+          "p50": 64.488,
+          "p95": 178.515,
+          "p99": 178.515
+        },
+        "search_stage_ms": {
+          "max": 161.931,
+          "mean": 157.818,
+          "min": 154.251,
+          "n": 10,
+          "p50": 157.025,
+          "p95": 161.931,
+          "p99": 161.931
+        },
+        "terminal_internal_ms": {
+          "max": 520.278,
+          "mean": 425.062,
+          "min": 379.602,
+          "n": 10,
+          "p50": 399.797,
+          "p95": 520.278,
+          "p99": 520.278
+        }
+      },
+      "telegram": {
+        "actions": {
+          "answerCallbackQuery": 20,
+          "editMessageReplyMarkup": 19,
+          "editMessageText": 41,
+          "getMe": 1,
+          "sendMessage": 30,
+          "sendPhoto": 10
+        },
+        "api_calls_per_pipeline": 12.0,
+        "api_duration_ms": {
+          "max": 115.911,
+          "mean": 52.016,
+          "min": 50.062,
+          "n": 121,
+          "p50": 50.259,
+          "p95": 56.733,
+          "p99": 100.035
+        },
+        "busy": {
+          "calls": 10,
+          "duration_ms": {
+            "max": 51.877,
+            "mean": 50.524,
+            "min": 50.077,
+            "n": 10,
+            "p50": 50.42,
+            "p95": 51.877,
+            "p99": 51.877
+          },
+          "intended_wait_ms": {
+            "max": 50.0,
+            "mean": 50.0,
+            "min": 50.0,
+            "n": 10,
+            "p50": 50.0,
+            "p95": 50.0,
+            "p99": 50.0
+          },
+          "outcomes": {
+            "delivered": 10
+          }
+        },
+        "calls_by_reason": {
+          "inactive_projection_recovery": 10,
+          "normal": 110
+        },
+        "normal_api_calls_per_pipeline": 11.0,
+        "outcomes": {
+          "delivered": 121
+        }
+      },
+      "throughput": {
+        "active_pipeline_peak": 1,
+        "elapsed_seconds": 6.253,
+        "pipelines_per_second": 1.6
+      },
+      "resources": {
+        "fds": {
+          "baseline": 16,
+          "final": 16,
+          "final_delta": 0,
+          "peak": 24
+        },
+        "lifecycle": {
+          "fds": {
+            "baseline": 7,
+            "final": 7,
+            "final_delta": 0
+          },
+          "measurement_phase": "before setup -> after teardown",
+          "tasks": {
+            "baseline": 1,
+            "final": 1,
+            "final_delta": 0,
+            "unexpected_final": []
+          }
+        },
+        "measurement_phase": "initialized runtimes before updates -> drained runtimes before teardown",
+        "memory": {
+          "ru_maxrss": 97419264,
+          "ru_maxrss_unit": "bytes",
+          "tracemalloc_baseline_bytes": 5278481,
+          "tracemalloc_current_bytes": 6473189,
+          "tracemalloc_current_delta_bytes": 1194708,
+          "tracemalloc_peak_bytes": 6880350
+        },
+        "render_locks": {
+          "baseline": 0,
+          "final": 0,
+          "peak": 2
+        },
+        "tasks": {
+          "baseline": 6,
+          "final": 6,
+          "final_delta": 0,
+          "peak": 22,
+          "unexpected_final": []
+        }
+      }
+    },
+    "busy": {
+      "scenario": {
+        "busy_latency_ms": 500.0,
+        "cancelled_busy_late_apply_ms": null,
+        "concurrency": 1,
+        "download_latency_ms": 100.0,
+        "duplicate_clicks": 2,
+        "force_inflight_seal_race": false,
+        "pipelines": 10,
+        "rename_latency_ms": 50.0,
+        "search_latency_ms": 50.0,
+        "telegram_latency_ms": 50.0,
+        "update_processor_concurrency": 1
+      },
+      "correctness": {
+        "callback_dispatches": 10,
+        "callback_feedback_drain_completed": true,
+        "completed_operations": 10,
+        "delivered_milestones": 10,
+        "download_effects": 10,
+        "duplicate_callbacks_rejected": 10,
+        "durable_seal_failures": [],
+        "durably_sealed_segments": 30,
+        "event_deliveries": 10,
+        "event_types": [
+          "download.completed"
+        ],
+        "exactly_once_milestones": 10,
+        "failures": 0,
+        "final_segment_failures": [],
+        "final_segment_visible": 30,
+        "final_terminal_failures": [],
+        "final_terminal_visible": 10,
+        "handler_errors": [],
+        "late_telegram_drain_completed": true,
+        "milestone_delivery_counts": {
+          "telegram-pressure-0000": 1,
+          "telegram-pressure-0001": 1,
+          "telegram-pressure-0002": 1,
+          "telegram-pressure-0003": 1,
+          "telegram-pressure-0004": 1,
+          "telegram-pressure-0005": 1,
+          "telegram-pressure-0006": 1,
+          "telegram-pressure-0007": 1,
+          "telegram-pressure-0008": 1,
+          "telegram-pressure-0009": 1
+        },
+        "milestone_drain_completed": true,
+        "operation_drain_completed": true,
+        "operations_without_active_segment": 10,
+        "ordered_milestones": 10,
+        "passed": true,
+        "pipeline_failures": [],
+        "published_milestones": 10,
+        "rename_effects": 10,
+        "sealed_segments": 30,
+        "terminal_owners": [
+          "rename"
+        ],
+        "terminal_projections": 10
+      },
+      "latency_ms": {
+        "callback_ack_ms": {
+          "max": 52.149,
+          "mean": 51.748,
+          "min": 51.498,
+          "n": 10,
+          "p50": 51.728,
+          "p95": 52.149,
+          "p99": 52.149
+        },
+        "callback_to_feature_rpc_ms": {
+          "max": 2.224,
+          "mean": 1.998,
+          "min": 1.815,
+          "n": 10,
+          "p50": 1.975,
+          "p95": 2.224,
+          "p99": 2.224
+        },
+        "command_to_candidate_ms": {
+          "max": 200.546,
+          "mean": 154.937,
+          "min": 62.948,
+          "n": 10,
+          "p50": 160.368,
+          "p95": 200.546,
+          "p99": 200.546
+        },
+        "download_stage_ms": {
+          "max": 162.5,
+          "mean": 161.038,
+          "min": 159.948,
+          "n": 10,
+          "p50": 160.638,
+          "p95": 162.5,
+          "p99": 162.5
+        },
+        "event_queue_ms": {
+          "max": 3.542,
+          "mean": 2.905,
+          "min": 2.495,
+          "n": 10,
+          "p50": 2.603,
+          "p95": 3.542,
+          "p99": 3.542
+        },
+        "foreground_complete_ms": {
+          "max": 1196.069,
+          "mean": 1157.339,
+          "min": 1103.534,
+          "n": 10,
+          "p50": 1157.029,
+          "p95": 1196.069,
+          "p99": 1196.069
+        },
+        "rename_stage_ms": {
+          "max": 65.274,
+          "mean": 62.838,
+          "min": 60.485,
+          "n": 10,
+          "p50": 62.953,
+          "p95": 65.274,
+          "p99": 65.274
+        },
+        "search_stage_ms": {
+          "max": 607.356,
+          "mean": 605.669,
+          "min": 604.679,
+          "n": 10,
+          "p50": 605.313,
+          "p95": 607.356,
+          "p99": 607.356
+        },
+        "terminal_internal_ms": {
+          "max": 838.303,
+          "mean": 833.989,
+          "min": 830.292,
+          "n": 10,
+          "p50": 833.93,
+          "p95": 838.303,
+          "p99": 838.303
+        }
+      },
+      "telegram": {
+        "actions": {
+          "answerCallbackQuery": 20,
+          "editMessageReplyMarkup": 20,
+          "editMessageText": 40,
+          "getMe": 1,
+          "sendMessage": 30,
+          "sendPhoto": 10
+        },
+        "api_calls_per_pipeline": 12.0,
+        "api_duration_ms": {
+          "max": 500.716,
+          "mean": 87.444,
+          "min": 50.054,
+          "n": 121,
+          "p50": 50.179,
+          "p95": 500.471,
+          "p99": 500.709
+        },
+        "busy": {
+          "calls": 10,
+          "duration_ms": {
+            "max": 500.716,
+            "mean": 500.504,
+            "min": 500.13,
+            "n": 10,
+            "p50": 500.488,
+            "p95": 500.716,
+            "p99": 500.716
+          },
+          "intended_wait_ms": {
+            "max": 500.0,
+            "mean": 500.0,
+            "min": 500.0,
+            "n": 10,
+            "p50": 500.0,
+            "p95": 500.0,
+            "p99": 500.0
+          },
+          "outcomes": {
+            "delivered": 10
+          }
+        },
+        "calls_by_reason": {
+          "inactive_projection_recovery": 10,
+          "normal": 110
+        },
+        "normal_api_calls_per_pipeline": 11.0,
+        "outcomes": {
+          "delivered": 121
+        }
+      },
+      "throughput": {
+        "active_pipeline_peak": 1,
+        "elapsed_seconds": 10.174,
+        "pipelines_per_second": 0.98
+      },
+      "resources": {
+        "fds": {
+          "baseline": 16,
+          "final": 16,
+          "final_delta": 0,
+          "peak": 24
+        },
+        "lifecycle": {
+          "fds": {
+            "baseline": 7,
+            "final": 7,
+            "final_delta": 0
+          },
+          "measurement_phase": "before setup -> after teardown",
+          "tasks": {
+            "baseline": 1,
+            "final": 1,
+            "final_delta": 0,
+            "unexpected_final": []
+          }
+        },
+        "measurement_phase": "initialized runtimes before updates -> drained runtimes before teardown",
+        "memory": {
+          "ru_maxrss": 97239040,
+          "ru_maxrss_unit": "bytes",
+          "tracemalloc_baseline_bytes": 5278905,
+          "tracemalloc_current_bytes": 6485207,
+          "tracemalloc_current_delta_bytes": 1206302,
+          "tracemalloc_peak_bytes": 6870442
+        },
+        "render_locks": {
+          "baseline": 0,
+          "final": 0,
+          "peak": 2
+        },
+        "tasks": {
+          "baseline": 6,
+          "final": 6,
+          "final_delta": 0,
+          "peak": 22,
+          "unexpected_final": []
+        }
+      }
+    }
+  }
+}

@@ -113,10 +113,12 @@ class Memory115:
             return {"state": "submitted" if submitted else "provider_rejected",
                     "submitted": submitted, "file_ids": file_ids, "target_dir_id": target_dir_id}
 
-    def delete_single_file(self, path):
+    def delete_single_file(self, path, *, expected_file_id=None):
         with self._lock:
             # Only empty-directory cleanup is expected in the successful movie case.
             if path not in self.nodes or any(other.startswith(path.rstrip('/') + '/') for other in self.nodes):
+                return False
+            if expected_file_id is not None and str(self.nodes[path]["file_id"]) != str(expected_file_id):
                 return False
             self.nodes.pop(path)
             self.writes.append(("delete", path))

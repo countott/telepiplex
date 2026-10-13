@@ -297,7 +297,7 @@ def process_file_first_media(
         selected_root=event.download_root or event.final_path,
         journal=getattr(storage, "journal", None),
         move_batch_size=int(
-            (runtime_context.config or {}).get("storage_move_batch_size") or 32
+            (runtime_context.config or {}).get("storage_move_batch_size") or 100
         ),
         preflight=preflight,
     )

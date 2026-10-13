@@ -21,6 +21,32 @@ class CompletionIntegrityTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(payload.get('snapshot_complete'), True)
         self.assertEqual(payload.get('file_tree_transport'), 'inline_v1')
 
+    async def test_cleanup_binds_snapshot_file_id_and_preserves_path_replacement(self):
+        original = self.client.get_file_tree('/Downloads/Show.S01E01.mkv')
+        expected_ids = []
+
+        def read(path):
+            return original + ([] if self.client.deleted_files else [{
+                'name': 'ad.txt', 'path': '/Downloads/ad.txt', 'relative_path': 'ad.txt',
+                'file_id': 'old-ad', 'is_dir': False, 'size': 1,
+            }])
+
+        def delete(path, *, expected_file_id=None):
+            expected_ids.append(expected_file_id)
+            # The live path now holds another object. Only an unbound delete
+            # would remove it; the snapshot's old ID must stop the transaction.
+            if expected_file_id is not None:
+                return False
+            self.client.deleted_files.append(path)
+            return True
+
+        self.client.get_file_tree = read
+        self.client.delete_single_file = delete
+        await self.run_download()
+        self.assertEqual(expected_ids, ['old-ad'])
+        self.assertEqual(self.client.deleted_files, [])
+        self.assertEqual(self.host.events[0][0], 'download.failed')
+
     async def test_oversized_release_is_rejected_before_cleanup(self):
         original = self.client.get_file_tree('/Downloads/Show.S01E01.mkv')
         self.client.get_file_tree = lambda path: original + [{
@@ -65,7 +91,8 @@ class CompletionIntegrityTest(unittest.IsolatedAsyncioTestCase):
             'name': 'ad.txt', 'path': '/Downloads/ad.txt', 'relative_path': 'ad.txt',
             'file_id': 'ad', 'is_dir': False, 'size': 1,
         }]
-        def delete_then_cancel(path):
+        def delete_then_cancel(path, *, expected_file_id=None):
+            self.assertEqual(expected_file_id, 'ad')
             self.client.deleted_files.append(path)
             operation = self.feature.operations['op-integrity']
             operation['cancel_event'].set()

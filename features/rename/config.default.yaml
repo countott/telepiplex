@@ -17,7 +17,7 @@ category_folder:
     plex_library_id: ""
 unorganized_path: /未整理
 storage_timeout: 120
-storage_move_batch_size: 32
+storage_move_batch_size: 100
 metadata_timeout: 120
 caption_enabled: true
 caption_timeout: 300

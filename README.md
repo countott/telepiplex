@@ -265,19 +265,19 @@ Host 负责 Telegram 接入、命令路由、任务与事件持久化、配置�
 
 #### 当前源码版本
 
-本次 Caption 1.2.0 将 `/caption` 交互对齐 Rename：分页选择目录、输入其他目录或单独查询字幕；扫描完成后显示视频数，点击“开始补字幕”后执行。作品候选支持查看详情和回复编号，批次中遇到同名作品或缺少原始语言时可确认后继续，在同一任务面板更新进度并取消。配套 Host 3.9.2 延续异步任务结束后的输入会话清理，并修复 CI 集成测试，使其按扫描确认后再执行的交互完成验证。Search 仍为 2.6.1；字幕来源、配置、chi/cht 命名与既有 Plex 入口保持。以下为本地源码版本，未自动发布。
+本轮修复目录完整性、兼容复制后删源顺序、字幕季集冲突与年份误识别，以及搜索片源和季度菜单问题。Rename 缺省移动批量为 100，已有显式配置保持；Caption 复用成功正文处理并重叠检索与下载；Host 为历史失败查询增加索引。Host API 1.9、SDK 2.2.1、Sync 2.1.1 保持。以下为本地源码版本，未自动发布；验证和逐文件清单见 [迭代交付](docs/audits/2026-10-13-iteration-results.md)。
 
 | 组件 | 版本 |
 | --- | --- |
-| Host | `3.9.2` |
+| Host | `3.9.3` |
 | SDK | `2.2.1` |
-| `download` | `2.2.0` |
-| `search` | `2.6.1` |
-| `rename` | `2.4.0` |
+| `download` | `2.2.1` |
+| `search` | `2.6.2` |
+| `rename` | `2.4.2` |
 | `sync` | `2.1.1` |
-| `caption` | `1.2.0` |
+| `caption` | `1.3.3` |
 
-升级顺序：Host 3.9.2 → Download 2.2.0 → Search 2.6.1 → Rename 2.4.0 → Caption 1.2.0；已安装 Sync 的用户可同步到 2.1.1（仅 SDK 更新）。Host API 1.9，SDK 2.2.1 随 Feature 构建打包，无需单独安装。更新完成后再提交新任务。详情见 [caption 模块说明](features/caption/README.md)。
+升级顺序：Host 3.9.3 → Download 2.2.1 → Search 2.6.2 → Rename 2.4.2 → Caption 1.3.3；更新完成后再提交新任务。Sync 2.1.1 无需因本轮再次更新。已有显式 `storage_move_batch_size: 32` 继续使用 32，缺省值与新配置采用 100；遇到限流或恢复异常可配置回 32。Host API 1.9，SDK 2.2.1 随 Feature 构建打包，无需单独安装。
 
 `main` 是 Core/Host 与五个 Feature 的有效源码分支。Host 使用 `telepiplex-v<semver>` tag，发布前验证提交已包含在远端 `main`；正式流水线生成 `ghcr.io/<owner>/telepiplex:<semver>` 与 `latest` 镜像，创建标题为 `Telepiplex <semver>` 的 GitHub Release 并强制设为 **Latest**。普通 `main` push 不更新正式镜像或 Latest 入口。
 

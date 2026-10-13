@@ -267,14 +267,17 @@ class FakeStorage:
                     f"{str(target).rstrip('/')}/{str(source).rsplit('/', 1)[-1]}"
                 )}
 
-    def delete_single_file(self, path):
+    def delete_single_file(self, path, *, expected_file_id=None):
+        if expected_file_id is not None and str((self.get_file_info(path) or {}).get("file_id")) != str(expected_file_id):
+            return False
         self.deleted.append(path)
         self.missing_paths.add(path)
         return True
 
 
 class CleanupFailureStorage(FakeStorage):
-    def delete_single_file(self, path):
+    def delete_single_file(self, path, *, expected_file_id=None):
+        assert str((self.get_file_info(path) or {}).get("file_id")) == str(expected_file_id)
         self.deleted.append(path)
         return path != "/Downloads/Release"
 
@@ -295,7 +298,7 @@ class SecondMoveFailureStorage(FakeStorage):
 
 
 class ExtraVideoDeleteFailureStorage(FakeStorage):
-    def delete_single_file(self, path):
+    def delete_single_file(self, path, *, expected_file_id=None):
         self.deleted.append(path)
         return not path.endswith("sample.mp4")
 
@@ -2253,6 +2256,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 super().__init__([])
 
             def get_file_list(self, params):
+                if params.get("offset", 0):
+                    return []
                 if params.get("cid") == "root-unorganized":
                     return [{
                         "file_id": "raw-movie-1",
@@ -2382,6 +2387,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 return super().get_file_info(path)
 
             def get_file_list(self, params):
+                if params.get("offset", 0):
+                    return []
                 if params.get("cid") == "root-movies":
                     if self.moved:
                         return []
@@ -2510,6 +2517,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 return super().get_file_info(path)
 
             def get_file_list(self, params):
+                if params.get("offset", 0):
+                    return []
                 cid = params.get("cid")
                 if cid == "root-movies":
                     return [{
@@ -2667,6 +2676,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
 
             def get_file_list(self, params):
                 self.list_calls.append(dict(params))
+                if params.get("offset", 0):
+                    return []
                 cid = params.get("cid")
                 if cid == "root-series":
                     return [{
@@ -2777,17 +2788,22 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             [call["cid"] for call in host.storage.list_calls],
             [
                 "root-series",
+                "root-series",
+                "organized-1",
                 "organized-1",
                 "organized-season-1",
+                "organized-season-1",
+                "raw-1",
                 "raw-1",
                 "raw-season-1",
+                "raw-season-1",
+                "empty-1",
                 "empty-1",
             ],
         )
-        self.assertTrue(all(
-            call["offset"] == 0 and call["limit"] == 1000
-            for call in host.storage.list_calls
-        ))
+        self.assertEqual([call["offset"] for call in host.storage.list_calls],
+                         [0, 3, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1])
+        self.assertTrue(all(call["limit"] == 1000 for call in host.storage.list_calls))
         self.assertEqual(
             preview["details"]["keyboard"][0][0]["callback_data"],
             "rename:inventory:confirm",
@@ -2806,6 +2822,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
                 return None
 
             def get_file_list(self, params):
+                if params.get("offset", 0):
+                    return []
                 cid = params.get("cid")
                 if cid == "root-unorganized":
                     return [{
@@ -2892,6 +2910,8 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             def get_file_list(self, params):
                 cid = params.get("cid")
                 if cid == "root-series":
+                    if params.get("offset", 0):
+                        return []
                     return [{
                         "file_id": "large-1",
                         "name": "Large.Release",
@@ -2942,7 +2962,7 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
             host.reports[-1]["details"]["counts"],
             {"pending": 1, "completed": 0},
         )
-        self.assertEqual(host.storage.offsets, [0, 1000])
+        self.assertEqual(host.storage.offsets, [0, 1000, 1001])
 
     async def test_ambiguous_s02_magnet_confirms_same_scope_before_storage(self):
         from telepiplex_rename.jobs import RenameJobStore
@@ -5814,9 +5834,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "2.4.0")
+        self.assertEqual(manifest["version"], "2.4.2")
         self.assertEqual(manifest["host_api"], ">=1.9,<2.0")
-        self.assertIn('version = "2.4.0"', project)
+        self.assertIn('version = "2.4.2"', project)
         self.assertIn('telepiplex-plugin-sdk==2.2.1', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
@@ -5832,8 +5852,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-2.4.0.tpx", source)
-        self.assertNotIn("dist/rename-2.4.0.tpx", source)
+        self.assertIn("/tmp/rename-2.4.2.tpx", source)
+        self.assertNotIn("dist/rename-2.4.2.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

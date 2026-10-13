@@ -253,6 +253,32 @@ class ServiceTest(unittest.IsolatedAsyncioTestCase):
             response = await self.feature.message({**self.owner, "text": "clear"})
             self.assertEqual(response["config_patch"], {"providers": {provider: {"api_key": ""}}})
 
+    async def test_source_profile_menu_selects_a_reviewable_config_patch(self):
+        for profile in ("all", "balanced"):
+            menu = await self.feature.command({**self.owner, "command": "caption_config"})
+            self.assertIn("精简常用", str(menu))
+            choices = await self.feature.callback({**self.owner, "payload": "config:source_profile"})
+            self.assertIn("全部来源", str(choices))
+            self.assertNotIn("config_patch", choices)
+            response = await self.feature.callback({**self.owner, "payload": "config:profile-" + profile})
+            self.assertEqual(response["config_patch"], {"source_profile": profile})
+            self.assertEqual(response["session"], {"state": "close"})
+
+    async def test_profile_validation_and_status_remain_compatible(self):
+        self.assertTrue((await self.feature.validate_config({"config": {}}))["valid"])
+        self.assertTrue((await self.feature.validate_config({"config": {"source_profile": "all"}}))["valid"])
+        with self.assertRaises(FeatureError):
+            await self.feature.validate_config({"config": {"source_profile": "typo"}})
+        status = await self.feature.capability({"method": "status"})
+        self.assertEqual(status["source_profile"], "balanced")
+        self.assertIn("providers", status)
+
+    async def test_no_eligible_sources_is_visible_without_a_false_source_outage(self):
+        self.engine.report = {"status": "no_match", "reason": "no_eligible_sources", "providers": [], "rejections": []}
+        operation = await self.run_command(["Test"])
+        self.assertIn("没有适用的已启用字幕来源", operation["status_text"])
+        self.assertNotIn("字幕来源暂时不可用", operation["status_text"])
+
     async def test_source_url_is_not_sent_to_metadata_search_and_is_retained(self):
         class DirectProvider:
             name = "subhd"

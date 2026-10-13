@@ -1,0 +1,339 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-05",
+  "release": {
+    "caption": "1.3.0",
+    "host": "3.9.2"
+  },
+  "scope": "Provider overlap assessment and balanced source routing. No credentials, media writes or Git operations.",
+  "historical_sample": {
+    "path": "provider-integration-validation-2026-09-28.json",
+    "date": "2026-09-28",
+    "cases": 16,
+    "matched_cases": 15,
+    "winner_sources": {
+      "assrt": 6,
+      "xunlei": 6,
+      "subhd": 3
+    },
+    "r3sub_queries_with_candidates": 6,
+    "addic7ed_queries_with_candidates": 0,
+    "limitations": [
+      "This sample searched only assrt, subhd, xunlei, r3sub and addic7ed. It is not an 18-provider comparison.",
+      "Selected-body hashes are biased toward winners; no full inventory overlap percentage can be inferred.",
+      "No playback synchronization or semantic translation validation."
+    ]
+  },
+  "primary_sources": [
+    {
+      "url": "https://subdl.com/subscene-alternative",
+      "finding": "SubDL says it preserves the Subscene historical archive and continues community uploads."
+    },
+    {
+      "url": "https://subsource.net/about",
+      "finding": "SubSource says it initially preserved Subscene Persian and English content and expanded to other languages."
+    },
+    {
+      "url": "https://subdl.com/subtitle/sd213724/interstellar/chinese-bg-code",
+      "finding": "A public klseklse release also appears on Subf2m; shared metadata does not prove identical bytes."
+    },
+    {
+      "url": "https://subf2m.co/subtitles/interstellar/chinese-bg-code/1081833",
+      "finding": "Interstellar.2014.IMAX.720p.Bluray.x264.DTS-EVO.chs&eng by klseklse."
+    }
+  ],
+  "keyword_search_checks": [
+    {
+      "provider": "zimuku",
+      "url": "https://zimuku.org/search?q=Interstellar",
+      "checked_at_utc": "2026-10-05T04:28:48Z",
+      "http_status": 404,
+      "elapsed_seconds": 3.376,
+      "body_bytes": 14210
+    },
+    {
+      "provider": "subf2m",
+      "url": "https://subf2m.co/subtitles/searchbytitle?query=Interstellar&l=",
+      "checked_at_utc": "2026-10-05T04:28:49Z",
+      "http_status": 500,
+      "elapsed_seconds": 1.476,
+      "body_bytes": 2717,
+      "html_title": "Subf2m - Internal Server Error"
+    }
+  ],
+  "live_balanced_retrieval": {
+    "started_at_utc": "2026-10-05T04:43:15Z",
+    "completed_at_utc": "2026-10-05T04:43:36Z",
+    "scope": "One low-volume public live retrieval. Explicit known work identity, no live Search resolution, credentials, media files, storage writes or playback verification. Reduced candidate budget is deliberate.",
+    "config": {
+      "source_profile": "balanced",
+      "request_timeout_seconds": 10,
+      "provider_timeout_seconds": 30,
+      "retrieval_timeout_seconds": 90,
+      "max_candidates": 8,
+      "max_candidates_per_provider": 3
+    },
+    "query": {
+      "title": "Interstellar",
+      "original_title": "",
+      "year": 2014,
+      "media_type": "movie",
+      "tmdb_id": "157336",
+      "imdb_id": "",
+      "season": null,
+      "episode": null,
+      "original_language": "en",
+      "video_path": "",
+      "release_name": "",
+      "duration_seconds": null,
+      "fps": null,
+      "aliases": [
+        "星际穿越"
+      ],
+      "shooter_hash": "",
+      "file_size": null,
+      "expected_duration_seconds": null,
+      "category_kind": "live_action_movie"
+    },
+    "elapsed_seconds": 21.531,
+    "selected": [
+      {
+        "provider": "assrt",
+        "candidate_id": "592672",
+        "source_page": "https://assrt.net/xml/sub/592/592672.xml",
+        "source_filename": "Interstellar.2014.IMAX.720p.Bluray.x264.DTS-EVO/Interstellar.2014.IMAX.720p.Bluray.x264.DTS-EVO.╝≥╠σ&╙ó╬─.ass",
+        "language": "chi",
+        "format": "ass",
+        "bilingual": true,
+        "cue_count": 2387,
+        "timing_verified": false,
+        "warnings": [
+          "video_timing_unverified"
+        ],
+        "season": null,
+        "episode": null,
+        "bytes": 841372,
+        "sha256": "7b4d75902816e879b2ec06872d05a7fd67646cc4f686be8cef83716097a9ee6b"
+      }
+    ],
+    "diagnostics": {
+      "status": "matched",
+      "providers": [
+        {
+          "provider": "assrt",
+          "status": "ok",
+          "message": "",
+          "count": 3
+        },
+        {
+          "provider": "shooter",
+          "status": "skipped",
+          "message": "未提供视频哈希，已跳过射手哈希检索",
+          "count": 0
+        },
+        {
+          "provider": "subhd",
+          "status": "ok",
+          "message": "",
+          "count": 3
+        },
+        {
+          "provider": "zimuku",
+          "status": "skipped",
+          "message": "精简方案保留此来源的指定详情链接检索",
+          "count": 0
+        },
+        {
+          "provider": "opensubtitles",
+          "status": "skipped",
+          "message": "未配置此来源的 API Key，已跳过自动检索",
+          "count": 0
+        },
+        {
+          "provider": "xunlei",
+          "status": "ok",
+          "message": "",
+          "count": 3
+        },
+        {
+          "provider": "r3sub",
+          "status": "unsafe_url",
+          "message": "字幕来源地址解析到非公网网络",
+          "count": 0
+        },
+        {
+          "provider": "subdl",
+          "status": "skipped",
+          "message": "未配置此来源的 API Key，已跳过自动检索",
+          "count": 0
+        },
+        {
+          "provider": "subsource",
+          "status": "skipped",
+          "message": "未配置此来源的 API Key，已跳过自动检索",
+          "count": 0
+        },
+        {
+          "provider": "subf2m",
+          "status": "skipped",
+          "message": "精简方案保留此来源的指定详情链接检索",
+          "count": 0
+        },
+        {
+          "provider": "addic7ed",
+          "status": "skipped",
+          "message": "此来源用于剧集字幕，已跳过电影检索",
+          "count": 0
+        },
+        {
+          "provider": "lwltv",
+          "status": "skipped",
+          "message": "此来源下载需要浏览器验证，精简方案已跳过自动检索",
+          "count": 0
+        },
+        {
+          "provider": "yysub",
+          "status": "skipped",
+          "message": "未配置网站登录 Cookie，精简方案已跳过此来源",
+          "count": 0
+        },
+        {
+          "provider": "nekomoe",
+          "status": "skipped",
+          "message": "已确认为真人作品，已跳过动画字幕组目录",
+          "count": 0
+        },
+        {
+          "provider": "mingy",
+          "status": "skipped",
+          "message": "已确认为真人作品，已跳过动画字幕组目录",
+          "count": 0
+        },
+        {
+          "provider": "kitauji",
+          "status": "skipped",
+          "message": "已确认为真人作品，已跳过动画字幕组目录",
+          "count": 0
+        },
+        {
+          "provider": "haruhana",
+          "status": "skipped",
+          "message": "已确认为真人作品，已跳过动画字幕组目录",
+          "count": 0
+        },
+        {
+          "provider": "local_archive",
+          "status": "skipped",
+          "message": "未配置本地字幕归档目录，已跳过归档检索",
+          "count": 0
+        }
+      ],
+      "examined_candidates": 7,
+      "source_profile": "balanced",
+      "searched_sources": [
+        "assrt",
+        "subhd",
+        "xunlei",
+        "r3sub"
+      ],
+      "source_mode": "search",
+      "reason": "",
+      "candidate_limit_reached": false,
+      "selection_budget_reached": false,
+      "retrieval_budget_reached": false,
+      "warnings": [],
+      "rejections": [
+        {
+          "provider": "assrt",
+          "candidate_id": "592841",
+          "filename": "",
+          "reason": "title_mismatch"
+        },
+        {
+          "provider": "subhd",
+          "candidate_id": "gbhp4H",
+          "filename": "",
+          "reason": "year_mismatch"
+        },
+        {
+          "provider": "assrt",
+          "candidate_id": "592672",
+          "filename": "Interstellar.2014.IMAX.720p.Bluray.x264.DTS-EVO/Interstellar.2014.IMAX.720p.Bluray.x264.DTS-EVO.╝≥╠σ.ass",
+          "reason": "outside_language_priority"
+        },
+        {
+          "provider": "assrt",
+          "candidate_id": "592672",
+          "filename": "Interstellar.2014.IMAX.720p.Bluray.x264.DTS-EVO/Interstellar.2014.IMAX.720p.Bluray.x264.DTS-EVO.╙ó╬─.srt",
+          "reason": "insufficient_chinese_dialogue,chinese_script_unverified"
+        },
+        {
+          "provider": "assrt",
+          "candidate_id": "592716",
+          "filename": "Interstellar.2014.1080p.BluRay.x264-DAA/Interstellar.2014.1080p.BluRay.x264-DAA.╝≥╠σ&╙ó╬─.ass",
+          "reason": "malformed_cues"
+        },
+        {
+          "provider": "assrt",
+          "candidate_id": "592716",
+          "filename": "Interstellar.2014.1080p.BluRay.x264-DAA/Interstellar.2014.1080p.BluRay.x264-DAA.╝≥╠σ&╙ó╬─.srt",
+          "reason": "malformed_cues"
+        },
+        {
+          "provider": "assrt",
+          "candidate_id": "592716",
+          "filename": "Interstellar.2014.1080p.BluRay.x264-DAA/Interstellar.2014.1080p.BluRay.x264-DAA.╝≥╠σ.ass",
+          "reason": "malformed_cues"
+        },
+        {
+          "provider": "assrt",
+          "candidate_id": "592716",
+          "filename": "Interstellar.2014.1080p.BluRay.x264-DAA/Interstellar.2014.1080p.BluRay.x264-DAA.╝≥╠σ.srt",
+          "reason": "malformed_cues"
+        },
+        {
+          "provider": "assrt",
+          "candidate_id": "592716",
+          "filename": "Interstellar.2014.1080p.BluRay.x264-DAA/Interstellar.2014.1080p.BluRay.x264-DAA.╖▒╠σ&╙ó╬─.ass",
+          "reason": "malformed_cues"
+        },
+        {
+          "provider": "assrt",
+          "candidate_id": "592716",
+          "filename": "Interstellar.2014.1080p.BluRay.x264-DAA/Interstellar.2014.1080p.BluRay.x264-DAA.╖▒╠σ&╙ó╬─.srt",
+          "reason": "malformed_cues"
+        },
+        {
+          "provider": "assrt",
+          "candidate_id": "592716",
+          "filename": "Interstellar.2014.1080p.BluRay.x264-DAA/Interstellar.2014.1080p.BluRay.x264-DAA.╖▒╠σ.ass",
+          "reason": "malformed_cues"
+        },
+        {
+          "provider": "assrt",
+          "candidate_id": "592716",
+          "filename": "Interstellar.2014.1080p.BluRay.x264-DAA/Interstellar.2014.1080p.BluRay.x264-DAA.╖▒╠σ.srt",
+          "reason": "malformed_cues"
+        },
+        {
+          "provider": "assrt",
+          "candidate_id": "592716",
+          "filename": "Interstellar.2014.1080p.BluRay.x264-DAA/Interstellar.2014.1080p.BluRay.x264-DAA.╙ó╬─.srt",
+          "reason": "malformed_cues,insufficient_chinese_dialogue,chinese_script_unverified"
+        },
+        {
+          "provider": "xunlei",
+          "candidate_id": "DF127372FDEC25FD9E3490CC0908AEAFF25B7799",
+          "filename": "星际穿越.ass",
+          "reason": "malformed_cues"
+        }
+      ]
+    }
+  },
+  "limitations": [
+    "Only one current live retrieval and one ordinary request per failing keyword entry; no permanent outage or coverage claim.",
+    "No personal Key API authorization or Cookie validation was performed.",
+    "The reduced live candidate budget cannot prove a globally best result or complete inventory coverage.",
+    "The four animation catalogs are distinct group channels; no complete cross-provider body hash comparison was performed."
+  ]
+}

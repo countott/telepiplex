@@ -70,6 +70,114 @@ def test_provider_round_robin_reserves_candidate_budget_for_other_sources():
     assert ("download", "b") in second.requests
 
 
+def test_legacy_all_enabled_config_defaults_to_four_movie_sources_before_queueing():
+    from telepiplex_caption.providers import build_providers
+
+    names = [provider.name for provider in build_providers()]
+    providers = [FixtureProvider(name) for name in names]
+    for provider in providers:
+        provider.config = {"enabled": True}
+    query = MediaQuery("Example", original_language="en", category_kind="live_action_movie")
+    engine = CaptionEngine({}, providers=providers)
+    called = []
+    original = engine._blocking
+    async def traced(function, *args, **kwargs):
+        called.append(function.__self__.name)
+        return await original(function, *args, **kwargs)
+    engine._blocking = traced
+    choices, report = asyncio.run(engine.retrieve(query))
+    expected = {"assrt", "subhd", "xunlei", "r3sub"}
+    assert not choices and report["status"] == "no_match"
+    assert set(called) == set(report["searched_sources"]) == expected
+    assert {p.name for p in providers if p.requests} == expected
+    assert len(report["providers"]) == 18
+    assert report["source_profile"] == "balanced"
+
+
+def test_all_profile_searches_every_enabled_ready_adapter():
+    from telepiplex_caption.providers import build_providers
+
+    providers = [FixtureProvider(p.name) for p in build_providers()]
+    for provider in providers:
+        provider.config = {"api_key": "test-key", "roots": ["/archive"], "cookie": "test-session"}
+    query = MediaQuery("Example", original_language="en", category_kind="live_action_movie",
+                       shooter_hash=";".join(["0" * 32] * 4))
+    _, report = asyncio.run(CaptionEngine({"source_profile": "all"}, providers=providers).retrieve(query))
+    assert len(report["searched_sources"]) == 18
+    assert all(p.requests for p in providers)
+
+
+def test_ready_overlapping_api_sources_still_compete_on_real_body_quality():
+    primary = FixtureProvider("subsource", [_candidate("srt", "subsource")], {"srt": make_srt()})
+    supplement = FixtureProvider("subdl", [_candidate("ass", "subdl")], {"ass": make_ass(bilingual=True)})
+    for provider in (primary, supplement):
+        provider.config = {"api_key": "test-key"}
+    query = MediaQuery("Example", year=2020, original_language="en", category_kind="live_action_movie")
+    choices, report = asyncio.run(CaptionEngine({}, providers=[primary, supplement]).retrieve(query))
+    assert set(report["searched_sources"]) == {"subdl", "subsource"}
+    assert choices[0].candidate.provider == "subdl"
+    assert choices[0].quality.bilingual and choices[0].document.format == "ass"
+
+
+def test_detail_link_bypasses_profile_but_never_searches_unrelated_sources():
+    class Detail(FixtureProvider):
+        def supports_detail_url(self, url):
+            return url == "https://zimuku.org/detail/123.html"
+        def lookup_detail(self, url):
+            self.requests.append(("detail", url))
+            return ProviderResult(self.name, "ok", self.candidates)
+    detail = Detail("zimuku", [_candidate("a", "zimuku")], {"a": make_ass(bilingual=True)})
+    unrelated = FixtureProvider("assrt")
+    query = MediaQuery("Example", year=2020, original_language="en")
+    engine = CaptionEngine({}, providers=[detail, unrelated])
+    choices, report = asyncio.run(engine.retrieve(query, source_url="https://zimuku.org/detail/123.html"))
+    assert choices and report["searched_sources"] == ["zimuku"]
+    assert report["source_mode"] == "detail"
+    assert unrelated.requests == []
+    assert detail.requests[0][0] == "detail"
+    detail.config = {"enabled": False}
+    detail.requests.clear()
+    choices, report = asyncio.run(engine.retrieve(query, source_url="https://zimuku.org/detail/123.html"))
+    assert not choices and not detail.requests and report["reason"] == "no_eligible_sources"
+    assert report["providers"][0]["status"] == "disabled"
+
+
+def test_skipped_sources_are_not_outages_but_actual_source_failure_is_preserved():
+    skipped = FixtureProvider("subdl")
+    query = MediaQuery("Example", original_language="en")
+    _, report = asyncio.run(CaptionEngine({}, providers=[skipped]).retrieve(query))
+    assert report["status"] == "no_match" and report["reason"] == "no_eligible_sources"
+    assert skipped.requests == []
+    unavailable = FixtureProvider("assrt", status="unavailable")
+    _, report = asyncio.run(CaptionEngine({}, providers=[skipped, unavailable]).retrieve(query))
+    assert report["status"] == "unavailable" and report["searched_sources"] == ["assrt"]
+
+
+def test_unknown_source_profile_is_rejected_before_search():
+    import pytest
+    with pytest.raises(ValueError, match="invalid_subtitle_source_profile"):
+        CaptionEngine({"source_profile": "typo"}, providers=[FixtureProvider()])
+
+
+def test_detail_requests_respect_source_quota_before_allocating_another_worker():
+    class QuotaDetail(FixtureProvider):
+        def supports_detail_url(self, url):
+            return url.startswith("https://zimuku.org/detail/")
+        def lookup_detail(self, url):
+            self.requests.append(("detail", url))
+            return ProviderResult(self.name, "rate_limited", message="quota")
+    provider = QuotaDetail("zimuku")
+    engine = CaptionEngine({}, providers=[provider])
+    query = MediaQuery("Example", original_language="en")
+    async def run():
+        for number in (1, 2):
+            _, report = await engine.retrieve(query, source_url=f"https://zimuku.org/detail/{number}.html")
+            assert report["status"] == "unavailable"
+            assert report["providers"][0]["status"] == "rate_limited"
+    asyncio.run(run())
+    assert len(provider.requests) == 1
+
+
 def test_unknown_original_language_makes_no_network_requests():
     provider = FixtureProvider()
     choices, report = retrieve(provider, MediaQuery("Example"))
@@ -197,7 +305,8 @@ def test_extraction_concurrency_is_bounded(monkeypatch):
         finally:
             with lock: state["active"] -= 1
     monkeypatch.setattr(engine_module, "extract_subtitles", delayed)
-    provider = FixtureProvider(candidates=[_candidate(str(i)) for i in range(7)], downloads={str(i): make_srt() for i in range(7)})
+    provider = FixtureProvider(candidates=[_candidate(str(i)) for i in range(7)],
+        downloads={str(i): replace(make_srt(), filename=f"Example.2020.{i}.srt") for i in range(7)})
     choices, _ = retrieve(provider)
     assert choices and state["peak"] == 2
 

@@ -19,7 +19,7 @@ class MixedRootStorage(FakeStorage):
         return super().get_file_info(path)
 
     def get_file_list(self, params):
-        return {
+        rows = {
             "root": [{
                 "file_id": "videos",
                 "name": "Random Videos",
@@ -52,6 +52,8 @@ class MixedRootStorage(FakeStorage):
                 "size": 1000,
             }],
         }.get(params.get("cid"), [])
+        offset = int(params.get("offset") or 0)
+        return rows[offset:offset + int(params.get("limit") or 1000)]
 
 
 class HoneyAuxiliaryStorage(FakeStorage):
@@ -70,7 +72,7 @@ class HoneyAuxiliaryStorage(FakeStorage):
             for role in ("NCED", "NCOP")
             for variant in range(1, 4)
         ]
-        return {
+        rows = {
             "root": [{
                 "file_id": "honey",
                 "name": "Honey Release",
@@ -91,6 +93,8 @@ class HoneyAuxiliaryStorage(FakeStorage):
                 "size": 100,
             } for index, name in enumerate(auxiliary_names, start=1)]],
         }.get(params.get("cid"), [])
+        offset = int(params.get("offset") or 0)
+        return rows[offset:offset + int(params.get("limit") or 1000)]
 
 
 class FileFirstInventoryTest(unittest.IsolatedAsyncioTestCase):

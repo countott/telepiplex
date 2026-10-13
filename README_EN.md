@@ -40,7 +40,7 @@ The automatic task ends with file organization. Plex scans are initiated separat
 | `sync` | Manually manage Plex scans and metadata enhancements | None | [Module guide](features/sync/README.md) |
 | `caption` | Chinese external subtitles after download, from a library, or by query | `download`, `search`, `rename` | [Module guide](features/caption/README.md) |
 
-Caption 1.2.0 requires Host API 1.9 and the updated Download, Search, and Rename Features listed below. SDK 2.2.1 is bundled into each Feature.
+Caption 1.3.3 requires Host API 1.9 and the updated Download, Search, and Rename Features listed below. SDK 2.2.1 is bundled into each Feature.
 
 For the complete search and organization flow, install `download → search → rename` in that order. Install `sync` as needed. Install `caption` after Rename to add external subtitle lookup before organization, library selection through `/caption` or `/caption scan`, and standalone `/caption Title Year` queries.
 
@@ -266,19 +266,19 @@ The current Host API 1.9 adds optional capability dependencies and caption messa
 
 #### Current source versions
 
-Caption 1.2.0 aligns `/caption` with Rename: choose a directory from a paginated menu, enter another path, or search for subtitles by title. Scans show the video count and wait for the user to start subtitle retrieval. Detailed candidates support numeric replies; ambiguous identities or missing original languages pause a batch for confirmation before it continues. Progress and cancellation stay in one task panel. Host 3.9.2 retains text session cleanup after asynchronous tasks finish and updates CI integration tests to confirm scans before processing. Search remains at 2.6.1. Subtitle providers, configuration, chi/cht naming and the existing Plex entry remain intact. These source versions have not been published automatically.
+This iteration repairs directory completeness, verification before deleting a copied source, subtitle coordinate conflicts and year parsing, release separators, and season menus. Rename defaults to batches of 100 while preserving explicit settings. Caption reuses successful content processing and overlaps retrieval stages. Host indexes outstanding dead letters. Host API 1.9, SDK 2.2.1 and Sync 2.1.1 remain unchanged. These source versions have not been published automatically. See the [iteration delivery](docs/audits/2026-10-13-iteration-results.md) for validation and file changes.
 
 | Component | Version |
 | --- | --- |
-| Host | `3.9.2` |
+| Host | `3.9.3` |
 | SDK | `2.2.1` |
-| `download` | `2.2.0` |
-| `search` | `2.6.1` |
-| `rename` | `2.4.0` |
+| `download` | `2.2.1` |
+| `search` | `2.6.2` |
+| `rename` | `2.4.2` |
 | `sync` | `2.1.1` |
-| `caption` | `1.2.0` |
+| `caption` | `1.3.3` |
 
-Upgrade Host 3.9.2, Download 2.2.0, Search 2.6.1, Rename 2.4.0, then Caption 1.2.0 before starting new tasks. Sync 2.1.1 only updates its SDK dependency. Host API is 1.9; SDK 2.2.1 is bundled with Features. See [Caption](features/caption/README.md).
+Upgrade Host 3.9.3, Download 2.2.1, Search 2.6.2, Rename 2.4.2, then Caption 1.3.3 before starting new tasks. Sync 2.1.1 needs no update for this iteration. Existing explicit `storage_move_batch_size: 32` settings retain 32; missing settings and new configurations use 100. Set it back to 32 if throttling or recovery issues occur. Host API remains 1.9 and SDK 2.2.1 is bundled with Features.
 
 `main` is the active source branch for Core/Host and all five Features. The Host uses `telepiplex-v<semver>` tags, with release commits verified as contained in remote `main`. The release workflow publishes `ghcr.io/<owner>/telepiplex:<semver>` and `latest`, then creates a GitHub Release titled `Telepiplex <semver>` for that tag explicitly marked **Latest**. An ordinary `main` push does not update official images or Latest entry points.
 

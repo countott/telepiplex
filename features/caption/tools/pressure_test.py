@@ -123,12 +123,23 @@ async def run(args):
         "remaining_workers": len(engine._workers),
         "remaining_active_work": len(engine._active_work),
         "remaining_shared_requests": len(engine._search_tasks) + len(engine._download_tasks),
+        "remaining_shared_cpu_requests": len(engine._cpu_tasks),
+        "cpu_cache_entries": len(engine._cpu_cache),
+        "cpu_cache_bytes": engine._cpu_cache.total_bytes,
+        "available_network_slots": engine._network._value,
+        "available_inspection_slots": engine._inspection._value,
+        "available_cpu_slots": engine._cpu._value,
     }
     metrics["passed"] = (matches == args.requests and not failures
         and len(queries) <= good.downloads <= len(queries) * (1 + int(elapsed / 600))
         and len(queries) <= good.searches <= len(queries) * (1 + int(elapsed / 120))
         and not engine._workers and not engine._active_work and not engine._search_tasks
         and not engine._download_tasks and len(engine._search_cache) <= 128)
+    metrics["passed"] = (metrics["passed"] and not engine._cpu_tasks
+        and len(engine._cpu_cache) <= engine._cpu_cache.max_entries
+        and engine._cpu_cache.total_bytes <= engine._cpu_cache.max_bytes
+        and good.peak <= 3 and engine._network._value == 3
+        and engine._inspection._value == 2 and engine._cpu._value == 2)
     return {"scope": "Offline synthetic subtitle bodies and fault injection against real engine, using 16 inventory title identities. No public-site traffic, media writes or playback verification.",
         "verified_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "load": metrics}
 

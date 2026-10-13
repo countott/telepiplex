@@ -97,6 +97,7 @@ def make_query(metadata: dict, context: dict | None = None, item: dict | None = 
         fps=item.get("fps"),
         file_size=item.get("size"),
         shooter_hash=str(item.get("shooter_hash") or ""),
+        category_kind=metadata["placement"]["category_kind"],
     )
 
 

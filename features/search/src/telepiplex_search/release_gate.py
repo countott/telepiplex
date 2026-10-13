@@ -209,9 +209,8 @@ def _contains_special_content(
     alias_span: tuple[int, int],
 ) -> bool:
     tokens = _tokens(title)
-    if media_type == "movie":
-        start, end = alias_span
-        tokens = tokens[:start] + tokens[end:]
+    start, end = alias_span
+    tokens = tokens[:start] + tokens[end:]
     for index, token in enumerate(tokens):
         if token in _SPECIAL_WORDS:
             return True
@@ -236,7 +235,9 @@ def _classify_scope(
     title: str,
     media_type: str,
 ) -> tuple[str, tuple[int, ...], tuple[tuple[int, int], ...], tuple[str, ...]]:
-    value = _text(title)
+    # Token matching treats underscores as separators; scope markers must use
+    # the same boundary convention rather than Python's word-character rule.
+    value = _text(title).replace("_", " ")
     seasons: set[int] = set()
     episodes: set[tuple[int, int]] = set()
     evidence = []

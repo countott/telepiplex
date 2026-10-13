@@ -36,6 +36,9 @@ class MediaQuery(Serializable):
     # Metadata runtime is only a coarse completeness reference, never video
     # synchronization evidence. Keep it distinct from a probed video duration.
     expected_duration_seconds: float | None = None
+    # Search's confirmed category is distinct from title/original language.
+    # An unknown category must not exclude potentially useful animation sources.
+    category_kind: str = ""
 
 
 @dataclass(frozen=True)

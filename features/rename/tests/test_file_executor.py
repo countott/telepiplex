@@ -95,9 +95,12 @@ class StatefulStorage:
                     "file_id": f"dir:{path}",
                     "file_category": "0",
                 })
-        return children[: params.get("limit", 1000)]
+        offset = params.get("offset", 0)
+        return children[offset:offset + params.get("limit", 1000)]
 
-    def delete_single_file(self, path):
+    def delete_single_file(self, path, *, expected_file_id=None):
+        if expected_file_id is not None and str((self.get_file_info(path) or {}).get("file_id")) != str(expected_file_id):
+            return False
         self.deleted.append(path)
         if path not in self.directories:
             return False
@@ -261,7 +264,9 @@ def test_same_hash_target_recovers_interrupted_copy_by_deleting_source():
                 },
             }
 
-        def delete_single_file(self, path):
+        def delete_single_file(self, path, *, expected_file_id=None):
+            if expected_file_id is not None and str((self.get_file_info(path) or {}).get("file_id")) != str(expected_file_id):
+                return False
             self.deleted.append(path)
             return self.files.pop(path, None) is not None
 
@@ -655,7 +660,8 @@ def test_manual_cleanup_deletes_empty_selected_work_group_root():
 
 def test_cleanup_delete_failure_is_reported_not_hidden():
     class DeleteFailureStorage(StatefulStorage):
-        def delete_single_file(self, path):
+        def delete_single_file(self, path, *, expected_file_id=None):
+            assert str((self.get_file_info(path) or {}).get("file_id")) == str(expected_file_id)
             self.deleted.append(path)
             return False
 
@@ -681,7 +687,8 @@ def test_cleanup_delete_failure_is_reported_not_hidden():
 
 def test_cleanup_requires_directory_absence_after_provider_delete_success():
     class StickyDirectoryStorage(StatefulStorage):
-        def delete_single_file(self, path):
+        def delete_single_file(self, path, *, expected_file_id=None):
+            assert str((self.get_file_info(path) or {}).get("file_id")) == str(expected_file_id)
             self.deleted.append(path)
             return True
 
@@ -1464,7 +1471,7 @@ def test_native_gate_rejects_duplicate_source_name_but_moves_safe_peer():
     class DuplicateSourceNameStorage(_FreshGateStorage):
         def get_file_list(self, params):
             items = super().get_file_list(params)
-            if params["cid"] == "dir:/Downloads":
+            if params["cid"] == "dir:/Downloads" and not params.get("offset", 0):
                 return [*items, {
                     "file_id": "foreign-duplicate",
                     "file_category": "1",
@@ -1513,7 +1520,7 @@ def test_native_gate_rejects_selected_id_already_at_target_under_another_name():
     class TargetIdentityCollisionStorage(_FreshGateStorage):
         def get_file_list(self, params):
             items = super().get_file_list(params)
-            if params["cid"] == "dir:/Series/Show":
+            if params["cid"] == "dir:/Series/Show" and not params.get("offset", 0):
                 return [*items, {
                     "file_id": "episode",
                     "file_category": "1",
@@ -1996,7 +2003,7 @@ class _DirectorySnapshotStorage:
     def get_file_list(self, params):
         request = dict(params)
         self.list_requests.append(request)
-        response = self.pages[(request["cid"], request["offset"])]
+        response = self.pages.get((request["cid"], request["offset"]), [])
         return response
 
 
@@ -2065,6 +2072,7 @@ def test_directory_snapshot_uses_complete_shared_parent_lists_for_preflight_fact
     ]
     assert [request["cid"] for request in storage.list_requests] == [
         "source-dir",
+        "source-dir",
         "target-dir",
     ]
 
@@ -2130,7 +2138,7 @@ def test_directory_snapshot_allows_absent_target_parent_to_prove_target_absence(
     assert storage.batch_requests == [
         ("/Downloads/Release", "/Series/Show"),
     ]
-    assert [request["cid"] for request in storage.list_requests] == ["source-dir"]
+    assert [request["cid"] for request in storage.list_requests] == ["source-dir", "source-dir"]
 
 
 def test_directory_snapshot_reads_all_pages_before_projecting_requested_child():
@@ -2161,7 +2169,7 @@ def test_directory_snapshot_reads_all_pages_before_projecting_requested_child():
     )
 
     assert snapshot.require_file_info("/Downloads/Release/two.mkv").provider_id == "two"
-    assert [request["offset"] for request in storage.list_requests] == [0, 1000, 0]
+    assert [request["offset"] for request in storage.list_requests] == [0, 1000, 1001, 0]
 
 
 @pytest.mark.parametrize(

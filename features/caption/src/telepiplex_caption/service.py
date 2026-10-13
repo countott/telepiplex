@@ -76,6 +76,8 @@ class CaptionFeature:
                 _path(config["output_path"])
             except ValueError as exc:
                 raise FeatureError("invalid_config", str(exc)) from None
+        if config.get("source_profile", "balanced") not in ("balanced", "all"):
+            raise FeatureError("invalid_config", "invalid subtitle source profile")
         return {"valid": True}
 
     async def capability(self, request):
@@ -83,6 +85,7 @@ class CaptionFeature:
         payload = request.get("payload") or {}
         if method == "status":
             return {"enabled": self.config.get("enabled", True), "external_only": True,
+                    "source_profile": self.config.get("source_profile", "balanced"),
                     "providers": [getattr(p, "name", type(p).__name__) for p in self.engine.providers]}
         if method != "prepare_download":
             raise FeatureError("method_not_allowed", "subtitle.caption method is not allowed")
@@ -127,7 +130,9 @@ class CaptionFeature:
     async def command(self, request):
         if str(request.get("command") or "") == "caption_config":
             self.sessions[_owner(request)] = {"kind": "config", "stage": "choose", "expires": time.time() + SESSION_TTL}
-            return _response("字幕设置：使用免费来源；个人免费 API Key 可在申请后补充。", keyboard=[
+            profile_label = "全部来源" if self.config.get("source_profile", "balanced") == "all" else "精简常用"
+            return _response("字幕设置：精简方案按作品类型选择来源，有授权的补充源自动加入。个人免费 API Key 可后补。", keyboard=[
+                [{"text": "字幕来源：" + profile_label, "callback_data": "caption:config:source_profile"}],
                 [{"text": "字幕保存目录", "callback_data": "caption:config:output_path"}],
                 [{"text": "ASSRT Token", "callback_data": "caption:config:assrt"}],
                 [{"text": "OpenSubtitles API Key", "callback_data": "caption:config:opensubtitles"}],
@@ -463,9 +468,16 @@ class CaptionFeature:
         written, existing = result["added_count"], result["existing_count"]
         text = f"外挂字幕处理完成：新增 {written}，已存在 {existing}，未完成 {result['unmatched_count']}。"
         if not written and not existing:
-            text += "\n" + {"metadata_required": "部分作品身份、季集或原始语言尚未确认。",
-                              "unavailable": "字幕来源暂时不可用。", "failed": "字幕下载或写入失败。"}.get(result["status"], "未找到通过匹配和内容检查的字幕。")
+            no_sources = result["results"] and all((row.get("search") or {}).get("reason") == "no_eligible_sources" for row in result["results"])
+            if no_sources:
+                text += "\n没有适用的已启用字幕来源，请检查来源设置或详情链接来源是否被关闭。"
+            else:
+                text += "\n" + {"metadata_required": "部分作品身份、季集或原始语言尚未确认。",
+                                  "unavailable": "字幕来源暂时不可用。", "failed": "字幕下载或写入失败。"}.get(result["status"], "未找到通过匹配和内容检查的字幕。")
         provider_issues = {}
+        if not written and not existing and result["status"] == "no_match" and not no_sources and not operation.get("source_url") and any(
+                (row.get("search") or {}).get("source_profile") == "balanced" for row in result["results"]):
+            text += "\n可在 /caption_config 切换到全部来源，或提供字幕详情链接继续查找。"
         issue_labels = {"auth_required": "待补充授权", "user_action_required": "需在来源网站完成操作",
             "unavailable": "暂时不可用", "timeout": "请求超时", "rate_limited": "访问额度受限",
             "access_denied": "来源拒绝访问", "invalid_response": "来源返回格式异常",
@@ -634,6 +646,16 @@ class CaptionFeature:
         if action == "automatic":
             self.sessions.pop(_owner(request), None)
             return {"actions": [], "session": {"state": "close"}, "config_patch": {"automatic": not self.config.get("automatic", True)}}
+        if action == "source_profile":
+            session["stage"] = "source_profile"
+            return _response("选择字幕来源方案：精简常用按作品类型选择来源；全部来源尝试更多已启用来源。缺少授权、视频哈希或归档目录的来源仍跳过。指定详情链接只查对应来源。", keyboard=[
+                [{"text": "精简常用（推荐）", "callback_data": "caption:config:profile-balanced"}],
+                [{"text": "全部来源", "callback_data": "caption:config:profile-all"}],
+                [{"text": "退出", "callback_data": "caption:config:cancel"}],
+            ], session="open")
+        if action in {"profile-balanced", "profile-all"} and session.get("stage") == "source_profile":
+            self.sessions.pop(_owner(request), None)
+            return {"actions": [], "session": {"state": "close"}, "config_patch": {"source_profile": action.removeprefix("profile-")}}
         if action != "output_path" and action not in _API_SETTINGS:
             raise FeatureError("invalid_selection", "invalid caption config option")
         session["stage"] = action

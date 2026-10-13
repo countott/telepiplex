@@ -1880,6 +1880,7 @@ class DownloadFeature:
                 frame_limit=getattr(self.host, "max_frame_bytes", 1_048_576),
             )
             rejected_paths = set(cleanup_plan.rejected_paths)
+            rejected_ids = {node["path"]: str(node["file_id"]) for node in file_tree if node.get("path") in rejected_paths}
             expected_tree = [node for node in file_tree if node.get("path") not in rejected_paths]
             operation["cleanup_deleted_paths"] = []
             for path in cleanup_plan.rejected_paths:
@@ -1887,6 +1888,7 @@ class DownloadFeature:
                 deleted = await asyncio.to_thread(
                     self.client.delete_single_file,
                     path,
+                    expected_file_id=rejected_ids[path],
                 )
                 if not deleted:
                     raise DownloadCleanupError(

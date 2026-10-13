@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from .file_plan import FileResolution, normalize_storage_path
+from .directory_listing import parse_directory_page, read_directory_items
 
 
 def _normalized_text_scalar(value, *, field: str, lower=False) -> str:
@@ -590,7 +591,7 @@ def _execute_one(
                 "source_directory_unverifiable",
             )
         try:
-            deleted = storage.delete_single_file(source) is True
+            deleted = storage.delete_single_file(source, expected_file_id=resolution.source_id) is True
         except Exception:
             deleted = False
         if not deleted or _get_info(storage, source) is not None:
@@ -843,7 +844,7 @@ def execute_file_resolutions(
     *,
     selected_root: str,
     journal=None,
-    move_batch_size: int = 32,
+    move_batch_size: int = 100,
     preflight: FileTransactionSnapshot | None = None,
 ) -> FileExecutionSummary:
     del selected_root  # Cleanup is an explicit, separately verified phase.
@@ -940,37 +941,7 @@ def _item_name(value) -> str:
 
 
 def _fresh_directory_items(storage, directory_id: str):
-    if not directory_id:
-        return None
-    collected = []
-    offset = 0
-    limit = 1000
-    for _page in range(100):
-        try:
-            response = storage.get_file_list({
-                "cid": directory_id,
-                "offset": offset,
-                "limit": limit,
-                "show_dir": 1,
-            })
-        except Exception:
-            return None
-        items = _list_items(response)
-        if items is None:
-            return None
-        collected.extend(item for item in items if isinstance(item, dict))
-        has_more = False
-        if isinstance(response, dict):
-            has_more = response.get("has_more") is True
-            data = response.get("data")
-            if isinstance(data, dict):
-                has_more = has_more or data.get("has_more") is True
-        if not has_more and len(items) < limit:
-            return collected
-        if not items:
-            return collected
-        offset += len(items)
-    return None
+    return _complete_directory_items(storage, directory_id)
 
 
 def _complete_directory_items(storage, directory_id: str) -> list[dict] | None:
@@ -978,58 +949,10 @@ def _complete_directory_items(storage, directory_id: str) -> list[dict] | None:
 
     if not directory_id:
         return None
-    collected = []
-    seen_page_signatures = set()
-    seen_item_facts = set()
-    seen_ids = {}
-    offset = 0
-    limit = 1000
-    for _page in range(100):
-        try:
-            response = storage.get_file_list({
-                "cid": directory_id,
-                "offset": offset,
-                "limit": limit,
-                "show_dir": 1,
-            })
-        except Exception:
-            return None
-        items = _list_items(response)
-        if items is None or any(not isinstance(item, dict) for item in items):
-            return None
-        has_more = _listing_has_more(response)
-        if has_more is None:
-            return None
-        if not items:
-            return None if has_more else collected
-        try:
-            page_facts = tuple(_listing_item_facts(item) for item in items)
-        except Exception:
-            return None
-        page_signature = frozenset(page_facts)
-        if len(page_signature) != len(page_facts):
-            return None
-        if page_signature in seen_page_signatures:
-            return None
-        seen_page_signatures.add(page_signature)
-        added_item = False
-        for item, facts in zip(items, page_facts):
-            provider_id, _name, _sha1_value, _size_value = facts
-            if facts not in seen_item_facts:
-                seen_item_facts.add(facts)
-                added_item = True
-            identity = facts[1:]
-            prior_identity = seen_ids.get(provider_id)
-            if prior_identity is not None and prior_identity != identity:
-                return None
-            seen_ids[provider_id] = identity
-        if not added_item:
-            return None
-        collected.extend(items)
-        if not has_more and len(items) < limit:
-            return collected
-        offset += len(items)
-    return None
+    try:
+        return read_directory_items(storage, directory_id, item_facts=_listing_item_facts)
+    except Exception:
+        return None
 
 
 def _listing_item_facts(value) -> tuple[str, str, str, int]:
@@ -1049,9 +972,12 @@ def _listing_item_facts(value) -> tuple[str, str, str, int]:
         break
     if name_value is None:
         raise ValueError("directory listing item lacks a name")
+    name = _normalized_text_scalar(name_value, field="file_name")
+    if not name or name in {".", ".."} or "/" in name or "\x00" in name:
+        raise ValueError("directory listing item has an invalid name")
     return (
         provider_id,
-        _normalized_text_scalar(name_value, field="file_name"),
+        name,
         _sha1(value),
         _size(value),
     )
@@ -1506,7 +1432,7 @@ def _execute_with_native_batches(
     try:
         batch_size = max(1, min(int(move_batch_size), 100))
     except (TypeError, ValueError):
-        batch_size = 32
+        batch_size = 100
     indexed_outcomes = {}
     logical_collision_reasons = _logical_native_collision_reasons(resolutions)
     prepared_items = []
@@ -1636,33 +1562,30 @@ def _list_items(value):
     return None
 
 
-def _fresh_directory_state(storage, path: str) -> str:
+def _fresh_directory_observation(storage, path: str) -> tuple[str, str]:
     try:
         info = storage.get_file_info(path)
         if info is None:
-            return "absent"
+            return "absent", ""
         directory_id = _provider_id(info)
         if not info or not directory_id:
-            return "lookup_failed"
+            return "lookup_failed", ""
         response = storage.get_file_list({
             "cid": directory_id,
+            "offset": 0,
             "limit": 1,
             "show_dir": 1,
         })
+        page = parse_directory_page(response, offset=0)
     except Exception:
-        return "lookup_failed"
-    items = _list_items(response)
-    if items is None:
-        return "lookup_failed"
-    if items:
-        return "nonempty"
-    if isinstance(response, dict):
-        if response.get("has_more") is True:
-            return "nonempty"
-        data = response.get("data")
-        if isinstance(data, dict) and data.get("has_more") is True:
-            return "nonempty"
-    return "empty"
+        return "lookup_failed", ""
+    if page.items:
+        return "nonempty", directory_id
+    return "empty", directory_id
+
+
+def _fresh_directory_state(storage, path: str) -> str:
+    return _fresh_directory_observation(storage, path)[0]
 
 
 def _fresh_directory_is_empty(storage, path: str) -> bool:
@@ -1714,7 +1637,7 @@ def cleanup_source_directories(
                 reason_code="protected_root",
             ))
             continue
-        state = _fresh_directory_state(storage, path)
+        state, observed_directory_id = _fresh_directory_observation(storage, path)
         if state == "nonempty":
             outcomes.append(DirectoryCleanupOutcome(
                 path=path,
@@ -1745,7 +1668,7 @@ def cleanup_source_directories(
             ))
             continue
         try:
-            deleted = storage.delete_single_file(path) is True
+            deleted = storage.delete_single_file(path, expected_file_id=observed_directory_id) is True
         except Exception:
             deleted = False
         post_delete_state = (

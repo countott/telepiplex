@@ -50,4 +50,7 @@ def test_caption_config_defaults_validate_and_legacy_empty_config_remains_valid(
     jsonschema.validate(config, schema)
     jsonschema.validate({}, schema)
     assert config["automatic"] is True
+    assert config["source_profile"] == "balanced"
     assert config["providers"]["assrt"]["token"] == ""
+    jsonschema.validate({"source_profile": "all"}, schema)
+    assert not jsonschema.Draft202012Validator(schema).is_valid({"source_profile": "unknown"})

@@ -2,6 +2,7 @@
 from telepiplex_plugin_sdk.storage_snapshot import SnapshotStore, SnapshotError
 from telepiplex_plugin_sdk.storage_tree import collect_snapshot_tree, TreeIntegrityError
 from .client import Open115Error
+from .storage_listing import TreeScanStorage
 
 
 def store_for(jobs):
@@ -23,7 +24,7 @@ def scan_snapshot(client,path):
     if not identity:raise SnapshotError('snapshot root has no stable identity')
     # The scanner itself verifies the root and all descendants. The extra root
     # read brackets that scan so its bound identity cannot be silently replaced.
-    try:tree=collect_snapshot_tree(client,path)
+    try:tree=collect_snapshot_tree(TreeScanStorage(client),path)
     except TreeIntegrityError as exc:
         raise Open115Error(str(exc),code='file_tree_incomplete',operation='get_file_tree') from exc
     if root_id(fresh_info())!=identity:raise SnapshotError('snapshot root changed during scan')

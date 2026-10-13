@@ -8,6 +8,10 @@
     "automatic": {
       "type": "boolean"
     },
+    "source_profile": {
+      "type": "string",
+      "enum": ["balanced", "all"]
+    },
     "output_path": {
       "type": "string",
       "pattern": "^/",

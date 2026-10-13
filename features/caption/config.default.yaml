@@ -1,5 +1,8 @@
 enabled: true
 automatic: true
+# balanced selects applicable sources; all also tries optional keyword sources.
+# enabled permits participation; it does not force every source into every query.
+source_profile: balanced
 output_path: /字幕
 request_timeout_seconds: 15
 provider_timeout_seconds: 45

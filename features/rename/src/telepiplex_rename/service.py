@@ -902,12 +902,15 @@ class RenameFeature:
         return common
 
     async def _inventory_directory_items(self, parent_id: str) -> list[dict]:
+        from .directory_listing import DirectoryListingError, parse_directory_page
+
         page_size = 1000
         offset = 0
         items = []
-        seen_page_items = set()
+        seen_ids = set()
         expected_count = None
-        while True:
+        promised_more = False
+        for _page in range(100):
             response = await self._storage_value(
                 "get_file_list",
                 {
@@ -922,46 +925,50 @@ class RenameFeature:
                     "inventory_tree_incomplete",
                     "storage reported an incomplete inventory page",
                 )
-            wrapper = response
-            while isinstance(wrapper, dict):
-                if "count" in wrapper:
-                    raw_count = wrapper["count"]
-                    if isinstance(raw_count, bool) or not str(raw_count).isdigit():
-                        raise FeatureError("inventory_tree_incomplete", "storage inventory count is invalid")
-                    count = int(raw_count)
-                    if expected_count is not None and count != expected_count:
-                        raise FeatureError("inventory_tree_incomplete", "storage inventory changed during scan")
-                    expected_count = count
-                wrapper = wrapper.get("list", wrapper.get("data", wrapper.get("items")))
-            if not isinstance(wrapper, list):
-                raise FeatureError("inventory_tree_incomplete", "storage inventory page is malformed")
-            page = self._storage_items(response)
-            if not page:
+            try:
+                page = parse_directory_page(response, offset=offset)
+            except DirectoryListingError as exc:
+                raise FeatureError("inventory_tree_incomplete", str(exc)) from exc
+            # Keep inventory-specific completeness flags on every validated
+            # wrapper; entries themselves are not listing wrappers.
+            wrappers = [response]
+            while wrappers:
+                wrapper = wrappers.pop()
+                if not isinstance(wrapper, dict):
+                    continue
+                if _storage_listing_incomplete(wrapper):
+                    raise FeatureError("inventory_tree_incomplete", "storage reported an incomplete inventory page")
+                wrappers.extend(wrapper[key] for key in ("list", "data")
+                                if isinstance(wrapper.get(key), dict))
+            if promised_more and not page.items:
+                raise FeatureError("inventory_tree_incomplete", "storage inventory continuation returned no records")
+            if page.count is not None:
+                if expected_count is not None and page.count != expected_count:
+                    raise FeatureError("inventory_tree_incomplete", "storage inventory changed during scan")
+                expected_count = page.count
+            for item in page.items:
+                raw_id = next((item[key] for key in ("file_id", "fid", "cid", "id")
+                    if key in item and item[key] is not None
+                    and str(item[key]).strip()), None)
+                if isinstance(raw_id, bool) or not isinstance(raw_id, (str, int)):
+                    raise FeatureError("inventory_tree_incomplete", "storage inventory node has no stable identity")
+                provider_id = self._inventory_item_id(item)
+                if provider_id != str(raw_id).strip():
+                    raise FeatureError("inventory_tree_incomplete", "storage inventory node identity changed")
+                if provider_id in seen_ids:
+                    raise FeatureError("inventory_tree_incomplete", "storage inventory repeats an object")
+                seen_ids.add(provider_id)
+            items.extend(page.items)
+            if expected_count is not None and len(items) > expected_count:
+                raise FeatureError("inventory_tree_incomplete", "storage inventory exceeds declared count")
+            if not page.items or page.has_more is False:
                 if expected_count is not None and len(items) != expected_count:
                     raise FeatureError("inventory_tree_incomplete", "storage inventory ended before declared count")
                 return items
-            new_items = []
-            for item in page:
-                identity = (
-                    self._inventory_item_id(item),
-                    self._inventory_item_name(item),
-                    self._inventory_item_is_dir(item),
-                )
-                if identity in seen_page_items:
-                    raise FeatureError("inventory_tree_incomplete", "storage inventory repeats an object")
-                seen_page_items.add(identity)
-                new_items.append(item)
-            if not new_items:
-                raise FeatureError(
-                    "inventory_tree_incomplete",
-                    "storage pagination did not advance",
-                )
-            items.extend(new_items)
-            if expected_count is not None and len(items) > expected_count:
-                raise FeatureError("inventory_tree_incomplete", "storage inventory exceeds declared count")
-            if len(page) < page_size and (expected_count is None or len(items) == expected_count):
-                return items
-            offset += len(page)
+            # Neither a short page nor count alone proves its empty tail.
+            offset += len(page.items)
+            promised_more = page.has_more is True
+        raise FeatureError("inventory_tree_incomplete", "storage inventory exceeds bounded page count")
 
     async def _inventory_file_tree(
         self,

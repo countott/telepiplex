@@ -161,3 +161,68 @@ def test_encore_requires_explicit_matching_video_edition():
     document = SubtitleDocument("Example.S01E01.Encore.SC.ass", "ass", b"")
     assert "document_edition_mismatch" in match_document(query, candidate, document).reasons
     assert match_document(replace(query, release_name="Example.S01E01.Encore.mkv"), replace(candidate, release_name="Example.Encore"), document).accepted
+
+
+@pytest.mark.parametrize("title,release", [
+    ("Example", "Example.S02E03.WEB"),
+    ("Example.S02E03", "Example.S01E02.WEB"),
+])
+def test_structured_coordinates_cannot_hide_explicit_name_conflicts(title, release):
+    query = MediaQuery("Example", media_type="series", season=1, episode=2, imdb_id="tt123")
+    candidate = SubtitleCandidate("subdl", "1", title, release_name=release,
+        season=1, episode=2, metadata={"imdb_id": "tt123"})
+    assert "candidate_coordinate_conflict" in match_candidate(query, candidate).reasons
+    assert not match_document(query, candidate, SubtitleDocument("chi.srt", "srt", b"")).accepted
+
+
+@pytest.mark.parametrize("extra", ["2x03", "第2季第3集", "EP03"])
+def test_mixed_coordinate_formats_cannot_hide_conflicts(extra):
+    query = MediaQuery("Example", media_type="series", season=1, episode=2, imdb_id="tt123")
+    candidate = SubtitleCandidate("fixture", "1", "Example", season=1, episode=2,
+        release_name=f"Example.S01E02.{extra}.WEB", metadata={"imdb_id": "tt123"})
+    assert "candidate_coordinate_conflict" in match_candidate(query, candidate).reasons
+    candidate = replace(candidate, release_name="Example.S01E02.WEB")
+    member = SubtitleDocument(f"Example.S01E02.{extra}.srt", "srt", b"")
+    assert "document_coordinate_conflict" in match_document(query, candidate, member).reasons
+
+
+def test_movie_metadata_year_cannot_hide_wrong_release_year():
+    query = MediaQuery("Example", year=2020, imdb_id="tt123")
+    candidate = SubtitleCandidate("subdl", "1", "Example", year=2020,
+        release_name="Example.2021.WEB", metadata={"imdb_id": "tt123"})
+    assert "candidate_year_conflict" in match_candidate(query, candidate).reasons
+
+
+def test_series_parent_year_and_later_episode_year_remain_distinct():
+    query = MediaQuery("Example", year=2020, media_type="series", season=2, episode=1)
+    candidate = SubtitleCandidate("subdl", "1", "Example", year=2020, season=2, episode=1,
+        release_name="Example.S02E01.2022.WEB")
+    result = match_candidate(query, candidate)
+    assert result.accepted and "series_year_differs" in result.warnings
+    member = SubtitleDocument("Example.S02E01.2022.srt", "srt", b"")
+    assert match_document(query, candidate, member).accepted
+
+
+def test_member_explicit_season_cannot_hide_conflicting_parent_directory():
+    query = MediaQuery("Example", media_type="series", season=1, episode=3)
+    candidate = SubtitleCandidate("fixture", "1", "Example S01")
+    member = SubtitleDocument("Example.S02/Example.S01E03.srt", "srt", b"")
+    assert "document_coordinate_conflict" in match_document(query, candidate, member).reasons
+
+
+def test_mapped_absolute_candidate_coordinates_agree_after_conversion():
+    query = MediaQuery("Example", media_type="series", season=2, episode=1)
+    candidate = SubtitleCandidate("fixture", "1", "Example", release_name="Example EP13.srt",
+        season=2, episode=1, metadata={"episode_mapping": {"season": 2, "offset": -12}})
+    assert match_candidate(query, candidate).accepted
+    assert match_document(query, candidate, SubtitleDocument("Example EP13.srt", "srt", b"")).accepted
+
+
+@pytest.mark.parametrize("technical", ["1920x1080", "1920×1080", "[AB2020CD]"])
+def test_technical_numbers_never_supply_a_false_release_year(technical):
+    query = MediaQuery("Example", year=2021, media_type="series", season=1, episode=2)
+    candidate = SubtitleCandidate("fixture", "1", "Example", year=2021, season=1, episode=2)
+    member = SubtitleDocument(f"Example.S01E02.{technical}.chi.srt", "srt", b"")
+    assert match_document(query, candidate, member).accepted
+    wrong = replace(member, filename=f"Example.S01E02.2020.{technical}.chi.srt")
+    assert "document_year_mismatch" in match_document(query, candidate, wrong).reasons

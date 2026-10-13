@@ -491,13 +491,32 @@ async def audit_live_full_case(case: dict, feature, **unused) -> dict:
         # Explicit Sxx/SxxExx may already have started the release search.
         if not stored.get("confirmed_contract") and plan_id in feature.plans:
             kind = case.get("scope", "work")
-            scope = "whole_series" if kind == "work" else kind
-            suffix = ""
-            if kind in {"season", "episode"}:
-                suffix += ":" + str(case["season_number"])
-            if kind == "episode":
-                suffix += ":" + str(case["episode_number"])
-            await callback(f"scope:{plan_id}:{scope}{suffix}")
+
+            async def click_rendered_scope(choice):
+                payload = f"search:scope:{plan_id}:{choice}"
+                operation = feature.operations.get(stored.get("operation_id")) or {}
+                rendered = {
+                    button.get("callback_data")
+                    for row in (operation.get("details") or {}).get("keyboard") or ()
+                    for button in row
+                }
+                if payload not in rendered:
+                    return False
+                await callback(payload.removeprefix("search:"))
+                return True
+
+            if kind == "season":
+                target = f"season_all:{case['season_number']}"
+                if not await click_rendered_scope(target):
+                    await click_rendered_scope(f"season:{case['season_number']}")
+                    await click_rendered_scope(target)
+            elif kind == "episode":
+                target = f"episode:{case['season_number']}:{case['episode_number']}"
+                if not await click_rendered_scope(target):
+                    await click_rendered_scope(f"season:{case['season_number']}")
+                    await click_rendered_scope(target)
+            else:
+                await click_rendered_scope("whole_series")
         contract = stored.get("confirmed_contract")
         if not contract:
             reason = "category_route_missing" if not stored.get("selected_path") else "scope_not_verified"

@@ -3430,7 +3430,7 @@ class SearchFeature:
         if state == "completed":
             keyboard.append([{
                 "text": f"{ordinal(season, '季')} 全季",
-                "callback_data": f"search:scope:{plan_id}:season:{season}",
+                "callback_data": f"search:scope:{plan_id}:season_all:{season}",
             }])
             episodes = inventory.all_by_season.get(season, ())
         else:
@@ -3643,14 +3643,6 @@ class SearchFeature:
             return self._start_selected_release(plan_id, stored)
         if choice == "season" and len(coordinates) == 1:
             season = int(coordinates[0])
-            inventory = series_inventory(contract)
-            if inventory.state_by_season.get(season) == "completed":
-                stored["plan"]["media_metadata"] = self._apply_selected_series_scope(
-                    plan_id, contract,
-                    "season",
-                    season_number=season,
-                )
-                return self._start_selected_release(plan_id, stored)
             return self._series_episode_scope_action(
                 plan_id,
                 stored,
@@ -3665,10 +3657,16 @@ class SearchFeature:
             )
             return self._start_selected_release(plan_id, stored)
         if choice == "season_all":
+            if len(coordinates) > 1:
+                raise FeatureError("invalid_callback", "series scope choice is invalid")
             stored["plan"]["media_metadata"] = self._apply_selected_series_scope(
                 plan_id, contract,
                 "season",
-                season_number=decision.get("season_number"),
+                season_number=(
+                    int(coordinates[0])
+                    if coordinates
+                    else decision.get("season_number")
+                ),
             )
             return self._start_selected_release(plan_id, stored)
         if choice == "season":

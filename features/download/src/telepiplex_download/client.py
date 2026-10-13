@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import hashlib
 import math
 import re
@@ -14,6 +14,7 @@ from pathlib import PurePosixPath
 import requests
 
 from .pacing import EndpointPacer
+from .storage_listing import ListingIntegrityError, TreeScanStorage, parse_listing_page, validate_status
 from telepiplex_plugin_sdk.storage_tree import TreeIntegrityError, collect_complete_tree
 
 
@@ -36,6 +37,7 @@ class Open115Client:
         ("POST", "/open/offline/add_task_urls"): "offline.mutation",
         ("POST", "/open/offline/del_task"): "offline.mutation",
         ("GET", "/open/folder/get_info"): "storage.read",
+        ("POST", "/open/folder/get_info"): "storage.read",
         ("GET", "/open/ufile/files"): "storage.read",
         ("POST", "/open/folder/add"): "storage.mutation",
         ("POST", "/open/ufile/update"): "storage.mutation",
@@ -55,6 +57,7 @@ class Open115Client:
         ("POST", "/open/offline/add_task_urls"): "add_offline_task",
         ("POST", "/open/offline/del_task"): "delete_offline_task",
         ("GET", "/open/folder/get_info"): "get_file_info",
+        ("POST", "/open/folder/get_info"): "get_file_info",
         ("GET", "/open/ufile/files"): "get_file_list",
         ("POST", "/open/folder/add"): "create_directory",
         ("POST", "/open/ufile/update"): "rename_file",
@@ -107,6 +110,7 @@ class Open115Client:
         self._storage_read_slots = threading.BoundedSemaphore(
             self.storage_read_workers
         )
+        self._request_budget = threading.local()
         self._cache_lock = threading.Lock()
         self._cache_condition = threading.Condition(self._cache_lock)
         self._cache_generation = 0
@@ -159,9 +163,9 @@ class Open115Client:
                 guard = self._storage_read_slots
             else:
                 guard = nullcontext()
-            with guard:
+            with self._request_guard(guard, endpoint_class):
                 pacer_wait_ms = round(
-                    max(0.0, float(self._pacer.acquire(endpoint_class))) * 1000
+                    max(0.0, float(self._acquire_pacer(endpoint_class))) * 1000
                 )
                 if pacer_wait_ms >= 50:
                     self._emit_observation(
@@ -184,7 +188,7 @@ class Open115Client:
                         params=params,
                         data=data,
                         files=files,
-                        timeout=self.timeout,
+                        timeout=self._effective_request_timeout(),
                     )
                     status_class = self._status_class(response)
                     self._observe_http_throttle(
@@ -245,6 +249,11 @@ class Open115Client:
             retryable=False,
         )
         if retry and result.get("code") in self.TOKEN_EXPIRED_CODES:
+            if getattr(self._request_budget, "deadline", None) is not None:
+                raise Open115Error(
+                    "115 token expired during bounded verification",
+                    code="verification_token_expired", operation=path,
+                )
             self.refresh_access_token()
             return self._request(
                 method,
@@ -255,6 +264,52 @@ class Open115Client:
                 retry=False,
             )
         return result
+
+    def _effective_request_timeout(self):
+        deadline = getattr(self._request_budget, "deadline", None)
+        if deadline is None:
+            return self.timeout
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Open115Error("115 verification deadline exceeded", operation="get_file_info")
+        return min(self.timeout, remaining)
+
+    def _acquire_pacer(self, endpoint_class):
+        deadline = getattr(self._request_budget, "deadline", None)
+        if deadline is not None and isinstance(self._pacer, EndpointPacer):
+            try:
+                return self._pacer.acquire(endpoint_class, deadline=deadline)
+            except TimeoutError as exc:
+                raise Open115Error("115 verification pacing deadline exceeded", operation="get_file_info") from exc
+        return self._pacer.acquire(endpoint_class)
+
+    @contextmanager
+    def _request_guard(self, guard, endpoint_class):
+        deadline = getattr(self._request_budget, "deadline", None)
+        if deadline is None or endpoint_class not in {"storage.read", "storage.mutation"}:
+            with guard:
+                yield
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not guard.acquire(timeout=remaining):
+            raise Open115Error("115 verification read slot deadline exceeded", operation="get_file_info")
+        try:
+            yield
+        finally:
+            guard.release()
+
+    @contextmanager
+    def _bounded_read_budget(self, seconds):
+        previous = getattr(self._request_budget, "deadline", None)
+        deadline = time.monotonic() + seconds
+        self._request_budget.deadline = min(previous, deadline) if previous is not None else deadline
+        try:
+            yield self._request_budget.deadline
+        finally:
+            if previous is None:
+                del self._request_budget.deadline
+            else:
+                self._request_budget.deadline = previous
 
     @classmethod
     def _operation_for_endpoint(cls, method: str, path: str) -> str:
@@ -527,7 +582,14 @@ class Open115Client:
 
     def _wait_for_storage_mutation(self) -> None:
         while self._storage_mutation_active:
-            self._cache_condition.wait()
+            deadline = getattr(self._request_budget, "deadline", None)
+            if deadline is None:
+                self._cache_condition.wait()
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise Open115Error("115 verification mutation barrier deadline exceeded", operation="get_file_info")
+                self._cache_condition.wait(timeout=remaining)
 
     def _remove_cached_file(self, path: str) -> None:
         with self._cache_condition:
@@ -547,20 +609,45 @@ class Open115Client:
         return False
 
     def get_file_info(self, path: str):
+        return self._read_path_info(path, strict=True)
+
+    def _read_path_info(self, path: str, *, strict=False, use_cache=True):
         path = self._normalize(path)
         with self._cache_condition:
             self._wait_for_storage_mutation()
-            if path in self._file_cache:
+            if use_cache and path in self._file_cache:
                 return self._file_cache[path]
             generation = self._cache_generation
-        result = self._request("GET", "/open/folder/get_info", params={"path": path})
-        value = result.get("data") if self._successful(result) else None
-        if not self._has_stable_file_identity(value):
+        result = self._request("POST", "/open/folder/get_info", data={"path": path})
+        value = self._file_info_value(result, strict=strict)
+        if value is None:
             return None
         with self._cache_condition:
             self._wait_for_storage_mutation()
             if generation == self._cache_generation:
                 self._file_cache[path] = value
+        return value
+
+    def _file_info_value(self, result, *, strict=False):
+        """115 returns an object or an array; only a successful [] is absent."""
+
+        try:
+            validate_status(result)
+        except ListingIntegrityError:
+            valid_status = False
+        else:
+            valid_status = True
+        if not self._successful(result) or not valid_status:
+            raise Open115Error("115 file identity lookup failed", operation="get_file_info")
+        value = result.get("data")
+        if isinstance(value, list):
+            if not value:
+                return None
+            value = value[0] if len(value) == 1 else None
+        if not self._has_stable_file_identity(value):
+            if strict:
+                raise Open115Error("115 file identity lookup is malformed", operation="get_file_info")
+            return None
         return value
 
     def get_file_info_batch(self, paths: list[str]):
@@ -596,12 +683,17 @@ class Open115Client:
 
     def get_file_info_by_id(self, file_id: str):
         result = self._request("GET", "/open/folder/get_info", params={"file_id": file_id})
-        value = result.get("data") if self._successful(result) else None
-        return value if self._has_stable_file_identity(value) else None
+        return self._file_info_value(result)
 
     def get_file_list(self, params: dict):
         result = self._request("GET", "/open/ufile/files", params=dict(params))
-        return result.get("data") if self._successful(result) else None
+        try:
+            parse_listing_page(result, offset=params.get("offset", 0))
+        except ListingIntegrityError as exc:
+            raise Open115Error(str(exc), code="file_tree_incomplete", operation="get_file_list") from exc
+        # 115 places count/offset beside data. Returning data alone discards the
+        # facts needed to reject incomplete pages before any cloud mutation.
+        return result
 
     def create_directory(self, parent_id, name: str):
         result = self._request(
@@ -907,12 +999,21 @@ class Open115Client:
             return True
         return False
 
-    def delete_single_file(self, path: str):
-        info = self.get_file_info(path)
+    def delete_single_file(self, path: str, *, expected_file_id=None):
+        if expected_file_id is not None:
+            if isinstance(expected_file_id, bool) or not isinstance(expected_file_id, (str, int)) or not str(expected_file_id).strip():
+                return False
+            captured_id = str(expected_file_id).strip()
+            info = self._fresh_file_info(path)
+            if self._move_provider_id(info) != captured_id:
+                return False
+        else:
+            info = self.get_file_info(path)
+            captured_id = str(info["file_id"]) if info else ""
         if not info:
             return False
         result = self._request(
-            "POST", "/open/ufile/delete", data={"file_ids": info["file_id"]}
+            "POST", "/open/ufile/delete", data={"file_ids": captured_id}
         )
         if self._successful(result):
             return True
@@ -970,20 +1071,149 @@ class Open115Client:
                 "source_path": source_path,
                 "target_path": target,
             }
-        self.create_dir_recursive(target_path)
-        if not self.copy_file(source_path, target_path):
-            return {"state": "copy_failed", "copied": False, "source_deleted": False,
-                    "source_path": source_path, "target_path": target}
-        try:
-            deleted = self.delete_single_file(source_path)
-        except Exception as exc:
-            deleted = False
-            error = type(exc).__name__
+        def outcome(state, *, copied=False, source_deleted=False, error=""):
+            return {"state": state, "copied": copied, "source_deleted": source_deleted,
+                    "source_path": source_path, "target_path": target, "error": error}
+
+        source = self._fresh_file_info(source_path)
+        fingerprint = self._move_fingerprint(source)
+        if fingerprint is None:
+            return outcome("copy_failed", error="source_identity_unverifiable")
+        source_id, sha1, size = fingerprint
+        existing_target = self._fresh_file_info(target)
+        if existing_target is not None:
+            existing_fingerprint = self._move_fingerprint(existing_target)
+            if existing_fingerprint is None or existing_fingerprint[1:] != (sha1, size):
+                return outcome("copy_failed", error="target_conflict")
+            if existing_fingerprint[0] == source_id:
+                return outcome("no_op")
+            # Resume a previously verified copy without issuing another copy.
         else:
-            error = "" if deleted else "delete_failed"
-        return {"state": "moved" if deleted else "copied_source_retained",
-                "copied": True, "source_deleted": bool(deleted),
-                "source_path": source_path, "target_path": target, "error": error}
+            self.create_dir_recursive(target_path)
+            if not self.copy_file(source_path, target_path):
+                return outcome("copy_failed")
+
+        target_verified = False
+        verified_target_fingerprint = None
+        with self._bounded_read_budget(10.0) as deadline:
+            for attempt in range(3):
+                if time.monotonic() >= deadline:
+                    break
+                try:
+                    observed = self._fresh_file_info(target)
+                except Open115Error:
+                    observed = None
+                if time.monotonic() >= deadline:
+                    break
+                observed_fingerprint = self._move_fingerprint(observed)
+                if observed_fingerprint is not None:
+                    target_verified = observed_fingerprint[1:] == (sha1, size)
+                    if target_verified:
+                        verified_target_fingerprint = observed_fingerprint
+                    break
+                if observed is not None:
+                    break
+                if attempt < 2:
+                    delay = min(0.25 * (2 ** attempt), max(0.0, deadline - time.monotonic()))
+                    if delay:
+                        time.sleep(delay)
+        if not target_verified:
+            return outcome("copied_source_retained", copied=True, error="target_identity_unverified")
+        # Re-read the source after the copy: another client may have replaced
+        # the path. Never derive the delete identity from a later path lookup.
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return outcome("copied_source_retained", copied=True, error="verification_deadline_exceeded")
+            with self._bounded_read_budget(remaining):
+                current_source = self._fresh_file_info(source_path)
+        except Open115Error as exc:
+            return outcome("copied_source_retained", copied=True, error=type(exc).__name__)
+        if time.monotonic() >= deadline:
+            return outcome("copied_source_retained", copied=True, error="verification_deadline_exceeded")
+        if self._move_fingerprint(current_source) != fingerprint:
+            return outcome("copied_source_retained", copied=True, error="source_identity_changed")
+        acknowledged = False
+        error = ""
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return outcome("copied_source_retained", copied=True, error="verification_deadline_exceeded")
+            with self._bounded_read_budget(remaining):
+                result = self._request(
+                    "POST", "/open/ufile/delete", data={"file_ids": source_id}
+                )
+            acknowledged = self._successful(result)
+            if not acknowledged:
+                error = "delete_failed"
+        except Exception as exc:
+            error = type(exc).__name__
+        with self._bounded_read_budget(10.0) as post_delete_deadline:
+            deleted = False
+            try:
+                original_after_delete = self._fresh_file_info_by_id(source_id)
+                deleted = original_after_delete is None
+                if time.monotonic() >= post_delete_deadline:
+                    return outcome("copy_failed", copied=True, source_deleted=deleted,
+                                   error="post_delete_verification_deadline_exceeded")
+                source_after_delete = self._fresh_file_info(source_path)
+            except Exception:
+                return outcome("copy_failed", copied=True, source_deleted=deleted,
+                               error="source_deletion_unverified")
+            if time.monotonic() >= post_delete_deadline:
+                return outcome("copy_failed", copied=True, source_deleted=deleted,
+                               error="post_delete_verification_deadline_exceeded")
+            if not deleted:
+                return outcome("copied_source_retained", copied=True, error=error or "source_still_present")
+            if self._move_provider_id(source_after_delete) == source_id:
+                return outcome("copy_failed", copied=True, error="source_deletion_unverified")
+            try:
+                final_target = self._move_fingerprint(self._fresh_file_info(target))
+                if time.monotonic() >= post_delete_deadline:
+                    final_target = None
+            except Exception:
+                final_target = None
+        if final_target != verified_target_fingerprint:
+            return outcome("copy_failed", copied=True, source_deleted=True,
+                           error="target_identity_unverified_after_delete")
+        return outcome("moved", copied=True, source_deleted=True)
+
+    def _fresh_file_info(self, path):
+        self._remove_cached_file(self._normalize(path))
+        return self._read_path_info(path, strict=True, use_cache=False)
+
+    def _fresh_file_info_by_id(self, file_id):
+        result = self._request("GET", "/open/folder/get_info", params={"file_id": file_id})
+        value = self._file_info_value(result, strict=True)
+        if value is not None and self._move_provider_id(value) != file_id:
+            raise Open115Error("115 ID lookup returned another object", operation="get_file_info")
+        return value
+
+    @staticmethod
+    def _move_provider_id(value):
+        if not isinstance(value, dict):
+            return None
+        provider_id = next((value[key] for key in ("file_id", "fid", "id") if key in value), None)
+        if isinstance(provider_id, bool) or not isinstance(provider_id, (str, int)) or not str(provider_id).strip():
+            return None
+        return str(provider_id).strip()
+
+    @staticmethod
+    def _move_fingerprint(value):
+        provider_id = Open115Client._move_provider_id(value)
+        if provider_id is None:
+            return None
+        sha1 = next((value[key] for key in ("sha1", "sha", "file_sha1") if key in value), None)
+        if not isinstance(sha1, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha1.strip()):
+            return None
+        size = next((value[key] for key in ("size_byte", "fs", "size") if key in value), None)
+        if type(size) is int and size >= 0:
+            normalized_size = size
+        elif isinstance(size, str) and size.isascii() and size.isdigit():
+            normalized_size = int(size)
+        else:
+            return None
+        return provider_id, sha1.strip().lower(), normalized_size
 
     def is_directory(self, path: str):
         info = self.get_file_info(path)
@@ -994,7 +1224,7 @@ class Open115Client:
         if not info:
             return []
         data = self.get_file_list({"cid": info["file_id"], "type": file_type, "limit": 1000})
-        return [item.get("fn") for item in (data or []) if item.get("fn")]
+        return [item.get("fn") for item in self._list_items(data) if item.get("fn")]
 
     @staticmethod
     def _list_items(value):
@@ -1043,7 +1273,7 @@ class Open115Client:
 
     def get_file_tree(self, root_path: str, *, max_depth=8, limit=1000):
         try:
-            return collect_complete_tree(self, root_path, max_depth=max_depth, limit=limit)
+            return collect_complete_tree(TreeScanStorage(self), root_path, max_depth=max_depth, limit=limit)
         except TreeIntegrityError as exc:
             raise Open115Error(str(exc), code="file_tree_incomplete", operation="get_file_tree") from exc
 

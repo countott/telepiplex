@@ -11,8 +11,11 @@ from .models import MatchResult, MediaQuery, SubtitleCandidate, SubtitleDocument
 _EPISODE = re.compile(r"(?i)(?<![a-z0-9])s(\d{1,2})[ ._-]*e(\d{1,3})(?:[ ._-]*(?:e|-e?)(\d{1,3}))?")
 _SEASON = re.compile(r"(?i)(?<![a-z0-9])(?:s|season[ ._-]*)(\d{1,2})(?!\d)")
 _EP_ONLY = re.compile(r"(?i)(?<![a-z0-9])(?:e|ep)[ ._-]*(\d{1,3})(?!\d)")
+_EP_RANGE = re.compile(r"(?i)(?<![a-z0-9])(?:e|ep)[ ._-]*(\d{1,3})(?!\d)(?:[ ._-]*(?:e|ep|-e?p?)(\d{1,3})(?!\d))?")
+_X_EPISODE = re.compile(r"(?i)(?<![a-z0-9])(\d{1,2})x(\d{1,3})(?!\d)")
 _YEARS = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 _NOISE = re.compile(r"(?i)(?:\b(?:480|576|720|1080|2160)p\b|\b(?:bluray|blu-ray|bdrip|brrip|webrip|web-dl|webdl|hdtv|dvdrip|remux|x264|x265|h264|h265|hevc|avc|aac|dts|srt|ass|ssa|chs|cht|chi|eng|english|subtitles?)\b)")
+_TECHNICAL_NUMBERS = re.compile(r"(?i)(?<![a-z0-9])\d{3,5}\s*[x×]\s*\d{3,5}(?![a-z0-9])|\[[0-9a-f]{8}\]")
 
 
 @lru_cache(maxsize=1)
@@ -39,7 +42,7 @@ def _title_matches(title: str, text: str) -> bool:
         return True
     # A film title contained in another title ("The Science of Interstellar")
     # is not the film. Evaluate the work name before release/year descriptors.
-    work = re.split(r"(?i)(?<!\d)(?:19|20)\d{2}(?!\d)|\b(?:480|576|720|1080|2160)p\b|blu[ ._-]?ray|web[ ._-]?(?:dl|rip)|\bs\d{1,2}[ ._-]*e?\d*\b|\b(?:e|ep)[ ._-]*\d{1,3}\b", text, maxsplit=1)[0]
+    work = re.split(r"(?i)(?<!\d)(?:19|20)\d{2}(?!\d)|\b(?:480|576|720|1080|2160)p\b|blu[ ._-]?ray|web[ ._-]?(?:dl|rip)|\bs\d{1,2}[ ._-]*e?\d*\b|\b(?:e|ep)[ ._-]*\d{1,3}\b", _TECHNICAL_NUMBERS.sub("", text), maxsplit=1)[0]
     work = re.sub(r"(?i)\b(?:imax|subtitles?|simplified|traditional|chinese|english|mandarin|cantonese|bilingual|chs|cht|chi|eng|srt|ass|ssa)\b", "", work)
     work = re.sub(r"简体|簡體|繁体|繁體|中文字幕|中英|双语|雙語|简中|簡中|繁中|字幕|特效|国配|國配|英文", "", work)
     if re.fullmatch(r"[a-z0-9]+", a):
@@ -98,6 +101,44 @@ def episode_coordinates(text: str) -> tuple[int | None, set[int]]:
     return season, episodes
 
 
+def _coordinate_evidence(text: str, candidate: SubtitleCandidate | None = None):
+    """Keep independent explicit names instead of overwriting them with metadata."""
+    evidence = []
+    for part in text.replace("\\", "/").split("/"):
+        matches = list(_EPISODE.finditer(part))
+        coordinates = []
+        for match in matches:
+            first, last = int(match[2]), int(match[3] or match[2])
+            coordinates.append((int(match[1]), set(range(first, last + 1))
+                                if first <= last <= first + 100 else {first}))
+        coordinates.extend((int(match[1]), {int(match[2])}) for match in _X_EPISODE.finditer(part))
+        coordinates.extend((int(match[1]), set()) for match in _SEASON.finditer(part))
+        coordinates.extend((int(match[1]), set()) for match in re.finditer(r"第\s*(\d{1,2})\s*季", part))
+        coordinates.extend((None, {int(match[1])}) for match in re.finditer(r"第\s*(\d{1,3})\s*集", part))
+        for match in _EP_RANGE.finditer(part):
+            # The E12 portion of S01E01-E12 is already part of the range.
+            if any(start.start() <= match.start() < start.end() for start in matches):
+                continue
+            first, last = int(match[1]), int(match[2] or match[1])
+            coordinates.append((None, set(range(first, last + 1))
+                                if first <= last <= first + 100 else {first}))
+        for season, episodes in coordinates:
+            if candidate and candidate.metadata.get("episode_mapping") and season is None and episodes:
+                from .catalog_providers import mapped_episode
+                mapped = mapped_episode(candidate, part)
+                if mapped is not None:
+                    season, episodes = mapped[0], {mapped[1]}
+            if season is not None or episodes:
+                evidence.append((season, episodes))
+    return evidence
+
+
+def _coordinate_conflict(evidence) -> bool:
+    seasons = {season for season, _ in evidence if season is not None}
+    episodes = [numbers for _, numbers in evidence if numbers]
+    return len(seasons) > 1 or bool(episodes and not set.intersection(*episodes))
+
+
 def _source(text: str) -> str:
     if re.search(r"(?i)blu[ ._-]?ray|bd[ ._-]?rip|brrip|remux", text):
         return "bluray"
@@ -134,6 +175,7 @@ def _release_years(text: str, query: MediaQuery) -> set[int]:
             continue
         pattern = r"(?<!\w)" + r"[\W_]*".join(re.escape(c) for c in chars) + r"(?!\w)"
         text = re.sub(pattern, "TITLE", text, flags=re.I)
+    text = _TECHNICAL_NUMBERS.sub("", text)
     return {int(value) for value in _YEARS.findall(text)}
 
 
@@ -184,7 +226,16 @@ def match_candidate(query: MediaQuery, candidate: SubtitleCandidate) -> MatchRes
         score += 40
     elif not (id_match or hash_match):
         reasons.append("title_mismatch")
-    candidate_years = {int(candidate.year)} if candidate.year else _release_years(candidate_text, query)
+    named_years = _release_years(candidate_text, query)
+    candidate_years = {int(candidate.year)} if candidate.year else named_years
+    if candidate.year and named_years and named_years != {int(candidate.year)}:
+        if _media_type(query.media_type) == "series":
+            # API parent-work metadata and an episode's airing/release year have
+            # different scopes. Year differences never waive coordinate conflicts.
+            if query.year == candidate.year or id_match:
+                warnings.append("series_year_differs")
+        elif not query.year or query.year == candidate.year:
+            reasons.append("candidate_year_conflict")
     if query.year and candidate_years:
         if int(query.year) not in candidate_years:
             if _media_type(query.media_type) == "series" and id_match:
@@ -198,6 +249,11 @@ def match_candidate(query: MediaQuery, candidate: SubtitleCandidate) -> MatchRes
     if candidate.media_type and query.media_type and _media_type(candidate.media_type) != _media_type(query.media_type):
         reasons.append("media_type_mismatch")
     season, episodes = episode_coordinates(candidate_text)
+    evidence = (_coordinate_evidence(candidate.title, candidate)
+                + _coordinate_evidence(candidate.release_name, candidate)
+                + [(candidate.season, {candidate.episode} if candidate.episode is not None else set())])
+    if _coordinate_conflict(evidence):
+        reasons.append("candidate_coordinate_conflict")
     if candidate.season is not None:
         season = candidate.season
     if candidate.episode is not None:
@@ -247,6 +303,12 @@ def match_document(query: MediaQuery, candidate: SubtitleCandidate, document: Su
     reasons, warnings = list(result.reasons), list(result.warnings)
     score = result.score
     season, episodes = episode_coordinates(document.filename)
+    document_evidence = _coordinate_evidence(document.filename, candidate)
+    candidate_evidence = (_coordinate_evidence(candidate.title, candidate)
+                          + _coordinate_evidence(candidate.release_name, candidate)
+                          + [(candidate.season, {candidate.episode} if candidate.episode is not None else set())])
+    if _coordinate_conflict(document_evidence + candidate_evidence):
+        reasons.append("document_coordinate_conflict")
     if candidate.metadata.get("episode_mapping"):
         from .catalog_providers import mapped_episode
         mapped = mapped_episode(candidate, document.filename)
@@ -288,7 +350,7 @@ def match_document(query: MediaQuery, candidate: SubtitleCandidate, document: Su
     # requested film; short names such as "chs.srt" inherit package identity.
     stem = PurePosixPath(document.filename.replace("\\", "/")).stem
     opaque_numeric = bool(re.fullmatch(r"\d{6,20}", stem))
-    meaningful = _YEARS.sub("", _NOISE.sub("", _EPISODE.sub("", stem)))
+    meaningful = _YEARS.sub("", _NOISE.sub("", _EPISODE.sub("", _TECHNICAL_NUMBERS.sub("", stem))))
     meaningful = re.sub(r"简体|簡體|繁体|繁體|中文|中英|双语|雙語|简中|簡中|繁中|字幕|特效|国配|國配|英文|简|繁|中字", "", meaningful)
     meaningful = re.sub(r"(?i)\b(?:simplified|traditional|chinese|mandarin|cantonese|bilingual|zh|zhcn|zhtw|cn|tw|gb|big5|utf8)\b", "", meaningful)
     if not opaque_numeric and len(_normalize(meaningful)) >= 5:
