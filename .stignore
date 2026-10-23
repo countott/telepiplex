@@ -1,0 +1,22 @@
+// Mac-local metadata and workspaces
+(?d).git
+(?d).worktrees
+(?d).venv
+
+// Python caches and generated packages
+(?d).pytest_cache
+(?d)**/.pytest_cache
+(?d)**/__pycache__
+(?d)**/*.pyc
+(?d)**/build
+(?d)**/dist
+(?d)**/*.egg-info
+
+// Editor and review scratch state
+(?d)**/.idea
+(?d)**/.vscode
+(?d)**/.superpowers/sdd
+
+// macOS metadata
+(?d).DS_Store
+(?d)**/.DS_Store

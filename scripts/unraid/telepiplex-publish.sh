@@ -8,7 +8,7 @@
 
 set -Eeuo pipefail
 
-REPO="${TELEPIPLEX_PUBLISH_REPO:-/mnt/user/archives/life hacker/telepiplex}"
+REPO="${TELEPIPLEX_PUBLISH_REPO:-/mnt/user/archives/Life hacker/Telepiplex}"
 EXPECTED_ORIGIN='ssh://git@ssh.github.com:443/countott/telepiplex.git'
 SSH_KEY="${TELEPIPLEX_PUBLISH_SSH_KEY:-/root/.ssh/telepiplex_github}"
 LOCK_FILE="${TELEPIPLEX_PUBLISH_LOCK_FILE:-/var/lock/telepiplex-publish.lock}"

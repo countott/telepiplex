@@ -1,11 +1,12 @@
 # Telepiplex 项目工作指引
 
-本文件适用于 `/Users/young/Documents/telepiplex` 及其所有子目录。除非用户在当前任务中明确改变流程，否则后续开发严格遵守以下边界。
+本文件适用于 `/Users/young/Documents/Telepiplex` 及其所有子目录。除非用户在当前任务中明确改变流程，否则后续开发严格遵守以下边界。
 
 ## 0. 产品名称口径
 
 - 对外品牌统一写作 `Telepiplex`，用于用户文案、现行文档中的产品称呼、自然语言日志、工作流展示标题、Release 展示标题、包描述和其他面向人的说明。
 - 代码身份继续使用既有小写 `telepiplex`，包括包名、模块、函数、内部键、路径、URL、镜像、tag、job ID、logger 名称、结构化日志字段和机器读取的元数据；不得全局替换。
+- 项目同步根目录是路径命名例外：Mac 使用 `/Users/young/Documents/Telepiplex`，Unraid 使用 `/mnt/user/archives/Life hacker/Telepiplex`，Syncthing 容器路径使用 `/Telepiplex`。Syncthing Folder ID 仍为 `telepiplex`，其余技术路径和标识保持原样。
 - User-Agent 和 MCP 服务名称属于协议层技术身份，保持原样。
 - 历史资料（归档、旧计划、审计交付记录及 `.superpowers` 快照）保持原文。生成产物从源文件重新生成，不直接修改旧构建产物或已发布包。
 - 全大写 `TELEPIPLEX_*` 仅用于环境变量和技术常量；不得为了品牌口径改写既有技术身份。
@@ -13,7 +14,7 @@
 
 ## 1. 工作区职责
 
-- 私人 Mac 上的 `/Users/young/Documents/telepiplex` 是唯一开发工作区。
+- 私人 Mac 上的 `/Users/young/Documents/Telepiplex` 是唯一开发工作区。
 - 在此目录中只进行源码读取、创建、修改、删除、重命名和本地测试。
 - 可以修改包括 `.github/workflows/`、`Dockerfile`、配置模板、脚本和项目文档在内的项目文件。
 - `main` 是 Telepiplex Core/Host 唯一有效的源码与发布分支；`features/` 下的五个 Feature 仍在 `main` 内保持独立版本和独立发布。
@@ -49,13 +50,13 @@ Mac 本地项目彻底不使用 Git。不要在此工作区执行任何 `git` �
 当前权威同步链路为：
 
 ```text
-Mac /Users/young/Documents/telepiplex
+Mac /Users/young/Documents/Telepiplex
   → Syncthing「仅发送」
-  → Unraid /mnt/user/archives/life hacker/telepiplex
+  → Unraid /mnt/user/archives/Life hacker/Telepiplex
   → Syncthing「仅接收」
 ```
 
-- 当前 Unraid 权威路径是 `/mnt/user/archives/life hacker/telepiplex`。
+- 当前 Unraid 权威路径是 `/mnt/user/archives/Life hacker/Telepiplex`；Syncthing Docker 将此主机目录映射到 `/Telepiplex`，文件夹配置的 Path 也必须为 `/Telepiplex`。
 - 旧的 `/mnt/user/dropzone/telepiplex` 及其他历史路径不再作为默认路径。
 - `.git` 只存在于 Unraid，并被 Mac 端 Syncthing 忽略。
 - `.stfolder` 是 Syncthing 文件夹标记，应保留。
@@ -74,7 +75,7 @@ Mac /Users/young/Documents/telepiplex
 推荐的本地完整测试命令：
 
 ```bash
-cd /Users/young/Documents/telepiplex
+cd /Users/young/Documents/Telepiplex
 
 PY=/Users/young/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
 
@@ -101,7 +102,7 @@ test -d .stfolder
 Syncthing 显示 `Up to Date / 最新` 后，由用户在 Unraid 手动检查和发布：
 
 ```bash
-cd "/mnt/user/archives/life hacker/telepiplex"
+cd "/mnt/user/archives/Life hacker/Telepiplex"
 
 git status
 git diff
