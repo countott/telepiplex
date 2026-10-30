@@ -1,5 +1,5 @@
 #!/bin/bash
-#name=Telepiplex Publish
+#name=Telepiplex Publisher
 #description=提交 Syncthing 同步内容，并发布 Telepiplex Host 与待发布 Feature 版本
 #foregroundOnly=true
 #arrayStarted=true
@@ -8,7 +8,7 @@
 
 set -Eeuo pipefail
 
-REPO="${TELEPIPLEX_PUBLISH_REPO:-/mnt/user/archives/Life hacker/Telepiplex}"
+REPO="${TELEPIPLEX_PUBLISH_REPO:-/mnt/user/archives/Life Hacker/Telepiplex}"
 EXPECTED_ORIGIN='ssh://git@ssh.github.com:443/countott/telepiplex.git'
 SSH_KEY="${TELEPIPLEX_PUBLISH_SSH_KEY:-/root/.ssh/telepiplex_github}"
 LOCK_FILE="${TELEPIPLEX_PUBLISH_LOCK_FILE:-/var/lock/telepiplex-publish.lock}"

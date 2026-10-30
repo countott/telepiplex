@@ -6,7 +6,7 @@
 
 - 对外品牌统一写作 `Telepiplex`，用于用户文案、现行文档中的产品称呼、自然语言日志、工作流展示标题、Release 展示标题、包描述和其他面向人的说明。
 - 代码身份继续使用既有小写 `telepiplex`，包括包名、模块、函数、内部键、路径、URL、镜像、tag、job ID、logger 名称、结构化日志字段和机器读取的元数据；不得全局替换。
-- 项目同步根目录是路径命名例外：Mac 使用 `/Users/young/Documents/Telepiplex`，Unraid 使用 `/mnt/user/archives/Life hacker/Telepiplex`，Syncthing 容器路径使用 `/Telepiplex`。Syncthing Folder ID 仍为 `telepiplex`，其余技术路径和标识保持原样。
+- 项目同步根目录是路径命名例外：Mac 使用 `/Users/young/Documents/Telepiplex`，Unraid 使用 `/mnt/user/archives/Life Hacker/Telepiplex`，Syncthing 容器路径使用 `/Telepiplex`。Syncthing Folder ID 仍为 `telepiplex`，其余技术路径和标识保持原样。
 - User-Agent 和 MCP 服务名称属于协议层技术身份，保持原样。
 - 历史资料（归档、旧计划、审计交付记录及 `.superpowers` 快照）保持原文。生成产物从源文件重新生成，不直接修改旧构建产物或已发布包。
 - 全大写 `TELEPIPLEX_*` 仅用于环境变量和技术常量；不得为了品牌口径改写既有技术身份。
@@ -52,11 +52,11 @@ Mac 本地项目彻底不使用 Git。不要在此工作区执行任何 `git` �
 ```text
 Mac /Users/young/Documents/Telepiplex
   → Syncthing「仅发送」
-  → Unraid /mnt/user/archives/Life hacker/Telepiplex
+  → Unraid /mnt/user/archives/Life Hacker/Telepiplex
   → Syncthing「仅接收」
 ```
 
-- 当前 Unraid 权威路径是 `/mnt/user/archives/Life hacker/Telepiplex`；Syncthing Docker 将此主机目录映射到 `/Telepiplex`，文件夹配置的 Path 也必须为 `/Telepiplex`。
+- 当前 Unraid 权威路径是 `/mnt/user/archives/Life Hacker/Telepiplex`；Syncthing Docker 将此主机目录映射到 `/Telepiplex`，文件夹配置的 Path 也必须为 `/Telepiplex`。
 - 旧的 `/mnt/user/dropzone/telepiplex` 及其他历史路径不再作为默认路径。
 - `.git` 只存在于 Unraid，并被 Mac 端 Syncthing 忽略。
 - `.stfolder` 是 Syncthing 文件夹标记，应保留。
@@ -102,7 +102,7 @@ test -d .stfolder
 Syncthing 显示 `Up to Date / 最新` 后，由用户在 Unraid 手动检查和发布：
 
 ```bash
-cd "/mnt/user/archives/Life hacker/Telepiplex"
+cd "/mnt/user/archives/Life Hacker/Telepiplex"
 
 git status
 git diff
@@ -111,7 +111,7 @@ git commit -m "..."
 git push origin main
 ```
 
-版本标签和 Release 也只能由用户在 Unraid 手动操作，或由用户主动运行 Unraid User Scripts 中的 `Telepiplex Publish` 脚本。该脚本的受控源文件是 [`scripts/unraid/telepiplex-publish.sh`](scripts/unraid/telepiplex-publish.sh)；修改后需要由用户同步替换 Unraid User Scripts 中的实际脚本。Mac 本地不得代替执行。
+版本标签和 Release 也只能由用户在 Unraid 手动操作，或由用户主动运行 Unraid User Scripts 中的 `Telepiplex Publisher` 脚本。该脚本的受控源文件是 [`scripts/unraid/telepiplex-publish.sh`](scripts/unraid/telepiplex-publish.sh)；修改后需要由用户同步替换 Unraid User Scripts 中的实际脚本。Mac 本地不得代替执行。
 
 Core/Host 的 `telepiplex-v<semver>` tag 必须指向已经包含在远端 `main` 中的提交。正式发布成功后，GitHub Actions 同时更新版本镜像、容器默认标签 `latest` 和 GitHub **Latest** Release；普通 `main` push 不更新这些默认发布入口。
 
