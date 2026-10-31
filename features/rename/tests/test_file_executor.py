@@ -429,6 +429,70 @@ def test_sixty_five_moves_use_three_native_batches_and_no_legacy_moves():
     assert storage.moves == []
 
 
+def test_the_wire_retry_moves_renamed_episode_and_remaining_release():
+    release = (
+        "/真人剧集/The Wire (2002) Season 1-5 S01-S05 "
+        "(1080p BluRay x265 HEVC 10bit AAC 5.1 Silence)/Season 5"
+    )
+    destination = "/真人剧集/火线 (2002) ⋯ The Wire/The Wire Season 05"
+    renamed_source = f"{release}/The Wire S05E10.mkv"
+    original_source = (
+        f"{release}/The Wire (2002) - S05E09 - Late Editions "
+        "(1080p BluRay x265 Silence).mkv"
+    )
+
+    class RetryStorage(StatefulStorage):
+        def __init__(self):
+            super().__init__(
+                files=[(renamed_source, "episode-10"), (original_source, "episode-09")],
+                directories=[release, "/真人剧集"],
+            )
+            self.created = []
+            self.native_calls = []
+
+        def create_dir_recursive(self, path):
+            self.created.append(path)
+            self.directories.add(path)
+            return self.get_file_info(path)
+
+        def move_files_by_id(self, file_ids, target_dir_id):
+            self.native_calls.append((tuple(file_ids), target_dir_id))
+            target_dir = str(target_dir_id)[4:]
+            for file_id in file_ids:
+                source = next(
+                    path for path, info in self.files.items()
+                    if info["file_id"] == file_id
+                )
+                target = str(PurePosixPath(target_dir) / PurePosixPath(source).name)
+                self.files[target] = self.files.pop(source)
+            return {"state": "submitted", "submitted": True}
+
+    storage = RetryStorage()
+    resolutions = [
+        _resolution(
+            "episode-10", renamed_source,
+            f"{destination}/The Wire S05E10.mkv", "move_only",
+        ),
+        _resolution(
+            "episode-09", original_source,
+            f"{destination}/The Wire S05E09.mkv", "rename_and_move",
+        ),
+    ]
+
+    summary = execute_file_resolutions(storage, resolutions, selected_root=release)
+
+    assert summary.organized_files == 2
+    assert summary.failed_files == 0
+    assert storage.created == [destination]
+    assert storage.renames == [(original_source, "The Wire S05E09.mkv")]
+    assert storage.native_calls == [
+        (("episode-10", "episode-09"), f"dir:{destination}"),
+    ]
+    assert storage.files[f"{destination}/The Wire S05E10.mkv"]["file_id"] == "episode-10"
+    assert storage.files[f"{destination}/The Wire S05E09.mkv"]["file_id"] == "episode-09"
+    assert storage.deleted == []
+
+
 def test_native_move_reconciles_observed_state_instead_of_response_boolean():
     class ReconciledStorage(StatefulStorage):
         def __init__(self, *, apply_move):

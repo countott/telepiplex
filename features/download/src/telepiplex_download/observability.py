@@ -66,6 +66,10 @@ def _safe_facts(facts: dict) -> dict:
     status_class = facts.get("status_class")
     if status_class in _STATUS_CLASSES:
         safe["status_class"] = status_class
+    provider_code = facts.get("provider_code")
+    if (isinstance(provider_code, str) and provider_code.isascii()
+            and provider_code.isdigit() and len(provider_code) <= 10):
+        safe["provider_code"] = provider_code
     if isinstance(facts.get("retryable"), bool):
         safe["retryable"] = facts["retryable"]
     for name in _MILLISECOND_FACTS:

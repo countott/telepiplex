@@ -1,4 +1,5 @@
 import unittest
+from urllib.parse import quote
 
 from telepiplex_search.release_gate import ReleaseGateResult
 from telepiplex_search.release_report import (
@@ -9,6 +10,105 @@ from telepiplex_search.release_identity import stable_release_id
 
 
 class ReleaseReportTest(unittest.TestCase):
+    def _specification_row(self, item):
+        text = format_release_report(
+            "Movie", None, [item], {"total_indexers": 1},
+        )
+        return text.splitlines()[3]
+
+    def test_specs_recognize_release_separators_cjk_and_video_aliases(self):
+        cases = (
+            ("剧集_1080P_WEB_DL_DDP5_1", "① 1080p · WEB-DL · DD+ · 6ch环绕"),
+            ("电影2160p蓝光杜比视界HDR10Plus国语5.1声道", "① 2160p · BluRay · DV · HDR10+ · 6ch环绕"),
+            ("Movie.3840x2160.WEBRip.Dolby-Vision.HDR10Plus.EAC3.6CH", "① 2160p · WEBRip · DV · HDR10+ · DD+ · 6ch环绕"),
+            ("Movie.1920×1080.Blu-Ray.HDR10P.AAC.2CH", "① 1080p · BluRay · HDR10+ · AAC · 2ch立体"),
+            ("Movie_4K_WEBRip_HLG_DD51", "① 2160p · WEBRip · HLG · DD · 6ch环绕"),
+            ("Movie.1080p.WEB.DL.DD+5.1", "① 1080p · WEB-DL · DD+ · 6ch环绕"),
+            ("Movie.720p.WEBRip.AAC.Stereo", "① 720p · WEBRip · AAC · 2ch立体"),
+            ("Movie.1080p.BluRay.FLAC.Mono", "① 1080p · BluRay · FLAC · 1ch"),
+            ("Movie.1080i.1920x1080.x264.8-bit.AAC2.0", "① 1080i · AVC · 8bit · AAC · 2ch立体"),
+            ("Movie.2160p.AV1.10.bit.Opus.6ch", "① 2160p · AV1 · 10bit · Opus · 6ch环绕"),
+        )
+        for title, expected in cases:
+            with self.subTest(title=title):
+                self.assertEqual(self._specification_row({"title": title}), expected)
+
+    def test_specs_choose_largest_explicit_track_and_ignore_title_decimals(self):
+        cases = (
+            ("Movie.1080p.AAC2.0.DTS-HD.MA.5.1", "① 1080p · DTS-HD MA / AAC · 6ch环绕"),
+            ("Movie.1080p.AAC2.0.TrueHD7.1.Atmos", "① 1080p · TrueHD / AAC · 8ch沉浸"),
+            ("Movie.3.0.2026.1080p.WEB-DL.AAC", "① 1080p · WEB-DL · AAC · ?ch"),
+            ("Movie.2026.1080p.AAC10.0.2", "① 1080p · AAC · 12ch环绕"),
+            ("Movie.2026.1080p.DD5.1.640kbps", "① 1080p · DD · 6ch环绕"),
+        )
+        for title, expected in cases:
+            with self.subTest(title=title):
+                self.assertEqual(self._specification_row({"title": title}), expected)
+
+    def test_capabilities_do_not_come_from_substrings_or_codec_defaults(self):
+        for title, expected in (
+            ("Atmosphere.2026.1080p.AAC-GROUP", "① 1080p · AAC · ?ch"),
+            ("Movie.1080p.DTSx264-GROUP", "① 1080p · ?ch"),
+            ("Movie.1080p.AC3-GROUP", "① 1080p · DD · ?ch"),
+            ("Movie.1080p.TrueHD-GROUP", "① 1080p · TrueHD · ?ch"),
+            ("Movie.1080p.Dual.Audio-GROUP", "① 1080p · ?ch"),
+        ):
+            with self.subTest(title=title):
+                self.assertEqual(self._specification_row({"title": title}), expected)
+
+    def test_missing_specs_can_use_same_release_magnet_name_and_sort_title(self):
+        shortened = "The Wire (2002) S01-5 S01-S05 (1080p BluRay x265 HEVC 10bit"
+        full_name = "The Wire (2002) Season 1-5 S01-S05 (1080p BluRay x265 HEVC 10bit AAC 5.1 Silence)"
+        for evidence in (
+            {"sort_title": full_name},
+            {"magnet_url": "magnet:?xt=urn:btih:" + "a" * 40 + "&dn=" + quote(full_name)},
+            {"download_url": "magnet:?xt=urn:btih:" + "a" * 40 + "&dn=" + quote(full_name)},
+        ):
+            with self.subTest(evidence=evidence):
+                self.assertEqual(
+                    self._specification_row({"title": shortened, **evidence}),
+                    "① 1080p · BluRay · HEVC · 10bit · AAC · 6ch环绕",
+                )
+        self.assertEqual(
+            self._specification_row({"title": shortened}),
+            "① 1080p · BluRay · HEVC · 10bit · ?ch",
+        )
+
+    def test_primary_specs_win_over_conflicting_fallback(self):
+        self.assertEqual(self._specification_row({
+            "title": "Movie.1080p.WEB-DL.SDR.AAC2.0",
+            "sort_title": "Movie.2160p.BluRay.HDR10.DTS5.1",
+        }), "① 1080p · WEB-DL · SDR · AAC · 2ch立体")
+        self.assertEqual(self._specification_row({
+            "title": "Movie.1080p.WEB-DL.SDR.AAC",
+            "sort_title": "Movie.2160p.BluRay.HDR10.DTS5.1",
+        }), "① 1080p · WEB-DL · SDR · AAC · ?ch")
+        self.assertEqual(self._specification_row({
+            "title": "Movie.1080p.Atmos",
+            "sort_title": "Movie.1080p.DDP5.1.Atmos",
+        }), "① 1080p · DD+ · 6ch沉浸")
+        self.assertEqual(self._specification_row({
+            "title": "Movie.1080p",
+            "sort_title": "Movie.1080p.DDP.Atmos",
+        }), "① 1080p · DD+ · ?ch沉浸")
+        self.assertEqual(self._specification_row({
+            "title": "Movie.1080p.AAC",
+            "sort_title": "Movie.1080p.DTS5.1",
+        }), "① 1080p · AAC · ?ch")
+        self.assertEqual(self._specification_row({
+            "title": "Movie.1080p.AAC2.0",
+            "sort_title": "Movie.1080p.AAC5.1.Atmos",
+        }), "① 1080p · AAC · 2ch立体")
+        self.assertEqual(self._specification_row({
+            "title": "Movie.1080p.Atmos",
+            "sort_title": "Movie.1080p.TrueHD7.1",
+        }), "① 1080p · TrueHD · 8ch沉浸")
+
+    def test_logged_the_wire_resource_keeps_known_capabilities_visible(self):
+        self.assertEqual(self._specification_row({
+            "title": "The.Wire.S01.2160p.x265.10bit.DTS-HD.MA.5.1[TheUpscaler]",
+        }), "① 2160p · HEVC · 10bit · DTS-HD MA · 6ch环绕")
+
     def test_report_hides_title_and_score_and_merges_identical_release_sources(self):
         mirrored = [{
             "title": (
@@ -66,12 +166,12 @@ class ReleaseReportTest(unittest.TestCase):
                 "搜索完成：3/3",
                 "",
                 (
-                    "① 1080p · BluRay · Remastered · 6ch环绕"
+                    "① 1080p · BluRay · HEVC · Remastered · DD · 6ch环绕"
                 ),
                 (
                     "   2 GB｜活种"
                 ),
-                "② 2160p · REMUX · 8ch沉浸",
+                "② 2160p · REMUX · HEVC · TrueHD · 8ch沉浸",
                 "   57 GB｜活种",
             ],
         )
@@ -118,38 +218,39 @@ class ReleaseReportTest(unittest.TestCase):
         )
 
         row = text.splitlines()[3]
-        self.assertEqual(row, "① 2160p · DV · HDR10+ · 8ch沉浸")
+        self.assertEqual(row, "① 2160p · DV · HDR10+ · HEVC · DD+ · 8ch沉浸")
         self.assertEqual(row.count("DV"), 1)
-        self.assertNotIn("HEVC", row)
+        self.assertEqual(row.count("HEVC"), 1)
+        self.assertEqual(row.count("DD+"), 1)
         self.assertNotIn("x265", row)
         self.assertNotIn("Atmos", row)
         self.assertNotIn("7.1", row)
 
-    def test_audio_formats_collapse_to_one_user_facing_capability_tier(self):
+    def test_audio_formats_keep_codec_and_one_capability_tier(self):
         cases = (
-            ("Movie.2.0.FLAC-GROUP", "① 2ch立体"),
-            ("Movie.5.1.DTS-GROUP", "① 6ch环绕"),
-            ("Movie.7.1.DTS-HD.MA-GROUP", "① 8ch环绕"),
-            ("Movie.7.1.DTS-HD.HRA-GROUP", "① 8ch环绕"),
-            ("Movie.7.1.DTS-HD-GROUP", "① 8ch环绕"),
-            ("Movie.7.1.TrueHD.Atmos-GROUP", "① 8ch沉浸"),
-            ("Movie.5.1.AC3-GROUP", "① 6ch环绕"),
-            ("Movie.5.1.EAC3-GROUP", "① 6ch环绕"),
-            ("Movie.5.1.DD+.Atmos-GROUP", "① 6ch沉浸"),
-            ("Movie.2.0.AAC-GROUP", "① 2ch立体"),
+            ("Movie.2.0.FLAC-GROUP", "① FLAC · 2ch立体"),
+            ("Movie.5.1.DTS-GROUP", "① DTS · 6ch环绕"),
+            ("Movie.7.1.DTS-HD.MA-GROUP", "① DTS-HD MA · 8ch环绕"),
+            ("Movie.7.1.DTS-HD.HRA-GROUP", "① DTS-HD HRA · 8ch环绕"),
+            ("Movie.7.1.DTS-HD-GROUP", "① DTS-HD · 8ch环绕"),
+            ("Movie.7.1.TrueHD.Atmos-GROUP", "① TrueHD · 8ch沉浸"),
+            ("Movie.5.1.AC3-GROUP", "① DD · 6ch环绕"),
+            ("Movie.5.1.EAC3-GROUP", "① DD+ · 6ch环绕"),
+            ("Movie.5.1.DD+.Atmos-GROUP", "① DD+ · 6ch沉浸"),
+            ("Movie.2.0.AAC-GROUP", "① AAC · 2ch立体"),
             (
                 "Movie.1080p.WEB-DL.x264.AAC.2CH-GROUP",
-                "① 1080p · WEB-DL · 2ch立体",
+                "① 1080p · WEB-DL · AVC · AAC · 2ch立体",
             ),
             (
                 "Movie.7.1.DTS-HD.MA.DTS:X-GROUP",
-                "① 8ch沉浸",
+                "① DTS-HD MA / DTS:X · 8ch沉浸",
             ),
             ("Movie.5.1.Auro-3D-GROUP", "① 6ch沉浸"),
             ("Movie.5.1.2.Atmos-GROUP", "① 8ch沉浸"),
-            ("Movie.7.1.4.DTS-X-GROUP", "① 12ch沉浸"),
+            ("Movie.7.1.4.DTS-X-GROUP", "① DTS:X · 12ch沉浸"),
             ("Movie.Atmos-GROUP", "① ?ch沉浸"),
-            ("Movie.FLAC-GROUP", "① ?ch"),
+            ("Movie.FLAC-GROUP", "① FLAC · ?ch"),
             ("Movie-GROUP", "① ?ch"),
         )
 
@@ -180,7 +281,7 @@ class ReleaseReportTest(unittest.TestCase):
                 first_result = text.splitlines()[3]
                 self.assertEqual(first_result, expected)
                 for hidden_format in (
-                    "无损", "有损", "Atmos", "DTS", "FLAC",
+                    "无损", "有损", "Atmos",
                     "Auro", "x264",
                 ):
                     self.assertNotIn(hidden_format, first_result)
@@ -267,7 +368,7 @@ class ReleaseReportTest(unittest.TestCase):
             "搜索进度：1/3，失败 2",
         )
         self.assertEqual(lines[2], "")
-        self.assertEqual(lines[3], "① 2160p · REMUX · ?ch")
+        self.assertEqual(lines[3], "① 2160p · REMUX · HEVC · ?ch")
         self.assertEqual(lines[4], "   35 GB｜活种")
         result_lines = [
             line for line in text.splitlines()
@@ -350,7 +451,7 @@ class ReleaseReportTest(unittest.TestCase):
             ]),
             12,
         )
-        self.assertIn("2160p · REMUX · ?ch沉浸", text)
+        self.assertIn("2160p · REMUX · HEVC · ?ch沉浸", text)
         self.assertNotIn("x265", text)
         self.assertNotIn("M-Team", text)
         self.assertNotIn("(+", text)

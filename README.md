@@ -265,19 +265,19 @@ Host 负责 Telegram 接入、命令路由、任务与事件持久化、配置�
 
 #### 当前源码版本
 
-本轮修复目录完整性、兼容复制后删源顺序、字幕季集冲突与年份误识别，以及搜索片源和季度菜单问题。Rename 缺省移动批量为 100，已有显式配置保持；Caption 复用成功正文处理并重叠检索与下载；Host 为历史失败查询增加索引。Host API 1.9、SDK 2.2.1、Sync 2.1.1 保持。以下为本地源码版本，未自动发布；验证和逐文件清单见 [迭代交付](docs/audits/2026-10-13-iteration-results.md)。
+本轮增强片源音轨与视频规格识别，并修复 Rename 查询不存在的规范季目录时中断的问题；批量身份查询失败不再当作不存在。Host、SDK、Sync 和 Caption 沿用当前版本。以下为本地源码版本，未自动发布；日志证据、验证和逐文件清单见 [本次交付](docs/audits/2026-10-31-media-recognition-rename.md)。
 
 | 组件 | 版本 |
 | --- | --- |
 | Host | `3.9.3` |
 | SDK | `2.2.1` |
-| `download` | `2.2.1` |
-| `search` | `2.6.2` |
-| `rename` | `2.4.2` |
+| `download` | `2.2.2` |
+| `search` | `2.7.0` |
+| `rename` | `2.4.3` |
 | `sync` | `2.1.1` |
 | `caption` | `1.3.3` |
 
-升级顺序：Host 3.9.3 → Download 2.2.1 → Search 2.6.2 → Rename 2.4.2 → Caption 1.3.3；更新完成后再提交新任务。Sync 2.1.1 无需因本轮再次更新。已有显式 `storage_move_batch_size: 32` 继续使用 32，缺省值与新配置采用 100；遇到限流或恢复异常可配置回 32。Host API 1.9，SDK 2.2.1 随 Feature 构建打包，无需单独安装。
+本轮升级顺序：Download 2.2.2 → Search 2.7.0 → Rename 2.4.3；更新完成后再提交新任务或重新发起失败的补整理。已安装的 Host 3.9.3、Caption 1.3.3 和 Sync 2.1.1 无需因本轮再次更新。已有显式 `storage_move_batch_size: 32` 继续使用 32，缺省值与新配置采用 100；遇到限流或恢复异常可配置回 32。Host API 1.9，SDK 2.2.1 随 Feature 构建打包，无需单独安装。
 
 `main` 是 Core/Host 与五个 Feature 的有效源码分支。Host 使用 `telepiplex-v<semver>` tag，发布前验证提交已包含在远端 `main`；正式流水线生成 `ghcr.io/<owner>/telepiplex:<semver>` 与 `latest` 镜像，创建标题为 `Telepiplex <semver>` 的 GitHub Release 并强制设为 **Latest**。普通 `main` push 不更新正式镜像或 Latest 入口。
 

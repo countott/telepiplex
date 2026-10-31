@@ -292,8 +292,13 @@ class StorageProxy:
                             "invalid_response",
                             "storage file info batch must return an object",
                         )
+                    if any(path not in values for path in chunk):
+                        raise FeatureError(
+                            "invalid_response",
+                            "storage file info batch is missing requested paths",
+                        )
                     for path in chunk:
-                        self._file_info_cache[path] = values.get(path)
+                        self._file_info_cache[path] = values[path]
             except (FeatureError, AttributeError, NotImplementedError) as exc:
                 if isinstance(exc, FeatureError) and exc.code not in {
                     "method_not_allowed",

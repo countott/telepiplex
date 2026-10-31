@@ -266,19 +266,19 @@ The current Host API 1.9 adds optional capability dependencies and caption messa
 
 #### Current source versions
 
-This iteration repairs directory completeness, verification before deleting a copied source, subtitle coordinate conflicts and year parsing, release separators, and season menus. Rename defaults to batches of 100 while preserving explicit settings. Caption reuses successful content processing and overlaps retrieval stages. Host indexes outstanding dead letters. Host API 1.9, SDK 2.2.1 and Sync 2.1.1 remain unchanged. These source versions have not been published automatically. See the [iteration delivery](docs/audits/2026-10-13-iteration-results.md) for validation and file changes.
+This iteration improves release audio and video specification detection and fixes Rename stopping when a canonical season directory does not exist yet. Failed identity lookups remain errors rather than confirmed absence. Host, SDK, Sync and Caption retain their current versions. These source versions have not been published automatically. See the [delivery record](docs/audits/2026-10-31-media-recognition-rename.md) for log evidence, validation and file changes.
 
 | Component | Version |
 | --- | --- |
 | Host | `3.9.3` |
 | SDK | `2.2.1` |
-| `download` | `2.2.1` |
-| `search` | `2.6.2` |
-| `rename` | `2.4.2` |
+| `download` | `2.2.2` |
+| `search` | `2.7.0` |
+| `rename` | `2.4.3` |
 | `sync` | `2.1.1` |
 | `caption` | `1.3.3` |
 
-Upgrade Host 3.9.3, Download 2.2.1, Search 2.6.2, Rename 2.4.2, then Caption 1.3.3 before starting new tasks. Sync 2.1.1 needs no update for this iteration. Existing explicit `storage_move_batch_size: 32` settings retain 32; missing settings and new configurations use 100. Set it back to 32 if throttling or recovery issues occur. Host API remains 1.9 and SDK 2.2.1 is bundled with Features.
+For this iteration, upgrade Download 2.2.2, Search 2.7.0, then Rename 2.4.3 before starting new tasks or rerunning failed inventory organization. Existing Host 3.9.3, Caption 1.3.3 and Sync 2.1.1 installations need no update for these changes. Existing explicit `storage_move_batch_size: 32` settings retain 32; missing settings and new configurations use 100. Set it back to 32 if throttling or recovery issues occur. Host API remains 1.9 and SDK 2.2.1 is bundled with Features.
 
 `main` is the active source branch for Core/Host and all five Features. The Host uses `telepiplex-v<semver>` tags, with release commits verified as contained in remote `main`. The release workflow publishes `ghcr.io/<owner>/telepiplex:<semver>` and `latest`, then creates a GitHub Release titled `Telepiplex <semver>` for that tag explicitly marked **Latest**. An ordinary `main` push does not update official images or Latest entry points.
 

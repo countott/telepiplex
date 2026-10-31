@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import yaml
 
+from telepiplex_plugin_sdk import FeatureError
 from telepiplex_plugin_sdk.media_metadata import attach_media_metadata
 from telepiplex_plugin_sdk.media_metadata_v2 import build_media_metadata_v2_id
 
@@ -106,6 +107,46 @@ class OrganizationStatusCopyTest(unittest.TestCase):
 
 
 class StorageProxyBatchTest(unittest.TestCase):
+    def test_missing_batch_entry_is_not_cached_as_confirmed_absence(self):
+        class PartialProxy(StorageProxy):
+            def __init__(self):
+                super().__init__(None, None)
+                self.reads = []
+
+            def _storage_call(self, method, args, kwargs):
+                self.reads.append((method, args))
+                if method == "get_file_info_batch":
+                    return {args[0][0]: {"file_id": "source"}}
+                return {"file_id": "target"}
+
+        proxy = PartialProxy()
+        with self.assertRaises(FeatureError) as raised:
+            proxy.get_file_info_batch(["/source.mkv", "/target.mkv"])
+
+        self.assertEqual(raised.exception.code, "invalid_response")
+        self.assertEqual(proxy._file_info_cache, {})
+        self.assertEqual(proxy.get_file_info("/target.mkv"), {"file_id": "target"})
+        self.assertEqual(proxy.reads[-1], ("get_file_info", ["/target.mkv"]))
+
+    def test_explicit_absence_is_cached_but_provider_errors_propagate(self):
+        class MissingProxy(StorageProxy):
+            def _storage_call(self, method, args, kwargs):
+                return {path: None for path in args[0]}
+
+        proxy = MissingProxy(None, None)
+        self.assertEqual(proxy.get_file_info_batch(["/missing"]), {"/missing": None})
+        self.assertIn("/missing", proxy._file_info_cache)
+
+        class FailedProxy(StorageProxy):
+            def _storage_call(self, method, args, kwargs):
+                raise FeatureError("storage_unavailable", "identity lookup failed")
+
+        failed = FailedProxy(None, None)
+        with self.assertRaises(FeatureError) as raised:
+            failed.get_file_info_batch(["/unknown"])
+        self.assertEqual(raised.exception.code, "storage_unavailable")
+        self.assertEqual(failed._file_info_cache, {})
+
     def test_file_info_batches_are_split_before_provider_rpc_deadline(self):
         class RecordingProxy(StorageProxy):
             def __init__(self):
@@ -5834,9 +5875,9 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "2.4.2")
+        self.assertEqual(manifest["version"], "2.4.3")
         self.assertEqual(manifest["host_api"], ">=1.9,<2.0")
-        self.assertIn('version = "2.4.2"', project)
+        self.assertIn('version = "2.4.3"', project)
         self.assertIn('telepiplex-plugin-sdk==2.2.1', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
@@ -5852,8 +5893,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-2.4.2.tpx", source)
-        self.assertNotIn("dist/rename-2.4.2.tpx", source)
+        self.assertIn("/tmp/rename-2.4.3.tpx", source)
+        self.assertNotIn("dist/rename-2.4.3.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

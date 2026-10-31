@@ -246,6 +246,7 @@ class Open115Client:
             pacer_wait_ms=pacer_wait_ms,
             http_elapsed_ms=self._elapsed_ms(http_started),
             status_class=status_class,
+            provider_code=self._provider_code(result),
             retryable=False,
         )
         if retry and result.get("code") in self.TOKEN_EXPIRED_CODES:
@@ -566,6 +567,15 @@ class Open115Client:
             result.get("state") is True or result.get("code") == 0
         )
 
+    @staticmethod
+    def _provider_code(result):
+        value = result.get("code") if isinstance(result, dict) else None
+        if type(value) is int or isinstance(value, str):
+            value = str(value)
+            if value.isascii() and value.isdigit() and len(value) <= 10:
+                return value
+        return ""
+
     def _begin_storage_mutation(self) -> None:
         with self._cache_condition:
             while self._storage_mutation_active:
@@ -629,7 +639,22 @@ class Open115Client:
         return value
 
     def _file_info_value(self, result, *, strict=False):
-        """115 returns an object or an array; only a successful [] is absent."""
+        """Keep a confirmed missing object distinct from a failed lookup."""
+
+        provider_code = self._provider_code(result)
+        # /open/folder/get_info uses 430004 for a missing/deleted object.
+        # Limit this exception to this lookup, with no contradictory identity
+        # or status facts; mutation/listing failures must remain failures.
+        if (
+            provider_code == "430004"
+            and result.get("state") is False
+            and ("success" not in result or result["success"] is False)
+            and result.get("data") in (None, {}, [])
+            and not self._has_stable_file_identity(result)
+            and not result.get("error")
+            and ("errno" not in result or str(result["errno"]) == provider_code)
+        ):
+            return None
 
         try:
             validate_status(result)
@@ -638,7 +663,12 @@ class Open115Client:
         else:
             valid_status = True
         if not self._successful(result) or not valid_status:
-            raise Open115Error("115 file identity lookup failed", operation="get_file_info")
+            detail = f" (provider code {provider_code})" if provider_code else ""
+            raise Open115Error(
+                "115 file identity lookup failed" + detail,
+                code=provider_code,
+                operation="get_file_info",
+            )
         value = result.get("data")
         if isinstance(value, list):
             if not value:
@@ -668,17 +698,21 @@ class Open115Client:
                     values[path] = self._file_cache[path]
         missing = [path for path in normalized if path not in values]
 
-        def fetch(path):
-            try:
-                return self.get_file_info(path)
-            except Exception:
-                return None
-
         if missing:
             worker_count = min(self.storage_read_workers, len(missing))
+            first_error = None
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                fetched = executor.map(fetch, missing)
-                values.update(zip(missing, fetched))
+                # A failed query is not proof that a target is absent. Let it
+                # fail the batch while retaining successful reads in cache.
+                pending = [(path, executor.submit(self.get_file_info, path)) for path in missing]
+                for path, future in pending:
+                    try:
+                        values[path] = future.result()
+                    except Exception as exc:
+                        if first_error is None:
+                            first_error = exc
+            if first_error is not None:
+                raise first_error
         return {path: values.get(path) for path in normalized}
 
     def get_file_info_by_id(self, file_id: str):

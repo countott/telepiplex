@@ -146,7 +146,7 @@ class _NoWaitPacer:
         return 0.0
 
 
-def test_file_info_batch_normalizes_deduplicates_orders_and_isolates_failures():
+def test_file_info_batch_preserves_successful_cache_without_hiding_failures():
     class PartialSession:
         def __init__(self):
             self.reads = []
@@ -208,7 +208,7 @@ def test_file_info_batch_normalizes_deduplicates_orders_and_isolates_failures():
         pacer=_NoWaitPacer(),
     )
 
-    result = client.get_file_info_batch([
+    paths = [
         "good",
         "/good/",
         "/rejected",
@@ -220,33 +220,20 @@ def test_file_info_batch_normalizes_deduplicates_orders_and_isolates_failures():
         "/fid",
         "/cid",
         "/id",
-    ])
-
-    assert list(result) == [
-        "/good",
-        "/rejected",
-        "/malformed",
-        "/raises",
-        "/empty",
-        "/empty-id",
-        "/partial",
-        "/fid",
-        "/cid",
-        "/id",
     ]
+    with pytest.raises(Open115Error, match="provider code 50001"):
+        client.get_file_info_batch(paths)
+
+    assert sorted(session.reads) == sorted({"/" + path.strip("/") for path in paths})
+    result = client.get_file_info_batch(["good", "/good/", "/fid", "/cid", "/id"])
+    assert list(result) == ["/good", "/fid", "/cid", "/id"]
     assert result == {
         "/good": {"file_id": "id:/good"},
-        "/rejected": None,
-        "/malformed": None,
-        "/raises": None,
-        "/empty": None,
-        "/empty-id": None,
-        "/partial": None,
         "/fid": {"fid": "fid-1"},
         "/cid": {"cid": 42},
         "/id": {"id": "generic-1"},
     }
-    assert sorted(session.reads) == sorted(result)
+    assert all(session.path_counts[path] == 1 for path in result)
 
     assert client.get_file_info("/empty") == {"file_id": "id:/empty"}
     assert client.get_file_info("/empty-id") == {"file_id": "id:/empty-id"}
