@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import re
-import unicodedata
+from dataclasses import replace
 from urllib.parse import parse_qs, urlsplit
 
+from .release_formats import (
+    AUDIO_CODEC_PARENTS,
+    ReleaseSpecs,
+    normalize_release_text,
+    parse_release_specs,
+)
 from .release_identity import stable_release_id
 
 
@@ -54,189 +60,105 @@ def _matches(title: str, pattern: str) -> bool:
     return re.search(pattern, title, re.IGNORECASE) is not None
 
 
-def _technical_text(value: object) -> str:
-    # Scene names use underscores as separators; ASCII boundaries also allow
-    # technical labels immediately beside a Chinese/Japanese title.
-    return unicodedata.normalize("NFKC", str(value or "")).replace("_", ".")
-
-
-def _token(pattern: str) -> str:
-    return rf"(?<![a-z0-9])(?:{pattern})(?![a-z0-9])"
-
-
-def _resolution(title: str) -> str:
-    for pattern, label in (
-        (_token(r"2160p|4k|uhd"), "2160p"),
-        (_token(r"1080p"), "1080p"),
-        (_token(r"1080i"), "1080i"),
-        (_token(r"720p"), "720p"),
-        (_token(r"576p"), "576p"),
-        (_token(r"480p"), "480p"),
-        (_token(r"(?:3840|4096)\s*[x×]\s*2160"), "2160p"),
-        (_token(r"1920\s*[x×]\s*1080"), "1080p"),
-        (_token(r"1280\s*[x×]\s*720"), "720p"),
-    ):
-        if _matches(title, pattern):
-            return label
-    return ""
-
-
-def _source(title: str) -> str:
-    for pattern, label in (
-        (_token(r"remux"), "REMUX"),
-        (_token(r"web[ .-]?dl"), "WEB-DL"),
-        (_token(r"web[ .-]?rip"), "WEBRip"),
-        (_token(r"blu[ .-]?ray|b[dr]rip") + r"|蓝光|藍光", "BluRay"),
-        (_token(r"hdtv"), "HDTV"),
-        (_token(r"dvd[ .-]?rip|dvd"), "DVD"),
-    ):
-        if _matches(title, pattern):
-            return label
-    return ""
-
-
-def _dynamic_range(title: str) -> list[str]:
-    labels = []
-    if _matches(title, _token(r"dv|dovi|dolby[ .-]?vision") + r"|杜比视界|杜比視界"):
-        labels.append("DV")
-    if _matches(title, _token(r"hdr10(?:[+]|plus|p)")):
-        labels.append("HDR10+")
-    elif _matches(title, _token(r"hdr10")):
-        labels.append("HDR10")
-    elif _matches(title, _token(r"hdr")):
-        labels.append("HDR")
-    elif _matches(title, _token(r"hlg")):
-        labels.append("HLG")
-    elif not labels and _matches(title, _token(r"sdr")):
-        labels.append("SDR")
-    return labels
-
-
-def _video_codec(title: str) -> str:
-    for pattern, label in (
-        (r"hevc|h[ .-]?265|x265", "HEVC"),
-        (r"avc|h[ .-]?264|x264", "AVC"),
-        (r"av1", "AV1"),
-        (r"vp9", "VP9"),
-    ):
-        if _matches(title, _token(pattern)):
-            return label
-    return ""
-
-
-def _bit_depth(title: str) -> str:
-    match = re.search(_token(r"(8|10|12)[ .-]?bits?"), title, re.IGNORECASE)
-    if match:
-        return f"{match.group(1)}bit"
-    return "10bit" if _matches(title, _token(r"hi10p")) else ""
-
-
-def _audio_codecs(title: str) -> list[str]:
-    # Consume compound names first, so DTS-HD MA does not also emit DTS.
-    patterns = (
-        (r"true[ .-]?hd", "TrueHD"),
-        (r"dts[ .-]?(?:hd[ .-]?)?ma", "DTS-HD MA"),
-        (r"dts[ .-]?hd[ .-]?hra", "DTS-HD HRA"),
-        (r"dts[ .-]?hd", "DTS-HD"),
-        (r"dts[ .:-]?x(?!26[45])", "DTS:X"),
-        (r"dts", "DTS"),
-        (r"e[ .-]?ac[ .-]?3|ddp|dd[+]|dolby[ .-]?digital[ .-]?plus", "DD+"),
-        (r"ac[ .-]?3|dd|dolby[ .-]?digital", "DD"),
-        (r"flac", "FLAC"),
-        (r"lpcm|pcm", "PCM"),
-        (r"aac", "AAC"),
-        (r"opus", "Opus"),
-        (r"mp3", "MP3"),
-    )
-    remaining = title
-    labels = []
-    for pattern, label in patterns:
-        pattern = rf"(?<![a-z0-9])(?:{pattern})(?=$|[^a-z0-9]|\d)"
-        if _matches(remaining, pattern):
-            labels.append(label)
-            remaining = re.sub(pattern, " ", remaining, flags=re.IGNORECASE)
-    return labels
-
-
-_AUDIO_FORMAT = (
-    r"(?:true[ .-]?hd|dts(?:[ .-]?hd(?:[ .-]?(?:ma|hra))?)?|"
-    r"e[ .-]?ac[ .-]?3|ac[ .-]?3|ddp?|dd[+]|aac|flac|pcm|lpcm|opus)"
-)
-_TECHNICAL_MARKER = re.compile(
-    rf"(?<![a-z0-9])(?:\d{{3,4}}[pi]|4k|uhd|blu[ .-]?ray|"
-    rf"web[ .-]?(?:dl|rip)|hdtv|x26[45]|h[ .-]?26[45]|hevc|"
-    rf"{_AUDIO_FORMAT})(?=$|[^a-z0-9]|\d)", re.IGNORECASE,
-)
-
-
-def _channel_count(title: str) -> int | None:
-    counts = []
-    technical_start = _TECHNICAL_MARKER.search(title)
-    for layout in re.finditer(
-        r"(?<!\d)(\d{1,2})\.(\d)(?:\.(\d))?(?!\d)", title,
-    ):
-        parts = [int(value) for value in layout.groups() if value is not None]
-        if (
-            1 <= parts[0] <= 12
-            and parts[1] <= 2
-            and all(value <= 8 for value in parts[2:])
-        ):
-            # A decimal in the work title (e.g. Movie 3.0) before the
-            # technical suffix is not an audio layout.
-            adjacent_audio = _matches(
-                title[:layout.start()], rf"{_AUDIO_FORMAT}[ .-]*$",
-            ) or _matches(title[layout.end():], rf"^[ .-]*{_AUDIO_FORMAT}(?![a-z])")
-            if (
-                technical_start is None
-                or layout.start() >= technical_start.start()
-                or adjacent_audio
-                or title[layout.end():].startswith("声道")
-            ):
-                counts.append(sum(parts))
-    for explicit in re.finditer(
-        r"(?<!\d)(\d{1,2})[ .-]?(?:ch(?:annels?)?|声道)(?![a-z0-9])",
-        title,
-        re.IGNORECASE,
-    ):
-        count = int(explicit.group(1))
-        if 1 <= count <= 32:
-            counts.append(count)
-    for compact in re.finditer(
-        rf"(?<![a-z0-9]){_AUDIO_FORMAT}[ .-]?(20|51|71)(?![a-z0-9])",
-        title, re.IGNORECASE,
-    ):
-        counts.append(sum(int(value) for value in compact.group(1)))
-    for pattern, count in (
-        (_token(r"stereo") + r"|立体声|立體聲", 2),
-        (_token(r"mono") + r"|单声道|單聲道", 1),
-    ):
-        match = re.search(pattern, title, re.IGNORECASE)
-        if match and (
-            technical_start is None or match.start() >= technical_start.start()
-        ):
-            counts.append(count)
-    return max(counts) if counts else None
-
-
-def _immersive(title: str) -> bool:
-    return _matches(
-        title,
-        _token(r"atmos|dts[ .:-]?x|auro[ .-]?3d") + r"|杜比全景声|杜比全景聲",
-    )
-
-
-def _audio_tier(title: str, *, known_immersive: bool = False) -> str:
-    channels = _channel_count(title)
-    immersive = known_immersive or _immersive(title)
+def _audio_tier(specs: ReleaseSpecs) -> str:
+    channels = specs.channels
     if channels is None:
-        return "?ch沉浸" if immersive else "?ch"
-    if immersive:
+        return "?ch沉浸" if specs.immersive else "?ch"
+    if specs.immersive:
         return f"{channels}ch沉浸"
     if channels == 2:
         return "2ch立体"
     if channels > 2:
         return f"{channels}ch环绕"
     return f"{channels}ch"
+
+
+_SCALAR_FORMAT_FIELDS = (
+    "resolution", "source", "video_codec", "bit_depth", "container", "frame_rate",
+)
+
+
+def _merge_dynamic_ranges(left: tuple, right: tuple) -> tuple | None:
+    labels = set(left) | set(right)
+    if "SDR" in labels and len(labels) > 1:
+        return None
+    if "HLG" in labels and labels.intersection({"HDR10", "HDR10+"}):
+        return None
+    if "HDR10+" in labels:
+        labels.difference_update({"HDR10", "HDR"})
+    elif labels.intersection({"HDR10", "HLG"}):
+        labels.discard("HDR")
+    return tuple(
+        label for label in ("DV", "HDR10+", "HDR10", "HDR", "HLG", "SDR")
+        if label in labels
+    )
+
+
+def _is_audio_parent(parent: str, child: str) -> bool:
+    seen = set()
+    while child in AUDIO_CODEC_PARENTS and child not in seen:
+        seen.add(child)
+        child = AUDIO_CODEC_PARENTS[child]
+        if child == parent:
+            return True
+    return False
+
+
+def _merge_audio_codecs(left: tuple, right: tuple) -> tuple | None:
+    if left and right and not any(
+        a == b or _is_audio_parent(a, b) or _is_audio_parent(b, a)
+        for a in left for b in right
+    ):
+        return None
+    codecs = tuple(dict.fromkeys((*left, *right)))
+    # A parent and subtype explicitly listed in one title may be separate
+    # tracks. Refining a generic fallback must not erase that evidence.
+    independent_parents = {
+        codec for group in (left, right) for codec in group
+        if any(_is_audio_parent(codec, other) for other in group)
+    }
+    return tuple(
+        codec for codec in codecs
+        if codec in independent_parents
+        or not any(_is_audio_parent(codec, other) for other in codecs)
+    )
+
+
+def _merge_specs(primary: ReleaseSpecs, alternative: ReleaseSpecs) -> ReleaseSpecs:
+    """Fill missing fields from compatible evidence of this same release."""
+    for name in _SCALAR_FORMAT_FIELDS:
+        left, right = getattr(primary, name), getattr(alternative, name)
+        if left and right and left != right:
+            return primary
+    dynamic_range = _merge_dynamic_ranges(
+        primary.dynamic_range, alternative.dynamic_range,
+    )
+    if dynamic_range is None:
+        return primary
+    audio_codecs = _merge_audio_codecs(
+        primary.audio_codecs, alternative.audio_codecs,
+    )
+    if audio_codecs is None:
+        return primary
+    if (
+        primary.channels is not None and alternative.channels is not None
+        and primary.channels != alternative.channels
+    ):
+        return primary
+    missing = {
+        name: getattr(primary, name) or getattr(alternative, name)
+        for name in _SCALAR_FORMAT_FIELDS
+    }
+    return replace(
+        primary, **missing,
+        dynamic_range=dynamic_range,
+        audio_codecs=audio_codecs,
+        channels=(
+            primary.channels if primary.channels is not None
+            else alternative.channels
+        ),
+        immersive=primary.immersive or alternative.immersive,
+    )
 
 
 def _editions(title: str) -> list[str]:
@@ -256,61 +178,28 @@ def _editions(title: str) -> list[str]:
 
 
 def _specifications(item: dict) -> str:
-    title = _technical_text(item.get("title"))
-    fallback_titles = [
-        _technical_text(item.get("sort_title") or item.get("sortTitle")),
-    ]
+    title = str(item.get("title") or "")
+    specs = parse_release_specs(title)
+    fallback_titles = [item.get("sort_title") or item.get("sortTitle")]
     for key in ("magnet_url", "magnetUrl", "download_url", "downloadUrl"):
         value = str(item.get(key) or "")
         if value.casefold().startswith("magnet:?"):
             try:
-                names = parse_qs(urlsplit(value).query).get("dn", ())
+                fallback_titles.extend(parse_qs(urlsplit(value).query).get("dn", ()))
             except ValueError:
-                names = ()
-            fallback_titles.extend(_technical_text(name) for name in names)
-    # A contradictory alternate title is insufficient evidence for filling
-    # missing facts. In particular, never copy 2160p/HDR audio into an SDR rip.
-    compatible = []
-    for fallback in fallback_titles:
-        if all(
-            not (primary := parser(title))
-            or not (alternative := parser(fallback))
-            or primary == alternative
-            for parser in (
-                _resolution, _source, _dynamic_range, _video_codec, _bit_depth,
-            )
-        ) and (
-            not (primary_codecs := set(_audio_codecs(title)))
-            or not (alternative_codecs := set(_audio_codecs(fallback)))
-            or bool(primary_codecs & alternative_codecs)
-        ) and (
-            (primary_channels := _channel_count(title)) is None
-            or (alternative_channels := _channel_count(fallback)) is None
-            or primary_channels == alternative_channels
-        ):
-            compatible.append(fallback)
-    evidence = tuple(dict.fromkeys(value for value in (title, *compatible) if value))
-    labels = []
-    for parser in (_resolution, _source, _dynamic_range, _video_codec, _bit_depth):
-        value = next((value for text in evidence if (value := parser(text))), None)
-        if isinstance(value, list):
-            labels.extend(value)
-        elif value:
-            labels.append(value)
-    labels.extend(_editions(title))
-    # Select audio evidence as a whole so a known stereo title keeps its own
-    # codec/channel capabilities even if a fallback describes another track.
-    audio_title = next(
-        (text for text in evidence if _channel_count(text) is not None),
-        next((text for text in evidence if _immersive(text)), title),
-    )
-    codecs = list(dict.fromkeys((*_audio_codecs(title), *_audio_codecs(audio_title))))
-    if not codecs:
-        codecs = next((value for text in evidence if (value := _audio_codecs(text))), [])
-    if codecs:
-        labels.append(" / ".join(codecs))
-    labels.append(_audio_tier(audio_title, known_immersive=_immersive(title)))
-    return " · ".join(dict.fromkeys(labels)) or "规格未知"
+                continue
+    for fallback in dict.fromkeys(str(value) for value in fallback_titles if value):
+        specs = _merge_specs(specs, parse_release_specs(fallback))
+    labels = list(filter(None, (specs.resolution, specs.source)))
+    labels.extend(specs.dynamic_range)
+    labels.extend(filter(None, (
+        specs.video_codec, specs.bit_depth, specs.container, specs.frame_rate,
+    )))
+    labels.extend(_editions(normalize_release_text(title)))
+    if specs.audio_codecs:
+        labels.append(" / ".join(specs.audio_codecs))
+    labels.append(_audio_tier(specs))
+    return " · ".join(dict.fromkeys(labels))
 
 
 def _compact_scope(value) -> str:

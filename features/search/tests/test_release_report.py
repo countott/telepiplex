@@ -109,6 +109,32 @@ class ReleaseReportTest(unittest.TestCase):
             "title": "The.Wire.S01.2160p.x265.10bit.DTS-HD.MA.5.1[TheUpscaler]",
         }), "① 2160p · HEVC · 10bit · DTS-HD MA · 6ch环绕")
 
+    def test_catalog_integration_keeps_normalized_edition_markers(self):
+        self.assertEqual(self._specification_row({
+            "title": "Movie_1080p_IMAX_Remastered_AAC_2CH",
+        }), "① 1080p · Remastered · IMAX · AAC · 2ch立体")
+
+    def test_fallback_can_refine_audio_families_without_replacing_siblings(self):
+        for title, fuller, expected in (
+            ("AAC", "HE-AAC2.0", "HE-AAC · 2ch立体"),
+            ("DTS", "DTS-HD.MA.5.1", "DTS-HD MA · 6ch环绕"),
+            ("DTS-HD", "DTS-HD.HRA.7.1", "DTS-HD HRA · 8ch环绕"),
+            ("DTS-HD.MA", "DTS-HD.HRA.7.1", "DTS-HD MA · ?ch"),
+        ):
+            with self.subTest(title=title, fuller=fuller):
+                self.assertEqual(self._specification_row({
+                    "title": "Movie.1080p." + title,
+                    "sort_title": "Movie.1080p." + fuller,
+                }), "① 1080p · " + expected)
+
+    def test_fallback_keeps_explicitly_separate_core_and_subtype_tracks(self):
+        title = "Movie.1080p.DTS-HD.MA.7.1.DTS.5.1"
+        for evidence in ({}, {"sort_title": title}):
+            with self.subTest(evidence=evidence):
+                self.assertEqual(self._specification_row({
+                    "title": title, **evidence,
+                }), "① 1080p · DTS-HD MA / DTS · 8ch环绕")
+
     def test_report_hides_title_and_score_and_merges_identical_release_sources(self):
         mirrored = [{
             "title": (
