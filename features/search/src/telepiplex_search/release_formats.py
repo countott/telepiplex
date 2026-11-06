@@ -394,6 +394,32 @@ def _parse_normalized(text: str) -> ReleaseSpecs:
     )
 
 
+def release_source_profile(title: str) -> tuple[str, bool]:
+    """Separate source family from remux packaging using explicit evidence."""
+    text = normalize_release_text(title)
+    source = parse_release_specs(text).source
+    remux = source == "REMUX"
+    if source in {"WEB-DL", "WEBRip", "WEBMux"}:
+        return "WEB", False
+    if source not in {"BluRay", "REMUX"}:
+        return "", False
+    if remux:
+        if re.search(_LEFT + rf"web{_SEP}remux" + _RIGHT, text, re.I):
+            return "WEB", True
+        for rule in FORMAT_RULES:
+            if rule.dimension == "source" and rule.label in {"WEB-DL", "WEBRip", "WEBMux"}:
+                if rule.expression.search(text):
+                    return "WEB", True
+    if re.search(_LEFT + rf"(?:uhd{_SEP})?b[dr]{_SEP}rip" + _RIGHT, text, re.I):
+        return "BDRip", remux
+    if re.search(_LEFT + rf"bd{_SEP}remux" + _RIGHT, text, re.I):
+        return "BluRay", remux
+    for rule in FORMAT_RULES:
+        if rule.dimension == "source" and rule.label == "BluRay" and rule.expression.search(text):
+            return "BluRay", remux
+    return "", remux
+
+
 def parse_release_specs(value: object) -> ReleaseSpecs:
     """Return only supported, explicit title facts; never read the network."""
     return _parse_normalized(normalize_release_text(value))

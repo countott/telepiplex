@@ -1,0 +1,36 @@
+scoring:
+  indexer_scores: {M-Team: 3, TorrentLeech: 1}
+  # 命中即排除，无需另配负分。分辨率不明的资源不会据此排除。
+  reject_keywords: [720p, 576p, 576i, 540p, 480p, 480i, 360p, 240p, CAM, TS, TC, HC, HDTC, HDCAM, 枪版, 抢先]
+  keyword_scores: {
+    # 分辨率
+    1080p: 50, 2160p: 100, 4K: 100, UHD: 100,
+
+    # 特别版本
+    4K修复: 150, "Collector's Edition": 150, "Collectors Edition": 150,
+    "Director Cut": 150, "Director's Cut": 150, "Directors Cut": 150,
+    Extended: 150, "Final Cut": 150, Remaster: 150, Remastered: 150,
+    Restoration: 150, Restored: 150, "Special Edition": 150, "Ultimate Edition": 150,
+    Uncensored: 150, Uncut: 150, Unrated: 150,
+    修复版: 150, 加长剪辑版: 150, 加长版: 150, 完整版: 150,
+    导剪: 150, 导演剪辑版: 150, 收藏版: 150, 无修正: 150,
+    无删减: 150, 无码: 150, 未分级版: 150, 未删减: 150,
+    特别版: 150, 终极版: 150, 重制版: 150, 重置版: 150,
+
+    # 动态范围：HDR10+ 与 HDR10 累加为 6
+    DV: 7, DoVi: 7, "Dolby Vision": 7,
+    HDR: 3, HDR10: 4, HDR10+: 2, HDR10Plus: 6,
+
+    # 音频
+    Atmos: 20, "DTS X": 20, DTS-X: 20, DTS.X: 20, "DTS:X": 20, DTSX: 20,
+    "Auro 3D": 20, Auro-3D: 20, Auro.3D: 20, Auro3D: 20,
+    TrueHD: 4, DTS-HD: 3, FLAC: 4, LPCM: 4, EAC3: 2, DDP: 2, AC3: 1,
+    # 扩展声道叠加基础声道
+    '5.1': 2, '5.1.2': 1, '5.1.4': 2, '7.1': 2, '7.1.4': 2,
+
+    # 编码
+    HEVC: 2, H.265: 2, x265: 2, H.264: 1, x264: 1,
+
+    # 来源归一计一次；Remux 仅对明确蓝光来源减分
+    BluRay: 12, BDRip: 10, WEB: 6, Remux: -1
+  }

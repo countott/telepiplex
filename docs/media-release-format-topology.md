@@ -1,8 +1,8 @@
 # Telepiplex 片源格式识别拓扑
 
-本说明对应 Search 2.8.0。识别对象是搜索结果中的资源命名信息，包括标题、同资源排序标题和 magnet 的显示名；它们是资源声明，不是对实际视频文件的检测结果。
+本说明对应 Search 2.9.0。识别对象是搜索结果中的资源命名信息，包括标题、同资源排序标题和 magnet 的显示名；它们是资源声明，不是对实际视频文件的检测结果。
 
-源码入口：`features/search/src/telepiplex_search/release_formats.py`。格式家族、正则、别名示例集中在声明式目录中。结果展示由 `release_report.py` 消费解析后的字段，不再单独维护另一套格式正则。
+源码入口：`features/search/src/telepiplex_search/release_formats.py`。格式家族、正则、别名示例集中在声明式目录中。结果展示由 `release_report.py` 消费解析后的字段；展示与评分共用 `release_source_profile`，复用目录规则并检查 WEB/BD REMUX 的显式来源前缀。
 
 ## 数据路径
 
@@ -53,6 +53,10 @@ flowchart TD
 | `240p` | `240p`、`320x240`、`426x240` |
 
 ### 片源来源（source）
+
+解析器保留下面的标准来源标签。搜索结果中，`WEB-DL`、`WEBRip`、`WEBMux` 统一简写为 `WEB`，`BluRay` 简写为 `BD`。`REMUX` 只有在资源名称明确包含 WEB 或蓝光来源时才显示对应简写；单独的 `REMUX` 或 `UHDRemux` 不推断为蓝光来源。同资源补充名称仍须通过既有字段冲突检查。
+
+评分使用来源层级 `BluRay` / `BDRip` / `WEB`。`BDRip`、`BRRip` 等派生来源与 BluRay 分开，标题同时包含 BluRay 和 BDRip 时取 BDRip，不重复加两档分。`Remux` 的配置分只在已知蓝光来源上生效，WEB REMUX 只取 WEB 来源分，来源不明的 REMUX 不获得蓝光分。其余评分关键词仍按标题匹配；来源分与作品版本、分辨率、音轨、站点和做种、体积分共同参与总分。
 
 | 标准展示标签 | 登记别名样例 |
 | --- | --- |

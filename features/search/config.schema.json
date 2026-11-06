@@ -59,32 +59,38 @@
           "properties": {
             "prefer_resolution": {
               "type": "array",
+              "deprecated": true,
               "title": "优先分辨率",
               "items": {"type": "string"}
             },
             "prefer_source": {
               "type": "array",
+              "deprecated": true,
               "title": "优先片源",
               "items": {"type": "string"}
             },
             "prefer_codec": {
               "type": "array",
+              "deprecated": true,
               "title": "优先编码",
               "items": {"type": "string"}
             },
             "prefer_audio": {
               "type": "array",
+              "deprecated": true,
               "title": "优先音频",
               "items": {"type": "string"}
             },
             "reject_keywords": {
               "type": "array",
-              "title": "排斥关键词",
+              "title": "拒绝关键词",
+              "description": "命中即排除，不扣分。分辨率关键词也匹配解析后的像素尺寸别名。",
               "items": {"type": "string"}
             },
             "keyword_scores": {
               "type": "object",
               "title": "关键词权重",
+              "description": "显式分数表不回补默认 prefer/reject。来源使用 BluRay、BDRip、WEB 归一计分，Remux 仅作用于明确蓝光来源。其余关键词按标题匹配。",
               "additionalProperties": {"type": "integer"}
             },
             "indexer_scores": {

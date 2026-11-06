@@ -4,6 +4,7 @@ import math
 import re
 
 from .context import runtime_context
+from .release_formats import normalize_release_text, parse_release_specs, release_source_profile
 
 
 DEFAULT_SCORING = {
@@ -25,7 +26,9 @@ WEIGHTS = {
 def _get_scoring_config():
     search_config = runtime_context.config.get("search") or {}
     scoring = search_config.get("scoring") or {}
-    merged = DEFAULT_SCORING.copy()
+    # An explicit score table is complete; omitted prefer/reject lists must not
+    # silently restore built-in preferences. Older explicit lists still work.
+    merged = {} if "keyword_scores" in scoring else DEFAULT_SCORING.copy()
     merged.update({key: value for key, value in scoring.items() if value is not None})
     return merged
 
@@ -65,14 +68,6 @@ def _keyword_score_entries(scoring: dict) -> list[tuple[str, int]]:
             score = configured_scores.get(keyword, weights.get(keyword, 8))
             entries.append((keyword, score))
             emitted.add(keyword.lower())
-
-    for keyword in scoring.get("reject_keywords", []):
-        keyword = str(keyword or "").strip()
-        if not keyword:
-            continue
-        score = configured_scores.get(keyword, -60)
-        entries.append((keyword, score))
-        emitted.add(keyword.lower())
 
     for keyword, score in configured_scores.items():
         if keyword.lower() not in emitted:
@@ -133,12 +128,21 @@ def _score_size(size: int) -> int:
 
 
 def score_release_details(item: dict) -> tuple[int, list[dict]]:
-    title = item.get("title") or ""
+    title = normalize_release_text(item.get("title") or "")
     scoring = _get_scoring_config()
     details = []
+    family, remux = release_source_profile(title)
+    source_tags = {family.lower()} if family else set()
+    if remux and family in {"BluRay", "BDRip"}:
+        source_tags.add("remux")
 
     for keyword, keyword_score in _keyword_score_entries(scoring):
-        if _contains_keyword(title, keyword):
+        key = keyword.lower()
+        matched = (
+            key in source_tags if key in {"bluray", "bdrip", "web", "remux"}
+            else _contains_keyword(title, keyword)
+        )
+        if matched:
             details.append({
                 "kind": "keyword",
                 "label": keyword,
@@ -187,10 +191,29 @@ def _selectable_url(item: dict) -> str:
     return item.get("magnet_url") or item.get("download_url") or item.get("magnetUrl") or item.get("downloadUrl") or ""
 
 
+def _is_rejected(title: str, keywords) -> bool:
+    resolution = parse_release_specs(title).resolution
+    for raw_keyword in keywords:
+        keyword = str(raw_keyword or "").strip()
+        if not keyword:
+            continue
+        if resolution and re.fullmatch(r"\d+[pi]", keyword, re.I):
+            # Pixel dimensions and downscale labels use the parsed resolution.
+            if resolution == keyword.lower():
+                return True
+        elif _contains_keyword(title, keyword):
+            return True
+    return False
+
+
 def rank_releases(items: list[dict], limit: int) -> list[dict]:
     ranked = []
+    scoring = _get_scoring_config()
     for item in items:
         if not _selectable_url(item):
+            continue
+        title = normalize_release_text(item.get("title") or "")
+        if _is_rejected(title, scoring.get("reject_keywords", [])):
             continue
         score, details = score_release_details(item)
         enriched = item.copy()

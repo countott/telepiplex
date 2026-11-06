@@ -31,46 +31,29 @@ search:
       tv: 5000
     result_limit: 12
   scoring:
-    prefer_resolution:
-      - "2160p"
-      - "1080p"
-    prefer_source:
-      - "WEB-DL"
-      - "BluRay"
-      - "Remux"
-    prefer_codec:
-      - "HEVC"
-      - "H.265"
-      - "x265"
-      - "H.264"
-      - "x264"
-    prefer_audio:
-      - "Atmos"
-      - "TrueHD"
-      - "DTS-HD"
-      - "EAC3"
-    reject_keywords:
-      - "CAM"
-      - "TS"
-      - "TC"
-      - "枪版"
-      - "抢先"
-      - "HC"
-      - "HDTC"
-      - "HDCAM"
+    # 命中即排除，不再参与评分。
+    reject_keywords: [720p, 576p, 480p, CAM, TS, TC, 枪版, 抢先, HC, HDTC, HDCAM]
     keyword_scores:
-      "2160p": 35
-      "1080p": 25
-      "WEB-DL": 25
-      "BluRay": 22
-      "Remux": 24
-      "国配": 10
-      "中字": 8
-      "CAM": -90
-      "枪版": -90
+      "2160p": 100
+      "1080p": 50
+      "BluRay": 12
+      "BDRip": 10
+      "WEB": 6
+      "Remux": -1
+      "HEVC": 2
+      "H.265": 2
+      "x265": 2
+      "H.264": 1
+      "x264": 1
+      "Atmos": 20
+      "TrueHD": 4
+      "DTS-HD": 3
+      "EAC3": 2
+      "国配": 2
+      "中字": 1
     indexer_scores:
-      "M-Team": 30
-      "TorrentLeech": 10
+      "M-Team": 3
+      "TorrentLeech": 1
 metadata:
   wikipedia:
     enable: true

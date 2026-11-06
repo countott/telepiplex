@@ -11,6 +11,7 @@ from .release_formats import (
     ReleaseSpecs,
     normalize_release_text,
     parse_release_specs,
+    release_source_profile,
 )
 from .release_identity import stable_release_id
 
@@ -177,9 +178,17 @@ def _editions(title: str) -> list[str]:
     return labels
 
 
+def _compact_source(source: str, title: str) -> str:
+    family, _ = release_source_profile(title)
+    if family:
+        return "BD" if family in {"BluRay", "BDRip"} else family
+    return {"WEB-DL": "WEB", "WEBRip": "WEB", "WEBMux": "WEB", "BluRay": "BD"}.get(source, source)
+
+
 def _specifications(item: dict) -> str:
     title = str(item.get("title") or "")
     specs = parse_release_specs(title)
+    source_label = _compact_source(specs.source, title)
     fallback_titles = [item.get("sort_title") or item.get("sortTitle")]
     for key in ("magnet_url", "magnetUrl", "download_url", "downloadUrl"):
         value = str(item.get(key) or "")
@@ -189,8 +198,11 @@ def _specifications(item: dict) -> str:
             except ValueError:
                 continue
     for fallback in dict.fromkeys(str(value) for value in fallback_titles if value):
-        specs = _merge_specs(specs, parse_release_specs(fallback))
-    labels = list(filter(None, (specs.resolution, specs.source)))
+        merged = _merge_specs(specs, parse_release_specs(fallback))
+        if merged is not specs and source_label in {"", "REMUX"}:
+            source_label = _compact_source(merged.source, fallback) or source_label
+        specs = merged
+    labels = list(filter(None, (specs.resolution, source_label)))
     labels.extend(specs.dynamic_range)
     labels.extend(filter(None, (
         specs.video_codec, specs.bit_depth, specs.container, specs.frame_rate,

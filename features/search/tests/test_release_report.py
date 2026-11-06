@@ -18,14 +18,14 @@ class ReleaseReportTest(unittest.TestCase):
 
     def test_specs_recognize_release_separators_cjk_and_video_aliases(self):
         cases = (
-            ("剧集_1080P_WEB_DL_DDP5_1", "① 1080p · WEB-DL · DD+ · 6ch环绕"),
-            ("电影2160p蓝光杜比视界HDR10Plus国语5.1声道", "① 2160p · BluRay · DV · HDR10+ · 6ch环绕"),
-            ("Movie.3840x2160.WEBRip.Dolby-Vision.HDR10Plus.EAC3.6CH", "① 2160p · WEBRip · DV · HDR10+ · DD+ · 6ch环绕"),
-            ("Movie.1920×1080.Blu-Ray.HDR10P.AAC.2CH", "① 1080p · BluRay · HDR10+ · AAC · 2ch立体"),
-            ("Movie_4K_WEBRip_HLG_DD51", "① 2160p · WEBRip · HLG · DD · 6ch环绕"),
-            ("Movie.1080p.WEB.DL.DD+5.1", "① 1080p · WEB-DL · DD+ · 6ch环绕"),
-            ("Movie.720p.WEBRip.AAC.Stereo", "① 720p · WEBRip · AAC · 2ch立体"),
-            ("Movie.1080p.BluRay.FLAC.Mono", "① 1080p · BluRay · FLAC · 1ch"),
+            ("剧集_1080P_WEB_DL_DDP5_1", "① 1080p · WEB · DD+ · 6ch环绕"),
+            ("电影2160p蓝光杜比视界HDR10Plus国语5.1声道", "① 2160p · BD · DV · HDR10+ · 6ch环绕"),
+            ("Movie.3840x2160.WEBRip.Dolby-Vision.HDR10Plus.EAC3.6CH", "① 2160p · WEB · DV · HDR10+ · DD+ · 6ch环绕"),
+            ("Movie.1920×1080.Blu-Ray.HDR10P.AAC.2CH", "① 1080p · BD · HDR10+ · AAC · 2ch立体"),
+            ("Movie_4K_WEBRip_HLG_DD51", "① 2160p · WEB · HLG · DD · 6ch环绕"),
+            ("Movie.1080p.WEB.DL.DD+5.1", "① 1080p · WEB · DD+ · 6ch环绕"),
+            ("Movie.720p.WEBRip.AAC.Stereo", "① 720p · WEB · AAC · 2ch立体"),
+            ("Movie.1080p.BluRay.FLAC.Mono", "① 1080p · BD · FLAC · 1ch"),
             ("Movie.1080i.1920x1080.x264.8-bit.AAC2.0", "① 1080i · AVC · 8bit · AAC · 2ch立体"),
             ("Movie.2160p.AV1.10.bit.Opus.6ch", "① 2160p · AV1 · 10bit · Opus · 6ch环绕"),
         )
@@ -37,13 +37,34 @@ class ReleaseReportTest(unittest.TestCase):
         cases = (
             ("Movie.1080p.AAC2.0.DTS-HD.MA.5.1", "① 1080p · DTS-HD MA / AAC · 6ch环绕"),
             ("Movie.1080p.AAC2.0.TrueHD7.1.Atmos", "① 1080p · TrueHD / AAC · 8ch沉浸"),
-            ("Movie.3.0.2026.1080p.WEB-DL.AAC", "① 1080p · WEB-DL · AAC · ?ch"),
+            ("Movie.3.0.2026.1080p.WEB-DL.AAC", "① 1080p · WEB · AAC · ?ch"),
             ("Movie.2026.1080p.AAC10.0.2", "① 1080p · AAC · 12ch环绕"),
             ("Movie.2026.1080p.DD5.1.640kbps", "① 1080p · DD · 6ch环绕"),
         )
         for title, expected in cases:
             with self.subTest(title=title):
                 self.assertEqual(self._specification_row({"title": title}), expected)
+
+    def test_source_labels_are_compact_and_remux_needs_origin_evidence(self):
+        for source, expected in (
+            ("WEB-DL", "WEB"), ("WEBRip", "WEB"), ("WEBMux", "WEB"),
+            ("BluRay", "BD"), ("BDRip", "BD"), ("蓝光", "BD"),
+            ("BDRemux", "BD"), ("WEBRemux", "WEB"),
+            ("BluRay.REMUX", "BD"), ("WEB-DL.REMUX", "WEB"),
+            ("REMUX", "REMUX"), ("UHDRemux", "REMUX"), ("HDTV", "HDTV"),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(self._specification_row({
+                    "title": f"Movie.1080p.{source}.AAC2.0",
+                }), f"① 1080p · {expected} · AAC · 2ch立体")
+        self.assertEqual(self._specification_row({
+            "title": "Movie.1080p.REMUX.AAC2.0",
+            "sort_title": "Movie.1080p.BDRemux.AAC2.0",
+        }), "① 1080p · BD · AAC · 2ch立体")
+        self.assertEqual(self._specification_row({
+            "title": "Movie.1080p.REMUX.AAC2.0",
+            "sort_title": "Movie.2160p.BDRemux.AAC2.0",
+        }), "① 1080p · REMUX · AAC · 2ch立体")
 
     def test_capabilities_do_not_come_from_substrings_or_codec_defaults(self):
         for title, expected in (
@@ -67,22 +88,22 @@ class ReleaseReportTest(unittest.TestCase):
             with self.subTest(evidence=evidence):
                 self.assertEqual(
                     self._specification_row({"title": shortened, **evidence}),
-                    "① 1080p · BluRay · HEVC · 10bit · AAC · 6ch环绕",
+                    "① 1080p · BD · HEVC · 10bit · AAC · 6ch环绕",
                 )
         self.assertEqual(
             self._specification_row({"title": shortened}),
-            "① 1080p · BluRay · HEVC · 10bit · ?ch",
+            "① 1080p · BD · HEVC · 10bit · ?ch",
         )
 
     def test_primary_specs_win_over_conflicting_fallback(self):
         self.assertEqual(self._specification_row({
             "title": "Movie.1080p.WEB-DL.SDR.AAC2.0",
             "sort_title": "Movie.2160p.BluRay.HDR10.DTS5.1",
-        }), "① 1080p · WEB-DL · SDR · AAC · 2ch立体")
+        }), "① 1080p · WEB · SDR · AAC · 2ch立体")
         self.assertEqual(self._specification_row({
             "title": "Movie.1080p.WEB-DL.SDR.AAC",
             "sort_title": "Movie.2160p.BluRay.HDR10.DTS5.1",
-        }), "① 1080p · WEB-DL · SDR · AAC · ?ch")
+        }), "① 1080p · WEB · SDR · AAC · ?ch")
         self.assertEqual(self._specification_row({
             "title": "Movie.1080p.Atmos",
             "sort_title": "Movie.1080p.DDP5.1.Atmos",
@@ -192,12 +213,12 @@ class ReleaseReportTest(unittest.TestCase):
                 "搜索完成：3/3",
                 "",
                 (
-                    "① 1080p · BluRay · HEVC · Remastered · DD · 6ch环绕"
+                    "① 1080p · BD · HEVC · Remastered · DD · 6ch环绕"
                 ),
                 (
                     "   2 GB｜活种"
                 ),
-                "② 2160p · REMUX · HEVC · TrueHD · 8ch沉浸",
+                "② 2160p · BD · HEVC · TrueHD · 8ch沉浸",
                 "   57 GB｜活种",
             ],
         )
@@ -266,7 +287,7 @@ class ReleaseReportTest(unittest.TestCase):
             ("Movie.2.0.AAC-GROUP", "① AAC · 2ch立体"),
             (
                 "Movie.1080p.WEB-DL.x264.AAC.2CH-GROUP",
-                "① 1080p · WEB-DL · AVC · AAC · 2ch立体",
+                "① 1080p · WEB · AVC · AAC · 2ch立体",
             ),
             (
                 "Movie.7.1.DTS-HD.MA.DTS:X-GROUP",
@@ -546,7 +567,7 @@ class ReleaseReportTest(unittest.TestCase):
                     "size": int(10.6 * 1024 ** 3),
                 },
                 "expected": (
-                    "① 1080p · WEB-DL · ?ch沉浸\n   10.6 GB｜活种"
+                    "① 1080p · WEB · ?ch沉浸\n   10.6 GB｜活种"
                 ),
                 "expected_title": "The Glory S02 · 第2季整季",
             },

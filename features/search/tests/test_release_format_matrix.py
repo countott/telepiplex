@@ -63,7 +63,7 @@ def test_report_covers_resolution_video_audio_separator_and_case_product(
         casing,
     )
     expected = " · ".join((
-        "① " + resolution[1], "WEB-DL", video[1], "10bit", audio[1], audio[2],
+        "① " + resolution[1], "WEB", video[1], "10bit", audio[1], audio[2],
     ))
     assert specification_row({"title": title}) == expected
 
@@ -81,29 +81,29 @@ def test_report_covers_resolution_video_audio_separator_and_case_product(
 def test_each_dynamic_range_family_reaches_the_report(alias, expected, separator):
     title = release_title(("2160p", "WEB-DL", alias, "HEVC", "DDP5.1"), separator)
     assert specification_row({"title": title}) == (
-        f"① 2160p · WEB-DL · {expected} · HEVC · DD+ · 6ch环绕"
+        f"① 2160p · WEB · {expected} · HEVC · DD+ · 6ch环绕"
     )
 
 
 @pytest.mark.parametrize("suffix,expected", (
     ("480p.DVDRip.MPEG-2.MP2.2CH", "480p · DVD · MPEG-2 · MP2 · 2ch立体"),
-    ("576p.BDRip.XviD.MP3.2CH", "576p · BluRay · Xvid · MP3 · 2ch立体"),
+    ("576p.BDRip.XviD.MP3.2CH", "576p · BD · Xvid · MP3 · 2ch立体"),
     ("1080i.HDTV.VC-1.AC3.5.1", "1080i · HDTV · VC-1 · DD · 6ch环绕"),
     ("2160p.REMUX.H.265.DTS-HD.HRA.7.1", "2160p · REMUX · HEVC · DTS-HD HRA · 8ch环绕"),
-    ("1080p.WEBRip.H264.HE-AAC.2CH", "1080p · WEBRip · AVC · HE-AAC · 2ch立体"),
-    ("1080p.WEB-DL.VP8.Vorbis.2CH", "1080p · WEB-DL · VP8 · Vorbis · 2ch立体"),
-    ("1080p.BluRay.AVC.ALAC.6CH", "1080p · BluRay · AVC · ALAC · 6ch环绕"),
-    ("1080p.BluRay.AVC.LPCM.5.1", "1080p · BluRay · AVC · PCM · 6ch环绕"),
+    ("1080p.WEBRip.H264.HE-AAC.2CH", "1080p · WEB · AVC · HE-AAC · 2ch立体"),
+    ("1080p.WEB-DL.VP8.Vorbis.2CH", "1080p · WEB · VP8 · Vorbis · 2ch立体"),
+    ("1080p.BluRay.AVC.ALAC.6CH", "1080p · BD · AVC · ALAC · 6ch环绕"),
+    ("1080p.BluRay.AVC.LPCM.5.1", "1080p · BD · AVC · PCM · 6ch环绕"),
 ))
 def test_legacy_and_profiled_formats_remain_visible(suffix, expected):
     assert specification_row({"title": "Feature.2026." + suffix}) == "① " + expected
 
 
 @pytest.mark.parametrize("title,expected", (
-    ("剧集_1080P_WEB_DL_H_264_DDP5_1", "① 1080p · WEB-DL · AVC · DD+ · 6ch环绕"),
-    ("Feature.2160p.Blu-Ray.H-265.DTS_HD_MA_7_1", "① 2160p · BluRay · HEVC · DTS-HD MA · 8ch环绕"),
-    ("Feature.1080p.WEBRip.h264.HE_AAC.2_0", "① 1080p · WEBRip · AVC · HE-AAC · 2ch立体"),
-    ("Feature.1080p.WEB-DL.AVC.DD51", "① 1080p · WEB-DL · AVC · DD · 6ch环绕"),
+    ("剧集_1080P_WEB_DL_H_264_DDP5_1", "① 1080p · WEB · AVC · DD+ · 6ch环绕"),
+    ("Feature.2160p.Blu-Ray.H-265.DTS_HD_MA_7_1", "① 2160p · BD · HEVC · DTS-HD MA · 8ch环绕"),
+    ("Feature.1080p.WEBRip.h264.HE_AAC.2_0", "① 1080p · WEB · AVC · HE-AAC · 2ch立体"),
+    ("Feature.1080p.WEB-DL.AVC.DD51", "① 1080p · WEB · AVC · DD · 6ch环绕"),
     ("Feature.2160p.REMUX.HEVC.TrueHD.7.1.4.Atmos", "① 2160p · REMUX · HEVC · TrueHD · 12ch沉浸"),
     ("Feature.2160p.REMUX.HEVC.DTS-X.7.1.4", "① 2160p · REMUX · HEVC · DTS:X · 12ch沉浸"),
 ))
@@ -149,7 +149,7 @@ def test_same_release_alternate_titles_fill_missing_specs_through_all_public_ali
         if "url" in evidence_key.lower() else complete
     )
     assert specification_row({"title": "Feature.2026.2160p", evidence_key: value}) == (
-        "① 2160p · WEB-DL · HEVC · 10bit · DD+ · 6ch环绕"
+        "① 2160p · WEB · HEVC · 10bit · DD+ · 6ch环绕"
     )
 
 
@@ -164,7 +164,7 @@ def test_conflicting_fallback_cannot_upgrade_known_primary_specs(fallback):
     assert specification_row({
         "title": "Feature.2026.1080p.WEB-DL.AVC.HDR10.AAC",
         "sort_title": fallback,
-    }) == "① 1080p · WEB-DL · HDR10 · AVC · AAC · ?ch"
+    }) == "① 1080p · WEB · HDR10 · AVC · AAC · ?ch"
 
 
 @pytest.mark.parametrize("primary,fallback,expected", (
@@ -212,7 +212,7 @@ def test_hdr_refinements_and_compatible_layers_fill_without_accepting_conflicts(
     (
         "Feature.2160p.WEB-DL.HEVC.AAC2.0",
         "Feature.2160p.BluRay.HDR10.HEVC.TrueHD7.1.Atmos",
-        "① 2160p · WEB-DL · HEVC · AAC · 2ch立体",
+        "① 2160p · WEB · HEVC · AAC · 2ch立体",
     ),
     (
         "Feature.2160p.HEVC.AAC2.0",
