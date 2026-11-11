@@ -107,6 +107,19 @@ plugins:
           branch: main
           commit: 67b02783b8094428e838277e9bb6b322bb7776cc
         url: https://github.com/countott/telepiplex/releases/download/caption-v1.3.3/caption-1.3.3.tpx
+      1.3.4:
+        host_api: '>=1.9,<2.0'
+        provides:
+        - subtitle.caption
+        requires:
+        - media.rename
+        - media.search
+        - storage.provider
+        sha256: dc664d19f054bb11a4012eab8f8ca7cfd789301ec22c4b46564631284d8e7a8c
+        source:
+          branch: main
+          commit: 8fd2fd19faa96605300116878cfb4c34df83d8ec
+        url: https://github.com/countott/telepiplex/releases/download/caption-v1.3.4/caption-1.3.4.tpx
   download:
     versions:
       1.0.0:
@@ -1666,5 +1679,5 @@ plugins:
           branch: main
           commit: 8fd2fd19faa96605300116878cfb4c34df83d8ec
         url: https://github.com/countott/telepiplex/releases/download/sync-v2.1.2/sync-2.1.2.tpx
-release: sync-v2.1.2
+release: caption-v1.3.4
 schema_version: 1
