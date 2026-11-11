@@ -12,6 +12,41 @@ from telepiplex_rename.file_plan import FileResolution
 from telepiplex_rename.operations import RenameOperationJournal
 
 
+def test_empty_snapshot_branches_are_cleaned_deepest_first_inside_resource_only():
+    root = "/Downloads/Release"
+    branch = root + "/Proof"
+    leaf = branch + "/Empty"
+    outside = "/Other/Empty"
+    storage = StatefulStorage(directories=[root, branch, leaf, outside, "/Movies"])
+    resolution = _resolution("video", root + "/Movie.mkv", "/Movies/Movie.mkv", "rename_into_work")
+    result = cleanup_source_directories(
+        storage, [resolution], selected_root=root, include_selected_root=True,
+        protected_roots=("/Movies",), source_directories=(branch, leaf, outside, "/Movies"),
+    )
+    assert result.complete
+    assert [item.path for item in result.outcomes if item.state == "deleted"] == [leaf, branch, root]
+    assert outside in storage.directories
+    assert "/Movies" in storage.directories
+
+
+def test_snapshot_branch_with_unhandled_content_and_category_root_are_kept():
+    root = "/Downloads/Release"
+    branch = root + "/Proof"
+    storage = StatefulStorage(files=[(branch + "/keep.txt", "keep")], directories=[root, branch])
+    resolution = _resolution("video", root + "/Movie.mkv", "/Movies/Movie.mkv", "rename_into_work")
+    result = cleanup_source_directories(
+        storage, [resolution], selected_root=root, include_selected_root=True,
+        source_directories=(branch,),
+    )
+    assert not result.complete
+    assert branch in storage.directories and root in storage.directories
+    assert len(result.to_dict()["retained_paths"]) == 2
+    storage = StatefulStorage(directories=["/Movies", "/Movies/Unrelated"])
+    cleanup_source_directories(storage, [], selected_root="/Movies", include_selected_root=True,
+                               protected_roots=("/Movies",), source_directories=("/Movies/Unrelated",))
+    assert "/Movies/Unrelated" in storage.directories
+
+
 def _resolution(
     source_id,
     source,

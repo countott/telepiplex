@@ -87,6 +87,11 @@ class RawSearchTest(unittest.IsolatedAsyncioTestCase):
     def buttons(self, report):
         return [b for row in report["details"]["keyboard"] for b in row]
 
+    async def confirm_download(self, plan_id=None):
+        plan_id = plan_id or self.plan_id
+        release_id = self.feature.plans[plan_id]["pending_release_id"]
+        return await self.click(f"search:release_confirm:{plan_id}:{release_id}")
+
     async def test_raw_query_preserves_text_and_has_no_media_category_or_metadata_lookup(self):
         query = '"Some  Title"\nS00 -CAM & x=y'
         report = await self.start(query)
@@ -132,6 +137,9 @@ class RawSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host.calls, [])
         await self.click(f"search:raw_path:{self.plan_id}:0")
         await self.click(f"search:raw_path:{self.plan_id}:0")
+        self.assertEqual(self.feature.operations[self.operation_id]["stage"], "release_confirmation")
+        self.assertEqual(self.host.calls, [])
+        await self.confirm_download()
         await self.runtime.run("search-submit-")
         self.assertEqual(len(self.host.calls), 1)
         capability, method, payload, options = self.host.calls[0]
@@ -176,6 +184,7 @@ class RawSearchTest(unittest.IsolatedAsyncioTestCase):
         callback = next(b["callback_data"] for b in self.buttons(report) if ":release:" in b["callback_data"])
         await self.click(callback)
         await self.click(f"search:raw_path:{self.plan_id}:0")
+        await self.confirm_download()
         await self.runtime.run("search-submit-")
         report = self.host.reports[-1]
         self.assertEqual(report["state"], "awaiting_input")
@@ -295,6 +304,7 @@ class RawSearchTest(unittest.IsolatedAsyncioTestCase):
             callback = next(b["callback_data"] for b in self.buttons(self.host.reports[-1]) if ":release:" in b["callback_data"])
             await self.click(callback)
             await self.click(f"search:raw_path:{plan_id}:0")
+            await self.confirm_download(plan_id)
             await asyncio.wait_for(asyncio.gather(*tasks), 2)
             self.assertEqual(len(self.host.calls), 1)
             self.assertFalse(any(item["state"] == "cancelled" for item in self.host.reports))
@@ -317,6 +327,7 @@ class RawSearchTest(unittest.IsolatedAsyncioTestCase):
         callback = next(b["callback_data"] for b in self.buttons(report) if ":release:" in b["callback_data"])
         await self.click(callback)
         await self.click(f"search:raw_path:{self.plan_id}:0")
+        await self.confirm_download()
         task = self.feature.operations[self.operation_id]["task"]
         result = await self.feature.operation_control({"operation_id": self.operation_id, "action": "cancel"})
         await asyncio.gather(task, return_exceptions=True)

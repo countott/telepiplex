@@ -855,6 +855,9 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         self.feature.bind_runtime(runtime)
         await self.feature.callback(request)
+        self.assertEqual(self.feature.operations[stored["operation_id"]]["stage"], "release_confirmation")
+        self.assertEqual(self.host.calls, [])
+        await self.feature.callback(dict(request, payload=f"release_confirm:{plan_id}:{release_id}"))
         repeated = await self.feature.callback(request)
         self.assertEqual(repeated["operation"]["state"], "running")
         await self.feature.callback(dict(request, payload=f"release:{plan_id}:another-release"))
@@ -2965,6 +2968,31 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(stored["results"]), 1)
         self.assertIn("黑暗荣耀 (The Glory)", result["actions"][0]["text"])
 
+    async def test_release_preview_back_and_owner_checks_never_submit_download(self):
+        from telepiplex_plugin_sdk import FeatureError
+        plan_id = await self._prepare_search()
+        await self.feature.callback({"payload": f"confirm:{plan_id}", "user_id": 1, "chat_id": 10})
+        await self.runtime.run("search-releases-")
+        stored = self.feature.plans[plan_id]
+        release_id = next(iter(stored["release_by_id"]))
+        request = {"payload": f"release:{plan_id}:{release_id}", "user_id": 1, "chat_id": 10}
+        preview = await self.feature.callback(request)
+        self.assertEqual(preview["operation"]["stage"], "release_confirmation")
+        self.assertEqual(preview["operation"]["segment"]["role"], "search")
+        self.assertIn(stored["release_by_id"][release_id]["title"], preview["operation"]["status_text"])
+        self.assertFalse(any(key.startswith("search-submit-") for key in self.runtime.tasks))
+        forged = await self.feature.callback({"payload": f"release_confirm:{plan_id}:{release_id}", "user_id": 2, "chat_id": 10})
+        self.assertEqual(forged["session"]["state"], "close")
+        returned = await self.feature.callback({"payload": f"release_back:{plan_id}", "user_id": 1, "chat_id": 10})
+        self.assertEqual(returned["operation"]["stage"], "release_selection")
+        self.assertEqual(self.host.calls, [])
+        stale = await self.feature.callback({"payload": f"release_confirm:{plan_id}:{release_id}", "user_id": 1, "chat_id": 10})
+        self.assertEqual(stale["operation"]["stage"], "release_selection")
+        await self.feature.callback(request)
+        with self.assertRaises(FeatureError):
+            await self.feature.callback({"payload": f"release_confirm:{plan_id}:wrong-id", "user_id": 1, "chat_id": 10})
+        self.assertEqual(self.host.calls, [])
+
     async def test_selected_release_calls_download_provider_with_canonical_contract(self):
         plan_id = await self._prepare_search()
         await self.feature.callback({
@@ -2979,6 +3007,11 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         result = await self.feature.callback({
             "namespace": "search",
             "payload": release_callback.removeprefix("search:"),
+            "user_id": 1, "chat_id": 10,
+        })
+        result = await self.feature.callback({
+            "namespace": "search",
+            "payload": release_callback.removeprefix("search:").replace("release:", "release_confirm:", 1),
             "user_id": 1, "chat_id": 10,
         })
         self.assertEqual(result["operation"]["stage"], "resolving_release")
@@ -3115,6 +3148,12 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "user_id": 1,
             "chat_id": 10,
         })
+        await self.feature.callback({
+            "namespace": "search",
+            "payload": f"release_confirm:{plan_id}:{failed_id}",
+            "user_id": 1,
+            "chat_id": 10,
+        })
         await self.runtime.run("search-submit-")
 
         current = self.feature.operations[stored["operation_id"]]
@@ -3152,6 +3191,12 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "user_id": 1,
             "chat_id": 10,
         })
+        await self.feature.callback({
+            "namespace": "search",
+            "payload": f"release_confirm:{plan_id}:{remaining_id}",
+            "user_id": 1,
+            "chat_id": 10,
+        })
         await self.runtime.run("search-submit-")
 
         self.assertEqual(len(self.host.calls), 1)
@@ -3182,6 +3227,12 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         await self.feature.callback({
             "namespace": "search",
             "payload": f"release:{plan_id}:{release_id}",
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        await self.feature.callback({
+            "namespace": "search",
+            "payload": f"release_confirm:{plan_id}:{release_id}",
             "user_id": 1,
             "chat_id": 10,
         })
@@ -3233,6 +3284,11 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
             "payload": release_callback.removeprefix("search:"),
             "user_id": 1, "chat_id": 10,
         })
+        submission = await self.feature.callback({
+            "namespace": "search",
+            "payload": release_callback.removeprefix("search:").replace("release:", "release_confirm:", 1),
+            "user_id": 1, "chat_id": 10,
+        })
         await self.runtime.run("search-submit-")
 
         self.assertEqual(self.host.calls, [])
@@ -3270,6 +3326,12 @@ class SearchFeatureTest(unittest.IsolatedAsyncioTestCase):
         submission = await self.feature.callback({
             "namespace": "search",
             "payload": release_callback.removeprefix("search:"),
+            "user_id": 1,
+            "chat_id": 10,
+        })
+        submission = await self.feature.callback({
+            "namespace": "search",
+            "payload": release_callback.removeprefix("search:").replace("release:", "release_confirm:", 1),
             "user_id": 1,
             "chat_id": 10,
         })
@@ -6826,12 +6888,12 @@ class FeatureSourceContractTest(unittest.TestCase):
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(manifest["version"], "2.9.0")
+        self.assertEqual(manifest["version"], "2.11.1")
         self.assertEqual(manifest["host_api"], ">=1.8,<2.0")
-        self.assertEqual(project["project"]["version"], "2.9.0")
+        self.assertEqual(project["project"]["version"], "2.11.1")
         self.assertEqual(
             project["project"]["dependencies"][0],
-            "telepiplex-plugin-sdk==2.2.1",
+            "telepiplex-plugin-sdk==2.2.2",
         )
 
     def test_default_config_enables_free_and_configured_sources(self):
@@ -6862,14 +6924,14 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/search-2.9.0.tpx", source)
+        self.assertIn("/tmp/search-2.11.1.tpx", source)
         self.assertIn("豆瓣", source)
         self.assertIn("用户确认", source)
         self.assertIn("不调用 AI", source)
         self.assertIn("Wikipedia", source)
         self.assertIn("TVDB", source)
         self.assertIn("Rename", source)
-        self.assertNotIn("dist/search-2.9.0.tpx", source)
+        self.assertNotIn("dist/search-2.11.1.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

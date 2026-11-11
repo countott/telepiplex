@@ -309,6 +309,7 @@ def process_file_first_media(
         selected_root=source_root,
         include_selected_root=True,
         protected_roots=tuple(filter(None, (protected_category_root,))),
+        source_directories=tuple(_source_path(event, node) for node in file_tree if node.get("is_dir")),
     )
     outcome_by_source = {
         outcome.source_id: outcome
@@ -336,6 +337,8 @@ def process_file_first_media(
         "canonical_no_ops": execution.canonical_no_ops,
         "kept_unresolved": sum(
             resolution.action == "keep_original"
+            and "target_conflict" not in resolution.reason_codes
+            and "planned_target_collision" not in resolution.reason_codes
             for resolution in media_resolutions
         ),
         "target_conflicts": sum(
@@ -1024,12 +1027,7 @@ def process_tvdb_episode(event: DownloadCompletedEvent) -> PostDownloadResult:
     )
     message = (
         f"{prefix} 媒体整理结果：`{rename_plan['series_name'] or rename_plan['target_root'].split('/')[-1]}`\n"
-        f"已整理 {file_first.get('organized_files', 0)}，"
-        f"已规范 {file_first.get('canonical_no_ops', 0)}，"
-        f"保留 {kept}，目标冲突 {conflicts}，失败 {failed}\n"
-        f"源目录删除 {cleanup.get('deleted_directories', 0)}，"
-        f"保留 {cleanup.get('retained_directories', 0)}，"
-        f"清理失败 {cleanup_failed}\n\n"
+        f"{_file_result_summary(file_first)}\n\n"
         f"保存目录：`{final_path}`"
     )
     if rename_plan.get("tvdb_series_id"):
@@ -1143,6 +1141,28 @@ def _standalone_contract_naming_metadata(event: DownloadCompletedEvent):
     return result
 
 
+def _file_result_summary(file_first: dict) -> str:
+    cleanup = file_first.get("cleanup") or {}
+    text = (
+        f"文件总计：{file_first.get('media_files_total', 0)} 个（含字幕）\n"
+        f"已整理 {file_first.get('organized_files', 0)}｜已规范 {file_first.get('canonical_no_ops', 0)}\n"
+        f"原位保留：无法确认 {file_first.get('kept_unresolved', 0)}｜"
+        f"目标冲突 {file_first.get('target_conflicts', 0)}\n"
+        f"处理失败 {file_first.get('failed_files', 0)}\n"
+        f"源文件夹：已删除 {cleanup.get('deleted_directories', 0)}｜"
+        f"保留 {cleanup.get('retained_directories', 0)}｜"
+        f"清理失败 {cleanup.get('failed_directories', 0)}"
+    )
+    if cleanup.get("already_absent_directories"):
+        text += f"｜原本已不存在 {cleanup['already_absent_directories']}"
+    for retained in (cleanup.get("retained_paths") or [])[:2]:
+        text += f"\n源文件夹保留：{retained.get('path', '')}（仍有文件）"
+    for failure in (cleanup.get("failures") or [])[:2]:
+        reason = "列表未能核实，暂未删除" if failure.get("state") == "lookup_failed" else "删除尚未确认"
+        text += f"\n未清理源文件夹：{failure.get('path', '')}（{reason}）"
+    return text
+
+
 def process_generic_media(event: DownloadCompletedEvent) -> PostDownloadResult:
     naming_auto_metadata = _standalone_contract_naming_metadata(event)
     result = _attempt_media_auto_rename(event, naming_auto_metadata)
@@ -1166,13 +1186,7 @@ def process_generic_media(event: DownloadCompletedEvent) -> PostDownloadResult:
     )
     message = (
         f"{prefix} 电影整理结果：`{plan.file_name}`\n"
-        f"主视频依据：{selection_reason}\n"
-        f"已整理 {file_first.get('organized_files', 0)}，"
-        f"已规范 {file_first.get('canonical_no_ops', 0)}，"
-        f"保留 {kept}，目标冲突 {conflicts}，失败 {failed}\n"
-        f"源目录删除 {cleanup.get('deleted_directories', 0)}，"
-        f"保留 {cleanup.get('retained_directories', 0)}，"
-        f"清理失败 {cleanup_failed}\n\n"
+        f"{_file_result_summary(file_first)}\n\n"
         f"保存目录：`{final_path}`"
     )
     return PostDownloadResult(

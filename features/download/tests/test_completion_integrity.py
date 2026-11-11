@@ -21,6 +21,33 @@ class CompletionIntegrityTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(payload.get('snapshot_complete'), True)
         self.assertEqual(payload.get('file_tree_transport'), 'inline_v1')
 
+    async def test_post_cleanup_tree_change_stops_without_retrying_or_repeating_deletion(self):
+        original = self.client.get_file_tree('/Downloads/Show.S01E01.mkv')
+        reads = []
+        ad = {'name': 'ad.txt', 'path': '/Downloads/ad.txt', 'relative_path': 'ad.txt',
+              'file_id': 'ad', 'is_dir': False, 'size': 1}
+        def read(path):
+            reads.append(path)
+            return original + ([ad] if len(reads) < 3 else [])
+        self.client.get_file_tree = read
+        await self.run_download()
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(self.client.deleted_files, ['/Downloads/ad.txt'])
+        self.assertEqual(self.host.events[0][0], 'download.failed')
+
+    async def test_directory_statistics_can_change_without_changing_file_identity(self):
+        original = self.client.get_file_tree('/Downloads/Show.S01E01.mkv')
+        reads = []
+        def read(path):
+            reads.append(path)
+            return original + [{'name': 'subs', 'path': '/Downloads/subs',
+                                'relative_path': 'subs', 'file_id': 'directory',
+                                'is_dir': True, 'size': 999 if len(reads) == 1 else 0}]
+        self.client.get_file_tree = read
+        await self.run_download()
+        self.assertEqual(self.host.events[0][0], 'download.completed')
+        self.assertEqual(len(reads), 2)
+
     async def test_cleanup_binds_snapshot_file_id_and_preserves_path_replacement(self):
         original = self.client.get_file_tree('/Downloads/Show.S01E01.mkv')
         expected_ids = []

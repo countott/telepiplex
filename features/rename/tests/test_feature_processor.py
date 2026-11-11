@@ -1531,7 +1531,7 @@ class RenamingProcessorTest(unittest.TestCase):
 
         self.assertTrue(result.handled)
         self.assertTrue(result.message.startswith("⚠️"))
-        self.assertIn("源目录删除 0，保留 1", result.message)
+        self.assertIn("源文件夹：已删除 0｜保留 1", result.message)
         self.assertFalse(result.file_results["cleanup"]["complete"])
         self.assertNotIn("/Downloads/Release", storage.deleted)
 
@@ -4652,9 +4652,12 @@ class RenameFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.assert_capability, "storage.provider")
         self.assertEqual(host.events, [])
         self.assertEqual(
-            host.notifications[0][1],
+            host.notifications[0][1].splitlines()[0],
             "已整理：中文电影 (2024) ⋯ English Movie",
         )
+        self.assertIn("文件总计：1 个（含字幕）", host.notifications[0][1])
+        self.assertIn("已整理 1｜已规范 0", host.notifications[0][1])
+        self.assertIn("源文件夹：已删除 1｜保留 0｜清理失败 0", host.notifications[0][1])
 
     async def test_cleanup_failure_publishes_nothing_and_is_not_success(self):
         from telepiplex_rename.jobs import RenameJobStore
@@ -5875,10 +5878,10 @@ class FeatureSourceContractTest(unittest.TestCase):
         )
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "2.4.3")
+        self.assertEqual(manifest["version"], "2.4.5")
         self.assertEqual(manifest["host_api"], ">=1.9,<2.0")
-        self.assertIn('version = "2.4.3"', project)
-        self.assertIn('telepiplex-plugin-sdk==2.2.1', project)
+        self.assertIn('version = "2.4.5"', project)
+        self.assertIn('telepiplex-plugin-sdk==2.2.2', project)
 
     def test_inventory_command_is_visible_and_config_command_is_hidden(self):
         manifest = yaml.safe_load(
@@ -5893,8 +5896,8 @@ class FeatureSourceContractTest(unittest.TestCase):
 
     def test_readme_build_example_uses_current_version(self):
         source = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("/tmp/rename-2.4.3.tpx", source)
-        self.assertNotIn("dist/rename-2.4.3.tpx", source)
+        self.assertIn("/tmp/rename-2.4.5.tpx", source)
+        self.assertNotIn("dist/rename-2.4.5.tpx", source)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

@@ -4,12 +4,29 @@ from urllib.parse import quote
 from telepiplex_search.release_gate import ReleaseGateResult
 from telepiplex_search.release_report import (
     format_release_report,
+    release_confirmation,
     release_keyboard,
 )
 from telepiplex_search.release_identity import stable_release_id
 
 
 class ReleaseReportTest(unittest.TestCase):
+    def test_logged_flac_title_stays_unknown_but_explicit_filename_has_two_channels(self):
+        title = "[yolerejiju] The Secret World of Arrietty 2010 (BD Remux 1080p FLAC H.264) [Multi-Audio] | Karigurashi no Arrietty | 借りぐらしのアリエッティ"
+        row = self._specification_row({"title": title})
+        self.assertIn("FLAC · ?ch", row)
+        filename = "The.Secret.World.of.Arrietty.2010.1080p.BluRay.Remux.AVC.MULTi.FLAC.2.0-yolerejiju.mkv"
+        self.assertIn("FLAC · 2ch立体", self._specification_row({"title": filename}))
+        preview = release_confirmation("plan", "release", {
+            "title": title, "indexer": "test", "size": 100, "seeders": 20,
+            "info_url": "https://example.com/torrents/123",
+        }, "/动画电影")
+        self.assertIn(title, preview["text"])
+        self.assertIn("未知项不代表", preview["text"])
+        self.assertIn("?ch", preview["text"])
+        self.assertEqual(preview["data"]["keyboard"][1][0]["url"], "https://example.com/torrents/123")
+        self.assertLessEqual(len(preview["text"]), 4096)
+
     def _specification_row(self, item):
         text = format_release_report(
             "Movie", None, [item], {"total_indexers": 1},

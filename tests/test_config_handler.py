@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -128,6 +129,82 @@ class ConfigHandlerTest(unittest.IsolatedAsyncioTestCase):
             ][(10, 1)]["plugin_id"],
             "download",
         )
+
+    async def test_config_search_dispatches_the_real_provider_api_wizard(self):
+        import json
+        from app.handlers.config_handler import config_command, select_config_plugin
+        with patch.object(sys, "path", [str(ROOT / "features/search/src"), str(ROOT / "sdk/src"), *sys.path]):
+            from telepiplex_search.service import SearchFeature
+        update, context, manager = self.request(text="/config")
+        config = {"search": {"prowlarr": {"api_key": "private-search-key"}}}
+        feature = SearchFeature(config=config, host=None)
+        manager.views = {"search": {
+            "plugin_id": "search", "version": "2.11.0", "config": config,
+            "schema": json.loads((ROOT / "features/search/config.schema.json").read_text()),
+        }}
+        manager.statuses = [{"plugin_id": "search", "version": "2.11.0", "state": "active"}]
+        route = self.custom_route("search_config")
+        route.plugin_id = "search"
+        route.manifest.callbacks = ("search",)
+        async def request(method, params, **kwargs):
+            self.assertEqual(method, "command.dispatch")
+            return await feature.command(params)
+        route.client.request.side_effect = request
+        context.application.bot_data["telepiplex_plugin_router"].plugin_route.return_value = route
+        with patch("app.handlers.config_handler.init.check_user", return_value=True), \
+             patch("app.handlers.config_handler.handle_feature_result", new_callable=AsyncMock) as deliver:
+            await config_command(update, context)
+            self.assertEqual(context.user_data["host_config_plugins"], ["search"])
+            update.callback_query.data = "host-config-plugin:0"
+            await select_config_plugin(update, context)
+        result = deliver.await_args.args[-1]
+        buttons = result["actions"][0]["data"]["keyboard"]
+        self.assertTrue(any(b["callback_data"] == "search:config:apis" for row in buttons for b in row))
+        self.assertNotIn("private-search-key", repr(result))
+
+    async def test_search_provider_prompts_reach_the_native_host_message(self):
+        from app.handlers.interaction_handler import COORDINATOR_KEY, ROUTER_KEY
+        from app.handlers.plugin_handler import handle_feature_result
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+        with patch.object(sys, "path", [str(ROOT / "features/search/src"), str(ROOT / "sdk/src"), *sys.path]):
+            from telepiplex_search.service import SearchFeature
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = InteractionCoordinator(Path(directory) / "host.db")
+            self.addCleanup(coordinator.close)
+            route = SimpleNamespace(plugin_id="search", manifest=SimpleNamespace(callbacks=("search",)))
+            router = Mock()
+            router.plugin_route.return_value = route
+            methods = ("send_message", "send_photo", "edit_message_text", "edit_message_media", "edit_message_caption", "edit_message_reply_markup")
+            bot = SimpleNamespace(**{name: AsyncMock(return_value=SimpleNamespace(message_id=90)) for name in methods})
+            context = SimpleNamespace(application=SimpleNamespace(
+                bot_data={COORDINATOR_KEY: coordinator, ROUTER_KEY: router}, bot=bot,
+            ))
+            update = SimpleNamespace(
+                effective_chat=SimpleNamespace(id=10), effective_user=SimpleNamespace(id=1),
+                effective_message=SimpleNamespace(message_id=5, photo=[], reply_text=AsyncMock()), callback_query=None,
+            )
+            owner = {"chat_id": 10, "user_id": 1}
+            feature = SearchFeature(config={"search": {"prowlarr": {"api_key": "old-private-key"}}}, host=None)
+
+            async def deliver(result):
+                await handle_feature_result(update, context, route, result)
+                record = coordinator.get(result["operation"]["operation_id"])
+                expected = result["actions"][0]["text"]
+                self.assertEqual(record.status_text, expected)
+                rendered = bot.edit_message_text.await_args or bot.send_message.await_args
+                self.assertEqual(rendered.kwargs["text"], expected)
+                calls = repr([getattr(bot, name).mock_calls for name in methods])
+                self.assertNotIn("old-private-key", calls)
+                self.assertNotIn("new-private-key", calls)
+
+            await deliver(await feature.command({**owner, "command": "search_config"}))
+            for payload in ("config:apis", "config:api:prowlarr", "config:field:prowlarr:timeout"):
+                await deliver(await feature.callback({**owner, "payload": payload}))
+            await deliver(await feature.message({**owner, "text": "nan"}))
+            await deliver(await feature.message({**owner, "text": "123"}))
+            await deliver(await feature.callback({**owner, "payload": "config:field:prowlarr:api_key"}))
+            await deliver(await feature.message({**owner, "text": "new-private-key"}))
+            bot.send_photo.assert_not_awaited()
 
     async def test_config_chooser_uses_exit_label_and_copy(self):
         from app.handlers.config_handler import (

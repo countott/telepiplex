@@ -115,6 +115,11 @@ class RawSearchHandoffTest(unittest.IsolatedAsyncioTestCase):
                 plan_id = feature.operations[operation_id]["plan_id"]
                 response = await runtime.callbacks["search"]({"payload": f"raw_path:{plan_id}:0", "chat_id": 10, "user_id": 1})
                 self.assertTrue((await sink("search", response["operation"]))["accepted"])
+                self.assertEqual(response["operation"]["stage"], "release_confirmation")
+                self.assertEqual(submitted, [])
+                release_id = feature.plans[plan_id]["pending_release_id"]
+                response = await runtime.callbacks["search"]({"payload": f"release_confirm:{plan_id}:{release_id}", "chat_id": 10, "user_id": 1})
+                self.assertTrue((await sink("search", response["operation"]))["accepted"])
                 await asyncio.wait_for(feature.operations[operation_id]["task"], 2)
                 record = coordinator.get(operation_id)
                 self.assertEqual((record.plugin_id, record.state), ("download", "running"))

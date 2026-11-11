@@ -227,7 +227,10 @@ class DownloadFeature:
                     "invalid_request",
                     "storage native move batch exceeds 100 unique file IDs",
                 )
-        value = await asyncio.to_thread(getattr(self.client, method), *args, **kwargs)
+        try:
+            value = await asyncio.to_thread(getattr(self.client, method), *args, **kwargs)
+        except Open115Error as exc:
+            raise FeatureError(exc.code or "storage_provider_error", str(exc)) from exc
         return {"value": value}
 
     async def command(self, request: dict) -> dict:
@@ -1896,16 +1899,18 @@ class DownloadFeature:
                     )
                 operation["cleanup_deleted_paths"].append(path)
             self._raise_if_cancelled(operation)
+            def tree_identity(nodes):
+                return sorted((str(node.get("file_id") or ""), str(node.get("path") or ""),
+                               bool(node.get("is_dir")),
+                               "" if node.get("is_dir") else str(node.get("size") or 0),
+                               "" if node.get("is_dir") else str(node.get("sha1") or "")) for node in nodes)
+            self._raise_if_cancelled(operation)
             if snapshot_enabled:
                 file_tree, verified_root = await asyncio.to_thread(scan_snapshot, self.client, final_path)
                 if verified_root != root_identity:
                     raise SnapshotError("snapshot root changed during cleanup")
             else:
                 file_tree = await asyncio.to_thread(self.client.get_file_tree, final_path)
-            def tree_identity(nodes):
-                return sorted((str(node.get("file_id") or ""), str(node.get("path") or ""),
-                               bool(node.get("is_dir")), str(node.get("size") or 0),
-                               str(node.get("sha1") or "")) for node in nodes)
             if tree_identity(file_tree) != tree_identity(expected_tree):
                 raise Open115Error(
                     "download tree changed during cleanup verification",

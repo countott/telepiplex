@@ -44,6 +44,7 @@ def feature_for(response):
     {"list": [node(1)], "has_more": False, "data": {"list": [node(1)], "has_more": True}},
     {"list": [node(1)], "data": {"list": [node(2)]}},
     {"list": [node(1)], "count": 2, "has_more": False},
+    {"list": [node(1)], "count": 1, "has_more": True},
     {"count": 1, "data": {"count": 2, "list": [node(1)]}},
     {"list": [node(1)], "offset": 1},
     {"offset": 0, "data": {"offset": 1, "list": [node(1)]}},
@@ -71,17 +72,45 @@ def test_inventory_retains_incomplete_flags_at_wrapper_depth(response):
     assert rejected.value.code == "inventory_tree_incomplete"
 
 
-@pytest.mark.parametrize("with_count", [False, True])
-def test_inventory_short_pages_and_count_only_pages_require_empty_tail(with_count):
+def test_inventory_list_only_short_pages_require_empty_tail():
     rows = [node(number) for number in range(3)]
 
     def response(params):
         page = rows[params["offset"]:params["offset"] + 1]
-        return {"data": {"list": page, "count": "3", "offset": params["offset"]}} if with_count else page
+        return page
 
     feature, host = feature_for(response)
     assert asyncio.run(feature._inventory_directory_items("root")) == rows
     assert [params["offset"] for params in host.calls] == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("count", [8, 13, 1000, 1001])
+def test_inventory_counted_pages_stop_at_declared_end_without_reading_tail(count):
+    rows = [node(number) for number in range(count)]
+
+    def response(params):
+        assert params["offset"] < count, "completed inventory must not request a tail page"
+        return {"data": {"list": rows[params["offset"]:params["offset"] + 1000],
+                         "count": str(count), "offset": params["offset"]}}
+
+    feature, host = feature_for(response)
+    assert asyncio.run(feature._inventory_directory_items("root")) == rows
+    assert [params["offset"] for params in host.calls] == ([0, 1000] if count == 1001 else [0])
+
+
+def test_inventory_stops_when_a_previously_declared_count_is_satisfied():
+    rows = [node(1), node(2), node(3)]
+
+    def response(params):
+        assert params["offset"] < 3, "prior count already proves completion"
+        page = {"list": rows[params["offset"]:params["offset"] + 1]}
+        if params["offset"] == 0:
+            page["count"] = "3"
+        return page
+
+    feature, host = feature_for(response)
+    assert asyncio.run(feature._inventory_directory_items("root")) == rows
+    assert [params["offset"] for params in host.calls] == [0, 1, 2]
 
 
 def test_inventory_consistent_explicit_terminal_page_can_finish_without_empty_tail():
@@ -94,9 +123,30 @@ def test_inventory_consistent_explicit_terminal_page_can_finish_without_empty_ta
     assert len(host.calls) == 1
 
 
-def test_inventory_underreported_count_cannot_hide_next_page():
+def test_inventory_page_cannot_exceed_declared_count():
+    feature, host = feature_for({"list": [node(1), node(2)], "count": 1, "offset": 0})
+    with pytest.raises(FeatureError) as rejected:
+        asyncio.run(feature._inventory_directory_items("root"))
+    assert rejected.value.code == "inventory_tree_incomplete"
+    assert [params["offset"] for params in host.calls] == [0]
+
+
+def test_inventory_rejects_count_changes_before_the_declared_end():
     feature, host = feature_for(lambda params: {
-        "list": [node(params["offset"] + 1)], "count": 1, "offset": params["offset"],
+        "list": [node(params["offset"] + 1)],
+        "count": 3 if params["offset"] == 0 else 4,
+        "offset": params["offset"], "has_more": True,
+    })
+    with pytest.raises(FeatureError, match="changed") as rejected:
+        asyncio.run(feature._inventory_directory_items("root"))
+    assert rejected.value.code == "inventory_tree_incomplete"
+    assert [params["offset"] for params in host.calls] == [0, 1]
+
+
+def test_prior_inventory_count_cannot_be_satisfied_with_an_explicit_continuation():
+    feature, host = feature_for(lambda params: {
+        "list": [node(params["offset"] + 1)], "has_more": True,
+        **({"count": 2} if params["offset"] == 0 else {}),
     })
     with pytest.raises(FeatureError) as rejected:
         asyncio.run(feature._inventory_directory_items("root"))

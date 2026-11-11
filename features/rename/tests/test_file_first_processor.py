@@ -108,6 +108,8 @@ def test_automatic_download_deletes_verified_empty_release_root():
     assert root not in storage.directories
     assert root in storage.deleted
     assert result.file_results["cleanup"] == {
+        "already_absent_directories": 0,
+        "retained_paths": [],
         "candidate_directories": 1,
         "deleted_directories": 1,
         "retained_directories": 0,
@@ -326,6 +328,9 @@ def test_target_conflict_is_local_and_source_is_not_moved_to_unorganized():
     assert storage.moves == []
     assert storage.deleted == []
     assert "目标冲突" in result.message
+    assert result.file_results["media_files_total"] == 1
+    assert result.file_results["kept_unresolved"] == 0
+    assert result.file_results["target_conflicts"] == 1
 
 
 def test_one_failed_episode_does_not_stop_the_next_episode():
@@ -400,6 +405,8 @@ def test_one_failed_episode_does_not_stop_the_next_episode():
             "reason_codes": ["move_failed"],
         }],
         "cleanup": {
+            "already_absent_directories": 0,
+            "retained_paths": [{"path": root, "reason_code": "directory_not_empty"}],
             "candidate_directories": 1,
             "deleted_directories": 0,
             "retained_directories": 1,

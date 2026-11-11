@@ -155,6 +155,11 @@ async def select_rendered_scope(query, *, episode=None):
             assert feature.operations[stored["operation_id"]]["stage"] == "release_selection"
             release_button = next(button for button in buttons() if button["callback_data"].startswith("search:release:"))
             await feature.callback({**request, "payload": release_button["callback_data"].removeprefix("search:")})
+            assert not host.submissions
+            preview = feature.operations[stored["operation_id"]]
+            confirmation = next(button["callback_data"] for row in preview["details"]["keyboard"]
+                                for button in row if ":release_confirm:" in button.get("callback_data", ""))
+            await feature.callback({**request, "payload": confirmation.removeprefix("search:")})
             await runtime.drain()
             assert len(host.submissions) == 1
             metadata = host.submissions[0][0]["media_metadata"]

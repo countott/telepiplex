@@ -110,6 +110,8 @@ def _collect_complete_tree(storage, root_path, *, max_depth, limit, ceiling):
                 if is_dir:
                     walk(file_id, relative, depth + 1)
             offset += len(response)
+            if expected_count is not None and offset == expected_count:
+                return
 
     walk(root_id)
     return tree

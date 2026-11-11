@@ -265,19 +265,19 @@ Host 负责 Telegram 接入、命令路由、任务与事件持久化、配置�
 
 #### 当前源码版本
 
-本轮 Search 2.9.0 将拒绝关键词改为硬过滤，显式评分表不再回补默认偏好；来源分按 BluRay、BDRip、WEB 归一，REMUX 调整只用于明确蓝光来源。搜索结果继续使用 `WEB` / `BD` 简写。文件与验证清单见 [本次评分交付](docs/audits/2026-11-06-search-scoring.md)，片源识别范围见 [格式识别拓扑](docs/media-release-format-topology.md)，此前的文件与验证清单见 [格式拓扑交付](docs/audits/2026-11-02-format-topology.md)。此前的 [Rename 目录查询修复](docs/audits/2026-10-31-media-recognition-rename.md) 继续保留。以下为本地源码版本，未自动发布。
+本轮日志核对已确认：部分任务的文件已改名并进入目标目录，随后额外尾页请求导致完整核验失败。SDK、Rename 现在校验并读满声明总数后结束分页，不再多读尾页；移动后源目录的列表矛盾和独立 770004 错误仍未确认根因。证据、边界与文件清单见 [本次交付](docs/audits/2026-11-11-115-pagination-diagnosis.md)。此前的 [Provider 配置](docs/audits/2026-11-11-search-provider-config-and-review.md)、[下载前确认及目录清理](docs/audits/2026-11-11-release-confirmation-and-storage.md)、[评分规则](docs/audits/2026-11-06-search-scoring.md) 和 [格式识别拓扑](docs/media-release-format-topology.md) 继续保留。以下为本地源码版本，未自动发布。
 
 | 组件 | 版本 |
 | --- | --- |
 | Host | `3.9.3` |
-| SDK | `2.2.1` |
-| `download` | `2.2.2` |
-| `search` | `2.9.0` |
-| `rename` | `2.4.3` |
-| `sync` | `2.1.1` |
-| `caption` | `1.3.3` |
+| SDK | `2.2.2` |
+| `download` | `2.2.5` |
+| `search` | `2.11.1` |
+| `rename` | `2.4.5` |
+| `sync` | `2.1.2` |
+| `caption` | `1.3.4` |
 
-本轮更新 Search 2.9.0 后再提交新搜索。已安装的 Host 3.9.3、Download 2.2.2、Rename 2.4.3、Caption 1.3.3 和 Sync 2.1.1 无需因本轮再次更新。尚未完成上一轮升级时，先更新 Download，再更新 Search 和 Rename。已有显式 `storage_move_batch_size: 32` 继续使用 32，缺省值与新配置采用 100；遇到限流或恢复异常可配置回 32。Host API 1.9，SDK 2.2.1 随 Feature 构建打包，无需单独安装。
+本轮优先更新 Download 2.2.5、Rename 2.4.5 后提交新任务。五个 Feature 都精确依赖随包 SDK，因此 Search 2.11.1、Sync 2.1.2 和 Caption 1.3.4 同步对齐 SDK 2.2.2；这三个 Feature 的业务逻辑未改。Host 3.9.3 无需更新。已有显式 `storage_move_batch_size: 32` 继续使用 32，缺省值与新配置采用 100。Host API 1.9，SDK 随 Feature 构建打包，无需单独安装。
 
 `main` 是 Core/Host 与五个 Feature 的有效源码分支。Host 使用 `telepiplex-v<semver>` tag，发布前验证提交已包含在远端 `main`；正式流水线生成 `ghcr.io/<owner>/telepiplex:<semver>` 与 `latest` 镜像，创建标题为 `Telepiplex <semver>` 的 GitHub Release 并强制设为 **Latest**。普通 `main` push 不更新正式镜像或 Latest 入口。
 

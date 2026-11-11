@@ -206,6 +206,8 @@ def test_locale_budget_with_real_page_confirmation_cancel_and_restart(scenario):
                         assert contract['identity']['provider_refs']['wikidata'] == 'Q91000002'
                         release_id = next(iter(stored['release_by_id']))
                         await callback(f'release:{plan_id}:{release_id}')
+                        assert not host.submissions
+                        await callback(f'release_confirm:{plan_id}:{release_id}')
                         assert len(host.submissions) == 1
                 frozen = deepcopy({k: stored.get(k) for k in ('candidates', 'selected_candidate',
                     'confirmed_contract', 'active_prowlarr_queries', 'selected_path')})

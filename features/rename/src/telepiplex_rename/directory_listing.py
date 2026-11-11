@@ -98,13 +98,16 @@ def read_directory_items(storage, directory_id: str, *, item_facts) -> list[dict
         end = offset + len(page.items)
         if expected_count is not None and end > expected_count:
             raise DirectoryListingError("directory listing exceeds prior count")
+        if expected_count is not None and end == expected_count and page.has_more is True:
+            raise DirectoryListingError("directory continuation contradicts prior count")
         for item in page.items:
             provider_id, name, _sha1, _size = item_facts(item)
             if provider_id in seen_ids:
                 raise DirectoryListingError("directory listing repeats an object")
             seen_ids.add(provider_id)
         collected.extend(page.items)
-        if not page.items or page.has_more is False:
+        if (not page.items or page.has_more is False
+                or (expected_count is not None and end == expected_count)):
             if expected_count is not None and end != expected_count:
                 raise DirectoryListingError("directory listing ended before prior count")
             return collected

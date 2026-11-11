@@ -81,7 +81,7 @@ def _status_timeout(prowlarr_config: dict):
         timeout = float(prowlarr_config.get("status_timeout", PROWLARR_STATUS_TIMEOUT))
     except (TypeError, ValueError):
         timeout = PROWLARR_STATUS_TIMEOUT
-    return max(5, min(timeout, 30))
+    return max(1, min(timeout, 300))
 
 
 def _indexer_timeout(prowlarr_config: dict):

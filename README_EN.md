@@ -40,7 +40,7 @@ The automatic task ends with file organization. Plex scans are initiated separat
 | `sync` | Manually manage Plex scans and metadata enhancements | None | [Module guide](features/sync/README.md) |
 | `caption` | Chinese external subtitles after download, from a library, or by query | `download`, `search`, `rename` | [Module guide](features/caption/README.md) |
 
-Caption 1.3.3 requires Host API 1.9 and the updated Download, Search, and Rename Features listed below. SDK 2.2.1 is bundled into each Feature.
+Caption 1.3.4 requires Host API 1.9 and the updated Download, Search, and Rename Features listed below. SDK 2.2.2 is bundled into each Feature.
 
 For the complete search and organization flow, install `download → search → rename` in that order. Install `sync` as needed. Install `caption` after Rename to add external subtitle lookup before organization, library selection through `/caption` or `/caption scan`, and standalone `/caption Title Year` queries.
 
@@ -266,19 +266,19 @@ The current Host API 1.9 adds optional capability dependencies and caption messa
 
 #### Current source versions
 
-This iteration defines an enumerable release-format catalog with aliases, conflict rules, and combination tests of rendered results. See the [format topology](docs/media-release-format-topology.md) and [delivery record](docs/audits/2026-11-02-format-topology.md). The previous [Rename directory lookup repair](docs/audits/2026-10-31-media-recognition-rename.md) remains included. These source versions have not been published automatically.
+The supplied logs show files renamed and present in their destination directories before verification failed. The SDK and Rename now stop after validating and reading the declared count, avoiding an unnecessary terminal-page request. Contradictory source-directory listings after moves and the separate provider error 770004 remain unresolved. See the [evidence and delivery record](docs/audits/2026-11-11-115-pagination-diagnosis.md). The previous [Provider configuration](docs/audits/2026-11-11-search-provider-config-and-review.md), [release confirmation and cleanup](docs/audits/2026-11-11-release-confirmation-and-storage.md), and [format topology](docs/media-release-format-topology.md) remain available. These source versions have not been published automatically.
 
 | Component | Version |
 | --- | --- |
 | Host | `3.9.3` |
-| SDK | `2.2.1` |
-| `download` | `2.2.2` |
-| `search` | `2.8.0` |
-| `rename` | `2.4.3` |
-| `sync` | `2.1.1` |
-| `caption` | `1.3.3` |
+| SDK | `2.2.2` |
+| `download` | `2.2.5` |
+| `search` | `2.11.1` |
+| `rename` | `2.4.5` |
+| `sync` | `2.1.2` |
+| `caption` | `1.3.4` |
 
-Update Search to 2.8.0 before starting a new search. Existing Host 3.9.3, Download 2.2.2, Rename 2.4.3, Caption 1.3.3 and Sync 2.1.1 installations need no update for this iteration. When also applying the preceding release, update Download before Search and Rename. Existing explicit `storage_move_batch_size: 32` settings retain 32; missing settings and new configurations use 100. Set it back to 32 if throttling or recovery issues occur. Host API remains 1.9 and SDK 2.2.1 is bundled with Features.
+Prioritize Download 2.2.5 and Rename 2.4.5 before starting a new task. All five Features pin their bundled SDK, so Search 2.11.1, Sync 2.1.2 and Caption 1.3.4 also align with SDK 2.2.2; their business code is unchanged. Host 3.9.3 needs no update. Existing explicit `storage_move_batch_size: 32` settings retain 32; missing settings and new configurations use 100. Host API remains 1.9 and the SDK is bundled with Features.
 
 `main` is the active source branch for Core/Host and all five Features. The Host uses `telepiplex-v<semver>` tags, with release commits verified as contained in remote `main`. The release workflow publishes `ghcr.io/<owner>/telepiplex:<semver>` and `latest`, then creates a GitHub Release titled `Telepiplex <semver>` for that tag explicitly marked **Latest**. An ordinary `main` push does not update official images or Latest entry points.
 

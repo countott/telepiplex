@@ -548,6 +548,13 @@ async def audit_live_full_case(case: dict, feature, **unused) -> dict:
             assert not host.submissions, "stale_session_submitted"
             return report("safe_rejection", "session_expired_after_restart")
         await callback(f"release:{plan_id}:{release_id}")
+        assert not host.submissions, "download_submitted_before_release_confirmation"
+        operation = feature.operations[stored["operation_id"]]
+        assert operation["stage"] == "release_confirmation", "release_confirmation_missing"
+        confirm = next(button["callback_data"]
+                       for row in operation["details"]["keyboard"] for button in row
+                       if ":release_confirm:" in button.get("callback_data", ""))
+        await callback(confirm.removeprefix("search:"))
         if not host.submissions and release_id not in (stored.get("release_by_id") or {}):
             return report("safe_rejection", "release_magnet_unavailable")
         assert len(host.submissions) == 1, "submission_count_invalid"

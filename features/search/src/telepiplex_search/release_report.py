@@ -224,6 +224,36 @@ def _compact_scope(value) -> str:
     return scope
 
 
+def release_confirmation(plan_id: str, release_id: str, item: dict, selected_path: str) -> dict:
+    """Expose the original provider facts before any download is submitted."""
+    title = str(item.get("title") or "未提供标题")
+    lines = ["请核对原始片源", "", "原始标题：", title[:2200]]
+    alternative = str(item.get("sort_title") or item.get("sortTitle") or "")
+    if alternative and alternative != title:
+        lines.extend(["", "原始排序标题：", alternative[:600]])
+    lines.extend([
+        "", f"站点：{_clip(item.get('indexer') or '未知', 100)}",
+        f"大小：{_approx_size_label(item.get('size'))}｜做种：{_clip(item.get('seeders', '未知'), 30)}",
+        f"发布时间：{_clip(item.get('publish_date') or '未知', 60)}｜文件数：{_clip(item.get('files') if item.get('files') is not None else '未知', 30)}",
+        f"名称解析：{_clip(_specifications(item), 300)}",
+        f"保存到：{_clip(selected_path, 200)}", "",
+        "音轨和声道仅按资源名称识别，未知项不代表资源具备该规格。",
+        "请核对原始信息；确认后才会提交 115 下载。",
+    ])
+    keyboard = [[{
+        "text": "确认下载", "callback_data": f"search:release_confirm:{plan_id}:{release_id}",
+    }, {"text": "返回结果", "callback_data": f"search:release_back:{plan_id}"}]]
+    info_url = str(item.get("info_url") or "")
+    try:
+        parsed = urlsplit(info_url)
+        if parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username:
+            keyboard.append([{"text": "原站种子详情", "url": info_url}])
+    except ValueError:
+        pass
+    keyboard.append([{"text": "退出", "callback_data": f"search:cancel:{plan_id}"}])
+    return {"text": "\n".join(lines), "data": {"keyboard": keyboard}}
+
+
 def _shared_scope(items: list[dict]) -> str:
     scopes = {
         scope

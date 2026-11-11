@@ -111,7 +111,7 @@ from .prowlarr_waves import plan_prowlarr_waves
 from .source_schedule import SourceRequestKey, SourceScheduler
 from .release_gate import gate_releases
 from .release_identity import deduplicate_releases, stable_release_id
-from .release_report import circled_number, format_release_report, release_keyboard
+from .release_report import circled_number, format_release_report, release_keyboard, release_confirmation
 from .release_score import rank_releases
 from .raw_search import RawSearch
 from .search_plan import (
@@ -1483,7 +1483,7 @@ class SearchFeature:
                 request,
                 state="awaiting_input",
                 stage="config_section",
-                status_text="选择搜索配置。",
+                status_text=result["actions"][0]["text"],
                 control="exit",
                 kind="config",
             )
@@ -1588,6 +1588,36 @@ class SearchFeature:
         stored = self.plans.get(plan_id)
         if not stored or stored["owner"] != self._owner_key(request):
             return self._closed("⚠️ 搜索任务已过期，请重新搜索。")
+        if action in {"release_confirm", "release_back"}:
+            operation = self.operations[stored["operation_id"]]
+            if operation.get("stage") != "release_confirmation" or operation.get("state") != "awaiting_input":
+                return {"actions": [], "operation": self._operation_view(operation)}
+            pending_id = stored.get("pending_release_id")
+            if action == "release_confirm":
+                if len(parts) != 3 or parts[2] != pending_id:
+                    raise FeatureError("invalid_release", "confirmation does not match selected release")
+                stored.pop("pending_release_id", None)
+                stored["selection_frozen"] = False
+                return self._start_submission_task(plan_id, stored, pending_id)
+            stored.pop("pending_release_id", None)
+            stored["selection_frozen"] = False
+            if stored.get("kind") == "raw":
+                return self.raw_search.present(plan_id, stored)
+            summary = deepcopy(stored.get("indexer_summary") or {})
+            was_searching = summary.get("final") is False
+            summary["final"] = True
+            text = format_release_report(
+                (stored.get("identity_presentation") or {}).get("title")
+                or (stored.get("plan") or {}).get("raw_query") or "搜索结果",
+                None, stored.get("results") or [], summary,
+            )
+            if was_searching:
+                text = text.replace("搜索完成：", "已查询：", 1) + "\n剩余查询已停止，可改选当前结果。"
+            details = {"keyboard": release_keyboard(plan_id, stored.get("results") or [])}
+            return {"actions": [], "operation": self._advance_operation(
+                stored["operation_id"], state="awaiting_input", stage="release_selection",
+                status_text=text, control="exit", details=details,
+            )}
         if stored.get("kind") == "raw" and action != "cancel":
             return self.raw_search.callback(action, plan_id, stored, parts[2:])
         choice_stages = {
@@ -1716,7 +1746,7 @@ class SearchFeature:
         if action == "placement" and len(parts) == 3:
             return self._placement_callback(plan_id, stored, parts[2])
         if action == "release" and len(parts) == 3:
-            return self._start_submission_task(plan_id, stored, parts[2])
+            return self._preview_release(plan_id, stored, parts[2])
         raise FeatureError("invalid_callback", "search callback action is invalid")
 
     def _start_plan_task(
@@ -1997,7 +2027,7 @@ class SearchFeature:
         try:
             result = await self._confirm_and_search(plan_id, stored)
             stored["release_search_phase"] = "search_result_delivery"
-            if stored.get("selection_frozen"):
+            if stored.get("selection_frozen") or stored.get("release_search_stopped"):
                 return
             action = (result.get("actions") or [{}])[0]
             recovery_details = deepcopy(action.get("data") or {})
@@ -2042,7 +2072,7 @@ class SearchFeature:
                     release_result_count=0,
                 )
         except asyncio.CancelledError:
-            if stored.get("selection_frozen"):
+            if stored.get("selection_frozen") or stored.get("release_search_stopped"):
                 return
             await self._finish_release_search(
                 plan_id, stored, operation_id, cancelled=True,
@@ -2104,6 +2134,23 @@ class SearchFeature:
                 stage=phase, error=error_code, report_status=report_status,
             )
             self._release_plan(plan_id)
+
+    def _preview_release(self, plan_id, stored, release_id):
+        operation = self.operations[stored["operation_id"]]
+        if stored.get("selection_frozen"):
+            return {"actions": [], "operation": self._operation_view(operation)}
+        if operation.get("stage") not in {"release_selection", "prowlarr_search", "raw_destination"}:
+            raise FeatureError("invalid_state", "release selection is no longer active")
+        item = (stored.get("release_by_id") or {}).get(release_id)
+        if item is None:
+            raise FeatureError("invalid_release", "selected release is invalid")
+        stored.update(pending_release_id=release_id, selection_frozen=True, release_search_stopped=True)
+        self._cancel_release_tasks(stored)
+        preview = release_confirmation(plan_id, release_id, item, stored.get("selected_path") or "")
+        return {"actions": [], "operation": self._advance_operation(
+            stored["operation_id"], state="awaiting_input", stage="release_confirmation",
+            status_text=preview["text"], control="exit", details=preview["data"],
+        )}
 
     def _start_submission_task(self, plan_id, stored, release_id):
         operation_id = stored["operation_id"]
@@ -4669,6 +4716,7 @@ class SearchFeature:
         results,
         indexer_summary,
     ):
+        stored["indexer_summary"] = deepcopy(indexer_summary)
         now = time.monotonic()
         last_report = float(stored.get("last_incremental_report") or 0)
         if last_report and now - last_report < 1.25:
@@ -7010,7 +7058,7 @@ class SearchFeature:
         return lookup_douban_evidence(
             queries,
             timeout=float(config.get("timeout") or 10),
-            cache_ttl=float(config.get("cache_ttl") or 900),
+            cache_ttl=float(config.get("cache_ttl", 900)),
             max_concurrency=int(config.get("max_concurrency") or 2),
             circuit_breaker_failures=int(
                 config.get("circuit_breaker_failures") or 3
@@ -7401,7 +7449,7 @@ class SearchFeature:
                 operation["operation_id"],
                 state="awaiting_input",
                 stage=f"config_{wizard_session.get('stage') or 'input'}",
-                status_text="输入搜索配置。",
+                status_text=result["actions"][0]["text"],
                 control="exit",
             )
         else:
@@ -7572,6 +7620,7 @@ class SearchFeature:
                 "prowlarr_search",
                 "prowlarr_recovery",
                 "release_selection",
+                "release_confirmation",
                 "resolving_release",
                 "submitting_download",
             }
@@ -7586,7 +7635,7 @@ class SearchFeature:
                 view["details"]["defer_photo_until_media"] = True
             view["segment"] = {
                 "role": role,
-                "presentation_kind": "text" if role == "search" else "photo",
+                "presentation_kind": "text" if role == "search" or operation.get("kind") == "config" else "photo",
             }
         return view
 

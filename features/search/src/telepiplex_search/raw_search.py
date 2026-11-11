@@ -162,7 +162,7 @@ class RawSearch:
                 release_result_count=len(results),
             )
         except asyncio.CancelledError:
-            if stored.get("selection_frozen"):
+            if stored.get("selection_frozen") or stored.get("release_search_stopped"):
                 return
             feature._release_plan(plan_id)
             if feature.operations[operation_id]["state"] not in {"cancelled", "handed_off"}:
@@ -255,7 +255,7 @@ class RawSearch:
             directories = stored["raw_directories"]
             index = self._index(value, len(directories))
             stored["selected_path"] = directories[index]["path"]
-            return feature._start_submission_task(
+            return feature._preview_release(
                 plan_id, stored, stored["raw_selected_release"],
             )
         raise FeatureError("invalid_callback", "raw search callback is invalid")

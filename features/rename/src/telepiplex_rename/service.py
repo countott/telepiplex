@@ -23,7 +23,7 @@ from .media_metadata_v2 import (
     naming_identity_from_v2,
 )
 from .operations import OperationCancelled, RenameOperationJournal
-from .processor import process_generic_media, process_tvdb_episode
+from .processor import process_generic_media, process_tvdb_episode, _file_result_summary
 from .query_recovery import recover_metadata_probe
 from .snapshot_reader import read_snapshot
 
@@ -115,6 +115,9 @@ def _inventory_completion_text(
     kept = int(file_counts.get("kept_unresolved") or 0)
     if kept:
         lines.append(f"无法确认：{kept}（保留在原目录）")
+    conflicts = int(file_counts.get("target_conflicts") or 0)
+    if conflicts:
+        lines.append(f"目标重名：{conflicts}（保留原文件）")
     failed_files = int(file_counts.get("failed_files") or 0)
     if failed or failed_files:
         lines.append(f"失败：作品 {failed}｜文件 {failed_files}")
@@ -966,11 +969,14 @@ class RenameFeature:
             items.extend(page.items)
             if expected_count is not None and len(items) > expected_count:
                 raise FeatureError("inventory_tree_incomplete", "storage inventory exceeds declared count")
-            if not page.items or page.has_more is False:
+            if expected_count is not None and len(items) == expected_count and page.has_more is True:
+                raise FeatureError("inventory_tree_incomplete", "storage inventory continuation contradicts declared count")
+            if (not page.items or page.has_more is False
+                    or (expected_count is not None and len(items) == expected_count)):
                 if expected_count is not None and len(items) != expected_count:
                     raise FeatureError("inventory_tree_incomplete", "storage inventory ended before declared count")
                 return items
-            # Neither a short page nor count alone proves its empty tail.
+            # Without a declared count or terminal flag, prove the empty tail.
             offset += len(page.items)
             promised_more = page.has_more is True
         raise FeatureError("inventory_tree_incomplete", "storage inventory exceeds bounded page count")
@@ -1250,7 +1256,7 @@ class RenameFeature:
                     operation_id,
                     state="running",
                     stage="inventory_batch",
-                    status_text=f"正在补整理：{index + 1}/{len(pending)}",
+                    status_text=f"正在补整理第 {index + 1}/{len(pending)} 部作品（已完成 {index} 部）",
                     control="cancel",
                     details={
                         "total": len(pending),
@@ -1285,9 +1291,14 @@ class RenameFeature:
                         file_results.get(counter) or 0
                     )
                 if not file_results:
+                    # Metadata failure must still account for scanned media.
+                    unresolved_count = len(item.get("source_ids") or [])
+                    aggregate["media_files_total"] = int(
+                        aggregate.get("media_files_total") or 0
+                    ) + unresolved_count
                     aggregate["kept_unresolved"] = int(
                         aggregate.get("kept_unresolved") or 0
-                    ) + len(item.get("source_ids") or [])
+                    ) + unresolved_count
                 if (
                     current
                     and current.get("state") == "partial_completed"
@@ -2706,6 +2717,8 @@ class RenameFeature:
             )
         if not (complete or organized):
             terminal_text = outcome.get("message") or "媒体整理未满足完整成功条件。"
+        elif file_results:
+            terminal_text += "\n" + _file_result_summary(file_results)
         terminal_text += _caption_completion_note(outcome)
         terminal_report = self._advance_operation(
             operation_id,
@@ -2828,7 +2841,9 @@ class RenameFeature:
                 if self.jobs:
                     self.jobs.update(job_id, "processed", outcome)
             if not bool(outcome.get("terminal_stage_sealed")):
-                if cleanup_complete:
+                if not organized:
+                    stage_text = outcome.get("message") or "媒体整理未满足完整成功条件。"
+                elif cleanup_complete:
                     file_results = dict(outcome.get("file_results") or {})
                     stage_text = _organization_status_text(
                         int(file_results.get("media_files_total") or 0),
@@ -2845,6 +2860,8 @@ class RenameFeature:
                         "已整理，但源目录清理未完成。\n"
                         f"目标目录：{outcome.get('final_path') or ''}"
                     )
+                if organized and outcome.get("file_results"):
+                    stage_text += "\n" + _file_result_summary(outcome["file_results"])
                 stage_text += _caption_completion_note(outcome)
                 for attempt in range(3):
                     try:
@@ -2965,6 +2982,8 @@ class RenameFeature:
                 else str(outcome.get("message") or "整理失败，请检查目录。")
             )
             try:
+                if outcome.get("organized") and file_results:
+                    text += "\n" + _file_result_summary(file_results)
                 await self.host.notify_user(
                     int(outcome["user_id"]),
                     text + _caption_completion_note(outcome),

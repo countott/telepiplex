@@ -108,3 +108,23 @@ def test_directory_can_omit_size_but_file_must_supply_it():
 def test_valid_zero_size_is_not_replaced_by_another_alias():
     client, _ = make_client({'root': [{**node('zero'), 'fs': 0, 'size': 999}]})
     assert client.get_file_tree('/downloads')[0]['size'] == 0
+
+
+@pytest.mark.parametrize('count, has_more', [(2, True), (3, False)])
+def test_continuation_must_agree_with_prior_count_when_current_count_is_omitted(count, has_more):
+    client, _ = make_client({})
+    calls = []
+
+    def listing(params):
+        offset = params['offset']
+        calls.append(offset)
+        if offset == 0:
+            return {'count': count, 'offset': 0, 'data': [node('a')], 'has_more': True}
+        if offset == 1:
+            return {'offset': 1, 'data': [node('b')], 'has_more': has_more}
+        return {'offset': offset, 'data': []}
+
+    client.get_file_list = listing
+    with pytest.raises(Open115Error, match='continuation contradicts'):
+        client.get_file_tree('/downloads')
+    assert calls == [0, 1]

@@ -720,10 +720,22 @@ class Open115Client:
         return self._file_info_value(result)
 
     def get_file_list(self, params: dict):
-        result = self._request("GET", "/open/ufile/files", params=dict(params))
+        # Always enumerate the current directory with a deterministic order.
+        # Account-level remembered filters/sorting must not change a tree scan.
+        query = {"cur": 1, "custom_order": 1, "o": "file_name", "asc": 1, **params}
+        result = self._request("GET", "/open/ufile/files", params=query)
         try:
-            parse_listing_page(result, offset=params.get("offset", 0))
+            parse_listing_page(result, offset=query.get("offset", 0))
         except ListingIntegrityError as exc:
+            self._emit_observation(
+                "download.listing.inconsistent", operation="get_file_list",
+                offset=query.get("offset", 0), directory_id=query.get("cid"),
+                request_limit=query.get("limit"),
+                returned_items=len(result.get("data")) if isinstance(result, dict) and isinstance(result.get("data"), list) else None,
+                reported_offset=result.get("offset") if isinstance(result, dict) else None,
+                declared_count=result.get("count") if isinstance(result, dict) else None,
+                reason=str(exc), retryable=False,
+            )
             raise Open115Error(str(exc), code="file_tree_incomplete", operation="get_file_list") from exc
         # 115 places count/offset beside data. Returning data alone discards the
         # facts needed to reject incomplete pages before any cloud mutation.

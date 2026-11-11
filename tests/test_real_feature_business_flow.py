@@ -134,8 +134,12 @@ def test_real_features_confirm_v2_download_and_rename_once(tmp_path, monkeypatch
                 selected_path = stored["selected_path"]
                 release_receipt = {key: selected_release[key] for key in ("title", "indexer", "size")}
                 await click(f"release:{plan_id}:{release_id}")
+                assert not storage.added
+                await click(f"release_confirm:{plan_id}:{release_id}")
                 await drain("download")
-                async with asyncio.timeout(60):
+                # The large snapshot now verifies and cleans 1000 formerly
+                # retained empty branches through the real RPC boundary.
+                async with asyncio.timeout(180 if large_tree else 60):
                     while not rename_jobs.get(f"{plan_id}:release:{release_id}") or harness.coordinator.get(operation_id).state not in {"completed", "failed", "cancelled"}:
                         await asyncio.sleep(0.01)
                 await drain("rename")
@@ -148,7 +152,7 @@ def test_real_features_confirm_v2_download_and_rename_once(tmp_path, monkeypatch
                 assert downloaded["payload"]["selected_path"] == selected_path
                 assert downloaded["result"]["release"] == release_receipt
                 assert downloaded["result"]["media_metadata"] == contract
-                expected_state = "failed" if large_tree else "completed"
+                expected_state = "completed"
                 assert renamed["state"] == expected_state, renamed["result"].get("message")
                 assert harness.coordinator.get(operation_id).state == expected_state
                 assert harness.coordinator.get(operation_id).plugin_id == "rename"
@@ -159,8 +163,8 @@ def test_real_features_confirm_v2_download_and_rename_once(tmp_path, monkeypatch
                     assert downloaded["result"]["file_tree_snapshot"]["node_count"] == 1001
                     assert renamed["result"]["file_results"]["organized_files"] == 1
                     assert renamed["result"]["file_results"]["failed_files"] == 0
-                    # Empty directories unrelated to a media source remain protected;
-                    # failure to remove the source root must not claim full success.
+                    # Verified empty branches inside this resource are cleaned,
+                    # so they no longer keep its source root alive.
                 else:
                     assert storage.tree_reads == 2  # Retain independent post-cleanup verification.
                 assert frame_sizes and max(frame_sizes) <= 1_048_576

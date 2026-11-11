@@ -362,10 +362,11 @@ def test_attachment_equivalent_transaction_uses_directory_snapshot_and_fresh_nat
         "rename": 16,
         "create_dir_recursive": 1,
         "move_files_by_id": 1,
-        "get_file_list": 9,
+        "get_file_list": 6,
         "delete_single_file": 1,
     }
-    assert len(storage.calls) == 64  # Three extra empty-tail proofs for count-only pages.
+    # The two source scans and target verification stop at their declared counts.
+    assert len(storage.calls) == 61
     snapshot_paths = [
         path
         for _phase, method, args, _kwargs in storage.calls
@@ -379,7 +380,7 @@ def test_attachment_equivalent_transaction_uses_directory_snapshot_and_fresh_nat
         if phase == "pre_move" and method == "get_file_list"
     ]
     assert Counter(params["cid"] for params in pre_submit_lists) == {
-        "dir:/Downloads/Release": 4,
+        "dir:/Downloads/Release": 2,
         "dir:/Series/Show": 1,
     }
     post_move_lists = [
@@ -389,7 +390,7 @@ def test_attachment_equivalent_transaction_uses_directory_snapshot_and_fresh_nat
     ]
     assert Counter(params["cid"] for params in post_move_lists) == {
         "dir:/Downloads/Release": 2,
-        "dir:/Series/Show": 2,
+        "dir:/Series/Show": 1,
     }
     assert all(
         phase == "post_move"
@@ -398,7 +399,7 @@ def test_attachment_equivalent_transaction_uses_directory_snapshot_and_fresh_nat
     )
 
 
-def test_two_interleaved_source_parents_are_order_independent_at_77_calls_with_fresh_native_gate():
+def test_two_interleaved_source_parents_are_order_independent_with_fresh_native_gate():
     parents = [
         f"/Downloads/Release/Part-{index % 2 + 1}"
         for index in range(16)
@@ -414,10 +415,11 @@ def test_two_interleaved_source_parents_are_order_independent_at_77_calls_with_f
         "rename": 16,
         "create_dir_recursive": 1,
         "move_files_by_id": 1,
-        "get_file_list": 16,
+        "get_file_list": 11,
         "delete_single_file": 3,
     }
-    assert len(storage.calls) == 77  # Count-only pages retain five empty-tail proofs.
+    # Two scans per source parent and target verification need no empty tail.
+    assert len(storage.calls) == 72
     snapshot_paths = [
         path
         for _phase, method, args, _kwargs in storage.calls
@@ -435,8 +437,8 @@ def test_two_interleaved_source_parents_are_order_independent_at_77_calls_with_f
         if phase == "pre_move" and method == "get_file_list"
     ]
     assert Counter(params["cid"] for params in pre_submit_lists) == {
-        "dir:/Downloads/Release/Part-1": 4,
-        "dir:/Downloads/Release/Part-2": 4,
+        "dir:/Downloads/Release/Part-1": 2,
+        "dir:/Downloads/Release/Part-2": 2,
         "dir:/Series/Show": 1,
     }
     post_move_lists = [
@@ -448,5 +450,5 @@ def test_two_interleaved_source_parents_are_order_independent_at_77_calls_with_f
         "dir:/Downloads/Release": 1,
         "dir:/Downloads/Release/Part-1": 2,
         "dir:/Downloads/Release/Part-2": 2,
-        "dir:/Series/Show": 2,
+        "dir:/Series/Show": 1,
     }

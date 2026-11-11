@@ -111,6 +111,11 @@ class TreeScanStorage:
                 (not page.items and offset != expected_count)
             ):
                 raise ListingIntegrityError("listing scan contradicts its previously declared count")
+            if expected_count is not None and (
+                (page.has_more is True and offset + len(page.items) >= expected_count)
+                or (page.has_more is False and offset + len(page.items) != expected_count)
+            ):
+                raise ListingIntegrityError("listing continuation contradicts its previously declared count")
             previous_continuation = self.promised_more.get(directory_id)
             if previous_continuation is True and not page.items:
                 raise ListingIntegrityError("promised listing continuation returned no records")

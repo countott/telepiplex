@@ -56,7 +56,7 @@ class SearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
         buttons = result["actions"][0]["data"]["keyboard"]
         self.assertEqual(
             [button[0]["text"] for button in buttons],
-            ["Prowlarr", "TMDB", "TVDB", "退出"],
+            ["Prowlarr", "TMDB", "TVDB", "Provider 接口参数", "退出"],
         )
         for internal in ("timeout", "分类", "阈值", "MCP", "Indexer"):
             self.assertNotIn(internal, text)

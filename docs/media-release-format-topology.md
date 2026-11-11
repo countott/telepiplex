@@ -1,6 +1,6 @@
 # Telepiplex 片源格式识别拓扑
 
-本说明对应 Search 2.9.0。识别对象是搜索结果中的资源命名信息，包括标题、同资源排序标题和 magnet 的显示名；它们是资源声明，不是对实际视频文件的检测结果。
+本说明对应 Search 2.11.1。识别对象是搜索结果中的资源命名信息，包括标题、同资源排序标题和 magnet 的显示名；它们是资源声明，不是对实际视频文件的检测结果。
 
 源码入口：`features/search/src/telepiplex_search/release_formats.py`。格式家族、正则、别名示例集中在声明式目录中。结果展示由 `release_report.py` 消费解析后的字段；展示与评分共用 `release_source_profile`，复用目录规则并检查 WEB/BD REMUX 的显式来源前缀。
 

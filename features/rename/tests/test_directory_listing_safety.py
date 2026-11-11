@@ -70,6 +70,7 @@ def test_contradictory_empty_directory_never_deletes(response):
 @pytest.mark.parametrize("reader", [_complete_directory_items, _fresh_directory_items])
 @pytest.mark.parametrize("response", [
     {"list": [_node(1)], "count": 2, "has_more": False},
+    {"list": [_node(1)], "count": 1, "has_more": True},
     {"count": 1, "data": {"count": 2, "list": [_node(1)]}},
     {"offset": 0, "data": {"offset": 1, "list": [_node(1)]}},
     {"state": False, "list": [_node(1)]},
@@ -87,6 +88,37 @@ def test_list_only_short_pages_are_read_until_empty_tail(reader):
     storage = ListingStorage(lambda params: rows[params["offset"]:params["offset"] + 137])
     assert reader(storage, "directory") == rows
     assert [call["offset"] for call in storage.calls] == [0, 137, 274, 300]
+
+
+@pytest.mark.parametrize("reader", [_complete_directory_items, _fresh_directory_items])
+@pytest.mark.parametrize("count", [8, 13, 1000, 1001])
+def test_counted_directory_stops_at_declared_end_without_reading_tail(reader, count):
+    rows = [_node(i) for i in range(count)]
+
+    def response(params):
+        assert params["offset"] < count, "completed listing must not request a tail page"
+        return {"state": True, "code": 0, "data": rows[params["offset"]:params["offset"] + 1000],
+                "count": count, "offset": params["offset"]}
+
+    storage = ListingStorage(response)
+    assert reader(storage, "directory") == rows
+    assert [call["offset"] for call in storage.calls] == ([0, 1000] if count == 1001 else [0])
+
+
+@pytest.mark.parametrize("reader", [_complete_directory_items, _fresh_directory_items])
+def test_directory_stops_when_a_previously_declared_count_is_satisfied(reader):
+    rows = [_node(1), _node(2), _node(3)]
+
+    def response(params):
+        assert params["offset"] < 3, "prior count already proves completion"
+        page = {"list": rows[params["offset"]:params["offset"] + 1]}
+        if params["offset"] == 0:
+            page["count"] = 3
+        return page
+
+    storage = ListingStorage(response)
+    assert reader(storage, "directory") == rows
+    assert [call["offset"] for call in storage.calls] == [0, 1, 2]
 
 
 @pytest.mark.parametrize("reader", [_complete_directory_items, _fresh_directory_items])
@@ -110,12 +142,20 @@ def test_count_changes_during_scan_are_rejected(reader):
 
 
 @pytest.mark.parametrize("reader", [_complete_directory_items, _fresh_directory_items])
-def test_underreported_count_does_not_hide_an_unexpected_next_page(reader):
+def test_prior_directory_count_cannot_be_satisfied_with_an_explicit_continuation(reader):
     storage = ListingStorage(lambda params: {
-        "list": [_node(params["offset"] + 1)], "count": 1, "offset": params["offset"],
+        "list": [_node(params["offset"] + 1)], "has_more": True,
+        **({"count": 2} if params["offset"] == 0 else {}),
     })
     assert reader(storage, "directory") is None
     assert [call["offset"] for call in storage.calls] == [0, 1]
+
+
+@pytest.mark.parametrize("reader", [_complete_directory_items, _fresh_directory_items])
+def test_directory_page_cannot_exceed_declared_count(reader):
+    storage = ListingStorage({"list": [_node(1), _node(2)], "count": 1, "offset": 0})
+    assert reader(storage, "directory") is None
+    assert [call["offset"] for call in storage.calls] == [0]
 
 
 def test_real_115_client_preserves_outer_count_before_directory_cleanup(monkeypatch):

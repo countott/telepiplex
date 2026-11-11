@@ -180,6 +180,7 @@ class DirectoryCleanupSummary:
             "deleted_directories": self.deleted_directories,
             "retained_directories": self.retained_directories,
             "failed_directories": self.failed_directories,
+            "already_absent_directories": sum(item.state == "already_absent" for item in self.outcomes),
             "complete": self.complete,
             "deleted_paths": [
                 item.path
@@ -194,6 +195,8 @@ class DirectoryCleanupSummary:
                 "lookup_failed",
                 "delete_failed",
             }],
+            "retained_paths": [{"path": item.path, "reason_code": item.reason_code}
+                               for item in self.outcomes if item.state in {"retained_nonempty", "retained_unresolved"}],
         }
 
 
@@ -1599,6 +1602,7 @@ def cleanup_source_directories(
     selected_root: str,
     include_selected_root: bool,
     protected_roots: tuple[str, ...] = (),
+    source_directories: tuple[str, ...] = (),
 ) -> DirectoryCleanupSummary:
     """Freshly verify and clean source ancestors after file verification."""
 
@@ -1611,6 +1615,14 @@ def cleanup_source_directories(
     }
     candidates = set()
     expected_retained = set()
+    # Empty branches (e.g. Sample/Proof) need not be ancestors of a media file.
+    # Only consider directories from this resource's verified snapshot; never
+    # expand a category-root scan into an unrelated empty-folder sweep.
+    if root_value not in protected and root_value not in {"", "/"}:
+        for value in source_directories:
+            path = PurePosixPath(normalize_storage_path(value))
+            if root in path.parents and ".." not in path.parts:
+                candidates.add(str(path))
     for resolution in resolutions or []:
         path = PurePosixPath(
             normalize_storage_path(resolution.source_path)

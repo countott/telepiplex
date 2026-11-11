@@ -74,9 +74,9 @@ def classify_download_failure(exc: Exception, *, stage: str) -> DownloadFailure:
     if isinstance(exc, (TreeCapacityError, SnapshotError)) or provider_code == "file_tree_incomplete":
         return DownloadFailure(
             code="download_tree_capacity_exceeded" if isinstance(exc, TreeCapacityError) else "download_tree_incomplete",
-            summary="下载文件完整性或容量检查未通过，未交给 rename。",
+            summary="下载已完成，但文件列表校验未通过，尚未开始整理。" if safe_stage == "cleaning_files" and provider_code == "file_tree_incomplete" else "下载文件完整性或容量检查未通过，未交给 rename。",
             detail=detail,
-            remedy="请检查下载目录或拆分资源后重试；已执行的清理记录见任务详情。",
+            remedy="请核对 115 中已下载的文件；列表持续不一致时稍后重试整理，无需重复下载。" if provider_code == "file_tree_incomplete" else "请检查下载目录或拆分资源后重试；已执行的清理记录见任务详情。",
             stage=safe_stage, provider_code=provider_code,
             provider_operation=provider_operation,
         )
