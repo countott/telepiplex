@@ -1021,6 +1021,14 @@ class PluginManager:
     ) -> ActiveRelease:
         staged = None
         try:
+            # Validate against the live route table before creating a release or
+            # installing its environment. Activation prepares again with the real
+            # client; this placeholder is never committed or called.
+            self.router.prepare_activation(verified.manifest.plugin_id,
+                                           verified.manifest, object())
+            reusable = await asyncio.to_thread(self.store.reusable_release, verified)
+            if reusable is not None:
+                return reusable
             staged = await asyncio.to_thread(self.store.stage, verified)
             await self._venv_installer(staged)
             return await asyncio.to_thread(

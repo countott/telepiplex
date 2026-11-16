@@ -40,7 +40,7 @@ The automatic task ends with file organization. Plex scans are initiated separat
 | `sync` | Manually manage Plex scans and metadata enhancements | None | [Module guide](features/sync/README.md) |
 | `caption` | Chinese external subtitles after download, from a library, or by query | `download`, `search`, `rename` | [Module guide](features/caption/README.md) |
 
-For this centralized configuration upgrade, use Host 3.10.0 / Host API 1.10 with Caption 1.3.5 and the Feature versions listed below. Each Feature bundles SDK 2.3.0.
+For this centralized configuration upgrade, use Host 3.10.1 / Host API 1.10 with Caption 1.3.5 and the Feature versions listed below. Each Feature bundles SDK 2.3.0.
 
 For the complete search and organization flow, install `download → search → rename` in that order. Install `sync` as needed. Install `caption` after Rename to add external subtitle lookup before organization, library selection through `/caption` or `/caption scan`, and standalone `/caption Title Year` queries.
 
@@ -114,6 +114,8 @@ A save directory is entered in two steps: its button label, then its actual path
 Both save directories and category destinations are **paths inside 115**. `features.download.save_directories` selects the offline destination. `shared.category_folder` supplies the same four category routes to Search, Rename and Sync. Shared directories can be edited in Telegram; edit other advanced settings in the main YAML and use `/reload`. Package defaults and schemas supply validation and missing values. Host-generated runtime snapshots are not editing entry points.
 
 When upgrading, retain the existing main file rather than replacing it with the new template. The first startup imports old `/config/plugins/<plugin_id>/config.yaml` files and retains the originals; subsequent operations use only the main file. Conflicting category paths or nonempty TMDB credentials stop migration and identify the relevant fields without exposing secrets. Central mode requires Download 2.3.0 or a newer compatible release; older Download versions are asked to upgrade rather than writing credentials to a disposable snapshot. Code rollback retains current settings and Tokens, and fails if the target schema cannot accept them.
+
+Host 3.10.1 fixes retries after out-of-order upgrades. Dependencies are checked before preparing a release. A previously committed but inactive version can resume activation when its package contents and checksum match, rather than remaining blocked by `release_exists`. No version-directory deletion or configuration reset is needed. Update Download before Search, Rename and Caption; Sync can update independently. Previously failed Search 2.11.2 and Rename 2.4.6 updates can retry their original versions after the Host upgrade, without republishing Feature packages.
 
 Wikipedia, Wikidata, Douban, and AniList do not require API Keys. search has no AI configuration. rename uses AI only for file mappings that rules cannot resolve; AI cannot confirm work identity, override external metadata, or authorize deletion. Saving configuration through Telegram validates it and switches the running instance; a failed switch restores the old configuration and routes.
 
@@ -273,7 +275,7 @@ This update centralizes configuration in the main YAML after removing unused con
 
 | Component | Version |
 | --- | --- |
-| Host | `3.10.0` |
+| Host | `3.10.1` |
 | SDK | `2.3.0` |
 | `download` | `2.3.0` |
 | `search` | `2.11.2` |

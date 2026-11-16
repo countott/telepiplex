@@ -626,7 +626,7 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret", str(raised.exception))
         self.assertIsNone(self.store.active("broken"))
 
-    async def test_missing_capability_stops_shadow_and_does_not_activate(self):
+    async def test_missing_capability_does_not_prepare_or_start_candidate(self):
         from app.runtime.plugin_manager import PluginOperationError
 
         with self.assertRaises(PluginOperationError) as raised:
@@ -639,7 +639,9 @@ class PluginManagerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.code, "missing_capability")
         self.assertIsNone(self.store.active("consumer"))
-        self.assertIn(("consumer", "1.0.0"), self.supervisor.stopped)
+        self.assertEqual(self.supervisor.instances, [])
+        self.assertFalse((self.store.root / "consumer").exists())
+        self.assertEqual(list(self.store.staging_root.iterdir()), [])
         self.assertIsNone(self.router.command_route("consume"))
 
     async def test_disable_and_enable_switch_routes_without_host_restart(self):

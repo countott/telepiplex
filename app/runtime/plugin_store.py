@@ -462,6 +462,42 @@ class PluginStore:
             raise StoreError("invalid_staging", "release is not in this store staging area")
         shutil.rmtree(staged.path, ignore_errors=True)
 
+    def reusable_release(self, artifact: VerifiedArtifact) -> ActiveRelease | None:
+        """Read an identical committed candidate without rewriting immutable files.
+
+        Activation can fail after commit. Only the original verified package may
+        retry that version; missing metadata or damaged payloads require operator
+        attention rather than silently replacing an existing release.
+        """
+        manifest = artifact.manifest
+        target = self._plugin_root(manifest.plugin_id) / "releases" / manifest.version
+        if not target.exists() and not target.is_symlink():
+            return None
+        try:
+            verified = verify_tpx(artifact.path, artifact.sha256)
+            metadata = json.loads((target / ".artifact.json").read_text(encoding="utf-8"))
+            if (target.is_symlink() or not target.is_dir()
+                    or not isinstance(metadata, dict)
+                    or metadata.get("artifact_sha256") != verified.sha256
+                    or _manifest_at(target) != verified.manifest):
+                raise ValueError("release identity differs")
+            # Match the verified inputs too: a recorded digest alone does not
+            # prove the files on disk still belong to that package.
+            with zipfile.ZipFile(verified.path, "r") as bundle:
+                for member in verified.members:
+                    installed = target / member
+                    if installed.is_symlink() or installed.read_bytes() != bundle.read(member):
+                        raise ValueError("release payload differs")
+            python = target / "venv/bin/python"
+            if not python.is_file() or not os.access(python, os.X_OK):
+                raise ValueError("release environment is missing")
+        except Exception:
+            raise StoreError("release_exists",
+                f"existing release cannot be safely reused: {manifest.version}") from None
+        return ActiveRelease(plugin_id=manifest.plugin_id, version=manifest.version,
+            path=target, manifest=verified.manifest, artifact_sha256=verified.sha256,
+            enabled=False)
+
     def activate(self, staged: StagedRelease) -> ActiveRelease:
         previous = self.active(staged.plugin_id)
         committed = self.commit(staged)
