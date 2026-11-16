@@ -178,6 +178,24 @@ class ReleaseCatalogGeneratorTest(unittest.TestCase):
         )
         self.assertEqual(download["requires"], [])
 
+    def test_mixed_package_floors_control_local_catalog_update_offers(self):
+        import asyncio
+        from app.runtime.plugin_catalog import PluginCatalog
+        from tests.mixed_config_releases import release
+        names = ("download", "search", "rename", "sync", "caption")
+        paths = [release(self.root, key, old=key != "search") for key in names]
+        catalog = build_catalog("local/telepiplex", "platform-v1.0.0", paths)
+        for key, floor, artifact in zip(names, ("1.10", "1.11", "1.9", "1.8", "1.9"), paths):
+            entry, = catalog["plugins"][key]["versions"].values()
+            self.assertEqual(entry["host_api"], f">={floor},<2.0")
+            self.assertEqual(entry["sha256"], hashlib.sha256(artifact.read_bytes()).hexdigest())
+        path = self.root / "catalog.yaml"
+        path.write_text(yaml.safe_dump(catalog))
+        reader = PluginCatalog(path, self.root/"cache")
+        installed = dict.fromkeys(names, "1.0.0")
+        for host, expected in (("1.10", set(names) - {"search"}), ("1.11", set(names))):
+            self.assertEqual({row.plugin_id for row in asyncio.run(reader.available_updates(installed, host))}, expected)
+
     def test_builds_catalog_from_main_source_identity(self):
         artifacts = [
             self._artifact(plugin_id, "main")

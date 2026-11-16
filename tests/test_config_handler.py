@@ -170,12 +170,12 @@ class ConfigHandlerTest(unittest.IsolatedAsyncioTestCase):
         route.client.request.side_effect = request
         context.application.bot_data["telepiplex_plugin_router"].plugin_route.return_value = route
         with patch("app.handlers.config_handler.init.check_user", return_value=True), \
-             patch("app.handlers.config_handler.handle_feature_result", new_callable=AsyncMock) as deliver:
+             patch("app.handlers.config_handler.deliver_feature_result", new_callable=AsyncMock) as deliver:
             await config_command(update, context)
             self.assertEqual(context.user_data["host_config_plugins"], ["search"])
             update.callback_query.data = "host-config-plugin:0"
             await select_config_plugin(update, context)
-        result = deliver.await_args.args[-1]
+        result = deliver.await_args.args[3]
         buttons = result["actions"][0]["data"]["keyboard"]
         self.assertTrue(any(b["callback_data"] == "search:config:apis" for row in buttons for b in row))
         self.assertNotIn("private-search-key", repr(result))
@@ -189,12 +189,12 @@ class ConfigHandlerTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             coordinator = InteractionCoordinator(Path(directory) / "host.db")
             self.addCleanup(coordinator.close)
-            route = SimpleNamespace(plugin_id="search", manifest=SimpleNamespace(callbacks=("search",)))
+            route = SimpleNamespace(plugin_id="search", client=object(), manifest=SimpleNamespace(callbacks=("search",)))
             router = Mock()
             router.plugin_route.return_value = route
             methods = ("send_message", "send_photo", "edit_message_text", "edit_message_media", "edit_message_caption", "edit_message_reply_markup")
             bot = SimpleNamespace(**{name: AsyncMock(return_value=SimpleNamespace(message_id=90)) for name in methods})
-            context = SimpleNamespace(application=SimpleNamespace(
+            context = SimpleNamespace(user_data={},application=SimpleNamespace(
                 bot_data={COORDINATOR_KEY: coordinator, ROUTER_KEY: router}, bot=bot,
             ))
             update = SimpleNamespace(
@@ -220,8 +220,20 @@ class ConfigHandlerTest(unittest.IsolatedAsyncioTestCase):
                 await deliver(await feature.callback({**owner, "payload": payload}))
             await deliver(await feature.message({**owner, "text": "nan"}))
             await deliver(await feature.message({**owner, "text": "123"}))
-            await deliver(await feature.callback({**owner, "payload": "config:field:prowlarr:api_key"}))
-            await deliver(await feature.message({**owner, "text": "new-private-key"}))
+            from tests.test_config_semantics_migration import contracts
+            defaults,schema=contracts()['search']
+            manager = Mock(central_config_enabled=True)
+            manager.store.active.return_value = object()
+            manager.store.config_defaults.return_value = defaults
+            manager.store.config_schema.return_value = schema
+            manager.store.central_config.read.return_value = {'config_version':3}
+            context.application.bot_data['telepiplex_plugin_manager']=manager
+            result=await feature.callback({**owner,'payload':'config:field:prowlarr:api_key'})
+            with patch('app.handlers.plugin_handler.init.check_user',return_value=True):
+                await handle_feature_result(update,context,route,result)
+            self.assertIsNone(coordinator.active(10,1))
+            self.assertEqual(context.user_data['host_shared_config'][(10,1)]['target'],'search_prowlarr')
+            self.assertIn('Prowlarr',update.effective_message.reply_text.await_args.args[0])
             bot.send_photo.assert_not_awaited()
 
     async def test_config_chooser_uses_exit_label_and_copy(self):

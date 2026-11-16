@@ -1,29 +1,12 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import time
-from urllib.parse import urlparse
 
 
 SESSION_TTL_SECONDS = 30 * 60
 
 def _owner(request: dict) -> tuple[int, int]:
     return int(request.get("chat_id") or 0), int(request.get("user_id") or 0)
-
-
-def _line(value) -> str:
-    value = str(value or "").strip().strip("`").strip('"').strip("'")
-    if not value or "\n" in value or "\r" in value:
-        raise ValueError("one non-empty line required")
-    return value
-
-
-def _url(value) -> str:
-    value = _line(value).rstrip("/")
-    parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("http(s) URL required")
-    return value
 
 
 class SyncConfigWizard:
@@ -88,75 +71,31 @@ class SyncConfigWizard:
         if action == "cancel":
             self.sessions.pop(key, None)
             return self._message("已退出 sync 配置。", "close", edit=True)
-        if session.get("stage") == "confirm" and action == "confirm":
-            patch = deepcopy(session["patch"])
-            self.sessions.pop(key, None)
-            return {
-                "actions": [],
-                "session": {"state": "close"},
-                "config_patch": patch,
-            }
-        if session.get("stage") == "choose" and action == "plex":
-            self._replace_session(key, {"stage": "plex_url", "values": {}})
-            return self._message("请发送 Plex 地址，例如 http://plex:32400。", "open", edit=True)
-        if session.get("stage") == "choose" and action in {"tmdb", "fanart"}:
-            self._replace_session(
-                key, {"stage": "provider_key", "section": action}
-            )
-            return self._message(
-                f"请发送 {action.upper()} API Key。发送 - 保留当前值。",
-                "open",
-                edit=True,
-            )
+        target = {"tmdb":"shared_tmdb","shared_tmdb":"shared_tmdb","plex":"sync_plex","fanart":"sync_fanart"}.get(action) or self._old_target(session)
+        if target:
+            return self._navigate(key,target)
         return self._message("⚠️ 配置操作与当前步骤不匹配。", "open")
 
-    def message(self, request: dict) -> dict:
+    def message(self, request):
         key = _owner(request)
         session = self._get_session(key)
-        if not session:
-            return self._message("⚠️ 配置会话已失效，请重新打开 /config。", "close")
-        raw = str(request.get("text") or "").strip()
-        stage = session.get("stage")
-        values = session.setdefault("values", {})
-        try:
-            if stage == "plex_url":
-                values["base_url"] = _url(raw)
-                session["stage"] = "plex_token"
-                return self._message("请发送 Plex Token。发送 - 保留当前值。", "open")
-            if stage == "plex_token":
-                values["token"] = self._secret(
-                    raw, (self.config.get("plex") or {}).get("token")
-                )
-                return self._finish(key, {"plex": deepcopy(values)})
-            if stage == "provider_key":
-                section = session["section"]
-                secret = self._secret(
-                    raw, (self.config.get(section) or {}).get("api_key")
-                )
-                return self._finish(key, {section: {"api_key": secret}})
-        except ValueError:
-            return self._message("⚠️ 输入无效，请按提示重新发送。", "open")
-        return self._message("⚠️ 配置会话已失效，请重新打开 /config。", "close")
+        target = self._old_target(session or {})
+        if target:
+            return self._navigate(key,target)
+        return self._message("请选择当前配置面板上的操作。", "open" if session else "close")
 
     @staticmethod
-    def _secret(raw: str, current) -> str:
-        return _line(current) if raw == "-" else _line(raw)
+    def _old_target(session):
+        for section,target in [("tmdb","shared_tmdb"),("fanart","sync_fanart"),("plex","sync_plex")]:
+            if section in (session.get("patch") or {}) or session.get("section")==section or str(session.get("stage")).startswith(section+"_"):
+                return target
+        return None
 
-    def _finish(self, key, patch: dict) -> dict:
-        self._replace_session(
-            key, {"stage": "confirm", "patch": deepcopy(patch)}
-        )
-        return {
-            "actions": [{
-                "kind": "send_message",
-                "text": "配置已收集，敏感值不会回显。确认保存并重新加载 Feature？",
-                "data": {"keyboard": [[
-                    {"text": "确认保存", "callback_data": "sync:config:confirm"},
-                    {"text": "退出", "callback_data": "sync:config:cancel"},
-                ]]},
-            }],
-            "session": {"state": "open"},
-        }
+    def _navigate(self,key,target):
+        self.sessions.pop(key,None)
+        result = self._message("请使用 /config 编辑此项基础配置。","close")
+        result["config_navigation"] = target
+        return result
 
     @staticmethod
     def _message(text: str, state: str, *, edit=False) -> dict:

@@ -59,45 +59,14 @@ class SyncConfigWizardTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(secret, text)
         self.assertIsNone(self.feature.service)
 
-    async def test_plex_flow_returns_only_address_and_token(self):
-        await self._start()
-        await self.feature.callback({
-            **self.owner, "namespace": "sync", "payload": "config:plex"
-        })
-        await self.feature.message({
-            **self.owner, "text": "http://plex:32400"
-        })
-        pending = await self.feature.message({
-            **self.owner, "text": "new-plex-token"
-        })
-        self.assertNotIn("config_patch", pending)
-        result = await self._confirm()
-
-        self.assertEqual(result["config_patch"], {
-            "plex": {
-                "base_url": "http://plex:32400",
-                "token": "new-plex-token",
-            },
-        })
-        self.assertEqual(result["session"]["state"], "close")
-
-    async def test_tmdb_and_fanart_each_return_only_api_key(self):
-        for section, expected in (
-            ("tmdb", "old-tmdb-key"),
-            ("fanart", "old-fanart-key"),
-        ):
-            with self.subTest(section=section):
-                await self._start()
-                await self.feature.callback({
-                    **self.owner,
-                    "namespace": "sync",
-                    "payload": f"config:{section}",
-                })
-                await self.feature.message({**self.owner, "text": "-"})
-                result = await self._confirm()
-                self.assertEqual(result["config_patch"], {
-                    section: {"api_key": expected},
-                })
+    async def test_basic_connections_open_host_editor_and_stale_confirm_cannot_write(self):
+        for action,target in [["plex","sync_plex"],["fanart","sync_fanart"]]:
+            await self._start()
+            result = await self.feature.callback({**self.owner, 'namespace':'sync', 'payload':'config:'+action})
+            self.assertEqual(result['config_navigation'],target)
+            self.assertEqual(result['session']['state'],'close')
+            self.assertNotIn('config_patch',result)
+            self.assertNotIn('config_patch',await self._confirm())
 
     async def test_removed_ai_section_cannot_start_a_configuration_flow(self):
         await self._start()
@@ -157,12 +126,9 @@ class SyncConfigWizardTest(unittest.IsolatedAsyncioTestCase):
         result = await self._start()
         self.assertEqual(result["operation"]["state"], "awaiting_input")
         self.assertEqual(len(exits(result)), 1)
-        result = await self.feature.callback({
-            **self.owner, "namespace": "sync", "payload": "config:plex",
-        })
-        self.assertEqual(len(exits(result)), 1)
-        result = await self.feature.message({**self.owner, "text": "bad-url"})
-        self.assertEqual(len(exits(result)), 1)
+        result = await self.feature.callback({**self.owner,"namespace":"sync","payload":"config:plex"})
+        self.assertEqual(result['session']['state'],'close')
+        self.assertEqual(len(exits(result)),0)
 
 
 if __name__ == "__main__":

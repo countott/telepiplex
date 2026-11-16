@@ -1,6 +1,6 @@
 # search Feature
 
-2.11.2 对齐随包 SDK 2.3.0；集中模式使用主配置投影，搜索业务策略保持。
+2.12.0 支持 1–300 秒的 TMDB、TVDB 和 AniList HTTP 超时。分类目录和共享 TMDB 凭据从 Host 配置页编辑。
 
 集中配置：Host 3.10.0 起统一编辑 `/config/config.yaml` 的 `features.search` 分区；公共目录和 TMDB 凭据位于 `shared`。Telegram `/config` 的修改写入同一主文件，安装包默认值和运行快照不作为独立编辑入口。
 
@@ -10,17 +10,17 @@
 
 2.10.0 在片源选择后增加原始详情确认：展示完整搜索标题、不同的排序标题、站点、大小、做种、发布时间、文件数、名称解析摘要和可用的原站详情入口。点击“确认下载”前不解析或提交下载链接；支持返回结果、退出，确认仍受任务所有者及所选资源约束。原始名称没有声明声道时继续显示未知，不把 FLAC 或 Multi-Audio 推断为立体声或环绕声。
 
-当前源码版本 2.11.2，配套 Caption 1.3.5。延续 `subtitle_context` 中已补充的已确认电影的参考时长和有明确季集对应的单集时长，供 Caption 检查截断字幕；不把剧集平均时长当作单集时长，也不把元数据时长当作视频实测时长。原始语言及 IMDb 编号继续提供，最小 v2 命名身份保持不变。
+当前源码版本 2.12.0，配套 Caption 1.4.0。延续 `subtitle_context` 中已补充的已确认电影的参考时长和有明确季集对应的单集时长，供 Caption 检查截断字幕；不把剧集平均时长当作单集时长，也不把元数据时长当作视频实测时长。原始语言及 IMDb 编号继续提供，最小 v2 命名身份保持不变。
 
 2.9.0 起将 `reject_keywords` 改为硬过滤，命中即从搜索结果排除，不再用默认负分代替拒绝。显式 `keyword_scores` 是完整分数表，省略的 `prefer_*` 和拒绝列表不再被默认回补；旧配置显式保留的 `prefer_*` 仍兼容，但新配置只需拒绝列表、关键词分和站点分。来源关键词 `BluRay`、`BDRip`、`WEB` 按实际识别的来源归一计分：蓝光别名只计一档，WEB-DL、WEBRip 和 WEBMux 统一为 WEB；`Remux` 分仅作用于明确蓝光来源，WEB REMUX 和来源不明的 REMUX 不受此项影响。其他关键词及内置做种、体积分保持原有规则。升级后应检查拒绝列表，不需要再为已拒绝关键词设置负分。
 
-搜索结果继续将网络来源简写为 `WEB`，蓝光来源简写为 `BD`；来源不明的 REMUX 保留原标签。展示和评分共用来源识别。[完整评分片段](examples/scoring.yaml) 可替换主配置 `features.search.search` 下的整个 `scoring` 段；默认模板提供较小的起点。格式识别详见 [格式识别拓扑](../../docs/media-release-format-topology.md)；未知字段保持未知，候选补充信息有冲突时不混用。
+搜索结果继续将网络来源简写为 `WEB`，蓝光来源简写为 `BD`；来源不明的 REMUX 保留原标签。展示和评分共用来源识别。[完整评分片段](examples/scoring.yaml) 可替换主配置 `features.search` 下的整个 `scoring` 段；默认模板提供较小的起点。格式识别详见 [格式识别拓扑](../../docs/media-release-format-topology.md)；未知字段保持未知，候选补充信息有冲突时不混用。
 
 2.7.0 增强片源报告中的音轨、视频编码和动态范围识别，兼容更多命名分隔符与格式别名。未提供的声道、编码和画面规格保持未知，不根据编码名称猜测声道数。
 
 2.6.2 修复下划线分隔片源的季集识别，以及 Special、Extras 等已确认剧名被误判为附加内容的问题。从根作品选择已完结季度后，先显示全季与单集菜单，再由用户确定范围；审计入口也只点击实际渲染的范围按钮。错误季集与真正的特别内容继续拒绝。
 
-当前版本：`2.11.2`；SDK：`2.3.0`；要求 Host API 1.8 / Host `3.8.0`。本次修复重复确认与电影接续入口，配合 Host `3.8.2` 修复最终身份海报覆盖。保留同剧集新任务入口和持久化元数据缓存。完整季集目录在选择范围之前保存，继续搜索生成新的任务、消息和下载幂等键。候选发现缓存 15 分钟，季集资料按连载 15 分钟／已完结 24 小时复用；用户确认上下文保留最多 7 天，过期目录沿已确认来源刷新。Prowlarr 片源结果不缓存。
+当前版本：`2.12.0`；SDK：`2.4.0`；要求 Host API 1.11 / Host `3.11.0`。已确认的作品不再重复确认，电影可接续下一步。保留同剧集新任务入口和持久化元数据缓存。完整季集目录在选择范围之前保存，继续搜索生成新的任务、消息和下载幂等键。候选发现缓存 15 分钟，季集资料按连载 15 分钟／已完结 24 小时复用；用户确认上下文保留最多 7 天，过期目录沿已确认来源刷新。Prowlarr 片源结果不缓存。
 
 search 2.11.2 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，并把人工确认候选冻结到持久状态。search 不调用 AI。用户原始片名只做空白归一化，不在 query 侧补写冒号、“篇”或别名；例如 `死神 千年血战` 由 Wikipedia 的排序结果承担匹配。规划期间先显示文字状态，不提前展示海报占位图；候选海报数据就绪后，Host 在原消息上更新海报和键盘，保留同一消息 ID。已知消息更新失败只重试原目标，不另发替代卡片。候选按钮第一次点击即进入不可重复消费的确认状态，Host 不改写 Telegram 的只读 callback 对象，而是从已持久化的 claim 恢复原始 payload；后台进度 revision 不会清除 claim，只有对应 Feature RPC 完成后才按 generation、token 和 message ID 原子释放。作品确认在后台执行，重复点击和同一 Telegram update 重放不再重复确认；失败后允许新的用户点击重试，取消后的迟到结果不能恢复旧任务。候选、正在确认和最终作品身份都属于 Host API 1.7 的同一条 `identity` 消息段；身份段封存后，Prowlarr 搜索结果才开启新的 `search` 消息，因此不会再出现两条有效身份卡片或两条仅后一条可点击的搜索结果。SDK 2.3.0 提供 v2-only 的最小 `media_metadata` 下游合同和 operation segment API。
 
@@ -42,7 +42,7 @@ search 2.11.2 使用 Wikipedia 与 Wikidata 的统一身份图确定根作品，
 
 结果按每页 5 条展示资源标题、大小、做种数、发布时间和索引器。默认最新优先，可按时间、标题、大小、Peers、索引器、抓取数、文件数、分类或协议排序；同一排序按钮再次点击切换升降序。排序与翻页只使用本次已获取的结果，不会重复请求索引器，也不受普通搜索的 12 条质量排序展示上限限制。Prowlarr 的搜索 API 没有通用排序参数，此处使用其返回字段实现同类排序；Peers 按 `seeders * 1000000 + leechers` 排序。同一资源来自不同索引器时保留独立行，按钮绑定稳定资源身份，不因重排选错资源。
 
-选择片源后，从 Search 已配置的 `category_folder` 选择保存目录，再复用 `download.provider.submit`、链接转磁力、任务所有权交接和幂等提交。Usenet 或缺少下载链接的结果仍可查看，但不提供投递按钮。原文 query 不是已确认的媒体身份，因此提交中省略 `media_metadata`；下载完成后，rename 复用现有文件识别和媒体确认流程。能搜索到资源不代表 rename 一定能识别，无法确定身份时仍按现有流程处理。
+选择片源后，从公共配置的 `shared.directory_roles.media_categories` 选择保存目录，再复用 `download.provider.submit`、链接转磁力、任务所有权交接和幂等提交。Usenet 或缺少下载链接的结果仍可查看，但不提供投递按钮。原文 query 不是已确认的媒体身份，因此提交中省略 `media_metadata`；下载完成后，rename 复用现有文件识别和媒体确认流程。能搜索到资源不代表 rename 一定能识别，无法确定身份时仍按现有流程处理。
 
 `/pr` 的输入、进度、排序、目录选择与退出使用同一条文字 `search` 消息段。取消后不会显示迟到的搜索结果；无法解析下载链接时移除该项并返回原文结果列表。任务状态保存在 Search 进程内，重启后需重新发起搜索。
 
@@ -105,10 +105,10 @@ search 提供 `media.search.resolve_metadata` 与持久冻结的 `media.search.c
 
 运行集中模式配置位于主文件的 `features.search` 分区。Wikipedia、Wikidata、豆瓣和 AniList 无需 API Key；P4529、P8729、P4086 与 IMDb ID 都直接来自 Wikidata/来源事实，不接入 IMDb 或 MyAnimeList API。TMDB 使用 API Read Access Token，TVDB 使用自身凭据。search 不再包含 AI 配置项。2.11.1 沿用配置 schema v2，并继续通过包内声明安全删除 1.8.0 遗留的顶层 `ai` 配置段，其余用户配置保持不变；集中模式回滚代码时保留主配置中的最新设置，目标 schema 不兼容则拒绝回滚。
 
-在 `/config → search → Provider 接口参数`（也可从 `/search_config` 进入）选择 Provider 和字段，输入新值后可继续修改其他字段或 Provider，再点击“保存修改 → 确认保存”。原有 Prowlarr、TMDB、TVDB 快速配置入口保留。
+从 `/search_config` 可打开 Prowlarr、TMDB、TVDB 快速入口或 Provider 接口参数。基础连接、共享 TMDB 凭据和元数据超时等入口会转到相应的 Host 配置页；其余搜索策略仍在插件向导中编辑。
 
 - Prowlarr：地址、API Key、总超时、单站超时、状态超时、站点 IDs、优先站点 IDs、其他站点延迟和结果数量。
-- TMDB、TVDB：启停、API 地址、凭据和超时；TVDB 另支持 Subscriber PIN。
+- TMDB、TVDB：启停、API 地址和超时；TMDB 凭据由 Search 与 Sync 共享，TVDB 使用自身凭据及可选 Subscriber PIN。
 - AniList：启停、GraphQL 地址和超时。
 - Wikipedia：启停、语言顺序、超时、请求间隔、查询数及限流冷却。
 - 豆瓣：启停、超时、缓存时长、并发数和连续失败冷却参数。
@@ -173,7 +173,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:sdk/src \
 构建示例：
 
 ```bash
-python tools/build_feature.py features/search /tmp/search-2.11.2.tpx \
+python tools/build_feature.py features/search /tmp/search-2.12.0.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

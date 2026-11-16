@@ -1,4 +1,5 @@
 import json
+import pytest
 from unittest.mock import patch
 
 from telepiplex_rename import ai as ai_module
@@ -21,6 +22,30 @@ class _Response:
 
     def json(self):
         return self._payload
+
+
+@pytest.mark.parametrize("settings,want", [
+    ({"base_url": "https://alias.example/v1"}, "https://alias.example/v1/chat/completions"),
+    ({"base_url": "https://alias.example/v1", "api_url": "https://canonical.example"},
+     "https://canonical.example/chat/completions"),
+])
+def test_ai_legacy_url_reaches_actual_http_request(settings, want):
+    runtime_context.configure({"ai": {"enable": True, "api_key": "secret", "model": "test", **settings}})
+    from telepiplex_rename.processor import _has_ai_episode_inference_config
+    assert ai_module.check_ai_api_available()
+    assert _has_ai_episode_inference_config()
+    with patch.object(ai_module.requests, "post", return_value=_Response({"choices": []})) as post:
+        chat_completion("test")
+    assert post.call_args.args[0] == want
+    assert post.call_args.kwargs["timeout"] == 60
+
+
+def test_explicit_empty_ai_url_disables_episode_inference_despite_legacy_alias():
+    from telepiplex_rename.processor import _has_ai_episode_inference_config
+    runtime_context.configure({"ai": {"api_url": "", "base_url": "https://old.example",
+                                     "api_key": "secret", "model": "test"}})
+    assert not ai_module.check_ai_api_available()
+    assert not _has_ai_episode_inference_config()
 
 
 class _RecordingLogger:

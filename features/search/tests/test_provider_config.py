@@ -35,40 +35,33 @@ class ProviderConfigTest(unittest.IsolatedAsyncioTestCase):
         return await self.click("confirm")
 
     async def test_batch_edits_across_providers_return_only_staged_fields(self):
-        await self.set_field("tmdb", "base_url", "https://tmdb.example/api/3/")
-        preview = await self.set_field("tmdb", "api_key", "new-private-token")
-        self.assertNotIn("new-private-token", repr(preview))
-        self.assertNotIn("original-tmdb-secret", repr(preview))
+        await self.set_field("tmdb","enable","off")
         await self.click("apis")
         await self.set_field("prowlarr", "timeout", "123")
         self.assertEqual(self.feature.config["search"]["prowlarr"]["timeout"], 200)
         saved = await self.save()
         self.assertEqual(saved["config_patch"], {
-            "metadata": {"tmdb": {"base_url": "https://tmdb.example/api/3", "api_key": "new-private-token"}},
+            "metadata": {"tmdb": {"enable":False}},
             "search": {"prowlarr": {"timeout": 123}},
         })
         self.assertEqual(saved["actions"], [])
         self.assertEqual(saved["session"]["state"], "close")
 
     async def test_secret_clear_keep_and_enable_are_explicit(self):
-        preview = await self.set_field("tvdb", "subscriber_pin", "clear")
-        self.assertNotIn("original-pin", repr(preview))
-        await self.set_field("prowlarr", "api_key", "-")
-        await self.set_field("tmdb", "enable", "off")
-        saved = await self.save()
-        self.assertEqual(saved["config_patch"]["metadata"]["tvdb"], {"subscriber_pin": ""})
-        self.assertEqual(saved["config_patch"]["metadata"]["tmdb"], {"enable": False})
-        self.assertEqual(saved["config_patch"]["search"]["prowlarr"]["api_key"], "original-prowlarr-secret")
+        for provider,name,target in [('tvdb','subscriber_pin','search_tvdb'),('prowlarr','api_key','search_prowlarr'),('tmdb','timeout','search_tmdb_endpoint'),('anilist','endpoint','search_anilist')]:
+            await self.feature.command({**self.owner,'command':'search_config'})
+            result=await self.click(f'field:{provider}:{name}')
+            self.assertEqual(result['config_navigation'],target)
+            self.assertNotIn('config_patch',result)
+            self.assertNotIn('original-pin',repr(result))
 
     async def test_public_api_endpoint_languages_and_indexer_types(self):
-        await self.set_field("anilist", "endpoint", "https://anilist.example/graphql")
         await self.set_field("wikipedia", "languages", "zh, en, zh")
         await self.set_field("prowlarr", "indexer_ids", "3,1,3")
         await self.set_field("prowlarr", "first_wave_indexer_ids", "[3, 1, 3]")
         await self.set_field("prowlarr", "wave_delay", "0.5")
         patch = (await self.save())["config_patch"]
         self.assertEqual(patch["metadata"]["wikipedia"]["languages"], ["zh", "en"])
-        self.assertEqual(patch["metadata"]["anilist"]["endpoint"], "https://anilist.example/graphql")
         self.assertEqual(patch["search"]["prowlarr"], {
             "indexer_ids": "3,1", "first_wave_indexer_ids": [3, 1], "wave_delay": 0.5,
         })
@@ -96,8 +89,6 @@ class ProviderConfigTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_inputs_do_not_change_the_draft(self):
         for provider, field, invalid in (
-            ("tmdb", "base_url", "not-a-url"), ("tmdb", "base_url", "https://user:secret@example.com"),
-            ("tmdb", "base_url", "https://example.com:invalid"),
             ("prowlarr", "timeout", "nan"), ("prowlarr", "timeout", "inf"),
             ("prowlarr", "timeout", "601"), ("prowlarr", "result_limit", "1.5"),
             ("prowlarr", "first_wave_indexer_ids", "-2"), ("prowlarr", "indexer_ids", "0"),
@@ -108,7 +99,7 @@ class ProviderConfigTest(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(self.feature.config_wizard.sessions[(10, 1)].get("api_patch"))
 
     async def test_foreign_owner_cancel_and_stale_save_never_commit(self):
-        await self.set_field("tmdb", "api_key", "new-private-token")
+        await self.set_field("prowlarr", "timeout", "300")
         foreign = await self.click("api_save", user_id=2)
         self.assertEqual(foreign["session"]["state"], "close")
         await self.click("cancel")
@@ -128,7 +119,7 @@ class ProviderConfigTest(unittest.IsolatedAsyncioTestCase):
         results.append(await self.click("field:prowlarr:timeout"))
         results.append(await self.feature.message({**self.owner, "text": "nan"}))
         results.append(await self.feature.message({**self.owner, "text": "123"}))
-        results.append(await self.set_field("prowlarr", "api_key", "new-private-token"))
+        results.append(await self.set_field("prowlarr", "result_limit", "8"))
         results.append(await self.click("api_save"))
         for result in results:
             with self.subTest(stage=result["operation"]["stage"]):
@@ -153,3 +144,18 @@ class ProviderConfigTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(field_schema["maximum"], maximum)
                     if kind == "secret":
                         self.assertTrue(field_schema["writeOnly"])
+
+    def test_advanced_prompt_uses_the_release_contract(self):
+        import tempfile
+        import yaml
+        from telepiplex_search.config_wizard import provider_contract
+        source=Path(__file__).resolve().parents[1]
+        defaults=yaml.safe_load((source/'config.default.yaml').read_text())
+        schema=json.loads((source/'config.schema.json').read_text())
+        defaults['search']['prowlarr']['result_limit']=20
+        schema['properties']['search']['properties']['prowlarr']['properties']['result_limit']['maximum']=25
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            (root/'config.default.yaml').write_text(yaml.safe_dump(defaults))
+            (root/'config.schema.json').write_text(json.dumps(schema))
+            self.assertEqual(provider_contract(root)['prowlarr'][2]['result_limit'][2:],(20,1,25))

@@ -13,6 +13,19 @@ from telepiplex_caption.providers import AssrtProvider, HttpResponse, ProviderEr
 from test_quality import make_ass, make_srt
 
 
+def test_missing_provider_budget_matches_package_default_at_wait_boundary(monkeypatch):
+    budgets = []
+    original = asyncio.wait_for
+    async def wait_for(awaitable, timeout):
+        budgets.append(timeout)
+        return await original(awaitable, timeout)
+    monkeypatch.setattr(asyncio, "wait_for", wait_for)
+    provider = FixtureProvider()
+    retrieve(provider)
+    assert 45 in budgets
+    assert 30 not in budgets
+
+
 def _zip(*documents):
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:

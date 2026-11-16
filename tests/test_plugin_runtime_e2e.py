@@ -32,7 +32,9 @@ class PluginRuntimeEndToEndTest(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temp.name)
         self.wheels = self.root / "wheels"
         self.wheels.mkdir()
-        self.sdk_wheel = await asyncio.to_thread(self._build_wheel, SDK_SOURCE, self.wheels / "sdk")
+        sdk = shutil.copytree(SDK_SOURCE, self.root / "sdk-source",
+                              ignore=shutil.ignore_patterns("build", "dist", "*.egg-info", "__pycache__"))
+        self.sdk_wheel = await asyncio.to_thread(self._build_wheel, sdk, self.wheels / "sdk")
         with zipfile.ZipFile(self.sdk_wheel) as archive:
             self.assertIn(
                 "telepiplex_plugin_sdk/diagnostic-event-v1.schema.json",

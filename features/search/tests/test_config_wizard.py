@@ -64,63 +64,16 @@ class SearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("old-tvdb-key", text)
         self.assertNotIn("old-tmdb-key", text)
 
-    async def test_prowlarr_flow_returns_only_public_patch_and_forces_enabled(self):
-        await self._start()
-        selected = await self.feature.callback({
-            **self.owner,
-            "namespace": "search",
-            "payload": "config:prowlarr",
-        })
-        self.assertIn("Prowlarr 地址", selected["actions"][0]["text"])
+    async def test_basic_connections_open_host_editor_and_stale_confirm_cannot_write(self):
+        for action,target in [["prowlarr","search_prowlarr"],["tvdb","search_tvdb"]]:
+            await self._start()
+            result = await self.feature.callback({**self.owner, 'namespace':'search', 'payload':'config:'+action})
+            self.assertEqual(result['config_navigation'],target)
+            self.assertEqual(result['session']['state'],'close')
+            self.assertNotIn('config_patch',result)
+            self.assertNotIn('config_patch',await self._confirm())
 
-        await self.feature.message({**self.owner, "text": "http://prowlarr:9696"})
-        pending = await self.feature.message({
-            **self.owner,
-            "text": "new-prowlarr-key",
-        })
-        self.assertNotIn("config_patch", pending)
-        self.assertEqual(pending["session"]["state"], "open")
-        result = await self._confirm()
-
-        self.assertEqual(result["session"]["state"], "close")
-        self.assertEqual(result["actions"], [])
-        self.assertEqual(result["config_patch"], {
-            "search": {
-                "enable": True,
-                "prowlarr": {
-                    "base_url": "http://prowlarr:9696",
-                    "api_key": "new-prowlarr-key",
-                },
-            },
-        })
-
-    async def test_tvdb_flow_supports_enable_and_preserving_secret_values(self):
-        await self._start()
-        await self.feature.callback({
-            **self.owner,
-            "namespace": "search",
-            "payload": "config:tvdb",
-        })
-        await self.feature.callback({
-            **self.owner,
-            "namespace": "search",
-            "payload": "config:boolean:on",
-        })
-        await self.feature.message({**self.owner, "text": "-"})
-        await self.feature.message({**self.owner, "text": "new-pin"})
-        result = await self._confirm()
-
-        self.assertEqual(result["config_patch"], {
-            "metadata": {
-                "tvdb": {
-                    "enable": True,
-                    "api_key": "old-tvdb-key",
-                    "subscriber_pin": "new-pin",
-                },
-            },
-        })
-
-    async def test_tmdb_flow_supports_read_access_token(self):
+    async def test_tmdb_flow_updates_only_local_enable_gate(self):
         await self._start()
         await self.feature.callback({
             **self.owner,
@@ -132,69 +85,26 @@ class SearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
             "namespace": "search",
             "payload": "config:boolean:on",
         })
-        await self.feature.message({
-            **self.owner,
-            "text": "new-tmdb-read-access-token",
-        })
         result = await self._confirm()
 
         self.assertEqual(result["config_patch"], {
             "metadata": {
                 "tmdb": {
                     "enable": True,
-                    "api_key": "new-tmdb-read-access-token",
                 },
             },
         })
 
-    async def test_cancel_at_confirmation_does_not_submit_patch(self):
-        await self._start()
-        await self.feature.callback({
-            **self.owner,
-            "namespace": "search",
-            "payload": "config:prowlarr",
-        })
-        await self.feature.message({**self.owner, "text": "http://prowlarr:9696"})
-        pending = await self.feature.message({**self.owner, "text": "new-secret"})
-        self.assertNotIn("new-secret", repr(pending))
-
-        cancelled = await self.feature.callback({
-            **self.owner,
-            "namespace": "search",
-            "payload": "config:cancel",
-        })
-
-        self.assertNotIn("config_patch", cancelled)
-        self.assertEqual(cancelled["session"]["state"], "close")
-        self.assertEqual(
-            cancelled["actions"][0]["text"],
-            "已退出 search 配置。",
-        )
-
-    async def test_expired_confirmation_cannot_submit_patch(self):
-        with patch(
-            "telepiplex_search.config_wizard.time.monotonic",
-            return_value=100,
-        ):
-            await self._start()
-            await self.feature.callback({
-                **self.owner,
-                "namespace": "search",
-                "payload": "config:prowlarr",
-            })
-            await self.feature.message({
-                **self.owner, "text": "http://prowlarr:9696"
-            })
-            await self.feature.message({**self.owner, "text": "new-secret"})
-
-        with patch(
-            "telepiplex_search.config_wizard.time.monotonic",
-            return_value=2000,
-        ):
-            expired = await self._confirm()
-
-        self.assertNotIn("config_patch", expired)
-        self.assertEqual(expired["session"]["state"], "close")
+    async def test_cancel_and_expired_local_confirmation_do_not_submit_patch(self):
+        for expired in (True,False):
+            with patch("telepiplex_search.config_wizard.time.monotonic",return_value=100):
+                await self._start()
+                await self.feature.callback({**self.owner,'payload':'config:tmdb'})
+                await self.feature.callback({**self.owner,'payload':'config:boolean:off'})
+                if not expired:
+                    await self.feature.callback({**self.owner,'payload':'config:cancel'})
+            with patch("telepiplex_search.config_wizard.time.monotonic",return_value=2000):
+                self.assertNotIn('config_patch',await self._confirm())
 
     async def test_every_open_configuration_step_has_one_exit(self):
         def exits(result):
@@ -208,20 +118,9 @@ class SearchConfigWizardTest(unittest.IsolatedAsyncioTestCase):
 
         result = await self._start()
         self.assertEqual(len(exits(result)), 1)
-        result = await self.feature.callback({
-            **self.owner,
-            "namespace": "search",
-            "payload": "config:prowlarr",
-        })
-        self.assertEqual(len(exits(result)), 1)
-        result = await self.feature.message({**self.owner, "text": "bad-url"})
-        self.assertEqual(len(exits(result)), 1)
-        result = await self.feature.message({
-            **self.owner, "text": "http://prowlarr:9696"
-        })
-        self.assertEqual(len(exits(result)), 1)
-        result = await self.feature.message({**self.owner, "text": "new-key"})
-        self.assertEqual(len(exits(result)), 1)
+        result = await self.feature.callback({**self.owner,"namespace":"search","payload":"config:prowlarr"})
+        self.assertEqual(result['session']['state'],'close')
+        self.assertEqual(len(exits(result)),0)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ def _ensure_module_paths():
 
 _ensure_module_paths()
 
+from app.runtime.config_defaults import LOG_LEVEL
 from app.utils.logger import Logger
 
 
@@ -56,7 +57,7 @@ def create_logger():
         "error": logging.ERROR,
         "critical": logging.CRITICAL,
     }
-    log_level = str(bot_config.get("log_level", "info")).lower()
+    log_level = str(bot_config.get("log_level", LOG_LEVEL)).lower()
     logger = Logger(
         level=level_map.get(log_level, logging.INFO),
         debug_model=debug_mode,

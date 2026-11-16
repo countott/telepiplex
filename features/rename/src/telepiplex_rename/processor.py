@@ -18,6 +18,7 @@ from telepiplex_plugin_sdk.media_metadata_v2 import (
 )
 from .models import DownloadCompletedEvent, PostDownloadResult
 from .ai import (
+    ai_api_url,
     explain_unresolved_episode_files_with_ai,
     infer_movie_cleanup_plan_with_ai,
     infer_tvdb_episode_plan_with_ai,
@@ -603,7 +604,7 @@ def _has_ai_episode_inference_config():
     return bool(
         ai_config.get("enable", True)
         and
-        str(ai_config.get("api_url") or ai_config.get("base_url") or "").strip()
+        ai_api_url(ai_config)
         and str(ai_config.get("api_key") or "").strip()
         and str(ai_config.get("model") or "").strip()
     )

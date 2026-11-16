@@ -54,6 +54,44 @@ def test_token_only_metadata_api_not_download():
     assert 'headers' not in provider.transport.calls[1][1]
 
 
+@pytest.mark.parametrize('override,want_token,ttl', [
+    ({}, 'inherited', 120),
+    ({'github_token': 'inherited'}, 'inherited', 120),
+    ({'github_token': 'different'}, 'different', 120),
+    ({'github_token': ''}, '', 120),
+    ({'cache_ttl_seconds': 300}, 'inherited', 300),
+])
+def test_host_github_projection_reaches_real_header_and_cache(monkeypatch, override, want_token, ttl):
+    from pathlib import Path
+    import yaml
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3]))
+    from app.runtime.config_projection import project_feature_config, ProjectionContract
+    root = Path(__file__).resolve().parents[1]
+    defaults = yaml.safe_load((root / 'config.default.yaml').read_text())
+    schema = json.loads((root / 'config.schema.json').read_text())
+    snapshot = project_feature_config('caption', defaults, document={
+        'config_version': 3, 'features': {'caption': {
+            'provider_defaults': {'github': {'github_token': 'inherited', 'cache_ttl_seconds': 120}},
+            'providers': {'mingy': {**override, 'max_release_pages': 2}},
+        }},
+    }, contract=ProjectionContract(schema))
+    clock = [0]
+    monkeypatch.setattr('telepiplex_caption.catalog_providers.time.monotonic', lambda: clock[0])
+    transport = Transport([], [])
+    provider = MingYProvider(snapshot['providers']['mingy'], transport=transport)
+    provider._api('releases')
+    headers = transport.calls[0][1]['headers']
+    assert headers.get('Authorization', '') == ('Bearer ' + want_token if want_token else '')
+    clock[0] = ttl - 1
+    provider._api('releases')
+    assert len(transport.calls) == 1
+    clock[0] = ttl + 1
+    provider._api('releases')
+    assert len(transport.calls) == 2
+    assert snapshot['providers']['mingy']['max_release_pages'] == 2
+    assert snapshot['providers']['local_archive']['cache_ttl_seconds'] == 300
+
+
 def test_mingy_excludes_font_asset():
     url = 'https://github.com/MingYSub/SubsArchive/releases/download/202507/Example.Fonts.7z'
     provider = MingYProvider(transport=Transport([{'tag_name': '202507', 'body': f'| Example | [Example]({url}) |', 'assets': [{'name': 'Example.Fonts.7z', 'browser_download_url': url}]}]))

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
+from app.runtime.config_defaults import PLUGIN_DEFAULTS
+
 
 class PluginUpdateMonitor:
     """Periodically discover Feature updates and notify once per transition."""
@@ -12,7 +14,7 @@ class PluginUpdateMonitor:
         manager,
         notify: Callable[[object], Awaitable[bool]],
         *,
-        interval: float = 21600,
+        interval: float = PLUGIN_DEFAULTS["catalog_refresh_interval"],
         logger=None,
     ):
         self.manager = manager

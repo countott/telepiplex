@@ -99,12 +99,8 @@ async def capability(feature, request):
 async def scan_library(feature, payload):
     root = str(payload.get("root_path") or "")
     if not root:
-        roots = []
-        for item in feature.config.get("category_folder") or []:
-            if isinstance(item, dict) and item.get("path"):
-                roots.append({"name": str(item.get("name") or item.get("category_kind") or item["path"]), "path": item["path"]})
-        if feature.config.get("unorganized_path"):
-            roots.append({"name": "未整理", "path": feature.config["unorganized_path"]})
+        from .inventory_roots import inventory_roots
+        roots = [{"name": item["name"], "path": item["path"]} for item in inventory_roots(feature.config)]
         return {"roots": roots}
     root = absolute_path(root)
     try:

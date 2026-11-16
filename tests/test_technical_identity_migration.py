@@ -13,11 +13,11 @@ from telepiplex_plugin_sdk import FeatureRuntime
 
 ROOT = Path(__file__).resolve().parents[1]
 FEATURES = {
-    "search": ("telepiplex_search", "2.11.2", "2.3.0"),
-    "download": ("telepiplex_download", "2.3.0", "2.3.0"),
-    "rename": ("telepiplex_rename", "2.4.6", "2.3.0"),
-    "sync": ("telepiplex_sync", "2.1.3", "2.3.0"),
-    "caption": ("telepiplex_caption", "1.3.5", "2.3.0"),
+    "search": ("telepiplex_search", "2.12.0", "2.4.0"),
+    "download": ("telepiplex_download", "2.4.0", "2.4.0"),
+    "rename": ("telepiplex_rename", "2.5.0", "2.4.0"),
+    "sync": ("telepiplex_sync", "2.1.4", "2.4.0"),
+    "caption": ("telepiplex_caption", "1.4.0", "2.4.0"),
 }
 LEGACY_FEATURE_DIRS = (
     "media-search",
@@ -45,7 +45,7 @@ def test_features_use_only_the_new_technical_identities():
         assert manifest["version"] == version
         assert manifest["entry_point"] == f"{package}.runtime:main"
         assert manifest["source"]["branch"] == "main"
-        assert "host_api" in manifest
+        assert manifest["host_api"] == ">=1.11,<2.0"
         assert "core_api" not in manifest
 
         project = tomllib.loads(

@@ -2,21 +2,25 @@ from __future__ import annotations
 
 import re
 import warnings
+from collections.abc import Mapping
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackQueryHandler, CommandHandler, ConversationHandler, MessageHandler, filters
 from telegram.warnings import PTBUserWarning
 
 import init
-from app.handlers.plugin_handler import ROUTER_KEY, handle_feature_result
-from app.handlers.shared_config_handler import (
-    CONFIG_SHARED, SESSION_KEY, shared_config_callback, shared_config_message,
+from app.handlers.plugin_handler import (
+    ROUTER_KEY, deliver_feature_result, dynamic_command_gateway,
+    retire_feature_settings, settings_epoch, start_feature_settings,
 )
+from app.handlers.shared_config_handler import (
+    CONFIG_SHARED, clear_host_draft, host_draft, shared_config_callback, shared_config_message,
+)
+from app.runtime.command_catalog import HOST_RESERVED_COMMANDS
 
 
 CONFIG_SELECT_PLUGIN = 80
 MANAGER_KEY = "telepiplex_plugin_manager"
-_SESSION_KEYS = ("host_config_plugins", SESSION_KEY)
 _DIRECT_CALLBACK_RE = re.compile(
     r"^host-config-direct:(?P<plugin_id>[a-z][a-z0-9-]{0,63})$"
 )
@@ -30,9 +34,9 @@ def _safe_error(value) -> str:
     )[:1000]
 
 
-def clear_config_session(user_data: dict):
-    for key in _SESSION_KEYS:
-        user_data.pop(key, None)
+def clear_config_session(update, context):
+    context.user_data.pop("host_config_plugins", None)
+    clear_host_draft(update, context)
 
 
 def _state_label(state: dict) -> str:
@@ -84,7 +88,8 @@ async def _show_config_menu(update, context, *, edit: bool):
         if state.get("configurable"):
             plugin_ids.append(plugin_id)
 
-    clear_config_session(context.user_data)
+    clear_config_session(update, context)
+    retire_feature_settings(update,context)
     context.user_data["host_config_plugins"] = plugin_ids
     if lines:
         text = "Feature 配置状态：\n\n" + "\n".join(lines)
@@ -100,7 +105,7 @@ async def _show_config_menu(update, context, *, edit: bool):
     ]
     if getattr(manager, "central_config_enabled", False) is True:
         rows.insert(0, [InlineKeyboardButton(
-            "公共配置：目录与 TMDB", callback_data="host-config-shared:open",
+            "基础配置、目录与迁移诊断", callback_data="host-config-shared:open",
         )])
         text = "配置统一保存到顶层 config.yaml。\n\n" + text
     if rows:
@@ -141,12 +146,15 @@ def _callback_index(data: str) -> int:
 async def _dispatch_config(plugin_id: str, update, context):
     manager = context.application.bot_data.get(MANAGER_KEY)
     router = context.application.bot_data.get(ROUTER_KEY)
+    clear_config_session(update, context)
     try:
         state = manager.config_state(plugin_id)
         route = router.plugin_route(plugin_id) if router is not None else None
         command = str(state.get("command") or "")
         if not state.get("configurable") or route is None or not command:
             raise RuntimeError(state.get("error_code") or "config_unavailable")
+        start_feature_settings(update, context, plugin_id)
+        epoch = settings_epoch(context, update)
         result = await route.client.request(
             "command.dispatch",
             {
@@ -160,12 +168,13 @@ async def _dispatch_config(plugin_id: str, update, context):
             deadline=30,
             idempotency_key=f"telegram:{getattr(update, 'update_id', '')}:config",
         )
-        await handle_feature_result(update, context, route, result)
+        await deliver_feature_result(update, context, route, result, epoch, settings_dispatch=True)
     except Exception:
         await update.callback_query.edit_message_text(
             "配置向导暂时不可用。"
         )
-    clear_config_session(context.user_data)
+    if host_draft(update, context):
+        return CONFIG_SHARED
     return ConversationHandler.END
 
 
@@ -197,7 +206,7 @@ async def direct_config_callback(update, context):
 
 
 async def quit_config_conversation(update, context):
-    clear_config_session(context.user_data)
+    clear_config_session(update, context)
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text("已退出配置。")
@@ -207,11 +216,30 @@ async def quit_config_conversation(update, context):
 
 
 def register_feature_config_handlers(application):
+    class RoutedCommand(filters.MessageFilter):
+        def filter(self, message):
+            if not isinstance(application.bot_data, Mapping):
+                return False
+            router = application.bot_data.get(ROUTER_KEY)
+            command = message.text.split()[0].lstrip('/').partition('@')[0].lower()
+            return (command not in HOST_RESERVED_COMMANDS | {'q'} and router is not None
+                    and router.command_route(command) is not None)
+
+    async def switch_to_feature(update, context):
+        if not init.check_user(update.effective_user.id):
+            return ConversationHandler.END
+        context.user_data.pop('host_config_plugins',None)
+        await dynamic_command_gateway(update, context)
+        return CONFIG_SHARED if host_draft(update, context) else ConversationHandler.END
+
+    feature_command = filters.COMMAND & RoutedCommand()
+    switch = MessageHandler(feature_command, switch_to_feature)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", PTBUserWarning)
         handler = ConversationHandler(
             entry_points=[
                 CommandHandler("config", config_command),
+                CallbackQueryHandler(shared_config_callback, pattern=r"^host-config-shared:(?:go:|e:|open$)"),
                 CallbackQueryHandler(config_open_callback, pattern=r"^host-config-open$"),
                 CallbackQueryHandler(
                     direct_config_callback,
@@ -220,6 +248,7 @@ def register_feature_config_handlers(application):
             ],
             states={
                 CONFIG_SELECT_PLUGIN: [
+                    switch,
                     CallbackQueryHandler(shared_config_callback, pattern=r"^host-config-shared:"),
                     CallbackQueryHandler(
                         select_config_plugin,
@@ -233,9 +262,15 @@ def register_feature_config_handlers(application):
                 CONFIG_SHARED: [
                     CallbackQueryHandler(shared_config_callback, pattern=r"^host-config-shared:"),
                     MessageHandler(
-                        filters.TEXT & ~filters.Regex(r"^/q(?:@\w+)?(?:\s|$)"),
+                        filters.TEXT & ~feature_command & ~filters.Regex(
+                            re.compile(
+                                r"^/(?:" + "|".join(sorted(HOST_RESERVED_COMMANDS | {"q"}))
+                                + r")(?:@\w+)?(?:\s|$)", re.IGNORECASE,
+                            )
+                        ),
                         shared_config_message,
                     ),
+                    switch,
                 ],
             },
             fallbacks=[CommandHandler("q", quit_config_conversation)],

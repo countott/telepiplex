@@ -80,6 +80,179 @@ class CentralLifecycleTest(unittest.IsolatedAsyncioTestCase):
         path.write_text(yaml.safe_dump(manifest))
         await self.manager.install(build_tpx(source, self.root / "modern-download.tpx"))
 
+    async def test_quarantined_old_search_can_upgrade_to_marked_target(self):
+        from app.runtime.plugin_manager import PluginOperationError
+        from tests.test_config_semantics_migration import contracts
+        defaults, old_schema = contracts()['search']
+        old_schema.pop('x-telepiplex-metadata-timeout-contract',None)
+        self.path.write_text('config_version: 3\n')
+        await self.manager.install(self._artifact('search', '1.0.0', config_schema=old_schema, config_default=defaults))
+        await self.supervisor.close_all()
+        doc = self.central.read()
+        doc['features'] = {'search': {'metadata': {'tmdb': {'timeout': 300}}}}
+        self.path.write_text(yaml.safe_dump(doc))
+        from tests.test_bot_runtime_startup import load_bot_module
+        host_config = {'plugins': {'root': str(self.store.root), 'runtime_root': str(self.root/'runtime')}}
+        cold = load_bot_module().build_plugin_manager(host_config, self.root/'cold.db', config_path=self.path)
+        cold.supervisor = SnapshotSupervisor()
+        cold._venv_installer = self._install_venv
+        cold.stabilize_seconds = 0
+        try:
+            self.assertEqual((await cold.restore_active())[0].state, 'quarantined')
+            marked = {**old_schema, 'x-telepiplex-metadata-timeout-contract': 'seconds_1_300_v1'}
+            await cold.update(self._artifact('search', '1.1.0', config_schema=marked, config_default=defaults))
+            self.assertEqual(cold.supervisor.process('search').config['metadata']['tmdb']['timeout'], 300)
+            with self.assertRaises(PluginOperationError):
+                await cold.rollback('search')
+            self.assertEqual(cold.store.active('search').version, '1.1.0')
+        finally:
+            await cold.close()
+
+    async def test_host_connection_editor_validates_disabled_release_without_starting(self):
+        from app.runtime.config_settings import setting_rows
+        from tests.test_config_semantics_migration import contracts
+        self.path.write_text('config_version: 3\n')
+        defaults,schema=contracts()['sync']
+        await self.manager.install(self._artifact('sync',config_schema=schema,config_default=defaults))
+        await self.manager.disable('sync')
+        row=next(r for r in setting_rows(self.manager,'sync_plex') if r.field=='plex.token')
+        result=await self.manager.save_setting(row,'new')
+        self.assertEqual(result.details['affected_plugins'],[])
+        self.assertFalse(self.store.active('sync').enabled)
+        self.assertIsNone(self.supervisor.process('sync'))
+        self.assertEqual(self.central.read()['features']['sync']['plex']['token'],'new')
+
+    async def test_host_connection_candidate_failure_keeps_prior_value_and_live_process(self):
+        from app.runtime.config_settings import setting_rows
+        from tests.test_config_semantics_migration import contracts
+        self.path.write_text('config_version: 3\n')
+        defaults,schema=contracts()['sync']
+        await self.manager.install(self._artifact('sync',config_schema=schema,config_default=defaults))
+        row=setting_rows(self.manager,'sync_plex')[1]
+        old=self.supervisor.process('sync')
+        original=self.central.read()
+        self.supervisor.fail_plugin='sync'
+        with self.assertRaises(Exception):
+            await self.manager.save_setting(row,'discarded')
+        self.assertEqual(self.central.read(),original)
+        self.assertIs(self.supervisor.process('sync'),old)
+
+    async def test_repair_batch_candidate_failure_keeps_original_v2_and_live_caption(self):
+        from app.runtime.config_settings import setting_rows
+        from tests.test_config_semantics_migration import contracts
+        defaults, schema = contracts()['caption']
+        await self.manager.install(self._artifact('caption',config_schema=schema,config_default=defaults))
+        process = self.supervisor.process('caption')
+        document = self.central.read()
+        document['features'] = {'caption': {'output_path': '../bad','providers': {'local_archive': {'roots':15}}},
+                                'download': {'access_token':'latest'}}
+        self.path.write_text(yaml.safe_dump(document))
+        original = self.path.read_bytes()
+        rows = setting_rows(self.manager,'repair_caption')
+        batch = [(rows[0],'/subs',False),(rows[1],['/archive'],False)]
+        self.supervisor.fail_plugin = 'caption'
+        with self.assertRaises(Exception):
+            await self.manager.save_repairs(batch)
+        self.assertEqual(self.path.read_bytes(),original)
+        self.assertIs(self.supervisor.process('caption'),process)
+        self.supervisor.fail_plugin = ''
+        result = await self.manager.save_repairs(batch)
+        self.assertEqual(result.details['affected_plugins'],['caption'])
+        self.assertEqual(self.supervisor.process('caption').config['output_path'],'/subs')
+        self.assertEqual(self.central.read()['features']['download']['access_token'],'latest')
+
+    async def _settings_dispatch_fixture(self):
+        from unittest.mock import AsyncMock
+        from tests.test_config_semantics_migration import contracts
+        from tests.test_shared_config_handler import SharedConfigHandlerTest
+        from app.handlers.plugin_handler import MANAGER_KEY, ROUTER_KEY
+        defaults,schema=contracts()['sync']
+        self.path.write_text(yaml.safe_dump({'config_version':3,'features':{'sync':{'plex':{'token':'current'}}}}))
+        await self.manager.install(self._artifact('sync',commands=('sync_config','scan'),
+                                                 config_schema=schema,config_default=defaults))
+        route=self.router.plugin_route('sync')
+        route.client.process=self.supervisor.process('sync')
+        route.client.request=AsyncMock(return_value={'actions':[],'session':{'state':'close'}})
+        update,ctx,_=SharedConfigHandlerTest().request()
+        ctx.application.bot_data.update({MANAGER_KEY:self.manager, ROUTER_KEY:self.router})
+        return update,ctx,route
+
+    async def test_scan_cannot_reauthorize_retired_patch_from_current_process(self):
+        from unittest.mock import patch
+        from app.handlers.plugin_handler import (
+            deliver_feature_result, dynamic_command_gateway, retire_feature_settings, settings_epoch,
+        )
+        update,ctx,route=await self._settings_dispatch_fixture()
+        update.callback_query=None
+        original_process=self.supervisor.process('sync')
+        old_epoch=settings_epoch(ctx,update)
+        retire_feature_settings(update,ctx,'sync')
+        stale={'config_patch':{'plex':{'token':'obsolete'}},'actions':[]}
+        with patch('app.handlers.plugin_handler.init.check_user',return_value=True):
+            update.effective_message.text='/scan'
+            await dynamic_command_gateway(update,ctx)
+            for epoch in (old_epoch,settings_epoch(ctx,update)):
+                await deliver_feature_result(update,ctx,route,stale,epoch)
+                self.assertEqual(self.central.read()['features']['sync']['plex']['token'],'current')
+                self.assertIs(self.supervisor.process('sync'),original_process)
+            business = {'actions': [{'kind': 'send_message', 'text': '扫描完成'}]}
+            await deliver_feature_result(update,ctx,route,business,old_epoch)
+            update.effective_message.reply_text.assert_awaited_with('扫描完成')
+            route.client.request.return_value={'actions':[],'session':{'state':'open'}}
+            update.effective_message.text='/sync_config'
+            await dynamic_command_gateway(update,ctx)
+            await deliver_feature_result(update,ctx,route,stale,old_epoch)
+            self.assertEqual(self.central.read()['features']['sync']['plex']['token'],'current')
+            # Different PTB owners can have the same generation.
+            other = SimpleNamespace(effective_chat=SimpleNamespace(id=20), effective_user=update.effective_user)
+            ctx.user_data['settings_epochs'][(20,1)] = ctx.user_data['settings_epochs'][(10,1)]
+            await deliver_feature_result(update,ctx,route,stale,settings_epoch(ctx,other))
+            self.assertEqual(self.central.read()['features']['sync']['plex']['token'],'current')
+            await deliver_feature_result(update,ctx,route,{'config_patch':{'plex':{'token':'fresh'}}},settings_epoch(ctx,update))
+            self.assertEqual(self.central.read()['features']['sync']['plex']['token'],'fresh')
+
+    async def test_direct_config_delayed_patch_cannot_write_after_scan(self):
+        import asyncio
+        from unittest.mock import patch
+        from app.handlers.config_handler import direct_config_callback
+        from app.handlers.plugin_handler import dynamic_command_gateway
+        update,ctx,route=await self._settings_dispatch_fixture()
+        update.callback_query.data='host-config-direct:sync'
+        started,release=asyncio.Event(),asyncio.Event()
+        async def respond(method,params,**kwargs):
+            if params['command']=='scan':
+                return {'actions':[],'session':{'state':'close'}}
+            started.set()
+            await release.wait()
+            return {'config_patch':{'plex':{'token':'obsolete'}},'actions':[]}
+        route.client.request.side_effect=respond
+        with patch('app.handlers.config_handler.init.check_user',return_value=True):
+            pending=asyncio.create_task(direct_config_callback(update,ctx))
+            await asyncio.wait_for(started.wait(),2)
+            scan=SimpleNamespace(effective_chat=update.effective_chat,effective_user=update.effective_user,
+                                 effective_message=SimpleNamespace(text='/scan',reply_text=update.effective_message.reply_text),
+                                 callback_query=None)
+            await dynamic_command_gateway(scan,ctx)
+            release.set()
+            await pending
+        self.assertEqual(self.central.read()['features']['sync']['plex']['token'],'current')
+
+    async def test_recovery_reload_reconciles_running_shared_peers(self):
+        for key in ('search', 'rename', 'sync', 'caption'):
+            await self.install_feature(key)
+        original_caption = self.supervisor.process('caption')
+        doc = self.central.read()
+        doc['features']['caption'] = {'output_path': '/unsafe//caption'}
+        doc['shared'] = {'tmdb': {'api_key': 'new'}, 'category_folder': category_routes('/edited')}
+        self.path.write_text(yaml.safe_dump(doc))
+        self.manager.bootstrap_semantics()
+        self.assertTrue(self.manager.migration_status()['blockers'])
+        await self.manager.reload_config('search')
+        for key in ('search', 'rename', 'sync'):
+            self.assertEqual(self.supervisor.process(key).config['category_folder'][0]['path'], '/edited')
+        self.assertEqual(self.supervisor.process('sync').config['tmdb']['api_key'], 'new')
+        self.assertIs(self.supervisor.process('caption'), original_caption)
+
     async def test_live_patch_does_not_acquire_lifecycle_lock_and_compares_fields(self):
         import asyncio
         await self.install_download()
@@ -106,6 +279,30 @@ class CentralLifecycleTest(unittest.IsolatedAsyncioTestCase):
             await self.install_feature("download")
         self.assertIs(self.supervisor.process("echo"), before)
         self.assertIsNone(self.store.active("download"))
+
+    async def test_old_host_rejects_new_bundle_before_install_or_update(self):
+        from app.runtime.plugin_manager import PluginOperationError
+        from tests.mixed_config_releases import release
+        current = release(self.root, "sync")
+        self.manager.host_api_version = "1.10"
+        for operation in ("install", "update"):
+            if operation == "update":
+                await self.manager.install(release(self.root, "sync", old=True))
+            before = {p.relative_to(self.store.root): p.read_bytes() for p in self.store.root.rglob("*") if p.is_file()}
+            original, process, launches = self.path.read_bytes(), self.supervisor.process("sync"), len(self.supervisor.instances)
+            with self.assertRaises(PluginOperationError) as error:
+                await getattr(self.manager, operation)(current)
+            self.assertEqual(error.exception.code, "incompatible_host")
+            self.assertIn("1.11", str(error.exception))
+            self.assertIn("1.10", str(error.exception))
+            self.assertEqual(self.path.read_bytes(), original)
+            self.assertEqual(before, {p.relative_to(self.store.root): p.read_bytes() for p in self.store.root.rglob("*") if p.is_file()})
+            self.assertEqual(len(self.supervisor.instances), launches)
+            self.assertIs(self.supervisor.process("sync"), process)
+            if process:
+                self.assertIs(self.router.plugin_route("sync").client, process.client)
+        self.manager.host_api_version = "1.11"
+        await self.manager.update(current)
 
     async def test_enable_stabilizes_candidate_once_before_promotion(self):
         await self.install_feature("echo")

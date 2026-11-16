@@ -13,6 +13,7 @@ import time
 import uuid
 
 from telepiplex_plugin_sdk import FeatureError
+from telepiplex_plugin_sdk.storage_paths import normalize_115_directory
 from telepiplex_plugin_sdk.media_metadata_v2 import validate_media_metadata_v2
 
 from .engine import CaptionEngine
@@ -47,10 +48,10 @@ def _response(text, *, keyboard=None, session=None):
 
 
 def _path(value):
-    value = str(value or "").strip()
-    if not value.startswith("/") or ".." in PurePosixPath(value).parts or "\\" in value or any(ord(c) < 32 for c in value):
+    try:
+        return normalize_115_directory(value, allow_relative=False, allow_root=True)
+    except ValueError:
         raise ValueError("请输入 115 内的绝对路径，例如 /字幕。")
-    return str(PurePosixPath(value))
 
 
 class CaptionFeature:
@@ -134,6 +135,7 @@ class CaptionFeature:
             return _response("字幕设置：精简方案按作品类型选择来源，有授权的补充源自动加入。个人免费 API Key 可后补。", keyboard=[
                 [{"text": "字幕来源：" + profile_label, "callback_data": "caption:config:source_profile"}],
                 [{"text": "字幕保存目录", "callback_data": "caption:config:output_path"}],
+                [{"text": "GitHub 字幕源设置", "callback_data": "caption:config:github"}],
                 [{"text": "ASSRT Token", "callback_data": "caption:config:assrt"}],
                 [{"text": "OpenSubtitles API Key", "callback_data": "caption:config:opensubtitles"}],
                 [{"text": "SubDL 免费 API Key", "callback_data": "caption:config:subdl"}],
@@ -643,9 +645,14 @@ class CaptionFeature:
         if action == "cancel":
             self.sessions.pop(_owner(request), None)
             return _response("已退出字幕配置。", session="close")
-        if action == "automatic":
-            self.sessions.pop(_owner(request), None)
-            return {"actions": [], "session": {"state": "close"}, "config_patch": {"automatic": not self.config.get("automatic", True)}}
+        target = {"automatic":"caption_policy","github":"caption_github","output_path":"directories"}.get(action)
+        if action in _API_SETTINGS:
+            target = "caption_credentials"
+        if target:
+            self.sessions.pop(_owner(request),None)
+            result = _response("请使用 /config 编辑基础配置。",session="close")
+            result["config_navigation"]=target
+            return result
         if action == "source_profile":
             session["stage"] = "source_profile"
             return _response("选择字幕来源方案：精简常用按作品类型选择来源；全部来源尝试更多已启用来源。缺少授权、视频哈希或归档目录的来源仍跳过。指定详情链接只查对应来源。", keyboard=[
@@ -656,10 +663,7 @@ class CaptionFeature:
         if action in {"profile-balanced", "profile-all"} and session.get("stage") == "source_profile":
             self.sessions.pop(_owner(request), None)
             return {"actions": [], "session": {"state": "close"}, "config_patch": {"source_profile": action.removeprefix("profile-")}}
-        if action != "output_path" and action not in _API_SETTINGS:
-            raise FeatureError("invalid_selection", "invalid caption config option")
-        session["stage"] = action
-        return _response("请输入 115 内的绝对保存路径。" if action == "output_path" else "请发送授权值；发送 clear 清空。授权值不会在回复中显示。", session="open")
+        raise FeatureError("invalid_selection", "invalid caption config option")
 
     async def message(self, request):
         operation = self._active_operation(request)
@@ -689,20 +693,10 @@ class CaptionFeature:
         session = self.sessions.get(_owner(request)) or {}
         if session.get("kind") != "config" or session.get("expires", 0) < time.time():
             return _response("请发送 /caption 片名，或 /caption_config 配置字幕。", session="close")
-        stage, value = session.get("stage"), str(request.get("text") or "").strip()
-        if stage == "output_path":
-            try:
-                patch = {"output_path": _path(value)}
-            except ValueError as exc:
-                return _response(str(exc), session="open")
-        elif stage in _API_SETTINGS:
-            if not value or len(value) > 1024 or any(c.isspace() for c in value):
-                return _response("请输入单行授权值，或发送 clear 清空。", session="open")
-            patch = {"providers": {stage: {_API_SETTINGS[stage]: "" if value == "clear" else value}}}
-        else:
-            return _response("请先选择配置项目。", session="open")
-        self.sessions.pop(_owner(request), None)
-        return {"actions": [], "session": {"state": "close"}, "config_patch": patch}
+        stage=session.get("stage")
+        if stage=="output_path" or stage in _API_SETTINGS:
+            return self._config_callback(request,stage)
+        return _response("请先选择配置项目。", session="open")
 
     async def operation_control(self, request):
         operation = self.operations.get(str(request.get("operation_id") or ""))

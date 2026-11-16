@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shutil
 import sys
@@ -8,6 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.runtime.config_defaults import PLUGIN_DEFAULTS
 from app.runtime.capability_router import CapabilityRouter, RoutingError
 from app.runtime.central_config import CentralConfigError
 from app.runtime.event_journal import EventJournal
@@ -53,9 +55,9 @@ class PluginManager:
         artifact_resolver=None,
         broker=None,
         host_api_version: str = HOST_API_VERSION,
-        install_timeout: float = 300,
-        drain_timeout: float = 120,
-        stabilize_seconds: float = 10,
+        install_timeout: float = PLUGIN_DEFAULTS["install_timeout"],
+        drain_timeout: float = PLUGIN_DEFAULTS["drain_timeout"],
+        stabilize_seconds: float = PLUGIN_DEFAULTS["stabilize_seconds"],
     ):
         self.store = store
         self.supervisor = supervisor
@@ -73,10 +75,74 @@ class PluginManager:
         # Last config known to back the running process. This intentionally
         # differs from config.yaml while an operator is testing a manual edit.
         self._active_configs: dict[str, dict] = {}
+        self._migration_status = {'blockers': [], 'notices': []}
+        self._raw_search_timeouts = None
         self.central_config_enabled = getattr(store, "central_config", None) is not None
         if self.central_config_enabled and broker is not None:
             broker.config_reader = self._read_live_config
             broker.config_writer = self._write_live_config
+
+    def _semantic_plan(self):
+        from app.runtime.config_semantics_migration import MigrationContext, load_builtin_contracts
+        active = {item.plugin_id: self.store.active(item.plugin_id) for item in self.store.list_installed() if item.active}
+        context = MigrationContext(builtin=load_builtin_contracts(), installed={
+            key: (self.store.config_defaults(release), self.store.config_schema(release)) for key, release in active.items()
+        }, caption_cwd=str(active['caption'].path) if 'caption' in active else None,
+            caption_home=os.environ.get('HOME') if 'caption' in active else None)
+        return self.store.central_config.preflight(context)
+
+    def migration_status(self):
+        return deepcopy(self._migration_status)
+
+    def preview_semantic_migration(self):
+        plan=self._semantic_plan()
+        return {'source_version':plan.source_version,'target_version':plan.target_version,
+                'blockers':list(plan.blockers),'notices':list(plan.notices)}
+
+    def _note_plan(self, plan):
+        self._migration_status = {'source_version': plan.source_version, 'target_version': 3,
+                                  'notices': list(plan.notices), 'blockers': list(plan.blockers)}
+
+    def bootstrap_semantics(self):
+        central = self.store.central_config
+        central.read()  # Invalid YAML remains a fatal bootstrap error.
+        try:
+            central.migrate_legacy(self.store.root)
+            plan = self._semantic_plan()
+            self._note_plan(plan)
+            if not plan.blockers and plan.changed_paths:
+                central.commit_semantics(plan)
+            self._raw_search_timeouts = self._timeout_fields(central.read())
+        except (CentralConfigError, StoreError) as exc:
+            self._migration_status['blockers'] = exc.details.get('config_error_paths') or [exc.code]
+
+    async def retry_semantic_migration(self):
+        async with self._lifecycle_lock:
+            central = self.store.central_config
+            self._check_raw_timeouts(central.read())
+            central.migrate_legacy(self.store.root)
+            plan = self._semantic_plan()
+            self._note_plan(plan)
+            if not plan.blockers and plan.changed_paths:
+                await self._central_transaction(plan)
+            return self.migration_status()
+
+    @staticmethod
+    def _timeout_fields(document):
+        from app.runtime.config_projection import ADAPTERS
+        metadata = document.get('features', {}).get('search', {}).get('metadata', {})
+        return {k: section['timeout'] for k in ADAPTERS if isinstance(metadata, dict)
+                and isinstance(section := metadata.get(k), dict) and 'timeout' in section}
+
+    def _check_raw_timeouts(self, document):
+        if self._raw_search_timeouts is None or document.get('config_version') != 2:
+            return
+        from app.runtime.config_projection import timeout_bounds
+        low, high = timeout_bounds(False)
+        for key, value in self._timeout_fields(document).items():
+            if value != self._raw_search_timeouts.get(key) and (type(value) not in (int, float) or not low <= value <= high):
+                raise PluginOperationError('invalid_config', 'New timeout requires upgraded Search and v3 configuration',
+                                           {'config_error_paths': [f'features.search.metadata.{key}.timeout']})
 
     def _check_central_release(self, release):
         if (self.central_config_enabled and release.plugin_id == "download"
@@ -106,8 +172,9 @@ class PluginManager:
         return document
 
     def _check_launch_config(self, release, launched, *, document=None):
-        effective = self.store.central_config.effective(release.plugin_id,
-            self.store.config_defaults(release), document=document)
+        if release.plugin_id == 'search':
+            self._check_raw_timeouts(document if document is not None else self.store.central_config.read())
+        effective = self.store.project_config(release, document=document)
         if effective != launched:
             raise PluginOperationError("config_conflict",
                 "Configuration changed while Feature was starting; retry the operation")
@@ -146,14 +213,14 @@ class PluginManager:
             raise PluginOperationError("not_installed", "Feature is not installed")
         self._check_central_release(release)
         central = self.store.central_config
-        change = central.prepare_patch("download", patch)
-        current = central.effective("download", self.store.config_defaults(release), document=change.before)
+        change = self.store.prepare_config_change("download", patch, baseline=expected)
+        current = self.store.project_config(release, document=change.before)
         if any(current.get(key) != value for key, value in expected.items()):
             raise PluginOperationError("config_conflict", "Configuration changed; read it again")
-        candidate = central.effective("download", self.store.config_defaults(release), document=change.after)
+        candidate = self.store.project_config(release, document=change.after)
         self.store.validate_config(release, candidate)
         document = central.commit(change)
-        latest = central.effective("download", self.store.config_defaults(release), document=document)
+        latest = self.store.project_config(release, document=document)
         self._active_configs["download"] = deepcopy(latest)
         process = self.supervisor.process("download")
         if process is not None:
@@ -162,7 +229,7 @@ class PluginManager:
             process.config = deepcopy(latest)
         return latest
 
-    async def configure_patch(self, plugin_id, patch, *, should_cancel=None):
+    async def configure_patch(self, plugin_id, patch, *, should_cancel=None, source_process=None):
         if not self.central_config_enabled:
             def merge(base, delta):
                 for key, value in delta.items():
@@ -178,7 +245,10 @@ class PluginManager:
             if release is None:
                 raise PluginOperationError("not_installed", "Feature is not installed")
             try:
-                change = self.store.central_config.prepare_patch(str(plugin_id), patch)
+                process = self.supervisor.process(str(plugin_id))
+                if source_process is not None and process is not source_process:
+                    raise PluginOperationError('config_conflict', 'Configuration editor instance is no longer active')
+                change = self.store.prepare_config_change(str(plugin_id), patch, baseline=getattr(process, 'config', None))
                 switched = await self._central_transaction(change, should_cancel=should_cancel)
             except Exception as exc:
                 raise self._operation_error(exc, "config_reload_failed") from None
@@ -190,10 +260,8 @@ class PluginManager:
         if not isinstance(expected, dict):
             raise PluginOperationError("invalid_config", "Expected shared configuration must be a mapping")
         current = self.store.central_config.read() if document is None else document
-        projected = self.store.central_config.effective("search", {}, document=current)
-        logical = deepcopy(current.get("shared", {}))
-        logical["category_folder"] = projected["category_folder"]
-        logical.setdefault("tmdb", {})["api_key"] = projected["metadata"]["tmdb"]["api_key"]
+        from app.runtime.config_projection import shared_view
+        logical = shared_view(current, include_categories='category_folder' in expected)
         missing = object()
         conflicts = []
         def compare(draft, actual, path=("shared",)):
@@ -227,6 +295,39 @@ class PluginManager:
             return PluginOperationResult("configured", "shared", "", "Shared configuration saved",
                                          {"affected_plugins": switched})
 
+    async def save_setting(self, draft, value=None, *, reset=False):
+        from app.runtime.config_settings import prepare_setting
+        async with self._lifecycle_lock:
+            change = prepare_setting(self,draft,value,reset)
+            switched = await self._central_transaction(change)
+        return PluginOperationResult("configured", "host", "", "Configuration saved",
+                                     {"affected_plugins": switched, "restart_host": draft.target == "runtime"})
+
+    async def save_repairs(self, entries):
+        from app.runtime.config_settings import prepare_repair
+        async with self._lifecycle_lock:
+            change = prepare_repair(self, entries)
+            switched = await self._central_transaction(change)
+        return PluginOperationResult('configured','host','','Repairs saved',{'affected_plugins':switched})
+
+    async def save_directory(self, draft, value=None, *, reset=False):
+        from app.runtime.directory_settings import prepare_directory
+        from app.runtime.config_settings import contract_for
+        from app.runtime.config_projection import ProjectionContract, project_feature_config
+        from app.runtime.plugin_store import _validate
+        async with self._lifecycle_lock:
+            change = prepare_directory(self.store.central_config.read(), draft, value,reset=reset)
+            for plugin_id in change.affected_plugins:
+                # The coordinated transaction validates installed releases. An
+                # absent consumer must be able to load its first snapshot too.
+                if self.store.active(plugin_id) is None:
+                    defaults, schema = contract_for(self, plugin_id)
+                    snapshot = project_feature_config(plugin_id, defaults, document=change.after,
+                                                      contract=ProjectionContract(schema))
+                    _validate(schema, snapshot, flat_search=plugin_id == 'search' and change.after.get('config_version') == 3)
+            switched = await self._central_transaction(change)
+        return PluginOperationResult('configured','shared','','Directory settings saved',{'affected_plugins':switched})
+
     async def reload_all_configs(self):
         async with self._lifecycle_lock:
             try:
@@ -234,18 +335,36 @@ class PluginManager:
             except Exception as exc:
                 raise self._operation_error(exc, "config_reload_failed") from None
 
-    async def _central_transaction(self, change, *, should_cancel=None):
+    def _recovery_reload_peers(self, document):
+        from app.runtime.config_projection import shared_snapshot_changed
+        peers = set()
+        for item in self.store.list_installed():
+            if not item.active:
+                continue
+            process = self.supervisor.process(item.plugin_id)
+            if process is None:
+                continue
+            release = self.store.active(item.plugin_id)
+            if shared_snapshot_changed(item.plugin_id, document, process.config, self.store.config_defaults(release)):
+                peers.add(item.plugin_id)
+        return peers
+
+    async def _central_transaction(self, change, *, should_cancel=None, only=None):
         central = self.store.central_config
         document = change.after if change is not None else central.read()
-        affected = set(change.affected_plugins) if change is not None else None
+        affected = set(change.affected_plugins) if change is not None else only
+        if only is not None:
+            affected = set(only) | self._recovery_reload_peers(document)
         releases = {item.plugin_id: self.store.active(item.plugin_id)
                     for item in self.store.list_installed()
                     if item.active and (affected is None or item.plugin_id in affected)}
         releases = {key: value for key, value in releases.items() if value is not None}
         configs = {}
+        if 'search' in releases:
+            self._check_raw_timeouts(document)
         for key, release in releases.items():
             configs[key] = self.store.validate_config(release,
-                central.effective(key, self.store.config_defaults(release), document=document))
+                self.store.project_config(release, document=document))
             if release.enabled:
                 self._check_central_release(release)
         def check_cancel():
@@ -272,7 +391,7 @@ class PluginManager:
             document = self._candidate_document(change)
             for key, release in releases.items():
                 configs[key] = self.store.validate_config(release,
-                    central.effective(key, self.store.config_defaults(release), document=document))
+                    self.store.project_config(release, document=document))
             for key, release in releases.items():
                 if not release.enabled:
                     continue
@@ -285,12 +404,13 @@ class PluginManager:
                 self.router.prepare_activation(key, releases[key].manifest, self._route_client(process))
             check_cancel()
             document = self._candidate_document(change)
+            if only is not None and self._recovery_reload_peers(document) - releases.keys():
+                raise PluginOperationError('config_conflict', 'Additional shared configuration changed during reload')
             for key, release in releases.items():
                 if key in candidates:
                     self._check_launch_config(release, configs[key], document=document)
                 else:
-                    self.store.validate_config(release, central.effective(key,
-                        self.store.config_defaults(release), document=document))
+                    self.store.validate_config(release, self.store.project_config(release, document=document))
             if change is not None:
                 document = central.commit(change)
                 committed = True
@@ -301,8 +421,7 @@ class PluginManager:
                 switched.append(key)
                 self.supervisor.promote(process)
                 self.journal.set_subscriptions(key, releases[key].manifest.subscribes)
-                self._active_configs[key] = central.effective(key,
-                    self.store.config_defaults(releases[key]), document=document)
+                self._active_configs[key] = self.store.project_config(releases[key], document=document)
                 process.config = deepcopy(self._active_configs[key])
         except BaseException as exc:
             recovery_errors = []
@@ -344,6 +463,8 @@ class PluginManager:
         for key in candidates:
             if old[key] is not None:
                 await self._safe_stop(old[key])
+        if 'search' in releases:
+            self._raw_search_timeouts = self._timeout_fields(document)
         return sorted(candidates)
 
     async def install(self, reference: str | Path, expected_sha256: str = "") -> PluginOperationResult:
@@ -418,7 +539,7 @@ class PluginManager:
             except (StoreError, CentralConfigError) as exc:
                 raise PluginOperationError(
                     "config_migration_required",
-                    "Rollback config must be migrated manually",
+                    exc.message if exc.code == 'config_migration_required' else "Rollback config must be migrated manually",
                     getattr(exc, "details", None),
                 ) from None
             old_process = self.supervisor.process(plugin_id)
@@ -959,7 +1080,11 @@ class PluginManager:
             release = self.store.active(plugin_id)
             if release is None:
                 raise PluginOperationError("not_installed", "Feature is not installed")
-            switched = await self.reload_all_configs()
+            if self._migration_status['blockers']:
+                async with self._lifecycle_lock:
+                    switched = await self._central_transaction(None, only={plugin_id})
+            else:
+                switched = await self.reload_all_configs()
             return self._result("active", release, "Feature configuration reloaded",
                                 extra_details={"affected_plugins": switched})
         view = self.config(plugin_id)
@@ -1211,6 +1336,8 @@ class PluginManager:
         switched = False
         added, removed = [], []
         try:
+            if old_release is not None and release.plugin_id == 'caption':
+                self.store.check_archive_switch('caption', release.version, self.store.config_defaults(release), central.read())
             if old_process is not None:
                 drained = True
                 health = await self.supervisor.drain(old_process, timeout=self.drain_timeout)
@@ -1219,7 +1346,7 @@ class PluginManager:
             # Drain can refresh credentials. Prepare only after it finishes.
             if migrate_config:
                 before, config, added, removed = self.store.migrate_config(release)
-                baseline = central.effective(release.plugin_id, self.store.config_defaults(release))
+                baseline = self.store.project_config(release)
                 change = central.prepare_migration(release.plugin_id, baseline, config)
             else:
                 config = self.store.read_config(release)
@@ -1279,6 +1406,8 @@ class PluginManager:
         return active, added, removed
 
     def _remember_active_config(self, release: ActiveRelease):
+        if self.central_config_enabled and release.plugin_id == 'search':
+            self._raw_search_timeouts = self._timeout_fields(self.store.central_config.read())
         if self.central_config_enabled:
             process = self.supervisor.process(release.plugin_id)
             if process is not None:

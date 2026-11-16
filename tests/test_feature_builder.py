@@ -15,6 +15,12 @@ def _write_wheel(path: Path, metadata: str):
         wheel.writestr("example-1.0.0.dist-info/METADATA", metadata)
 
 
+def _copy_source(source, target):
+    # setuptools writes build/ and egg-info inside its input tree.
+    return shutil.copytree(source, target, ignore=shutil.ignore_patterns(
+        "build", "dist", "*.egg-info", "__pycache__"))
+
+
 class FeatureBuilderTest(unittest.TestCase):
     def test_config_migration_copy_rejects_symbolic_links(self):
         from tools.build_feature import FeatureBuildError, copy_feature_migrations
@@ -37,11 +43,11 @@ class FeatureBuilderTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source = root / "feature"
-            shutil.copytree(ROOT / "examples/echo_feature", source)
+            _copy_source(ROOT / "examples/echo_feature", source)
             pyproject = source / "pyproject.toml"
             pyproject.write_text(
                 pyproject.read_text(encoding="utf-8").replace(
-                    "telepiplex-plugin-sdk==2.3.0",
+                    "telepiplex-plugin-sdk==2.4.0",
                     "telepiplex-plugin-sdk==1.1.0",
                 ),
                 encoding="utf-8",
@@ -51,7 +57,7 @@ class FeatureBuilderTest(unittest.TestCase):
                 build_feature_artifact(
                     source,
                     root / "echo.tpx",
-                    sdk_source=ROOT / "sdk",
+                    sdk_source=_copy_source(ROOT / "sdk", root / "sdk"),
                     repository="local/telepiplex",
                     branch="main",
                     commit="a" * 40,
@@ -184,9 +190,9 @@ class FeatureBuilderTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "echo.tpx"
             build_feature_artifact(
-                ROOT / "examples/echo_feature",
+                _copy_source(ROOT / "examples/echo_feature", Path(tmpdir) / "feature"),
                 output,
-                sdk_source=ROOT / "sdk",
+                sdk_source=_copy_source(ROOT / "sdk", Path(tmpdir) / "sdk"),
                 repository="git@example.test:telepiplex.git",
                 branch="feature/echo",
                 commit="b" * 40,
@@ -204,7 +210,7 @@ class FeatureBuilderTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source = root / "feature"
-            shutil.copytree(ROOT / "examples/echo_feature", source)
+            _copy_source(ROOT / "examples/echo_feature", source)
             migrations = source / "migrations"
             migrations.mkdir()
             (migrations / "config-1-to-2.json").write_text(
@@ -218,7 +224,7 @@ class FeatureBuilderTest(unittest.TestCase):
             build_feature_artifact(
                 source,
                 output,
-                sdk_source=ROOT / "sdk",
+                sdk_source=_copy_source(ROOT / "sdk", root / "sdk"),
                 repository="local/telepiplex",
                 branch="main",
                 commit="b" * 40,

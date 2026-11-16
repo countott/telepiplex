@@ -21,10 +21,6 @@ from .cleanup import (
     plan_download_cleanup,
 )
 from .context import logger
-from .directories import (
-    normalize_save_directories,
-    normalize_save_directory_path,
-)
 from .failure import classify_download_failure
 from .transport_capacity import check_completion_capacity
 from .snapshot_store import scan_snapshot, store_for
@@ -33,7 +29,6 @@ from telepiplex_plugin_sdk.storage_snapshot import build_snapshot, SnapshotError
 
 _MAGNET = re.compile(r"^magnet:\?xt=urn:btih:(?:[A-Fa-f0-9]{40}|[A-Za-z2-7]{32})(?:&.*)?$")
 SESSION_TTL_SECONDS = 30 * 60
-DIRECTORY_PAGE_SIZE = 5
 OPERATION_TERMINAL_STATES = {
     "completed", "cancelled", "failed", "rolled_back",
     "partially_rolled_back", "interrupted",
@@ -376,7 +371,7 @@ class DownloadFeature:
 
         stage = session.get("stage")
         if stage.startswith("directory_"):
-            return self._directory_message(request, key, session)
+            return self._settings_navigation(key, "directories")
         if stage == "minimum_video_size":
             try:
                 value = normalize_minimum_video_size_mib(
@@ -611,6 +606,7 @@ class DownloadFeature:
                             "download:config:minimum_video_size"
                         ),
                     }],
+                    [{"text":"115 服务连接","callback_data":"download:config:connection"}],
                     self._exit_row(),
                 ]},
             }],
@@ -629,29 +625,10 @@ class DownloadFeature:
                 operation_id=session["operation_id"],
                 kind="edit_message",
             )
-        if payload == "config:directories" and stage == "config_home":
-            current = (
-                self.config_store.read()
-                if self.config_store else dict(self.config)
-            )
-            session.update({
-                "stage": "directory_list",
-                "working_directories": normalize_save_directories(
-                    current.get("save_directories") or []
-                ),
-                "page": 0,
-            })
-            self._schedule_sensitive_expiry(key)
-            operation = self._advance_operation(
-                session["operation_id"],
-                state="awaiting_input",
-                stage="directory_list",
-                status_text="管理 115 保存目录。",
-                control="exit",
-            )
-            return self._directory_list_message(
-                key, kind="edit_message", operation=operation
-            )
+        if str(stage).startswith("directory_") or (payload=="config:directories" and stage=="config_home"):
+            return self._settings_navigation(key, "directories")
+        if payload=="config:connection" and stage=="config_home":
+            return self._settings_navigation(key, "download_connection")
         if (
             payload == "config:minimum_video_size"
             and stage == "config_home"
@@ -675,160 +652,6 @@ class DownloadFeature:
                 kind="edit_message",
                 operation=operation,
             )
-        if payload == "config:back" and str(stage).startswith("directory_"):
-            return self._return_to_directory_list(
-                key, "保存目录列表。", kind="edit_message"
-            )
-        if (
-            payload.startswith("config:page:")
-            and stage == "directory_list"
-        ):
-            try:
-                session["page"] = int(payload.rsplit(":", 1)[1])
-            except ValueError:
-                return self._directory_prompt(
-                    key, "⚠️ 保存目录页码无效。", stage="directory_list"
-                )
-            self._schedule_sensitive_expiry(key)
-            return self._directory_list_message(key, kind="edit_message")
-        if payload == "config:add" and stage == "directory_list":
-            return self._directory_prompt(
-                key,
-                (
-                    "第一步（显示名称）：请发送保存目录的显示名称，例如"
-                    "“真人电影”。该名称只用于按钮展示，不是保存路径。"
-                ),
-                stage="directory_add_name",
-                status_text="输入保存目录名称。",
-                kind="edit_message",
-            )
-        if payload.startswith("config:item:") and stage == "directory_list":
-            try:
-                index = self._bounded_index(
-                    session["working_directories"],
-                    payload.rsplit(":", 1)[1],
-                )
-                directory = session["working_directories"][index]
-            except (IndexError, TypeError, ValueError):
-                return self._directory_list_message(
-                    key,
-                    kind="edit_message",
-                    text_prefix="⚠️ 保存目录条目不可用。",
-                )
-            session.update({"stage": "directory_item", "selected_index": index})
-            self._schedule_sensitive_expiry(key)
-            operation = self._advance_operation(
-                session["operation_id"],
-                state="awaiting_input",
-                stage="directory_item",
-                status_text="选择目录操作。",
-                control="exit",
-            )
-            return {
-                "actions": [{
-                    "kind": "edit_message",
-                    "text": (
-                        f"目录名称：{directory['name']}\n"
-                        f"115 路径：{directory['path']}\n\n"
-                        "请选择操作。"
-                    ),
-                    "data": {"keyboard": [
-                        [{
-                            "text": "编辑名称",
-                            "callback_data": "download:config:edit:name",
-                        }],
-                        [{
-                            "text": "编辑路径",
-                            "callback_data": "download:config:edit:path",
-                        }],
-                        [{
-                            "text": "删除目录",
-                            "callback_data": "download:config:delete",
-                        }],
-                        [{
-                            "text": "返回目录列表",
-                            "callback_data": "download:config:back",
-                        }],
-                        self._exit_row(),
-                    ]},
-                }],
-                "session": {"state": "open"},
-                "operation": operation,
-            }
-        if payload == "config:edit:name" and stage == "directory_item":
-            return self._directory_prompt(
-                key,
-                (
-                    "请发送新的显示名称。该名称只用于按钮展示，"
-                    "不是保存路径。"
-                ),
-                stage="directory_edit_name",
-                status_text="输入新的保存目录名称。",
-                kind="edit_message",
-            )
-        if payload == "config:edit:path" and stage == "directory_item":
-            return self._directory_prompt(
-                key,
-                (
-                    "保存路径：单级目录直接输入“真人电影”；多级目录可输入"
-                    "“series/live action”。不要以 / 开头，末尾 / 可省略。"
-                ),
-                stage="directory_edit_path",
-                status_text="输入新的 115 保存路径。",
-                kind="edit_message",
-            )
-        if payload == "config:delete" and stage == "directory_item":
-            index = session["selected_index"]
-            directory = session["working_directories"][index]
-            session["stage"] = "directory_delete_confirm"
-            self._schedule_sensitive_expiry(key)
-            operation = self._advance_operation(
-                session["operation_id"],
-                state="awaiting_input",
-                stage="directory_delete_confirm",
-                status_text="确认删除保存目录。",
-                control="exit",
-            )
-            return {
-                "actions": [{
-                    "kind": "edit_message",
-                    "text": (
-                        f"确认删除目录“{directory['name']}”"
-                        f"（{directory['path']}）？"
-                    ),
-                    "data": {"keyboard": [
-                        [{
-                            "text": "确认删除",
-                            "callback_data": "download:config:delete:confirm",
-                        }],
-                        [{
-                            "text": "返回目录列表",
-                            "callback_data": "download:config:back",
-                        }],
-                        self._exit_row(),
-                    ]},
-                }],
-                "session": {"state": "open"},
-                "operation": operation,
-            }
-        if (
-            payload == "config:delete:confirm"
-            and stage == "directory_delete_confirm"
-        ):
-            index = session["selected_index"]
-            try:
-                session["working_directories"].pop(index)
-            except IndexError:
-                return self._return_to_directory_list(
-                    key,
-                    "⚠️ 保存目录条目已不存在。",
-                    kind="edit_message",
-                )
-            return self._return_to_directory_list(
-                key, "目录删除待保存。", kind="edit_message"
-            )
-        if payload == "config:save" and stage == "directory_list":
-            return await self._save_directory_config(key)
         if stage == "config_home":
             self._schedule_sensitive_expiry(key)
             return self._config_home_message(
@@ -836,101 +659,7 @@ class DownloadFeature:
                 kind="edit_message",
                 text_prefix="⚠️ 配置操作与当前步骤不匹配。",
             )
-        return self._directory_prompt(
-            key,
-            "⚠️ 配置操作与当前步骤不匹配。",
-            stage=str(stage or "directory_list"),
-        )
-
-    def _directory_message(self, request, key, session):
-        stage = session.get("stage")
-        try:
-            if stage == "directory_add_name":
-                session["pending_name"] = self._directory_name(
-                    request.get("text"), session["working_directories"]
-                )
-                return self._directory_prompt(
-                    key,
-                    (
-                        "第二步（保存路径）：单级目录直接输入“真人电影”；"
-                        "多级目录可输入“series/live action”。不要以 / 开头，"
-                        "末尾 / 可省略。"
-                    ),
-                    stage="directory_add_path",
-                    status_text="输入 115 保存路径。",
-                )
-            if stage == "directory_add_path":
-                path = self._directory_path(
-                    request.get("text"), session["working_directories"]
-                )
-                candidate = deepcopy(session["working_directories"])
-                candidate.append({
-                    "name": session["pending_name"],
-                    "path": path,
-                })
-                session["working_directories"] = normalize_save_directories(
-                    candidate
-                )
-                return self._return_to_directory_list(
-                    key, "目录新增待保存。"
-                )
-            if stage in {"directory_edit_name", "directory_edit_path"}:
-                index = int(session["selected_index"])
-                candidate = deepcopy(session["working_directories"])
-                if stage == "directory_edit_name":
-                    candidate[index]["name"] = self._directory_name(
-                        request.get("text"), candidate, exclude_index=index
-                    )
-                else:
-                    candidate[index]["path"] = self._directory_path(
-                        request.get("text"), candidate, exclude_index=index
-                    )
-                session["working_directories"] = normalize_save_directories(
-                    candidate
-                )
-                return self._return_to_directory_list(
-                    key, "目录修改待保存。"
-                )
-        except (IndexError, TypeError, ValueError) as exc:
-            return self._directory_prompt(
-                key,
-                f"⚠️ {exc}",
-                stage=str(stage),
-                status_text="保存目录无效，请重新输入。",
-            )
-        return self._message_with_session("⚠️ 配置会话已失效。", "close")
-
-    @staticmethod
-    def _directory_name(value, directories, *, exclude_index=None):
-        name = str(value or "").strip()
-        if not name or "\n" in name or "\r" in name:
-            raise ValueError("目录名称必须是非空单行文本。")
-        if any(
-            index != exclude_index and item.get("name") == name
-            for index, item in enumerate(directories)
-        ):
-            raise ValueError("目录名称重复，请重新输入。")
-        return name
-
-    @staticmethod
-    def _directory_path(value, directories, *, exclude_index=None):
-        raw_path = str(value or "").strip()
-        if raw_path.startswith("/"):
-            raise ValueError(
-                "目录路径请从 115 根文件夹开始填写，不要以 / 开头。"
-            )
-        try:
-            path = normalize_save_directory_path(raw_path)
-        except ValueError as exc:
-            raise ValueError(
-                "目录路径只能包含有效的根目录相对路径段。"
-            ) from exc
-        if any(
-            index != exclude_index and item.get("path") == path
-            for index, item in enumerate(directories)
-        ):
-            raise ValueError("目录路径重复，请重新输入。")
-        return path
+        return self._interaction_message(key, "请选择当前配置面板上的操作。")
 
     @staticmethod
     def _bounded_index(items, value):
@@ -939,118 +668,12 @@ class DownloadFeature:
             raise IndexError("download directory index is out of range")
         return index
 
-    def _directory_prompt(
-        self,
-        key,
-        text,
-        *,
-        stage,
-        status_text=None,
-        kind="send_message",
-    ):
-        session = self.sessions.get(key)
-        if not session:
-            return self._message_with_session("配置会话已失效，请重新开始。", "close")
-        session["stage"] = stage
-        self._schedule_sensitive_expiry(key)
-        operation = self._advance_operation(
-            session["operation_id"],
-            state="awaiting_input",
-            stage=stage,
-            status_text=status_text or text,
-            control="exit",
-        )
-        return {
-            "actions": [{
-                "kind": kind,
-                "text": text,
-                "data": {"keyboard": [
-                    [{
-                        "text": "返回目录列表",
-                        "callback_data": "download:config:back",
-                    }],
-                    self._exit_row(),
-                ]},
-            }],
-            "session": {"state": "open"},
-            "operation": operation,
-        }
-
-    def _return_to_directory_list(self, key, status_text, *, kind="send_message"):
-        session = self.sessions[key]
-        session["stage"] = "directory_list"
-        session.pop("pending_name", None)
-        session.pop("selected_index", None)
-        self._schedule_sensitive_expiry(key)
-        operation = self._advance_operation(
-            session["operation_id"],
-            state="awaiting_input",
-            stage="directory_list",
-            status_text=status_text,
-            control="exit",
-        )
-        return self._directory_list_message(
-            key,
-            kind=kind,
-            operation=operation,
-            text_prefix=status_text,
-        )
-
-    async def _save_directory_config(self, key):
-        session = self.sessions[key]
-        operation_id = session["operation_id"]
-        working_directories = normalize_save_directories(
-            session["working_directories"]
-        )
-        await self._report_operation(
-            operation_id,
-            state="running",
-            stage="config_persistence",
-            status_text="正在保存目录配置。",
-            control="",
-        )
-        try:
-            if self.config_store:
-                updated = await asyncio.to_thread(
-                    self.config_store.write_save_directories,
-                    working_directories,
-                )
-            else:
-                updated = dict(self.config)
-                updated["save_directories"] = working_directories
-        except Exception as exc:
-            logger.error(
-                "download_directory_config_write_failed "
-                f"error={type(exc).__name__}"
-            )
-            session["stage"] = "directory_list"
-            self._schedule_sensitive_expiry(key)
-            operation = await self._report_operation(
-                operation_id,
-                state="awaiting_input",
-                stage="directory_list",
-                status_text="保存失败，当前修改仍保留。",
-                control="exit",
-            )
-            return self._directory_list_message(
-                key,
-                operation=operation,
-                text_prefix="保存失败，请重试或退出。",
-            )
-        self.config.clear()
-        self.config.update(updated)
-        self._clear_auth_session(key)
-        operation = await self._report_operation(
-            operation_id,
-            state="completed",
-            stage="completed",
-            status_text="115 保存目录已更新。",
-            control="",
-        )
-        result = self._message_with_session(
-            "115 保存目录已更新。", "close"
-        )
-        result["operation"] = operation
+    def _settings_navigation(self,key,target):
+        operation = self._close_interaction(key,"已转到公共配置。")
+        result = self._message_with_session("请使用 /config 编辑基础设置。","close")
+        result["config_navigation"] = target
+        if operation:
+            result["operation"] = operation
         return result
 
     async def _save_minimum_video_size(self, key, value):
@@ -1151,68 +774,6 @@ class DownloadFeature:
                         "callback_data": "download:auth:scan",
                     },
                 ], self._exit_row()]},
-            }],
-            "session": {"state": "open"},
-            "operation": operation,
-        }
-
-    def _directory_list_message(
-        self,
-        key,
-        *,
-        kind="send_message",
-        operation=None,
-        text_prefix="",
-    ):
-        session = self.sessions[key]
-        directories = session["working_directories"]
-        page_count = max(
-            1, (len(directories) + DIRECTORY_PAGE_SIZE - 1) // DIRECTORY_PAGE_SIZE
-        )
-        page = max(0, min(int(session.get("page") or 0), page_count - 1))
-        session["page"] = page
-        start = page * DIRECTORY_PAGE_SIZE
-        keyboard = [[{
-            "text": f"📁 {item['name']}",
-            "callback_data": f"download:config:item:{index}",
-        }] for index, item in enumerate(
-            directories[start:start + DIRECTORY_PAGE_SIZE], start=start
-        )]
-        if page_count > 1:
-            navigation = []
-            if page > 0:
-                navigation.append({
-                    "text": "上一页",
-                    "callback_data": f"download:config:page:{page - 1}",
-                })
-            if page + 1 < page_count:
-                navigation.append({
-                    "text": "下一页",
-                    "callback_data": f"download:config:page:{page + 1}",
-                })
-            keyboard.append(navigation)
-        keyboard.extend([
-            [{"text": "新增目录", "callback_data": "download:config:add"}],
-            [{
-                "text": "保存并完成",
-                "callback_data": "download:config:save",
-            }],
-            self._exit_row(),
-        ])
-        if operation is None:
-            operation = self._operation_view(
-                self.operations[session["operation_id"]]
-            )
-        return {
-            "actions": [{
-                "kind": kind,
-                "text": (
-                    (f"{text_prefix}\n\n" if text_prefix else "") +
-                    f"115 保存目录（{len(directories)} 个）\n"
-                    f"第 {page + 1}/{page_count} 页\n\n"
-                    "逐条新增、编辑或删除，最后统一保存。"
-                ),
-                "data": {"keyboard": keyboard},
             }],
             "session": {"state": "open"},
             "operation": operation,

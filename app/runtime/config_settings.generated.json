@@ -1,0 +1,1636 @@
+{
+  "host": {
+    "defaults": {
+      "log_level": "info",
+      "plugins": {
+        "root": "/config/plugins",
+        "runtime_root": "/tmp/telepiplex",
+        "catalog": "https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml",
+        "catalog_refresh_interval": 21600,
+        "install_timeout": 300,
+        "startup_timeout": 30,
+        "drain_timeout": 120,
+        "stabilize_seconds": 10,
+        "restart_limit": 3,
+        "event_retry_interval": 1,
+        "event_delivery_timeout": 1800,
+        "event_max_attempts": 5
+      }
+    },
+    "schema": {
+      "type": "object",
+      "properties": {
+        "log_level": {
+          "type": "string"
+        },
+        "bot_token": {
+          "type": "string",
+          "writeOnly": true
+        },
+        "allowed_user": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        },
+        "plugins": {
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string"
+            },
+            "runtime_root": {
+              "type": "string"
+            },
+            "catalog": {
+              "type": "string"
+            },
+            "catalog_refresh_interval": {
+              "type": "number"
+            },
+            "install_timeout": {
+              "type": "number"
+            },
+            "startup_timeout": {
+              "type": "number"
+            },
+            "drain_timeout": {
+              "type": "number"
+            },
+            "stabilize_seconds": {
+              "type": "number"
+            },
+            "restart_limit": {
+              "type": "integer"
+            },
+            "event_retry_interval": {
+              "type": "number"
+            },
+            "event_delivery_timeout": {
+              "type": "number"
+            },
+            "event_max_attempts": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    }
+  },
+  "features": {
+    "download": {
+      "version": "2.4.0",
+      "config_schema_version": 1,
+      "defaults": {
+        "base_url": "https://proapi.115.com",
+        "passport_url": "https://passportapi.115.com",
+        "auth_mode": "direct",
+        "access_token": "",
+        "refresh_token": "",
+        "app_id": "",
+        "auth_poll_timeout": 300,
+        "auth_poll_interval": 2,
+        "timeout": 30,
+        "download_timeout": 1800,
+        "minimum_video_size_mib": 100,
+        "poll_initial_interval": 2,
+        "poll_max_interval": 30,
+        "poll_backoff_factor": 1.7,
+        "endpoint_intervals": {
+          "offline_poll": 1.0,
+          "offline_mutation": 1.0,
+          "storage_read": 0.25,
+          "storage_mutation": 1.0,
+          "token_refresh": 1.0
+        },
+        "storage_read_workers": 4,
+        "save_directories": [],
+        "enable_tree_snapshot_references": false
+      },
+      "schema": {
+        "x-telepiplex-download-directory-contract": "preserve_segment_spaces_v1",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "x-telepiplex-config-command": "config",
+        "properties": {
+          "enable_tree_snapshot_references": {
+            "type": "boolean",
+            "default": false
+          },
+          "base_url": {
+            "type": "string",
+            "pattern": "^https://"
+          },
+          "passport_url": {
+            "type": "string",
+            "pattern": "^https://"
+          },
+          "auth_mode": {
+            "enum": [
+              "direct",
+              "scan"
+            ]
+          },
+          "access_token": {
+            "type": "string",
+            "writeOnly": true
+          },
+          "refresh_token": {
+            "type": "string",
+            "writeOnly": true
+          },
+          "app_id": {
+            "type": "string"
+          },
+          "auth_poll_timeout": {
+            "type": "number",
+            "minimum": 30,
+            "maximum": 900
+          },
+          "auth_poll_interval": {
+            "type": "number",
+            "minimum": 0.5,
+            "maximum": 30
+          },
+          "timeout": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 300
+          },
+          "download_timeout": {
+            "type": "number",
+            "minimum": 10,
+            "maximum": 86400
+          },
+          "minimum_video_size_mib": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10240
+          },
+          "poll_initial_interval": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 300
+          },
+          "poll_max_interval": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 300
+          },
+          "poll_backoff_factor": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "endpoint_intervals": {
+            "type": "object",
+            "properties": {
+              "offline_poll": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 300
+              },
+              "offline_mutation": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 300
+              },
+              "storage_read": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 300
+              },
+              "storage_mutation": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 300
+              },
+              "token_refresh": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 300
+              }
+            },
+            "required": [
+              "offline_poll",
+              "offline_mutation",
+              "storage_read",
+              "storage_mutation",
+              "token_refresh"
+            ],
+            "additionalProperties": false
+          },
+          "storage_read_workers": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4
+          },
+          "poll_interval": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 300
+          },
+          "request_interval": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 30
+          },
+          "save_directories": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "path": {
+                  "type": "string",
+                  "pattern": "^(?!\\.\\.?(?:/|$))[^/\\\\\\u0000-\\u001f\\u007f-\\u009f]+(?:/(?!\\.\\.?(?:/|$))[^/\\\\\\u0000-\\u001f\\u007f-\\u009f]+)*/?(?![\\s\\S])"
+                }
+              },
+              "required": [
+                "name",
+                "path"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "base_url",
+          "passport_url",
+          "auth_mode",
+          "access_token",
+          "refresh_token",
+          "app_id",
+          "auth_poll_timeout",
+          "auth_poll_interval",
+          "timeout",
+          "download_timeout",
+          "poll_initial_interval",
+          "poll_max_interval",
+          "poll_backoff_factor",
+          "endpoint_intervals",
+          "storage_read_workers",
+          "save_directories"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "search": {
+      "version": "2.12.0",
+      "config_schema_version": 2,
+      "defaults": {
+        "category_folder": [
+          {
+            "kind": "live_action_movie",
+            "name": "真人电影",
+            "path": "/真人电影",
+            "plex_library_id": ""
+          },
+          {
+            "kind": "animated_movie",
+            "name": "动画电影",
+            "path": "/动画电影",
+            "plex_library_id": ""
+          },
+          {
+            "kind": "live_action_series",
+            "name": "真人剧集",
+            "path": "/真人剧集",
+            "plex_library_id": ""
+          },
+          {
+            "kind": "animated_series",
+            "name": "动画剧集",
+            "path": "/动画剧集",
+            "plex_library_id": ""
+          }
+        ],
+        "search": {
+          "enable": true,
+          "prowlarr": {
+            "base_url": "http://127.0.0.1:9696",
+            "api_key": "",
+            "timeout": 200,
+            "indexer_timeout": 75,
+            "status_timeout": 15,
+            "indexer_ids": "-2",
+            "first_wave_indexer_ids": [],
+            "wave_delay": 1.5,
+            "categories": {
+              "movie": 2000,
+              "tv": 5000
+            },
+            "result_limit": 12
+          },
+          "scoring": {
+            "reject_keywords": [
+              "720p",
+              "576p",
+              "480p",
+              "CAM",
+              "TS",
+              "TC",
+              "枪版",
+              "抢先",
+              "HC",
+              "HDTC",
+              "HDCAM"
+            ],
+            "keyword_scores": {
+              "2160p": 100,
+              "1080p": 50,
+              "BluRay": 12,
+              "BDRip": 10,
+              "WEB": 6,
+              "Remux": -1,
+              "HEVC": 2,
+              "H.265": 2,
+              "x265": 2,
+              "H.264": 1,
+              "x264": 1,
+              "Atmos": 20,
+              "TrueHD": 4,
+              "DTS-HD": 3,
+              "EAC3": 2,
+              "国配": 2,
+              "中字": 1
+            },
+            "indexer_scores": {
+              "M-Team": 3,
+              "TorrentLeech": 1
+            }
+          }
+        },
+        "metadata": {
+          "wikipedia": {
+            "enable": true,
+            "languages": [
+              "zh",
+              "en"
+            ],
+            "timeout": 10,
+            "min_interval": 3,
+            "max_queries": 2,
+            "rate_limit_cooldown": 30
+          },
+          "douban": {
+            "enable": true,
+            "timeout": 10,
+            "cache_ttl": 900,
+            "max_concurrency": 2,
+            "circuit_breaker_failures": 3,
+            "circuit_breaker_seconds": 300
+          },
+          "tvdb": {
+            "enable": true,
+            "api_key": "",
+            "base_url": "https://api4.thetvdb.com/v4",
+            "subscriber_pin": "",
+            "timeout": 15
+          },
+          "tmdb": {
+            "enable": true,
+            "api_key": "",
+            "base_url": "https://api.themoviedb.org/3",
+            "timeout": 15
+          },
+          "anilist": {
+            "enable": true,
+            "endpoint": "https://graphql.anilist.co",
+            "timeout": 15
+          }
+        }
+      },
+      "schema": {
+        "x-telepiplex-metadata-timeout-contract": "seconds_1_300_v1",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "x-telepiplex-config-command": "search_config",
+        "properties": {
+          "category_folder": {
+            "type": "array",
+            "minItems": 4,
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "live_action_movie",
+                    "animated_movie",
+                    "live_action_series",
+                    "animated_series"
+                  ]
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "path": {
+                  "type": "string",
+                  "pattern": "^/"
+                },
+                "plex_library_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "name",
+                "path",
+                "plex_library_id"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "search": {
+            "type": "object",
+            "title": "搜索",
+            "properties": {
+              "enable": {
+                "type": "boolean",
+                "title": "启用搜索"
+              },
+              "prowlarr": {
+                "type": "object",
+                "title": "Prowlarr",
+                "properties": {
+                  "base_url": {
+                    "type": "string",
+                    "title": "服务地址"
+                  },
+                  "api_key": {
+                    "type": "string",
+                    "title": "API Key",
+                    "writeOnly": true
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 600,
+                    "title": "搜索超时（秒）"
+                  },
+                  "indexer_timeout": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 600,
+                    "title": "单 Indexer 超时（秒）"
+                  },
+                  "status_timeout": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 300,
+                    "title": "状态超时（秒）"
+                  },
+                  "indexer_ids": {
+                    "type": "string",
+                    "title": "Indexer IDs"
+                  },
+                  "first_wave_indexer_ids": {
+                    "type": "array",
+                    "title": "首波 Indexer IDs",
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  },
+                  "wave_delay": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 30,
+                    "title": "尾波延迟（秒）"
+                  },
+                  "categories": {
+                    "type": "object",
+                    "title": "搜索分类",
+                    "properties": {
+                      "movie": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "title": "电影分类"
+                      },
+                      "tv": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "title": "剧集分类"
+                      }
+                    },
+                    "additionalProperties": true
+                  },
+                  "result_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 12,
+                    "title": "结果数量"
+                  }
+                },
+                "additionalProperties": true
+              },
+              "scoring": {
+                "type": "object",
+                "title": "评分",
+                "properties": {
+                  "prefer_resolution": {
+                    "type": "array",
+                    "deprecated": true,
+                    "title": "优先分辨率",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "prefer_source": {
+                    "type": "array",
+                    "deprecated": true,
+                    "title": "优先片源",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "prefer_codec": {
+                    "type": "array",
+                    "deprecated": true,
+                    "title": "优先编码",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "prefer_audio": {
+                    "type": "array",
+                    "deprecated": true,
+                    "title": "优先音频",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "reject_keywords": {
+                    "type": "array",
+                    "title": "拒绝关键词",
+                    "description": "命中即排除，不扣分。分辨率关键词也匹配解析后的像素尺寸别名。",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "keyword_scores": {
+                    "type": "object",
+                    "title": "关键词权重",
+                    "description": "显式分数表不回补默认 prefer/reject。来源使用 BluRay、BDRip、WEB 归一计分，Remux 仅作用于明确蓝光来源。其余关键词按标题匹配。",
+                    "additionalProperties": {
+                      "type": "integer"
+                    }
+                  },
+                  "indexer_scores": {
+                    "type": "object",
+                    "title": "Indexer 权重",
+                    "additionalProperties": {
+                      "type": "integer"
+                    }
+                  }
+                },
+                "additionalProperties": true
+              }
+            },
+            "additionalProperties": true
+          },
+          "metadata": {
+            "type": "object",
+            "title": "元数据",
+            "properties": {
+              "wikipedia": {
+                "type": "object",
+                "title": "Wikipedia",
+                "properties": {
+                  "enable": {
+                    "type": "boolean",
+                    "title": "启用"
+                  },
+                  "languages": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 300,
+                    "title": "超时（秒）"
+                  },
+                  "min_interval": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 30,
+                    "title": "请求最小间隔（秒）"
+                  },
+                  "max_queries": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 6,
+                    "title": "每轮最大查询数"
+                  },
+                  "rate_limit_cooldown": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 3600,
+                    "title": "限流冷却（秒）"
+                  }
+                },
+                "additionalProperties": true
+              },
+              "douban": {
+                "type": "object",
+                "title": "豆瓣",
+                "properties": {
+                  "enable": {
+                    "type": "boolean",
+                    "title": "启用"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 300,
+                    "title": "超时（秒）"
+                  },
+                  "cache_ttl": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 86400,
+                    "title": "缓存时长（秒）"
+                  },
+                  "max_concurrency": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 8,
+                    "title": "最大并发"
+                  },
+                  "circuit_breaker_failures": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "title": "熔断失败阈值"
+                  },
+                  "circuit_breaker_seconds": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 3600,
+                    "title": "熔断时长（秒）"
+                  }
+                },
+                "additionalProperties": true
+              },
+              "tvdb": {
+                "type": "object",
+                "title": "TVDB",
+                "properties": {
+                  "enable": {
+                    "type": "boolean",
+                    "title": "启用"
+                  },
+                  "api_key": {
+                    "type": "string",
+                    "title": "API Key",
+                    "writeOnly": true
+                  },
+                  "base_url": {
+                    "type": "string",
+                    "title": "API 地址"
+                  },
+                  "subscriber_pin": {
+                    "type": "string",
+                    "title": "Subscriber PIN",
+                    "writeOnly": true
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 300,
+                    "title": "超时（秒）"
+                  }
+                },
+                "additionalProperties": true
+              },
+              "tmdb": {
+                "type": "object",
+                "title": "TMDB",
+                "properties": {
+                  "enable": {
+                    "type": "boolean",
+                    "title": "启用"
+                  },
+                  "api_key": {
+                    "type": "string",
+                    "title": "API Read Access Token",
+                    "writeOnly": true
+                  },
+                  "base_url": {
+                    "type": "string",
+                    "title": "API 地址"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 300,
+                    "title": "超时（秒）"
+                  }
+                },
+                "additionalProperties": true
+              },
+              "anilist": {
+                "type": "object",
+                "title": "AniList",
+                "properties": {
+                  "enable": {
+                    "type": "boolean",
+                    "title": "启用"
+                  },
+                  "endpoint": {
+                    "type": "string",
+                    "title": "GraphQL 地址"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 300,
+                    "title": "超时（秒）"
+                  }
+                },
+                "additionalProperties": true
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "category_folder",
+          "search",
+          "metadata"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "rename": {
+      "version": "2.5.0",
+      "config_schema_version": 2,
+      "defaults": {
+        "category_folder": [
+          {
+            "kind": "live_action_movie",
+            "name": "真人电影",
+            "path": "/真人电影",
+            "plex_library_id": ""
+          },
+          {
+            "kind": "animated_movie",
+            "name": "动画电影",
+            "path": "/动画电影",
+            "plex_library_id": ""
+          },
+          {
+            "kind": "live_action_series",
+            "name": "真人剧集",
+            "path": "/真人剧集",
+            "plex_library_id": ""
+          },
+          {
+            "kind": "animated_series",
+            "name": "动画剧集",
+            "path": "/动画剧集",
+            "plex_library_id": ""
+          }
+        ],
+        "unorganized_path": "/未整理",
+        "storage_timeout": 120,
+        "storage_move_batch_size": 100,
+        "metadata_timeout": 120,
+        "caption_enabled": true,
+        "caption_timeout": 300,
+        "selection": {
+          "movie_size_fallback_ratio": 1.5,
+          "unmatched_large_ratio": 0.25,
+          "unmatched_large_min_bytes": 314572800
+        },
+        "ai": {
+          "enable": true,
+          "api_url": "",
+          "api_key": "",
+          "model": "",
+          "timeout": 60
+        }
+      },
+      "schema": {
+        "x-telepiplex-inventory-root-contract": "null_disables_extra_root_v1",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "x-telepiplex-config-command": "rename_config",
+        "properties": {
+          "category_folder": {
+            "type": "array",
+            "minItems": 4,
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "live_action_movie",
+                    "animated_movie",
+                    "live_action_series",
+                    "animated_series"
+                  ]
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "path": {
+                  "type": "string",
+                  "pattern": "^/"
+                },
+                "plex_library_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "name",
+                "path",
+                "plex_library_id"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "unorganized_path": {
+            "type": "string",
+            "pattern": "^/"
+          },
+          "storage_timeout": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 600
+          },
+          "storage_move_batch_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "metadata_timeout": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 600
+          },
+          "caption_enabled": {
+            "type": "boolean",
+            "title": "自动匹配外挂字幕"
+          },
+          "caption_timeout": {
+            "type": "number",
+            "minimum": 10,
+            "maximum": 1800,
+            "title": "字幕匹配超时（秒）"
+          },
+          "selection": {
+            "type": "object",
+            "properties": {
+              "movie_size_fallback_ratio": {
+                "type": "number",
+                "minimum": 1
+              },
+              "unmatched_large_ratio": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "unmatched_large_min_bytes": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "movie_size_fallback_ratio",
+              "unmatched_large_ratio",
+              "unmatched_large_min_bytes"
+            ],
+            "additionalProperties": false
+          },
+          "ai": {
+            "type": "object",
+            "title": "AI",
+            "properties": {
+              "enable": {
+                "type": "boolean",
+                "title": "启用"
+              },
+              "api_url": {
+                "type": "string",
+                "title": "API 地址"
+              },
+              "api_key": {
+                "type": "string",
+                "title": "API Key",
+                "writeOnly": true
+              },
+              "model": {
+                "type": "string",
+                "title": "模型"
+              },
+              "timeout": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 600,
+                "title": "超时（秒）"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "category_folder",
+          "unorganized_path",
+          "storage_timeout",
+          "storage_move_batch_size",
+          "metadata_timeout",
+          "selection",
+          "ai"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sync": {
+      "version": "2.1.4",
+      "config_schema_version": 1,
+      "defaults": {
+        "category_folder": [],
+        "plex": {
+          "base_url": "",
+          "token": "",
+          "timeout": 15,
+          "scan_poll_interval": 5,
+          "scan_timeout": 300
+        },
+        "tmdb": {
+          "api_key": "",
+          "timeout": 15
+        },
+        "fanart": {
+          "api_key": "",
+          "timeout": 15
+        },
+        "mcp": {
+          "enabled": false,
+          "host": "127.0.0.1",
+          "port": 8765,
+          "path": "/mcp",
+          "auth_token": ""
+        }
+      },
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "x-telepiplex-config-command": "sync_config",
+        "properties": {
+          "category_folder": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "live_action_movie",
+                    "animated_movie",
+                    "live_action_series",
+                    "animated_series"
+                  ]
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "path": {
+                  "type": "string",
+                  "pattern": "^/"
+                },
+                "plex_library_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "name",
+                "path",
+                "plex_library_id"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "plex": {
+            "type": "object",
+            "title": "Plex",
+            "properties": {
+              "base_url": {
+                "type": "string"
+              },
+              "token": {
+                "type": "string",
+                "writeOnly": true
+              },
+              "timeout": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 300
+              },
+              "scan_poll_interval": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 300
+              },
+              "scan_timeout": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 3600
+              }
+            },
+            "required": [
+              "base_url",
+              "token",
+              "timeout",
+              "scan_poll_interval",
+              "scan_timeout"
+            ],
+            "additionalProperties": false
+          },
+          "tmdb": {
+            "$ref": "#/$defs/metadata_provider",
+            "title": "TMDB"
+          },
+          "fanart": {
+            "$ref": "#/$defs/metadata_provider",
+            "title": "Fanart.tv"
+          },
+          "mcp": {
+            "type": "object",
+            "title": "MCP",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "host": {
+                "type": "string"
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "path": {
+                "type": "string"
+              },
+              "auth_token": {
+                "type": "string",
+                "writeOnly": true
+              }
+            },
+            "required": [
+              "enabled",
+              "host",
+              "port",
+              "path",
+              "auth_token"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "$defs": {
+          "metadata_provider": {
+            "type": "object",
+            "properties": {
+              "api_key": {
+                "type": "string",
+                "writeOnly": true
+              },
+              "timeout": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 300
+              }
+            },
+            "required": [
+              "api_key",
+              "timeout"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "category_folder",
+          "plex",
+          "tmdb",
+          "fanart",
+          "mcp"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "caption": {
+      "version": "1.4.0",
+      "config_schema_version": 1,
+      "defaults": {
+        "enabled": true,
+        "automatic": true,
+        "source_profile": "balanced",
+        "output_path": "/字幕",
+        "request_timeout_seconds": 15,
+        "provider_timeout_seconds": 45,
+        "retrieval_timeout_seconds": 180,
+        "automatic_timeout_seconds": 240,
+        "max_candidates": 30,
+        "max_candidates_per_provider": 15,
+        "max_download_bytes": 16777216,
+        "providers": {
+          "assrt": {
+            "enabled": true,
+            "token": ""
+          },
+          "shooter": {
+            "enabled": true
+          },
+          "subhd": {
+            "enabled": true,
+            "cookie": "",
+            "user_agent": ""
+          },
+          "zimuku": {
+            "enabled": true,
+            "cookie": "",
+            "user_agent": ""
+          },
+          "opensubtitles": {
+            "enabled": true,
+            "api_key": "",
+            "username": "",
+            "password": "",
+            "token": ""
+          },
+          "xunlei": {
+            "enabled": true
+          },
+          "subdl": {
+            "enabled": true,
+            "api_key": ""
+          },
+          "subsource": {
+            "enabled": true,
+            "api_key": ""
+          },
+          "subf2m": {
+            "enabled": true
+          },
+          "r3sub": {
+            "enabled": true
+          },
+          "addic7ed": {
+            "enabled": true,
+            "cookie": "",
+            "user_agent": ""
+          },
+          "lwltv": {
+            "enabled": true,
+            "cookie": "",
+            "user_agent": ""
+          },
+          "yysub": {
+            "enabled": true,
+            "cookie": "",
+            "user_agent": ""
+          },
+          "nekomoe": {
+            "enabled": true,
+            "github_token": "",
+            "cache_ttl_seconds": 3600,
+            "title_aliases": {},
+            "episode_mappings": {}
+          },
+          "mingy": {
+            "enabled": true,
+            "github_token": "",
+            "cache_ttl_seconds": 3600,
+            "max_release_pages": 3,
+            "title_aliases": {},
+            "episode_mappings": {}
+          },
+          "kitauji": {
+            "enabled": true,
+            "github_token": "",
+            "cache_ttl_seconds": 3600,
+            "title_aliases": {},
+            "episode_mappings": {}
+          },
+          "haruhana": {
+            "enabled": true,
+            "github_token": "",
+            "cache_ttl_seconds": 3600,
+            "title_aliases": {},
+            "episode_mappings": {}
+          },
+          "local_archive": {
+            "enabled": true,
+            "roots": [],
+            "mapping_file": "",
+            "cache_ttl_seconds": 300,
+            "max_files": 20000,
+            "max_depth": 12,
+            "episode_mappings": {}
+          }
+        }
+      },
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "x-telepiplex-config-command": "caption_config",
+        "type": "object",
+        "$defs": {
+          "enabledProvider": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
+          "browserSessionProvider": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "cookie": {
+                "type": "string",
+                "maxLength": 8192,
+                "pattern": "^[^\\r\\n]*$"
+              },
+              "user_agent": {
+                "type": "string",
+                "maxLength": 512,
+                "pattern": "^[^\\r\\n]*$"
+              }
+            },
+            "additionalProperties": false
+          },
+          "apiKeyProvider": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "api_key": {
+                "type": "string",
+                "maxLength": 1024,
+                "pattern": "^[^\\r\\n]*$"
+              }
+            },
+            "additionalProperties": false
+          },
+          "githubProvider": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "github_token": {
+                "type": "string",
+                "maxLength": 1024,
+                "pattern": "^[^\\r\\n]*$"
+              },
+              "cache_ttl_seconds": {
+                "type": "integer",
+                "minimum": 60,
+                "maximum": 86400
+              },
+              "title_aliases": {
+                "type": "object",
+                "maxProperties": 2000,
+                "additionalProperties": {
+                  "type": "array",
+                  "maxItems": 30,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                }
+              },
+              "episode_mappings": {
+                "type": "object",
+                "maxProperties": 2000,
+                "additionalProperties": {
+                  "type": "object",
+                  "required": [
+                    "season"
+                  ],
+                  "properties": {
+                    "season": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 99
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "minimum": -1000,
+                      "maximum": 1000
+                    },
+                    "first": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9999
+                    },
+                    "last": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9999
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "automatic": {
+            "type": "boolean"
+          },
+          "source_profile": {
+            "type": "string",
+            "enum": [
+              "balanced",
+              "all"
+            ]
+          },
+          "output_path": {
+            "type": "string",
+            "pattern": "^/",
+            "minLength": 1
+          },
+          "request_timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 60
+          },
+          "provider_timeout_seconds": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": 180
+          },
+          "automatic_timeout_seconds": {
+            "type": "integer",
+            "minimum": 30,
+            "maximum": 1800
+          },
+          "max_candidates": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "max_candidates_per_provider": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "max_download_bytes": {
+            "type": "integer",
+            "minimum": 1024,
+            "maximum": 33554432
+          },
+          "providers": {
+            "type": "object",
+            "properties": {
+              "assrt": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              },
+              "shooter": {
+                "$ref": "#/$defs/enabledProvider"
+              },
+              "subhd": {
+                "$ref": "#/$defs/browserSessionProvider"
+              },
+              "zimuku": {
+                "$ref": "#/$defs/browserSessionProvider"
+              },
+              "opensubtitles": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "api_key": {
+                    "type": "string"
+                  },
+                  "username": {
+                    "type": "string"
+                  },
+                  "password": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              },
+              "xunlei": {
+                "$ref": "#/$defs/enabledProvider"
+              },
+              "subdl": {
+                "$ref": "#/$defs/apiKeyProvider"
+              },
+              "subsource": {
+                "$ref": "#/$defs/apiKeyProvider"
+              },
+              "subf2m": {
+                "$ref": "#/$defs/enabledProvider"
+              },
+              "r3sub": {
+                "$ref": "#/$defs/enabledProvider"
+              },
+              "addic7ed": {
+                "$ref": "#/$defs/browserSessionProvider"
+              },
+              "lwltv": {
+                "$ref": "#/$defs/browserSessionProvider"
+              },
+              "yysub": {
+                "$ref": "#/$defs/browserSessionProvider"
+              },
+              "nekomoe": {
+                "$ref": "#/$defs/githubProvider"
+              },
+              "mingy": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "github_token": {
+                    "type": "string",
+                    "maxLength": 1024,
+                    "pattern": "^[^\\r\\n]*$"
+                  },
+                  "cache_ttl_seconds": {
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": 86400
+                  },
+                  "title_aliases": {
+                    "type": "object",
+                    "maxProperties": 2000,
+                    "additionalProperties": {
+                      "type": "array",
+                      "maxItems": 30,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 500
+                      }
+                    }
+                  },
+                  "episode_mappings": {
+                    "type": "object",
+                    "maxProperties": 2000,
+                    "additionalProperties": {
+                      "type": "object",
+                      "required": [
+                        "season"
+                      ],
+                      "properties": {
+                        "season": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 99
+                        },
+                        "offset": {
+                          "type": "integer",
+                          "minimum": -1000,
+                          "maximum": 1000
+                        },
+                        "first": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9999
+                        },
+                        "last": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9999
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "max_release_pages": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10
+                  }
+                },
+                "additionalProperties": false
+              },
+              "kitauji": {
+                "$ref": "#/$defs/githubProvider"
+              },
+              "haruhana": {
+                "$ref": "#/$defs/githubProvider"
+              },
+              "local_archive": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "roots": {
+                    "type": "array",
+                    "maxItems": 20,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 4096
+                    }
+                  },
+                  "mapping_file": {
+                    "type": "string",
+                    "maxLength": 4096
+                  },
+                  "cache_ttl_seconds": {
+                    "type": "integer",
+                    "minimum": 10,
+                    "maximum": 86400
+                  },
+                  "max_files": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100000
+                  },
+                  "max_depth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 30
+                  },
+                  "episode_mappings": {
+                    "type": "object",
+                    "maxProperties": 2000,
+                    "additionalProperties": {
+                      "type": "object",
+                      "required": [
+                        "season"
+                      ],
+                      "properties": {
+                        "season": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 99
+                        },
+                        "offset": {
+                          "type": "integer",
+                          "minimum": -1000,
+                          "maximum": 1000
+                        },
+                        "first": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9999
+                        },
+                        "last": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9999
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          "retrieval_timeout_seconds": {
+            "type": "number",
+            "minimum": 10,
+            "maximum": 600
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

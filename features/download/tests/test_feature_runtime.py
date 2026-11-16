@@ -706,6 +706,25 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
             })
         self.assertEqual(self.client.added, added_before)
 
+    async def test_central_projection_preserves_legacy_poll_interval_at_service_boundary(self):
+        import sys
+        sys.path.insert(0, str(ROOT.parents[1]))
+        from app.runtime.central_config import CentralConfigStore
+
+        defaults = yaml.safe_load((ROOT / "config.default.yaml").read_text())
+        store = CentralConfigStore(Path("/unused/config.yaml"), initial={
+            "features": {"download": {"request_interval": 0, "poll_interval": 10}},
+        })
+        self.feature.config = store.effective("download", defaults)
+        await self.feature.download_capability({
+            "method": "submit",
+            "payload": {"link": "magnet:?xt=urn:btih:" + "d" * 40,
+                        "selected_path": "/Downloads", "user_id": 123},
+            "context": {"idempotency_key": "central-legacy"},
+        })
+        await self.runtime.tasks.pop("central-legacy")
+        self.assertEqual(self.client.wait_kwargs["poll_initial_interval"], 10)
+
     async def test_service_wires_new_adaptive_polling_config(self):
         self.feature.config.update({
             "poll_initial_interval": 1.25,
@@ -2339,6 +2358,7 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
             "download:config:auth",
             "download:config:directories",
             "download:config:minimum_video_size",
+            "download:config:connection",
             "download:exit",
         ])
         self.assertIn("保存目录：0 个", config["actions"][0]["text"])
@@ -2398,47 +2418,13 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.feature.config["minimum_video_size_mib"], 256)
 
-    async def test_directory_list_is_paginated_with_bounded_keyboard(self):
-        directories = [
-            {"name": f"目录{index}", "path": f"Path{index}"}
-            for index in range(7)
-        ]
-        self.feature.config["save_directories"] = directories
-        self.feature.config_store.config["save_directories"] = directories
-
-        response = await self._open_directory_config()
-
-        keyboard = response["actions"][0]["data"]["keyboard"]
-        self.assertLessEqual(len(keyboard), 10)
-        self.assertIn("download:config:page:1", str(keyboard))
-        self.assertIn("目录4", str(keyboard))
-        self.assertNotIn("目录5", str(keyboard))
-
-        next_page = await self.feature.callback({
-            "payload": "config:page:1", "user_id": 1, "chat_id": 10,
-        })
-        next_keyboard = next_page["actions"][0]["data"]["keyboard"]
-        self.assertLessEqual(len(next_keyboard), 10)
-        self.assertIn("download:config:page:0", str(next_keyboard))
-        self.assertIn("目录5", str(next_keyboard))
-        self.assertIn("目录6", str(next_keyboard))
-
-    async def test_directory_editor_rejects_negative_item_index(self):
-        directories = [
-            {"name": "A", "path": "A"},
-            {"name": "B", "path": "B"},
-        ]
-        self.feature.config["save_directories"] = directories
-        self.feature.config_store.config["save_directories"] = directories
-        await self._open_directory_config()
-
-        response = await self.feature.callback({
-            "payload": "config:item:-1", "user_id": 1, "chat_id": 10,
-        })
-
-        self.assertIn("不可用", response["actions"][0]["text"])
-        self.assertEqual(self.feature.sessions[(10, 1)]["stage"], "directory_list")
-        self.assertNotIn("selected_index", self.feature.sessions[(10, 1)])
+    async def test_manual_directories_handoff_and_stale_save_cannot_write(self):
+        result=await self._open_directory_config()
+        self.assertEqual(result['config_navigation'],'directories')
+        self.assertEqual(result['operation']['state'],'cancelled')
+        stale=await self.feature.callback({'user_id':1,'chat_id':10,'payload':'config:save'})
+        self.assertNotIn('config_patch',stale)
+        self.assertEqual(self.feature.config_store.directory_writes,[])
 
     async def test_config_out_of_order_callback_keeps_home_navigation(self):
         await self.feature.command({
@@ -2477,190 +2463,12 @@ class DownloadFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn((10, 1), self.feature.sessions)
         self.assertEqual(self.runtime.tasks, {})
 
-    async def test_directory_working_copy_add_edit_delete_and_save(self):
-        original = [
-            {"name": "剧集", "path": "series"},
-            {"name": "删除项", "path": "delete"},
-        ]
-        self.feature.config["save_directories"] = original
-        self.feature.config_store.config["save_directories"] = original
-        await self._open_directory_config()
-
-        name_prompt = await self.feature.callback({
-            "payload": "config:add", "user_id": 1, "chat_id": 10,
-        })
-        self.assertIn("第一步", name_prompt["actions"][0]["text"])
-        self.assertIn("只用于按钮展示", name_prompt["actions"][0]["text"])
-        path_prompt = await self.feature.message({
-            "text": "真人电影", "user_id": 1, "chat_id": 10,
-        })
-        self.assertIn("第二步", path_prompt["actions"][0]["text"])
-        self.assertIn("单级目录", path_prompt["actions"][0]["text"])
-        self.assertIn("真人电影", path_prompt["actions"][0]["text"])
-        self.assertIn("series/live action", path_prompt["actions"][0]["text"])
-        added = await self.feature.message({
-            "text": "真人电影", "user_id": 1, "chat_id": 10,
-        })
-        self.assertIn("真人电影", str(
-            added["actions"][0]["data"]["keyboard"]
-        ))
-
-        await self.feature.callback({
-            "payload": "config:item:0", "user_id": 1, "chat_id": 10,
-        })
-        await self.feature.callback({
-            "payload": "config:edit:name", "user_id": 1, "chat_id": 10,
-        })
-        await self.feature.message({
-            "text": "电视剧", "user_id": 1, "chat_id": 10,
-        })
-        await self.feature.callback({
-            "payload": "config:item:0", "user_id": 1, "chat_id": 10,
-        })
-        await self.feature.callback({
-            "payload": "config:edit:path", "user_id": 1, "chat_id": 10,
-        })
-        await self.feature.message({
-            "text": "tv/live action/", "user_id": 1, "chat_id": 10,
-        })
-
-        await self.feature.callback({
-            "payload": "config:item:1", "user_id": 1, "chat_id": 10,
-        })
-        confirm = await self.feature.callback({
-            "payload": "config:delete", "user_id": 1, "chat_id": 10,
-        })
-        self.assertIn("确认删除", confirm["actions"][0]["text"])
-        self.assertEqual(len(
-            self.feature.sessions[(10, 1)]["working_directories"]
-        ), 3)
-        await self.feature.callback({
-            "payload": "config:delete:confirm", "user_id": 1, "chat_id": 10,
-        })
-
-        saved = await self.feature.callback({
-            "payload": "config:save", "user_id": 1, "chat_id": 10,
-        })
-        expected = [
-            {"name": "电视剧", "path": "tv/live action"},
-            {"name": "真人电影", "path": "真人电影"},
-        ]
-        self.assertEqual(saved["session"]["state"], "close")
-        self.assertEqual(self.feature.config_store.directory_writes, [expected])
-        self.assertEqual(self.feature.config["save_directories"], expected)
-        self.assertEqual(saved["operation"]["state"], "completed")
-
-        magnet = await self.feature.command({
-            "command": "magnet",
-            "args": ["magnet:?xt=urn:btih:" + "4" * 40],
-            "user_id": 1,
-            "chat_id": 10,
-        })
-        magnet_keyboard = magnet["actions"][0]["data"]["keyboard"]
-        self.assertIn("电视剧", str(magnet_keyboard))
-        self.assertIn("真人电影", str(magnet_keyboard))
-
-    async def test_directory_input_rejects_invalid_and_duplicate_values(self):
-        original = [{"name": "剧集", "path": "series/live action"}]
-        self.feature.config["save_directories"] = original
-        self.feature.config_store.config["save_directories"] = original
-        await self._open_directory_config()
-        await self.feature.callback({
-            "payload": "config:add", "user_id": 1, "chat_id": 10,
-        })
-
-        invalid_name = await self.feature.message({
-            "text": "line-one\nline-two", "user_id": 1, "chat_id": 10,
-        })
-        self.assertIn("名称", invalid_name["actions"][0]["text"])
-        await self.feature.message({
-            "text": "电影", "user_id": 1, "chat_id": 10,
-        })
-        leading_slash = await self.feature.message({
-            "text": "/movies", "user_id": 1, "chat_id": 10,
-        })
-        duplicate_path = await self.feature.message({
-            "text": "series/live action/", "user_id": 1, "chat_id": 10,
-        })
-        self.assertIn("不要以 / 开头", leading_slash["actions"][0]["text"])
-        self.assertIn("重复", duplicate_path["actions"][0]["text"])
-        await self.feature.message({
-            "text": "movies", "user_id": 1, "chat_id": 10,
-        })
-
-        await self.feature.callback({
-            "payload": "config:add", "user_id": 1, "chat_id": 10,
-        })
-        duplicate_name = await self.feature.message({
-            "text": "电影", "user_id": 1, "chat_id": 10,
-        })
-        self.assertIn("重复", duplicate_name["actions"][0]["text"])
-        self.assertEqual(self.feature.config_store.directory_writes, [])
-
-    async def test_directory_exit_and_q_discard_working_copy(self):
-        for use_q in (False, True):
-            with self.subTest(use_q=use_q):
-                await self._open_directory_config()
-                await self.feature.callback({
-                    "payload": "config:add", "user_id": 1, "chat_id": 10,
-                })
-                await self.feature.message({
-                    "text": "电影", "user_id": 1, "chat_id": 10,
-                })
-                await self.feature.message({
-                    "text": "/Movies", "user_id": 1, "chat_id": 10,
-                })
-                if use_q:
-                    response = await self.feature.command({
-                        "command": "q", "user_id": 1, "chat_id": 10,
-                    })
-                else:
-                    response = await self.feature.callback({
-                        "payload": "exit", "user_id": 1, "chat_id": 10,
-                    })
-                self.assertEqual(response["session"]["state"], "close")
-                self.assertEqual(self.feature.config_store.directory_writes, [])
-
-    async def test_directory_session_timeout_discards_working_copy(self):
-        from telepiplex_download import service
-
-        with patch.object(service, "SESSION_TTL_SECONDS", 0):
-            await self._open_directory_config()
-            await asyncio.sleep(0.01)
-
-        self.assertNotIn((10, 1), self.feature.sessions)
-        self.assertEqual(self.feature.config_store.directory_writes, [])
-        self.assertEqual(self.host.reports[-1]["state"], "cancelled")
-        self.assertIn("目录配置", self.host.reports[-1]["status_text"])
-
-    async def test_directory_save_failure_retains_old_config_and_working_copy(self):
-        original = [{"name": "剧集", "path": "series"}]
-        self.feature.config["save_directories"] = original
-        self.feature.config_store.config["save_directories"] = original
-        self.feature.config_store.fail_directory_writes = True
-        await self._open_directory_config()
-        await self.feature.callback({
-            "payload": "config:add", "user_id": 1, "chat_id": 10,
-        })
-        await self.feature.message({
-            "text": "电影", "user_id": 1, "chat_id": 10,
-        })
-        await self.feature.message({
-            "text": "movies", "user_id": 1, "chat_id": 10,
-        })
-
-        response = await self.feature.callback({
-            "payload": "config:save", "user_id": 1, "chat_id": 10,
-        })
-
-        self.assertEqual(response["session"]["state"], "open")
-        self.assertEqual(response["operation"]["state"], "awaiting_input")
-        self.assertEqual(self.feature.config["save_directories"], original)
-        self.assertEqual(self.feature.sessions[(10, 1)]["stage"], "directory_list")
-        self.assertEqual(len(
-            self.feature.sessions[(10, 1)]["working_directories"]
-        ), 2)
-        self.assertNotIn("secret-value", str(response))
+    async def test_stale_private_directory_draft_is_discarded(self):
+        await self.feature.command({'command':'config','user_id':1,'chat_id':10})
+        self.feature.sessions[(10,1)].update(stage='directory_list',working_directories=[{'name':'obsolete','path':'old'}])
+        result=await self.feature.callback({'user_id':1,'chat_id':10,'payload':'config:save'})
+        self.assertEqual(result['config_navigation'],'directories')
+        self.assertEqual(self.feature.config_store.directory_writes,[])
 
     async def test_direct_token_wizard_writes_only_after_refresh_and_activates_client(self):
         await self.feature.command({
@@ -3101,7 +2909,7 @@ class FeatureConfigStoreTest(unittest.TestCase):
             ])
 
             self.assertEqual(updated["save_directories"], [
-                {"name": "剧集", "path": "series"},
+                {"name": "剧集", "path": " series/ "},
                 {"name": "电影", "path": "movies"},
             ])
             self.assertEqual(updated["access_token"], "access")
@@ -3138,7 +2946,7 @@ class FeatureConfigStoreTest(unittest.TestCase):
             invalid = (
                 None,
                 [{"name": "", "path": "series"}],
-                [{"name": "剧集", "path": "/series"}],
+                [{"name": "剧集", "path": "/"}],
                 [{"name": "剧集", "path": "a", "extra": True}],
                 [
                     {"name": "剧集", "path": "a"},
@@ -3159,20 +2967,19 @@ class FeatureConfigStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = FeatureConfigStore(Path(directory) / "config.yaml")
             updated = store.write_save_directories([
-                {"name": "剧集", "path": " series/live action/ "},
-                {"name": "电影", "path": "movies"},
+                {"name": "剧集", "path": "/series/live action/"},
+                {"name": "电影", "path": " movies "},
             ])
 
             self.assertEqual(updated["save_directories"], [
                 {"name": "剧集", "path": "series/live action"},
-                {"name": "电影", "path": "movies"},
+                {"name": "电影", "path": " movies "},
             ])
 
     def test_save_directory_writeback_rejects_command_and_unsafe_paths(self):
         from telepiplex_download.config_store import FeatureConfigStore
 
         invalid_paths = (
-            "/series",
             "/",
             "series//live action",
             "series//",
@@ -3182,6 +2989,8 @@ class FeatureConfigStoreTest(unittest.TestCase):
             "./series",
             "series/../live action",
             "series/./live action",
+            "series\\live action",
+            "series\x7f",
         )
         with tempfile.TemporaryDirectory() as directory:
             store = FeatureConfigStore(Path(directory) / "config.yaml")
@@ -3254,6 +3063,21 @@ class RuntimeStartupTest(unittest.TestCase):
 
 
 class FeatureSourceContractTest(unittest.TestCase):
+    def test_manual_path_schema_accepts_sdk_segments_in_relative_snapshot(self):
+        from telepiplex_plugin_sdk.storage_paths import normalize_115_directory
+        schema = yaml.safe_load((ROOT / 'config.schema.json').read_text())
+        path_schema = schema['properties']['save_directories']['items']['properties']['path']
+        validator = Draft202012Validator(path_schema)
+        for path in (' 前缀/尾部 ', '子/ 目录/', ' ', '电影/动作', '.', 'a/../b',
+                     'a//b', 'a\\b', 'a\n', 'a\x7f', 'a\x80', '/abs', '/'):
+            with self.subTest(path=path):
+                try:
+                    normalize_115_directory(path, allow_relative=True, allow_root=False)
+                    expected = not path.startswith('/')
+                except ValueError:
+                    expected = False
+                self.assertEqual(validator.is_valid(path),expected)
+
     def test_adaptive_pacing_default_and_schema_contract(self):
         defaults = yaml.safe_load(
             (ROOT / "config.default.yaml").read_text(encoding="utf-8")
@@ -3328,22 +3152,17 @@ class FeatureSourceContractTest(unittest.TestCase):
         commands = [item["name"] for item in manifest["commands"]]
         self.assertNotIn("config", commands)
         self.assertIn("auth", commands)
-        self.assertEqual(manifest["version"], "2.3.0")
-        self.assertEqual(manifest["host_api"], ">=1.10,<2.0")
+        self.assertEqual(manifest["version"], "2.4.0")
+        self.assertEqual(manifest["host_api"], ">=1.11,<2.0")
         self.assertEqual(manifest["config_schema_version"], 1)
         self.assertEqual(manifest["state_schema_version"], 1)
-        self.assertEqual(project["project"]["version"], "2.3.0")
+        self.assertEqual(project["project"]["version"], "2.4.0")
         self.assertEqual(
             project["project"]["dependencies"][0],
-            "telepiplex-plugin-sdk==2.3.0",
+            "telepiplex-plugin-sdk==2.4.0",
         )
-        self.assertIn("/tmp/download-2.3.0.tpx", readme)
-        self.assertNotIn("dist/download-2.3.0.tpx", readme)
-        self.assertIn("逐条新增、编辑和删除", readme)
-        self.assertIn("series/live action", readme)
-        self.assertIn("单级目录", readme)
-        self.assertIn("真人电影", readme)
-        self.assertIn("不要以 / 开头", readme)
+        self.assertIn("/tmp/download-2.4.0.tpx", readme)
+        self.assertNotIn("dist/download-2.4.0.tpx", readme)
 
     def test_source_has_no_host_telegram_or_init_imports(self):
         forbidden = []

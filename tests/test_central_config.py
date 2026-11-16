@@ -123,7 +123,7 @@ def test_missing_file_can_bootstrap_explicit_initial_without_early_write(tmp_pat
     assert store.read() == {'bot_token': 'initial', 'config_version': 2}
 
 
-@pytest.mark.parametrize('text', ['token: [secret-broken', 'features: secret-invalid', 'shared:\n  tmdb: secret-invalid'])
+@pytest.mark.parametrize('text', ['token: [secret-broken', 'features: secret-invalid', 'shared: secret-invalid'])
 def test_invalid_main_config_reports_no_values(tmp_path, text):
     from app.runtime.central_config import CentralConfigStore, CentralConfigError
     path = tmp_path / 'config.yaml'

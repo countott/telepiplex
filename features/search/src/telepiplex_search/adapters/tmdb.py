@@ -7,6 +7,7 @@ from urllib.parse import quote
 import requests
 
 from ..context import runtime_context
+from .config_values import provider_settings, timeout_seconds
 
 
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
@@ -42,20 +43,17 @@ def _integer(value) -> int | None:
 
 
 def _get_tmdb_config() -> dict:
-    config = ((runtime_context.config.get("metadata") or {}).get("tmdb") or {})
+    config = provider_settings(runtime_context.config, "tmdb", TmdbConfigError)
     if not config.get("enable", False):
         raise TmdbConfigError("metadata.tmdb.enable 未开启", "disabled")
     api_key = _text(config.get("api_key"))
     if not api_key:
         raise TmdbConfigError("metadata.tmdb.api_key 未配置", "credential_missing")
-    try:
-        timeout = float(config.get("timeout") or 15)
-    except (TypeError, ValueError):
-        timeout = 15
+    timeout = timeout_seconds(config, "tmdb", TmdbConfigError)
     return {
         "base_url": _text(config.get("base_url") or TMDB_BASE_URL).rstrip("/"),
         "api_key": api_key,
-        "timeout": max(5, min(timeout, 60)),
+        "timeout": timeout,
     }
 
 

@@ -14,6 +14,8 @@ import yaml
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
+from app.runtime.central_config import _defaults
+from app.runtime.config_projection import ProjectionContract
 from app.runtime.plugin_artifact import VerifiedArtifact, verify_tpx
 from app.runtime.plugin_manifest import PluginManifest
 
@@ -131,7 +133,7 @@ def _config_error_paths(schema: dict, value: dict) -> list[str]:
     return sorted(paths)[:20]
 
 
-def _validate(schema: dict, value: dict) -> dict:
+def _validate(schema: dict, value: dict, *, flat_search=False) -> dict:
     if not isinstance(value, dict):
         raise StoreError("invalid_config", "plugin config must be a mapping")
     try:
@@ -145,10 +147,15 @@ def _validate(schema: dict, value: dict) -> dict:
         ) from None
     errors = list(Draft202012Validator(schema).iter_errors(value))
     if errors:
+        paths = _config_error_paths(schema, value)
+        if flat_search:
+            # Current Search packages validate a private wrapper around these public fields.
+            paths = ["features." + path if path.split(".")[:2] in (["search", "prowlarr"], ["search", "scoring"])
+                     else path for path in paths]
         raise StoreError(
             "invalid_config",
             "plugin config does not match schema",
-            {"config_error_paths": _config_error_paths(schema, value)},
+            {"config_error_paths": paths},
         )
     return deepcopy(value)
 
@@ -313,6 +320,7 @@ def _migrate_config_value(
     from_version: int,
     to_version: int,
     preserve_empty: bool = False,
+    flat_search: bool = False,
 ) -> tuple[dict, list[str], list[str]]:
     migrated, removed = _apply_config_migrations(
         current,
@@ -321,7 +329,7 @@ def _migrate_config_value(
         to_version=to_version,
     )
     migrated, added = _fill_missing_defaults(migrated, default, preserve_empty=preserve_empty)
-    return _validate(schema, migrated), added, removed
+    return _validate(schema, migrated, flat_search=flat_search), added, removed
 
 
 def _atomic_json(path: Path, value: dict):
@@ -393,13 +401,15 @@ class PluginStore:
                 else "invalid_config"
             )
             if self.central_config is not None:
-                current = self.central_config.effective(manifest.plugin_id, default)
+                document = self.central_config.read()
+                self.check_archive_switch(manifest.plugin_id, manifest.version, default, document)
+                current = self.central_config.effective(manifest.plugin_id, default, document=document, contract=ProjectionContract(schema))
                 _migrate_config_value(
                     current, default, schema, staged_path,
                     from_version=(active_release.manifest.config_schema_version
                                   if active_release else manifest.config_schema_version),
                     to_version=manifest.config_schema_version,
-                    preserve_empty=True,
+                    preserve_empty=True, flat_search=self._flat_search(manifest.plugin_id),
                 )
             elif config_path.exists():
                 try:
@@ -569,18 +579,17 @@ class PluginStore:
         """Apply declared removals and defaults without replacing operator values."""
         if self.central_config is not None:
             source_release = self.active(release.plugin_id)
-            current = self.central_config.effective(
-                release.plugin_id,
-                self.config_defaults(source_release or release),
-            )
+            # Source values are migration inputs. A quarantined old release may
+            # be unable to launch the very settings supported by its replacement.
+            current = self.project_config(source_release or release, source_input=True)
             validated, added, removed = _migrate_config_value(
-                self.central_config.effective(release.plugin_id, self.config_defaults(release)),
+                self.project_config(release),
                 self.config_defaults(release), _schema_at(release.path),
                 release.path,
                 from_version=(source_release.manifest.config_schema_version
                               if source_release else release.manifest.config_schema_version),
                 to_version=release.manifest.config_schema_version,
-                preserve_empty=True,
+                preserve_empty=True, flat_search=self._flat_search(release.plugin_id),
             )
             return deepcopy(current), validated, added, removed
         config_path = self._plugin_root(release.plugin_id) / "config.yaml"
@@ -796,8 +805,12 @@ class PluginStore:
                 ))
         return installed
 
+    def _flat_search(self, plugin_id):
+        return (plugin_id == "search" and self.central_config is not None
+                and self.central_config.read().get("config_version") == 3)
+
     def validate_config(self, release: ActiveRelease | StagedRelease, value: dict) -> dict:
-        return _validate(_schema_at(release.path), value)
+        return _validate(_schema_at(release.path), value, flat_search=self._flat_search(release.plugin_id))
 
     def config_schema(self, release: ActiveRelease | StagedRelease) -> dict:
         return deepcopy(_schema_at(release.path))
@@ -805,16 +818,55 @@ class PluginStore:
     def config_defaults(self, release: ActiveRelease | StagedRelease) -> dict:
         return deepcopy(_default_at(release.path))
 
-    def prepare_config_change(self, plugin_id: str, patch: dict):
+    def projection_contract(self, release):
+        return ProjectionContract(self.config_schema(release))
+
+    def check_archive_switch(self, plugin_id, version, target_defaults, document):
+        if plugin_id != 'caption':
+            return
+        source = self.active(plugin_id)
+        if source is None or source.version == version:
+            return
+        fields = []
+        for defaults in (self.config_defaults(source), target_defaults):
+            # Local archive inherits package defaults in every layout. The
+            # selected release validates unrelated provider settings separately.
+            snapshot = _defaults(defaults, document.get('features', {}).get(plugin_id, {}))
+            local = snapshot.get('providers', {}).get('local_archive', {})
+            for key in ('roots', 'mapping_file'):
+                value = local.get(key)
+                if not value:
+                    continue
+                paths = value if key == 'roots' and isinstance(value, list) else [value]
+                if any(not isinstance(p, str) or not Path(p).is_absolute() for p in paths):
+                    fields.append('features.caption.providers.local_archive.' + key)
+        if fields:
+            raise StoreError('config_migration_required', 'Specify absolute Caption archive paths before switching releases',
+                             {'config_error_paths': list(dict.fromkeys(fields))})
+
+    def project_config(self, release, *, document=None, source_input=False):
+        contract = self.projection_contract(release)
+        if source_input:
+            contract = ProjectionContract(contract.schema, enforce_runtime=False, migration_source=True)
+        defaults = self.config_defaults(release)
+        if release.plugin_id == 'caption':
+            document = self.central_config.read() if document is None else document
+            self.check_archive_switch(release.plugin_id, release.version, defaults, document)
+        return self.central_config.effective(release.plugin_id, defaults,
+                                             document=document, contract=contract)
+
+    def prepare_config_change(self, plugin_id: str, patch: dict, *, baseline=None):
         if self.central_config is None:
             raise StoreError('invalid_config', 'central config backend is not enabled')
-        return self.central_config.prepare_patch(plugin_id, patch)
+        release = self.active(plugin_id)
+        if release is None:
+            raise StoreError('not_installed', 'Feature is not installed')
+        return self.central_config.prepare_patch(plugin_id, patch, baseline=baseline, defaults=self.config_defaults(release),
+                                                 contract=self.projection_contract(release))
 
     def read_config(self, release: ActiveRelease | StagedRelease) -> dict:
         if self.central_config is not None:
-            return self.validate_config(release, self.central_config.effective(
-                release.plugin_id, self.config_defaults(release),
-            ))
+            return self.validate_config(release, self.project_config(release))
         config_path = self._plugin_root(release.plugin_id) / "config.yaml"
         try:
             value = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -832,8 +884,7 @@ class PluginStore:
     ) -> dict:
         validated = _validate(_schema_at(release.path), value)
         if self.central_config is not None:
-            self.central_config.commit(self.prepare_config_change(release.plugin_id, validated))
-            return deepcopy(validated)
+            raise StoreError('invalid_config', 'Central writes require explicit changes against a source snapshot')
         config_path = self._plugin_root(release.plugin_id) / "config.yaml"
         try:
             _atomic_yaml(config_path, validated)

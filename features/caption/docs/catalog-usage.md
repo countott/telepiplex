@@ -17,14 +17,14 @@ Caption 只取得独立 ASS、SSA、SRT 或包含这些文件的 ZIP、7z、RAR�
 
 Search 的标题、原名和已确认别名先与官方目录核对。`title_aliases` 可补充用户确认的目录名/资产名与作品名关系；不要用模糊词、简称或不确定翻译强行关联。来源 README 明确写出 `Season 1/2` 并对应具体成品链接时可形成映射；其他动漫绝对集号不会自行猜成 TMDB aired 季集。
 
-下面是配置结构示例，应放在现有 Caption 配置的 `providers` 下；实际配置位置以部署中的 Caption 配置为准。`season` 与 `offset` 必须基于你确认的 Search/TMDB 季集关系填写。
+下面的片段放在主文件 `/config/config.yaml` 的 `features.caption` 下。四个 GitHub 来源默认继承 `provider_defaults.github` 的 Token 和缓存 TTL；只为有差异的来源设置覆盖。显式空 Token 表示该来源匿名访问，删除覆盖后恢复继承。`season` 与 `offset` 按已确认的 Search/TMDB 关系填写。
 
 ```yaml
 providers:
   nekomoe:
     enabled: true
     cache_ttl_seconds: 3600
-    github_token: ""  # 可留空
+    github_token: ""  # 该来源显式匿名；删除本行可继承公共 Token
     title_aliases:
       5Hanayome: ["五等分的新娘", "Go-Toubun no Hanayome"]
     # 该作品 README 本身已有 Season 1、Season 2 及对应链接。

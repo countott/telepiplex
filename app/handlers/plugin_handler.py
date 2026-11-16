@@ -18,7 +18,7 @@ from app.runtime.command_catalog import sync_bot_commands
 from app.runtime.poster_grid import build_poster_grid
 from app.runtime.telegram_text import bounded_photo_caption
 from app.utils.log_sanitizer import sanitize_log_value
-from app.handlers.shared_config_handler import central_config_saved_feedback
+from app.handlers.shared_config_handler import central_config_saved_feedback, clear_host_draft, host_draft
 from app.handlers.interaction_handler import (
     CONFIG_OPERATION_TASKS_KEY,
     COORDINATOR_KEY,
@@ -557,7 +557,28 @@ async def dynamic_command_gateway(update, context):
     route = router.command_route(command) if router is not None else None
     if route is None:
         return
+    settings_dispatch = False
+    if isinstance(getattr(context, 'user_data', None), dict):
+        key = _session_key(update)
+        retired = context.user_data.get('retired_config_sources', {}).get(key, ())
+        if host_draft(update, context) or command.endswith('_config') or route.plugin_id in retired:
+            manager = context.application.bot_data.get(MANAGER_KEY)
+            if manager is not None:
+                try:
+                    declaration = manager.config_state(route.plugin_id)
+                    settings_dispatch = bool(declaration.get('configurable') and declaration.get('command') == command)
+                except Exception:
+                    settings_dispatch = False
+        if settings_dispatch:
+            start_feature_settings(update, context, route.plugin_id)
+        else:
+            clear_host_draft(update, context)
+            # Invalidate in-flight settings results while an ordinary command
+            # runs, keeping the Feature's retirement and business session.
+            epochs = context.user_data.setdefault('settings_epochs', {})
+            epochs[key] = epochs.get(key, 0) + 1
     try:
+        epoch = settings_epoch(context, update)
         result = await route.client.request(
             "command.dispatch",
             {
@@ -571,7 +592,7 @@ async def dynamic_command_gateway(update, context):
             deadline=30,
             idempotency_key=f"telegram:{getattr(update, 'update_id', '')}",
         )
-        await handle_feature_result(update, context, route, result)
+        await deliver_feature_result(update, context, route, result, epoch, settings_dispatch=settings_dispatch)
     except Exception as exc:
         code = getattr(exc, "code", "feature_command_failed")
         await update.effective_message.reply_text(f"❌ {code}：{_safe_error(exc)}")
@@ -664,6 +685,7 @@ async def dynamic_callback_gateway(update, context):
             except Exception:
                 pass
         try:
+            epoch = settings_epoch(context, update)
             result = await route.client.request(
                 "callback.dispatch",
                 {
@@ -676,7 +698,7 @@ async def dynamic_callback_gateway(update, context):
                 deadline=30,
                 idempotency_key=f"telegram:{getattr(update, 'update_id', '')}",
             )
-            await handle_feature_result(update, context, route, result)
+            await deliver_feature_result(update, context, route, result, epoch)
         except Exception as exc:
             await release_claim()
             code = getattr(exc, "code", "feature_callback_failed")
@@ -775,6 +797,7 @@ async def dynamic_message_gateway(update, context):
         if route is None:
             return
     try:
+        epoch = settings_epoch(context, update)
         result = await route.client.request(
             "message.dispatch",
             {
@@ -786,7 +809,7 @@ async def dynamic_message_gateway(update, context):
             deadline=30,
             idempotency_key=f"telegram:{getattr(update, 'update_id', '')}",
         )
-        await handle_feature_result(update, context, route, result)
+        await deliver_feature_result(update, context, route, result, epoch)
     except Exception as exc:
         code = getattr(exc, "code", "feature_message_failed")
         _log_feature_event(
@@ -816,8 +839,70 @@ def _is_stale_operation_snapshot(operation, active) -> bool:
     return revision < active.revision
 
 
-async def handle_feature_result(update, context, route, result: dict):
+def settings_epoch(context, update):
+    user_data = getattr(context, 'user_data', None)
+    owner = _session_key(update)
+    generation = user_data.get('settings_epochs', {}).get(owner, 0) if isinstance(user_data,dict) else 0
+    return owner, generation
+
+
+async def deliver_feature_result(update, context, route, result, epoch, *, settings_dispatch=False):
+    config_result = isinstance(result,dict) and ('config_navigation' in result or 'config_patch' in result)
+    if (settings_dispatch or config_result) and epoch != settings_epoch(context, update):
+        from app.handlers.shared_config_handler import _show
+        await _show(update, '原配置会话已变化，请使用当前面板。', fresh=True)
+        return
+    if config_result and 'config_patch' in result:
+        return await handle_feature_result(update, context, route, result, source_epoch=epoch)
+    return await handle_feature_result(update, context, route, result)
+
+
+async def handle_feature_result(update, context, route, result: dict, *, source_epoch=None):
     coordinator = context.application.bot_data.get(COORDINATOR_KEY)
+    if isinstance(result, dict) and 'config_navigation' in result:
+        from app.runtime.config_settings import NAVIGATION
+        from app.handlers.settings_editor import open_section
+        from app.handlers.shared_config_handler import _show
+        target = result['config_navigation']
+        router = context.application.bot_data.get(ROUTER_KEY)
+        manager = context.application.bot_data.get(MANAGER_KEY)
+        current = router.plugin_route(route.plugin_id) if router else None
+        op = result.get('operation')
+        if ('config_patch' in result or not isinstance(target,str) or target not in NAVIGATION.get(route.plugin_id,())
+            or not init.check_user(update.effective_user.id) or result.get('session') != {'state':'close'}
+            or current is None or current.client is not route.client or getattr(manager,'central_config_enabled',False) is not True):
+            await _show(update,'配置入口已失效，请重新打开 /config。')
+            return
+        owner = _session_key(update)
+        active = coordinator.active(*owner) if coordinator else None
+        binding = context.application.bot_data.get(SESSION_KEY, {}).get(owner, {})
+        retired = context.user_data.get('retired_config_sources', {}).get(owner, ())
+        if (route.plugin_id in retired or host_draft(update, context)
+                or (binding and binding.get('plugin_id') != route.plugin_id)
+                or (op is None and (active or binding.get('operation_id')))):
+            await _show(update,'原配置会话已变化，请使用当前面板。',fresh=True)
+            return
+        if op is not None:
+            if (not active or not isinstance(op,dict) or op.get('state')!='cancelled'
+                or (op.get('chat_id'),op.get('user_id')) != _session_key(update)
+                or active.plugin_id!=route.plugin_id or active.operation_id!=op.get('operation_id')
+                or coordinator.report(route.plugin_id,op).state!='cancelled'):
+                await _show(update,'原配置会话已变化，请重新打开 /config。')
+                return
+        # An operation's old Telegram card stays bound to its terminal record.
+        # Host inputs must live on a fresh message outside that ownership.
+        retire_feature_settings(update,context,route.plugin_id)
+        return await open_section(update,context,manager,target,fresh=op is not None)
+    if isinstance(result,dict) and 'config_patch' in result:
+        owner = _session_key(update)
+        retired = (getattr(context,'user_data',None) or {}).get('retired_config_sources',{}).get(owner,())
+        operation = result.get('operation')
+        if (route.plugin_id in retired or host_draft(update,context)
+                or (operation is not None and (not isinstance(operation,dict)
+                    or (operation.get('chat_id'),operation.get('user_id')) != owner))):
+            from app.handlers.shared_config_handler import _show
+            await _show(update,'旧配置会话已失效，本次修改未保存。')
+            return
     operation_record = None
     operation_segment = None
     stale_operation_snapshot = False
@@ -926,7 +1011,7 @@ async def handle_feature_result(update, context, route, result: dict):
             )
             return
     if isinstance(result, dict) and "config_patch" in result:
-        await _apply_feature_config_patch(update, context, route, result)
+        await _apply_feature_config_patch(update, context, route, result, source_epoch=source_epoch)
         return
     native_feedback_only = operation_record is None and _native_callback_source(update, context)
     if (
@@ -1142,7 +1227,7 @@ def merge_nested_patch(current: dict, patch: dict) -> dict:
     return result
 
 
-async def _apply_feature_config_patch(update, context, route, result: dict):
+async def _apply_feature_config_patch(update, context, route, result: dict, *, source_epoch=None):
     patch = result.get("config_patch")
     prefer_edit = bool(getattr(update, "callback_query", None))
     if not isinstance(patch, dict) or not patch:
@@ -1229,10 +1314,19 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
     )
     try:
         configure = manager.configure_patch if central_mode else manager.configure
+        source = getattr(getattr(route, 'client', None), 'process', None)
+        def should_cancel():
+            return cancel_event.is_set() or (
+                source_epoch is not None and source_epoch != settings_epoch(context, update)
+            )
+
+        if should_cancel():
+            raise PluginOperationError("config_cancelled", "Settings session changed")
         outcome = await configure(
             route.plugin_id,
             configured,
-            should_cancel=cancel_event.is_set if operation_id else None,
+            **({'source_process': source} if central_mode and source is not None else {}),
+            should_cancel=should_cancel if operation_id or source_epoch is not None else None,
         )
     except PluginOperationError as exc:
         cancelled = cancel_event.is_set() or exc.code == "config_cancelled"
@@ -1811,6 +1905,26 @@ async def _feature_feedback(update, text: str, *, prefer_edit: bool = False, con
 
 def _session_key(update):
     return (int(update.effective_chat.id), int(update.effective_user.id))
+
+
+def retire_feature_settings(update,context,plugin_id=None):
+    key=_session_key(update)
+    sessions=context.application.bot_data.get(SESSION_KEY,{})
+    source=plugin_id or sessions.get(key,{}).get('plugin_id')
+    epochs = context.user_data.setdefault('settings_epochs', {})
+    epochs[key] = epochs.get(key, 0) + 1
+    if source:
+        context.user_data.setdefault('retired_config_sources',{}).setdefault(key,set()).add(source)
+    _drop_session(context.application.bot_data,key)
+
+
+def start_feature_settings(update,context,plugin_id):
+    retire_feature_settings(update,context)
+    key=_session_key(update)
+    retired=context.user_data.get('retired_config_sources',{})
+    if key in retired:
+        retired[key].discard(plugin_id)
+    clear_host_draft(update, context)
 
 
 def _drop_session(bot_data: dict, key):

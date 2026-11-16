@@ -231,11 +231,16 @@ JSON结构：
 输入事实如下：
 """
 
+def ai_api_url(ai_config):
+    """An explicit canonical URL, including empty, takes priority over its alias."""
+    return str(ai_config.get("api_url", ai_config.get("base_url", "")) or "").strip()
+
+
 def check_ai_api_available():
     ai_config = runtime_context.config.get("ai", {})
     if ai_config.get("enable") is False:
         return False
-    url = ai_config.get("api_url", "")
+    url = ai_api_url(ai_config)
     if not url:
         if runtime_context.logger:
             runtime_context.logger.warn("AI API URL 未定义.")
@@ -286,7 +291,7 @@ def _is_messages_endpoint(url: str) -> bool:
 
 
 def chat_completion(tip_words, max_tokens=8192):
-    url = runtime_context.config.get("ai").get("api_url")
+    url = ai_api_url(runtime_context.config.get("ai") or {})
     # 智能判断是否需要拼接 /chat/completions
     # 如果URL中不包含 chat/completions 也不包含 messages (适配Anthropic风格)，且不以 / 结尾，则尝试拼接
     if "chat/completions" not in url and "messages" not in url:

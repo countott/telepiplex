@@ -16,14 +16,29 @@ from tests.test_media_metadata_v2 import contract
 
 def async_test(fn):
     @wraps(fn)
-    def wrapped():
-        return asyncio.run(fn())
+    def wrapped(*args, **kwargs):
+        return asyncio.run(fn(*args, **kwargs))
     return wrapped
 
 
 def test_video_name_retains_exact_stem_and_no_duplicate_extension():
     result=name_subtitle({'video_path':'/media/Show.S01E01.1080p.mkv','language':'cht','extension':'.ass'})
     assert result['path']=='/media/Show.S01E01.1080p.cht.ass'
+
+
+@pytest.mark.parametrize('extra', ['/', None, '', '/extra'])
+@async_test
+async def test_inventory_and_caption_menu_share_disabled_root_and_category_order(extra):
+    feature = RenameFeature(config={'category_folder': [
+        {'kind': 'tv', 'name': 'TV first', 'path': '/shows'},
+        {'kind': 'movie', 'name': 'Films next', 'path': '/films'},
+    ], 'unorganized_path': extra}, host=object())
+    want = [{'name': 'TV first', 'path': '/shows'}, {'name': 'Films next', 'path': '/films'}]
+    if extra == '/extra':
+        want.append({'name': '未整理', 'path': '/extra'})
+    result = await capability(feature, {'method': 'scan_library', 'payload': {}})
+    assert result['roots'] == want
+    assert [{'name': r['name'], 'path': r['path']} for r in feature._inventory_roots()] == want
 
 
 def test_no_video_uses_frozen_title_folder_and_scope():
@@ -95,13 +110,16 @@ async def test_caption_hook_refreshes_before_processing_and_keeps_root():
     assert event.caption_tree_verified
 
 
+@pytest.mark.parametrize('enabled', [False, True])
 @async_test
-async def test_download_caption_is_placed_before_rename_and_preserves_cht():
+async def test_download_caption_is_placed_before_rename_and_preserves_cht(enabled):
     from tests.test_feature_processor import FakeHost, EmptyAfterMoveStorage, FakeRuntime, movie_contract_v2
     storage = EmptyAfterMoveStorage([{'fn':'Movie.2024.mkv','fid':'video','fc':'1','fs':1000}])
+    caption_calls = []
     class CaptionHost(FakeHost):
         async def call_capability(self, capability, method, payload, **kwargs):
             if capability == 'subtitle.caption':
+                caption_calls.append(method)
                 assert method == 'prepare_download'
                 assert storage.renamed == [] and storage.moved == []
                 assert payload['file_tree'][0]['file_id'] == 'video'
@@ -109,7 +127,7 @@ async def test_download_caption_is_placed_before_rename_and_preserves_cht():
                 return {'status':'completed','added_count':1,'existing_count':0,'warnings':[]}
             return await super().call_capability(capability, method, payload, **kwargs)
     host = CaptionHost(storage)
-    feature = RenameFeature(config={'storage_timeout':3},host=host)
+    feature = RenameFeature(config={'storage_timeout':3, 'caption_enabled': enabled},host=host)
     runtime = FakeRuntime()
     feature.bind_runtime(runtime)
     await feature.download_completed({'event_id':'caption-event','payload':{
@@ -119,10 +137,11 @@ async def test_download_caption_is_placed_before_rename_and_preserves_cht():
         'media_metadata':movie_contract_v2(),
     }})
     await runtime.wait()
-    assert ('/Downloads/Movie.2024.cht.srt','English Movie.cht.srt') in storage.renamed
+    assert caption_calls == (['prepare_download'] if enabled else [])
+    assert (('/Downloads/Movie.2024.cht.srt','English Movie.cht.srt') in storage.renamed) is enabled
     assert ('/Downloads/Movie.2024.mkv','English Movie.mkv') in storage.renamed
     assert '/Downloads' not in storage.deleted
-    assert any('English Movie.cht.srt' in source for source,_ in storage.moved)
+    assert any('English Movie.cht.srt' in source for source,_ in storage.moved) is enabled
 
 
 @async_test

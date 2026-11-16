@@ -7,10 +7,11 @@ import re
 import threading
 import uuid
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
 
 
 class CentralConfigError(RuntimeError):
@@ -27,11 +28,13 @@ class ConfigChange:
     after: dict
     changed_paths: tuple[tuple[str, ...], ...]
     affected_plugins: tuple[str, ...]
+    read_paths: tuple[tuple[str, ...], ...] = field(default=(), kw_only=True)
+    directory_reference_ids: tuple[str, ...] = field(default=(), kw_only=True)
 
 
 _ABSENT = object()
 _KEY = re.compile(r'^[A-Za-z_][A-Za-z0-9_-]{0,63}$')
-_CATEGORIES = [
+_V2_CATEGORIES = [
     {'kind': kind, 'name': name, 'path': '/' + name, 'plex_library_id': ''}
     for kind, name in [('live_action_movie', '真人电影'), ('animated_movie', '动画电影'),
                        ('live_action_series', '真人剧集'), ('animated_series', '动画剧集')]
@@ -78,11 +81,16 @@ def _set(document, path, value):
         parent[path[-1]] = deepcopy(value)
 
 
-def _leaves(value, prefix=()):
+_SCORE_TABLES = ("keyword_scores", "indexer_scores")
+PRIVATE_SCORE_MAPS = {("search", "scoring", key) for key in _SCORE_TABLES}
+PUBLIC_SCORE_MAPS = {("features", "search", "scoring", key) for key in _SCORE_TABLES}
+
+
+def _leaves(value, prefix=(), *, atomic=()):
     for key, item in value.items():
         path = (*prefix, key)
-        if isinstance(item, dict) and item:
-            yield from _leaves(item, path)
+        if isinstance(item, dict) and item and path not in atomic:
+            yield from _leaves(item, path, atomic=atomic)
         else:
             yield path, item
 
@@ -92,7 +100,7 @@ def _defaults(default, current, prefix=()):
     for key, value in current.items():
         path = (*prefix, key)
         if (isinstance(value, dict) and value and isinstance(result.get(key), dict)
-            and path not in (('search', 'scoring', 'keyword_scores'), ('search', 'scoring', 'indexer_scores'))):
+            and path not in PRIVATE_SCORE_MAPS):
             result[key] = _defaults(result[key], value, path)
         else:
             result[key] = deepcopy(value)
@@ -112,12 +120,12 @@ def _safe_paths(paths):
     return ['.'.join(path) for path in paths if all(_KEY.fullmatch(p) for p in path)][:20]
 
 
-def _check_document(document):
+def _check_document(document, *, semantic=True):
     if not isinstance(document, dict):
         raise CentralConfigError('invalid_config', 'main config must be a mapping')
     invalid = []
     if 'config_version' in document and (
-        type(document['config_version']) is not int or document['config_version'] not in (1, 2)
+        type(document['config_version']) is not int or document['config_version'] not in (1, 2, 3)
     ):
         invalid.append(('config_version',))
     for key in ('shared', 'features'):
@@ -128,15 +136,11 @@ def _check_document(document):
             invalid.append(('features',))
     if isinstance(document.get('shared'), dict):
         shared = document['shared']
-        if 'tmdb' in shared and not isinstance(shared['tmdb'], dict):
-            invalid.append(('shared', 'tmdb'))
-        elif isinstance(shared.get('tmdb'), dict) and 'api_key' in shared['tmdb'] and not isinstance(shared['tmdb']['api_key'], str):
-            invalid.append(('shared', 'tmdb', 'api_key'))
-        if 'category_folder' in shared and not isinstance(shared['category_folder'], list):
+        if semantic and 'category_folder' in shared and not isinstance(shared['category_folder'], list):
             invalid.append(('shared', 'category_folder'))
-        elif 'category_folder' in shared:
+        elif semantic and 'category_folder' in shared:
             routes = shared['category_folder']
-            kinds = {item['kind'] for item in _CATEGORIES}
+            kinds = {item['kind'] for item in _V2_CATEGORIES}
             seen = set()
             for item in routes:
                 if (not isinstance(item, dict)
@@ -164,39 +168,64 @@ class CentralConfigStore:
     def read(self) -> dict:
         with self._lock:
             if not self.path.exists() and self._initial is not None:
-                return deepcopy(_check_document(self._initial))
+                return deepcopy(_check_document(self._initial, semantic=False))
             try:
                 value = yaml.safe_load(self.path.read_text(encoding='utf-8'))
             except (OSError, UnicodeDecodeError, yaml.YAMLError):
                 raise CentralConfigError('invalid_config', 'cannot read main config') from None
-            return deepcopy(_check_document(value))
+            return deepcopy(_check_document(value, semantic=False))
 
-    def effective(self, plugin_id: str, defaults: dict, *, document: dict | None = None) -> dict:
-        document = self.read() if document is None else _check_document(document)
-        value = _defaults(defaults, document.get('features', {}).get(plugin_id, {}))
-        if plugin_id in ('search', 'rename', 'sync'):
-            value['category_folder'] = deepcopy(document.get('shared', {}).get('category_folder', _CATEGORIES))
-        if plugin_id in ('search', 'sync'):
-            path = ('metadata', 'tmdb', 'api_key') if plugin_id == 'search' else ('tmdb', 'api_key')
-            _set(value, path, document.get('shared', {}).get('tmdb', {}).get('api_key', ''))
-        return value
+    def effective(self, plugin_id: str, defaults: dict, *, document=None, contract=None) -> dict:
+        from app.runtime.config_projection import project_feature_config
+        document = self.read() if document is None else _check_document(document, semantic=False)
+        return project_feature_config(plugin_id, defaults, document=document, contract=contract)
 
-    def prepare_patch(self, plugin_id: str, patch: dict) -> ConfigChange:
+    def preflight(self, context):
+        from app.runtime.config_semantics_migration import plan_v3_migration
+        return plan_v3_migration(self.read(), context=context)
+
+    def commit_semantics(self, plan):
+        return self.commit(plan)
+
+    def prepare_patch(self, plugin_id: str, patch: dict, *, contract=None, baseline=None, defaults=None) -> ConfigChange:
         if not isinstance(plugin_id, str) or not _KEY.fullmatch(plugin_id):
             raise CentralConfigError('invalid_config', 'invalid plugin identity')
         if not isinstance(patch, dict):
             raise CentralConfigError('invalid_config', 'config patch must be a mapping')
+        from app.runtime.config_role_edits import feature_change, check_timeout_edit
+        before = self.read()
+        check_timeout_edit(before, plugin_id, patch, contract, baseline)
+        if before.get('config_version') == 3:
+            return feature_change(before, plugin_id, patch, baseline, defaults=defaults, contract=contract)
         mapped = {}
         for path, value in _leaves(patch):
             if not all(isinstance(part, str) for part in path):
                 raise CentralConfigError('invalid_config', 'invalid config path')
             _set(mapped, _mapped(plugin_id, path), value)
-        return self.prepare_document_patch(mapped)
+        if baseline is not None and ('category_folder' in patch and plugin_id in ('search', 'rename', 'sync')):
+            from app.runtime.config_role_edits import merge_category_draft
+            raw = before.get('shared', {}).get('category_folder', _V2_CATEGORIES)
+            latest = self.effective(plugin_id, {}, document=before, contract=contract)['category_folder']
+            merged = merge_category_draft(raw, latest, patch['category_folder'], baseline.get('category_folder'))
+            if merged == raw:
+                mapped['shared'].pop('category_folder')
+                if not mapped['shared']:
+                    mapped.pop('shared')
+            else:
+                mapped['shared']['category_folder'] = merged
+        return self._prepare_document_patch(before, mapped)
 
     def prepare_document_patch(self, patch: dict) -> ConfigChange:
         if not isinstance(patch, dict):
             raise CentralConfigError('invalid_config', 'config patch must be a mapping')
-        before = self.read()
+        return self._prepare_document_patch(self.read(), patch)
+
+    def _prepare_document_patch(self, before, patch):
+        if 'config_version' in patch:
+            raise CentralConfigError('invalid_config', 'Document version is managed by migration')
+        if before.get('config_version') == 3:
+            from app.runtime.config_role_edits import canonical_change
+            return canonical_change(before, patch)
         after = deepcopy(before)
         changed = []
         affected = set()
@@ -222,8 +251,23 @@ class CentralConfigStore:
                 affected.update(('search', 'sync'))
             elif path == ('shared',):
                 affected.update(('search', 'rename', 'sync'))
-        _check_document(after)
+        if any(path[:2] == ('shared', 'tmdb') or path == ('shared',) for path in changed):
+            from app.runtime.config_projection import tmdb_token
+            tmdb_token(after.get('shared', {}))
+        _check_document(after, semantic=any(path[:2] == ('shared', 'category_folder') or path == ('shared',) for path in changed))
         return ConfigChange(before, after, tuple(changed), tuple(sorted(affected)))
+
+    def prepare_directory_delete(self, directory_id):
+        from app.runtime.config_role_edits import make_change
+        before = self.read()
+        if before.get('config_version') != 3 or not isinstance(directory_id, str) or not _KEY.fullmatch(directory_id):
+            raise CentralConfigError('invalid_config', 'Invalid directory ID')
+        after = deepcopy(before)
+        directories = after.get('shared', {}).get('directories', {})
+        if directory_id not in directories:
+            raise CentralConfigError('invalid_config', 'Unknown directory ID')
+        del directories[directory_id]
+        return make_change(before, after)
 
     def prepare_migration(self, plugin_id: str, before_effective: dict, after_effective: dict) -> ConfigChange:
         """Prepare schema changes without materializing unchanged package defaults."""
@@ -239,7 +283,15 @@ class CentralConfigStore:
                 elif not _equal(left, right):
                     yield path, right
         for path, value in changes(before_effective, after_effective):
-            mapped = _mapped(plugin_id, path)
+            if before.get('config_version') == 3:
+                from app.runtime.config_role_edits import canonical_path
+                if path[0] in ('category_folder', 'save_directories', 'output_path', 'unorganized_path'):
+                    raise CentralConfigError('config_migration_required', 'Package migration cannot change directory roles')
+                mapped = canonical_path(plugin_id, path)
+            else:
+                mapped = _mapped(plugin_id, path)
+            if mapped[:2] != ('features', plugin_id) or mapped == ('features', 'caption', 'automatic'):
+                raise CentralConfigError('config_migration_required', 'Package migration cannot change shared settings')
             if value is _ABSENT and _get(before, mapped) is _ABSENT:
                 continue
             if _equal(_get(before, mapped), value):
@@ -267,15 +319,50 @@ class CentralConfigStore:
     def commit(self, change: ConfigChange) -> dict:
         with self._lock:
             current = self.read()
-            conflicts = [p for p in change.changed_paths if not _equal(_get(current, p), _get(change.before, p))
+            conflicts = [p for p in (*change.changed_paths, *change.read_paths) if not _equal(_get(current, p), _get(change.before, p))
                          or not _parents_compatible(current, change.before, p)]
+            if change.directory_reference_ids:
+                from app.runtime.directory_settings import refs
+                roles = ('shared','directory_roles')
+                for key in change.directory_reference_ids:
+                    if refs(current.get('shared',{}).get('directory_roles',{}),key) != refs(
+                            change.before.get('shared',{}).get('directory_roles',{}),key):
+                        conflicts.append(roles)
             if conflicts:
                 raise CentralConfigError('config_conflict', 'config fields changed during operation',
                                          {'config_error_paths': _safe_paths(conflicts)})
+            from app.runtime.config_semantics_migration import MigrationPlan, plan_v3_migration
+            if isinstance(change, MigrationPlan):
+                latest = plan_v3_migration(current, context=change.context)
+                if change.blockers or latest.blockers or latest.changed_paths != change.changed_paths or any(
+                    not _equal(_get(change.after, p), _get(latest.after, p)) for p in change.changed_paths
+                ):
+                    raise CentralConfigError('config_conflict', 'Semantic preflight no longer valid')
+                if change.changed_paths and self.path.exists():
+                    backup = self.path.with_name(f'{self.path.name}.pre-v3.{uuid.uuid4().hex}.bak')
+                    try:
+                        summary = {'source_version': change.source_version, 'target_version': change.target_version,
+                                   'changed_field_count': len(change.changed_paths), 'notices': change.notices}
+                        for target, data in ((backup, self.path.read_bytes()),
+                                             (backup.with_suffix('.summary.json'), json.dumps(summary).encode('utf-8'))):
+                            with os.fdopen(os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), 'wb') as handle:
+                                handle.write(data)
+                                handle.flush()
+                                os.fsync(handle.fileno())
+                    except OSError:
+                        raise CentralConfigError('config_write_failed', 'Cannot back up main config') from None
+                    self.last_semantic_backup = backup
+            before_rebase = deepcopy(current)
             for path in change.changed_paths:
                 _set(current, path, _get(change.after, path))
             if change.changed_paths:
-                self._write(_check_document(current))
+                if current.get('config_version') == 3 and any(p[:1] == ('shared',) for p in change.changed_paths):
+                    from app.runtime.config_role_edits import make_change
+                    actual = make_change(before_rebase, current)
+                    if not isinstance(change, MigrationPlan) and set(actual.affected_plugins) != set(change.affected_plugins):
+                        raise CentralConfigError('config_conflict', 'Directory consumers changed during operation')
+                self._write(_check_document(current, semantic=any(p[:2] == ('shared', 'category_folder')
+                                                                 for p in change.changed_paths)))
             return deepcopy(current)
 
     def rollback(self, change: ConfigChange) -> dict:
@@ -302,8 +389,20 @@ class CentralConfigStore:
         from app.runtime.plugin_store import _default_at, _schema_at, _validate, _manifest_at
         with self._lock:
             before = self.read()
-            if before.get('config_version') == 2:
+            if before.get('config_version') in (2, 3):
                 return False
+            # Legacy imports land in v2 first. Preserve explicit public values
+            # while merging old package files at their private snapshot paths.
+            search = _get(before, ('features', 'search'))
+            if isinstance(search, dict):
+                for key in ('scoring', 'prowlarr'):
+                    if key not in search:
+                        continue
+                    wrapped = search.setdefault('search', {})
+                    if not isinstance(wrapped, dict) or key in wrapped:
+                        raise CentralConfigError('legacy_config_conflict', 'Conflicting Search layouts',
+                                                 {'config_error_paths': [f'features.search.{key}']})
+                    wrapped[key] = search.pop(key)
             candidate = deepcopy(before)
             shared_sources = {}
             categories = {}
@@ -321,7 +420,7 @@ class CentralConfigStore:
                                              {'plugin_id': plugin_id}) from None
                 if not isinstance(legacy, dict):
                     raise CentralConfigError('invalid_config', 'legacy config must be a mapping', {'plugin_id': plugin_id})
-                for path, value in _leaves(legacy):
+                for path, value in _leaves(legacy, atomic=PRIVATE_SCORE_MAPS if plugin_id == 'search' else ()):
                     mapped = _mapped(plugin_id, path)
                     if mapped == ('shared', 'category_folder'):
                         if 'category_folder' in explicit_shared:
@@ -353,17 +452,13 @@ class CentralConfigStore:
                                                       'sources': [shared_sources[mapped], plugin_id]})
                         shared_sources[mapped] = plugin_id
                     elif (_get(before, mapped) is not _ABSENT
-                          or (mapped[:4] == ('features', 'search', 'search', 'scoring')
-                              and len(mapped) >= 5
-                              and mapped[4] in ('keyword_scores', 'indexer_scores')
-                              and isinstance(_get(before, mapped[:5]), dict))
                           or any(_get(before, mapped[:length]) == {}
                                  for length in range(3, len(mapped)))):
                         continue
                     _set(candidate, mapped, value)
             if categories:
                 merged = []
-                for default in _CATEGORIES:
+                for default in _V2_CATEGORIES:
                     merged.append({**default, **categories.pop(default['kind'], {})})
                 merged.extend(categories.values())
                 _set(candidate, ('shared', 'category_folder'), merged)
@@ -376,7 +471,10 @@ class CentralConfigStore:
                         raise ValueError()
                     release = record.parent / 'releases' / version
                     manifest = _manifest_at(release)
-                    _validate(_schema_at(release), self.effective(manifest.plugin_id, _default_at(release), document=candidate))
+                    from app.runtime.config_projection import ProjectionContract
+                    schema = _schema_at(release)
+                    _validate(schema, self.effective(manifest.plugin_id, _default_at(release), document=candidate,
+                                                    contract=ProjectionContract(schema)))
                 except Exception as exc:
                     raise CentralConfigError('invalid_config', 'legacy config cannot be migrated',
                                              {'plugin_id': record.parent.name,

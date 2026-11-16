@@ -1,6 +1,6 @@
 # Plex Management Feature
 
-2.1.3 对齐随包 SDK 2.3.0；集中模式共用分类路由和 TMDB 凭据，Plex 业务策略保持。
+2.1.4 将分类目录和 TMDB 凭据的配置入口指向 Host 公共配置页；Plex 扫描行为保持不变。
 
 集中配置：Host 3.10.0 起统一编辑 `/config/config.yaml` 的 `features.sync` 分区；公共目录和 TMDB 凭据位于 `shared`。Telegram `/config` 的修改写入同一主文件，安装包默认值和运行快照不作为独立编辑入口。
 
@@ -8,7 +8,7 @@
 
 2.1.1 仅同步 SDK 2.2.1 的字幕内容日志脱敏修复；Plex 扫描、增强与手动入口不变。
 
-当前版本：`2.1.3`；SDK：`2.3.0`；要求 Host API 1.8 / Host `3.8.0`。本次允许用户从整理完成后的选择卡主动进入 Plex 扫描；地址或 Token 未配置时隐藏入口。优先扫描本次分类对应库，未配置映射时显示既有媒体库选择，不自动扫描全部库。
+当前版本：`2.1.4`；SDK：`2.4.0`；要求 Host API 1.11 / Host `3.11.0`。用户可从整理完成后的选择卡主动进入 Plex 扫描；地址或 Token 未配置时隐藏入口。优先扫描本次分类对应库，未配置映射时显示既有媒体库选择，不自动扫描全部库。
 
 `features/sync` 是独立 Feature 源码目录。Telepiplex 将其构建为不可变 `.tpx`，并在 Telepiplex 容器内以独立 venv/子进程运行。
 
@@ -53,7 +53,7 @@ MCP 对外地址由 `mcp.host`、`mcp.port`、`mcp.path` 控制；非本机监�
 纯本地验证构建（不读取 Git 元数据）：
 
 ```bash
-python tools/build_feature.py features/sync /tmp/sync-2.1.3.tpx \
+python tools/build_feature.py features/sync /tmp/sync-2.1.4.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

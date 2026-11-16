@@ -1,12 +1,12 @@
 # Telepiplex Caption
 
-1.3.5 复用完全相同的 provider schema，并补齐 `/config` 的向导声明；随包 SDK 2.3.0，字幕业务策略保持。
+1.4.0 使用统一的自动字幕开关，支持 GitHub 来源继承公共凭据和缓存时间，仍可逐来源覆盖。
 
 集中配置：Host 3.10.0 起统一编辑 `/config/config.yaml` 的 `features.caption` 分区；公共目录和 TMDB 凭据位于 `shared`。Telegram `/config` 的修改写入同一主文件，安装包默认值和运行快照不作为独立编辑入口。
 
 1.3.4 仅升级随包 SDK 至 2.2.2，保持构建依赖一致；字幕业务代码未改。
 
-当前源码版本：`1.3.5`；SDK `2.3.0`；最低 Host API `1.9`。本轮集中化搭配 Host `3.10.1` / Host API `1.10`、Download `2.3.0`、Search `2.11.2`、Rename `2.4.6`。本模块只查找、检查和补齐外挂字幕；不检查视频内置字幕，不生成或翻译字幕。
+当前源码版本：`1.4.0`；SDK `2.4.0`；最低 Host API `1.11`（Host `3.11.0`）。本模块只查找、检查和补齐外挂字幕；不检查视频内置字幕，不生成或翻译字幕。
 
 1.3.3 核对来源字段、发布名和压缩包成员的明确季集冲突，分辨率与 CRC 不再作为年份证据。成功解包与接受的正文检查按内容和完整上下文复用，新增缓存合计最多 32 MiB、128 项、600 秒；匹配与排序仍逐请求执行。只提前检查确定会进入最终候选集合的条目，将下载检查与剩余来源检索重叠，保留来源顺序、候选预算与并发上限。
 
@@ -14,7 +14,7 @@
 
 1. **下载后补字幕**：Download 完成 → Rename 确认媒体身份及文件树 → 调用 Caption → 校验、选优并通过 Rename 写入外挂字幕 → Rename 刷新文件树后统一整理视频和字幕。Caption 没有安装、被关闭或未找到合格字幕时保留现有整理能力；存在未确认的存储写入时先等待写入结束。Plex 的既有手动入口保持。
 2. **媒体库补字幕**：`/caption` 和 `/caption scan` 打开相同的目录菜单，选择 Rename 已配置目录，或输入其他 115 目录。也可用 `/caption scan /真人电影` 直接指定目录。复用 Rename 的完整扫描，扫描结束后显示视频数量，点击“开始补字幕”再逐文件确认身份、匹配字幕，在现有视频旁写入同名外挂字幕。此入口不移动或改名原有视频。同名作品或缺少原始语言时暂停当前批次，确认后继续；仍无法确定作品或季集的文件会保留并报告。
-3. **单独查询字幕**：在目录菜单点击“单独查找字幕”后输入作品，或直接发送 `/caption 星际穿越 2014`、`/caption Breaking Bad S01E02`。只调用 Search 的元数据能力，不启动 Prowlarr 片源搜索或视频下载。同名作品先选择；缺少原始语言时先确认语言。即使没有视频，也按 Rename 规则保存到配置的 `output_path`，默认为 `/字幕`。整季／全剧查询会按包内明确季集分别选优，不把整包当成一个单集字幕；不能验证完整覆盖时会说明。
+3. **单独查询字幕**：在目录菜单点击“单独查找字幕”后输入作品，或直接发送 `/caption 星际穿越 2014`、`/caption Breaking Bad S01E02`。只调用 Search 的元数据能力，不启动 Prowlarr 片源搜索或视频下载。同名作品先选择；缺少原始语言时先确认语言。即使没有视频，也按 Rename 规则保存到公共目录用途 `shared.directory_roles.standalone_subtitles`，默认为 `/字幕`。整季／全剧查询会按包内明确季集分别选优，不把整包当成一个单集字幕；不能验证完整覆盖时会说明。
 
 ## 命令交互
 
@@ -85,7 +85,7 @@ SubDL 与 SubSource 都承接 Subscene 历史内容，但新增上传和可用�
 
 详情入口示例：`/caption Friends 1994 S01E01 --source https://zimuku.org/detail/2265.html`。支持 SubHD、字幕库、Subf2m、R3SUB 的正规详情地址；只查对应来源，仍通过 Search 确认片源身份，并逐一验证来源真实作品、年份、季集和正文，链接不能强行覆盖匹配结果。
 
-`/caption_config` 支持来源方案、保存目录、自动开关及 ASSRT／OpenSubtitles／SubDL／SubSource 授权字段。其余字段写入主文件的 `features.caption` 分区，通过现有模块重载流程生效；见[默认配置](config.default.yaml)、[Schema](config.schema.json)和[字幕组／本地归档配置](docs/catalog-usage.md)。网站 Cookie 仅发送给对应来源域名，不发送到文件 CDN；不输出授权值。GitHub 公共索引不强制 token，需要时可自行配置以提高公开 API 配额。
+通过 `/caption_config` 选择来源方案；保存目录、自动字幕开关和来源凭据通过相应的 Host 配置页编辑。GitHub 来源继承 `features.caption.provider_defaults.github` 的 Token 和缓存 TTL；来源单独设置覆盖值，显式空 Token 表示匿名访问。网站 Cookie 仅发送给对应来源域名，不发送到文件 CDN。高级参数见[配置契约](config.schema.json)和[字幕组／本地归档配置](docs/catalog-usage.md)。
 
 动漫绝对集号不能直接当作已播季集；只有来源明确说明或用户提供 `episode_mappings` 才允许换算。未知映射报告 `episode_mapping_unresolved`。Search 提供的电影／精确单集时长仅用于辅助拒绝严重截断，不能替代视频实测，也不能证明对白同步。
 

@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 import requests
 
 from ..context import runtime_context
+from .config_values import provider_settings, timeout_seconds
 
 
 TVDB_BASE_URL = "https://api4.thetvdb.com/v4"
@@ -48,8 +49,7 @@ class TvdbAuthenticationError(TvdbRequestError):
 
 
 def _get_tvdb_config():
-    metadata_config = runtime_context.config.get("metadata") or {}
-    tvdb_config = metadata_config.get("tvdb") or {}
+    tvdb_config = provider_settings(runtime_context.config, "tvdb", TvdbConfigError)
     if not tvdb_config.get("enable", False):
         raise TvdbConfigError("metadata.tvdb.enable 未开启", "disabled")
 
@@ -62,16 +62,13 @@ def _get_tvdb_config():
 
     base_url = str(tvdb_config.get("base_url") or TVDB_BASE_URL).strip().rstrip("/")
     subscriber_pin = str(tvdb_config.get("subscriber_pin") or "").strip()
-    try:
-        timeout = float(tvdb_config.get("timeout", 15))
-    except (TypeError, ValueError):
-        timeout = 15
+    timeout = timeout_seconds(tvdb_config, "tvdb", TvdbConfigError)
 
     return {
         "base_url": base_url,
         "api_key": api_key,
         "subscriber_pin": subscriber_pin,
-        "timeout": max(5, min(timeout, 60)),
+        "timeout": timeout,
     }
 
 

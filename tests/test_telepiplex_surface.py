@@ -70,7 +70,8 @@ class HostSurfaceTest(unittest.TestCase):
         ):
             config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             self.assertIsInstance(config["plugins"], dict)
-            self.assertEqual(set(config["shared"]), {"category_folder", "tmdb"})
+            self.assertEqual(config["config_version"], 3)
+            self.assertEqual(set(config["shared"]), {"directories", "directory_roles", "tmdb"})
             self.assertEqual(set(config["features"]), {"download", "search", "rename", "sync", "caption"})
             for legacy in ("modules", "aria2"):
                 self.assertNotIn(legacy, config)

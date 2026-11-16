@@ -1,17 +1,14 @@
 # Telepiplex 主配置；运行时唯一编辑入口为 /config/config.yaml。
-# /config 的确认保存与 115 授权刷新均写入本文件。
-# 旧版本升级时保留原主配置，首次启动自动迁入原插件 YAML；不要先用新模板覆盖。
-
-config_version: 2
-
-# 1. Bot 与日志
-log_level: info
+# 升级时保留原主配置，预检将原设置迁入新版布局。
+# /config 确认保存与 115 授权刷新均写入本文件，未安装插件也可预先配置。
+# shared.tmdb.api_key 填写 API Read Access Token，Search 与 Sync 共用。
+config_version: 3
 bot_token: your_bot_token
 allowed_user: 123456789
-
-# 2. 插件安装、更新与运行环境
+log_level: info
 plugins:
   root: /config/plugins
+  runtime_root: /tmp/telepiplex
   catalog: https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml
   catalog_refresh_interval: 21600
   install_timeout: 300
@@ -19,37 +16,55 @@ plugins:
   drain_timeout: 120
   stabilize_seconds: 10
   restart_limit: 3
+  event_retry_interval: 1
   event_delivery_timeout: 1800
   event_max_attempts: 5
-
-# 3. 公共媒体目录与 TMDB 凭据
-# 分类按 kind 识别。TMDB api_key 填 API Read Access Token，Search 与 Sync 共用。
 shared:
-  category_folder:
-  - kind: live_action_movie
-    name: 真人电影
-    path: /真人电影
-    plex_library_id: ''
-  - kind: animated_movie
-    name: 动画电影
-    path: /动画电影
-    plex_library_id: ''
-  - kind: live_action_series
-    name: 真人剧集
-    path: /真人剧集
-    plex_library_id: ''
-  - kind: animated_series
-    name: 动画剧集
-    path: /动画剧集
-    plex_library_id: ''
+  directories:
+    live_action_movie:
+      name: 真人电影
+      path: /真人电影
+    animated_movie:
+      name: 动画电影
+      path: /动画电影
+    live_action_series:
+      name: 真人剧集
+      path: /真人剧集
+    animated_series:
+      name: 动画剧集
+      path: /动画剧集
+    unorganized_inventory:
+      name: 额外盘点
+      path: /未整理
+    standalone_subtitles:
+      name: 独立字幕导出
+      path: /字幕
+  directory_roles:
+    media_categories:
+      live_action_movie:
+        directory_id: live_action_movie
+        label: 真人电影
+        plex_library_id: ''
+      animated_movie:
+        directory_id: animated_movie
+        label: 动画电影
+        plex_library_id: ''
+      live_action_series:
+        directory_id: live_action_series
+        label: 真人剧集
+        plex_library_id: ''
+      animated_series:
+        directory_id: animated_series
+        label: 动画剧集
+        plex_library_id: ''
+    manual_downloads: []
+    unorganized_inventory:
+      directory_id: unorganized_inventory
+    standalone_subtitles:
+      directory_id: standalone_subtitles
   tmdb:
     api_key: ''
-
-# 4. 各插件的服务连接与业务策略；安装后直接读取本区。
-# 未安装插件也可预先配置。包内 schema/default 只用于校验与缺省，不是另一份编辑入口。
 features:
-
-  # 115 授权、保存目录、清理阈值与 API 速率
   download:
     base_url: https://proapi.115.com
     passport_url: https://passportapi.115.com
@@ -72,60 +87,8 @@ features:
       storage_mutation: 1.0
       token_refresh: 1.0
     storage_read_workers: 4
-    save_directories: []
     enable_tree_snapshot_references: false
-
-  # Prowlarr、搜索评分及元数据来源策略
   search:
-    search:
-      enable: true
-      prowlarr:
-        base_url: http://127.0.0.1:9696
-        api_key: ''
-        timeout: 200
-        indexer_timeout: 75
-        status_timeout: 15
-        indexer_ids: '-2'
-        first_wave_indexer_ids: []
-        wave_delay: 1.5
-        categories:
-          movie: 2000
-          tv: 5000
-        result_limit: 12
-      scoring:
-        reject_keywords:
-        - 720p
-        - 576p
-        - 480p
-        - CAM
-        - TS
-        - TC
-        - 枪版
-        - 抢先
-        - HC
-        - HDTC
-        - HDCAM
-        keyword_scores:
-          2160p: 100
-          1080p: 50
-          BluRay: 12
-          BDRip: 10
-          WEB: 6
-          Remux: -1
-          HEVC: 2
-          H.265: 2
-          x265: 2
-          H.264: 1
-          x264: 1
-          Atmos: 20
-          TrueHD: 4
-          DTS-HD: 3
-          EAC3: 2
-          国配: 2
-          中字: 1
-        indexer_scores:
-          M-Team: 3
-          TorrentLeech: 1
     metadata:
       wikipedia:
         enable: true
@@ -157,15 +120,57 @@ features:
         enable: true
         endpoint: https://graphql.anilist.co
         timeout: 15
-
-  # 未整理目录、文件映射 AI 与整理策略
+    prowlarr:
+      base_url: http://127.0.0.1:9696
+      api_key: ''
+      timeout: 200
+      indexer_timeout: 75
+      status_timeout: 15
+      indexer_ids: '-2'
+      first_wave_indexer_ids: []
+      wave_delay: 1.5
+      categories:
+        movie: 2000
+        tv: 5000
+      result_limit: 12
+    scoring:
+      reject_keywords:
+      - 720p
+      - 576p
+      - 480p
+      - CAM
+      - TS
+      - TC
+      - 枪版
+      - 抢先
+      - HC
+      - HDTC
+      - HDCAM
+      keyword_scores:
+        2160p: 100
+        1080p: 50
+        BluRay: 12
+        BDRip: 10
+        WEB: 6
+        Remux: -1
+        HEVC: 2
+        H.265: 2
+        x265: 2
+        H.264: 1
+        x264: 1
+        Atmos: 20
+        TrueHD: 4
+        DTS-HD: 3
+        EAC3: 2
+        国配: 2
+        中字: 1
+      indexer_scores:
+        M-Team: 3
+        TorrentLeech: 1
   rename:
-    unorganized_path: /未整理
     storage_timeout: 120
     storage_move_batch_size: 100
     metadata_timeout: 120
-    caption_enabled: true
-    caption_timeout: 300
     selection:
       movie_size_fallback_ratio: 1.5
       unmatched_large_ratio: 0.25
@@ -176,8 +181,7 @@ features:
       api_key: ''
       model: ''
       timeout: 60
-
-  # Plex、Fanart、扫描与 MCP
+    caption_stage_timeout_seconds: 300
   sync:
     plex:
       base_url: ''
@@ -196,13 +200,10 @@ features:
       port: 8765
       path: /mcp
       auth_token: ''
-
-  # 字幕源、各源凭据、输出目录与检索预算
   caption:
     enabled: true
     automatic: true
     source_profile: balanced
-    output_path: /字幕
     request_timeout_seconds: 15
     provider_timeout_seconds: 45
     retrieval_timeout_seconds: 180
@@ -256,27 +257,19 @@ features:
         user_agent: ''
       nekomoe:
         enabled: true
-        github_token: ''
-        cache_ttl_seconds: 3600
         title_aliases: {}
         episode_mappings: {}
       mingy:
         enabled: true
-        github_token: ''
-        cache_ttl_seconds: 3600
         max_release_pages: 3
         title_aliases: {}
         episode_mappings: {}
       kitauji:
         enabled: true
-        github_token: ''
-        cache_ttl_seconds: 3600
         title_aliases: {}
         episode_mappings: {}
       haruhana:
         enabled: true
-        github_token: ''
-        cache_ttl_seconds: 3600
         title_aliases: {}
         episode_mappings: {}
       local_archive:
@@ -287,3 +280,7 @@ features:
         max_files: 20000
         max_depth: 12
         episode_mappings: {}
+    provider_defaults:
+      github:
+        github_token: ''
+        cache_ttl_seconds: 3600

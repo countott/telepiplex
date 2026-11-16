@@ -5,6 +5,7 @@ from __future__ import annotations
 import requests
 
 from ..context import runtime_context
+from .config_values import provider_settings, timeout_seconds
 
 
 ANILIST_ENDPOINT = "https://graphql.anilist.co"
@@ -27,16 +28,13 @@ def _text(value) -> str:
 
 
 def _get_anilist_config() -> dict:
-    config = ((runtime_context.config.get("metadata") or {}).get("anilist") or {})
+    config = provider_settings(runtime_context.config, "anilist", AniListConfigError)
     if not config.get("enable", True):
         raise AniListConfigError("metadata.anilist.enable 未开启", "disabled")
-    try:
-        timeout = float(config.get("timeout") or 15)
-    except (TypeError, ValueError):
-        timeout = 15
+    timeout = timeout_seconds(config, "anilist", AniListConfigError)
     return {
         "endpoint": _text(config.get("endpoint") or ANILIST_ENDPOINT),
-        "timeout": max(5, min(timeout, 60)),
+        "timeout": timeout,
     }
 
 

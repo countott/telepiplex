@@ -1,8 +1,8 @@
 plugin_id: download
 config_write_mode: host_rpc_v1
 name: download
-version: 2.3.0
-host_api: ">=1.10,<2.0"
+version: 2.4.0
+host_api: ">=1.11,<2.0"
 entry_point: telepiplex_download.runtime:main
 provides:
   - name: download.provider

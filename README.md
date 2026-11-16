@@ -110,11 +110,11 @@ docker logs -f telepiplex
 
 115 保存目录分两步录入：先填写按钮显示名称，再填写实际路径。例如显示名称 `真人电影`，路径填写 `真人电影`；多级路径可填写 `series/live action`。在 Telegram 输入路径时不要以 `/` 开头，以免被识别为命令。
 
-保存目录与分类目录都是 **115 内的路径**。`features.download.save_directories` 决定离线下载位置；`shared.category_folder` 统一供 Search、Rename、Sync 使用，默认分为真人电影、动画电影、真人剧集、动画剧集。公共目录可在 Telegram 编辑；其他高级参数直接编辑主 YAML，再执行 `/reload`。插件包内默认值与 schema 只负责缺省和校验，运行快照由 Host 生成，不是用户编辑入口。
+115 目录在 `shared.directories` 定义一次。手动下载菜单和媒体分类在 `shared.directory_roles` 分别设置顺序和显示名称；只有显式添加的目录才会出现在手动菜单。使用 Telegram `/config` 可以在安装插件前填写基础参数；高级参数仍可编辑主 YAML 后执行 `/reload`。
 
 旧版本升级时保留原主配置，不要先用新模板覆盖。首次启动会将旧 `/config/plugins/<plugin_id>/config.yaml` 迁入主文件并保留原文件；迁入后只使用主文件。多个旧配置的公共目录或非空 TMDB 凭据不一致时，迁移停止并指出冲突字段，修正后重启；不会自动挑选一个覆盖。集中模式要求 Download 2.3.0 或更高兼容版本，旧 Download 会提示升级，不继续向运行快照写授权。插件代码回滚保留主配置中的最新设置和 Token，目标版本不兼容时拒绝回滚。
 
-Host 3.10.1 修复升级顺序导致的失败重试：缺少依赖时在准备安装包前提示；此前已提交但未激活的同一版本，在安装包内容和校验和一致时可继续激活，不再被 `release_exists` 永久阻挡。升级失败后无需删除版本目录或重新填写配置。建议先更新 Download，再更新 Search、Rename、Caption；Sync 独立更新。此前卡住的 Search 2.11.2、Rename 2.4.6 可在升级 Host 后重试原版本，不需要重打 Feature 包。
+Host 3.10.1 修复升级顺序导致的失败重试：缺少依赖时在准备安装包前提示；此前已提交但未激活的同一版本，在安装包内容和校验和一致时可继续激活，不再被 `release_exists` 永久阻挡。升级失败后无需删除版本目录或重新填写配置。此前卡住的 Search 2.11.2、Rename 2.4.6 可在升级 Host 后重试原版本，不需要重打 Feature 包。
 
 Wikipedia、Wikidata、豆瓣和 AniList 不需要 API Key。search 没有 AI 配置；rename 的 AI 仅处理规则无法确定的文件映射，不能确认作品身份、覆盖外部元数据或授权删除。通过 Telegram 保存配置时会执行校验和运行实例切换；失败则恢复旧配置与旧路由。
 
@@ -264,25 +264,25 @@ docker compose up -d
 
 Host 负责 Telegram 接入、命令路由、任务与事件持久化、配置和模块生命周期。Feature 在各自 Python 虚拟环境与子进程中运行，通过 Unix Domain Socket 调用 capability；socket 位于临时目录 `/tmp/telepiplex`。业务源码不打入 Host 镜像，各 Feature 不直接 import 其他 Feature。
 
-当前 Host API 1.10 增加认证的配置读取和字段级写回，主文件集中配置并向各进程提供隔离快照。Host API 1.9 的可选 capability 依赖与 caption 任务消息段、Host API 1.8 的独立下一步选择卡继续保留；同时延续 Host API 1.7 的任务消息段、Host API 1.6 的身份／阶段里程碑和 Host API 1.5 的逐版本配置迁移合同。模块通过 `manifest.yaml` 声明 `host_api` 范围和 capability 依赖。
+Host API 1.11 支持公共配置导航、路径语义和按包声明的超时范围。Host API 1.10 增加认证的配置读取和字段级写回，主文件集中配置并向各进程提供隔离快照。Host API 1.9 的可选 capability 依赖与 caption 任务消息段、Host API 1.8 的独立下一步选择卡继续保留；同时延续 Host API 1.7 的任务消息段、Host API 1.6 的身份／阶段里程碑和 Host API 1.5 的逐版本配置迁移合同。模块通过 `manifest.yaml` 声明 `host_api` 范围和 capability 依赖。
 
 ### 独立发布
 
 #### 当前源码版本
 
-本轮将配置统一到主 YAML，先删除闲置配置代码，再明确迁移和生效策略。此前的 [存储分页诊断](docs/audits/2026-11-11-115-pagination-diagnosis.md)、[Provider 配置](docs/audits/2026-11-11-search-provider-config-and-review.md)、[评分规则](docs/audits/2026-11-06-search-scoring.md) 和 [格式识别拓扑](docs/media-release-format-topology.md) 保持历史记录；集中化不改变其中尚未确认的 115 线上问题。以下为本地源码版本，未自动发布。
+主 YAML v3 用目录引用、共享凭据和单一自动字幕开关保存用户设置。此前的 [存储分页诊断](docs/audits/2026-11-11-115-pagination-diagnosis.md)、[Provider 配置](docs/audits/2026-11-11-search-provider-config-and-review.md)、[评分规则](docs/audits/2026-11-06-search-scoring.md) 和 [格式识别拓扑](docs/media-release-format-topology.md) 保持历史记录；集中化不改变其中尚未确认的 115 线上问题。以下为本地源码版本，未自动发布。
 
 | 组件 | 版本 |
 | --- | --- |
-| Host | `3.10.1` |
-| SDK | `2.3.0` |
-| `download` | `2.3.0` |
-| `search` | `2.11.2` |
-| `rename` | `2.4.6` |
-| `sync` | `2.1.3` |
-| `caption` | `1.3.5` |
+| Host | `3.11.0` |
+| SDK | `2.4.0` |
+| `download` | `2.4.0` |
+| `search` | `2.12.0` |
+| `rename` | `2.5.0` |
+| `sync` | `2.1.4` |
+| `caption` | `1.4.0` |
 
-本轮先完成代码清理，再统一配置存储和生效策略。升级 Host 后通过 Telegram 将 Download 更新到 2.3.0；其余模块按需更新。五个 Feature 的随包 SDK 对齐 2.3.0，SDK 无需单独安装。Search、Sync 的业务策略未改；Rename 删除闲置 TVDB 接口，Caption 复用相同的配置 schema 并补齐 `/config` 的向导声明。已有显式 `storage_move_batch_size: 32` 继续保留。集中化设计与迁移边界见 [设计文档](docs/superpowers/specs/2026-11-16-centralized-config-design.md)。
+Host 3.11.0 会预检现有 v2 主文件；能保留现有行为时自动迁移至 v3。若有歧义，原文件保留，在 Telegram /config 查看字段、修复并重试；兼容的插件仍可管理和更新。新包需要 API 1.11，随包 SDK 2.4.0 无需单独安装。已有五包可逐个更新；回滚代码保留最新授权和设置，不能无损转换时拒绝导出旧 Host 配置。
 
 `main` 是 Core/Host 与五个 Feature 的有效源码分支。Host 使用 `telepiplex-v<semver>` tag，发布前验证提交已包含在远端 `main`；正式流水线生成 `ghcr.io/<owner>/telepiplex:<semver>` 与 `latest` 镜像，创建标题为 `Telepiplex <semver>` 的 GitHub Release 并强制设为 **Latest**。普通 `main` push 不更新正式镜像或 Latest 入口。
 

@@ -32,6 +32,7 @@ from telepiplex_plugin_sdk.diagnostics import (
 import init
 from app.runtime.capability_router import CapabilityRouter
 from app.runtime.central_config import CentralConfigStore
+from app.runtime.config_defaults import LOG_LEVEL, PLUGIN_DEFAULTS
 from app.runtime.command_catalog import (
     build_bot_commands,
     build_start_help,
@@ -98,13 +99,11 @@ SENSITIVE_CONFIG_KEYWORDS = (
     "authorization",
 )
 PLUGIN_UPDATE_TASK_KEY = "telepiplex_plugin_update_task"
-DEFAULT_PLUGIN_CATALOG_URL = (
-    "https://raw.githubusercontent.com/countott/telepiplex/catalog/catalog.yaml"
-)
+DEFAULT_PLUGIN_CATALOG_URL = PLUGIN_DEFAULTS["catalog"]
 
 
 def get_version(md_format=False):
-    version = "v3.10.1-host"
+    version = "v3.11.0-host"
     if md_format:
         return escape_markdown(version, version=2)
     return version
@@ -163,12 +162,18 @@ def resolve_plugin_catalog_source(plugin_config: dict, root: Path) -> str:
 def build_plugin_manager(config=None, host_database=None, *, config_path=None):
     config = config or {}
     plugin_config = config.get("plugins") or {}
-    root = Path(str(plugin_config.get("root") or "/config/plugins"))
+
+    def configured(key):
+        value = plugin_config.get(key)
+        if key in ("restart_limit", "stabilize_seconds") and type(value) in (int, float) and value == 0:
+            return value
+        return value or PLUGIN_DEFAULTS[key]
+
+    root = Path(str(configured("root")))
     central_config = CentralConfigStore(
         Path(config_path) if config_path is not None else Path(init.CONFIG_FILE),
         initial=config,
     )
-    central_config.migrate_legacy(root)
     if host_database is None:
         host_database = root.parent / "host.db"
     router = CapabilityRouter()
@@ -187,15 +192,13 @@ def build_plugin_manager(config=None, host_database=None, *, config_path=None):
         operation_sink,
         milestone_sink,
     )
-    runtime_root = Path(str(plugin_config.get("runtime_root") or "/tmp/telepiplex"))
+    runtime_root = Path(str(configured("runtime_root")))
     dispatcher = EventDispatcher(
         router,
         journal,
-        retry_interval=float(plugin_config.get("event_retry_interval") or 1),
-        delivery_deadline=float(
-            plugin_config.get("event_delivery_timeout") or 1800
-        ),
-        max_attempts=int(plugin_config.get("event_max_attempts") or 5),
+        retry_interval=float(configured("event_retry_interval")),
+        delivery_deadline=float(configured("event_delivery_timeout")),
+        max_attempts=int(configured("event_max_attempts")),
         operation_coordinator=coordinator,
     )
     broker = RuntimeBroker(
@@ -213,11 +216,11 @@ def build_plugin_manager(config=None, host_database=None, *, config_path=None):
         logger=init.logger,
     )
     supervisor = PluginSupervisor(
-        startup_timeout=float(plugin_config.get("startup_timeout") or 30),
-        restart_limit=int(plugin_config.get("restart_limit") or 3),
+        startup_timeout=float(configured("startup_timeout")),
+        restart_limit=int(configured("restart_limit")),
         runtime_root=runtime_root,
         broker=broker,
-        log_level=str((config or {}).get("log_level") or "info"),
+        log_level=str((config or {}).get("log_level") or LOG_LEVEL),
         log_session=getattr(init.logger, "session", None),
     )
     catalog_source = resolve_plugin_catalog_source(plugin_config, root)
@@ -230,10 +233,11 @@ def build_plugin_manager(config=None, host_database=None, *, config_path=None):
         interaction_coordinator=coordinator,
         artifact_resolver=catalog,
         broker=broker,
-        install_timeout=float(plugin_config.get("install_timeout") or 300),
-        drain_timeout=float(plugin_config.get("drain_timeout") or 120),
-        stabilize_seconds=float(plugin_config.get("stabilize_seconds") or 10),
+        install_timeout=float(configured("install_timeout")),
+        drain_timeout=float(configured("drain_timeout")),
+        stabilize_seconds=float(configured("stabilize_seconds")),
     )
+    manager.bootstrap_semantics()
     return manager
 
 
@@ -332,19 +336,11 @@ def _config_value(config: dict, path: tuple[str, ...], default=None):
 
 HOT_RUNTIME_FIELDS = (
     ("allowed_user", ("allowed_user",), None),
-    ("log_level", ("log_level",), "info"),
-    ("plugins.install_timeout", ("plugins", "install_timeout"), 300),
-    ("plugins.startup_timeout", ("plugins", "startup_timeout"), 30),
-    ("plugins.drain_timeout", ("plugins", "drain_timeout"), 120),
-    ("plugins.stabilize_seconds", ("plugins", "stabilize_seconds"), 10),
-    ("plugins.restart_limit", ("plugins", "restart_limit"), 3),
-    ("plugins.event_retry_interval", ("plugins", "event_retry_interval"), 1),
-    (
-        "plugins.event_delivery_timeout",
-        ("plugins", "event_delivery_timeout"),
-        1800,
-    ),
-    ("plugins.event_max_attempts", ("plugins", "event_max_attempts"), 5),
+    ("log_level", ("log_level",), LOG_LEVEL),
+    *((f"plugins.{key}", ("plugins", key), PLUGIN_DEFAULTS[key]) for key in (
+        "install_timeout", "startup_timeout", "drain_timeout", "stabilize_seconds",
+        "restart_limit", "event_retry_interval", "event_delivery_timeout", "event_max_attempts",
+    )),
 )
 
 
@@ -363,20 +359,21 @@ def apply_hot_runtime_config(manager, previous: dict, current: dict) -> list[str
     if not isinstance(plugin_config, dict):
         raise ValueError("plugins must be a mapping")
 
-    def value(key, default):
+    def value(key):
+        default = PLUGIN_DEFAULTS[key]
         configured = plugin_config.get(key, default)
         return default if configured is None else configured
 
-    install_timeout = float(value("install_timeout", 300))
-    drain_timeout = float(value("drain_timeout", 120))
-    stabilize_seconds = max(0, float(value("stabilize_seconds", 10)))
-    startup_timeout = float(value("startup_timeout", 30))
-    restart_limit = max(0, int(value("restart_limit", 3)))
-    event_retry_interval = max(0.01, float(value("event_retry_interval", 1)))
+    install_timeout = float(value("install_timeout"))
+    drain_timeout = float(value("drain_timeout"))
+    stabilize_seconds = max(0, float(value("stabilize_seconds")))
+    startup_timeout = float(value("startup_timeout"))
+    restart_limit = max(0, int(value("restart_limit")))
+    event_retry_interval = max(0.01, float(value("event_retry_interval")))
     event_delivery_timeout = max(
-        0.1, float(value("event_delivery_timeout", 1800))
+        0.1, float(value("event_delivery_timeout"))
     )
-    event_max_attempts = max(1, int(value("event_max_attempts", 5)))
+    event_max_attempts = max(1, int(value("event_max_attempts")))
 
     manager.install_timeout = install_timeout
     manager.drain_timeout = drain_timeout
@@ -391,7 +388,7 @@ def apply_hot_runtime_config(manager, previous: dict, current: dict) -> list[str
 
     import logging
 
-    level_name = str((current or {}).get("log_level") or "info").upper()
+    level_name = str((current or {}).get("log_level") or LOG_LEVEL).upper()
     level = getattr(logging, level_name, logging.INFO)
     if init.logger is not None:
         init.logger.logger.setLevel(level)
@@ -845,7 +842,7 @@ async def start_host_runtime(application, manager):
     monitor = PluginUpdateMonitor(
         manager,
         lambda update: send_plugin_update_notification(application, update),
-        interval=float(plugin_config.get("catalog_refresh_interval") or 21600),
+        interval=float(plugin_config.get("catalog_refresh_interval") or PLUGIN_DEFAULTS["catalog_refresh_interval"]),
         logger=init.logger,
     )
     application.bot_data[PLUGIN_UPDATE_TASK_KEY] = asyncio.create_task(

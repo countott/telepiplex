@@ -619,25 +619,8 @@ class RenameFeature:
         )
 
     def _inventory_roots(self) -> list[dict]:
-        roots = [{
-            "kind": str(item.get("kind") or ""),
-            "name": str(item.get("name") or item.get("path") or ""),
-            "path": "/" + str(item.get("path") or "").strip("/"),
-            "source_kind": "category",
-        } for item in self.config.get("category_folder") or [] if (
-            isinstance(item, dict) and str(item.get("path") or "").strip("/")
-        )]
-        unorganized_path = "/" + str(
-            self.config.get("unorganized_path") or ""
-        ).strip("/")
-        if unorganized_path != "/":
-            roots.append({
-                "kind": "unorganized",
-                "name": "未整理",
-                "path": unorganized_path,
-                "source_kind": "unorganized",
-            })
-        return roots
+        from .inventory_roots import inventory_roots
+        return inventory_roots(self.config)
 
     def _inventory_menu(self, request: dict) -> dict:
         if request.get("args"):

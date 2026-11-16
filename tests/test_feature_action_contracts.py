@@ -136,14 +136,11 @@ async def test_sync_config_buttons_render_and_dispatch_through_host(sync_host, s
     menu = await host.feature.command({**owner, "command": "sync_config"})
     buttons = keyboard(host, menu)
     selected = await click(host, next(data for data in buttons if data == f"sync:config:{section}"))
-    keyboard(host, selected)
-    if section == "plex":
-        prompt = await host.feature.message({**owner, "text": "http://plex:32400"})
-        keyboard(host, prompt)
-    confirmation = await host.feature.message({**owner, "text": "local-test-secret"})
-    confirms = keyboard(host, confirmation)
-    saved = await click(host, next(data for data in confirms if data.endswith(":confirm")))
-    assert section in saved["config_patch"]
+    assert selected['config_navigation']=={'plex':'sync_plex','tmdb':'shared_tmdb','fanart':'sync_fanart'}[section]
+    assert selected['session']['state']=='close'
+    assert not any('keyboard' in action.get('data',{}) for action in selected['actions'])
+    stale=await click(host,'sync:config:confirm')
+    assert 'config_patch' not in stale
     menu = await host.feature.command({**owner, "command": "sync_config"})
     exited = await click(host, next(data for data in keyboard(host, menu) if data.endswith(":cancel")))
     assert exited["session"]["state"] == "close"

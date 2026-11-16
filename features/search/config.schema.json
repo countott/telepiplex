@@ -1,4 +1,5 @@
 {
+  "x-telepiplex-metadata-timeout-contract": "seconds_1_300_v1",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "x-telepiplex-config-command": "search_config",

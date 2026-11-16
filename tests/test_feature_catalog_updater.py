@@ -192,6 +192,22 @@ class FeatureCatalogUpdaterTest(unittest.TestCase):
             {"branch": "main", "commit": "a" * 40},
         )
 
+    def test_independent_search_release_keeps_last_compatible_update_for_old_hosts(self):
+        import asyncio
+        from app.runtime.plugin_catalog import PluginCatalog
+        from tests.mixed_config_releases import release
+        old = release(self.root, "search", old=True)
+        new = release(self.root, "search")
+        catalog = merge_feature_release(None, old, "local/telepiplex", "search-v2.11.2")
+        catalog = merge_feature_release(catalog, new, "local/telepiplex", "search-v2.12.0")
+        path = self.root / "catalog.yaml"
+        path.write_text(yaml.safe_dump(catalog))
+        reader = PluginCatalog(path, self.root / "cache")
+        for host, version, artifact in (("1.10", "2.11.2", old), ("1.11", "2.12.0", new)):
+            update, = asyncio.run(reader.available_updates({"search": "2.11.1"}, host))
+            self.assertEqual(update.target_version, version)
+            self.assertEqual(update.sha256, hashlib.sha256(artifact.read_bytes()).hexdigest())
+
     def test_merge_drops_legacy_plugin_ids(self):
         previous = self._previous_catalog()
         previous["plugins"].update({

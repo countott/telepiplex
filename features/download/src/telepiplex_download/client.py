@@ -87,7 +87,7 @@ class Open115Client:
         self.access_token = str(config.get("access_token") or "")
         self.refresh_token = str(config.get("refresh_token") or "")
         self.timeout = max(1, float(config.get("timeout") or 30))
-        self.request_interval = max(0, float(config.get("request_interval") or 1))
+        self.request_interval = max(0, float(config.get("request_interval", 1)))
         self.session = session or requests.Session()
         self.on_tokens_changed = on_tokens_changed
         self.on_tokens_refreshed = on_tokens_refreshed

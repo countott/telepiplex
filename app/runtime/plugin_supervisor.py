@@ -13,6 +13,7 @@ import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.runtime.config_defaults import LOG_LEVEL, PLUGIN_DEFAULTS
 from app.runtime.plugin_contract import ContractError
 from app.runtime.plugin_rpc import RpcClient
 from app.runtime.plugin_store import ActiveRelease
@@ -105,13 +106,13 @@ class PluginSupervisor:
     def __init__(
         self,
         *,
-        startup_timeout: float = 30,
-        restart_limit: int = 3,
+        startup_timeout: float = PLUGIN_DEFAULTS["startup_timeout"],
+        restart_limit: int = PLUGIN_DEFAULTS["restart_limit"],
         restart_backoff: float = 1,
         max_log_lines: int = 200,
-        runtime_root: Path = Path("/tmp/telepiplex"),
+        runtime_root: Path = Path(PLUGIN_DEFAULTS["runtime_root"]),
         broker=None,
-        log_level: str = "info",
+        log_level: str = LOG_LEVEL,
         restart_listener=None,
         log_session: LogSession | None = None,
     ):
@@ -122,7 +123,7 @@ class PluginSupervisor:
         self.runtime_root = Path(runtime_root).resolve()
         self.runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.broker = broker
-        self.log_level = str(log_level or "info")
+        self.log_level = str(log_level or LOG_LEVEL)
         self.restart_listener = restart_listener
         self.log_session = log_session or current_log_session()
         self._active: dict[str, PluginProcess] = {}

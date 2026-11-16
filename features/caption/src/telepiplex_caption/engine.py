@@ -54,7 +54,7 @@ class CaptionEngine:
         if self.source_profile not in {"balanced", "all"}:
             raise ValueError("invalid_subtitle_source_profile")
         self.providers = list(providers) if providers is not None else build_providers(config)
-        self.timeout = float(config.get("provider_timeout_seconds", 30))
+        self.timeout = float(config.get("provider_timeout_seconds", 45))
         self.limit = max(1, min(100, int(config.get("max_candidates", 30))))
         self._downloads: dict[tuple, tuple[float, bytes, str]] = {}
         self._search_cache = OrderedDict()

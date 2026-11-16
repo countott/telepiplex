@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+from app.runtime.config_defaults import PLUGIN_DEFAULTS
 from app.runtime.capability_router import CapabilityRouter
 from app.runtime.event_journal import EventJournal
 from app.runtime.interaction_coordinator import TERMINAL_STATES
@@ -20,10 +21,10 @@ class EventDispatcher:
         router: CapabilityRouter,
         journal: EventJournal,
         *,
-        retry_interval: float = 1,
+        retry_interval: float = PLUGIN_DEFAULTS["event_retry_interval"],
         delivery_deadline: float = 30,
         batch_size: int = 100,
-        max_attempts: int = 5,
+        max_attempts: int = PLUGIN_DEFAULTS["event_max_attempts"],
         operation_coordinator=None,
     ):
         self.router = router

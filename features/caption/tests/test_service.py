@@ -230,28 +230,20 @@ class ServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("待补充授权", operation["status_text"])
         self.assertNotIn("未找到通过", operation["status_text"])
 
-    async def test_config_secrets_not_reflected_and_invalid_paths_not_written(self):
-        await self.feature.command({**self.owner, "command": "caption_config"})
-        await self.feature.callback({**self.owner, "payload": "config:assrt"})
-        response = await self.feature.message({**self.owner, "text": "secret-fixture"})
-        self.assertEqual(response["config_patch"], {"providers": {"assrt": {"token": "secret-fixture"}}})
-        self.assertEqual(response["actions"], [])
-        await self.feature.command({**self.owner, "command": "caption_config"})
-        await self.feature.callback({**self.owner, "payload": "config:output_path"})
-        invalid = await self.feature.message({**self.owner, "text": "/a/../b"})
-        self.assertNotIn("config_patch", invalid)
+    async def test_basic_settings_handoff_and_reject_stale_messages(self):
+        for action,target in [('output_path','directories'),('assrt','caption_credentials'),('opensubtitles','caption_credentials'),('subdl','caption_credentials'),('subsource','caption_credentials'),('github','caption_github')]:
+            await self.feature.command({**self.owner,'command':'caption_config'})
+            result=await self.feature.callback({**self.owner,'payload':'config:'+action})
+            self.assertEqual(result['config_navigation'],target)
+            self.assertEqual(result['session']['state'],'close')
+            response=await self.feature.message({**self.owner,'text':'private-test-value'})
+            self.assertNotIn('config_patch',response)
+            self.assertNotIn('private-test-value',repr(response))
 
-    async def test_free_provider_keys_are_configurable_and_never_echoed(self):
-        for provider in ("subdl", "subsource"):
-            await self.feature.command({**self.owner, "command": "caption_config"})
-            await self.feature.callback({**self.owner, "payload": "config:" + provider})
-            response = await self.feature.message({**self.owner, "text": "free-personal-test-key"})
-            self.assertEqual(response["config_patch"], {"providers": {provider: {"api_key": "free-personal-test-key"}}})
-            self.assertEqual(response["actions"], [])
-            await self.feature.command({**self.owner, "command": "caption_config"})
-            await self.feature.callback({**self.owner, "payload": "config:" + provider})
-            response = await self.feature.message({**self.owner, "text": "clear"})
-            self.assertEqual(response["config_patch"], {"providers": {provider: {"api_key": ""}}})
+    async def test_output_config_requires_absolute_safe_paths(self):
+        for value in ("字幕", "/a//b", "/a/./b", "/a/../b", "/a\\b", "/a\n", "/a\x7f", None):
+            with self.subTest(value=value), self.assertRaises(FeatureError):
+                await self.feature.validate_config({"config": {"output_path": value}})
 
     async def test_source_profile_menu_selects_a_reviewable_config_patch(self):
         for profile in ("all", "balanced"):
@@ -327,6 +319,49 @@ class ServiceTest(unittest.IsolatedAsyncioTestCase):
         self.feature.config["automatic"] = False
         result = await self.feature.capability({"method": "prepare_download", "payload": {}})
         self.assertEqual(result["status"], "disabled")
+        self.assertEqual(self.host.calls, [])
+
+    async def test_total_gate_blocks_manual_query_without_starting_work(self):
+        self.feature.config['enabled'] = False
+        result = await self.feature.command({**self.owner, 'command': 'caption', 'args': ['Example']})
+        self.assertNotIn('operation', result)
+        self.assertEqual(self.host.calls, [])
+
+    async def test_automatic_editor_hands_off_to_host_without_local_toggle(self):
+        await self.feature.command({**self.owner, "command": "caption_config"})
+        result = await self.feature.callback({**self.owner, "payload": "config:automatic"})
+        self.assertEqual(result["config_navigation"], "caption_policy")
+        self.assertEqual(result["session"]["state"], "close")
+        self.assertNotIn("config_patch", result)
+
+    async def test_projected_legacy_gate_pairs_retain_actual_capability_outcome(self):
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+        self.addCleanup(sys.path.pop, 0)
+        from app.runtime.config_projection import project_feature_config
+        from app.runtime.config_semantics_migration import plan_v3_migration, MigrationContext
+        import json
+        import yaml
+        root = Path(__file__).resolve().parents[3]
+        packages = {name: (yaml.safe_load((root / f'features/{name}/config.default.yaml').read_text()),
+                           json.loads((root / f'features/{name}/config.schema.json').read_text()))
+                    for name in ('download', 'search', 'rename', 'sync', 'caption')}
+        for rename_gate, caption_gate in ((False, False), (False, True), (True, False), (True, True), (None, None)):
+            for enabled in (False, True):
+                with self.subTest(rename=rename_gate, caption=caption_gate, enabled=enabled):
+                    document = {'config_version': 2, 'features': {
+                        'rename': {} if rename_gate is None else {'caption_enabled': rename_gate},
+                        'caption': {'enabled': enabled, **({} if caption_gate is None else {'automatic': caption_gate})},
+                    }}
+                    plan = plan_v3_migration(document, context=MigrationContext(builtin=packages))
+                    self.assertFalse(plan.blockers)
+                    outcomes = []
+                    for source in (document, plan.after):
+                        self.feature.config = project_feature_config('caption', packages['caption'][0], document=source, contract=None)
+                        result = await self.feature.capability({'method': 'prepare_download', 'payload': {}})
+                        rename = project_feature_config('rename', packages['rename'][0], document=source, contract=None)
+                        outcomes.append(rename.get('caption_enabled', True) and result['status'] == 'metadata_required')
+                    self.assertEqual(outcomes, [enabled and rename_gate is not False and caption_gate is not False] * 2)
         self.assertEqual(self.host.calls, [])
 
     async def test_automatic_metadata_recovery_consumes_the_same_total_budget(self):

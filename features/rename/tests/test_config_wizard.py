@@ -77,49 +77,14 @@ class RenameConfigWizardTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("config_patch", result)
 
-    async def test_ai_flow_returns_enable_url_key_and_model_only(self):
-        await self._start()
-        await self.feature.callback({
-            **self.owner,
-            "namespace": "rename",
-            "payload": "config:ai",
-        })
-        await self.feature.callback({
-            **self.owner,
-            "namespace": "rename",
-            "payload": "config:boolean:on",
-        })
-        await self.feature.message({
-            **self.owner, "text": "https://ai.example/v1"
-        })
-        await self.feature.message({**self.owner, "text": "-"})
-        await self.feature.message({**self.owner, "text": "new-model"})
-        result = await self._confirm()
-
-        self.assertEqual(result["config_patch"], {
-            "ai": {
-                "enable": True,
-                "api_url": "https://ai.example/v1",
-                "api_key": "old-ai-key",
-                "model": "new-model",
-            },
-        })
-
-    async def test_ai_can_be_disabled_directly(self):
-        await self._start()
-        await self.feature.callback({
-            **self.owner,
-            "namespace": "rename",
-            "payload": "config:ai",
-        })
-        pending = await self.feature.callback({
-            **self.owner,
-            "namespace": "rename",
-            "payload": "config:boolean:off",
-        })
-        self.assertNotIn("config_patch", pending)
-        result = await self._confirm()
-        self.assertEqual(result["config_patch"], {"ai": {"enable": False}})
+    async def test_basic_connections_open_host_editor_and_stale_confirm_cannot_write(self):
+        for action,target in [["ai","rename_ai"]]:
+            await self._start()
+            result = await self.feature.callback({**self.owner, 'namespace':'rename', 'payload':'config:'+action})
+            self.assertEqual(result['config_navigation'],target)
+            self.assertEqual(result['session']['state'],'close')
+            self.assertNotIn('config_patch',result)
+            self.assertNotIn('config_patch',await self._confirm())
 
     async def test_exit_closes_without_submitting_patch(self):
         await self._start()
@@ -177,16 +142,9 @@ class RenameConfigWizardTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["operation"]["state"], "awaiting_input")
         self.assertEqual(result["operation"]["control"], "exit")
         self.assertEqual(len(exits(result)), 1)
-        result = await self.feature.callback({
-            **self.owner, "namespace": "rename", "payload": "config:ai",
-        })
-        self.assertEqual(len(exits(result)), 1)
-        result = await self.feature.callback({
-            **self.owner, "namespace": "rename", "payload": "config:boolean:on",
-        })
-        self.assertEqual(len(exits(result)), 1)
-        result = await self.feature.message({**self.owner, "text": "bad-url"})
-        self.assertEqual(len(exits(result)), 1)
+        result = await self.feature.callback({**self.owner,"namespace":"rename","payload":"config:ai"})
+        self.assertEqual(result['session']['state'],'close')
+        self.assertEqual(len(exits(result)),0)
 
 
 if __name__ == "__main__":

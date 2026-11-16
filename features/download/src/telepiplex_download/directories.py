@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from telepiplex_plugin_sdk.storage_paths import normalize_115_directory
+
 
 def _single_line(value, *, field: str) -> str:
     text = str(value or "").strip()
@@ -11,20 +13,8 @@ def _single_line(value, *, field: str) -> str:
 
 
 def normalize_save_directory_path(value) -> str:
-    path = _single_line(value, field="path")
-    if path.startswith("/"):
-        raise ValueError(
-            "download save directory path must start from the 115 root folder "
-            "without a leading slash"
-        )
-    if path.endswith("/"):
-        path = path[:-1]
-    parts = path.split("/")
-    if not path or any(not part or part in {".", ".."} for part in parts):
-        raise ValueError(
-            "download save directory path must contain safe root-relative segments"
-        )
-    return path
+    """Adapt canonical 115 paths to Download's legacy root-relative snapshot."""
+    return normalize_115_directory(value, allow_relative=True, allow_root=False)[1:]
 
 
 def normalize_save_directories(value) -> list[dict[str, str]]:
