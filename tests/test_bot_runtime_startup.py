@@ -29,7 +29,7 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
     async def test_core_runtime_version_matches_current_host_release(self):
         bot_module = await asyncio.to_thread(load_bot_module)
 
-        self.assertEqual(bot_module.get_version(), "v3.9.3-host")
+        self.assertEqual(bot_module.get_version(), "v3.10.0-host")
 
     async def test_uncaught_telegram_error_uses_the_same_sanitized_incident_in_frontend_and_machine_log(self):
         from app.utils.logger import Logger
@@ -159,10 +159,12 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
                     "restart_limit": 2,
                     "event_delivery_timeout": 777,
                 }
-            }, host_database=root / "host.db")
+            }, host_database=root / "host.db", config_path=root / "config.yaml")
             self.addAsyncCleanup(manager.close)
 
             self.assertEqual(manager.store.root, (root / "plugins").resolve())
+            self.assertTrue(manager.central_config_enabled)
+            self.assertEqual(manager.store.central_config.path, root / "config.yaml")
             self.assertEqual(manager.journal.database_path, root / "host.db")
             self.assertEqual(
                 manager.interaction_coordinator.database_path,
@@ -202,7 +204,7 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
                     "root": str(root / "plugins"),
                     "runtime_root": str(root / "plugins" / ".runtime"),
                 }
-            }, host_database=root / "host.db")
+            }, host_database=root / "host.db", config_path=root / "config.yaml")
             self.addAsyncCleanup(manager.close)
             application = SimpleNamespace(
                 bot_data={},
@@ -284,7 +286,7 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
                     "root": str(root / "plugins"),
                     "catalog": remote,
                 }
-            }, host_database=root / "host.db")
+            }, host_database=root / "host.db", config_path=root / "config.yaml")
             self.addAsyncCleanup(manager.close)
 
             self.assertEqual(manager._artifact_resolver.catalog_url, remote)
@@ -537,6 +539,38 @@ class BotPluginRuntimeStartupTest(unittest.IsolatedAsyncioTestCase):
                 "plugins.event_max_attempts",
             ],
         )
+
+    async def test_failed_central_reload_restores_host_runtime_values(self):
+        bot_module = await asyncio.to_thread(load_bot_module)
+        from app.runtime.plugin_manager import PluginOperationError
+
+        old = {"allowed_user": 42, "plugins": {"install_timeout": 300}}
+        new = {"allowed_user": 7, "plugins": {"install_timeout": 11}}
+        dispatcher = SimpleNamespace(retry_interval=1, delivery_deadline=1800, max_attempts=5)
+        manager = SimpleNamespace(
+            central_config_enabled=True, install_timeout=300, drain_timeout=120,
+            stabilize_seconds=10, supervisor=SimpleNamespace(startup_timeout=30, restart_limit=3),
+            broker=SimpleNamespace(dispatcher=dispatcher),
+            store=SimpleNamespace(list_installed=lambda: []),
+            reload_all_configs=AsyncMock(side_effect=PluginOperationError("invalid_config", "secret-value")),
+        )
+        update = SimpleNamespace(effective_user=SimpleNamespace(id=42), effective_chat=SimpleNamespace(id=42))
+        bot = SimpleNamespace(send_message=AsyncMock())
+        context = SimpleNamespace(bot=bot, application=SimpleNamespace(bot_data={"telepiplex_plugin_manager": manager}))
+
+        def load_config(**kwargs):
+            bot_module.init.bot_config = new
+
+        with (
+            patch.object(bot_module.init, "bot_config", old),
+            patch.object(bot_module.init, "check_user", return_value=True),
+            patch.object(bot_module.init, "load_yaml_config", side_effect=load_config),
+        ):
+            await bot_module.reload(update, context)
+            self.assertEqual(bot_module.init.bot_config, old)
+        self.assertEqual(manager.install_timeout, 300)
+        manager.reload_all_configs.assert_awaited_once()
+        self.assertNotIn("secret-value", str(bot.send_message.await_args))
 
     async def test_reload_reports_each_feature_and_continues_after_failure(self):
         bot_module = await asyncio.to_thread(load_bot_module)

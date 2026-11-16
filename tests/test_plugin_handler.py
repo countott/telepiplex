@@ -352,6 +352,25 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("update_id=99", message)
         self.assertNotIn("must-not-leak", message)
 
+    async def test_central_config_forwards_only_selected_fields_without_stale_snapshot(self):
+        from app.handlers.plugin_handler import handle_feature_result
+
+        update, context, manager = self._request([], user_id=1)
+        manager.central_config_enabled = True
+        manager.configure_patch = AsyncMock(return_value=SimpleNamespace(details={}))
+        manager.config = Mock(side_effect=AssertionError("central edits must not fetch a stale complete config"))
+        route = SimpleNamespace(plugin_id="search", manifest=SimpleNamespace(callbacks=("search",)))
+
+        await handle_feature_result(update, context, route, {
+            "actions": [], "config_patch": {"metadata": {"tmdb": {"api_key": "new-secret"}}},
+        })
+
+        manager.configure_patch.assert_awaited_once_with(
+            "search", {"metadata": {"tmdb": {"api_key": "new-secret"}}}, should_cancel=None,
+        )
+        self.assertEqual(manager.configurations, [])
+        self.assertNotIn("new-secret", str(update.effective_message.reply_text.await_args_list))
+
     async def test_feature_config_patch_is_merged_and_reloaded_by_host(self):
         from app.handlers.plugin_handler import handle_feature_result
 
@@ -382,6 +401,27 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         message = update.effective_message.reply_text.await_args.args[0]
         self.assertEqual(message, "配置已更新。")
         self.assertNotIn("kept-secret", message)
+
+    async def test_central_save_feedback_reports_actual_switched_consumers(self):
+        from app.handlers.plugin_handler import handle_feature_result
+
+        for affected, expected in ((["sync"], "已重新加载：sync。"), ([], "没有运行中的插件切换配置。")):
+            with self.subTest(affected=affected):
+                update, context, manager = self._request([], user_id=1)
+                manager.central_config_enabled = True
+                manager.configure_patch = AsyncMock(return_value=SimpleNamespace(details={
+                    "affected_plugins": affected, "api_key": "result-secret",
+                }))
+                route = SimpleNamespace(plugin_id="search", manifest=SimpleNamespace(callbacks=("search",)))
+                await handle_feature_result(update, context, route, {
+                    "actions": [], "config_patch": {"metadata": {"tmdb": {"api_key": "new-secret"}}},
+                })
+                message = update.effective_message.reply_text.await_args.args[0]
+                self.assertIn("已保存到顶层 config.yaml", message)
+                self.assertIn(expected, message)
+                self.assertNotIn("search", message)
+                self.assertNotIn("new-secret", message)
+                self.assertNotIn("result-secret", message)
 
     async def test_successful_feature_config_patch_completes_operation(self):
         from app.runtime.interaction_coordinator import InteractionCoordinator
@@ -901,12 +941,16 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("keyboard", normalized["details"])
 
-    async def test_photo_to_text_action_clears_old_photo_buttons(self):
+    async def test_photo_to_text_action_edits_caption_and_clears_old_buttons(self):
         from app.handlers.plugin_handler import _render_actions
 
         update, context, _manager = self._request([], user_id=1)
+        update.effective_message.message_id = 55
         update.effective_message.photo = [object()]
         update.effective_message.edit_reply_markup = AsyncMock()
+        update.effective_message.edit_caption = AsyncMock(
+            return_value=SimpleNamespace(message_id=55)
+        )
         update.effective_message.reply_text.return_value = SimpleNamespace(
             message_id=56
         )
@@ -928,10 +972,12 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(rendered)
-        self.assertEqual((message_id, message_kind), (56, "text"))
-        update.effective_message.edit_reply_markup.assert_awaited_once_with(
-            reply_markup=None
+        self.assertEqual((message_id, message_kind), (55, "photo"))
+        update.effective_message.edit_caption.assert_awaited_once_with(
+            caption="正在搜索片源", reply_markup={"inline_keyboard": []},
         )
+        update.effective_message.reply_text.assert_not_awaited()
+        update.effective_message.edit_reply_markup.assert_not_awaited()
 
     async def test_callback_send_action_clears_clicked_message_keyboard(self):
         from app.handlers.plugin_handler import _render_actions
@@ -2522,12 +2568,16 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
             update.effective_message.reply_text.await_args.args[0],
         )
 
-    async def test_feature_text_update_on_photo_sends_replacement_message(self):
+    async def test_feature_text_update_on_photo_edits_original_caption(self):
         from app.handlers.plugin_handler import _render_actions
 
         update, context, _manager = self._request([], user_id=1)
+        update.effective_message.message_id = 55
         update.effective_message.photo = [SimpleNamespace(file_id="poster")]
         update.effective_message.edit_text = AsyncMock()
+        update.effective_message.edit_caption = AsyncMock(
+            return_value=SimpleNamespace(message_id=55)
+        )
         update.effective_message.reply_text = AsyncMock(
             return_value=SimpleNamespace(message_id=82)
         )
@@ -2547,9 +2597,122 @@ class PluginHandlerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(rendered)
-        self.assertEqual((message_id, message_kind), (82, "text"))
+        self.assertEqual((message_id, message_kind), (55, "photo"))
         update.effective_message.edit_text.assert_not_awaited()
-        update.effective_message.reply_text.assert_awaited_once()
+        update.effective_message.edit_caption.assert_awaited_once_with(
+            caption="正在搜索片源", reply_markup={"inline_keyboard": []},
+        )
+        update.effective_message.reply_text.assert_not_awaited()
+
+    async def test_sync_photo_edit_timeout_retries_original_card(self):
+        from telegram.error import BadRequest, TimedOut
+        from app.handlers.plugin_handler import _render_actions
+
+        for not_modified in (False, True):
+            with self.subTest(not_modified=not_modified):
+                update, context, _manager = self._request([], user_id=1)
+                message = update.effective_message
+                message.message_id = 55
+                message.photo = [SimpleNamespace(file_id="poster")]
+                message.edit_media = AsyncMock(side_effect=[
+                    TimedOut(),
+                    BadRequest("Message is not modified") if not_modified
+                    else SimpleNamespace(message_id=55),
+                ])
+                message.reply_text = AsyncMock(return_value=SimpleNamespace(message_id=82))
+                message.reply_photo = AsyncMock()
+                update.callback_query = SimpleNamespace(edit_message_reply_markup=AsyncMock())
+                route = SimpleNamespace(plugin_id="sync", manifest=SimpleNamespace(callbacks=("sync",)))
+                rendered, message_id, kind = await _render_actions(update, context, route, {
+                    "actions": [{"kind": "edit_photo", "text": "海报 2",
+                        "data": {"photo_url": "https://image.example/2.jpg", "keyboard": [[{
+                            "text": "选择", "callback_data": "sync:choice:1:n:pick:1",
+                        }]]}}],
+                })
+                self.assertTrue(rendered)
+                self.assertEqual((message_id, kind), (55, "photo"))
+                self.assertEqual(message.edit_media.await_count, 2)
+                for call in message.edit_media.await_args_list:
+                    self.assertEqual(call.kwargs["media"].caption, "海报 2")
+                    self.assertEqual(call.kwargs["reply_markup"].inline_keyboard[0][0].callback_data,
+                                     "sync:choice:1:n:pick:1")
+                message.reply_text.assert_not_awaited()
+                message.reply_photo.assert_not_awaited()
+                update.callback_query.edit_message_reply_markup.assert_not_awaited()
+
+    async def test_sync_photo_edit_exhaustion_preserves_cursor_and_can_recover(self):
+        from telegram.error import TimedOut
+        from app.handlers.plugin_handler import handle_feature_result
+        from app.runtime.interaction_coordinator import InteractionCoordinator
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        coordinator = InteractionCoordinator(Path(temporary.name) / "host.db")
+        self.addCleanup(coordinator.close)
+        operation = {"operation_id": "sync-edit", "chat_id": 10, "user_id": 1,
+            "state": "awaiting_input", "stage": "artwork", "control": "cancel",
+            "status_text": "海报 1", "revision": 1, "details": {}}
+        coordinator.report("sync", operation)
+        coordinator.set_message_id("sync-edit", 55, "photo")
+        update, context, _manager = self._request([], user_id=1)
+        message = update.effective_message
+        message.message_id = 55
+        message.photo = [SimpleNamespace(file_id="poster")]
+        message.edit_media = AsyncMock(side_effect=TimedOut())
+        message.reply_text = AsyncMock(return_value=SimpleNamespace(message_id=82))
+        message.reply_photo = AsyncMock()
+        update.callback_query = SimpleNamespace(edit_message_reply_markup=AsyncMock())
+        context.application.bot_data["telepiplex_interaction_coordinator"] = coordinator
+        route = SimpleNamespace(plugin_id="sync", manifest=SimpleNamespace(callbacks=("sync",)))
+        result = {"operation": {**operation, "revision": 2, "status_text": "海报 2"},
+            "actions": [{"kind": "edit_photo", "text": "海报 2",
+                "data": {"photo_url": "https://image.example/2.jpg", "keyboard": [[{
+                    "text": "选择", "callback_data": "sync:choice:1:n:pick:1",
+                }]]}}]}
+        await handle_feature_result(update, context, route, result)
+        current = coordinator.get("sync-edit")
+        self.assertEqual((current.message_id, current.message_kind), (55, "photo"))
+        self.assertEqual(message.edit_media.await_count, 3)
+        self.assertIsNone(coordinator.get_message_cleanup("sync-edit", 55))
+        message.reply_text.assert_not_awaited()
+        message.reply_photo.assert_not_awaited()
+        update.callback_query.edit_message_reply_markup.assert_not_awaited()
+
+        message.edit_media.side_effect = None
+        message.edit_media.return_value = SimpleNamespace(message_id=55)
+        await handle_feature_result(update, context, route, result)
+        current = coordinator.get("sync-edit")
+        self.assertEqual((current.message_id, current.message_kind), (55, "photo"))
+        self.assertEqual(message.edit_media.await_count, 4)
+        self.assertIsNone(coordinator.get_message_cleanup("sync-edit", 55))
+
+    async def test_sync_text_edit_exhaustion_preserves_original_controls(self):
+        from telegram.error import TimedOut
+        from app.handlers.plugin_handler import _render_actions
+
+        for photo in (False, True):
+            with self.subTest(photo=photo):
+                update, context, _manager = self._request([], user_id=1)
+                message = update.effective_message
+                message.message_id = 55
+                message.photo = [SimpleNamespace(file_id="poster")] if photo else []
+                message.edit_text = AsyncMock(side_effect=TimedOut())
+                message.edit_caption = AsyncMock(side_effect=TimedOut())
+                message.reply_text = AsyncMock()
+                update.callback_query = SimpleNamespace(edit_message_reply_markup=AsyncMock())
+                route = SimpleNamespace(plugin_id="sync", manifest=SimpleNamespace(callbacks=("sync",)))
+                rendered, message_id, kind = await _render_actions(update, context, route, {
+                    "actions": [{"kind": "edit_message", "text": "正在处理",
+                        "data": {"keyboard": [[{
+                            "text": "取消任务", "callback_data": "sync:cancel",
+                        }]]}}],
+                })
+                self.assertFalse(rendered)
+                self.assertEqual((message_id, kind), (None, None))
+                editor = message.edit_caption if photo else message.edit_text
+                self.assertEqual(editor.await_count, 3)
+                message.reply_text.assert_not_awaited()
+                update.callback_query.edit_message_reply_markup.assert_not_awaited()
 
     async def test_retired_callback_clears_only_its_message_without_replaying(self):
         import yaml

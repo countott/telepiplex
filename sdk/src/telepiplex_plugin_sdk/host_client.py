@@ -12,6 +12,12 @@ from .diagnostics import bounded_diagnostic_value, outbound_diagnostic_context
 
 
 class HostClient:
+    async def read_config(self, *, deadline: float = 10) -> dict:
+        return await self._request("config.read", {}, deadline=deadline)
+
+    async def patch_config(self, patch: dict, expected: dict, *, deadline: float = 10) -> dict:
+        return await self._request("config.patch", {"patch": patch, "expected": expected}, deadline=deadline)
+
     def __init__(self, socket_path: Path, token: str, max_frame_bytes: int = 1024 * 1024):
         self.socket_path = Path(socket_path)
         self.token = str(token)

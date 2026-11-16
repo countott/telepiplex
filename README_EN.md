@@ -40,7 +40,7 @@ The automatic task ends with file organization. Plex scans are initiated separat
 | `sync` | Manually manage Plex scans and metadata enhancements | None | [Module guide](features/sync/README.md) |
 | `caption` | Chinese external subtitles after download, from a library, or by query | `download`, `search`, `rename` | [Module guide](features/caption/README.md) |
 
-Caption 1.3.4 requires Host API 1.9 and the updated Download, Search, and Rename Features listed below. SDK 2.2.2 is bundled into each Feature.
+For this centralized configuration upgrade, use Host 3.10.0 / Host API 1.10 with Caption 1.3.5 and the Feature versions listed below. Each Feature bundles SDK 2.3.0.
 
 For the complete search and organization flow, install `download → search → rename` in that order. Install `sync` as needed. Install `caption` after Rename to add external subtitle lookup before organization, library selection through `/caption` or `/caption scan`, and standalone `/caption Title Year` queries.
 
@@ -71,7 +71,7 @@ plugins:
   catalog_refresh_interval: 21600
 ```
 
-See the [full configuration template](config/config.yaml.example) for additional runtime settings. Host configuration covers the Bot and module runtime. Credentials and settings for 115, Prowlarr, and Plex belong to their respective Features.
+All user configuration lives in `/config/config.yaml`. The [complete template](config/config.yaml.example) separates Bot/logging, the `plugins` runtime, `shared` category routes and TMDB credentials, and per-Feature settings under `features`.
 
 ### 2. Start the container
 
@@ -99,18 +99,21 @@ Open your Bot in Telegram and send `/start`. Send `/plugin` to open module manag
 
 Use the buttons to install `download`, `search`, and `rename` in that order. Only dependency-satisfied, ready candidates receive an Install button; missing dependencies are listed on the page. Install and Update buttons target that Feature's newest stable, Host-compatible release. Telepiplex never installs automatically.
 
-Send `/config`, choose a module, and follow its prompts:
+You can fill in the main configuration before installing modules; installation uses the matching section. Alternatively, send `/config`, choose shared settings or a module wizard, and confirm changes to the same main file:
 
 | Module | Initial configuration |
 | --- | --- |
 | `download` | Complete 115 authorization and set save directories |
-| `search` | Set the Prowlarr address and API Key, configure TMDB and TVDB credentials, and check category directories |
-| `rename` | Check category directories; configure the AI endpoint, API Key, and model for file mapping as needed |
-| `sync` (optional) | Set the Plex address and Token; configure TMDB and Fanart.tv as needed for artwork and other enhancements |
+| Shared settings | Set category directories, Plex library mappings and TMDB credentials once |
+| `search` | Set the Prowlarr address and API Key; configure TVDB and other metadata sources as needed |
+| `rename` | Configure the file-mapping AI endpoint, API Key and model as needed; no TVDB settings |
+| `sync` (optional) | Set the Plex address and Token; configure Fanart.tv as needed |
 
 A save directory is entered in two steps: its button label, then its actual path. For example, enter `真人电影` as both label and path, or use a nested path such as `series/live action`. Do not start a path entered in Telegram with `/`, which Telegram treats as a command.
 
-Both save directories and category destinations are **paths inside 115**. download's `save_directories` selects the offline download destination; search and rename use `category_folder` for media categories. Defaults separate live-action movies, animated movies, live-action series, and animated series. Keep both modules' category paths consistent when customizing them. Edit category arrays and other advanced settings in the relevant YAML file; each module's default configuration provides the field structure.
+Both save directories and category destinations are **paths inside 115**. `features.download.save_directories` selects the offline destination. `shared.category_folder` supplies the same four category routes to Search, Rename and Sync. Shared directories can be edited in Telegram; edit other advanced settings in the main YAML and use `/reload`. Package defaults and schemas supply validation and missing values. Host-generated runtime snapshots are not editing entry points.
+
+When upgrading, retain the existing main file rather than replacing it with the new template. The first startup imports old `/config/plugins/<plugin_id>/config.yaml` files and retains the originals; subsequent operations use only the main file. Conflicting category paths or nonempty TMDB credentials stop migration and identify the relevant fields without exposing secrets. Central mode requires Download 2.3.0 or a newer compatible release; older Download versions are asked to upgrade rather than writing credentials to a disposable snapshot. Code rollback retains current settings and Tokens, and fails if the target schema cannot accept them.
 
 Wikipedia, Wikidata, Douban, and AniList do not require API Keys. search has no AI configuration. rename uses AI only for file mappings that rules cannot resolve; AI cannot confirm work identity, override external metadata, or authorize deletion. Saving configuration through Telegram validates it and switches the running instance; a failed switch restores the old configuration and routes.
 
@@ -183,9 +186,9 @@ All persistent data lives under `/config`. Preserve the whole directory when bac
 
 | Container path | Contents |
 | --- | --- |
-| `/config/config.yaml` | Host and Telegram configuration |
-| `/config/plugins/<plugin_id>/config.yaml` | Private Feature configuration |
-| `/config/plugins/<plugin_id>/config.yaml.example` | Installed Feature configuration template |
+| `/config/config.yaml` | The sole authoritative file for all user configuration: Host, Telegram, shared settings, and Features |
+| `/config/plugins/<plugin_id>/config.yaml` | Legacy configuration backup retained after first migration; no longer an active configuration source |
+| `/config/plugins/<plugin_id>/config.yaml.example` | Installed Feature package defaults for reference; not a user configuration editing entry point |
 | `/config/plugins` | Module versions, environments, and persistent state |
 | `/config/logs` | Logs grouped by Host startup session |
 
@@ -260,25 +263,25 @@ Local builds do not change the official `ghcr.io/countott/telepiplex:latest` ima
 
 The Host owns Telegram access, command routing, durable tasks and events, configuration, and module lifecycles. Each Feature runs in its own Python virtual environment and subprocess. Capabilities are called over Unix Domain Sockets under the temporary `/tmp/telepiplex` directory. Business source is not bundled into the Host image, and Features do not directly import one another.
 
-The current Host API 1.9 adds optional capability dependencies and caption message segments. Host API 1.8 provides disposable post-rename choices with one-time consumption and a durable 60-second expiry. It retains durable operation message segments from Host API 1.7, identity/stage milestones from Host API 1.6, and versioned configuration migrations from Host API 1.5. Each module declares its `host_api` range and capability dependencies in `manifest.yaml`.
+Host API 1.10 adds authenticated configuration reads and field-level writes, with one main YAML and isolated process snapshots. It retains optional dependencies and caption segments from Host API 1.9, next-action choices from Host API 1.8, operation segments from Host API 1.7, milestones from Host API 1.6, and configuration migrations from Host API 1.5. Each module declares its `host_api` range and dependencies in `manifest.yaml`.
 
 ### Independent releases
 
 #### Current source versions
 
-The supplied logs show files renamed and present in their destination directories before verification failed. The SDK and Rename now stop after validating and reading the declared count, avoiding an unnecessary terminal-page request. Contradictory source-directory listings after moves and the separate provider error 770004 remain unresolved. See the [evidence and delivery record](docs/audits/2026-11-11-115-pagination-diagnosis.md). The previous [Provider configuration](docs/audits/2026-11-11-search-provider-config-and-review.md), [release confirmation and cleanup](docs/audits/2026-11-11-release-confirmation-and-storage.md), and [format topology](docs/media-release-format-topology.md) remain available. These source versions have not been published automatically.
+This update centralizes configuration in the main YAML after removing unused configuration code and defining migration and activation rules. The previous [storage diagnosis](docs/audits/2026-11-11-115-pagination-diagnosis.md), [Provider configuration](docs/audits/2026-11-11-search-provider-config-and-review.md), and [format topology](docs/media-release-format-topology.md) remain historical evidence. Centralization does not resolve the previously unconfirmed 115 service issues. These source versions have not been published automatically.
 
 | Component | Version |
 | --- | --- |
-| Host | `3.9.3` |
-| SDK | `2.2.2` |
-| `download` | `2.2.5` |
-| `search` | `2.11.1` |
-| `rename` | `2.4.5` |
-| `sync` | `2.1.2` |
-| `caption` | `1.3.4` |
+| Host | `3.10.0` |
+| SDK | `2.3.0` |
+| `download` | `2.3.0` |
+| `search` | `2.11.2` |
+| `rename` | `2.4.6` |
+| `sync` | `2.1.3` |
+| `caption` | `1.3.5` |
 
-Prioritize Download 2.2.5 and Rename 2.4.5 before starting a new task. All five Features pin their bundled SDK, so Search 2.11.1, Sync 2.1.2 and Caption 1.3.4 also align with SDK 2.2.2; their business code is unchanged. Host 3.9.3 needs no update. Existing explicit `storage_move_batch_size: 32` settings retain 32; missing settings and new configurations use 100. Host API remains 1.9 and the SDK is bundled with Features.
+This update first cleans unused code, then centralizes configuration and activation. After upgrading the Host, update Download to 2.3.0 through Telegram; update the remaining modules as needed. Each Feature bundles SDK 2.3.0, which needs no separate installation. Search and Sync business strategies are unchanged; Rename removes the unused TVDB API, and Caption reuses identical provider schemas and declares its `/config` wizard. Explicit `storage_move_batch_size: 32` settings remain intact. See the [approved configuration design](docs/superpowers/specs/2026-11-16-centralized-config-design.md) for migration and compatibility rules.
 
 `main` is the active source branch for Core/Host and all five Features. The Host uses `telepiplex-v<semver>` tags, with release commits verified as contained in remote `main`. The release workflow publishes `ghcr.io/<owner>/telepiplex:<semver>` and `latest`, then creates a GitHub Release titled `Telepiplex <semver>` for that tag explicitly marked **Latest**. An ordinary `main` push does not update official images or Latest entry points.
 

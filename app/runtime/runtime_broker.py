@@ -24,10 +24,12 @@ class BrokerError(RuntimeError):
         self.message = str(message)
 
 
-@dataclass(frozen=True)
+@dataclass
 class BrokerIdentity:
     plugin_id: str
     manifest: PluginManifest
+    instance_id: str = ""
+    active: bool = True
 
 
 class RuntimeBroker:
@@ -61,14 +63,23 @@ class RuntimeBroker:
         self.max_deadline = max(1, float(max_deadline))
         self._identities: dict[str, BrokerIdentity] = {}
         self._server = None
+        self.config_reader = None
+        self.config_writer = None
 
-    def register(self, plugin_id: str, token: str, manifest: PluginManifest):
+    def register(self, plugin_id: str, token: str, manifest: PluginManifest, *, instance_id: str = "", active: bool = True):
         if str(plugin_id) != manifest.plugin_id or not str(token):
             raise BrokerError("identity_mismatch", "Feature broker identity is invalid")
-        self._identities[str(token)] = BrokerIdentity(str(plugin_id), manifest)
+        self._identities[str(token)] = BrokerIdentity(str(plugin_id), manifest, instance_id, active)
+
+    def set_active(self, token: str, active: bool):
+        identity = self._identities.get(str(token))
+        if identity is not None:
+            identity.active = bool(active)
 
     def unregister(self, token: str):
-        self._identities.pop(str(token), None)
+        identity = self._identities.pop(str(token), None)
+        if identity is not None:
+            identity.active = False
 
     async def start(self):
         if self._server is not None:
@@ -292,6 +303,38 @@ class RuntimeBroker:
     ) -> dict:
         method = str(request.get("method") or "")
         idempotency_key = str(request.get("idempotency_key") or "")
+        if method in {"config.read", "config.patch"}:
+            if method == "config.read":
+                if params:
+                    raise BrokerError("invalid_request", "config.read takes no selectors")
+                hook = self.config_reader
+                args = (identity,)
+            else:
+                if not identity.active or identity.plugin_id != "download" or identity.manifest.config_write_mode != "host_rpc_v1":
+                    raise BrokerError("config_write_forbidden", "Feature instance cannot write configuration")
+                patch, expected = params.get("patch"), params.get("expected")
+                allowed = {"auth_mode", "access_token", "refresh_token", "save_directories", "minimum_video_size_mib"}
+                if set(params) != {"patch", "expected"} or not isinstance(patch, dict) or not isinstance(expected, dict) or not patch or not set(patch) <= allowed or set(expected) != set(patch):
+                    raise BrokerError("invalid_request", "configuration patch must contain scoped fields and expected values")
+                hook = self.config_writer
+                args = (identity, patch, expected)
+            if hook is None:
+                raise BrokerError("config_unavailable", "Host configuration service is unavailable")
+            try:
+                result = hook(*args)
+                if inspect.isawaitable(result):
+                    result = await result
+            except Exception as exc:
+                if getattr(exc, "code", None) in {
+                    "config_conflict", "invalid_config", "config_write_failed",
+                    "config_write_forbidden", "config_unavailable", "not_installed",
+                    "config_upgrade_required",
+                }:
+                    raise BrokerError(exc.code, str(exc)) from None
+                raise
+            if not isinstance(result, dict):
+                raise BrokerError("internal_error", "configuration hook must return an object")
+            return result
         if method == "capability.call":
             capability = str(params.get("capability") or "")
             if capability not in (

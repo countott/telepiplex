@@ -15,6 +15,47 @@ FIXTURE = ROOT / "tests/fixtures/plugin_processes/fake_python.py"
 
 
 class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_central_snapshots_are_private_and_isolated(self):
+        import yaml
+        supervisor = self._supervisor()
+        release = self._release("healthy")
+        first = await supervisor.start(release, config={"token": "first"})
+        second = await supervisor.start(release, shadow=True, config={"token": "second"})
+        self.assertNotEqual(first.config_path, second.config_path)
+        self.assertEqual(yaml.safe_load(first.config_path.read_text()), {"token": "first"})
+        self.assertEqual(yaml.safe_load(second.config_path.read_text()), {"token": "second"})
+        self.assertEqual(first.config_path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(first.config_path.parent, supervisor.runtime_root)
+        environment = await first.client.request("configuration", {}, deadline=1)
+        self.assertEqual(environment, {"path": str(first.config_path), "mode": "central"})
+        path = first.config_path
+        await supervisor.stop(first)
+        self.assertFalse(path.exists())
+        replacement = await supervisor.start(release, config={"token": "replacement"})
+        self.assertNotEqual(replacement.config_path, path)
+
+    async def test_promoting_shadow_revokes_old_writer_even_if_it_restarts(self):
+        from app.runtime.runtime_broker import RuntimeBroker
+        from app.runtime.capability_router import CapabilityRouter
+        from app.runtime.event_journal import EventJournal
+        journal = EventJournal(self.root / "events.db")
+        broker = RuntimeBroker(CapabilityRouter(), journal, self.root / "host.sock")
+        supervisor = self._supervisor(broker=broker)
+        release = self._release("healthy")
+        try:
+            old = await supervisor.start(release, config={})
+            candidate = await supervisor.start(release, shadow=True, config={})
+            supervisor.promote(candidate)
+            self.assertFalse(broker._identities[old.startup_token].active)
+            self.assertTrue(broker._identities[candidate.startup_token].active)
+            old.desired_stop = True
+            await supervisor._terminate_child(old)
+            await supervisor._launch_once(old)
+            self.assertFalse(broker._identities[old.startup_token].active)
+        finally:
+            await supervisor.close_all()
+            journal.close()
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -262,7 +303,8 @@ class PluginSupervisorTest(unittest.IsolatedAsyncioTestCase):
 
         process = await supervisor.start(release)
         broker.register.assert_called_once_with(
-            "healthy", process.startup_token, release.manifest
+            "healthy", process.startup_token, release.manifest,
+            instance_id=process.instance_id, active=True,
         )
 
         await supervisor.stop(process)

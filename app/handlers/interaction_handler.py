@@ -2374,108 +2374,38 @@ async def _promote_segment_text_to_photo(
     )
     kwargs = {
         "chat_id": record.chat_id,
-        "photo": await _segment_photo_media(record, upload_confirmed=True),
-        "caption": caption,
-        "reply_markup": None,
+        "message_id": segment.message_id,
+        "media": InputMediaPhoto(
+            media=await _segment_photo_media(record, upload_confirmed=True),
+            caption=caption,
+            parse_mode=parse_mode,
+        ),
+        "reply_markup": markup,
     }
-    if parse_mode:
-        kwargs["parse_mode"] = parse_mode
     coordinator = application.bot_data.get(COORDINATOR_KEY)
     if coordinator is None:
         raise RuntimeError("operation coordinator is unavailable")
-    claimed = coordinator.claim_segment_replacement_delivery(
+    # Telegram can add media to an existing text message. Keep its known ID
+    # so a timeout can retry the edit without creating an unknown replacement.
+    try:
+        result = await application.bot.edit_message_media(**kwargs)
+        if result is None or result is False:
+            raise RuntimeError("segment media edit not acknowledged")
+    except Exception as exc:
+        if not _message_not_modified(exc):
+            raise
+    promoted = coordinator.replace_segment_message(
         segment.segment_id,
         owner_plugin_id=segment.owner_plugin_id,
         generation=segment.generation,
         chat_id=record.chat_id,
         expected_message_id=segment.message_id,
         expected_message_kind="text",
+        message_id=segment.message_id,
+        message_kind="photo",
     )
-    if claimed is None:
-        current = coordinator.get_segment(segment.segment_id)
-        if current is not None and current.delivery_state == "delivering":
-            coordinator.mark_segment_delivery_uncertain(
-                current.segment_id,
-                owner_plugin_id=current.owner_plugin_id,
-                generation=current.generation,
-            )
-        raise RuntimeError("segment photo promotion lost its delivery claim")
-    try:
-        message = await application.bot.send_photo(**kwargs)
-    except asyncio.CancelledError:
-        coordinator.mark_segment_delivery_uncertain(
-            claimed.segment_id,
-            owner_plugin_id=claimed.owner_plugin_id,
-            generation=claimed.generation,
-        )
-        raise
-    except Exception:
-        coordinator.mark_segment_delivery_uncertain(
-            claimed.segment_id,
-            owner_plugin_id=claimed.owner_plugin_id,
-            generation=claimed.generation,
-        )
-        raise
-    message_id = getattr(message, "message_id", None)
-    if not isinstance(message_id, int) or message_id <= 0:
-        coordinator.mark_segment_delivery_uncertain(
-            claimed.segment_id,
-            owner_plugin_id=claimed.owner_plugin_id,
-            generation=claimed.generation,
-        )
-        raise RuntimeError("promoted segment photo has no Telegram message id")
-    try:
-        promoted = coordinator.replace_segment_message(
-            claimed.segment_id,
-            owner_plugin_id=claimed.owner_plugin_id,
-            generation=claimed.generation,
-            chat_id=record.chat_id,
-            expected_message_id=segment.message_id,
-            expected_message_kind="text",
-            message_id=message_id,
-            message_kind="photo",
-        )
-    except Exception:
-        await _discard_unbound_segment_message(
-            application,
-            record.chat_id,
-            message_id,
-            operation_id=record.operation_id,
-        )
-        try:
-            coordinator.mark_segment_delivery_uncertain(
-                claimed.segment_id,
-                owner_plugin_id=claimed.owner_plugin_id,
-                generation=claimed.generation,
-            )
-        except Exception:
-            pass
-        raise
     if promoted is None:
-        await _discard_unbound_segment_message(
-            application,
-            record.chat_id,
-            message_id,
-            operation_id=record.operation_id,
-        )
-        coordinator.mark_segment_delivery_uncertain(
-            claimed.segment_id,
-            owner_plugin_id=claimed.owner_plugin_id,
-            generation=claimed.generation,
-        )
         raise RuntimeError("segment photo promotion lost its active cursor")
-    await _discard_replaced_segment_message(
-        application,
-        record.chat_id,
-        segment.message_id,
-        operation_id=record.operation_id,
-    )
-    if markup is not None:
-        await application.bot.edit_message_reply_markup(
-            chat_id=record.chat_id,
-            message_id=message_id,
-            reply_markup=markup,
-        )
 
 
 async def _discard_unbound_segment_message(
@@ -2568,6 +2498,52 @@ async def _render_operation_locked(application, _router, record: OperationRecord
     markup = operation_markup(record, _router)
     poster_items = _operation_poster_items(record.details)
     photo_url = _operation_photo_url(record.details)
+    if record.message_id is not None:
+        async def edit_current():
+            if poster_items or photo_url:
+                caption, parse_mode = bounded_photo_caption(
+                    text, record.details.get("parse_mode"),
+                )
+                media = (
+                    await asyncio.to_thread(build_poster_grid, poster_items)
+                    if poster_items else photo_url
+                )
+                return await application.bot.edit_message_media(
+                    chat_id=record.chat_id,
+                    message_id=record.message_id,
+                    media=InputMediaPhoto(media=media, caption=caption, parse_mode=parse_mode),
+                    reply_markup=markup,
+                )
+            if record.message_kind == "photo":
+                caption, parse_mode = bounded_photo_caption(
+                    text, record.details.get("parse_mode"),
+                )
+                return await application.bot.edit_message_caption(
+                    chat_id=record.chat_id,
+                    message_id=record.message_id,
+                    caption=caption,
+                    parse_mode=parse_mode,
+                    reply_markup=markup,
+                )
+            return await application.bot.edit_message_text(
+                chat_id=record.chat_id,
+                message_id=record.message_id,
+                text=text,
+                reply_markup=markup,
+            )
+
+        try:
+            await retry_message_edit(
+                edit_current, operation_id=record.operation_id, message_id=record.message_id,
+            )
+        except Exception:
+            return None
+        if (poster_items or photo_url) and record.message_kind != "photo":
+            coordinator.set_message_id_if_current(
+                record.operation_id, record.plugin_id, record.revision,
+                record.message_id, "photo",
+            )
+        return record.message_id
     if poster_items or photo_url:
         parse_mode = (
             record.details.get("parse_mode")
@@ -2587,34 +2563,6 @@ async def _render_operation_locked(application, _router, record: OperationRecord
                 )
             return photo_url
 
-        if record.message_id is not None:
-            if record.message_kind == "photo":
-                try:
-                    await application.bot.edit_message_media(
-                        chat_id=record.chat_id,
-                        message_id=record.message_id,
-                        media=InputMediaPhoto(
-                            media=await photo_media(),
-                            caption=caption,
-                            parse_mode=parse_mode,
-                        ),
-                        reply_markup=markup,
-                    )
-                    return record.message_id
-                except Exception as exc:
-                    if _message_not_modified(exc):
-                        return record.message_id
-                    _log(
-                        "warn",
-                        "任务候选海报编辑失败，改发新消息："
-                        f"operation_id={record.operation_id}, "
-                        f"message_id={record.message_id}, "
-                        f"message_kind={record.message_kind}, "
-                        f"error={_render_error(exc)}",
-                    )
-                    await _clear_message_keyboard(application, record)
-            else:
-                await _clear_message_keyboard(application, record)
         try:
             send_photo_kwargs = {
                 "chat_id": record.chat_id,
@@ -2647,30 +2595,6 @@ async def _render_operation_locked(application, _router, record: OperationRecord
                     "photo",
                 )
                 return message_id
-    if record.message_id is not None:
-        if record.message_kind == "text":
-            try:
-                await application.bot.edit_message_text(
-                    chat_id=record.chat_id,
-                    message_id=record.message_id,
-                    text=text,
-                    reply_markup=markup,
-                )
-                return record.message_id
-            except Exception as exc:
-                if _message_not_modified(exc):
-                    return record.message_id
-                _log(
-                    "warn",
-                    "任务状态消息编辑失败，改发新消息："
-                    f"operation_id={record.operation_id}, "
-                    f"message_id={record.message_id}, "
-                    f"message_kind={record.message_kind}, "
-                    f"error={_render_error(exc)}",
-                )
-                await _clear_message_keyboard(application, record)
-        else:
-            await _clear_message_keyboard(application, record)
     try:
         message = await application.bot.send_message(
             chat_id=record.chat_id,
@@ -2709,6 +2633,26 @@ def _render_error(exc: Exception) -> str:
 
 def _message_not_modified(exc: Exception) -> bool:
     return "message is not modified" in str(exc).casefold()
+
+
+async def retry_message_edit(edit, *, operation_id=None, message_id=None):
+    """Retry an edit at its known address without sending a replacement."""
+    for attempt in range(1, _SEGMENT_EDIT_MAX_ATTEMPTS + 1):
+        try:
+            return await edit()
+        except Exception as exc:
+            if _message_not_modified(exc):
+                return True
+            _log(
+                "warn",
+                "已知任务消息编辑失败，保留原消息游标："
+                f"operation_id={operation_id}, message_id={message_id}, "
+                f"attempt={attempt}/{_SEGMENT_EDIT_MAX_ATTEMPTS}, "
+                f"error={_render_error(exc)}",
+            )
+            if attempt == _SEGMENT_EDIT_MAX_ATTEMPTS:
+                raise
+            await asyncio.sleep(0)
 
 
 async def _clear_message_keyboard(application, record: OperationRecord):

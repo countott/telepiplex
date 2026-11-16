@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.runtime.capability_router import CapabilityRouter, RoutingError
+from app.runtime.central_config import CentralConfigError
 from app.runtime.event_journal import EventJournal
 from app.runtime.plugin_artifact import ArtifactError, verify_tpx
 from app.runtime.plugin_catalog import CatalogError, ResolvedArtifact
@@ -72,6 +73,278 @@ class PluginManager:
         # Last config known to back the running process. This intentionally
         # differs from config.yaml while an operator is testing a manual edit.
         self._active_configs: dict[str, dict] = {}
+        self.central_config_enabled = getattr(store, "central_config", None) is not None
+        if self.central_config_enabled and broker is not None:
+            broker.config_reader = self._read_live_config
+            broker.config_writer = self._write_live_config
+
+    def _check_central_release(self, release):
+        if (self.central_config_enabled and release.plugin_id == "download"
+                and getattr(release.manifest, "config_write_mode", "") != "host_rpc_v1"):
+            raise PluginOperationError("config_upgrade_required",
+                "Upgrade Download to a release supporting Host configuration writes")
+
+    def _candidate_document(self, change=None):
+        """Rebase owned fields on the latest YAML, including migration deletions."""
+        document = self.store.central_config.read()
+        if change is None:
+            return document
+        missing = object()
+        for path in change.changed_paths:
+            value = change.after
+            for part in path:
+                value = value.get(part, missing) if isinstance(value, dict) else missing
+            parent = document
+            for part in path[:-1]:
+                if not isinstance(parent.get(part), dict):
+                    parent[part] = {}
+                parent = parent[part]
+            if value is missing:
+                parent.pop(path[-1], None)
+            else:
+                parent[path[-1]] = deepcopy(value)
+        return document
+
+    def _check_launch_config(self, release, launched, *, document=None):
+        effective = self.store.central_config.effective(release.plugin_id,
+            self.store.config_defaults(release), document=document)
+        if effective != launched:
+            raise PluginOperationError("config_conflict",
+                "Configuration changed while Feature was starting; retry the operation")
+
+    async def _start_candidate(self, release, config=None):
+        self._check_central_release(release)
+        if self.central_config_enabled:
+            if config is None:
+                config = self.store.read_config(release)
+            return await self.supervisor.start(release, shadow=True, config=config)
+        return await self.supervisor.start(release, shadow=True)
+
+    def _read_live_config(self, identity):
+        if not identity.active:
+            instances = getattr(self.supervisor, "_instances", {})
+            process = instances.get(getattr(identity, "instance_id", ""))
+            if process is None or process.config is None:
+                raise PluginOperationError("config_unavailable", "Feature configuration snapshot is unavailable")
+            return deepcopy(process.config)
+        release = self.store.active(identity.plugin_id)
+        if release is None:
+            raise PluginOperationError("not_installed", "Feature is not installed")
+        return self.store.read_config(release)
+
+    def _write_live_config(self, identity, patch, expected):
+        # Deliberately synchronous: no lifecycle lock and no await between the
+        # authenticated authority check, compare, durable write, and cache update.
+        allowed = {"auth_mode", "access_token", "refresh_token", "save_directories",
+                   "minimum_video_size_mib"}
+        if (not identity.active or identity.plugin_id != "download"
+                or not isinstance(patch, dict) or not set(patch).issubset(allowed)
+                or not isinstance(expected, dict) or set(expected) != set(patch)):
+            raise PluginOperationError("config_write_forbidden", "Configuration write is not authorized")
+        release = self.store.active("download")
+        if release is None:
+            raise PluginOperationError("not_installed", "Feature is not installed")
+        self._check_central_release(release)
+        central = self.store.central_config
+        change = central.prepare_patch("download", patch)
+        current = central.effective("download", self.store.config_defaults(release), document=change.before)
+        if any(current.get(key) != value for key, value in expected.items()):
+            raise PluginOperationError("config_conflict", "Configuration changed; read it again")
+        candidate = central.effective("download", self.store.config_defaults(release), document=change.after)
+        self.store.validate_config(release, candidate)
+        document = central.commit(change)
+        latest = central.effective("download", self.store.config_defaults(release), document=document)
+        self._active_configs["download"] = deepcopy(latest)
+        process = self.supervisor.process("download")
+        if process is not None:
+            # Automatic process restart rewrites its isolated snapshot from this
+            # value; never revive credentials from the original startup snapshot.
+            process.config = deepcopy(latest)
+        return latest
+
+    async def configure_patch(self, plugin_id, patch, *, should_cancel=None):
+        if not self.central_config_enabled:
+            def merge(base, delta):
+                for key, value in delta.items():
+                    if isinstance(value, dict) and isinstance(base.get(key), dict):
+                        merge(base[key], value)
+                    else:
+                        base[key] = deepcopy(value)
+                return base
+            return await self.configure(plugin_id, merge(self.config(plugin_id)["config"], patch),
+                                        should_cancel=should_cancel)
+        async with self._lifecycle_lock:
+            release = self.store.active(str(plugin_id))
+            if release is None:
+                raise PluginOperationError("not_installed", "Feature is not installed")
+            try:
+                change = self.store.central_config.prepare_patch(str(plugin_id), patch)
+                switched = await self._central_transaction(change, should_cancel=should_cancel)
+            except Exception as exc:
+                raise self._operation_error(exc, "config_reload_failed") from None
+            return PluginOperationResult("active" if plugin_id in switched else "configured",
+                plugin_id, release.version, "Feature configuration saved",
+                {"restarted": plugin_id in switched, "affected_plugins": switched})
+
+    def _check_expected_shared(self, expected, *, document=None):
+        if not isinstance(expected, dict):
+            raise PluginOperationError("invalid_config", "Expected shared configuration must be a mapping")
+        current = self.store.central_config.read() if document is None else document
+        projected = self.store.central_config.effective("search", {}, document=current)
+        logical = deepcopy(current.get("shared", {}))
+        logical["category_folder"] = projected["category_folder"]
+        logical.setdefault("tmdb", {})["api_key"] = projected["metadata"]["tmdb"]["api_key"]
+        missing = object()
+        conflicts = []
+        def compare(draft, actual, path=("shared",)):
+            for key, value in draft.items():
+                if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", key):
+                    raise PluginOperationError("invalid_config", "Invalid expected configuration field")
+                field_path = (*path, key)
+                latest = actual.get(key, missing) if isinstance(actual, dict) else missing
+                if isinstance(value, dict) and value:
+                    compare(value, latest, field_path)
+                elif latest != value:
+                    conflicts.append(".".join(field_path))
+        compare(expected, logical)
+        if conflicts:
+            raise PluginOperationError("config_conflict", "Shared configuration changed while the draft was open",
+                                       {"config_error_paths": conflicts})
+
+    async def configure_shared(self, patch, *, should_cancel=None, expected=None):
+        async with self._lifecycle_lock:
+            try:
+                if expected is not None:
+                    self._check_expected_shared(expected)
+                change = self.store.central_config.prepare_document_patch({"shared": patch})
+                if expected is not None:
+                    # Tie the draft comparison to the same read used by CAS,
+                    # including manual file edits between the two reads.
+                    self._check_expected_shared(expected, document=change.before)
+                switched = await self._central_transaction(change, should_cancel=should_cancel)
+            except Exception as exc:
+                raise self._operation_error(exc, "config_reload_failed") from None
+            return PluginOperationResult("configured", "shared", "", "Shared configuration saved",
+                                         {"affected_plugins": switched})
+
+    async def reload_all_configs(self):
+        async with self._lifecycle_lock:
+            try:
+                return await self._central_transaction(None)
+            except Exception as exc:
+                raise self._operation_error(exc, "config_reload_failed") from None
+
+    async def _central_transaction(self, change, *, should_cancel=None):
+        central = self.store.central_config
+        document = change.after if change is not None else central.read()
+        affected = set(change.affected_plugins) if change is not None else None
+        releases = {item.plugin_id: self.store.active(item.plugin_id)
+                    for item in self.store.list_installed()
+                    if item.active and (affected is None or item.plugin_id in affected)}
+        releases = {key: value for key, value in releases.items() if value is not None}
+        configs = {}
+        for key, release in releases.items():
+            configs[key] = self.store.validate_config(release,
+                central.effective(key, self.store.config_defaults(release), document=document))
+            if release.enabled:
+                self._check_central_release(release)
+        def check_cancel():
+            if should_cancel is not None and should_cancel():
+                raise PluginOperationError("config_cancelled", "Feature configuration change was cancelled")
+        old = {key: self.supervisor.process(key) for key in releases}
+        candidates = {}
+        drained = []
+        switched = []
+        committed = False
+        old_configs = {}
+        try:
+            check_cancel()
+            for key, release in releases.items():
+                if not release.enabled:
+                    continue
+                if old[key] is not None:
+                    drained.append(key)
+                    health = await self.supervisor.drain(old[key], timeout=self.drain_timeout)
+                    if health.active_tasks:
+                        raise PluginOperationError("drain_timeout", "Feature still has active work")
+            # Draining may complete a token refresh. Rebase snapshots on the
+            # latest unrelated fields, retaining the original commit comparison.
+            document = self._candidate_document(change)
+            for key, release in releases.items():
+                configs[key] = self.store.validate_config(release,
+                    central.effective(key, self.store.config_defaults(release), document=document))
+            for key, release in releases.items():
+                if not release.enabled:
+                    continue
+                check_cancel()
+                candidates[key] = await self._start_candidate(release, configs[key])
+                await self._verify_stable(candidates[key])
+                check_cancel()
+            # Validate route replacements before writing any authoritative field.
+            for key, process in candidates.items():
+                self.router.prepare_activation(key, releases[key].manifest, self._route_client(process))
+            check_cancel()
+            document = self._candidate_document(change)
+            for key, release in releases.items():
+                if key in candidates:
+                    self._check_launch_config(release, configs[key], document=document)
+                else:
+                    self.store.validate_config(release, central.effective(key,
+                        self.store.config_defaults(release), document=document))
+            if change is not None:
+                document = central.commit(change)
+                committed = True
+            # No await: consumers and routing switch as one event-loop transaction.
+            for key, process in candidates.items():
+                old_configs[key] = deepcopy(self._active_configs.get(key))
+                self.router.activate(key, releases[key].manifest, self._route_client(process))
+                switched.append(key)
+                self.supervisor.promote(process)
+                self.journal.set_subscriptions(key, releases[key].manifest.subscribes)
+                self._active_configs[key] = central.effective(key,
+                    self.store.config_defaults(releases[key]), document=document)
+                process.config = deepcopy(self._active_configs[key])
+        except BaseException as exc:
+            recovery_errors = []
+            for key, value in old_configs.items():
+                if value is None:
+                    self._active_configs.pop(key, None)
+                else:
+                    self._active_configs[key] = value
+            if committed:
+                try:
+                    central.rollback(change)
+                except Exception:
+                    recovery_errors.append("config")
+            for key in reversed(switched):
+                try:
+                    if old[key] is not None:
+                        self.router.activate(key, releases[key].manifest, self._route_client(old[key]))
+                        # Drained processes must resume before Supervisor permits
+                        # them to regain active instance authority.
+                        await self.supervisor.resume(old[key])
+                        self.supervisor.promote(old[key])
+                    else:
+                        self.router.deactivate(key)
+                except Exception:
+                    recovery_errors.append(f"route:{key}")
+            for process in candidates.values():
+                await self._safe_stop(process)
+            for key in drained:
+                try:
+                    await self.supervisor.resume(old[key])
+                except Exception:
+                    recovery_errors.append(f"process:{key}")
+            if recovery_errors:
+                raise PluginOperationError("config_rollback_failed",
+                    "Feature configuration rollback was incomplete",
+                    {"failed_steps": recovery_errors,
+                     "original_code": getattr(exc, "code", "config_reload_failed")}) from None
+            raise
+        for key in candidates:
+            if old[key] is not None:
+                await self._safe_stop(old[key])
+        return sorted(candidates)
 
     async def install(self, reference: str | Path, expected_sha256: str = "") -> PluginOperationResult:
         async with self._lifecycle_lock:
@@ -128,11 +401,10 @@ class PluginManager:
             target = self.store.release(plugin_id, current.previous_version)
             if target is None:
                 raise PluginOperationError("rollback_unavailable", "Rollback release is missing")
+            self._check_central_release(target)
             try:
-                rollback_config = await asyncio.to_thread(
-                    self.store.read_rollback_config,
-                    current,
-                )
+                rollback_config = self.store.read_config(target) if self.central_config_enabled else await asyncio.to_thread(
+                    self.store.read_rollback_config, current)
                 if rollback_config is None:
                     current_config = await asyncio.to_thread(
                         self.store.read_config,
@@ -143,10 +415,11 @@ class PluginManager:
                         target,
                         current_config,
                     )
-            except StoreError:
+            except (StoreError, CentralConfigError) as exc:
                 raise PluginOperationError(
                     "config_migration_required",
                     "Rollback config must be migrated manually",
+                    getattr(exc, "details", None),
                 ) from None
             old_process = self.supervisor.process(plugin_id)
             active, _, _ = await self._activate_release(
@@ -188,12 +461,17 @@ class PluginManager:
                 return self._result("active", release, "Feature is already active")
             process = None
             try:
-                process = await self.supervisor.start(release, shadow=True)
+                launch_config = self.store.read_config(release) if self.central_config_enabled else None
+                process = await self._start_candidate(release, launch_config)
+                if self.central_config_enabled:
+                    await self._verify_stable(process)
                 prepared = self.router.prepare_activation(
                     plugin_id,
                     release.manifest,
                     self._route_client(process),
                 )
+                if self.central_config_enabled:
+                    self._check_launch_config(release, launch_config)
                 enabled = self.store.set_active(
                     release,
                     previous_version=release.previous_version,
@@ -201,7 +479,8 @@ class PluginManager:
                 )
                 self.router.commit(prepared)
                 self.supervisor.promote(process)
-                await self._verify_stable(process)
+                if not self.central_config_enabled:
+                    await self._verify_stable(process)
                 self.journal.set_subscriptions(plugin_id, release.manifest.subscribes)
                 self.assert_active_consistency(enabled)
                 await asyncio.to_thread(
@@ -377,7 +656,7 @@ class PluginManager:
                 "schema": self.store.config_schema(release),
                 "config": self.store.read_config(release),
             }
-        except StoreError as exc:
+        except (StoreError, CentralConfigError) as exc:
             raise self._operation_error(exc, "invalid_config") from None
 
     def config_state(self, plugin_id: str) -> dict:
@@ -393,7 +672,7 @@ class PluginManager:
             }
         try:
             schema = self.store.config_schema(release)
-        except StoreError:
+        except (StoreError, CentralConfigError):
             return {
                 "plugin_id": plugin_id,
                 "version": release.version,
@@ -405,7 +684,7 @@ class PluginManager:
         command = str(schema.get("x-telepiplex-config-command") or "").strip()
         try:
             self.store.read_config(release)
-        except StoreError:
+        except (StoreError, CentralConfigError):
             return {
                 "plugin_id": plugin_id,
                 "version": release.version,
@@ -515,6 +794,8 @@ class PluginManager:
         *,
         should_cancel=None,
     ) -> PluginOperationResult:
+        if self.central_config_enabled:
+            return await self.configure_patch(plugin_id, value, should_cancel=should_cancel)
         async with self._lifecycle_lock:
             def raise_if_cancelled():
                 if should_cancel is not None and should_cancel():
@@ -674,6 +955,13 @@ class PluginManager:
 
     async def reload_config(self, plugin_id: str) -> PluginOperationResult:
         """Validate the current YAML on disk and restart its active Feature."""
+        if self.central_config_enabled:
+            release = self.store.active(plugin_id)
+            if release is None:
+                raise PluginOperationError("not_installed", "Feature is not installed")
+            switched = await self.reload_all_configs()
+            return self._result("active", release, "Feature configuration reloaded",
+                                extra_details={"affected_plugins": switched})
         view = self.config(plugin_id)
         return await self.configure(plugin_id, view["config"])
 
@@ -754,6 +1042,9 @@ class PluginManager:
         migrate_config: bool = False,
         replacement_config: dict | None = None,
     ) -> tuple[ActiveRelease, list[str], list[str]]:
+        if self.central_config_enabled:
+            return await self._activate_central_release(release, old_release, old_process,
+                migrate_config=migrate_config, replacement_config=replacement_config)
         new_process = None
         route_committed = False
         old_drained = False
@@ -901,7 +1192,90 @@ class PluginManager:
                 ) from None
             raise self._operation_error(exc, "activation_failed") from None
 
+    async def _activate_central_release(self, release, old_release, old_process, *,
+                                        migrate_config=False, replacement_config=None):
+        self._check_central_release(release)
+        central = self.store.central_config
+        new_process = None
+        drained = False
+        change = None
+        committed = False
+        switched = False
+        added, removed = [], []
+        try:
+            if old_process is not None:
+                drained = True
+                health = await self.supervisor.drain(old_process, timeout=self.drain_timeout)
+                if health.active_tasks:
+                    raise PluginOperationError("drain_timeout", "Feature still has active work")
+            # Drain can refresh credentials. Prepare only after it finishes.
+            if migrate_config:
+                before, config, added, removed = self.store.migrate_config(release)
+                baseline = central.effective(release.plugin_id, self.store.config_defaults(release))
+                change = central.prepare_migration(release.plugin_id, baseline, config)
+            else:
+                config = self.store.read_config(release)
+                if replacement_config is not None:
+                    # Rollbacks validate the latest document rather than replaying
+                    # a historical token/settings snapshot.
+                    config = self.store.validate_config(release, config)
+            new_process = await self._start_candidate(release, config)
+            await self._verify_stable(new_process)
+            prepared = self.router.prepare_activation(release.plugin_id, release.manifest,
+                                                       self._route_client(new_process))
+            self._check_launch_config(release, config, document=self._candidate_document(change))
+            if change is not None:
+                central.commit(change)
+                committed = True
+            active = self.store.set_active(release,
+                previous_version=old_release.version if old_release else None, enabled=True)
+            self.router.commit(prepared)
+            switched = True
+            self.supervisor.promote(new_process)
+            self.journal.set_subscriptions(release.plugin_id, release.manifest.subscribes)
+            self.assert_active_consistency(active)
+            self._remember_active_config(active)
+        except Exception as exc:
+            recovery = []
+            if committed:
+                try:
+                    central.rollback(change)
+                except Exception:
+                    recovery.append("config")
+            try:
+                if old_release is not None:
+                    self.store.set_active(old_release, previous_version=old_release.previous_version,
+                                          enabled=old_release.enabled)
+                    if switched and old_process is not None:
+                        self.router.activate(old_release.plugin_id, old_release.manifest,
+                                             self._route_client(old_process))
+                        if drained:
+                            await self.supervisor.resume(old_process)
+                        self.supervisor.promote(old_process)
+                    elif drained and old_process is not None:
+                        await self.supervisor.resume(old_process)
+                else:
+                    self.store.clear_active(release.plugin_id)
+                    if switched:
+                        self.router.deactivate(release.plugin_id)
+            except Exception:
+                recovery.append("old-release")
+            if new_process is not None:
+                await self._safe_stop(new_process)
+            if recovery:
+                raise PluginOperationError("activation_rollback_failed", "Activation rollback was incomplete",
+                                           {"failed_steps": recovery}) from None
+            raise self._operation_error(exc, "activation_failed") from None
+        if old_process is not None:
+            await self._safe_stop(old_process)
+        return active, added, removed
+
     def _remember_active_config(self, release: ActiveRelease):
+        if self.central_config_enabled:
+            process = self.supervisor.process(release.plugin_id)
+            if process is not None:
+                self._active_configs[release.plugin_id] = deepcopy(process.config)
+                return
         self._active_configs[release.plugin_id] = deepcopy(
             self.store.read_config(release)
         )
@@ -996,7 +1370,7 @@ class PluginManager:
     def _operation_error(self, exc: Exception, fallback_code: str) -> PluginOperationError:
         if isinstance(exc, PluginOperationError):
             return exc
-        if isinstance(exc, (ArtifactError, StoreError, RoutingError, SupervisorError)):
+        if isinstance(exc, (ArtifactError, StoreError, RoutingError, SupervisorError, CentralConfigError)):
             return PluginOperationError(
                 exc.code,
                 self._sanitize(str(exc)),

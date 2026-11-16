@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,28 +63,18 @@ class HostSurfaceTest(unittest.TestCase):
         for path in removed_paths:
             self.assertFalse(path.exists(), str(path))
 
-    def test_host_config_excludes_business_sections(self):
+    def test_host_config_exposes_central_shared_and_feature_sections(self):
         for config_path in (
             ROOT / "config" / "config.yaml.example",
             ROOT / "app" / "config.yaml.example",
         ):
-            source = config_path.read_text(encoding="utf-8")
-            self.assertIn("plugins:", source)
-            self.assertNotIn("category_folder:", source)
-            self.assertNotIn("modules:", source)
-            for term in (
-                "115_app_id",
-                "access_token",
-                "refresh_token",
-                "search:",
-                "prowlarr",
-                "media:",
-                "metadata:",
-                "tvdb",
-                "aria2:",
-                "ai:",
-            ):
-                self.assertNotIn(term, source)
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            self.assertIsInstance(config["plugins"], dict)
+            self.assertEqual(set(config["shared"]), {"category_folder", "tmdb"})
+            self.assertEqual(set(config["features"]), {"download", "search", "rename", "sync", "caption"})
+            for legacy in ("modules", "aria2"):
+                self.assertNotIn(legacy, config)
+                self.assertNotIn(legacy, config["features"])
 
 
 if __name__ == "__main__":

@@ -2407,11 +2407,14 @@ class DownloadFeature:
 
     async def _restore_token_snapshot(self, snapshot: dict):
         store_snapshot = snapshot.get("store")
+        restored = None
         if self.config_store and store_snapshot is not None:
             if hasattr(self.config_store, "restore"):
-                await asyncio.to_thread(
+                restored = await asyncio.to_thread(
                     self.config_store.restore, store_snapshot
                 )
+                if not getattr(self.config_store, "central_authoritative", False):
+                    restored = None
             else:
                 old = store_snapshot.get("config") or {}
                 await asyncio.to_thread(
@@ -2420,10 +2423,15 @@ class DownloadFeature:
                     auth_mode=old.get("auth_mode") or "direct",
                 )
         self.config.clear()
-        self.config.update(snapshot.get("config") or {})
+        self.config.update(restored if restored is not None else snapshot.get("config") or {})
         access_token, refresh_token = snapshot.get("client_tokens") or ("", "")
+        if restored is not None:
+            access_token = str(restored.get("access_token") or "")
+            refresh_token = str(restored.get("refresh_token") or "")
         if access_token and refresh_token:
             self.client.set_tokens(access_token, refresh_token)
+        elif hasattr(self.client, "clear_tokens"):
+            self.client.clear_tokens()
         elif hasattr(self.client, "access_token"):
             self.client.access_token = access_token
             self.client.refresh_token = refresh_token
@@ -2440,12 +2448,17 @@ class DownloadFeature:
         try:
             self._raise_if_cancelled(operation)
             if self.config_store:
-                updated = await asyncio.to_thread(
-                    self.config_store.write_tokens,
-                    access_token,
-                    refresh_token,
-                    auth_mode=auth_mode,
-                )
+                owned_writer = getattr(self.config_store, "write_authorization_tokens", None)
+                if owned_writer is not None:
+                    updated = await asyncio.to_thread(
+                        owned_writer, snapshot["store"], access_token, refresh_token,
+                        auth_mode=auth_mode,
+                    )
+                else:
+                    updated = await asyncio.to_thread(
+                        self.config_store.write_tokens, access_token, refresh_token,
+                        auth_mode=auth_mode,
+                    )
             else:
                 updated = dict(self.config)
                 updated.update({

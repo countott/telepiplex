@@ -158,6 +158,7 @@ def _fill_missing_defaults(
     default: dict,
     *,
     prefix: str = "",
+    preserve_empty: bool = False,
 ) -> tuple[dict, list[str]]:
     """Fill absent mapping keys while always preserving operator values."""
     merged = deepcopy(current)
@@ -174,10 +175,15 @@ def _fill_missing_defaults(
             continue
         current_value = current[key]
         if isinstance(current_value, dict) and isinstance(default_value, dict):
+            if preserve_empty and (not current_value or path in (
+                'search.scoring.keyword_scores', 'search.scoring.indexer_scores'
+            )):
+                continue
             merged_value, nested = _fill_missing_defaults(
                 current_value,
                 default_value,
                 prefix=path,
+                preserve_empty=preserve_empty,
             )
             merged[key] = merged_value
             added.extend(nested)
@@ -306,6 +312,7 @@ def _migrate_config_value(
     *,
     from_version: int,
     to_version: int,
+    preserve_empty: bool = False,
 ) -> tuple[dict, list[str], list[str]]:
     migrated, removed = _apply_config_migrations(
         current,
@@ -313,7 +320,7 @@ def _migrate_config_value(
         from_version=from_version,
         to_version=to_version,
     )
-    migrated, added = _fill_missing_defaults(migrated, default)
+    migrated, added = _fill_missing_defaults(migrated, default, preserve_empty=preserve_empty)
     return _validate(schema, migrated), added, removed
 
 
@@ -352,8 +359,9 @@ def _atomic_yaml(path: Path, value: dict, *, mode: int = 0o600):
 
 
 class PluginStore:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, central_config=None):
         self.root = Path(root).resolve()
+        self.central_config = central_config
         self.staging_root = self.root / ".staging"
         self.staging_root.mkdir(parents=True, exist_ok=True)
 
@@ -384,7 +392,16 @@ class PluginStore:
                 if active_release is not None
                 else "invalid_config"
             )
-            if config_path.exists():
+            if self.central_config is not None:
+                current = self.central_config.effective(manifest.plugin_id, default)
+                _migrate_config_value(
+                    current, default, schema, staged_path,
+                    from_version=(active_release.manifest.config_schema_version
+                                  if active_release else manifest.config_schema_version),
+                    to_version=manifest.config_schema_version,
+                    preserve_empty=True,
+                )
+            elif config_path.exists():
                 try:
                     current = yaml.safe_load(config_path.read_text(encoding="utf-8"))
                 except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
@@ -487,6 +504,8 @@ class PluginStore:
         })
         (target / ".validated-default.json").unlink(missing_ok=True)
 
+        if self.central_config is not None:
+            return committed
         if not config_path.exists():
             default = self.write_config_example(committed)
             _atomic_yaml(config_path, default)
@@ -512,6 +531,22 @@ class PluginStore:
         release: ActiveRelease | StagedRelease,
     ) -> tuple[dict, dict, list[str], list[str]]:
         """Apply declared removals and defaults without replacing operator values."""
+        if self.central_config is not None:
+            source_release = self.active(release.plugin_id)
+            current = self.central_config.effective(
+                release.plugin_id,
+                self.config_defaults(source_release or release),
+            )
+            validated, added, removed = _migrate_config_value(
+                self.central_config.effective(release.plugin_id, self.config_defaults(release)),
+                self.config_defaults(release), _schema_at(release.path),
+                release.path,
+                from_version=(source_release.manifest.config_schema_version
+                              if source_release else release.manifest.config_schema_version),
+                to_version=release.manifest.config_schema_version,
+                preserve_empty=True,
+            )
+            return deepcopy(current), validated, added, removed
         config_path = self._plugin_root(release.plugin_id) / "config.yaml"
         try:
             current = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -731,7 +766,19 @@ class PluginStore:
     def config_schema(self, release: ActiveRelease | StagedRelease) -> dict:
         return deepcopy(_schema_at(release.path))
 
+    def config_defaults(self, release: ActiveRelease | StagedRelease) -> dict:
+        return deepcopy(_default_at(release.path))
+
+    def prepare_config_change(self, plugin_id: str, patch: dict):
+        if self.central_config is None:
+            raise StoreError('invalid_config', 'central config backend is not enabled')
+        return self.central_config.prepare_patch(plugin_id, patch)
+
     def read_config(self, release: ActiveRelease | StagedRelease) -> dict:
+        if self.central_config is not None:
+            return self.validate_config(release, self.central_config.effective(
+                release.plugin_id, self.config_defaults(release),
+            ))
         config_path = self._plugin_root(release.plugin_id) / "config.yaml"
         try:
             value = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -748,6 +795,9 @@ class PluginStore:
         value: dict,
     ) -> dict:
         validated = _validate(_schema_at(release.path), value)
+        if self.central_config is not None:
+            self.central_config.commit(self.prepare_config_change(release.plugin_id, validated))
+            return deepcopy(validated)
         config_path = self._plugin_root(release.plugin_id) / "config.yaml"
         try:
             _atomic_yaml(config_path, validated)

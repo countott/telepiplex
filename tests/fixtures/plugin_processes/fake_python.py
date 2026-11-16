@@ -109,6 +109,8 @@ async def main():
                 method = request.get("method")
                 if method == "handshake":
                     result = {"plugin_id": PLUGIN_ID, "version": VERSION, "state": state["value"]}
+                elif method == "configuration":
+                    result = {"path": os.environ["TPX_CONFIG_PATH"], "mode": os.environ.get("TPX_CONFIG_MODE", "")}
                 elif method == "health":
                     active_tasks = int(
                         state["value"] == "draining"

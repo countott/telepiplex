@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -486,29 +487,6 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         router = Mock()
         router.plugin_route.return_value = route
         context = self.context(router=router)
-        events = []
-
-        async def send_photo(**kwargs):
-            events.append(("send_photo", kwargs.get("reply_markup")))
-            return SimpleNamespace(message_id=91)
-
-        async def delete_message(**_kwargs):
-            events.append(("delete_old", None))
-            return True
-
-        async def attach_keyboard(**kwargs):
-            events.append(("attach_keyboard", kwargs.get("reply_markup")))
-            raise RuntimeError("telegram keyboard edit timed out")
-
-        async def retry_photo(**kwargs):
-            events.append(("retry_photo", kwargs.get("reply_markup")))
-
-        context.application.bot.send_photo.side_effect = send_photo
-        context.application.bot.delete_message.side_effect = delete_message
-        context.application.bot.edit_message_reply_markup.side_effect = (
-            attach_keyboard
-        )
-        context.application.bot.edit_message_media.side_effect = retry_photo
         sink = OperationReportSink(self.coordinator)
         sink.attach(lambda record: render_operation(
             context.application,
@@ -537,80 +515,63 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(segment.message_kind, "text")
         self.assertEqual(segment.rendered_revision, 1)
 
-        original_replace = self.coordinator.replace_segment_message
-
-        def replace_message(*args, **kwargs):
-            events.append(("replace_cursor", None))
-            return original_replace(*args, **kwargs)
-
-        with patch.object(
-            self.coordinator,
-            "replace_segment_message",
-            side_effect=replace_message,
-        ):
-            await sink(
-                "search",
-                self.report(
-                    revision=2,
-                    state="awaiting_input",
-                    stage="candidate_selection",
-                    status_text="请选择作品",
-                    control="exit",
-                    details={
-                        "defer_photo_until_media": True,
-                        "poster_items": [{
-                            "number": 1,
-                            "title": "蜂蜜与四叶草",
-                            "poster_url": "https://image.example/poster.jpg",
-                        }],
-                        "keyboard": [[{
-                            "text": "① 蜂蜜与四叶草",
-                            "callback_data": "search:select:plan:0",
-                        }]],
-                    },
-                    segment={
-                        "role": "identity",
-                        "presentation_kind": "photo",
-                    },
-                ),
-            )
-            await sink.drain()
+        await sink(
+            "search",
+            self.report(
+                revision=2,
+                state="awaiting_input",
+                stage="candidate_selection",
+                status_text="请选择作品",
+                control="exit",
+                details={
+                    "defer_photo_until_media": True,
+                    "poster_items": [{
+                        "number": 1,
+                        "title": "蜂蜜与四叶草",
+                        "poster_url": "https://image.example/poster.jpg",
+                    }],
+                    "keyboard": [[{
+                        "text": "① 蜂蜜与四叶草",
+                        "callback_data": "search:select:plan:0",
+                    }]],
+                },
+                segment={
+                    "role": "identity",
+                    "presentation_kind": "photo",
+                },
+            ),
+        )
+        await sink.drain()
 
         context.application.bot.send_message.assert_awaited_once()
-        context.application.bot.send_photo.assert_awaited_once()
-        context.application.bot.delete_message.assert_awaited_once_with(
-            chat_id=10,
-            message_id=90,
-        )
+        context.application.bot.send_photo.assert_not_awaited()
+        context.application.bot.delete_message.assert_not_awaited()
+        context.application.bot.edit_message_reply_markup.assert_not_awaited()
+        context.application.bot.edit_message_media.assert_awaited_once()
+        edit = context.application.bot.edit_message_media.await_args.kwargs
+        self.assertEqual(edit["chat_id"], 10)
+        self.assertEqual(edit["message_id"], 90)
+        self.assertEqual(edit["media"].caption, "请选择作品")
+        self.assertEqual(edit["media"].media.input_file_content, b"candidate-grid")
         segment = self.coordinator.get_active_segment("op-1")
-        self.assertEqual(segment.message_id, 91)
+        self.assertEqual(segment.message_id, 90)
         self.assertEqual(segment.message_kind, "photo")
         self.assertEqual(segment.rendered_revision, 2)
-        self.assertEqual(
-            [name for name, _value in events],
-            [
-                "send_photo",
-                "replace_cursor",
-                "delete_old",
-                "attach_keyboard",
-                "retry_photo",
-            ],
-        )
-        self.assertIsNone(events[0][1])
-        self.assertIsNotNone(events[-1][1])
+        self.assertIsNotNone(edit["reply_markup"])
         self.assertTrue(
-            events[-1][1].inline_keyboard[0][0].callback_data.startswith(
+            edit["reply_markup"].inline_keyboard[0][0].callback_data.startswith(
                 f"~1.{segment.callback_generation:x}~"
             )
         )
 
     @patch("app.handlers.interaction_handler.build_poster_grid")
-    async def test_photo_promotion_discards_new_message_when_cursor_cas_raises(
+    async def test_photo_promotion_keeps_original_message_when_cursor_cas_raises(
         self,
         build_poster_grid,
     ):
         from app.handlers.interaction_handler import (
             _promote_segment_text_to_photo,
+            render_operation,
         )
 
         candidate_grid = BytesIO(b"candidate-grid")
@@ -634,6 +595,13 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             message_id=90,
             message_kind="text",
         )
+        self.coordinator.record_segment_rendered(
+            segment.segment_id,
+            owner_plugin_id="search",
+            generation=segment.generation,
+            business_revision=1,
+            projection_hash=segment.projection_hash,
+        )
         operation, segment = self.coordinator.accept_segment_report(
             "search",
             self.report(
@@ -655,13 +623,16 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
         context = self.context()
-
-        with patch.object(
-            self.coordinator,
-            "replace_segment_message",
-            side_effect=RuntimeError("cursor database unavailable"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+        self.coordinator._connection.execute("""
+            CREATE TRIGGER fail_photo_promotion
+            BEFORE UPDATE OF message_kind ON operation_message_segments
+            WHEN OLD.message_kind = 'text' AND NEW.message_kind = 'photo'
+            BEGIN
+                SELECT RAISE(ABORT, 'cursor database unavailable');
+            END
+        """)
+        try:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "database unavailable"):
                 await _promote_segment_text_to_photo(
                     context.application,
                     operation,
@@ -669,85 +640,196 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
                     text="请选择作品",
                     markup=Mock(),
                 )
+        finally:
+            self.coordinator._connection.execute("DROP TRIGGER fail_photo_promotion")
 
-        context.application.bot.delete_message.assert_awaited_once_with(
-            chat_id=10,
-            message_id=91,
-        )
+        context.application.bot.delete_message.assert_not_awaited()
+        current = self.coordinator.get_segment(segment.segment_id)
+        self.assertEqual(current.message_id, 90)
+        self.assertEqual(current.message_kind, "text")
+        self.assertEqual(current.state, "open")
+        self.assertEqual(current.delivery_state, "delivered")
+        self.assertEqual(current.rendered_revision, 1)
 
-    @patch("app.handlers.interaction_handler.build_poster_grid")
-    async def test_photo_promotion_timeout_is_uncertain_and_never_resends(
-        self,
-        build_poster_grid,
-    ):
-        from app.handlers.interaction_handler import (
-            OperationReportSink,
-            render_operation,
-        )
-
-        candidate_grid = BytesIO(b"candidate-grid")
-        candidate_grid.name = "telepiplex-candidates.jpg"
-        build_poster_grid.return_value = candidate_grid
-        context = self.context()
-        sink = OperationReportSink(self.coordinator)
-        sink.attach(lambda record: render_operation(
-            context.application,
-            Mock(),
-            record,
-        ))
-        await sink("search", self.report(
-            status_text="正在识别媒体…",
-            details={"defer_photo_until_media": True},
-            segment={
-                "role": "identity",
-                "presentation_kind": "photo",
-            },
-        ))
-        await sink.drain()
-
-        async def timeout_after_send(**_kwargs):
-            current = self.coordinator.get_active_segment("op-1")
-            self.assertEqual(current.state, "open")
-            self.assertEqual(current.delivery_state, "delivering")
-            raise TimedOut()
-
-        context.application.bot.send_photo.side_effect = timeout_after_send
-        await sink("search", self.report(
-            revision=2,
-            state="awaiting_input",
-            stage="candidate_selection",
-            status_text="请选择作品",
-            control="exit",
-            details={
-                "defer_photo_until_media": True,
-                "poster_items": [{
-                    "number": 1,
-                    "title": "蜂蜜与四叶草",
-                    "poster_url": "https://image.example/poster.jpg",
-                }],
-            },
-            segment={
-                "role": "identity",
-                "presentation_kind": "photo",
-            },
-        ))
-        await sink.drain()
-
-        uncertain = self.coordinator.get_active_segment("op-1")
-        context.application.bot.send_photo.assert_awaited_once()
-        self.assertEqual(uncertain.state, "delivery_uncertain")
-        self.assertEqual(uncertain.delivery_state, "uncertain")
-        self.assertEqual(uncertain.message_id, 90)
-        self.assertEqual(uncertain.message_kind, "text")
-        self.assertEqual(uncertain.business_revision, 2)
-        self.assertEqual(uncertain.rendered_revision, 1)
-
+        context.bot.edit_message_media.side_effect = BadRequest("Message is not modified")
         await render_operation(
             context.application,
             Mock(),
             self.coordinator.get("op-1"),
         )
-        context.application.bot.send_photo.assert_awaited_once()
+        recovered = self.coordinator.get_segment(segment.segment_id)
+        self.assertEqual(recovered.message_id, 90)
+        self.assertEqual(recovered.message_kind, "photo")
+        self.assertEqual(recovered.rendered_revision, 2)
+        self.assertEqual(context.bot.edit_message_media.await_count, 2)
+        self.assertTrue(all(call.kwargs["message_id"] == 90
+            for call in context.bot.edit_message_media.await_args_list))
+        context.bot.send_photo.assert_not_awaited()
+        context.bot.delete_message.assert_not_awaited()
+
+    @patch("app.handlers.interaction_handler.build_poster_grid")
+    async def test_photo_promotion_timeout_retries_original_message_and_keeps_candidates_selectable(
+        self,
+        build_poster_grid,
+    ):
+        from app.handlers.interaction_handler import (
+            OperationReportSink,
+            callback_dispatch_data,
+            drain_callback_feedback,
+            operation_gate,
+            render_operation,
+        )
+
+        build_poster_grid.side_effect = lambda *_args: BytesIO(b"candidate-grid")
+        for index, retry_not_modified in enumerate((False, True)):
+            with self.subTest(retry_not_modified=retry_not_modified):
+                operation_id = f"promotion-timeout-{index}"
+                message_id = 90 + index
+                route = SimpleNamespace(
+                    plugin_id="search",
+                    manifest=SimpleNamespace(callbacks=("search",)),
+                )
+                router = Mock()
+                router.plugin_route.return_value = route
+                router.callback_route.return_value = route
+                context = self.context(router=router)
+                context.bot.send_message.return_value = SimpleNamespace(message_id=message_id)
+                sink = OperationReportSink(self.coordinator)
+                sink.attach(lambda record: render_operation(
+                    context.application, router, record,
+                ))
+                initial = self.report(
+                    operation_id=operation_id,
+                    user_id=index + 1,
+                    status_text="正在识别媒体…",
+                    details={"defer_photo_until_media": True},
+                    segment={"role": "identity", "presentation_kind": "photo"},
+                )
+                await sink("search", initial)
+                await sink.drain()
+                attempts = []
+
+                async def timeout_then_acknowledge(**kwargs):
+                    current = self.coordinator.get_active_segment(operation_id)
+                    self.assertEqual(current.state, "open")
+                    self.assertEqual(current.delivery_state, "delivered")
+                    self.assertEqual(current.message_id, message_id)
+                    self.assertEqual(current.message_kind, "text")
+                    attempts.append(kwargs)
+                    if len(attempts) == 1:
+                        raise TimedOut("promotion reply lost")
+                    if retry_not_modified:
+                        raise BadRequest("Message is not modified")
+                    return True
+
+                context.bot.edit_message_media.side_effect = timeout_then_acknowledge
+                await sink("search", {
+                    **initial,
+                    "revision": 2,
+                    "state": "awaiting_input",
+                    "stage": "candidate_selection",
+                    "status_text": "请选择作品",
+                    "control": "exit",
+                    "details": {
+                        "poster_items": [{
+                            "number": 1,
+                            "title": "蜂蜜与四叶草",
+                            "poster_url": "https://image.example/poster.jpg",
+                        }],
+                        "keyboard": [[{
+                            "text": "① 蜂蜜与四叶草",
+                            "callback_data": "search:select:plan:0",
+                        }]],
+                    },
+                })
+                await sink.drain()
+
+                current = self.coordinator.get_active_segment(operation_id)
+                self.assertEqual(current.state, "open")
+                self.assertEqual(current.delivery_state, "delivered")
+                self.assertEqual(current.message_id, message_id)
+                self.assertEqual(current.message_kind, "photo")
+                self.assertEqual(current.rendered_revision, 2)
+                self.assertEqual(len(attempts), 2)
+                self.assertEqual([attempt["message_id"] for attempt in attempts],
+                                 [message_id, message_id])
+                self.assertTrue(all(attempt["media"].caption == "请选择作品"
+                    for attempt in attempts))
+                self.assertEqual(attempts[0]["reply_markup"], attempts[1]["reply_markup"])
+
+                encoded = attempts[-1]["reply_markup"].inline_keyboard[0][0].callback_data
+                update = self.callback_update(encoded, message_id=message_id)
+                update.effective_user.id = index + 1
+                try:
+                    await operation_gate(update, context)
+                    self.assertEqual(callback_dispatch_data(update, self.coordinator),
+                                     "search:select:plan:0")
+                    claimed = self.coordinator.get_active_segment(operation_id)
+                    self.assertEqual(claimed.callback_state, "busy")
+                    self.assertEqual(claimed.callback_token, "search:select:plan:0")
+                finally:
+                    await drain_callback_feedback(context.application, timeout=1)
+                context.bot.send_photo.assert_not_awaited()
+                context.bot.delete_message.assert_not_awaited()
+
+    @patch("app.handlers.interaction_handler.build_poster_grid")
+    async def test_photo_promotion_three_timeouts_leave_original_message_recoverable(
+        self,
+        build_poster_grid,
+    ):
+        from app.handlers.interaction_handler import render_operation
+
+        build_poster_grid.side_effect = lambda *_args: BytesIO(b"candidate-grid")
+        initial = self.report(
+            details={"defer_photo_until_media": True},
+            segment={"role": "identity", "presentation_kind": "photo"},
+        )
+        _, segment = self.coordinator.accept_segment_report("search", initial)
+        segment = self.coordinator.bind_segment_message(
+            segment.segment_id, owner_plugin_id="search", generation=segment.generation,
+            chat_id=10, message_id=90, message_kind="text",
+        )
+        self.coordinator.record_segment_rendered(
+            segment.segment_id, owner_plugin_id="search", generation=segment.generation,
+            business_revision=1, projection_hash=segment.projection_hash,
+        )
+        record, _ = self.coordinator.accept_segment_report("search", {
+            **initial,
+            "revision": 2,
+            "state": "awaiting_input",
+            "stage": "candidate_selection",
+            "status_text": "请选择作品",
+            "details": {"poster_items": [{"number": 1, "title": "蜂蜜与四叶草"}]},
+        })
+        context = self.context()
+        context.bot.edit_message_media.side_effect = TimedOut("promotion reply lost")
+
+        await render_operation(
+            context.application, Mock(), record,
+        )
+        current = self.coordinator.get_active_segment("op-1")
+        self.assertEqual(current.message_id, 90)
+        self.assertEqual(current.message_kind, "text")
+        self.assertEqual(current.state, "open")
+        self.assertEqual(current.delivery_state, "delivered")
+        self.assertEqual(current.business_revision, 2)
+        self.assertEqual(current.rendered_revision, 1)
+        self.assertEqual(context.bot.edit_message_media.await_count, 3)
+
+        context.bot.edit_message_media.side_effect = None
+        context.bot.edit_message_media.return_value = True
+        await render_operation(context.application, Mock(), self.coordinator.get("op-1"))
+
+        recovered = self.coordinator.get_active_segment("op-1")
+        self.assertEqual(recovered.message_id, 90)
+        self.assertEqual(recovered.message_kind, "photo")
+        self.assertEqual(recovered.rendered_revision, 2)
+        self.assertEqual(context.bot.edit_message_media.await_count, 4)
+        self.assertTrue(all(call.kwargs["message_id"] == 90
+            for call in context.bot.edit_message_media.await_args_list))
+        context.bot.send_message.assert_not_awaited()
+        context.bot.send_photo.assert_not_awaited()
+        context.bot.delete_message.assert_not_awaited()
 
     async def test_segment_update_arriving_during_first_send_edits_the_same_message(self):
         from app.handlers.interaction_handler import (
@@ -1162,10 +1244,25 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
                         segment={"role": "identity", "presentation_kind": "photo"}))
                     await sink.drain()
                 upload.assert_called_once_with("所选电影", "")
-                context.bot.send_photo.assert_awaited_once()
-                self.assertIs(context.bot.send_photo.await_args.kwargs["photo"], local_poster)
-                self.assertEqual(self.coordinator.get_active_segment(operation_id).message_kind, "photo")
+                if previous_kind is None:
+                    context.bot.send_photo.assert_awaited_once()
+                    self.assertIs(context.bot.send_photo.await_args.kwargs["photo"], local_poster)
+                    context.bot.edit_message_media.assert_not_awaited()
+                    expected_message_id = 120 + index
+                else:
+                    context.bot.send_photo.assert_not_awaited()
+                    context.bot.edit_message_media.assert_awaited_once()
+                    edit = context.bot.edit_message_media.await_args.kwargs
+                    self.assertEqual(edit["message_id"], 110)
+                    self.assertEqual(edit["media"].media.input_file_content, b"selected")
+                    self.assertEqual(edit["media"].caption, "所选电影\n已确认")
+                    expected_message_id = 110
+                current = self.coordinator.get_active_segment(operation_id)
+                self.assertEqual(current.message_id, expected_message_id)
+                self.assertEqual(current.message_kind, "photo")
                 context.bot.send_message.assert_not_awaited()
+                context.bot.delete_message.assert_not_awaited()
+                context.bot.edit_message_reply_markup.assert_not_awaited()
 
     async def test_confirmed_identity_ignores_stale_grid_and_uploads_url_for_new_messages(self):
         from app.handlers.interaction_handler import _segment_photo_media
@@ -1290,6 +1387,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             ("text", "text", "edit_message_text", False, True),
             ("text", "photo", "edit_message_caption", False, True),
             ("photo", "photo", "edit_message_media", False, True),
+            ("photo", "text", "edit_message_media", False, True),
             ("text", "text", "edit_message_text", True, True),
             ("text", "text", "edit_message_text", False, False),
         )
@@ -1332,6 +1430,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
                     started.set()
                     await release.wait()
                     visible.update(kwargs)
+                    return True
 
                 async def clear_controls(**kwargs):
                     clear_attempts.append(kwargs["message_id"])
@@ -3918,7 +4017,7 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             clients["rename"].request.await_args.args[1]["revision"], 5
         )
 
-    async def test_failed_status_edit_sends_replacement_and_persists_message_id(self):
+    async def test_failed_status_edit_preserves_message_and_keyboard_after_three_attempts(self):
         from app.handlers import interaction_handler
         from app.handlers.interaction_handler import render_operation
 
@@ -3932,17 +4031,95 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         logger = Mock()
 
         with patch.object(interaction_handler.init, "logger", logger):
-            await render_operation(context.application, Mock(), record)
+            message_id = await render_operation(context.application, Mock(), record)
 
-        context.application.bot.edit_message_text.assert_awaited_once()
-        context.application.bot.send_message.assert_awaited_once()
-        self.assertEqual(self.coordinator.get("op-1").message_id, 34)
+        self.assertIsNone(message_id)
+        self.assertEqual(context.application.bot.edit_message_text.await_count, 3)
+        context.application.bot.send_message.assert_not_awaited()
+        context.application.bot.send_photo.assert_not_awaited()
+        context.application.bot.edit_message_reply_markup.assert_not_awaited()
+        current = self.coordinator.get("op-1")
+        self.assertEqual((current.message_id, current.message_kind), (12, "text"))
         warning = logger.warn.call_args.args[0]
         self.assertIn("message missing", warning)
         self.assertIn("message_id=12", warning)
-        self.assertIn("message_kind=text", warning)
         self.assertIn("access_token=***redacted***", warning)
         self.assertNotIn("should-not-leak", warning)
+
+    async def test_status_renderer_retries_transient_text_edit_on_same_message(self):
+        from app.handlers.interaction_handler import render_operation
+
+        record = self.coordinator.report("sync", self.report())
+        record = self.coordinator.set_message_id(record.operation_id, 12)
+        context = self.context()
+        context.bot.edit_message_text.side_effect = [TimedOut(), True]
+
+        message_id = await render_operation(context.application, Mock(), record)
+
+        self.assertEqual(message_id, 12)
+        self.assertEqual(context.bot.edit_message_text.await_count, 2)
+        self.assertEqual(
+            [call.kwargs["message_id"] for call in context.bot.edit_message_text.await_args_list],
+            [12, 12],
+        )
+        context.bot.send_message.assert_not_awaited()
+        context.bot.edit_message_reply_markup.assert_not_awaited()
+        self.assertEqual(self.coordinator.get("op-1").message_id, 12)
+
+    async def test_message_edit_retry_returns_result_and_reraises_last_failure(self):
+        from app.handlers.interaction_handler import retry_message_edit
+
+        attempts = 0
+        result = object()
+
+        async def succeeds_on_third_attempt():
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise TimedOut()
+            return result
+
+        self.assertIs(
+            await retry_message_edit(succeeds_on_third_attempt, operation_id="op-1", message_id=12),
+            result,
+        )
+        self.assertEqual(attempts, 3)
+        errors = [RuntimeError("one"), RuntimeError("two"), RuntimeError("three")]
+        failures = 0
+
+        async def always_fails():
+            nonlocal failures
+            error = errors[failures]
+            failures += 1
+            raise error
+
+        with self.assertRaises(RuntimeError) as caught:
+            await retry_message_edit(always_fails)
+        self.assertIs(caught.exception, errors[-1])
+        self.assertEqual(failures, 3)
+
+    async def test_message_edit_retry_stops_on_unchanged_and_cancellation(self):
+        from app.handlers.interaction_handler import retry_message_edit
+
+        attempts = 0
+
+        async def unchanged():
+            nonlocal attempts
+            attempts += 1
+            raise BadRequest("Message is not modified")
+
+        self.assertIs(await retry_message_edit(unchanged), True)
+        self.assertEqual(attempts, 1)
+        attempts = 0
+
+        async def cancelled():
+            nonlocal attempts
+            attempts += 1
+            raise asyncio.CancelledError()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await retry_message_edit(cancelled)
+        self.assertEqual(attempts, 1)
 
     async def test_stale_supplied_snapshot_cannot_overwrite_newer_cursor_owner(self):
         from app.handlers.interaction_handler import render_operation
@@ -4175,7 +4352,73 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
         context.application.bot.edit_message_media.assert_awaited_once()
         context.application.bot.edit_message_text.assert_not_awaited()
 
-    async def test_status_renderer_replaces_photo_before_text_progress(self):
+    async def test_status_renderer_retries_photo_edit_with_fresh_media_on_same_message(self):
+        from app.handlers.interaction_handler import render_operation
+
+        record = self.coordinator.report("sync", self.report(
+            details={"photo_url": "https://image.example/poster.jpg"},
+        ))
+        record = self.coordinator.set_message_id(record.operation_id, 44, "photo")
+        context = self.context()
+        context.bot.edit_message_media.side_effect = [TimedOut(), True]
+
+        message_id = await render_operation(context.application, Mock(), record)
+
+        self.assertEqual(message_id, 44)
+        edits = context.bot.edit_message_media.await_args_list
+        self.assertEqual([call.kwargs["message_id"] for call in edits], [44, 44])
+        self.assertIsNot(edits[0].kwargs["media"], edits[1].kwargs["media"])
+        context.bot.send_photo.assert_not_awaited()
+        context.bot.send_message.assert_not_awaited()
+        context.bot.edit_message_reply_markup.assert_not_awaited()
+
+    async def test_status_renderer_failed_photo_edit_keeps_original_cursor_and_keyboard(self):
+        from app.handlers.interaction_handler import render_operation
+
+        record = self.coordinator.report("sync", self.report(
+            details={"photo_url": "https://image.example/poster.jpg"},
+        ))
+        record = self.coordinator.set_message_id(record.operation_id, 44, "photo")
+        context = self.context()
+        context.bot.edit_message_media.side_effect = TimedOut()
+
+        message_id = await render_operation(context.application, Mock(), record)
+
+        self.assertIsNone(message_id)
+        self.assertEqual(context.bot.edit_message_media.await_count, 3)
+        context.bot.send_photo.assert_not_awaited()
+        context.bot.send_message.assert_not_awaited()
+        context.bot.edit_message_reply_markup.assert_not_awaited()
+        current = self.coordinator.get(record.operation_id)
+        self.assertEqual((current.message_id, current.message_kind), (44, "photo"))
+
+    async def test_status_renderer_promotes_text_to_photo_in_place_even_when_unchanged(self):
+        from app.handlers.interaction_handler import render_operation
+
+        for unchanged in (False, True):
+            with self.subTest(unchanged=unchanged):
+                operation_id = "op-unchanged" if unchanged else "op-edited"
+                record = self.coordinator.report("sync", self.report(
+                    operation_id=operation_id,
+                    chat_id=20 if unchanged else 10,
+                    details={"photo_url": "https://image.example/poster.jpg"},
+                ))
+                record = self.coordinator.set_message_id(record.operation_id, 44 if unchanged else 45, "text")
+                context = self.context()
+                if unchanged:
+                    context.bot.edit_message_media.side_effect = BadRequest("Message is not modified")
+
+                message_id = await render_operation(context.application, Mock(), record)
+
+                self.assertEqual(message_id, record.message_id)
+                context.bot.edit_message_media.assert_awaited_once()
+                context.bot.send_photo.assert_not_awaited()
+                context.bot.send_message.assert_not_awaited()
+                context.bot.edit_message_reply_markup.assert_not_awaited()
+                current = self.coordinator.get(record.operation_id)
+                self.assertEqual((current.message_id, current.message_kind), (record.message_id, "photo"))
+
+    async def test_status_renderer_preserves_photo_for_text_progress(self):
         from app.handlers.interaction_handler import render_operation
 
         record = self.coordinator.report("search", self.report(
@@ -4205,16 +4448,77 @@ class InteractionHandlerTest(unittest.IsolatedAsyncioTestCase):
             context.application, Mock(), record
         )
 
-        self.assertEqual(message_id, 56)
-        context.application.bot.edit_message_reply_markup.assert_awaited_once_with(
-            chat_id=10,
-            message_id=55,
-            reply_markup=None,
-        )
+        self.assertEqual(message_id, 55)
+        context.application.bot.edit_message_caption.assert_awaited_once()
+        self.assertEqual(context.bot.edit_message_caption.await_args.kwargs["caption"], "正在搜索片源")
+        self.assertEqual(context.bot.edit_message_caption.await_args.kwargs["message_id"], 55)
+        context.application.bot.edit_message_reply_markup.assert_not_awaited()
         context.application.bot.edit_message_text.assert_not_awaited()
-        context.application.bot.send_message.assert_awaited_once()
+        context.application.bot.send_message.assert_not_awaited()
         current = self.coordinator.get(record.operation_id)
-        self.assertEqual((current.message_id, current.message_kind), (56, "text"))
+        self.assertEqual((current.message_id, current.message_kind), (55, "photo"))
+
+    async def test_status_renderer_bounds_and_retries_photo_progress_caption(self):
+        from app.handlers.interaction_handler import render_operation
+
+        record = self.coordinator.report("sync", self.report(
+            status_text="<b>" + "进度" * 600 + "</b>",
+            details={"parse_mode": "HTML"},
+        ))
+        record = self.coordinator.set_message_id(record.operation_id, 55, "photo")
+        context = self.context()
+        context.bot.edit_message_caption.side_effect = [TimedOut(), True]
+
+        message_id = await render_operation(context.application, Mock(), record)
+
+        self.assertEqual(message_id, 55)
+        self.assertEqual(context.bot.edit_message_caption.await_count, 2)
+        kwargs = context.bot.edit_message_caption.await_args.kwargs
+        self.assertEqual(kwargs["message_id"], 55)
+        self.assertLessEqual(len(kwargs["caption"]), 1024)
+        self.assertNotIn("<b>", kwargs["caption"])
+        self.assertIsNone(kwargs["parse_mode"])
+        context.bot.send_photo.assert_not_awaited()
+        context.bot.send_message.assert_not_awaited()
+        context.bot.edit_message_reply_markup.assert_not_awaited()
+
+    async def test_status_renderer_failed_text_to_photo_edit_preserves_text_cursor(self):
+        from app.handlers.interaction_handler import render_operation
+
+        record = self.coordinator.report("sync", self.report(
+            details={"photo_url": "https://image.example/poster.jpg"},
+        ))
+        record = self.coordinator.set_message_id(record.operation_id, 55, "text")
+        context = self.context()
+        context.bot.edit_message_media.side_effect = TimedOut()
+
+        message_id = await render_operation(context.application, Mock(), record)
+
+        self.assertIsNone(message_id)
+        self.assertEqual(context.bot.edit_message_media.await_count, 3)
+        context.bot.send_photo.assert_not_awaited()
+        context.bot.send_message.assert_not_awaited()
+        context.bot.edit_message_reply_markup.assert_not_awaited()
+        current = self.coordinator.get(record.operation_id)
+        self.assertEqual((current.message_id, current.message_kind), (55, "text"))
+
+    async def test_status_renderer_failed_photo_caption_preserves_photo_cursor(self):
+        from app.handlers.interaction_handler import render_operation
+
+        record = self.coordinator.report("sync", self.report())
+        record = self.coordinator.set_message_id(record.operation_id, 55, "photo")
+        context = self.context()
+        context.bot.edit_message_caption.side_effect = TimedOut()
+
+        message_id = await render_operation(context.application, Mock(), record)
+
+        self.assertIsNone(message_id)
+        self.assertEqual(context.bot.edit_message_caption.await_count, 3)
+        context.bot.send_photo.assert_not_awaited()
+        context.bot.send_message.assert_not_awaited()
+        context.bot.edit_message_reply_markup.assert_not_awaited()
+        current = self.coordinator.get(record.operation_id)
+        self.assertEqual((current.message_id, current.message_kind), (55, "photo"))
 
     async def test_terminal_operation_never_renders_stale_feature_keyboard(self):
         from app.handlers.interaction_handler import operation_markup

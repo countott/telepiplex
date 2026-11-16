@@ -18,6 +18,7 @@ from app.runtime.command_catalog import sync_bot_commands
 from app.runtime.poster_grid import build_poster_grid
 from app.runtime.telegram_text import bounded_photo_caption
 from app.utils.log_sanitizer import sanitize_log_value
+from app.handlers.shared_config_handler import central_config_saved_feedback
 from app.handlers.interaction_handler import (
     CONFIG_OPERATION_TASKS_KEY,
     COORDINATOR_KEY,
@@ -30,6 +31,7 @@ from app.handlers.interaction_handler import (
     release_callback_dispatch,
     repair_rejected_callback,
     render_operation,
+    retry_message_edit,
 )
 
 
@@ -1170,9 +1172,10 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
             context=context,
         )
         return
+    central_mode = getattr(manager, "central_config_enabled", False) is True
     try:
-        previous = manager.config(route.plugin_id).get("config") or {}
-        configured = merge_nested_patch(previous, patch)
+        previous = {} if central_mode else manager.config(route.plugin_id).get("config") or {}
+        configured = patch if central_mode else merge_nested_patch(previous, patch)
     except Exception as exc:
         _finish_feature_config_operation(
             context, route, result,
@@ -1225,7 +1228,8 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
         context=context,
     )
     try:
-        outcome = await manager.configure(
+        configure = manager.configure_patch if central_mode else manager.configure
+        outcome = await configure(
             route.plugin_id,
             configured,
             should_cancel=cancel_event.is_set if operation_id else None,
@@ -1280,7 +1284,7 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
                 context.application.bot_data.pop(
                     CONFIG_OPERATION_TASKS_KEY, None
                 )
-    if cancel_event.is_set():
+    if cancel_event.is_set() and not central_mode:
         try:
             await manager.configure(route.plugin_id, previous)
         except Exception as exc:
@@ -1309,14 +1313,15 @@ async def _apply_feature_config_patch(update, context, route, result: dict):
         )
         return
     _drop_session(context.application.bot_data, _session_key(update))
+    saved_feedback = central_config_saved_feedback(outcome) if central_mode else "配置已更新。"
     _finish_feature_config_operation(
         context, route, result,
         state="completed",
-        status_text="配置已更新。",
+        status_text=saved_feedback,
     )
     await _feature_feedback(
         update,
-        "配置已更新。",
+        saved_feedback,
         prefer_edit=prefer_edit,
         context=context,
     )
@@ -1497,25 +1502,50 @@ async def _render_actions(
             await _feature_feedback(update, text, context=context)
             continue
         delivered_action = str(action["kind"])
-        if action["kind"] == "send_message":
+        if action["kind"] in {"edit_message", "edit_photo"}:
+            rendered_kind = "photo" if (
+                action["kind"] == "edit_photo"
+                or _message_has_photo(update.effective_message)
+            ) else "text"
+
+            async def edit_current():
+                if rendered_kind == "text":
+                    return await update.effective_message.edit_text(text, **kwargs)
+                caption, caption_parse_mode = bounded_photo_caption(text, parse_mode)
+                media_kwargs = dict(kwargs)
+                media_kwargs.pop("parse_mode", None)
+                if reply_markup is None:
+                    media_kwargs["reply_markup"] = {"inline_keyboard": []}
+                if action["kind"] == "edit_message":
+                    if caption_parse_mode:
+                        media_kwargs["parse_mode"] = caption_parse_mode
+                    return await update.effective_message.edit_caption(
+                        caption=caption, **media_kwargs,
+                    )
+                return await update.effective_message.edit_media(
+                    media=InputMediaPhoto(
+                        media=photo_url, caption=caption, parse_mode=caption_parse_mode,
+                    ),
+                    **media_kwargs,
+                )
+
+            try:
+                sent = await retry_message_edit(
+                    edit_current,
+                    operation_id=getattr(operation_record, "operation_id", None),
+                    message_id=getattr(update.effective_message, "message_id", None),
+                )
+            except Exception as exc:
+                _log_feature_event(
+                    "warning", "feature.message_edit_failed", update, route,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                return False, None, None
+            edited_source = True
+        elif action["kind"] == "send_message":
             sent = await update.effective_message.reply_text(text, **kwargs)
             rendered_kind = "text"
             edited_source = False
-        elif action["kind"] == "edit_message":
-            if _message_has_photo(update.effective_message):
-                try:
-                    await update.effective_message.edit_reply_markup(
-                        reply_markup=None
-                    )
-                except Exception:
-                    pass
-                sent = await update.effective_message.reply_text(text, **kwargs)
-                edited_source = False
-                delivered_action = "send_message"
-            else:
-                sent = await update.effective_message.edit_text(text, **kwargs)
-                edited_source = True
-            rendered_kind = "text"
         else:
             caption, caption_parse_mode = bounded_photo_caption(
                 text,
@@ -1537,7 +1567,7 @@ async def _render_actions(
                         **media_kwargs,
                     )
                     edited_source = False
-                elif action["kind"] == "send_photo":
+                else:
                     if caption_parse_mode:
                         media_kwargs["parse_mode"] = caption_parse_mode
                     sent = await update.effective_message.reply_photo(
@@ -1546,16 +1576,6 @@ async def _render_actions(
                         **media_kwargs,
                     )
                     edited_source = False
-                else:
-                    sent = await update.effective_message.edit_media(
-                        media=InputMediaPhoto(
-                            media=photo_url,
-                            caption=caption,
-                            parse_mode=caption_parse_mode,
-                        ),
-                        **media_kwargs,
-                    )
-                    edited_source = True
                 rendered_kind = "photo"
             except Exception as exc:
                 if grid_action:

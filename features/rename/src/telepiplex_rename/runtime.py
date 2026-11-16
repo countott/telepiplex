@@ -13,7 +13,6 @@ def main(context: RuntimeContext) -> FeatureRuntime:
     config = yaml.safe_load(context.config_path.read_text(encoding="utf-8")) or {}
     runtime_context.configure({
         "ai": config.get("ai") or {},
-        "metadata": config.get("metadata") or {},
         "media": {"unorganized_path": config.get("unorganized_path") or ""},
         "selection": config.get("selection") or {},
         "storage_move_batch_size": int(

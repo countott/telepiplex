@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
+
 from telepiplex_plugin_sdk import FeatureRuntime, RuntimeContext
 
 from .client import Open115Client
-from .config_store import FeatureConfigStore
+from .config_store import FeatureConfigStore, HostConfigStore
 from .directories import normalize_save_directories
 from .service import DownloadFeature
 from .jobs import DownloadJobStore
@@ -13,9 +15,12 @@ from .observability import emit_download_observation
 def main(context: RuntimeContext) -> FeatureRuntime:
     config_store = FeatureConfigStore(context.config_path)
     config = config_store.read()
+    central = os.environ.get("TPX_CONFIG_MODE") == "central"
+    if central:
+        config_store = HostConfigStore(context.host, config)
     configured_directories = config.get("save_directories") or []
     normalized_directories = normalize_save_directories(configured_directories)
-    if configured_directories != normalized_directories:
+    if configured_directories != normalized_directories and not central:
         config = config_store.write_save_directories(normalized_directories)
     else:
         config["save_directories"] = normalized_directories
@@ -32,9 +37,14 @@ def main(context: RuntimeContext) -> FeatureRuntime:
     def observe_client(event_name, facts):
         emit_download_observation(event_name, **facts)
 
+    def persist_central_refresh(access_token, refresh_token, expected):
+        return config_store.persist_refreshed_tokens(access_token, refresh_token, expected)
+
     client = Open115Client(
         config,
-        on_tokens_changed=persist_refreshed_tokens,
+        on_tokens_changed=persist_refreshed_tokens if not central else None,
+        on_tokens_refreshed=persist_central_refresh if central else None,
+        defer_authorization_commit=central,
         on_observation=observe_client,
     )
     feature = DownloadFeature(

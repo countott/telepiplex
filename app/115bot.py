@@ -31,6 +31,7 @@ from telepiplex_plugin_sdk.diagnostics import (
 
 import init
 from app.runtime.capability_router import CapabilityRouter
+from app.runtime.central_config import CentralConfigStore
 from app.runtime.command_catalog import (
     build_bot_commands,
     build_start_help,
@@ -103,7 +104,7 @@ DEFAULT_PLUGIN_CATALOG_URL = (
 
 
 def get_version(md_format=False):
-    version = "v3.9.3-host"
+    version = "v3.10.0-host"
     if md_format:
         return escape_markdown(version, version=2)
     return version
@@ -159,10 +160,15 @@ def resolve_plugin_catalog_source(plugin_config: dict, root: Path) -> str:
     return configured
 
 
-def build_plugin_manager(config=None, host_database=None):
+def build_plugin_manager(config=None, host_database=None, *, config_path=None):
     config = config or {}
     plugin_config = config.get("plugins") or {}
     root = Path(str(plugin_config.get("root") or "/config/plugins"))
+    central_config = CentralConfigStore(
+        Path(config_path) if config_path is not None else Path(init.CONFIG_FILE),
+        initial=config,
+    )
+    central_config.migrate_legacy(root)
     if host_database is None:
         host_database = root.parent / "host.db"
     router = CapabilityRouter()
@@ -217,7 +223,7 @@ def build_plugin_manager(config=None, host_database=None):
     catalog_source = resolve_plugin_catalog_source(plugin_config, root)
     catalog = PluginCatalog(catalog_source, root / ".cache")
     manager = PluginManager(
-        store=PluginStore(root),
+        store=PluginStore(root, central_config=central_config),
         supervisor=supervisor,
         router=router,
         journal=journal,
@@ -473,7 +479,21 @@ async def reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hot_fields = hot_runtime_changed_fields(previous, init.bot_config)
     feature_lines = []
     feature_failed = False
-    for plugin_id in _enabled_feature_ids(manager):
+    central_reload = getattr(manager, "central_config_enabled", False) is True
+    enabled_ids = _enabled_feature_ids(manager)
+    if central_reload:
+        try:
+            reloaded = await manager.reload_all_configs()
+            feature_lines.extend(f"✅ {plugin_id}" for plugin_id in reloaded)
+        except Exception as exc:
+            code = str(getattr(exc, "code", type(exc).__name__))
+            feature_failed = True
+            feature_lines.append(f"❌ 集中配置：{code}；相关插件继续使用重载前配置。")
+            apply_hot_runtime_config(manager, init.bot_config, previous)
+            init.bot_config = previous
+            hot_fields = []
+            restart_fields = []
+    for plugin_id in ([] if central_reload else enabled_ids):
         try:
             await manager.reload_config(plugin_id)
         except Exception as exc:

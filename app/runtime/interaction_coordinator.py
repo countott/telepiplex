@@ -1470,8 +1470,10 @@ class InteractionCoordinator:
                 "UPDATE operation_message_segments SET message_id = ?, "
                 "message_kind = ?, delivery_state = 'delivered', updated_at = ? "
                 "WHERE segment_id = ? AND owner_plugin_id = ? "
-                "AND generation = ? AND state = 'open' "
-                "AND delivery_state = 'delivering' "
+                "AND generation = ? "
+                "AND ((state = 'open' AND delivery_state = 'delivering') "
+                "OR (message_id = ? AND state IN ('open', 'sealing') "
+                "AND delivery_state = 'delivered')) "
                 "AND message_id = ? AND message_kind = ? "
                 "AND EXISTS (SELECT 1 FROM operations operation "
                 "WHERE operation.operation_id = "
@@ -1486,6 +1488,7 @@ class InteractionCoordinator:
                     str(segment_id),
                     normalized_owner,
                     normalized_generation,
+                    normalized_message_id,
                     normalized_expected_id,
                     normalized_expected_kind,
                     normalized_chat_id,

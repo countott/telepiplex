@@ -2,6 +2,18 @@ import unittest
 
 
 class PluginManifestTest(unittest.TestCase):
+    def test_config_write_protocol_is_optional_and_validated(self):
+        from app.runtime.plugin_contract import ContractError
+        from app.runtime.plugin_manifest import PluginManifest
+        self.assertEqual(PluginManifest.from_mapping(self._value()).config_write_mode, "")
+        value = self._value()
+        value["config_write_mode"] = "host_rpc_v1"
+        self.assertEqual(PluginManifest.from_mapping(value).config_write_mode, "host_rpc_v1")
+        for invalid in ("file", None, [], {}):
+            value["config_write_mode"] = invalid
+            with self.assertRaises(ContractError):
+                PluginManifest.from_mapping(value)
+
     def test_optional_capabilities_are_explicit_but_not_required(self):
         from app.runtime.plugin_contract import ContractError
         from app.runtime.plugin_manifest import PluginManifest

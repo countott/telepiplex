@@ -34,25 +34,6 @@
       "required": ["movie_size_fallback_ratio", "unmatched_large_ratio", "unmatched_large_min_bytes"],
       "additionalProperties": false
     },
-    "metadata": {
-      "type": "object",
-      "title": "元数据",
-      "properties": {
-        "tvdb": {
-          "type": "object",
-          "title": "TVDB",
-          "properties": {
-            "enable": {"type": "boolean", "title": "启用"},
-            "api_key": {"type": "string", "title": "API Key", "writeOnly": true},
-            "base_url": {"type": "string", "title": "API 地址"},
-            "subscriber_pin": {"type": "string", "title": "Subscriber PIN", "writeOnly": true},
-            "timeout": {"type": "number", "minimum": 1, "maximum": 300, "title": "超时（秒）"}
-          },
-          "additionalProperties": true
-        }
-      },
-      "additionalProperties": true
-    },
     "ai": {
       "type": "object",
       "title": "AI",
@@ -66,6 +47,6 @@
       "additionalProperties": true
     }
   },
-  "required": ["category_folder", "unorganized_path", "storage_timeout", "storage_move_batch_size", "metadata_timeout", "selection", "metadata", "ai"],
+  "required": ["category_folder", "unorganized_path", "storage_timeout", "storage_move_batch_size", "metadata_timeout", "selection", "ai"],
   "additionalProperties": false
 }

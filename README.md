@@ -70,7 +70,7 @@ plugins:
   catalog_refresh_interval: 21600
 ```
 
-更多运行参数见 [完整配置模板](config/config.yaml.example)。Host 配置只负责 Bot 和模块运行环境；115、Prowlarr、Plex 等配置分别保存在各 Feature 内。
+所有配置统一放在 `/config/config.yaml`，完整字段见 [主配置模板](config/config.yaml.example)：Bot 与日志、`plugins` 运行环境、`shared` 公共目录和 TMDB 凭据、`features` 各插件策略分别分区。
 
 ### 2. 启动容器
 
@@ -98,18 +98,21 @@ docker logs -f telepiplex
 
 依次点击安装 `download`、`search`、`rename`。只有依赖满足的 ready 候选才显示安装按钮；缺少依赖时，页面会提示先安装哪个模块。安装按钮和更新按钮都绑定该 Feature 的最新稳定兼容版本。Telepiplex 不会自动安装模块。
 
-安装后发送 `/config`，选择模块并按提示配置：
+可以先填写主配置，再安装模块；安装后直接使用对应分区。也可以发送 `/config`，选择公共配置或模块向导，确认后统一保存到主配置：
 
 | 模块 | 首次配置内容 |
 | --- | --- |
 | `download` | 完成 115 授权并设置保存目录 |
-| `search` | 填写 Prowlarr 地址与 API Key，配置 TMDB、TVDB 凭据并核对分类目录 |
-| `rename` | 核对分类目录；按需配置用于文件映射的 AI 地址、API Key 与模型 |
-| `sync`（可选） | 填写 Plex 地址与 Token；海报等增强功能按需配置 TMDB、Fanart.tv |
+| 公共配置 | 一次设置四分类目录、Plex 库映射和 TMDB 凭据 |
+| `search` | 填写 Prowlarr 地址与 API Key，按需配置 TVDB 等元数据来源 |
+| `rename` | 按需配置用于文件映射的 AI 地址、API Key 与模型；不再配置 TVDB |
+| `sync`（可选） | 填写 Plex 地址与 Token；增强功能按需配置 Fanart.tv |
 
 115 保存目录分两步录入：先填写按钮显示名称，再填写实际路径。例如显示名称 `真人电影`，路径填写 `真人电影`；多级路径可填写 `series/live action`。在 Telegram 输入路径时不要以 `/` 开头，以免被识别为命令。
 
-保存目录与分类目录都是 **115 内的路径**。download 的 `save_directories` 决定离线下载位置；search 与 rename 的 `category_folder` 决定分类位置，默认分为真人电影、动画电影、真人剧集、动画剧集。自定义分类时，保持两个模块的目录配置一致。分类数组等高级配置直接编辑对应 YAML，字段结构见各模块默认配置。
+保存目录与分类目录都是 **115 内的路径**。`features.download.save_directories` 决定离线下载位置；`shared.category_folder` 统一供 Search、Rename、Sync 使用，默认分为真人电影、动画电影、真人剧集、动画剧集。公共目录可在 Telegram 编辑；其他高级参数直接编辑主 YAML，再执行 `/reload`。插件包内默认值与 schema 只负责缺省和校验，运行快照由 Host 生成，不是用户编辑入口。
+
+旧版本升级时保留原主配置，不要先用新模板覆盖。首次启动会将旧 `/config/plugins/<plugin_id>/config.yaml` 迁入主文件并保留原文件；迁入后只使用主文件。多个旧配置的公共目录或非空 TMDB 凭据不一致时，迁移停止并指出冲突字段，修正后重启；不会自动挑选一个覆盖。集中模式要求 Download 2.3.0 或更高兼容版本，旧 Download 会提示升级，不继续向运行快照写授权。插件代码回滚保留主配置中的最新设置和 Token，目标版本不兼容时拒绝回滚。
 
 Wikipedia、Wikidata、豆瓣和 AniList 不需要 API Key。search 没有 AI 配置；rename 的 AI 仅处理规则无法确定的文件映射，不能确认作品身份、覆盖外部元数据或授权删除。通过 Telegram 保存配置时会执行校验和运行实例切换；失败则恢复旧配置与旧路由。
 
@@ -182,9 +185,9 @@ Telepiplex 不提供 115 到 Plex 的文件挂载。请先确保 Plex 能通过�
 
 | 容器内路径 | 内容 |
 | --- | --- |
-| `/config/config.yaml` | Host 与 Telegram 配置 |
-| `/config/plugins/<plugin_id>/config.yaml` | Feature 私有配置 |
-| `/config/plugins/<plugin_id>/config.yaml.example` | 已安装 Feature 的配置模板 |
+| `/config/config.yaml` | 全部用户配置的唯一权威文件，包含 Host、Telegram、公共设置和各 Feature 配置 |
+| `/config/plugins/<plugin_id>/config.yaml` | 首次迁移后保留的旧配置备份，不再作为生效配置来源 |
+| `/config/plugins/<plugin_id>/config.yaml.example` | 已安装 Feature 的包内默认值参考，不是用户配置编辑入口 |
 | `/config/plugins` | 模块版本、运行环境与持久状态 |
 | `/config/logs` | 按 Host 启动会话分组的日志 |
 
@@ -259,25 +262,25 @@ docker compose up -d
 
 Host 负责 Telegram 接入、命令路由、任务与事件持久化、配置和模块生命周期。Feature 在各自 Python 虚拟环境与子进程中运行，通过 Unix Domain Socket 调用 capability；socket 位于临时目录 `/tmp/telepiplex`。业务源码不打入 Host 镜像，各 Feature 不直接 import 其他 Feature。
 
-当前 Host API 1.9 增加可选 capability 依赖与 caption 任务消息段；Host API 1.8 提供整理完成后的独立下一步选择卡，支持一次性点击、60 秒退出和持久化清理。它延续 Host API 1.7 的任务消息段、Host API 1.6 的身份／阶段里程碑和 Host API 1.5 的逐版本配置迁移合同。模块通过 `manifest.yaml` 声明 `host_api` 范围和 capability 依赖。
+当前 Host API 1.10 增加认证的配置读取和字段级写回，主文件集中配置并向各进程提供隔离快照。Host API 1.9 的可选 capability 依赖与 caption 任务消息段、Host API 1.8 的独立下一步选择卡继续保留；同时延续 Host API 1.7 的任务消息段、Host API 1.6 的身份／阶段里程碑和 Host API 1.5 的逐版本配置迁移合同。模块通过 `manifest.yaml` 声明 `host_api` 范围和 capability 依赖。
 
 ### 独立发布
 
 #### 当前源码版本
 
-本轮日志核对已确认：部分任务的文件已改名并进入目标目录，随后额外尾页请求导致完整核验失败。SDK、Rename 现在校验并读满声明总数后结束分页，不再多读尾页；移动后源目录的列表矛盾和独立 770004 错误仍未确认根因。证据、边界与文件清单见 [本次交付](docs/audits/2026-11-11-115-pagination-diagnosis.md)。此前的 [Provider 配置](docs/audits/2026-11-11-search-provider-config-and-review.md)、[下载前确认及目录清理](docs/audits/2026-11-11-release-confirmation-and-storage.md)、[评分规则](docs/audits/2026-11-06-search-scoring.md) 和 [格式识别拓扑](docs/media-release-format-topology.md) 继续保留。以下为本地源码版本，未自动发布。
+本轮将配置统一到主 YAML，先删除闲置配置代码，再明确迁移和生效策略。此前的 [存储分页诊断](docs/audits/2026-11-11-115-pagination-diagnosis.md)、[Provider 配置](docs/audits/2026-11-11-search-provider-config-and-review.md)、[评分规则](docs/audits/2026-11-06-search-scoring.md) 和 [格式识别拓扑](docs/media-release-format-topology.md) 保持历史记录；集中化不改变其中尚未确认的 115 线上问题。以下为本地源码版本，未自动发布。
 
 | 组件 | 版本 |
 | --- | --- |
-| Host | `3.9.3` |
-| SDK | `2.2.2` |
-| `download` | `2.2.5` |
-| `search` | `2.11.1` |
-| `rename` | `2.4.5` |
-| `sync` | `2.1.2` |
-| `caption` | `1.3.4` |
+| Host | `3.10.0` |
+| SDK | `2.3.0` |
+| `download` | `2.3.0` |
+| `search` | `2.11.2` |
+| `rename` | `2.4.6` |
+| `sync` | `2.1.3` |
+| `caption` | `1.3.5` |
 
-本轮优先更新 Download 2.2.5、Rename 2.4.5 后提交新任务。五个 Feature 都精确依赖随包 SDK，因此 Search 2.11.1、Sync 2.1.2 和 Caption 1.3.4 同步对齐 SDK 2.2.2；这三个 Feature 的业务逻辑未改。Host 3.9.3 无需更新。已有显式 `storage_move_batch_size: 32` 继续使用 32，缺省值与新配置采用 100。Host API 1.9，SDK 随 Feature 构建打包，无需单独安装。
+本轮先完成代码清理，再统一配置存储和生效策略。升级 Host 后通过 Telegram 将 Download 更新到 2.3.0；其余模块按需更新。五个 Feature 的随包 SDK 对齐 2.3.0，SDK 无需单独安装。Search、Sync 的业务策略未改；Rename 删除闲置 TVDB 接口，Caption 复用相同的配置 schema 并补齐 `/config` 的向导声明。已有显式 `storage_move_batch_size: 32` 继续保留。集中化设计与迁移边界见 [设计文档](docs/superpowers/specs/2026-11-16-centralized-config-design.md)。
 
 `main` 是 Core/Host 与五个 Feature 的有效源码分支。Host 使用 `telepiplex-v<semver>` tag，发布前验证提交已包含在远端 `main`；正式流水线生成 `ghcr.io/<owner>/telepiplex:<semver>` 与 `latest` 镜像，创建标题为 `Telepiplex <semver>` 的 GitHub Release 并强制设为 **Latest**。普通 `main` push 不更新正式镜像或 Latest 入口。
 

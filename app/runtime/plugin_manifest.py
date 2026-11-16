@@ -22,6 +22,7 @@ _HOSTNAME = re.compile(
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
 )
 _MANIFEST_KEYS = {
+    "config_write_mode",
     "plugin_id",
     "name",
     "version",
@@ -136,6 +137,7 @@ class PluginManifest:
     state_schema_version: int
     source: SourceDeclaration
     optional_requires: tuple[str, ...] = ()
+    config_write_mode: str = ""
 
     @classmethod
     def from_mapping(cls, value: dict) -> "PluginManifest":
@@ -216,7 +218,11 @@ class PluginManifest:
         )
         if set(requires) & set(optional_requires):
             _invalid("required and optional capabilities must not overlap")
+        config_write_mode = value.get("config_write_mode", "")
+        if not isinstance(config_write_mode, str) or config_write_mode not in {"", "host_rpc_v1"}:
+            _invalid("unsupported config_write_mode")
         return cls(
+            config_write_mode=config_write_mode,
             plugin_id=plugin_id,
             name=name,
             version=version,

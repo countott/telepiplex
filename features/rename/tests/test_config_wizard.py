@@ -46,22 +46,22 @@ class RenameConfigWizardTest(unittest.IsolatedAsyncioTestCase):
             "payload": "config:confirm",
         })
 
-    async def test_entry_exposes_only_tvdb_and_ai(self):
+    async def test_entry_exposes_only_active_ai_configuration(self):
         result = await self._start()
 
         self.assertEqual(result["session"]["state"], "open")
         buttons = result["actions"][0]["data"]["keyboard"]
         self.assertEqual(
             [row[0]["text"] for row in buttons],
-            ["TVDB", "AI", "退出"],
+            ["AI", "退出"],
         )
         text = result["actions"][0]["text"]
-        for hidden in ("timeout", "阈值", "未整理", "selection", "MCP"):
+        for hidden in ("TVDB", "timeout", "阈值", "未整理", "selection", "MCP"):
             self.assertNotIn(hidden, text)
         self.assertNotIn("old-tvdb-key", text)
         self.assertNotIn("old-ai-key", text)
 
-    async def test_tvdb_flow_returns_enable_key_and_pin_only(self):
+    async def test_stale_tvdb_button_cannot_submit_configuration(self):
         await self._start()
         await self.feature.callback({
             **self.owner,
@@ -71,21 +71,11 @@ class RenameConfigWizardTest(unittest.IsolatedAsyncioTestCase):
         await self.feature.callback({
             **self.owner,
             "namespace": "rename",
-            "payload": "config:boolean:on",
+            "payload": "config:boolean:off",
         })
-        await self.feature.message({**self.owner, "text": "new-tvdb-key"})
-        await self.feature.message({**self.owner, "text": "-"})
         result = await self._confirm()
 
-        self.assertEqual(result["config_patch"], {
-            "metadata": {
-                "tvdb": {
-                    "enable": True,
-                    "api_key": "new-tvdb-key",
-                    "subscriber_pin": "old-pin",
-                },
-            },
-        })
+        self.assertNotIn("config_patch", result)
 
     async def test_ai_flow_returns_enable_url_key_and_model_only(self):
         await self._start()
@@ -115,26 +105,21 @@ class RenameConfigWizardTest(unittest.IsolatedAsyncioTestCase):
             },
         })
 
-    async def test_sections_can_be_disabled_directly(self):
-        for section, expected in (
-            ("tvdb", {"metadata": {"tvdb": {"enable": False}}}),
-            ("ai", {"ai": {"enable": False}}),
-        ):
-            with self.subTest(section=section):
-                await self._start()
-                await self.feature.callback({
-                    **self.owner,
-                    "namespace": "rename",
-                    "payload": f"config:{section}",
-                })
-                pending = await self.feature.callback({
-                    **self.owner,
-                    "namespace": "rename",
-                    "payload": "config:boolean:off",
-                })
-                self.assertNotIn("config_patch", pending)
-                result = await self._confirm()
-                self.assertEqual(result["config_patch"], expected)
+    async def test_ai_can_be_disabled_directly(self):
+        await self._start()
+        await self.feature.callback({
+            **self.owner,
+            "namespace": "rename",
+            "payload": "config:ai",
+        })
+        pending = await self.feature.callback({
+            **self.owner,
+            "namespace": "rename",
+            "payload": "config:boolean:off",
+        })
+        self.assertNotIn("config_patch", pending)
+        result = await self._confirm()
+        self.assertEqual(result["config_patch"], {"ai": {"enable": False}})
 
     async def test_exit_closes_without_submitting_patch(self):
         await self._start()

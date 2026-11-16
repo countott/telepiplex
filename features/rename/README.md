@@ -1,10 +1,14 @@
 # rename Feature
 
+2.4.6 删除闲置 TVDB API 与配置入口，保留已确认元数据的整理及 AI 映射；随包 SDK 2.3.0。
+
+集中配置：Host 3.10.0 起统一编辑 `/config/config.yaml` 的 `features.rename` 分区；公共目录和 TMDB 凭据位于 `shared`。Telegram `/config` 的修改写入同一主文件，安装包默认值和运行快照不作为独立编辑入口。
+
 2.4.5 修正移动核验和补整理库存的分页终止：已验证并读满 count 后结束，不再请求额外尾页；无总数时仍继续读取。随包使用 SDK 2.2.2。源目录列表矛盾和云盘拒绝仍停止删除，不把这次分页修复宣称为所有 115 问题的修复。
 
 2.4.4 清理已验证原资源快照中的空目录分支，防止空 Sample/Proof 阻挡外层源目录清理；不扩展为媒体库根目录的全盘空目录清理，非空或无法核实的目录仍保留。无法确认与目标冲突分别计数，整部作品身份失败仍计入已扫描文件；结果按文件处理和源文件夹清理分行展示，列出保留及失败路径。
 
-当前版本：`2.4.5`；SDK：`2.2.2`；要求 Host API 1.9 / Host `3.9.0`。新增 `media.rename` 字幕命名、放置和媒体库扫描能力，并在下载整理前可选调用 caption；成功整理后的 Plex 链路保持原样。
+当前版本：`2.4.6`；SDK：`2.3.0`；要求 Host API 1.9 / Host `3.9.0`。新增 `media.rename` 字幕命名、放置和媒体库扫描能力，并在下载整理前可选调用 caption；成功整理后的 Plex 链路保持原样。
 
 2.4.3 拒绝缺少请求路径的批量身份响应，避免把未知身份缓存为不存在。配合 Download 2.2.2 修复新季目录查询阻塞，覆盖文件已改名、尚未移动时的重试整理。
 
@@ -49,7 +53,7 @@ rename 会在写操作前按文件预检目标冲突。已有目标与相同 pro
 rename 在媒体文件全部被核验为已整理或规范 `no_op`、不存在原位保留/目标冲突/文件失败，并且源作品目录清理完成时写入 `completed`。若已验证文件至少一个、其余媒体文件仅为安全原位保留，且没有冲突、执行失败或意外清理失败，则写入 `partial_completed`；完全无法匹配仍失败关闭且不执行移动。Telegram 通知是尽力投递的旁路；通知失败不会把已经核验完成的 Job 改成失败，也不会触发重复文件操作。用户通知使用纯文本，文件名和路径不会依赖 Telegram Markdown 转义。
 
 ```bash
-python tools/build_feature.py features/rename /tmp/rename-2.4.5.tpx \
+python tools/build_feature.py features/rename /tmp/rename-2.4.6.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

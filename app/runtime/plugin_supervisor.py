@@ -8,6 +8,8 @@ import os
 import re
 import secrets
 import uuid
+import copy
+import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -78,6 +80,8 @@ class PluginProcess:
     log_tasks: list[asyncio.Task] = field(default_factory=list)
     desired_stop: bool = False
     last_diagnostic_sequence: int = 0
+    config: dict | None = None
+    config_path: Path | None = None
 
     @property
     def pid(self) -> int | None:
@@ -124,12 +128,12 @@ class PluginSupervisor:
         self._active: dict[str, PluginProcess] = {}
         self._instances: dict[str, PluginProcess] = {}
 
-    async def start(self, release: ActiveRelease, *, shadow: bool = False) -> PluginProcess:
+    async def start(self, release: ActiveRelease, *, shadow: bool = False, config: dict | None = None) -> PluginProcess:
         if not shadow and release.plugin_id in self._active:
             raise SupervisorError("already_running", f"Feature is already running: {release.plugin_id}")
         instance_id = (
             f"{release.plugin_id}@{release.version}-{uuid.uuid4().hex[:8]}"
-            if shadow else release.plugin_id
+            if shadow or config is not None else release.plugin_id
         )
         socket_name = hashlib.sha256(instance_id.encode("utf-8")).hexdigest()[:16]
         socket_path = self.runtime_root / f"{socket_name}.sock"
@@ -142,6 +146,8 @@ class PluginSupervisor:
             shadow=bool(shadow),
             socket_path=socket_path,
             argv=argv,
+            config=copy.deepcopy(config),
+            config_path=(self.runtime_root / f"{socket_name}.yaml") if config is not None else None,
         )
         self._instances[instance_id] = process
         try:
@@ -166,6 +172,11 @@ class PluginSupervisor:
     def promote(self, process: PluginProcess):
         if process.state != "healthy":
             raise SupervisorError("not_healthy", "only a healthy shadow process can be promoted")
+        previous = self._active.get(process.plugin_id)
+        if self.broker is not None:
+            if previous is not None and previous is not process:
+                self.broker.set_active(previous.startup_token, False)
+            self.broker.set_active(process.startup_token, True)
         process.shadow = False
         self._active[process.plugin_id] = process
 
@@ -192,6 +203,8 @@ class PluginSupervisor:
                 process.plugin_id,
                 process.startup_token,
                 process.release.manifest,
+                instance_id=process.instance_id,
+                active=(not process.shadow and self._active.get(process.plugin_id, process) is process),
             )
         process.state = "starting"
         process.last_diagnostic_sequence = 0
@@ -206,7 +219,7 @@ class PluginSupervisor:
             "TPX_PLUGIN_VERSION": process.release.version,
             "TPX_ENTRY_POINT": process.release.manifest.entry_point,
             "TPX_SOCKET_PATH": str(process.socket_path),
-            "TPX_CONFIG_PATH": str(process.release.path.parent.parent / "config.yaml"),
+            "TPX_CONFIG_PATH": str(process.config_path or process.release.path.parent.parent / "config.yaml"),
             "TPX_STATE_PATH": str(process.release.path.parent.parent / "state"),
             "TPX_STARTUP_TOKEN": process.startup_token,
             "TPX_HOST_SOCKET_PATH": str(
@@ -221,6 +234,12 @@ class PluginSupervisor:
             ),
             "TPX_INSTANCE_ID": process.instance_id,
         })
+        if process.config_path is not None:
+            fd = os.open(process.config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                os.fchmod(handle.fileno(), 0o600)
+                yaml.safe_dump(process.config, handle, allow_unicode=True, sort_keys=False)
+            environment["TPX_CONFIG_MODE"] = "central"
         process.child = await asyncio.create_subprocess_exec(
             *process.argv,
             cwd=str(process.release.path),
@@ -617,6 +636,7 @@ class PluginSupervisor:
     async def stop(self, target: str | PluginProcess, timeout: float = 10):
         process = self._resolve(target)
         process.desired_stop = True
+        self._revoke_token(process)
         if process.client is not None and process.child is not None and process.child.returncode is None:
             try:
                 await process.client.request("shutdown", {}, deadline=min(float(timeout), 2))
@@ -634,6 +654,8 @@ class PluginSupervisor:
                     await process.child.wait()
         await asyncio.gather(*process.log_tasks, return_exceptions=True)
         process.socket_path.unlink(missing_ok=True)
+        if process.config_path is not None:
+            process.config_path.unlink(missing_ok=True)
         self._revoke_token(process)
         process.state = "stopped"
         self._log_feature_event(
@@ -650,6 +672,7 @@ class PluginSupervisor:
             await asyncio.gather(monitor, return_exceptions=True)
 
     async def _terminate_child(self, process: PluginProcess):
+        self._revoke_token(process)
         child = process.child
         if child is not None and child.returncode is None:
             child.terminate()
@@ -660,6 +683,8 @@ class PluginSupervisor:
                 await child.wait()
         await asyncio.gather(*process.log_tasks, return_exceptions=True)
         process.socket_path.unlink(missing_ok=True)
+        if process.config_path is not None:
+            process.config_path.unlink(missing_ok=True)
         self._revoke_token(process)
 
     def _revoke_token(self, process: PluginProcess):

@@ -82,6 +82,55 @@ class PluginStoreTest(unittest.TestCase):
         self.assertIsNone(record["previous_version"])
         self.assertEqual(store.active("echo").version, "1.0.0")
 
+    def test_central_install_uses_main_values_without_creating_private_config(self):
+        from app.runtime.central_config import CentralConfigStore
+        from app.runtime.plugin_store import PluginStore
+
+        path = self.root / 'config.yaml'
+        path.write_text('features:\n  echo:\n    prefix: customized\n')
+        central = CentralConfigStore(path)
+        store = PluginStore(self.plugins_root, central_config=central)
+        original = path.read_bytes()
+        staged = store.stage(self._artifact())
+        self.assertEqual(store.read_config(staged), {'prefix': 'customized'})
+        active = store.activate(staged)
+        self.assertEqual(store.read_config(active), {'prefix': 'customized'})
+        self.assertFalse((self.plugins_root / 'echo/config.yaml').exists())
+        self.assertEqual(path.read_bytes(), original)
+        change = store.prepare_config_change('echo', {'prefix': 'new'})
+        self.assertEqual(path.read_bytes(), original)
+        central.commit(change)
+        self.assertEqual(store.read_config(active), {'prefix': 'new'})
+
+    def test_legacy_migration_validates_installed_schema_before_main_write(self):
+        from app.runtime.central_config import CentralConfigStore, CentralConfigError
+        from app.runtime.plugin_store import PluginStore
+        store = PluginStore(self.plugins_root)
+        store.activate(store.stage(self._artifact()))
+        (self.plugins_root / 'echo/config.yaml').write_text('prefix: 42\n')
+        path = self.root / 'config.yaml'
+        path.write_text('bot_token: keep\n')
+        central = CentralConfigStore(path)
+        original = path.read_bytes()
+        with self.assertRaises(CentralConfigError) as caught:
+            central.migrate_legacy(self.plugins_root)
+        self.assertEqual(caught.exception.code, 'invalid_config')
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_central_update_uses_new_defaults_without_materializing_old_defaults(self):
+        from app.runtime.central_config import CentralConfigStore
+        from app.runtime.plugin_store import PluginStore
+        path = self.root / 'config.yaml'
+        path.write_text('features:\n  echo: {}\n')
+        central = CentralConfigStore(path)
+        store = PluginStore(self.plugins_root, central_config=central)
+        store.activate(store.stage(self._artifact(default_prefix='old')))
+        staged = store.stage(self._artifact('1.1.0', default_prefix='new'))
+        before, candidate, _, _ = store.migrate_config(staged)
+        self.assertEqual(before, {'prefix': 'old'})
+        self.assertEqual(candidate, {'prefix': 'new'})
+        self.assertEqual(central.read(), {'features': {'echo': {}}})
+
     def test_second_activation_preserves_previous_release_for_rollback(self):
         from app.runtime.plugin_store import PluginStore
 

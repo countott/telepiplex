@@ -1,6 +1,6 @@
 plugin_id: rename
 name: rename
-version: 2.4.5
+version: 2.4.6
 host_api: ">=1.9,<2.0"
 entry_point: telepiplex_rename.runtime:main
 provides:
@@ -23,7 +23,7 @@ commands:
     menu_visible: false
 callbacks:
   - rename
-config_schema_version: 1
+config_schema_version: 2
 state_schema_version: 1
 source:
   repository: origin

@@ -74,10 +74,14 @@ class Open115Client:
         *,
         session=None,
         on_tokens_changed=None,
+        on_tokens_refreshed=None,
+        defer_authorization_commit=False,
         pacer=None,
         on_observation=None,
     ):
         self.config = config
+        self._token_lock = threading.RLock()
+        self._token_generation = 0
         self.base_url = str(config.get("base_url") or "https://proapi.115.com").rstrip("/")
         self.passport_url = str(config.get("passport_url") or "https://passportapi.115.com").rstrip("/")
         self.access_token = str(config.get("access_token") or "")
@@ -86,6 +90,8 @@ class Open115Client:
         self.request_interval = max(0, float(config.get("request_interval") or 1))
         self.session = session or requests.Session()
         self.on_tokens_changed = on_tokens_changed
+        self.on_tokens_refreshed = on_tokens_refreshed
+        self.defer_authorization_commit = bool(defer_authorization_commit)
         self.on_observation = on_observation
         endpoint_intervals = config.get("endpoint_intervals")
         if not isinstance(endpoint_intervals, dict):
@@ -126,8 +132,21 @@ class Open115Client:
                 code="missing_token",
                 operation="set_tokens",
             )
-        self.access_token = access_token
-        self.refresh_token = refresh_token
+        with self._token_lock:
+            self.access_token = access_token
+            self.refresh_token = refresh_token
+            self._token_generation += 1
+            if self.on_tokens_refreshed is not None:
+                self.config.update(access_token=access_token, refresh_token=refresh_token)
+
+    def clear_tokens(self):
+        """Revoke local credentials when authorization rolls back to empty."""
+        with self._token_lock:
+            self.access_token = ""
+            self.refresh_token = ""
+            self._token_generation += 1
+            if self.on_tokens_refreshed is not None:
+                self.config.update(access_token="", refresh_token="")
 
     def _headers(self):
         if not self.access_token:
@@ -427,7 +446,10 @@ class Open115Client:
             return result
 
     def refresh_access_token(self):
-        if not self.refresh_token:
+        with self._token_lock:
+            expected = {"access_token": self.access_token, "refresh_token": self.refresh_token}
+            generation = self._token_generation
+        if not expected["refresh_token"]:
             raise Open115Error(
                 "115 refresh_token is not configured",
                 code="missing_refresh_token",
@@ -436,7 +458,7 @@ class Open115Client:
         try:
             result = self._passport_post(
                 "/open/refreshToken",
-                data={"refresh_token": self.refresh_token},
+                data={"refresh_token": expected["refresh_token"]},
             )
         except (requests.RequestException, ValueError) as exc:
             raise Open115Error(
@@ -450,10 +472,19 @@ class Open115Client:
                 code=str(result.get("code") or "") if isinstance(result, dict) else "",
                 operation="refresh_access_token",
             )
-        self.access_token = str(data["access_token"])
-        self.refresh_token = str(data.get("refresh_token") or self.refresh_token)
-        if self.on_tokens_changed:
-            self.on_tokens_changed(self.access_token, self.refresh_token)
+        access_token = str(data["access_token"])
+        refresh_token = str(data.get("refresh_token") or expected["refresh_token"])
+        if self.on_tokens_refreshed is not None:
+            current = self.on_tokens_refreshed(access_token, refresh_token, expected)
+            # Host CAS and local installation are separate scheduling points.
+            # A newer authorization/rollback owns the local pair once installed.
+            with self._token_lock:
+                if self._token_generation == generation:
+                    self.set_tokens(current.get("access_token"), current.get("refresh_token"))
+        else:
+            self.set_tokens(access_token, refresh_token)
+            if self.on_tokens_changed:
+                self.on_tokens_changed(self.access_token, self.refresh_token)
 
     @staticmethod
     def _pkce_pair():
@@ -553,6 +584,8 @@ class Open115Client:
         data = result.get("data") if isinstance(result, dict) else None
         if not isinstance(data, dict) or not data.get("access_token") or not data.get("refresh_token"):
             raise Open115Error("115 device token exchange returned invalid data")
+        if self.defer_authorization_commit:
+            return {"access_token": str(data["access_token"]), "refresh_token": str(data["refresh_token"])}
         self.set_tokens(data["access_token"], data["refresh_token"])
         if self.on_tokens_changed:
             self.on_tokens_changed(self.access_token, self.refresh_token)

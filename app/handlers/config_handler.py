@@ -4,16 +4,19 @@ import re
 import warnings
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import CallbackQueryHandler, CommandHandler, ConversationHandler
+from telegram.ext import CallbackQueryHandler, CommandHandler, ConversationHandler, MessageHandler, filters
 from telegram.warnings import PTBUserWarning
 
 import init
 from app.handlers.plugin_handler import ROUTER_KEY, handle_feature_result
+from app.handlers.shared_config_handler import (
+    CONFIG_SHARED, SESSION_KEY, shared_config_callback, shared_config_message,
+)
 
 
 CONFIG_SELECT_PLUGIN = 80
 MANAGER_KEY = "telepiplex_plugin_manager"
-_SESSION_KEYS = ("host_config_plugins",)
+_SESSION_KEYS = ("host_config_plugins", SESSION_KEY)
 _DIRECT_CALLBACK_RE = re.compile(
     r"^host-config-direct:(?P<plugin_id>[a-z][a-z0-9-]{0,63})$"
 )
@@ -95,6 +98,11 @@ async def _show_config_menu(update, context, *, edit: bool):
         )]
         for index, plugin_id in enumerate(plugin_ids)
     ]
+    if getattr(manager, "central_config_enabled", False) is True:
+        rows.insert(0, [InlineKeyboardButton(
+            "公共配置：目录与 TMDB", callback_data="host-config-shared:open",
+        )])
+        text = "配置统一保存到顶层 config.yaml。\n\n" + text
     if rows:
         rows.append([InlineKeyboardButton("退出", callback_data="host-config-cancel")])
     markup = InlineKeyboardMarkup(rows) if rows else None
@@ -103,7 +111,7 @@ async def _show_config_menu(update, context, *, edit: bool):
         await update.callback_query.edit_message_text(text, **kwargs)
     else:
         await update.effective_message.reply_text(text, **kwargs)
-    return CONFIG_SELECT_PLUGIN if plugin_ids else ConversationHandler.END
+    return CONFIG_SELECT_PLUGIN if rows else ConversationHandler.END
 
 
 async def config_command(update, context):
@@ -212,6 +220,7 @@ def register_feature_config_handlers(application):
             ],
             states={
                 CONFIG_SELECT_PLUGIN: [
+                    CallbackQueryHandler(shared_config_callback, pattern=r"^host-config-shared:"),
                     CallbackQueryHandler(
                         select_config_plugin,
                         pattern=r"^host-config-plugin:\d+$",
@@ -219,6 +228,13 @@ def register_feature_config_handlers(application):
                     CallbackQueryHandler(
                         quit_config_conversation,
                         pattern=r"^host-config-cancel$",
+                    ),
+                ],
+                CONFIG_SHARED: [
+                    CallbackQueryHandler(shared_config_callback, pattern=r"^host-config-shared:"),
+                    MessageHandler(
+                        filters.TEXT & ~filters.Regex(r"^/q(?:@\w+)?(?:\s|$)"),
+                        shared_config_message,
                     ),
                 ],
             },

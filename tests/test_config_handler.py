@@ -99,6 +99,24 @@ class ConfigHandlerTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    async def test_caption_configuration_is_discoverable_from_config_menu(self):
+        import json
+        from app.handlers.config_handler import config_command
+
+        update, context, manager = self.request(text="/config")
+        manager.views = {"caption": {
+            "plugin_id": "caption", "version": "1.3.5",
+            "schema": json.loads((ROOT / "features/caption/config.schema.json").read_text()),
+            "config": {},
+        }}
+        manager.statuses = [{"plugin_id": "caption", "version": "1.3.5", "state": "active"}]
+        with patch("app.handlers.config_handler.init.check_user", return_value=True):
+            await config_command(update, context)
+
+        markup = update.effective_message.reply_text.await_args.kwargs.get("reply_markup")
+        labels = [button.text for row in markup.inline_keyboard for button in row] if markup else []
+        self.assertIn("配置 caption", labels)
+
     async def test_custom_config_feature_is_listed_and_handed_to_current_route(self):
         from app.handlers.config_handler import config_command, select_config_plugin
 

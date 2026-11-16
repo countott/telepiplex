@@ -115,7 +115,7 @@ class DeploymentContractTest(unittest.TestCase):
     def test_operation_segments_are_declared_as_host_api_1_7(self):
         from app.runtime.plugin_contract import HOST_API_VERSION
 
-        self.assertEqual(HOST_API_VERSION, "1.9")
+        self.assertEqual(HOST_API_VERSION, "1.10")
         for name in ("README.md", "README_EN.md"):
             source = (ROOT / name).read_text(encoding="utf-8")
             self.assertIn("Host API 1.5", source)
@@ -127,7 +127,7 @@ class DeploymentContractTest(unittest.TestCase):
             (ROOT / "sdk" / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(project["project"]["version"], "2.2.2")
+        self.assertEqual(project["project"]["version"], "2.3.0")
 
     def test_build_script_only_references_existing_dockerfiles(self):
         source = (ROOT / "build.sh").read_text(encoding="utf-8")

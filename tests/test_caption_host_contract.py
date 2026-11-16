@@ -6,6 +6,7 @@ import yaml
 
 from app.runtime.operation_segments import validate_segment_declaration
 from app.runtime.plugin_manifest import PluginManifest
+from app.runtime.plugin_contract import HOST_API_VERSION
 from app.utils.log_sanitizer import sanitize_log_value
 from telepiplex_plugin_sdk.diagnostics import sanitize_diagnostic_value
 
@@ -19,7 +20,7 @@ def test_current_manifests_form_installable_caption_dependency_chain():
     router = CapabilityRouter()
     for name in ("download", "search", "rename", "caption"):
         manifest = PluginManifest.from_mapping(yaml.safe_load((ROOT / "features" / name / "manifest.yaml").read_text()))
-        assert manifest.supports_host("1.9")
+        assert manifest.supports_host(HOST_API_VERSION)
         router.activate(name, manifest, object())
     assert not router.snapshot.blocked
     router.deactivate("caption")

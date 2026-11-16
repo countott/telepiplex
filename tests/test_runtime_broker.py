@@ -49,6 +49,48 @@ def manifest(plugin_id, *, provides=(), requires=(), optional_requires=(), publi
 
 
 class RuntimeBrokerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_config_writes_require_current_declared_scoped_identity(self):
+        from dataclasses import replace
+        from telepiplex_plugin_sdk import HostClient, FeatureError
+        declared = replace(manifest("download"), config_write_mode="host_rpc_v1")
+        self.broker.register("download", "writer", declared, instance_id="candidate", active=False)
+        state = {"access_token": "old", "other": 7}
+        def patch(identity, changes, expected):
+            if any(state.get(key) != value for key, value in expected.items()):
+                from app.runtime.runtime_broker import BrokerError
+                raise BrokerError("config_conflict", "configuration changed")
+            state.update(changes)
+            return dict(state)
+        self.broker.config_writer = patch
+        self.broker.config_reader = lambda identity: dict(state)
+        client = HostClient(self.broker.socket_path, "writer")
+        with self.assertRaises(FeatureError):
+            await client.patch_config({"access_token": "new"}, {"access_token": "old"})
+        self.assertEqual(state["access_token"], "old")
+        self.broker.set_active("writer", True)
+        result = await client.patch_config({"access_token": "new"}, {"access_token": "old"})
+        self.assertEqual(result, {"access_token": "new", "other": 7})
+        with self.assertRaises(FeatureError):
+            await client.patch_config({"access_token": "stale"}, {"access_token": "old"})
+        with self.assertRaises(FeatureError):
+            await client.patch_config({"shared": {}}, {"shared": {}})
+        self.broker.unregister("writer")
+        with self.assertRaises(FeatureError):
+            await client.patch_config({"access_token": "retired"}, {"access_token": "new"})
+        self.assertEqual(state, {"access_token": "new", "other": 7})
+
+    async def test_config_conflict_from_host_hook_keeps_protocol_error(self):
+        from dataclasses import replace
+        from app.runtime.plugin_manager import PluginOperationError
+        from telepiplex_plugin_sdk import HostClient, FeatureError
+        self.broker.register("download", "writer", replace(manifest("download"), config_write_mode="host_rpc_v1"))
+        def conflict(*args):
+            raise PluginOperationError("config_conflict", "Configuration changed")
+        self.broker.config_writer = conflict
+        with self.assertRaises(FeatureError) as raised:
+            await HostClient(self.broker.socket_path, "writer").patch_config({"access_token": "new"}, {"access_token": "old"})
+        self.assertEqual(raised.exception.code, "config_conflict")
+
     async def test_optional_caption_is_callable_when_present_and_does_not_block_rename(self):
         from telepiplex_plugin_sdk import HostClient, FeatureError
 

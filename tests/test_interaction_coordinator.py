@@ -243,6 +243,47 @@ class InteractionCoordinatorTest(unittest.TestCase):
                     expected_message_kind="text", message_id=78, message_kind="photo")
         self.assertEqual(self.coordinator.get_segment(segment.segment_id).message_id, 77)
 
+    def test_in_place_photo_edit_preserves_cursor_without_replacement_claim(self):
+        for sealing in (False, True):
+            with self.subTest(sealing=sealing):
+                operation_id = f"edit-{sealing}"
+                _, segment = self.coordinator.accept_segment_report("search", self.report(
+                    operation_id=operation_id, user_id=2 if sealing else 1,
+                    segment={"role": "identity", "presentation_kind": "photo"}))
+                message_id = 78 if sealing else 77
+                self.coordinator.bind_segment_message(segment.segment_id, owner_plugin_id="search",
+                    generation=segment.generation, chat_id=10, message_id=message_id,
+                    message_kind="text")
+                if sealing:
+                    self.coordinator.seal_segment("search", operation_id, "identity")
+                edited = self.coordinator.replace_segment_message(segment.segment_id,
+                    owner_plugin_id="search", generation=segment.generation, chat_id=10,
+                    expected_message_id=message_id, expected_message_kind="text",
+                    message_id=message_id, message_kind="photo")
+                self.assertIsNotNone(edited)
+                self.assertEqual(edited.message_id, message_id)
+                self.assertEqual(edited.message_kind, "photo")
+                self.assertEqual(edited.delivery_state, "delivered")
+                self.assertEqual(edited.state, "sealing" if sealing else "open")
+                self.assertTrue(self.coordinator.owns_message(operation_id, message_id))
+                cleanup = self.coordinator.get_message_cleanup(operation_id, message_id)
+                if sealing:
+                    self.assertFalse(cleanup.delete)
+                    self.assertEqual(cleanup.reason, "sealing")
+                else:
+                    self.assertIsNone(cleanup)
+
+    def test_new_message_still_requires_replacement_claim(self):
+        _, segment = self.coordinator.accept_segment_report("search", self.report(
+            segment={"role": "identity", "presentation_kind": "photo"}))
+        self.coordinator.bind_segment_message(segment.segment_id, owner_plugin_id="search",
+            generation=segment.generation, chat_id=10, message_id=77, message_kind="text")
+        self.assertIsNone(self.coordinator.replace_segment_message(segment.segment_id,
+            owner_plugin_id="search", generation=segment.generation, chat_id=10,
+            expected_message_id=77, expected_message_kind="text", message_id=78,
+            message_kind="photo"))
+        self.assertEqual(self.coordinator.get_segment(segment.segment_id).message_id, 77)
+
     def test_terminal_report_queues_current_message_without_deleting_it(self):
         self.coordinator.report("search", self.report())
         self.coordinator.set_message_id("op-1", 77, "text")

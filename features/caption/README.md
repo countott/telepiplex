@@ -1,8 +1,12 @@
 # Telepiplex Caption
 
+1.3.5 复用完全相同的 provider schema，并补齐 `/config` 的向导声明；随包 SDK 2.3.0，字幕业务策略保持。
+
+集中配置：Host 3.10.0 起统一编辑 `/config/config.yaml` 的 `features.caption` 分区；公共目录和 TMDB 凭据位于 `shared`。Telegram `/config` 的修改写入同一主文件，安装包默认值和运行快照不作为独立编辑入口。
+
 1.3.4 仅升级随包 SDK 至 2.2.2，保持构建依赖一致；字幕业务代码未改。
 
-当前源码版本：`1.3.4`；SDK `2.2.2`；Host API `1.9`。搭配 Host `3.9.3`、Download `2.2.1`、Search `2.6.2`、Rename `2.4.2`。本模块只查找、检查和补齐外挂字幕；不检查视频内置字幕，不生成或翻译字幕。
+当前源码版本：`1.3.5`；SDK `2.3.0`；最低 Host API `1.9`。本轮集中化搭配 Host `3.10.0` / Host API `1.10`、Download `2.3.0`、Search `2.11.2`、Rename `2.4.6`。本模块只查找、检查和补齐外挂字幕；不检查视频内置字幕，不生成或翻译字幕。
 
 1.3.3 核对来源字段、发布名和压缩包成员的明确季集冲突，分辨率与 CRC 不再作为年份证据。成功解包与接受的正文检查按内容和完整上下文复用，新增缓存合计最多 32 MiB、128 项、600 秒；匹配与排序仍逐请求执行。只提前检查确定会进入最终候选集合的条目，将下载检查与剩余来源检索重叠，保留来源顺序、候选预算与并发上限。
 
@@ -81,7 +85,7 @@ SubDL 与 SubSource 都承接 Subscene 历史内容，但新增上传和可用�
 
 详情入口示例：`/caption Friends 1994 S01E01 --source https://zimuku.org/detail/2265.html`。支持 SubHD、字幕库、Subf2m、R3SUB 的正规详情地址；只查对应来源，仍通过 Search 确认片源身份，并逐一验证来源真实作品、年份、季集和正文，链接不能强行覆盖匹配结果。
 
-`/caption_config` 支持来源方案、保存目录、自动开关及 ASSRT／OpenSubtitles／SubDL／SubSource 授权字段。其余字段写入 `/config/plugins/caption/config.yaml`，通过现有模块重载流程生效；见[默认配置](config.default.yaml)、[Schema](config.schema.json)和[字幕组／本地归档配置](docs/catalog-usage.md)。网站 Cookie 仅发送给对应来源域名，不发送到文件 CDN；不输出授权值。GitHub 公共索引不强制 token，需要时可自行配置以提高公开 API 配额。
+`/caption_config` 支持来源方案、保存目录、自动开关及 ASSRT／OpenSubtitles／SubDL／SubSource 授权字段。其余字段写入主文件的 `features.caption` 分区，通过现有模块重载流程生效；见[默认配置](config.default.yaml)、[Schema](config.schema.json)和[字幕组／本地归档配置](docs/catalog-usage.md)。网站 Cookie 仅发送给对应来源域名，不发送到文件 CDN；不输出授权值。GitHub 公共索引不强制 token，需要时可自行配置以提高公开 API 配额。
 
 动漫绝对集号不能直接当作已播季集；只有来源明确说明或用户提供 `episode_mappings` 才允许换算。未知映射报告 `episode_mapping_unresolved`。Search 提供的电影／精确单集时长仅用于辅助拒绝严重截断，不能替代视频实测，也不能证明对白同步。
 

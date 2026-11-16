@@ -52,21 +52,17 @@ class RenameConfigWizard:
     def start(self, request: dict) -> dict:
         key = _owner(request)
         self._replace_session(key, {"stage": "choose"})
-        tvdb = (self.config.get("metadata") or {}).get("tvdb") or {}
         ai = self.config.get("ai") or {}
         return {
             "actions": [{
                 "kind": "send_message",
                 "text": (
                     "rename 配置\n\n"
-                    f"TVDB：{'启用' if tvdb.get('enable') else '停用'}，"
-                    f"{'已配置' if tvdb.get('api_key') else '未配置'}\n"
                     f"AI：{'启用' if ai.get('enable') else '停用'}，"
                     f"{'已配置' if ai.get('api_key') else '未配置'}\n\n"
                     "请选择要修改的配置。内部参数请直接编辑 YAML。"
                 ),
                 "data": {"keyboard": [
-                    [{"text": "TVDB", "callback_data": "rename:config:tvdb"}],
                     [{"text": "AI", "callback_data": "rename:config:ai"}],
                     [{"text": "退出", "callback_data": "rename:config:cancel"}],
                 ]},
@@ -92,16 +88,15 @@ class RenameConfigWizard:
                 "session": {"state": "close"},
                 "config_patch": patch,
             }
-        if session.get("stage") == "choose" and action in {"tvdb", "ai"}:
+        if session.get("stage") == "choose" and action == "ai":
             self._replace_session(key, {
                 "stage": "boolean",
-                "section": action,
                 "values": {},
             })
             return {
                 "actions": [{
                     "kind": "edit_message",
-                    "text": f"是否启用 {action.upper()}？",
+                    "text": "是否启用 AI？",
                     "data": {"keyboard": [[
                         {"text": "启用", "callback_data": "rename:config:boolean:on"},
                         {"text": "停用", "callback_data": "rename:config:boolean:off"},
@@ -113,22 +108,14 @@ class RenameConfigWizard:
             "boolean:on", "boolean:off"
         }:
             enabled = action.endswith(":on")
-            section = session["section"]
             if not enabled:
-                patch = (
-                    {"metadata": {"tvdb": {"enable": False}}}
-                    if section == "tvdb"
-                    else {"ai": {"enable": False}}
-                )
-                return self._finish(key, patch)
+                return self._finish(key, {"ai": {"enable": False}})
             session["values"]["enable"] = True
-            session["stage"] = "tvdb_key" if section == "tvdb" else "ai_url"
-            prompt = (
-                "请发送 TVDB API Key。发送 - 保留当前值。"
-                if section == "tvdb"
-                else "请发送 AI API 地址，例如 https://api.example/v1。"
+            session["stage"] = "ai_url"
+            return self._message(
+                "请发送 AI API 地址，例如 https://api.example/v1。",
+                "open", edit=True,
             )
-            return self._message(prompt, "open", edit=True)
         return self._message("⚠️ 配置操作与当前步骤不匹配。", "open")
 
     def message(self, request: dict) -> dict:
@@ -140,20 +127,6 @@ class RenameConfigWizard:
         stage = session.get("stage")
         values = session.setdefault("values", {})
         try:
-            if stage == "tvdb_key":
-                current = ((self.config.get("metadata") or {}).get("tvdb") or {})
-                values["api_key"] = self._secret(raw, current.get("api_key"))
-                session["stage"] = "tvdb_pin"
-                return self._message(
-                    "请发送 TVDB Subscriber PIN；发送 - 保留，发送 clear 清空。",
-                    "open",
-                )
-            if stage == "tvdb_pin":
-                current = ((self.config.get("metadata") or {}).get("tvdb") or {})
-                values["subscriber_pin"] = self._optional_secret(
-                    raw, current.get("subscriber_pin")
-                )
-                return self._finish(key, {"metadata": {"tvdb": deepcopy(values)}})
             if stage == "ai_url":
                 values["api_url"] = _url(raw)
                 session["stage"] = "ai_key"
@@ -174,14 +147,6 @@ class RenameConfigWizard:
     @staticmethod
     def _secret(raw: str, current) -> str:
         return _line(current) if raw == "-" else _line(raw)
-
-    @staticmethod
-    def _optional_secret(raw: str, current) -> str:
-        if raw == "-":
-            return str(current or "")
-        if raw.lower() == "clear":
-            return ""
-        return _line(raw)
 
     def _finish(self, key, patch: dict) -> dict:
         self._replace_session(

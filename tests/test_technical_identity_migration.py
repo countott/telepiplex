@@ -13,11 +13,11 @@ from telepiplex_plugin_sdk import FeatureRuntime
 
 ROOT = Path(__file__).resolve().parents[1]
 FEATURES = {
-    "search": ("telepiplex_search", "2.11.1", "2.2.2"),
-    "download": ("telepiplex_download", "2.2.5", "2.2.2"),
-    "rename": ("telepiplex_rename", "2.4.5", "2.2.2"),
-    "sync": ("telepiplex_sync", "2.1.2", "2.2.2"),
-    "caption": ("telepiplex_caption", "1.3.4", "2.2.2"),
+    "search": ("telepiplex_search", "2.11.2", "2.3.0"),
+    "download": ("telepiplex_download", "2.3.0", "2.3.0"),
+    "rename": ("telepiplex_rename", "2.4.6", "2.3.0"),
+    "sync": ("telepiplex_sync", "2.1.3", "2.3.0"),
+    "caption": ("telepiplex_caption", "1.3.5", "2.3.0"),
 }
 LEGACY_FEATURE_DIRS = (
     "media-search",

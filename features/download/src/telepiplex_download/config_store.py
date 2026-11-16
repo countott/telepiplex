@@ -3,12 +3,110 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
+import asyncio
+import copy
 from pathlib import Path
 
 import yaml
 
 from .cleanup import normalize_minimum_video_size_mib
 from .directories import normalize_save_directories
+
+
+class HostConfigStore:
+    """Host-authoritative config; synchronous mutations run on worker threads.
+
+    Event-loop readers use the latest snapshot, so rendering a menu never waits
+    synchronously for RPC. Worker reads re-fetch current Host values.
+    """
+
+    central_authoritative = True
+
+    def __init__(self, host, initial: dict):
+        self.host = host
+        self._config = copy.deepcopy(initial)
+        self._lock = threading.RLock()
+
+    def _on_event_loop(self):
+        try:
+            asyncio.get_running_loop()
+            return True
+        except RuntimeError:
+            return False
+
+    def _request(self, method, *args):
+        if self._on_event_loop():
+            raise RuntimeError("Host config mutations require a worker thread")
+        return asyncio.run(method(*args))
+
+    def read(self):
+        # Do not take a worker-held lock on the RPC event loop.
+        if self._on_event_loop():
+            return copy.deepcopy(self._config)
+        with self._lock:
+            self._config = self._request(self.host.read_config)
+            return copy.deepcopy(self._config)
+
+    def snapshot(self):
+        snapshot = {"exists": True, "config": self.read(), "owned": None}
+        return snapshot
+
+    def _patch(self, patch, *, snapshot=None):
+        with self._lock:
+            current = self.read()
+            expected = {key: current.get(key) for key in patch}
+            updated = self._request(self.host.patch_config, patch, expected)
+            self._config = copy.deepcopy(updated)
+            if snapshot is not None:
+                snapshot["config"].update(expected)
+                snapshot["owned"] = copy.deepcopy(patch)
+            return copy.deepcopy(updated)
+
+    def write_tokens(self, access_token, refresh_token, *, auth_mode, _snapshot=None):
+        if auth_mode not in {"direct", "scan"}:
+            raise ValueError("download auth_mode must be direct or scan")
+        access_token, refresh_token = str(access_token or "").strip(), str(refresh_token or "").strip()
+        if not access_token or not refresh_token:
+            raise ValueError("download access_token and refresh_token are required")
+        return self._patch({"access_token": access_token, "refresh_token": refresh_token, "auth_mode": auth_mode}, snapshot=_snapshot)
+
+    def write_authorization_tokens(self, snapshot, access_token, refresh_token, *, auth_mode):
+        return self.write_tokens(access_token, refresh_token, auth_mode=auth_mode, _snapshot=snapshot)
+
+    def persist_refreshed_tokens(self, access_token, refresh_token, expected):
+        """Compare against the tokens that actually authorized the HTTP refresh."""
+        patch = {"access_token": str(access_token), "refresh_token": str(refresh_token)}
+        with self._lock:
+            try:
+                self._config = self._request(self.host.patch_config, patch, expected)
+            except Exception as exc:
+                if getattr(exc, "code", "") != "config_conflict":
+                    raise
+                return self.read()
+            return copy.deepcopy(self._config)
+
+    def write_save_directories(self, directories):
+        return self._patch({"save_directories": normalize_save_directories(directories)})
+
+    def write_minimum_video_size_mib(self, value):
+        return self._patch({"minimum_video_size_mib": normalize_minimum_video_size_mib(value)})
+
+    def restore(self, snapshot):
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("config"), dict):
+            raise ValueError("invalid download config snapshot")
+        with self._lock:
+            current = self.read()
+            owned = snapshot.get("owned")
+            if not owned or any(current.get(key) != value for key, value in owned.items()):
+                return current
+            patch = {key: snapshot["config"].get(key) for key in owned}
+            try:
+                self._config = self._request(self.host.patch_config, patch, owned)
+            except Exception as exc:
+                if getattr(exc, "code", "") != "config_conflict":
+                    raise
+                return self.read()
+            return copy.deepcopy(self._config)
 
 
 class FeatureConfigStore:

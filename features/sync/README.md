@@ -1,10 +1,14 @@
 # Plex Management Feature
 
+2.1.3 对齐随包 SDK 2.3.0；集中模式共用分类路由和 TMDB 凭据，Plex 业务策略保持。
+
+集中配置：Host 3.10.0 起统一编辑 `/config/config.yaml` 的 `features.sync` 分区；公共目录和 TMDB 凭据位于 `shared`。Telegram `/config` 的修改写入同一主文件，安装包默认值和运行快照不作为独立编辑入口。
+
 2.1.2 仅升级随包 SDK 至 2.2.2，保持构建依赖一致；Plex 业务代码未改。
 
 2.1.1 仅同步 SDK 2.2.1 的字幕内容日志脱敏修复；Plex 扫描、增强与手动入口不变。
 
-当前版本：`2.1.2`；SDK：`2.2.2`；要求 Host API 1.8 / Host `3.8.0`。本次允许用户从整理完成后的选择卡主动进入 Plex 扫描；地址或 Token 未配置时隐藏入口。优先扫描本次分类对应库，未配置映射时显示既有媒体库选择，不自动扫描全部库。
+当前版本：`2.1.3`；SDK：`2.3.0`；要求 Host API 1.8 / Host `3.8.0`。本次允许用户从整理完成后的选择卡主动进入 Plex 扫描；地址或 Token 未配置时隐藏入口。优先扫描本次分类对应库，未配置映射时显示既有媒体库选择，不自动扫描全部库。
 
 `features/sync` 是独立 Feature 源码目录。Telepiplex 将其构建为不可变 `.tpx`，并在 Telepiplex 容器内以独立 venv/子进程运行。
 
@@ -16,7 +20,7 @@ Telepiplex 对删除或改名的配置字段采用 fail-closed 策略；如果�
 
 ## 独立手动管理
 
-sync 2.1.2 不订阅 rename 事件，也不会在 rename 完成后自动扫描 Plex。扫描由用户通过 Telegram 命令、整理后的「扫描 Plex」按钮或带确认令牌的 MCP 写工具发起；按钮只启动扫描，不启动海报／音轨／字幕增强。rename 的成功或失败不依赖 sync 是否安装、启用或可用。`library.sync` 继续只提供查询能力，新增 `scan_status` 仅检查配置完整性，不联系 Plex。
+sync 2.1.3 不订阅 rename 事件，也不会在 rename 完成后自动扫描 Plex。扫描由用户通过 Telegram 命令、整理后的「扫描 Plex」按钮或带确认令牌的 MCP 写工具发起；按钮只启动扫描，不启动海报／音轨／字幕增强。rename 的成功或失败不依赖 sync 是否安装、启用或可用。`library.sync` 继续只提供查询能力，新增 `scan_status` 仅检查配置完整性，不联系 Plex。
 
 用户明确发起增强 Job 后，Plex 自己负责识别、匹配和基础元数据，插件执行：
 
@@ -30,6 +34,8 @@ scanning -> artwork -> audio -> subtitle -> completed
 
 ## Telegram 命令
 
+同一张任务卡的海报翻页、选择进度和状态更新沿用原消息；文字转海报直接更新原消息，海报后的文字进度更新原 caption。已知消息编辑失败最多重试三次，仍失败时保留原消息游标和按钮，等待后续同目标更新继续；不通过另发文字或替代卡片恢复。新任务和重新打开待选项仍沿用原有的新发入口。
+
 - `/sync`：查看最近 Job；传入 Job ID 可查看单个任务和待处理选择。
 - `/scan`：实时列出 Plex 媒体库，扫描一个库或全部库。它是独立手动操作，不创建增强 Job，也不执行 artwork、audio、subtitle。
 - `/sync_config`：交互配置 Plex、TMDB 和 Fanart.tv。MCP 仅通过 YAML 配置。
@@ -38,7 +44,7 @@ scanning -> artwork -> audio -> subtitle -> completed
 
 ## 配置与 MCP
 
-运行时配置位于 `/config/plugins/sync/config.yaml`；仓库中的默认值和 schema 分别是 `config.default.yaml` 与 `config.schema.json`。状态库由 Telepiplex 放在该 Feature 的私有 state 目录。
+集中模式运行配置来自主文件的 `features.sync` 分区；仓库中的默认值和 schema 分别是 `config.default.yaml` 与 `config.schema.json`。状态库由 Telepiplex 放在该 Feature 的私有 state 目录。
 
 Plex 客户端和 MCP 都延迟初始化。Plex 配置缺失或 MCP 启动失败不会阻止 Feature 进程，更不会阻止 Telepiplex/Bot 启动。提供只读 `library.sync` capability（`get_job`、`list_jobs`），直接查询本地任务库，无需 Plex 凭据或连接。其他 capability 方法在初始化外部服务前拒绝。
 
@@ -47,7 +53,7 @@ MCP 对外地址由 `mcp.host`、`mcp.port`、`mcp.path` 控制；非本机监�
 纯本地验证构建（不读取 Git 元数据）：
 
 ```bash
-python tools/build_feature.py features/sync /tmp/sync-2.1.2.tpx \
+python tools/build_feature.py features/sync /tmp/sync-2.1.3.tpx \
   --repository local/telepiplex --branch main \
   --commit 0000000000000000000000000000000000000000
 ```

@@ -1,6 +1,115 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-telepiplex-config-command": "caption_config",
   "type": "object",
+  "$defs": {
+    "enabledProvider": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "browserSessionProvider": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "cookie": {
+          "type": "string",
+          "maxLength": 8192,
+          "pattern": "^[^\\r\\n]*$"
+        },
+        "user_agent": {
+          "type": "string",
+          "maxLength": 512,
+          "pattern": "^[^\\r\\n]*$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "apiKeyProvider": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "api_key": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^[^\\r\\n]*$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "githubProvider": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "github_token": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^[^\\r\\n]*$"
+        },
+        "cache_ttl_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 86400
+        },
+        "title_aliases": {
+          "type": "object",
+          "maxProperties": 2000,
+          "additionalProperties": {
+            "type": "array",
+            "maxItems": 30,
+            "items": {
+              "type": "string",
+              "maxLength": 500
+            }
+          }
+        },
+        "episode_mappings": {
+          "type": "object",
+          "maxProperties": 2000,
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "season"
+            ],
+            "properties": {
+              "season": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 99
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": -1000,
+                "maximum": 1000
+              },
+              "first": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9999
+              },
+              "last": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9999
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
   "properties": {
     "enabled": {
       "type": "boolean"
@@ -63,51 +172,13 @@
           "additionalProperties": false
         },
         "shooter": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/enabledProvider"
         },
         "subhd": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "cookie": {
-              "type": "string",
-              "maxLength": 8192,
-              "pattern": "^[^\\r\\n]*$"
-            },
-            "user_agent": {
-              "type": "string",
-              "maxLength": 512,
-              "pattern": "^[^\\r\\n]*$"
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/browserSessionProvider"
         },
         "zimuku": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "cookie": {
-              "type": "string",
-              "maxLength": 8192,
-              "pattern": "^[^\\r\\n]*$"
-            },
-            "user_agent": {
-              "type": "string",
-              "maxLength": 512,
-              "pattern": "^[^\\r\\n]*$"
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/browserSessionProvider"
         },
         "opensubtitles": {
           "type": "object",
@@ -131,180 +202,31 @@
           "additionalProperties": false
         },
         "xunlei": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/enabledProvider"
         },
         "subdl": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "api_key": {
-              "type": "string",
-              "maxLength": 1024,
-              "pattern": "^[^\\r\\n]*$"
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/apiKeyProvider"
         },
         "subsource": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "api_key": {
-              "type": "string",
-              "maxLength": 1024,
-              "pattern": "^[^\\r\\n]*$"
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/apiKeyProvider"
         },
         "subf2m": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/enabledProvider"
         },
         "r3sub": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/enabledProvider"
         },
         "addic7ed": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "cookie": {
-              "type": "string",
-              "maxLength": 8192,
-              "pattern": "^[^\\r\\n]*$"
-            },
-            "user_agent": {
-              "type": "string",
-              "maxLength": 512,
-              "pattern": "^[^\\r\\n]*$"
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/browserSessionProvider"
         },
         "lwltv": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "cookie": {
-              "type": "string",
-              "maxLength": 8192,
-              "pattern": "^[^\\r\\n]*$"
-            },
-            "user_agent": {
-              "type": "string",
-              "maxLength": 512,
-              "pattern": "^[^\\r\\n]*$"
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/browserSessionProvider"
         },
         "yysub": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "cookie": {
-              "type": "string",
-              "maxLength": 8192,
-              "pattern": "^[^\\r\\n]*$"
-            },
-            "user_agent": {
-              "type": "string",
-              "maxLength": 512,
-              "pattern": "^[^\\r\\n]*$"
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/browserSessionProvider"
         },
         "nekomoe": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "github_token": {
-              "type": "string",
-              "maxLength": 1024,
-              "pattern": "^[^\\r\\n]*$"
-            },
-            "cache_ttl_seconds": {
-              "type": "integer",
-              "minimum": 60,
-              "maximum": 86400
-            },
-            "title_aliases": {
-              "type": "object",
-              "maxProperties": 2000,
-              "additionalProperties": {
-                "type": "array",
-                "maxItems": 30,
-                "items": {
-                  "type": "string",
-                  "maxLength": 500
-                }
-              }
-            },
-            "episode_mappings": {
-              "type": "object",
-              "maxProperties": 2000,
-              "additionalProperties": {
-                "type": "object",
-                "required": [
-                  "season"
-                ],
-                "properties": {
-                  "season": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 99
-                  },
-                  "offset": {
-                    "type": "integer",
-                    "minimum": -1000,
-                    "maximum": 1000
-                  },
-                  "first": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 9999
-                  },
-                  "last": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 9999
-                  }
-                },
-                "additionalProperties": false
-              }
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/githubProvider"
         },
         "mingy": {
           "type": "object",
@@ -376,132 +298,10 @@
           "additionalProperties": false
         },
         "kitauji": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "github_token": {
-              "type": "string",
-              "maxLength": 1024,
-              "pattern": "^[^\\r\\n]*$"
-            },
-            "cache_ttl_seconds": {
-              "type": "integer",
-              "minimum": 60,
-              "maximum": 86400
-            },
-            "title_aliases": {
-              "type": "object",
-              "maxProperties": 2000,
-              "additionalProperties": {
-                "type": "array",
-                "maxItems": 30,
-                "items": {
-                  "type": "string",
-                  "maxLength": 500
-                }
-              }
-            },
-            "episode_mappings": {
-              "type": "object",
-              "maxProperties": 2000,
-              "additionalProperties": {
-                "type": "object",
-                "required": [
-                  "season"
-                ],
-                "properties": {
-                  "season": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 99
-                  },
-                  "offset": {
-                    "type": "integer",
-                    "minimum": -1000,
-                    "maximum": 1000
-                  },
-                  "first": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 9999
-                  },
-                  "last": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 9999
-                  }
-                },
-                "additionalProperties": false
-              }
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/githubProvider"
         },
         "haruhana": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "github_token": {
-              "type": "string",
-              "maxLength": 1024,
-              "pattern": "^[^\\r\\n]*$"
-            },
-            "cache_ttl_seconds": {
-              "type": "integer",
-              "minimum": 60,
-              "maximum": 86400
-            },
-            "title_aliases": {
-              "type": "object",
-              "maxProperties": 2000,
-              "additionalProperties": {
-                "type": "array",
-                "maxItems": 30,
-                "items": {
-                  "type": "string",
-                  "maxLength": 500
-                }
-              }
-            },
-            "episode_mappings": {
-              "type": "object",
-              "maxProperties": 2000,
-              "additionalProperties": {
-                "type": "object",
-                "required": [
-                  "season"
-                ],
-                "properties": {
-                  "season": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 99
-                  },
-                  "offset": {
-                    "type": "integer",
-                    "minimum": -1000,
-                    "maximum": 1000
-                  },
-                  "first": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 9999
-                  },
-                  "last": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 9999
-                  }
-                },
-                "additionalProperties": false
-              }
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/githubProvider"
         },
         "local_archive": {
           "type": "object",
